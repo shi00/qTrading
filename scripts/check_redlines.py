@@ -1,4 +1,4 @@
-"""红线自动化检查脚本（R4/R12/R13/R14/R15 + UI 裸 ft.Colors 拦截）。
+"""红线自动化检查脚本（R4/R12/R13/R14/R15 + UI 裸 ft.Colors 拦截 + Tushare token 日志脱敏）。
 
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
 - R4  SQL 注入：扫描 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
@@ -7,6 +7,7 @@
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
 - R15 单例未注册：扫描带 _instance/__new__ 的单例类是否使用 @register_singleton
 - R_no_bare_ft_colors_in_ui: 扫描 UI 层裸 ft.Colors.<COLOR> 引用 (必须替换为 AppColors token)
+- R_tushare_token_log: 扫描 tushare_client.py 中 logger 调用是否直接打印 self.token / token 明文 (R9 红线)
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
@@ -597,6 +598,132 @@ def check_R_no_bare_ft_colors_in_ui() -> list[str]:
 
 
 # ============================================================================
+# R_tushare_token_log: Tushare token 日志脱敏检查 (R9 红线专属守护)
+# ============================================================================
+
+# logger 调用方法名（覆盖 logging 模块标准 level + Logger.exception）
+_LOGGER_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "critical", "exception", "log"})
+
+# 已脱敏调用名（self.token 在这些 Call 子树中视为已脱敏，放行）
+# 覆盖：DataSanitizer.sanitize_token / sanitize_error / sanitize + hashlib.sha256 / hexdigest
+_SANITIZED_CALL_NAMES = frozenset({"sanitize_token", "sanitize_error", "sanitize", "sha256", "hexdigest"})
+
+
+def _is_self_token_ref(node: ast.AST) -> bool:
+    """识别 ``self.token`` 表达式 (ast.Attribute with value=Name('self'), attr='token')。"""
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr == "token"
+    )
+
+
+def _collect_self_token_ids(node: ast.AST) -> set[int]:
+    """收集 AST 子树中所有 self.token 引用的 id() 集合。"""
+    return {id(sub) for sub in ast.walk(node) if _is_self_token_ref(sub)}
+
+
+def _collect_sanitized_self_token_ids(node: ast.AST) -> set[int]:
+    """收集 AST 子树中所有位于 sanitize_*/sha256/hexdigest 调用子树内的 self.token 引用 id()。
+
+    这些引用视为已脱敏，从违规集合中排除。
+    """
+    sanitized: set[int] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        func_name: str | None = None
+        if isinstance(func, ast.Attribute):
+            func_name = func.attr
+        elif isinstance(func, ast.Name):
+            func_name = func.id
+        if func_name is None or func_name not in _SANITIZED_CALL_NAMES:
+            continue
+        sanitized.update(_collect_self_token_ids(sub))
+    return sanitized
+
+
+def _contains_unsanitized_self_token(node: ast.AST) -> bool:
+    """检测 AST 节点中是否存在未脱敏的 self.token 引用。
+
+    判定：所有 self.token 引用 id 减去 sanitize_*/sha256/hexdigest 调用子树内的引用 id，
+    剩余非空即存在未脱敏引用。
+    """
+    all_refs = _collect_self_token_ids(node)
+    if not all_refs:
+        return False
+    sanitized_refs = _collect_sanitized_self_token_ids(node)
+    return bool(all_refs - sanitized_refs)
+
+
+def _check_R_tushare_token_log_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查 AST 中 logger 调用是否直接打印 self.token 明文。
+
+    覆盖以下形式：
+    - 直接引用：``logger.info("...", self.token)``
+    - f-string 内嵌：``logger.info(f"...{self.token}...")``
+    - format 参数：``logger.info("...".format(self.token))``
+    - % 格式化：``logger.info("...%s..." % self.token)``
+    - 字典/列表包装：``logger.info("...", {"token": self.token})``
+
+    放行以下合规形式（已脱敏）：
+    - ``DataSanitizer.sanitize_token(self.token or "")``
+    - ``hashlib.sha256(self.token.encode()).hexdigest()[:16]``
+    """
+    errors: list[str] = []
+    rel = source_path.relative_to(ROOT)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _LOGGER_METHODS:
+            continue
+        # 检查位置参数
+        for arg in node.args:
+            if _contains_unsanitized_self_token(arg):
+                errors.append(
+                    f"{rel}:{node.lineno}: R_tushare_token_log — logger.{node.func.attr}(...) "
+                    f"直接传入 self.token 明文，必须经 DataSanitizer.sanitize_token() 脱敏 (R9 红线)"
+                )
+        # 检查关键字参数
+        for kw in node.keywords:
+            if _contains_unsanitized_self_token(kw.value):
+                errors.append(
+                    f"{rel}:{node.lineno}: R_tushare_token_log — logger.{node.func.attr}(...) "
+                    f"关键字参数 '{kw.arg}' 直接传入 self.token 明文，必须经 DataSanitizer.sanitize_token() 脱敏 (R9 红线)"
+                )
+    return errors
+
+
+def check_R_tushare_token_log() -> list[str]:
+    """扫描 tushare_client.py 中 logger 调用是否直接打印 self.token 明文 (R9 红线守护)。
+
+    扫描范围：data/external/tushare_client.py（token 仅在此处出现，避免误报）
+    退出码：0 通过；返回非空 list 表示有 error (1 失败)。
+
+    设计取舍：
+    - 仅检测 ``self.token`` 直接引用（含 f-string/format/%/dict 等包装），不检测局部变量 token
+      （局部变量可能来自其他来源，避免误报）。
+    - 不检测字符串字面量中的 'token' 关键字（如 "Token not set" 提示信息）。
+    - ``DataSanitizer.sanitize_token(self.token or "")`` 视为合规（已脱敏）。
+    - ``hashlib.sha256(self.token.encode()).hexdigest()[:16]`` 视为合规（已 hash）。
+    """
+    errors: list[str] = []
+    target = ROOT / "data" / "external" / "tushare_client.py"
+    if not target.exists():
+        return errors
+    tree = _parse_module(target)
+    if tree is None:
+        return errors
+    errors.extend(_check_R_tushare_token_log_in_tree(tree, target))
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -610,6 +737,7 @@ def main() -> int:
         ("R14 策略未注册", check_R14()),
         ("R15 单例未注册", check_R15()),
         ("R_no_bare_ft_colors_in_ui", check_R_no_bare_ft_colors_in_ui()),
+        ("R_tushare_token_log", check_R_tushare_token_log()),
     ]
     all_errors: list[str] = []
     for _, errs in checks:
@@ -621,7 +749,7 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui）")
+    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_tushare_token_log）")
     return 0
 
 

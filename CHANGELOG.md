@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Documentation
+* **tushare:** 修复 Tushare 文档缺失问题（C2-C19 检视报告）
+  * `docs/debt/known-technical-debt.md` 补登记 `tushare_client.py` 2 处 NOTE(lazy) 标记（pro 字段类型注解 + points_15000 API 集），新增 P3-Tushare-Client-Lazy-Markers 条目
+  * `docs/patterns/data-sync.md` 新增 Tushare Syncer 设计模式章节（数据流向/限流重试/质量门控/错误处理/取消传播）
+  * `docs/guides/how-to.md` 新增 §5.1 Tushare 集成工作流简述
+  * `README.md` 新增 §4.1 配置 Tushare 数据源（token 获取/积分档位/降级行为）
+  * `SECURITY.md` 新增 Tushare Token Security 章节（存储/脱敏/熔断/静态守护）
+  * `docs/architecture/singleton-lifecycle.md` 新增 TushareClient 特殊说明（Token 注入/pro 字段简化/_token_invalid 熔断标志/Token 脱敏）
+  * `docs/README.md` 补充 Tushare 文档索引
 * **governance:** 修复 docs/review716/r6.md 检视报告问题
   * Flet 版本事实对齐 pyproject.toml（移除 0.85.3 硬编码，改为引用 pyproject.toml）
   * Dialog/Dropdown/Hooks cleanup 契约统一（ft.use_dialog/on_select/cleanup= 显式参数）
@@ -14,6 +22,10 @@
   * 已解决事项（Windows 测试泄漏、V0 垫片删除、声明式迁移收官）从活动规范移入本 changelog
 
 ### Features
+* **redline:** `scripts/check_redlines.py` 新增 `R_tushare_token_log` 检查（R9 红线专属守护）
+  * 扫描 `data/external/tushare_client.py` 中 logger 调用是否直接打印 `self.token` 明文
+  * 覆盖直接引用/f-string/format/%/dict 等包装形式
+  * 放行 `DataSanitizer.sanitize_token()` / `hashlib.sha256()` 等已脱敏形式
 * **flet:** upgrade 0.28.3 → 0.85.3 (architecture-level rewrite)
   * R1: ft.app(target=) → ft.run(main=, [web_renderer=])
   * R2: page.on_resized → page.on_resize

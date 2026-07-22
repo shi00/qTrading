@@ -569,7 +569,7 @@ class FinancialDao(BaseDao):
             except EngineDisposedError:
                 raise
             except Exception as exc:
-                logger.debug("[FinancialDao] fina_audit count query failed: %s", exc)
+                logger.debug("[FinancialDao] fina_audit count query failed: %s", DataSanitizer.sanitize_error(exc))
                 result["tables"]["fina_audit"] = 0
 
         except asyncio.CancelledError:

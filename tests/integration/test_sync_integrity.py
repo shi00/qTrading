@@ -27,13 +27,13 @@ class TestSyncResultMerge:
         assert result1.updated == 8, f"Expected 8, got {result1.updated}"
         assert result1.skipped == 3, f"Expected 3, got {result1.skipped}"
 
-    def test_merge_failed_plus_success_equals_partial(self):
+    def test_merge_failed_plus_success_equals_failed(self):
         from data.sync.base import SyncResult
 
         result1 = SyncResult(status="failed")
         result2 = SyncResult(status="success")
         result1.merge(result2)
-        assert result1.status == "partial", f"Expected partial, got {result1.status}"
+        assert result1.status == "failed", f"Expected failed, got {result1.status}"
 
     def test_merge_cancelled_takes_priority(self):
         from data.sync.base import SyncResult

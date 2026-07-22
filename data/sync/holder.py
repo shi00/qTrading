@@ -7,9 +7,10 @@ import pandas as pd
 
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.error_classifier import classify_error, classify_severity
+from utils.loop_local import get_loop_local
 from utils.time_utils import get_now
 
-from .base import ISyncStrategy, SyncResult, safe_error
+from .base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
@@ -43,6 +44,33 @@ class HolderSyncStrategy(ISyncStrategy):
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
+
+    @property
+    def _shutdown_event(self):
+        """Get or create shutdown event dynamically per event loop.
+
+        Mirrors FinancialSyncStrategy/HistoricalSyncStrategy pattern (R11):
+        asyncio.Event must bind to the running loop, so we cache it via
+        ``get_loop_local`` keyed by ``holder_shutdown_evt``.
+        """
+
+        def _factory():
+            return asyncio.Event()
+
+        return get_loop_local("holder_shutdown_evt", _factory)
+
+    def cancel(self):
+        """Signal cancellation.
+
+        Sets both the legacy ``_cancelled`` flag (polled in short loops) and
+        the loop-local ``_shutdown_event`` (polled in long per-stock iteration
+        such as ``_sync_top10_holders``).
+        """
+        super().cancel()
+        try:
+            self._shutdown_event.set()
+        except RuntimeError:
+            logger.debug("[HolderSync] Shutdown event unavailable (no event loop).")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
@@ -90,6 +118,7 @@ class HolderSyncStrategy(ISyncStrategy):
     async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
+        self._shutdown_event.clear()
         errors = 0
 
         try:
@@ -119,7 +148,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 if errors >= _MAX_ERRORS or self._check_cancelled(result):
                     break
 
-                count = await self._sync_top10_holders(qe)
+                count = await self._sync_top10_holders(qe, result)
                 if count < 0:
                     errors += 1
                 else:
@@ -253,7 +282,7 @@ class HolderSyncStrategy(ISyncStrategy):
             return -1
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def _sync_top10_holders(self, period: str):
+    async def _sync_top10_holders(self, period: str, result: SyncResult | None = None):
         """
         Fetch top10_holders for all stocks by iterating per-stock.
         Tushare requires ts_code as a mandatory parameter for this API.
@@ -266,6 +295,13 @@ class HolderSyncStrategy(ISyncStrategy):
 
         Checkpoint resume: periodically saves progress so that an interrupted
         sync can resume from the last checkpoint instead of starting over.
+
+        Args:
+            period: Quarter-end date string (YYYYMMDD).
+            result: Optional SyncResult. When provided, partial per-stock
+                failures are surfaced via ``result.status = PARTIAL`` and
+                ``result.errors`` records the failing ts_code, so callers
+                aggregating results can distinguish full success from partial.
 
         Returns total row count on success, -1 on error.
         """
@@ -314,7 +350,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
 
             for i, ts_code in enumerate(ts_codes):
-                if self._cancelled:
+                if self._cancelled or self._shutdown_event.is_set():
                     logger.debug("[HolderSync] Stop | Cancelled during top10_holders iteration.")
                     break
 
@@ -349,6 +385,11 @@ class HolderSyncStrategy(ISyncStrategy):
                     )
                     if is_rate_limit:
                         rate_limit_hits += 1
+
+                    # S17: surface failing ts_code to caller's SyncResult so partial
+                    # failures are visible at the _run_impl aggregation layer.
+                    if result is not None:
+                        result.errors.append(f"top10_holders ts_code={ts_code} period={period}: {safe_error(e)}")
 
                     if stock_errors <= 3 or is_rate_limit:
                         if severity == "recoverable":
@@ -425,8 +466,23 @@ class HolderSyncStrategy(ISyncStrategy):
             if consecutive_errors >= _MAX_ERRORS:
                 return -1
 
-            if self._cancelled:
+            if self._cancelled or self._shutdown_event.is_set():
                 return -1
+
+            # S17: partial per-stock failures (non-abort, non-cancel) must surface
+            # as PARTIAL so the aggregation layer can distinguish full success
+            # from partial. Only set when result is provided; do not overwrite
+            # an existing "failed"/"cancelled" status set by upstream logic.
+            if (
+                stock_errors > 0
+                and result is not None
+                and result.status
+                not in (
+                    SyncStatus.FAILED.value,
+                    SyncStatus.CANCELLED.value,
+                )
+            ):
+                result.status = SyncStatus.PARTIAL.value
 
             return total_rows
         except EngineDisposedError:

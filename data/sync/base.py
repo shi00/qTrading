@@ -192,13 +192,14 @@ class SyncResult:
             else:
                 self.table_stats[table] = stats.copy()
 
+        # 优先级：cancelled > failed > partial > success。
+        # failed 优先级高于 partial：任一子任务 failed 即视整体失败，
+        # 避免部分成功掩盖关键失败（如 DB 不可用场景）。
         if other.status == "cancelled" or self.status == "cancelled":
             self.status = "cancelled"
-        elif other.status == "failed" and self.status == "failed":
+        elif other.status == "failed" or self.status == "failed":
             self.status = "failed"
-        elif (
-            other.status == "failed" or self.status == "failed" or other.status == "partial" or self.status == "partial"
-        ):
+        elif other.status == "partial" or self.status == "partial":
             self.status = "partial"
         else:
             self.status = "success"
@@ -251,6 +252,15 @@ class ISyncStrategy(ABC):
 
     def _check_cancelled(self, result: SyncResult) -> bool:
         """Check if cancelled and update result status. Returns True if cancelled."""
+        # 统一取消信号通道：context.cancel_event 由 DataProcessor 在外部设置，
+        # 此处同步至 _cancelled 标志，确保仅继承基类 cancel() 的新 syncer
+        # 也能在长 await 间隙的轮询点响应取消。
+        # 用 ``is True`` 严格匹配 bool：asyncio.Event.is_set() 返回 bool，
+        # 而 MagicMock 的 is_set() 返回非 bool 的 Mock 对象（truthy 但非 True），
+        # 避免子类测试用 MagicMock 作为 context 时误触发取消。
+        cancel_event = self.context.cancel_event
+        if cancel_event is not None and cancel_event.is_set() is True:
+            self._cancelled = True
         if self._cancelled:
             result.status = "cancelled"
             return True

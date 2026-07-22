@@ -1858,3 +1858,255 @@ class TestFinancialSyncFullSyncErrorPathsExtended:
         with patch("utils.async_utils.asyncio.gather", side_effect=mock_gather):
             result = await strategy.run(force=True)
             assert result is not None
+
+
+class TestRunIncrementalSyncCancellation:
+    """S4: _run_incremental_sync 日级循环取消响应。"""
+
+    @pytest.mark.asyncio
+    async def test_day_loop_breaks_on_shutdown(self):
+        """日级循环中 shutdown_event 被设置时应 break，不再处理后续日期。"""
+        ctx = make_ctx()
+        three_days_ago = get_now() - datetime.timedelta(days=3)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+
+        call_count = 0
+
+        async def selective_disclosure(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                strategy._shutdown_event.set()
+            return None
+
+        ctx.api.get_disclosure_date = AsyncMock(side_effect=selective_disclosure)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        # 只处理了第一天就 break
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_day_loop_continues_when_not_shutdown(self):
+        """shutdown_event 未设置时应处理所有日期。"""
+        ctx = make_ctx()
+        three_days_ago = get_now() - datetime.timedelta(days=3)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        # 应处理所有日期（3 天 + 1 = 4 天）
+        assert ctx.api.get_disclosure_date.await_count >= 3
+
+
+class TestProcessOneStockCancellation:
+    """S5: process_one_stock 6 表 fetch 后取消响应。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_after_fetch_on_shutdown(self):
+        """fetch 完成后 shutdown_event 被设置时应跳过 DB 事务。"""
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+
+        async def fetch_and_shutdown(*args, **kwargs):
+            strategy._shutdown_event.set()
+            return (
+                pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]}),
+                {"mainbz": 0, "audit": 0},
+            )
+
+        strategy._fetch_comprehensive_financial_data = fetch_and_shutdown
+        result = await strategy.run(force=True)
+        assert result is not None
+        # save_financial_reports 不应被调用（shutdown_event 在 fetch 后设置）
+        ctx.cache.save_financial_reports.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_db_transaction_skipped_on_shutdown(self):
+        """shutdown_event 在 fetch 后设置时 mark_stock_step4_completed 也不应被调用。"""
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+
+        async def fetch_and_shutdown(*args, **kwargs):
+            strategy._shutdown_event.set()
+            return (
+                pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]}),
+                {"mainbz": 0, "audit": 0},
+            )
+
+        strategy._fetch_comprehensive_financial_data = fetch_and_shutdown
+        await strategy.run(force=True)
+        ctx.cache.mark_stock_step4_completed.assert_not_awaited()
+
+
+class TestDedupFinancialDfUpdateFlag:
+    """S10: _dedup_financial_df update_flag="1" 修订版优先保留。"""
+
+    def test_update_flag_one_preferred_over_none(self):
+        """update_flag="1" 应优先于 None 被保留（当 end_date + ann_date 相同）。"""
+        from data.sync.financial import _dedup_financial_df
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "end_date": ["20240331", "20240331"],
+                "ann_date": ["20240428", "20240428"],
+                "update_flag": [None, "1"],
+                "revenue": [100.0, 200.0],
+            }
+        )
+        result = _dedup_financial_df(df)
+        assert len(result) == 1
+        assert result.iloc[0]["revenue"] == 200.0
+        assert result.iloc[0]["update_flag"] == "1"
+
+    def test_update_flag_one_preferred_over_zero(self):
+        """update_flag="1" 应优先于 "0" 被保留（当 end_date + ann_date 相同）。"""
+        from data.sync.financial import _dedup_financial_df
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "end_date": ["20240331", "20240331"],
+                "ann_date": ["20240428", "20240428"],
+                "update_flag": ["0", "1"],
+                "revenue": [100.0, 200.0],
+            }
+        )
+        result = _dedup_financial_df(df)
+        assert len(result) == 1
+        assert result.iloc[0]["revenue"] == 200.0
+        assert result.iloc[0]["update_flag"] == "1"
+
+    def test_update_flag_none_kept_when_no_one(self):
+        """无 update_flag="1" 时保留 None 版本（按 ann_date 排序 keep=last）。"""
+        from data.sync.financial import _dedup_financial_df
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "end_date": ["20240331", "20240331"],
+                "ann_date": ["20240425", "20240430"],
+                "update_flag": [None, None],
+                "revenue": [100.0, 200.0],
+            }
+        )
+        result = _dedup_financial_df(df)
+        assert len(result) == 1
+        assert result.iloc[0]["revenue"] == 200.0
+
+    def test_update_flag_one_with_different_ann_dates(self):
+        """ann_date 不同时，update_flag="1" + 更晚 ann_date 应被保留。"""
+        from data.sync.financial import _dedup_financial_df
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "end_date": ["20240331", "20240331", "20240331"],
+                "ann_date": ["20240425", "20240428", "20240430"],
+                "update_flag": [None, "0", "1"],
+                "revenue": [100.0, 200.0, 300.0],
+            }
+        )
+        result = _dedup_financial_df(df)
+        assert len(result) == 1
+        assert result.iloc[0]["revenue"] == 300.0
+        assert result.iloc[0]["update_flag"] == "1"
+
+
+class TestIncrementalBatchStatus:
+    """S12: 增量同步 batch 失败时 status 正确标记。"""
+
+    @pytest.mark.asyncio
+    async def test_batch_all_failed_status_failed(self):
+        """全部 batch 任务失败（day_saved=0）时 status="failed"。"""
+        ctx = make_ctx()
+        yesterday = get_now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "actual_date": ["20240430"],
+                }
+            )
+        )
+        ctx.cache.save_financial_reports = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        assert len(status_calls) >= 1
+        failed_calls = [c for c in status_calls if c.kwargs.get("status") == "failed"]
+        assert len(failed_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_batch_partial_failure_status_partial(self):
+        """部分 batch 任务失败（day_saved>0）时 status="partial"。"""
+        ctx = make_ctx()
+        yesterday = get_now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "end_date": ["20240331", "20240331"],
+                    "actual_date": ["20240430", "20240430"],
+                }
+            )
+        )
+
+        # 让 API 根据传入的 ts_code 返回对应数据（make_ctx 默认总返回 000001.SZ）
+        async def selective_api(*args, **kwargs):
+            ts_code = kwargs.get("ts_code")
+            return pd.DataFrame({"ts_code": [ts_code], "end_date": ["20240331"], "revenue": [100.0]})
+
+        ctx.api.get_income = AsyncMock(side_effect=selective_api)
+        ctx.api.get_balancesheet = AsyncMock(side_effect=selective_api)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+        ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
+        ctx.api.get_fina_audit = AsyncMock(return_value=None)
+
+        # 000001.SZ 抛异常，000002.SZ 正常返回
+        def selective_save(df, *args, **kwargs):
+            ts_code = df["ts_code"].iloc[0] if "ts_code" in df.columns else None
+            if ts_code == "000001.SZ":
+                raise EngineDisposedError("disposed")
+            return 1
+
+        ctx.cache.save_financial_reports = AsyncMock(side_effect=selective_save)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        assert len(status_calls) >= 1
+        partial_calls = [c for c in status_calls if c.kwargs.get("status") == "partial"]
+        assert len(partial_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_batch_all_success_no_status_override(self):
+        """全部成功时不传 status 参数（默认 "success"）。"""
+        ctx = make_ctx()
+        yesterday = get_now() - datetime.timedelta(days=1)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240331"],
+                    "actual_date": ["20240430"],
+                }
+            )
+        )
+        ctx.cache.save_financial_reports = AsyncMock(return_value=1)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        assert len(status_calls) >= 1
+        # 默认调用不传 status kwarg
+        no_status_calls = [c for c in status_calls if "status" not in c.kwargs]
+        assert len(no_status_calls) >= 1

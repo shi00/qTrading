@@ -123,7 +123,7 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         """SyncResult.merge 应将子任务的 failed 状态正确传播到主 result。
 
         验证 ``data/sync/base.py`` SyncResult.merge 的真实合并逻辑：
-        - success + failed → partial（主任务由成功降级为部分失败，传播生效）
+        - success + failed → failed（任一子任务 failed 即视整体 failed，传播生效）
         - failed + failed → failed（双重失败保持 failed，强化传播语义）
         """
         self.cache._disposed = True
@@ -136,10 +136,10 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
             sub_result.status = SyncStatus.FAILED
             sub_result.errors.append("Engine disposed during sync")
 
-        # 路径 1: 主任务 success + 子任务 failed → partial（failed 传播到主 result）
+        # 路径 1: 主任务 success + 子任务 failed → failed（failed 传播到主 result）
         main_success = SyncResult()
         main_success.merge(sub_result)
-        assert main_success.status == SyncStatus.PARTIAL
+        assert main_success.status == SyncStatus.FAILED
         assert "Engine disposed during sync" in main_success.errors
 
         # 路径 2: 主任务 failed + 子任务 failed → failed（双重失败保持 failed）

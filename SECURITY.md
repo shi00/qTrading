@@ -55,6 +55,14 @@ AStockScreener implements the following security measures:
 - Fallback encryption using AES-GCM for environments without keyring support
 - No hardcoded secrets in source code
 
+### Tushare Token Security
+
+- Tushare token 通过系统 Keyring 加密存储，无 Keyring 环境回退到 AES-GCM 加密文件，不入数据库。
+- `TushareClient` 的所有日志与异常消息中，token 必须经 `DataSanitizer` 脱敏后才输出（对应 CLAUDE.md §3.1 R9 红线）。
+- token 认证失败时触发全局熔断（`_token_invalid` 标志置 True），所有 API 调用 fast-fail，避免无效 token 在日志中重复刷屏。
+- `set_token()` 重置熔断标志并刷新 SDK 全局状态；token 更新路径不记录明文 token 到任何日志通道。
+- 静态守护：`scripts/check_redlines.py` 的 `check_R_tushare_token_log` 检查 `data/external/tushare_client.py` 中是否存在直接打印 token 的 logger 调用。
+
 ### Data Protection
 
 - Database credentials are never logged

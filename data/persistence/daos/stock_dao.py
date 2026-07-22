@@ -12,6 +12,7 @@ from data.persistence.models import (
     get_model_columns,
     get_model_pk_columns,
 )
+from data.sync.base import safe_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now, to_utc_for_db
@@ -218,7 +219,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error("[StockDao] overwrite_concepts failed: %s", e)
+            logger.error("[StockDao] overwrite_concepts failed: %s", safe_error(e))
             raise
 
     async def clear_all_ai_llm_concepts(self) -> int:
@@ -466,7 +467,9 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error("[StockDao] upsert_ai_concept_failure failed for %s: %s", ts_code, e, exc_info=True)
+            logger.error(
+                "[StockDao] upsert_ai_concept_failure failed for %s: %s", ts_code, safe_error(e), exc_info=True
+            )
             raise
 
     async def get_ai_concept_failures_for_retry(
@@ -494,7 +497,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error("[StockDao] get_ai_concept_failures_for_retry failed: %s", e, exc_info=True)
+            logger.error("[StockDao] get_ai_concept_failures_for_retry failed: %s", safe_error(e), exc_info=True)
             return []
         if df is None or df.empty:
             return []
@@ -512,7 +515,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error("[StockDao] clear_ai_concept_failure failed for %s: %s", ts_code, e, exc_info=True)
+            logger.error("[StockDao] clear_ai_concept_failure failed for %s: %s", ts_code, safe_error(e), exc_info=True)
             raise
 
     async def count_ai_concept_failures(self) -> int:
@@ -549,5 +552,5 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error("[StockDao] delete_expired_failures failed: %s", e, exc_info=True)
+            logger.error("[StockDao] delete_expired_failures failed: %s", safe_error(e), exc_info=True)
             raise

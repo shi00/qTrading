@@ -46,7 +46,11 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
         if "update_flag" in df.columns:
             sort_cols.append("update_flag")
             ascending.append(True)
-        return df.sort_values(by=sort_cols, ascending=ascending).drop_duplicates(subset=["end_date"], keep="last")
+        # na_position="first": NaN update_flag 排在 "0"/"1" 之前，keep="last" 保留
+        # update_flag="1"（修订版）而非 None 版本（当 end_date + ann_date 相同时）。
+        return df.sort_values(by=sort_cols, ascending=ascending, na_position="first").drop_duplicates(
+            subset=["end_date"], keep="last"
+        )
     return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
 
 
@@ -387,6 +391,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 exc_info=True,
                             )
 
+                    if self._shutdown_event.is_set():
+                        return
+
                     if not has_error:
                         has_actual_data = df_merged is not None and not df_merged.empty
                         if has_actual_data:
@@ -595,6 +602,10 @@ class FinancialSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(adjusted_concurrency)
 
         for day_str in dates_to_sync:
+            if self._shutdown_event.is_set():
+                logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
+                break
+
             df_disclosure = await self.context.api.get_disclosure_date(date=day_str)
 
             if df_disclosure is None or df_disclosure.empty:
@@ -666,6 +677,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 return result
 
             day_saved = 0
+            day_has_error = False
             # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
             _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
             for batch_start in range(0, len(target_list), _BATCH_SIZE):
@@ -675,6 +687,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 for r in batch_results:
                     if isinstance(r, Exception):
                         logger.warning("[FinancialSync] Batch task failed: %s", r)
+                        day_has_error = True
                         continue
                     day_saved += r["saved"]  # type: ignore[index]
                     total_saved += r["saved"]  # type: ignore[index]
@@ -682,11 +695,28 @@ class FinancialSyncStrategy(ISyncStrategy):
                     total_audit_rows += r["audit"]  # type: ignore[index]
 
             day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
-            await self.context.cache.update_sync_status(
-                "financial_reports",
-                day_date,
-                day_saved,
-            )
+            if day_has_error and day_saved == 0:
+                # 全部失败：标记 failed，不推进 last_sync_date 以便下次重试
+                await self.context.cache.update_sync_status(
+                    "financial_reports",
+                    day_date,
+                    0,
+                    status="failed",
+                )
+            elif day_has_error:
+                # 部分失败：标记 partial，仍推进 last_sync_date
+                await self.context.cache.update_sync_status(
+                    "financial_reports",
+                    day_date,
+                    day_saved,
+                    status="partial",
+                )
+            else:
+                await self.context.cache.update_sync_status(
+                    "financial_reports",
+                    day_date,
+                    day_saved,
+                )
 
             if progress_callback:
                 progress_callback(0, 0, f"{I18n.get('progress_sync_done')} {day_str}")

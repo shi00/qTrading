@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import random
 import threading
 import time
 import typing
@@ -346,6 +347,9 @@ class TushareClient:
                     cls._instance._probe_in_progress = False
             cls._instance = None
             cls._initialized = False
+            # 显式重置类属性，防止测试通过 TushareClient._probe_in_progress = True
+            # 直接修改类属性后 _reset_singleton 未清理（R7 测试隔离）
+            cls._probe_in_progress = False
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -784,12 +788,17 @@ class TushareClient:
         # ``self._probe_in_progress = True`` 之间无 await，理论原子。
         if self._probe_in_progress:
             logger.warning("[TushareClient] Probe already in progress, skipping")
-            # 浅拷贝（bool 不可变足够）；调用方检测 _probe_in_progress 决定 UI 反馈
-            return dict(self._capability_cache)
+            # B5/B19 修复：持锁读取当前 cache 快照（所有 _capability_cache 访问持锁）
+            return self.get_capability_cache()
         self._probe_in_progress = True
 
-        # 入口快照：取消/异常时回滚到入口状态（v1.9.0 P0-3/M-3）
-        cache_snapshot = dict(self._capability_cache)
+        # 入口持锁快照：取消/异常时回滚到入口状态（v1.9.0 P0-3/M-3）
+        # B5/B19 修复：持锁访问 _capability_cache；B3 修复：同时快照 token，
+        # set_token 在 probe 期间替换 token + 清空 cache + 重建 pro，回滚/写入时
+        # 检查 token 一致性避免污染新 token 的 cache。
+        with self._capability_cache_lock:
+            cache_snapshot = dict(self._capability_cache)
+        token_snapshot = self.token
 
         try:
             recent_date = get_now().strftime("%Y%m%d")
@@ -908,6 +917,17 @@ class TushareClient:
                     total,
                 )
 
+            # B3 修复：写入前检查 token 一致性，set_token 后旧 probe 持有的结果丢弃，
+            # 避免旧 token 的 probe 结果覆盖新 token 的 cache（路径 B 污染）
+            if self.token != token_snapshot:
+                logger.info(
+                    "[TushareClient] Token changed during probe (entry=%s, current=%s), "
+                    "discarding probe results to avoid cache pollution",
+                    DataSanitizer.sanitize_token(token_snapshot or ""),
+                    DataSanitizer.sanitize_token(self.token or ""),
+                )
+                return self.get_capability_cache()
+
             # gather 全部成功后统一写入 _capability_cache（None 不写入，避免污染）
             for api_name, available in results.items():
                 if available is True:
@@ -921,16 +941,28 @@ class TushareClient:
             return results
         except asyncio.CancelledError:
             # 取消时回滚 _capability_cache 到入口快照（R2 红线：raise 传播）
+            # B3+B5/B19 修复：持锁回滚 + token 一致性检查，避免污染新 token 的 cache
             logger.info("[TushareClient] Probe cancelled, rolling back _capability_cache to entry snapshot")
-            self._capability_cache = cache_snapshot
+            if self.token == token_snapshot:
+                with self._capability_cache_lock:
+                    self._capability_cache.clear()
+                    self._capability_cache.update(cache_snapshot)
+            else:
+                logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
             raise
         except Exception as exc:
             # 其他异常（网络抖动等非取消）也回退到入口快照，避免部分污染
+            # B3+B5/B19 修复：持锁回滚 + token 一致性检查
             logger.warning(
                 "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
                 exc,
             )
-            self._capability_cache = cache_snapshot
+            if self.token == token_snapshot:
+                with self._capability_cache_lock:
+                    self._capability_cache.clear()
+                    self._capability_cache.update(cache_snapshot)
+            else:
+                logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
             return self.get_capability_cache()
         finally:
             self._probe_in_progress = False
@@ -958,10 +990,15 @@ class TushareClient:
         if not self.pro:
             raise Exception("Tushare Token not set. Please set your token in settings.")
 
+        # 捕获限速器为局部变量：consume_async 与网络 await 之间若被 set_token/reload_rate_limiters
+        # 替换 self._rate_limiter/self._probe_rate_limiter，会破坏限流语义（B1+B17 竞态修复）。
+        global_limiter = self._rate_limiter
+        probe_limiter = self._probe_rate_limiter
+
         # 两段消费：全局桶 + probe 专用桶
-        if self._rate_limiter is not None:
-            await self._rate_limiter.consume_async(1)
-        await self._probe_rate_limiter.consume_async(1)
+        if global_limiter is not None:
+            await global_limiter.consume_async(1)
+        await probe_limiter.consume_async(1)
 
         # 格式化日期参数（与 _handle_api_call 一致）
         formatted_kwargs = {}
@@ -990,6 +1027,19 @@ class TushareClient:
             if is_permission_error:
                 # 权限拒绝抛 TushareAPIPermissionError，由 _probe_one 分类为 False
                 raise TushareAPIPermissionError(api_name, error_msg) from e
+            # B13 修复：client_param_error（必填参数缺失等）分类为不可用（False）。
+            # probe 使用固定参数，参数错误说明该 API 在当前 probe 参数下不可用，
+            # 应记 ERROR 日志并通过 TushareAPIPermissionError 让 _probe_one 分类为 False。
+            is_client_param_error = any(
+                k in error_msg_lower for k in ("必填参数", "缺少参数", "invalid parameter", "missing required")
+            )
+            if is_client_param_error:
+                logger.error(
+                    "[TushareClient] Probe %s: client param error (API not available with probe params): %s",
+                    api_name,
+                    DataSanitizer.sanitize_error(e),
+                )
+                raise TushareAPIPermissionError(api_name, f"client_param_error: {error_msg}") from e
             # 其他异常（429 / 网络错误等）原样抛出，由 _probe_one 分类为 None
             # 不调用 reduce_rate（probe 一次性探测，不永久降速）
             raise
@@ -1076,10 +1126,9 @@ class TushareClient:
 
         from utils.thread_pool import ThreadPoolManager
 
-        if isinstance(func, functools.partial) and func.args:
-            api_name = str(func.args[0])
-        else:
-            api_name = getattr(func, "__name__", str(func))
+        # B7 修复：删除 functools.partial 死代码分支（所有调用方传入的 func 都是
+        # bound method，不是 partial；partial 分支语义错误且不可达）。
+        api_name = getattr(func, "__name__", str(func))
 
         capability = self.is_api_available(api_name)
         if capability is False:
@@ -1110,10 +1159,15 @@ class TushareClient:
                 "Token marked invalid; call set_token() to reset after updating",
             )
 
+        # 捕获全局 rate_limiter 为局部变量：consume_async 与 on_success/reduce_rate 之间隔着网络 await，
+        # 若 set_token/reload_rate_limiters 在 await 期间替换 self._rate_limiter，则 consume 在旧 limiter、
+        # on_success/reduce_rate 在新 limiter，破坏限流语义（B1+B17 竞态修复）。
+        global_limiter = self._rate_limiter
+
         for i in range(self.max_retries):
             # 两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧
-            if self._rate_limiter:
-                await self._rate_limiter.consume_async(1)
+            if global_limiter:
+                await global_limiter.consume_async(1)
             if api_limiter:
                 await api_limiter.consume_async(1)
 
@@ -1140,15 +1194,15 @@ class TushareClient:
 
                 self.mark_api_available(api_name)
 
-                # 两段消费配套：两个桶分别 on_success
-                if self._rate_limiter:
-                    self._rate_limiter.on_success()
+                # 两段消费配套：两个桶分别 on_success（用 global_limiter 避免竞态）
+                if global_limiter:
+                    global_limiter.on_success()
                 if api_limiter:
                     api_limiter.on_success()
 
                 return result
             except Exception as e:
-                import random
+                from utils.error_classifier import classify_error, classify_severity
 
                 error_msg = str(e)
                 error_msg_lower = error_msg.lower()
@@ -1158,8 +1212,8 @@ class TushareClient:
                 is_permission_error = is_token_invalid or any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
                 is_rate_limit = (
                     "每分钟最多访问" in error_msg_lower
-                    or "抱歉" in error_msg_lower
-                    or "检测到" in error_msg_lower
+                    or "抱歉，每分钟" in error_msg_lower
+                    or "抱歉，频次" in error_msg_lower
                     or "429" in error_msg_lower
                     or "rate limit" in error_msg_lower
                     or "频次超限" in error_msg_lower
@@ -1171,6 +1225,18 @@ class TushareClient:
                     or "timed out" in error_msg_lower
                 )
 
+                # 使用 classify_error + classify_severity 进行标准化分类（CLAUDE.md §3.2 强制要求）
+                # context="token"：classify_error 识别 token/timeout/network/server 关键字；
+                # tushare 特有的 permission/rate_limit/client_param 关键字保留补充判断（语义一致）
+                error_info = classify_error(e, context="token")
+                severity = classify_severity(e, context="token")
+                if severity == "system":
+                    log_level = logging.CRITICAL
+                elif severity == "recoverable":
+                    log_level = logging.WARNING
+                else:
+                    log_level = logging.ERROR
+
                 if is_permission_error:
                     self.mark_api_unavailable(api_name)
                     # 仅 token 认证失败触发全局熔断；per-API 权限错误（如积分不足）不熔断
@@ -1181,15 +1247,21 @@ class TushareClient:
                             "[tushare_api] TOKEN_INVALID (%s): global breaker engaged — subsequent calls will fast-fail",
                             api_name,
                         )
-                    try:
-                        t = asyncio.create_task(self._persist_capability_safely())
-                        self._bg_tasks.add(t)
-                        t.add_done_callback(self._bg_tasks.discard)
-                    except RuntimeError:
-                        pass
-                    logger.error(
-                        "[tushare_api] PERMISSION_DENIED (%s): %s",
+                    # B4 修复：_reset_singleton 后旧协程持有的 self 仍指向旧实例，
+                    # 新创建的 _persist_capability_safely task 会被添加到旧实例的 _bg_tasks，
+                    # 新实例无法追踪。检查 self is TushareClient._instance 跳过。
+                    if self is TushareClient._instance:
+                        try:
+                            t = asyncio.create_task(self._persist_capability_safely())
+                            self._bg_tasks.add(t)
+                            t.add_done_callback(self._bg_tasks.discard)
+                        except RuntimeError:
+                            pass
+                    logger.log(
+                        log_level,
+                        "[tushare_api] PERMISSION_DENIED (%s, type=%s): %s",
                         api_name,
+                        error_info.get("code", "unknown"),
                         DataSanitizer.sanitize_error(e),
                     )
                     raise TushareAPIPermissionError(api_name, error_msg) from e
@@ -1198,25 +1270,29 @@ class TushareClient:
                     k in error_msg_lower for k in ("必填参数", "缺少参数", "invalid parameter", "missing required")
                 )
                 if is_client_param_error:
-                    logger.error(
-                        "[tushare_api] INVALID_REQUEST (%s): %s",
+                    logger.log(
+                        log_level,
+                        "[tushare_api] INVALID_REQUEST (%s, type=%s): %s",
                         api_name,
+                        error_info.get("code", "unknown"),
                         DataSanitizer.sanitize_error(e),
                     )
                     raise
 
                 if is_rate_limit:
-                    # 两段消费配套：两个桶分别 reduce_rate
-                    if self._rate_limiter:
-                        self._rate_limiter.reduce_rate(factor=0.5)
+                    # 两段消费配套：两个桶分别 reduce_rate（用 global_limiter 避免竞态）
+                    if global_limiter:
+                        global_limiter.reduce_rate(factor=0.5)
                     if api_limiter:
                         api_limiter.reduce_rate(factor=0.5)
 
                     sleep_time = 5 + random.uniform(0, 5) + i * 5
-                    current_rpm = self._rate_limiter.current_rate_per_min if self._rate_limiter else 0
-                    logger.warning(
-                        "[tushare_api] RATE_LIMITED (%s): adaptive slowdown -> %.0f/min, backoff=%.1fs (attempt %d/%d)",
+                    current_rpm = global_limiter.current_rate_per_min if global_limiter else 0
+                    logger.log(
+                        log_level,
+                        "[tushare_api] RATE_LIMITED (%s, type=%s): adaptive slowdown -> %.0f/min, backoff=%.1fs (attempt %d/%d)",
                         api_name,
+                        error_info.get("code", "unknown"),
                         current_rpm,
                         sleep_time,
                         i + 1,
@@ -1227,9 +1303,11 @@ class TushareClient:
 
                 if is_network_error:
                     sleep_time = 1 * (i + 1) + random.uniform(0.1, 0.5)
-                    logger.warning(
-                        "[tushare_api] CONNECTION_ERROR (%s): %s - retry in %.2fs (attempt %d/%d)",
+                    logger.log(
+                        log_level,
+                        "[tushare_api] CONNECTION_ERROR (%s, type=%s): %s - retry in %.2fs (attempt %d/%d)",
                         api_name,
+                        error_info.get("code", "unknown"),
                         type(e).__name__,
                         sleep_time,
                         i + 1,
@@ -1239,9 +1317,11 @@ class TushareClient:
                     continue
 
                 if i == self.max_retries - 1:
-                    logger.error(
-                        "[tushare_api] RETRY_EXHAUSTED (%s): %s",
+                    logger.log(
+                        log_level,
+                        "[tushare_api] RETRY_EXHAUSTED (%s, type=%s): %s",
                         api_name,
+                        error_info.get("code", "unknown"),
                         DataSanitizer.sanitize_error(e),
                     )
                     raise
@@ -1249,6 +1329,10 @@ class TushareClient:
                 await asyncio.sleep(1)
         raise RuntimeError(f"[tushare_api] All {self.max_retries} retries exhausted for {api_name}")
 
+    @log_async_operation(
+        operation_name="TushareClient._handle_api_call_paginated",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def _handle_api_call_paginated(self, func: typing.Callable, max_pages: int = 100, **kwargs: typing.Any):
         import pandas as pd
 
@@ -1256,12 +1340,14 @@ class TushareClient:
         df_list = []
         offset = 0
         page = 0
-        full_page_size = None
 
         while page < max_pages:
             kwargs["offset"] = offset
             try:
                 df = await self._handle_api_call(func, **kwargs)
+            except TushareAPIPermissionError:
+                # B10 修复：权限错误向上传播，调用方需知道数据不完整（不能视为普通分页失败吞掉）
+                raise
             except Exception as exc:
                 if page == 0:
                     raise
@@ -1274,39 +1360,42 @@ class TushareClient:
                 )
                 break
 
+            # B9 修复：分页终止条件改为空页判断，而非"页大小小于第一页"。
+            # 原逻辑假设页大小恒定，若 Tushare 内部过滤导致非末页返回少于首页，
+            # 会误中断丢失后续数据。空页判断更健壮（多请求一次空页的代价可接受）。
             if df is None or df.empty:
                 break
 
             df_list.append(df)
-            returned_len = len(df)
-
-            if full_page_size is None:
-                full_page_size = returned_len
-
-            if returned_len < full_page_size:
-                break
-
-            offset += returned_len
+            offset += len(df)
             page += 1
 
+        # B12 修复：达到 max_pages 时标记 truncated=True，调用方可检查 df.attrs["truncated"]
+        truncated = False
         if page >= max_pages:
             logger.warning(
                 "[API] Pagination hit max_pages=%s (offset=%s). Results are INCOMPLETE. Consider increasing max_pages or using date range filters.",
                 max_pages,
                 offset,
             )
+            truncated = True
 
         if not df_list:
             return None
-        return pd.concat(df_list, ignore_index=True)
+        result = pd.concat(df_list, ignore_index=True)
+        if truncated:
+            result.attrs["truncated"] = True
+        return result
 
     @track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     def get_trade_dates(self, start_date: datetime.date | str | None, end_date: datetime.date | str | None):
         """Get list of actual trading dates (includes holidays handling).
         NOTE: This is a SYNC method — must remain sync for APScheduler (non-asyncio thread).
         For async contexts, use get_trade_cal() instead."""
+        # B11 修复：pro is None 时降级返回 []，与 is_trading_day 的降级契约一致
         if not self.pro:
-            raise Exception("Tushare Token not set. Please set your token in settings.")
+            logger.warning("[API] get_trade_dates: Tushare Token not set, returning empty list")
+            return []
 
         if isinstance(start_date, (datetime.date, datetime.datetime)):
             start_date = start_date.strftime("%Y%m%d")
@@ -1351,23 +1440,31 @@ class TushareClient:
             return date_str in self._trade_cal_cache
 
         try:
+            # 锁内仅做缓存检查（B2 修复：避免锁内网络调用阻塞其他线程）
             with self._calendar_lock:
                 if year in self._loaded_years:
                     return date_str in self._trade_cal_cache
 
-                logger.info("[Cache] Loading trading calendar for year %s...", year)
+            logger.info("[Cache] Loading trading calendar for year %s...", year)
 
-                start_date = f"{year}0101"
-                end_date = f"{year}1231"
+            start_date = f"{year}0101"
+            end_date = f"{year}1231"
 
-                if not self.pro:
-                    raise Exception("Tushare Token not set")
-                df = self.pro.trade_cal(
-                    exchange="SSE",
-                    start_date=start_date,
-                    end_date=end_date,
-                    is_open="1",
-                )
+            if not self.pro:
+                raise Exception("Tushare Token not set")
+            # 锁外执行网络调用（trade_cal 是同步 IO，不应持锁阻塞其他线程）
+            df = self.pro.trade_cal(
+                exchange="SSE",
+                start_date=start_date,
+                end_date=end_date,
+                is_open="1",
+            )
+
+            # 锁内更新缓存并返回结果
+            with self._calendar_lock:
+                # 二次检查：网络调用期间其他线程可能已加载该年份
+                if year in self._loaded_years:
+                    return date_str in self._trade_cal_cache
 
                 if df is not None and not df.empty:
                     dates = set(df["cal_date"].tolist())

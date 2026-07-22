@@ -23,7 +23,7 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
-from .base import ISyncStrategy, SyncResult, safe_error
+from .base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,12 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                             safe_error(e),
                             exc_info=True,
                         )
+
+                    # S16：循环错误分支标记 partial 并记录 errors，避免部分成员
+                    # fetch 失败时 status 仍为 success。system 级别已 raise，此处
+                    # 仅覆盖 recoverable/operational 路径。
+                    result.status = SyncStatus.PARTIAL.value
+                    result.errors.append(f"member index_code={index_code}: {safe_error(e)}")
 
             if not all_dfs:
                 logger.warning(

@@ -11,6 +11,7 @@ import sqlalchemy as sa
 
 from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 from data.persistence.models import BacktestResultModel, get_model_columns
+from data.sync.base import safe_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
@@ -203,5 +204,5 @@ class BacktestDAO(BaseDao):
             logger.warning("[BacktestDAO] Engine disposed during delete_result for %s", run_id)
             raise
         except Exception as e:
-            logger.error("[BacktestDAO] delete_result failed for %s: %s", run_id, e)
+            logger.error("[BacktestDAO] delete_result failed for %s: %s", run_id, safe_error(e))
             return False

@@ -312,7 +312,7 @@ class TestSyncResultMerge:
         result1.merge(result2)
 
         assert len(result1.errors) == 3
-        assert result1.status == "partial"
+        assert result1.status == "failed"
 
     def test_merge_quality_scores(self):
         """
@@ -349,7 +349,7 @@ class TestSyncResultMerge:
 
         result1.merge(result2)
 
-        assert result1.status == "partial"
+        assert result1.status == "failed"
 
         result3 = SyncResult(status="partial")
         result4 = SyncResult(status="success")
@@ -358,18 +358,18 @@ class TestSyncResultMerge:
 
         assert result3.status == "partial"
 
-    def test_merge_failed_plus_success_equals_partial(self):
+    def test_merge_failed_plus_success_equals_failed(self):
         """
-        H4 修复验证：failed + success = partial
+        H4 修复验证：failed + success = failed
 
-        场景：一个失败一个成功应产生 partial 状态
+        场景：任一子任务 failed 即视整体 failed（failed 优先级高于 partial）
         """
         result1 = SyncResult(status="failed")
         result2 = SyncResult(status="success")
 
         result1.merge(result2)
 
-        assert result1.status == "partial"
+        assert result1.status == "failed"
 
     def test_merge_failed_plus_failed_equals_failed(self):
         """
@@ -735,7 +735,8 @@ class TestBreakpointResumeCoreTables:
         strategy.sync_daily_market_snapshot.assert_awaited_once()
         called_date = strategy.sync_daily_market_snapshot.await_args[0][0]
         assert called_date == d2
-        assert result.updated == 1
+        # S14 修复：skipped 日期计入 result.skipped 而非 result.updated
+        assert result.skipped == 1
         assert result.added == 1
 
 

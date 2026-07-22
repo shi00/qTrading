@@ -55,6 +55,42 @@ class TestMacroDaoSaveShiborDaily:
         assert result == 3
 
 
+class TestMacroDaoSaveLprDaily:
+    """S15 fix: save_lpr_daily 独立 upsert LPR 数据到 shibor_daily 表。"""
+
+    @pytest.mark.asyncio
+    async def test_none(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        result = await dao.save_lpr_daily(None)
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        result = await dao.save_lpr_daily(pd.DataFrame())
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._save_upsert = AsyncMock(return_value=2)
+        result = await dao.save_lpr_daily(
+            pd.DataFrame(
+                {
+                    "record_date": ["20240615"],
+                    "lpr_1y": [3.45],
+                    "lpr_5y": [3.95],
+                }
+            )
+        )
+        assert result == 2
+        # 验证仅传入 record_date/lpr_1y/lpr_5y 三列（不触碰其他 shibor 列）
+        call_args = dao._save_upsert.call_args
+        assert call_args.args[1] == "shibor_daily"
+        columns = call_args.args[2]
+        assert set(columns) == {"record_date", "lpr_1y", "lpr_5y"}
+
+
 class TestMacroDaoGetMacroLatestDate:
     @pytest.mark.asyncio
     async def test_with_data(self):

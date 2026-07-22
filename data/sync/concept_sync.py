@@ -25,6 +25,7 @@ from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 _AKSHARE_CONCURRENCY = 3
 _AKSHARE_MAX_RETRIES = 3
 _AKSHARE_RETRY_BASE_DELAY = 1.0  # seconds; exponential backoff: 1, 2, 4
+
+# S7: AKShare 循环体内取消检查的时间间隔（秒）。
+# 项目内存约束："长运行操作必须每 2 秒检查 cancel_event"。旧实现每 200 条
+# board 检查一次，单 board 最坏 7s+，最坏 1000s 才响应取消，远超 2s 红线。
+_AKSHARE_CANCEL_CHECK_INTERVAL = 2.0
 
 # Default batch size for AI concept tagging.
 _AI_TAG_DEFAULT_BATCH = 50
@@ -170,11 +176,16 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                         exc_info=True,
                                     )
 
-            # Phase 2F: 循环体每 200 条检查 _check_cancelled，响应取消信号
+            # Phase 2F + S7: 循环体按时间维度（每 2 秒）检查 _check_cancelled。
+            # 旧实现每 200 条 board 检查一次，单 board 最坏 7s+，最坏 1000s 才响应取消，远超 2s 红线。
             tasks: list = []
-            for i, (_, row) in enumerate(df_boards.iterrows()):
-                if i > 0 and i % 200 == 0 and self._check_cancelled(result):
-                    return result
+            last_cancel_check = get_now()
+            for _, row in df_boards.iterrows():
+                now = get_now()
+                if (now - last_cancel_check).total_seconds() >= _AKSHARE_CANCEL_CHECK_INTERVAL:
+                    last_cancel_check = now
+                    if self._check_cancelled(result):
+                        return result
                 tasks.append(sync_one_board(str(row["板块名称"]), str(row["板块代码"])))
             await gather_return_exceptions_propagating_cancel(*tasks)
 
@@ -238,10 +249,6 @@ class LimitListSyncStrategy(ISyncStrategy):
                 return result
 
             stock_dao = self.context.cache.stock_dao
-            await stock_dao.clear_today_limit_concepts()
-
-            if self._check_cancelled(result):
-                return result
 
             try:
                 df = await self.context.api.get_limit_list(trade_date=trade_date)
@@ -279,6 +286,8 @@ class LimitListSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return result
 
+            # S11 fix: fetch 成功后再 clear+upsert，避免 clear 后 fetch 失败导致旧数据丢失
+            await stock_dao.clear_today_limit_concepts()
             if records:
                 saved = await stock_dao.upsert_limit_concepts(records)
                 result.added = saved or 0

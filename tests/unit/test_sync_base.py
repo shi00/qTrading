@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import datetime
 from unittest.mock import MagicMock
 
@@ -120,7 +121,7 @@ class TestSyncResultMergeStatus:
         r1 = SyncResult(status="success")
         r2 = SyncResult(status="failed")
         r1.merge(r2)
-        assert r1.status == "partial"
+        assert r1.status == "failed"
 
     def test_merge_both_failed(self):
         r1 = SyncResult(status="failed")
@@ -144,7 +145,7 @@ class TestSyncResultMergeStatus:
         r1 = SyncResult(status="partial")
         r2 = SyncResult(status="failed")
         r1.merge(r2)
-        assert r1.status == "partial"
+        assert r1.status == "failed"
 
     def test_merge_success_and_partial(self):
         r1 = SyncResult(status="success")
@@ -328,6 +329,68 @@ class TestISyncStrategyCancelSemantics:
         from data.sync.macro import MacroSyncStrategy
 
         assert hasattr(MacroSyncStrategy, "_check_cancelled"), "MacroSyncStrategy.run should use _check_cancelled"
+
+
+class TestCheckCancelledContextEvent:
+    """S1: 基类 _check_cancelled 应检查 context.cancel_event。
+
+    验证仅继承基类 cancel() 的新 syncer 也能通过 context.cancel_event
+    响应取消信号（无需自行维护 _shutdown_event）。
+    """
+
+    @staticmethod
+    def _make_strategy(cancel_event=None):
+        ctx = SyncContext(api=MagicMock(), cache=MagicMock(), cancel_event=cancel_event)
+
+        class ConcreteStrategy(ISyncStrategy):
+            async def _run_impl(self, **kwargs):
+                return SyncResult()
+
+        return ConcreteStrategy(ctx)
+
+    def test_cancel_event_not_set_returns_false(self):
+        """context.cancel_event 存在但未 set 时，_check_cancelled 返回 False。"""
+        event = asyncio.Event()
+        strategy = self._make_strategy(cancel_event=event)
+        result = SyncResult()
+        assert strategy._check_cancelled(result) is False
+        assert result.status == "success"
+        assert strategy._cancelled is False
+
+    def test_cancel_event_set_returns_true_and_syncs_flag(self):
+        """context.cancel_event.is_set() 时，_check_cancelled 返回 True 并同步 _cancelled。"""
+        event = asyncio.Event()
+        event.set()
+        strategy = self._make_strategy(cancel_event=event)
+        result = SyncResult()
+        assert strategy._check_cancelled(result) is True
+        assert result.status == "cancelled"
+        assert strategy._cancelled is True
+
+    def test_cancel_event_none_falls_back_to_flag(self):
+        """context.cancel_event 为 None 时，回退到 _cancelled 标志检查。"""
+        strategy = self._make_strategy(cancel_event=None)
+        result = SyncResult()
+        assert strategy._check_cancelled(result) is False
+
+        strategy._cancelled = True
+        assert strategy._check_cancelled(result) is True
+        assert result.status == "cancelled"
+
+    def test_cancel_event_set_syncs_flag_for_subsequent_calls(self):
+        """cancel_event set 后首次调用同步 _cancelled，后续调用直接命中标志。"""
+        event = asyncio.Event()
+        event.set()
+        strategy = self._make_strategy(cancel_event=event)
+        assert strategy._cancelled is False
+        result = SyncResult()
+        assert strategy._check_cancelled(result) is True
+        assert strategy._cancelled is True
+        # 第二次调用：即使 cancel_event 被 clear，_cancelled 已同步仍返回 True
+        event.clear()
+        result2 = SyncResult()
+        assert strategy._check_cancelled(result2) is True
+        assert result2.status == "cancelled"
 
 
 class TestSafeError:
