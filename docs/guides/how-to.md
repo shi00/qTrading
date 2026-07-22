@@ -87,3 +87,67 @@
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
 6. 在 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) 的单例列表中补充新单例名称。
 7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。
+
+### 9. 内置 PostgreSQL 离线维护
+
+> 适用场景：应用无法启动（数据目录损坏 / 启动失败 / 需要离线备份恢复）时，使用 sidecar CLI 进行离线维护。
+
+#### 9.1 前置条件
+
+- 应用必须完全退出（sidecar 会获取 PGDATA 锁，运行中无法维护）
+- sidecar binary 位于 `sidecars/qtrading-pg-sidecar[.exe]`
+- 数据目录默认在 `<app data>/postgres/17/data`（可通过 `AppConfig.embedded_pg_data_root` 自定义）
+
+#### 9.2 诊断（doctor）
+
+```bash
+sidecars/qtrading-pg-sidecar doctor --data-dir <数据目录>
+```
+
+输出 JSON（schema `qtrading.embedded_postgres.doctor.v1`），含 `initialized` / `pg_version` / `critical_files_missing` / `postgres_alive` / `state_file` / `issues` 等字段。
+
+exit code 含义：
+- `0` 成功（PG 运行中）
+- `20` PG 未运行（容忍，doctor 是只读诊断）
+- `40` 数据目录损坏
+- `50` 锁冲突（应用未完全退出）
+
+#### 9.3 备份（dump）
+
+```bash
+sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文件路径>
+```
+
+输出 PostgreSQL custom format 备份文件，可用 `pg_restore` 工具恢复。
+
+#### 9.4 恢复（restore）
+
+```bash
+sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份文件路径> [--target-data-dir <新数据目录>]
+```
+
+**重要**：sidecar 采用原子切换策略 — 恢复到新目录而非覆盖原目录，避免恢复中途失败导致数据丢失。恢复成功后需手动切换数据目录指向新目录。
+
+#### 9.5 维护实例（maintenance-shell）
+
+```bash
+sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
+```
+
+启动临时维护实例（不竞争主实例锁），输出含 `psql_path` + `connection_string_redacted`（密码已脱敏）的 JSON，用户可用 psql 直接连接进行高级维护。
+
+#### 9.6 错误分类
+
+| exit code | 错误类型 | 用户提示 |
+|-----------|---------|---------|
+| 10 | sidecar_arg_error | 维护命令参数错误 |
+| 11 | initdb_failed | 数据库初始化失败 |
+| 12 | pg_start_failed | 数据库启动失败 |
+| 15 | disk_full | 磁盘空间不足，请清理后重试 |
+| 20 | pg_not_running | 幂等，doctor 容忍 |
+| 40 | pgdata_corrupt | 数据目录损坏，请使用恢复向导 |
+| 50 | lock_conflict | 请先关闭 qTrading 再执行维护操作 |
+
+#### 9.7 Python 服务封装
+
+工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。
