@@ -13,7 +13,7 @@ CONTRIBUTING.md 历史版本「已知架构技术债」表第一条 P3 记录了
 
 该决策的 upgrade 触发条件为「红线违规频发或 CI 自动化专项迭代时重新评估 3b/3c」。
 
-本次文档体系检视整改（plan-docs/claude-review.md P1-2）属于 CI 自动化专项迭代，触发条件已满足。同时：
+本次文档体系检视整改（P1-2）属于 CI 自动化专项迭代，触发条件已满足。同时：
 
 - 红线 R1~R18 是项目宪法核心，append-only 与不复用废弃编号的约束目前仅靠人工评审守护
 - CLAUDE.md §3.1 红线表的「强制状态」字段（pre-commit / CI-test / 仅人工评审）与实际 hook/CI 配置存在漂移风险
@@ -52,7 +52,7 @@ CONTRIBUTING.md 历史版本「已知架构技术债」表第一条 P3 记录了
 
 Decision 3 中"docs/debt/known-technical-debt.md 第一条 P3 条目更新为「3a 已落地，3b 已落地（见 ADR-0003），3c 仍不做」"所指的"第一条 P3 条目"为决策时点（2026-07-17）的 doc-lint 自动化第二阶段条目。
 
-该条目后因 3a/3b/3c 全部落地完成（3a 由 Phase 5 落地、3b 由本 ADR 落地、3c 由 ADR-0005 落地），已于 2026-07-19 从 `docs/debt/known-technical-debt.md` 清理（符合 CLAUDE.md §3.3「已解决事项不再列入本表」原则，详见 `.trae/specs/revise-tech-debt-records-v3/`）。
+该条目后因 3a/3b/3c 全部落地完成（3a 由 Phase 5 落地、3b 由本 ADR 落地、3c 由 ADR-0005 落地），已于 2026-07-19 从 `docs/debt/known-technical-debt.md` 清理（符合 CLAUDE.md §3.3「已解决事项不再列入本表」原则；设计 spec 未纳入版本控制）。
 
 当前 `docs/debt/known-technical-debt.md` 第一条 P3 条目为"strategies/ 层 except Exception 已标记 NOTE(lazy)"，与本 ADR 决策无直接关联。读者如需查阅 doc-lint 历史决策记录，请直接阅读本 ADR 与 ADR-0005，无需在 `known-technical-debt.md` 中查找。
 
