@@ -987,6 +987,47 @@ async def wizard_page(e2e_browser, wizard_app: AppServer, request):
     await _teardown_page(fp, request, failed=failed)
 
 
+@pytest.fixture(scope="session")
+def embedded_wizard_app(tmp_path_factory, mock_keyring):
+    """Embedded 模式 wizard app fixture (P3-18)。
+
+    与 wizard_app 区别：注入 QTRADING_DATABASE_MODE=embedded + fake_sidecar 路径，
+    使 app 内部 EmbeddedPostgresService 启动时 Popen fake_sidecar 而非真实 sidecar。
+    """
+    from tests.e2e.fixtures.fake_sidecar import create_fake_sidecar
+
+    fake_sidecar_path = create_fake_sidecar(tmp_path_factory.mktemp("fake_sidecar"))
+    proc, url, cfg_file = _spawn(
+        tmp_path_factory,
+        config={
+            "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(fake_sidecar_path),
+        },
+        env_overrides={
+            "TS_TOKEN": "e2e-dummy-token",
+            "AI_API_KEY": "e2e-dummy-key",
+            "QTRADING_DATABASE_MODE": "embedded",
+            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+        },
+    )
+    app = AppServer(proc, url, cfg_file)
+    yield app
+    _terminate(proc)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def embedded_wizard_page(e2e_browser, embedded_wizard_app: AppServer, request):
+    """Function 级 Page（embedded 模式向导测试, P3-18）。"""
+    fp = await _make_page(e2e_browser, embedded_wizard_app, request)
+    yield fp
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
+
+
 @pytest.fixture(autouse=True)
 def pristine_config(request):
     """配置快照/还原：仅对标记 ``mutates_config`` 的用例激活。
