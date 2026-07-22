@@ -23,7 +23,21 @@ def setup_test_files(
 ):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n',
+        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n\n[tool.qtrading.sidecar]\nversion = "0.1.0"\nprotocol_version = "v1"\npostgresql_version = "17.2.0"\ncrate_version = "0.21.0"\n',
+        encoding="utf-8",
+    )
+
+    # sidecar stub 文件：与 pyproject [tool.qtrading.sidecar] 版本一致，供 check_sidecar_version_consistency() 解析
+    sidecar_dir = tmp_path / "sidecars" / "qtrading-pg-sidecar"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    (sidecar_dir / "Cargo.toml").write_text(
+        '[package]\nversion = "0.1.0"\n\n[dependencies]\npostgresql_embedded = "=0.21.0"\n',
+        encoding="utf-8",
+    )
+    sidecar_src = sidecar_dir / "src"
+    sidecar_src.mkdir(parents=True, exist_ok=True)
+    (sidecar_src / "protocol.rs").write_text(
+        'pub const PROTOCOL_VERSION: &str = "v1";\n',
         encoding="utf-8",
     )
 
@@ -93,6 +107,8 @@ def _patch_all_paths(
     requirements_dev,
 ):
     """Helper to patch all path constants used by verify_versions.main()."""
+    # sidecar stub 路径从 pyproject.parent 推导，与 setup_test_files 中创建位置一致
+    sidecar_dir = pyproject.parent / "sidecars" / "qtrading-pg-sidecar"
     return [
         patch("verify_versions.PYPROJECT_PATH", pyproject),
         patch("verify_versions.INSTALLER_PATH", installer),
@@ -104,6 +120,8 @@ def _patch_all_paths(
         patch("verify_versions.SECURITY_PATH", security),
         patch("verify_versions.CLAUDE_PATH", claude),
         patch("verify_versions.REQUIREMENTS_DEV_PATH", requirements_dev),
+        patch("verify_versions.SIDECAR_CARGO_PATH", sidecar_dir / "Cargo.toml"),
+        patch("verify_versions.SIDECAR_PROTOCOL_PATH", sidecar_dir / "src" / "protocol.rs"),
     ]
 
 

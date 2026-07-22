@@ -200,3 +200,17 @@ type = "forbidden"
 source_modules = ["strategies"]
 forbidden_modules = ["ui"]
 
+# qTrading embedded PostgreSQL sidecar 配置 (pg_plan §15.5 AI-12)
+# 由 scripts/verify_versions.py 校验与 sidecars/qtrading-pg-sidecar/Cargo.toml 一致
+[tool.qtrading.sidecar]
+# sidecar 二进制版本，必须与 sidecars/qtrading-pg-sidecar/Cargo.toml [package].version 一致
+version = "0.1.0"
+# ready JSON schema 主版本号 (pg_plan §6.2 / §13.7.19 / D34)
+# 与 sidecars/qtrading-pg-sidecar/src/protocol.rs PROTOCOL_VERSION 常量一致
+# Python 端 EmbeddedPostgresService.start() 校验 ready JSON 的 schema 主版本与该值兼容
+protocol_version = "v1"
+# bundled PostgreSQL 归档版本 (pg_plan §15.2，固定 17 系列)
+postgresql_version = "17.2.0"
+# postgresql_embedded crate 版本 (Cargo.toml dependencies)
+crate_version = "0.21.0"
+
