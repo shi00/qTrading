@@ -52,3 +52,39 @@ Name: "{autodesktop}\AStockScreener"; Filename: "{app}\AStockScreener.exe"; Task
 
 [Run]
 Filename: "{app}\AStockScreener.exe"; Description: "启动 AStockScreener"; Flags: nowait postinstall skipifsilent
+
+#if TargetVariant == "embedded"
+[UninstallRun]
+; Phase 5 失败注入 #32 配套：卸载前先 stop sidecar（防止文件占用）；Check 确保开发环境无 sidecar binary 时不报错
+; --data-dir 路径与 resources/maintenance/README-maintenance.md 一致（platformdirs 默认）
+Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop --data-dir ""{localappdata}\qTrading\postgres\17\data"""; Flags: runhidden; RunOnceId: "StopSidecar"; Check: SidecarExists
+#endif
+
+#if TargetVariant == "embedded"
+[Code]
+// Phase 5 失败注入 #32：qTrading 运行中启动安装器被拒绝
+// 使用 tasklist + find（Windows 原生，无需 PowerShell，Inno Setup Exec 调用 cmd 更稳定）
+// find 返回 0 表示找到匹配（进程存在），非 0 表示未找到
+function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  if Exec(ExpandConstant('{cmd}'), '/C tasklist /FI "IMAGENAME eq AStockScreener.exe" | find "AStockScreener.exe"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+    begin
+      MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+  end;
+  Result := True;
+end;
+
+// Check 函数：sidecar binary 存在时才执行 [UninstallRun] 中的 stop 命令
+// 开发环境或 standard variant 升级到 embedded（无 sidecar binary）时不报错
+function SidecarExists(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\_internal\sidecars\qtrading-pg-sidecar.exe'));
+end;
+#endif

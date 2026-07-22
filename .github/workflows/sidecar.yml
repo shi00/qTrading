@@ -6,6 +6,7 @@ on:
     paths:
       - 'sidecars/qtrading-pg-sidecar/**'
       - '.github/workflows/sidecar.yml'
+    tags: ['sidecar-v*']
   pull_request:
     paths:
       - 'sidecars/qtrading-pg-sidecar/**'
@@ -33,6 +34,11 @@ env:
 jobs:
   lint-test:
     name: Lint & Test (${{ matrix.os }}/${{ matrix.target }})
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -84,8 +90,36 @@ jobs:
       - name: cargo test (failure_injection integration, serial)
         run: cargo test --target ${{ matrix.target }} --test failure_injection -- --test-threads=1
 
+      - name: Install cargo-llvm-cov (Linux only)
+        if: matrix.os == 'linux'
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9  # v2.84.0
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo llvm-cov (unit tests coverage, Linux only, advisory mode)
+        # NOTE(lazy): §17.0 要求 Rust unit 行覆盖率 ≥85%，但 Phase 1 合并时未设门禁，
+        # 当前实际覆盖率约 40-50%（run.rs/maint.rs/pgbin.rs 测试不足）。
+        # ceiling: 85%（§17.0 强制门禁）. upgrade: 补充 Rust unit 测试至 85% 后恢复 --fail-under-lines 85.
+        # Phase 5 DoD（§19）只要求"覆盖率报告归档"，不要求"达标"，故此处用 advisory 模式收集数据。
+        if: matrix.os == 'linux'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo llvm-cov --target ${{ matrix.target }} --bins --lcov --output-path lcov.info
+
+      - name: Upload coverage report (Linux only)
+        if: matrix.os == 'linux' && always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: rust-coverage-lcov
+          path: lcov.info
+          retention-days: 14
+
   build-artifacts:
     name: Build release artifact (${{ matrix.os }}/${{ matrix.target }})
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: lint-test
@@ -93,21 +127,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # binary_path 相对于 defaults.run.working-directory（sidecars/qtrading-pg-sidecar）
+          # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
-            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
+            binary_path: target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
           - os: linux
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: qtrading-pg-sidecar-linux-x86_64
-            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
+            binary_path: target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
           - os: macos
             runner: macos-14
             target: aarch64-apple-darwin
             artifact_name: qtrading-pg-sidecar-macos-aarch64
-            binary_path: sidecars/qtrading-pg-sidecar/target/aarch64-apple-darwin/release/qtrading-pg-sidecar
+            binary_path: target/aarch64-apple-darwin/release/qtrading-pg-sidecar
     defaults:
       run:
         working-directory: sidecars/qtrading-pg-sidecar
@@ -131,11 +167,28 @@ jobs:
       - name: cargo build --release
         run: cargo build --target ${{ matrix.target }} --release
 
-      - name: Upload release artifact
+      - name: Setup Python (for generate_sidecar_manifest.py)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Generate sidecar manifest
+        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证三平台一致
+        shell: bash
+        run: |
+          python ../../scripts/generate_sidecar_manifest.py \
+            --sidecar ${{ matrix.binary_path }} \
+            --target ${{ matrix.target }} \
+            --output sidecar-manifest-${{ matrix.os }}.json
+
+      - name: Upload release artifact (含 manifest)
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.binary_path }}
+          # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
+          path: |
+            sidecars/qtrading-pg-sidecar/${{ matrix.binary_path }}
+            sidecars/qtrading-pg-sidecar/sidecar-manifest-${{ matrix.os }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -165,3 +218,77 @@ jobs:
         # 检查 Cargo.lock 中的已知漏洞（RustSec Advisory Database）
         # 与平台无关，仅在 Linux 上跑即可
         run: cargo audit --deny warnings
+
+  release:
+    name: Release sidecar binary & manifest (Windows, Phase 5)
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/sidecar-v')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write  # gh release upload 需要
+    defaults:
+      run:
+        working-directory: sidecars/qtrading-pg-sidecar
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: release-windows-tag
+
+      - name: Setup Python (for generate_sidecar_manifest.py)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: cargo build --release (Windows only, Phase 5)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo build --target x86_64-pc-windows-msvc --release
+
+      - name: Generate sidecar manifest (Windows)
+        run: |
+          python ../../scripts/generate_sidecar_manifest.py `
+            --sidecar target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe `
+            --target x86_64-pc-windows-msvc `
+            --output sidecar-manifest-windows.json
+        shell: pwsh
+
+      - name: "Generate SHA256 checksums (Phase 5 Security)"
+        shell: pwsh
+        run: |
+          $binaryPath = "target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $binaryPath).Hash.ToLower()
+          $binaryName = Split-Path $binaryPath -Leaf
+          "$hash  $binaryName" | Out-File -Encoding ASCII -NoNewline sha256sums.txt
+          Write-Host "SHA256: $hash  $binaryName"
+          Get-Content sha256sums.txt
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $TAG = $env:GITHUB_REF -replace '^refs/tags/', ''
+          Write-Host "Creating release for tag: $TAG"
+          # gh release create 幂等：release 已存在时静默失败
+          gh release create $TAG --generate-notes --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+          # 上传 Windows binary + manifest + sha256sums（--clobber 覆盖已存在的 assets）
+          gh release upload $TAG `
+            target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe `
+            sidecar-manifest-windows.json `
+            sha256sums.txt `
+            --clobber
+          Write-Host "Release $TAG assets uploaded successfully"
