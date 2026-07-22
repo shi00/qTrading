@@ -231,6 +231,12 @@ class AppConfig(BaseModel):
     embedded_pg_username: str = Field(default="qtrading", description="PG 超级用户名")
     embedded_pg_database: str = Field(default="qtrading", description="默认业务库名")
 
+    # Phase 3：Settings DatabaseTab 高级模式开关（开启后显示外置 PostgreSQL 配置表单）
+    db_show_advanced: bool = Field(
+        default=False,
+        description="Settings DatabaseTab 高级模式开关（显示外置 PostgreSQL 表单）",
+    )
+
 
 @cache
 def get_default_config() -> dict[str, Any]:
