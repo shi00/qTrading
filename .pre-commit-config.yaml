@@ -32,6 +32,24 @@ repos:
         pass_filenames: true
         exclude: ^scripts/check_no_isolated_asyncio\.py$
 
+      - id: pyright-changed
+        name: Pyright Type Check (staged files)
+        entry: python scripts/run_pyright_changed.py
+        language: system
+        types_or: [ python, pyi ]
+        pass_filenames: true
+        # 排除 alembic 迁移脚本（自动生成，类型注解宽松）与 scripts 自身（工具脚本，非业务代码）
+        exclude: ^(alembic/|scripts/run_pyright_changed\.py$)
+
+      - id: weak-assertion-changed
+        name: Weak Assertion Scan (staged test files)
+        entry: python scripts/check_staged_weak_assertions.py
+        language: system
+        types_or: [ python, pyi ]
+        pass_filenames: true
+        # 仅扫描 tests/ 下的 test_*.py（脚本内部已按文件名前缀过滤，files 是 pre-commit 层前置过滤）
+        files: ^tests/.*test_.*\.py$
+
       - id: pip-compile-core
         name: pip-compile requirements.txt
         entry: uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
