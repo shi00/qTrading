@@ -17,6 +17,7 @@ NOTE(lazy): 备份/恢复路径暂用固定默认值 (qtrading-backup.dump),
   upgrade: 接入 FilePicker 后移除默认路径.
 """
 
+from datetime import datetime
 import logging
 from pathlib import Path
 
@@ -31,9 +32,13 @@ from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
 
 logger = logging.getLogger(__name__)
 
+
 # NOTE(lazy): 备份/恢复路径默认值 (FilePicker 集成前的权宜之计).
 # ceiling: 单机桌面端单用户场景. upgrade: 接入 FilePicker 后移除.
-_DEFAULT_BACKUP_PATH = Path("qtrading-backup.dump")
+def _generate_default_backup_path() -> Path:
+    """生成带时间戳的默认备份路径, 避免覆盖保护导致备份不可重复."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Path(f"qtrading-backup-{timestamp}.dump")
 
 
 def _render_message(msg: Message | None) -> str:
@@ -50,7 +55,7 @@ def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandl
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(vm.start_backup, _DEFAULT_BACKUP_PATH)
+                page.run_task(vm.start_backup, _generate_default_backup_path())
         except RuntimeError:
             logger.debug("[BackupRestorePanel] page not available for start_backup")
 
@@ -67,7 +72,9 @@ def _on_restore_wizard_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEv
         try:
             page = ft.context.page
             if page is not None:
-                input_path = Path(vm.state.backup_path) if vm.state.backup_path is not None else _DEFAULT_BACKUP_PATH
+                input_path = (
+                    Path(vm.state.backup_path) if vm.state.backup_path is not None else _generate_default_backup_path()
+                )
                 page.run_task(vm.start_restore_wizard, input_path)
         except RuntimeError:
             logger.debug("[BackupRestorePanel] page not available for start_restore_wizard")
