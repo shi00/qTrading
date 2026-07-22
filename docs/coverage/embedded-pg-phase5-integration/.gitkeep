@@ -1,0 +1,3 @@
+# Phase 5 Python integration 覆盖率报告占位
+# 实际报告由 CI 生成，PR 合入后从 CI artifact (test-reports-Linux-3.13) 下载归档
+# 详见 ../embedded-pg-phase5-README.md
