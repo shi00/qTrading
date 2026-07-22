@@ -244,6 +244,9 @@ async def test_db_connection_test_and_save(e2e_page):
     见 commit message), 所有走 show_snack_callback 的 toast 通知不渲染. test_connection
     走面板级 status 路径, View 直接渲染翻译文本 (不走 toast, 可见).
 
+    P3-13: DatabaseTab 默认模式只渲染 EmbeddedStatusCard/DatabaseStatusPanel/BackupRestorePanel,
+    需先点击"高级模式"开关启用 ExternalPgForm 才能看到 host/port 表单和"测试连接"按钮.
+
     mock 策略: DB 测试连接调真实 asyncpg, 配置默认值 (host="", port=5432, user=postgres,
     password=_E2E_DB_PASSWORD from env var, database=astock). host="" 触发 VM validate()
     前置校验失败, 返回 wizard_err_host_required (最常见路径). 若 host 有值则走 asyncpg,
@@ -251,7 +254,11 @@ async def test_db_connection_test_and_save(e2e_page):
     """
     await _navigate_to_settings_tab(e2e_page, "settings_tab_database")
 
-    # 等待数据库面板渲染（主机 label 可见）
+    # P3-13: DatabaseTab 默认模式不渲染 ExternalPgForm, 需先开启"高级模式"开关
+    advanced_switch_label = I18n.get("settings_db_advanced_mode")
+    await e2e_page.click_text(advanced_switch_label, timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 等待 ExternalPgForm 渲染（主机 label 可见）
     host_label = I18n.get("db_host")
     await e2e_page.expect_text(host_label, timeout_ms=TIMEOUTS.INTERACTION)
 
