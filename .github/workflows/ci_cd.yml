@@ -527,7 +527,7 @@ jobs:
             $errors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors)
             if ($errors.Count -gt 0) {
-              Write-Error "Syntax error in $script:"
+              Write-Error "Syntax error in ${script}:"
               $errors | ForEach-Object { Write-Host "  $($_.Message) at line $($_.Extent.StartLineNumber)" }
               $hasError = $true
             } else {
