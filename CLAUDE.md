@@ -80,6 +80,7 @@
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
 | 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
+| 代码检视 / PR review | [docs/reviews/code-review-guide.md](./docs/reviews/code-review-guide.md)（三轮检视法 + 项目 Profile §7.9）；项目红线见 §3、架构边界见 §4 |
 | 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 docs/guides/how-to.md「6. 新增与升级依赖」 |
@@ -214,3 +215,4 @@ app → 编排所有层，仅被 main.py 调用
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
 | Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
+| AI 代码检视指南（三轮检视法 / 质量维度 / 专项 Profile / 输出契约） | [docs/reviews/code-review-guide.md](./docs/reviews/code-review-guide.md) |

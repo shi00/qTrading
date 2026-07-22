@@ -11,6 +11,7 @@
 - [debt/](./debt/) — 已知架构技术债
 - [adr/](./adr/) — 架构决策记录（ADR）
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml）
+- [reviews/](./reviews/) — AI 代码检视指南（三轮检视法 / 质量维度 / 专项 Profile）
 
 ## 文档层次
 
