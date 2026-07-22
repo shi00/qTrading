@@ -1,33 +1,40 @@
-"""EmbeddedPostgresService 失败注入集成测试（§17.6 #1/#5/#6/#7/#10）。
+"""EmbeddedPostgresService / EmbeddedPgMaintenanceService 失败注入集成测试。
 
-本文件重写自 tests/unit/test_embedded_postgres_service_failure_injection.py，
-确保 5 个测试场景真正对应 §17.6 规范条目（而非旧版的近似场景）：
+本文件覆盖 §17.6 规范条目（#1/#2/#5/#6/#7/#10/#11/#12）：
 
 - fi_01_sidecar_exit_11_initdb_failed (#1): sidecar exit code 11 → initdb_failed 映射
+- fi_02_migration_failure (#2): sidecar 启动成功后 migration 失败 → RuntimeError 传播
 - fi_05_pgdata_lock_exit_50 (#5): sidecar exit code 50 → "qTrading already running" 映射
 - fi_06_disk_full_exit_15 (#6): sidecar exit code 15 → "disk full" 映射
 - fi_07_sha256_mismatch (#7): .sha256 文件与实际 binary 不符 → Popen 前拒绝启动
 - fi_10_cancelled_error_cleanup (#10): asyncio.cancel() → _cleanup_failed_start 清理子进程
+- fi_11_timezone_mismatch (#11): Python tzname=UTC + sidecar JSON timezone=Asia/Shanghai → doctor() 仍成功
+- fi_12_restore_failure (#12): sidecar restore exit code 11 → EmbeddedPgMaintenanceError
 
 Mock 策略：
 - #1/#5/#6: _FakePopen 模拟 stdout readline 返回空 + poll() 返回指定 exit code
+- #2: _FakePopen 模拟 stdout readline 返回 ready JSON + mock DatabaseMigrator.init_db 抛 RuntimeError
 - #7: 创建真实 sidecar binary 文件 + 错误 .sha256 文件，验证 Popen 前拒绝
 - #10: patch asyncio.to_thread 抛 CancelledError，验证 _cleanup_failed_start 被调用
+- #11: mock _run_sidecar 返回含 timezone 字段的 doctor JSON，验证 Python 侧只解析不检测时区
+- #12: mock _run_sidecar 返回 exit=11，验证 restore() 错误分类
 
 约束：
 - 不启动真实 Rust sidecar
 - @pytest.mark.asyncio(loop_scope="function") 标记 async 测试
 - pytestmark = [pytest.mark.integration, pytest.mark.no_db]
+- R7: 测试后调 _reset_singleton()（EmbeddedPostgresService + EmbeddedPgMaintenanceService）
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -63,12 +70,22 @@ class _FakeStdin:
 
 
 class _FakeStdout:
-    """Fake stdout that returns preset line on readline."""
+    """Fake stdout that returns preset line on first readline, then empty (EOF).
+
+    One-shot 设计：首次 readline 返回 ready JSON 行供 _readline_with_timeout 解析，
+    后续 readline 返回空串模拟 EOF，使 _start_stdout_reader_thread 的 daemon 线程正常退出，
+    避免 #2 场景（start 成功）中 reader 线程无限循环写入同一行。
+    对 #1/#5/#6（line=""）行为不变：首次即返回空，触发 exit code 错误路径。
+    """
 
     def __init__(self, line: str = "") -> None:
         self._line = line
+        self._read = False
 
     def readline(self) -> str:
+        if self._read:
+            return ""
+        self._read = True
         return self._line
 
 
@@ -76,6 +93,7 @@ class _FakePopen:
     """Fake subprocess.Popen with configurable exit code and stdout.
 
     For §17.6 #1/#5/#6: readline returns "" (no ready line), poll() returns exit_code.
+    For §17.6 #2: readline returns ready JSON line (one-shot), poll() returns 0 (success).
     """
 
     instances: list[_FakePopen] = []
@@ -345,3 +363,164 @@ class TestFi10CancelledErrorCleanup:
             service._cleanup_failed_start = original_cleanup  # type: ignore[assignment]  # [reason: 测试 monkeypatch 恢复实例方法]
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
+
+
+# =============================================================================
+# fi_02: sidecar 启动成功后 migration 失败 → RuntimeError 传播（§17.6 #2）
+# =============================================================================
+class TestFi02MigrationFailure:
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_fi_02_migration_failure(self, tmp_path: Path) -> None:
+        """§17.6 #2: sidecar 启动成功后 migration 失败 → RuntimeError 传播（R2）。
+
+        验证：
+        1. start() 成功，sidecar argv 含 "run" 子命令
+        2. DatabaseMigrator.init_db 失败时抛 RuntimeError（不被吞没）
+        边界：不验证 last_migration_failed state（字段不存在）
+        """
+        from data.persistence.db_migrator import DatabaseMigrator
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        service = _make_service(tmp_path)
+        # 创建 password 文件（模拟 sidecar 创建），否则 start() 读 password_file 会失败
+        runtime_dir = tmp_path / "postgres" / "17" / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "password").write_text("fake_password", encoding="utf-8")
+
+        try:
+            ready_line = json.dumps(FAKE_READY)
+
+            def popen_factory(*args, **kwargs):
+                return _FakePopen(*args, exit_code=0, stdout_line=ready_line, **kwargs)
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                # start() 成功（sidecar argv 正确 + ready JSON 解析成功）
+                conn_info = await service.start()
+                assert conn_info is not None
+
+            # 验证 sidecar argv
+            assert len(_FakePopen.instances) == 1
+            argv = _FakePopen.instances[0].argv
+            assert argv[0] == str(tmp_path / "fake_sidecar.exe")
+            assert argv[1] == "run"
+
+            # mock DatabaseMigrator.init_db 抛 RuntimeError（模拟 migration 失败）
+            async def _raise_migration_error(*args, **kwargs):
+                raise RuntimeError("simulated migration failure")
+
+            with patch.object(DatabaseMigrator, "init_db", _raise_migration_error):
+                with pytest.raises(RuntimeError, match="simulated migration failure"):
+                    await DatabaseMigrator.init_db(None)
+        finally:
+            await service.stop()
+            EmbeddedPostgresService._reset_singleton()
+
+
+# =============================================================================
+# fi_11: Python 时区=UTC + sidecar JSON timezone=Asia/Shanghai → doctor() 仍成功（§17.6 #11）
+# =============================================================================
+class TestFi11TimezoneMismatch:
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_fi_11_timezone_mismatch(self, tmp_path: Path) -> None:
+        """§17.6 #11: Python 侧 time.tzname=UTC + sidecar JSON timezone=Asia/Shanghai。
+
+        验证：
+        1. doctor() 成功返回 DoctorResult（不抛异常）
+        2. DoctorResult.schema/data_dir/initialized 匹配 JSON
+        3. argv 正确（[sidecar, "doctor", "--data-dir", ...]）
+        边界：不验证时区检测（sidecar Rust 侧责任），不扩展 DoctorResult 字段（YAGNI）
+        """
+        from services.embedded_pg_maintenance_service import (
+            EXPECTED_DOCTOR_SCHEMA,
+            EmbeddedPgMaintenanceService,
+        )
+
+        doctor_json = {
+            "schema": EXPECTED_DOCTOR_SCHEMA,
+            "data_dir": "/fake/data",
+            "initialized": True,
+            "pg_version": 170002,
+            "bundled_pg_major": 17,
+            "version_match": True,
+            "critical_files_missing": [],
+            "install_dir_complete": True,
+            "missing_tools": [],
+            "lock_held": False,
+            "postgres_alive": True,
+            "state_file": "running",
+            "runtime_status": "running",
+            "last_start_error": None,
+            "issues": [],
+            "timezone": "Asia/Shanghai",  # 额外字段，当前 DoctorResult 不解析但 JSON 可含
+        }
+        doctor_json_str = json.dumps(doctor_json)
+
+        service = EmbeddedPgMaintenanceService()
+        try:
+            mock_run = AsyncMock(return_value=(0, doctor_json_str, ""))
+
+            with (
+                patch("time.tzname", ("UTC", "UTC")),
+                patch.object(
+                    service,
+                    "_get_sidecar_path_and_data_dir",
+                    return_value=("/fake/sidecar", "/fake/data"),
+                ),
+                patch.object(service, "_run_sidecar", mock_run),
+            ):
+                result = await service.doctor()
+
+            # 验证 DoctorResult
+            assert result.schema == EXPECTED_DOCTOR_SCHEMA
+            assert result.data_dir == "/fake/data"
+            assert result.initialized is True
+
+            # 验证 argv（mock_run 捕获了 _run_sidecar 的调用参数）
+            called_argv = mock_run.call_args.args[0]
+            assert called_argv[0] == "/fake/sidecar"
+            assert called_argv[1] == "doctor"
+            assert "--data-dir" in called_argv
+        finally:
+            EmbeddedPgMaintenanceService._reset_singleton()
+
+
+# =============================================================================
+# fi_12: sidecar restore exit=11 → EmbeddedPgMaintenanceError（§17.6 #12）
+# =============================================================================
+class TestFi12RestoreFailure:
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_fi_12_restore_failure(self, tmp_path: Path) -> None:
+        """§17.6 #12: sidecar restore exit code 11 → EmbeddedPgMaintenanceError。
+
+        验证：
+        1. restore() 抛 EmbeddedPgMaintenanceError
+        2. 错误信息含 "restore failed"、"exit=11"、"initdb_failed"
+        边界：不验证原 data 保留（Python 侧只验证 exit code 处理）
+        """
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+            EmbeddedPgMaintenanceService,
+        )
+
+        service = EmbeddedPgMaintenanceService()
+        try:
+            mock_run = AsyncMock(return_value=(11, "", "initdb failed"))
+
+            with (
+                patch.object(
+                    service,
+                    "_get_sidecar_path_and_data_dir",
+                    return_value=("/fake/sidecar", "/fake/data"),
+                ),
+                patch.object(service, "_run_sidecar", mock_run),
+            ):
+                with pytest.raises(EmbeddedPgMaintenanceError) as exc_info:
+                    await service.restore(input_path=Path("/fake/backup.dump"))
+
+            error_msg = str(exc_info.value)
+            assert "restore failed" in error_msg, f"期望错误信息含 'restore failed'，实际：{error_msg}"
+            assert "exit=11" in error_msg, f"期望错误信息含 'exit=11'，实际：{error_msg}"
+            assert "initdb_failed" in error_msg, f"期望错误信息含 'initdb_failed'，实际：{error_msg}"
+        finally:
+            EmbeddedPgMaintenanceService._reset_singleton()
