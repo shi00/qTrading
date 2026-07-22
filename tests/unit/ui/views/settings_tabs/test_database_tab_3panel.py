@@ -12,7 +12,8 @@
 通过 mock 调用次数验证渲染分支。
 """
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -182,7 +183,9 @@ class TestDatabaseTab3Panel:
             # 构造 ControlEvent mock
             e = MagicMock()
             e.control.value = True
-            advanced_switch.on_change(e)
+            # on_change 类型为 ControlEventHandler[Switch] | None，
+            # 实际是 _on_advanced_toggle(e: ControlEvent) -> None，接受 1 个参数
+            cast(Callable[[Any], Any], advanced_switch.on_change)(e)
 
         # 验证 save_config 被调用, 参数含 {"db_show_advanced": True}
         config_handler_mock.save_config.assert_called_once_with({"db_show_advanced": True})

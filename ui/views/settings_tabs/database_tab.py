@@ -24,6 +24,7 @@ from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
 from ui.components.config_panels.database_status_panel import DatabaseStatusPanel
 from ui.components.config_panels.embedded_status_card import EmbeddedStatusCard
 from ui.components.config_panels.external_pg_form import ExternalPgForm
+from ui.components.flet_type_helpers import get_control_value, safe_on_change
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -91,7 +92,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
 
     def _on_advanced_toggle(e: ft.ControlEvent) -> None:
         """高级模式开关切换: 更新 state + 持久化到 AppConfig。"""
-        value = bool(e.control.value)
+        value = bool(get_control_value(e.control, ft.Switch))
         set_show_advanced(value)
         try:
             ConfigHandler.save_config({"db_show_advanced": value})
@@ -109,7 +110,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
     advanced_switch = ft.Switch(
         label=I18n.get("settings_db_advanced_mode"),
         value=show_advanced,
-        on_change=_on_advanced_toggle,
+        on_change=safe_on_change(_on_advanced_toggle),
         active_color=AppColors.PRIMARY,
     )
 
