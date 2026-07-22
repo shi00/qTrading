@@ -8,6 +8,9 @@
 5. 渲染 version/port/data_dir/log_dir 信息
 6. 渲染 3 个按钮 (refresh/open_data_dir/open_log_dir)
 7. VM 生命周期 (mount/dispose)
+8. 纯函数 _render_message
+9. Click handler factory (page 可用 / RuntimeError 分支)
+10. 状态渲染分支 (各 status_type / info 字段非 None / error_message)
 """
 
 import contextlib
@@ -19,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import flet as ft
 import pytest
 
+from core.i18n import Message
 from tests.unit.ui.component_renderer import (
     FakePage,
     make_component,
@@ -28,6 +32,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.components.config_panels import database_status_panel as panel_module
 from ui.components.config_panels.database_status_panel import DatabaseStatusPanel
+from ui.viewmodels.database_status_view_model import DatabaseStatusState
 
 pytestmark = pytest.mark.unit
 
@@ -223,3 +228,288 @@ class TestDatabaseStatusPanelVMLifecycle:
             _, _, _, component = _render_panel()
             run_unmount_effects(component)
         mock_dispose.assert_called_once_with()
+
+
+# ============================================================================
+# 纯函数测试
+# ============================================================================
+
+
+class TestRenderMessage:
+    """_render_message 纯函数测试."""
+
+    def test_none_returns_empty(self, mock_i18n_state) -> None:
+        """None 输入返回空字符串."""
+        assert panel_module._render_message(None) == ""
+
+    def test_message_returns_translated_text(self, mock_i18n_state) -> None:
+        """Message 输入调 I18n.get(key, **params) 返回翻译文本."""
+        msg = Message("db_status_running")
+        with patch.object(panel_module, "I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **kw: f"translated:{key}"
+            result = panel_module._render_message(msg)
+        assert result == "translated:db_status_running"
+        mock_i18n.get.assert_called_once_with("db_status_running")
+
+
+# ============================================================================
+# Click handler factory 测试
+# ============================================================================
+
+
+class TestClickHandlers:
+    """Click handler factory 测试 — 覆盖 page 可用 / RuntimeError 分支."""
+
+    def test_on_refresh_click_calls_refresh_status(self) -> None:
+        """page 可用时调 page.run_task(vm.refresh_status)."""
+        from flet.controls.context import _context_page
+
+        vm = MagicMock()
+        mock_page = MagicMock()
+        _context_page.set(mock_page)
+        try:
+            handler = panel_module._on_refresh_click_factory(vm)
+            handler(MagicMock())
+        finally:
+            _context_page.set(None)
+
+        mock_page.run_task.assert_called_once_with(vm.refresh_status)
+
+    def test_on_refresh_click_silent_on_runtime_error(self) -> None:
+        """page 不可用 (RuntimeError, _context_page 为 None) 时静默处理."""
+        from flet.controls.context import _context_page
+
+        vm = MagicMock()
+        # _context_page.set(None) 让 ft.context.page property 抛 RuntimeError
+        _context_page.set(None)
+        try:
+            handler = panel_module._on_refresh_click_factory(vm)
+            handler(MagicMock())  # 不应抛异常
+        finally:
+            _context_page.set(None)
+        vm.refresh_status.assert_not_called()
+
+    def test_on_refresh_click_silent_when_page_none(self) -> None:
+        """page 为 None 时静默处理 (ft.context.page 抛 RuntimeError 由 except 捕获)."""
+        from flet.controls.context import _context_page
+
+        vm = MagicMock()
+        _context_page.set(None)
+        try:
+            handler = panel_module._on_refresh_click_factory(vm)
+            handler(MagicMock())
+        finally:
+            _context_page.set(None)
+        vm.refresh_status.assert_not_called()
+
+    def test_on_open_data_dir_click_calls_open_data_dir(self) -> None:
+        """open_data_dir 同步调用, 直接调 vm.open_data_dir()."""
+        vm = MagicMock()
+        handler = panel_module._on_open_data_dir_click_factory(vm)
+        handler(MagicMock())
+        vm.open_data_dir.assert_called_once_with()
+
+    def test_on_open_log_dir_click_calls_open_log_dir(self) -> None:
+        """open_log_dir 同步调用, 直接调 vm.open_log_dir()."""
+        vm = MagicMock()
+        handler = panel_module._on_open_log_dir_click_factory(vm)
+        handler(MagicMock())
+        vm.open_log_dir.assert_called_once_with()
+
+
+# ============================================================================
+# 状态渲染分支测试
+# ============================================================================
+
+
+def _render_panel_with_state(
+    state: DatabaseStatusState,
+    *,
+    page: FakePage | None = None,
+) -> tuple[Any, FakePage, Any, Any]:
+    """用自定义 state 渲染 DatabaseStatusPanel (mock use_viewmodel 返回 state)."""
+    if page is None:
+        page = FakePage()
+
+    mock_vm = MagicMock()
+
+    with contextlib.ExitStack() as stack:
+        mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
+        mock_i18n.get.side_effect = lambda key, **kw: key
+        stack.enter_context(patch.object(panel_module, "AppColors"))
+        mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
+        from ui.theme import AppStyles as _RealAppStyles
+
+        for attr in dir(_RealAppStyles):
+            if not attr.startswith("_"):
+                val = getattr(_RealAppStyles, attr, None)
+                if isinstance(val, (str, int, float)):
+                    setattr(mock_styles, attr, val)
+        mock_styles.primary_button = MagicMock(return_value=ft.ButtonStyle())
+        mock_styles.secondary_button = MagicMock(return_value=ft.ButtonStyle())
+
+        stack.enter_context(patch.object(panel_module, "use_viewmodel", return_value=(state, mock_vm)))
+
+        component = make_component(DatabaseStatusPanel)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+    return mock_vm, page, result, component
+
+
+class TestDatabaseStatusPanelStateRendering:
+    """DatabaseStatusPanel 各 state 渲染分支测试."""
+
+    def test_renders_version_when_pg_version_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """pg_version 非 None 时渲染 db_status_version."""
+        state = DatabaseStatusState(pg_version="17")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_version" in text_values
+
+    def test_renders_port_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """port 非 None 时渲染 db_status_port."""
+        state = DatabaseStatusState(port=5432)
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_port" in text_values
+
+    def test_renders_data_dir_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """data_dir 非 None 时渲染 db_status_data_dir."""
+        state = DatabaseStatusState(data_dir="/var/lib/pg")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_data_dir" in text_values
+
+    def test_renders_log_dir_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """log_dir 非 None 时渲染 db_status_log_dir."""
+        state = DatabaseStatusState(log_dir="/var/log/pg")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_log_dir" in text_values
+
+    def test_renders_status_message_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """status_message 非 None 时渲染翻译文本 + status icon."""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_running"),
+            status_type="success",
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_running" in text_values
+        # status icon 应可见
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        assert any(getattr(i, "visible", False) for i in icons)
+
+    def test_renders_error_message_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """error_message 非 None 时渲染翻译文本."""
+        state = DatabaseStatusState(
+            error_message=Message("db_status_refresh_failed"),
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "db_status_refresh_failed" in text_values
+
+    def test_refresh_button_disabled_when_refreshing(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """is_refreshing=True 时 refresh_button disabled=True."""
+        state = DatabaseStatusState(is_refreshing=True)
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        refresh_btns = [
+            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "db_status_refresh"
+        ]
+        assert len(refresh_btns) == 1
+        assert refresh_btns[0].disabled is True
+
+    def test_open_data_dir_button_disabled_when_data_dir_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """data_dir 为 None 时 open_data_dir_button disabled=True."""
+        state = DatabaseStatusState(data_dir=None)
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        open_data_btns = [
+            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "db_status_open_data_dir"
+        ]
+        assert len(open_data_btns) == 1
+        assert open_data_btns[0].disabled is True
+
+    def test_open_data_dir_button_enabled_when_data_dir_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """data_dir 非 None 时 open_data_dir_button disabled=False."""
+        state = DatabaseStatusState(data_dir="/var/lib/pg")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        open_data_btns = [
+            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "db_status_open_data_dir"
+        ]
+        assert len(open_data_btns) == 1
+        assert open_data_btns[0].disabled is False
+
+    def test_open_log_dir_button_disabled_when_log_dir_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """log_dir 为 None 时 open_log_dir_button disabled=True."""
+        state = DatabaseStatusState(log_dir=None)
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        open_log_btns = [
+            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "db_status_open_log_dir"
+        ]
+        assert len(open_log_btns) == 1
+        assert open_log_btns[0].disabled is True
+
+    def test_open_log_dir_button_enabled_when_log_dir_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """log_dir 非 None 时 open_log_dir_button disabled=False."""
+        state = DatabaseStatusState(log_dir="/var/log/pg")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        open_log_btns = [
+            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "db_status_open_log_dir"
+        ]
+        assert len(open_log_btns) == 1
+        assert open_log_btns[0].disabled is False
+
+    def test_status_icon_uses_success_mapping(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """status_type=success 时 status_icon 用 CHECK_CIRCLE icon."""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_running"),
+            status_type="success",
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        # ft.Icon 的 icon 属性是 icon name (int 类型 in Flet V1)
+        assert any(getattr(i, "icon", None) == ft.Icons.CHECK_CIRCLE for i in icons)
+
+    def test_status_icon_uses_error_mapping(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """status_type=error 时 status_icon 用 ERROR icon."""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_stopped"),
+            status_type="error",
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        assert any(getattr(i, "icon", None) == ft.Icons.ERROR for i in icons)
+
+    def test_status_icon_uses_warning_mapping(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """status_type=warning 时 status_icon 用 WARNING icon."""
+        state = DatabaseStatusState(
+            status_message=Message("db_status_stopped"),
+            status_type="warning",
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        assert any(getattr(i, "icon", None) == ft.Icons.WARNING for i in icons)
+
+    def test_status_icon_hidden_when_no_status_message(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """status_message 为 None 时 status_icon visible=False."""
+        state = DatabaseStatusState(status_message=None)
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        icons = [c for c in ctrls if isinstance(c, ft.Icon)]
+        assert len(icons) >= 1
+        assert all(not getattr(i, "visible", True) for i in icons)
