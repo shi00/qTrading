@@ -22,6 +22,7 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -126,13 +127,25 @@ class EmbeddedPostgresService:
     def from_config(cls, config: AppConfig) -> EmbeddedPostgresService:
         """从 AppConfig 解析路径并构造/复用单例。
 
-        - sidecar_binary：显式路径优先，否则按平台默认搜索 sidecars/qtrading-pg-sidecar[.exe]
+        - sidecar_binary：显式路径优先；否则按运行模式解析
+          - PyInstaller frozen 模式（``sys.frozen``）：``sys._MEIPASS / sidecars / qtrading-pg-sidecar[.exe]``
+            （pg_plan §16.2，installer embedded variant 安装到 ``<app>/_internal/sidecars/``）
+          - 开发模式：``Path("sidecars") / qtrading-pg-sidecar[.exe]``（cwd-relative）
         - data_dir：embedded_pg_data_root 为空时用 platformdirs 默认 <app data>/postgres/17/data
         - install_dir：默认 <data_root>/install
         - log_dir：默认 <app data>/postgres-logs
         """
         if config.embedded_pg_sidecar_path:
             sidecar_binary = Path(config.embedded_pg_sidecar_path)
+        elif getattr(sys, "frozen", False):
+            # PyInstaller onedir: sys._MEIPASS 指向 _internal/，sidecar 由 AStockScreener.spec 收集到 _internal/sidecars/
+            exe_suffix = ".exe" if os.name == "nt" else ""
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass is None:
+                raise EmbeddedPostgresStartError(
+                    "sys.frozen is True but sys._MEIPASS is None; cannot resolve sidecar binary path"
+                )
+            sidecar_binary = Path(meipass) / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}"
         else:
             exe_suffix = ".exe" if os.name == "nt" else ""
             sidecar_binary = Path("sidecars") / f"qtrading-pg-sidecar{exe_suffix}"

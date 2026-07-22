@@ -34,7 +34,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "dist\AStockScreener\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; common: 递归收集 PyInstaller 产物，排除 sidecar binary（仅 embedded variant 收集）。
+; maintenance 脚本位于 resources/ 不在 dist/AStockScreener/ 下，无需 Excludes。
+Source: "dist\AStockScreener\*"; DestDir: "{app}"; Excludes: "\_internal\sidecars\"; Flags: ignoreversion recursesubdirs createallsubdirs
+#if TargetVariant == "embedded"
+; embedded variant: 收集 sidecar binary（PyInstaller 产物中存在时，避免无 sidecar 构建时 iscc 报错）
+#ifexist "dist\AStockScreener\_internal\sidecars\qtrading-pg-sidecar.exe"
+Source: "dist\AStockScreener\_internal\sidecars\*"; DestDir: "{app}\_internal\sidecars"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
+; embedded variant: 收集离线维护脚本（pg_plan §16.2）
+Source: "resources\maintenance\*"; DestDir: "{app}\resources\maintenance"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{group}\AStockScreener"; Filename: "{app}\AStockScreener.exe"

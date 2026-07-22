@@ -950,6 +950,82 @@ class TestEmbeddedPostgresServiceFromConfig:
             f"log_dir 默认值错误，实际：{service._log_dir}，期望：{expected_log_dir}"
         )
 
+    def test_from_config_frozen_app_resolves_meipass(self, monkeypatch, tmp_path: Path) -> None:
+        """P4-8: PyInstaller frozen 模式下 sidecar_binary 从 sys._MEIPASS 解析。
+
+        验证：
+        1. sys.frozen=True + sys._MEIPASS 存在 → sidecar_binary = MEIPASS/sidecars/qtrading-pg-sidecar[.exe]
+        2. 不受 embedded_pg_sidecar_path 为空影响
+        """
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.config_models import AppConfig
+
+        meipass = tmp_path / "_internal"
+        meipass.mkdir()
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        monkeypatch.setattr("sys._MEIPASS", str(meipass), raising=False)
+
+        EmbeddedPostgresService._reset_singleton()
+        config = AppConfig()  # embedded_pg_sidecar_path 默认空
+        service = EmbeddedPostgresService.from_config(config)
+
+        expected_suffix = ".exe" if os.name == "nt" else ""
+        expected = meipass / "sidecars" / f"qtrading-pg-sidecar{expected_suffix}"
+        assert service._sidecar_binary == expected, (
+            f"frozen app sidecar_binary 错误，实际：{service._sidecar_binary}，期望：{expected}"
+        )
+
+    def test_from_config_frozen_app_explicit_path_overrides_meipass(self, monkeypatch, tmp_path: Path) -> None:
+        """P4-8: 显式 embedded_pg_sidecar_path 优先于 frozen app _MEIPASS 解析。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.config_models import AppConfig
+
+        meipass = tmp_path / "_internal"
+        meipass.mkdir()
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        monkeypatch.setattr("sys._MEIPASS", str(meipass), raising=False)
+
+        explicit_path = tmp_path / "custom-sidecar.exe"
+        EmbeddedPostgresService._reset_singleton()
+        config = AppConfig(embedded_pg_sidecar_path=str(explicit_path))
+        service = EmbeddedPostgresService.from_config(config)
+
+        assert service._sidecar_binary == explicit_path, f"显式 sidecar_path 应优先，实际：{service._sidecar_binary}"
+
+    def test_from_config_frozen_app_missing_meipass_raises(self, monkeypatch, tmp_path: Path) -> None:
+        """P4-8: sys.frozen=True 但 sys._MEIPASS=None 时抛 EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres.service import (
+            EmbeddedPostgresService,
+            EmbeddedPostgresStartError,
+        )
+        from utils.config_models import AppConfig
+
+        monkeypatch.setattr("sys.frozen", True, raising=False)
+        # 删除 _MEIPASS 属性（getattr 默认返回 None）
+        monkeypatch.delattr("sys", "_MEIPASS", raising=False)
+
+        EmbeddedPostgresService._reset_singleton()
+        config = AppConfig()
+        with pytest.raises(EmbeddedPostgresStartError, match="_MEIPASS is None"):
+            EmbeddedPostgresService.from_config(config)
+
+    def test_from_config_dev_mode_does_not_use_meipass(self, monkeypatch, tmp_path: Path) -> None:
+        """P4-8: 开发模式（sys.frozen=False）使用 cwd-relative 路径，不读取 _MEIPASS。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.config_models import AppConfig
+
+        # 确保 sys.frozen=False（默认值，但显式设置避免污染）
+        monkeypatch.setattr("sys.frozen", False, raising=False)
+        EmbeddedPostgresService._reset_singleton()
+        config = AppConfig()
+        service = EmbeddedPostgresService.from_config(config)
+
+        expected_suffix = ".exe" if os.name == "nt" else ""
+        expected = Path("sidecars") / f"qtrading-pg-sidecar{expected_suffix}"
+        assert service._sidecar_binary == expected, (
+            f"开发模式 sidecar_binary 错误，实际：{service._sidecar_binary}，期望：{expected}"
+        )
+
 
 # =============================================================================
 # TestEmbeddedPostgresServiceCrossMethodIdempotent: M7 跨方法幂等测试

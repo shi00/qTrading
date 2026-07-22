@@ -59,6 +59,21 @@ hiddenimports = [
 # PyInstaller 静态分析无法发现，需 collect_dynamic_libs 收集到 _internal/llama_cpp/lib/（保持原相对路径）。
 binaries = collect_dynamic_libs("llama_cpp")
 
+# qtrading-pg-sidecar Rust 二进制（pg_plan §15.4）：embedded PostgreSQL sidecar。
+# 通过 cargo build --release 单独编译产物（见 .github/workflows/sidecar.yml build-artifacts job），
+# PyInstaller 不参与 Rust 编译，仅打包已存在的 binary 到 _internal/sidecars/ 下。
+# EmbeddedPostgresService.from_config 在 frozen 模式下从 sys._MEIPASS / "sidecars" 解析（P4-8）。
+# 缺失时跳过：开发环境未编译 sidecar 也能构建普通发行物（installer.iss standard variant 不打包 sidecar）。
+_sidecar_exe_name = "qtrading-pg-sidecar.exe" if os.name == "nt" else "qtrading-pg-sidecar"
+_sidecar_src = project_root / "sidecars" / "qtrading-pg-sidecar" / "target" / "release" / _sidecar_exe_name
+if _sidecar_src.exists():
+    binaries += [(str(_sidecar_src), "sidecars")]
+else:
+    # 开发环境兜底：尝试 sidecars/qtrading-pg-sidecar/{exe_name}（cargo 输出软链接或本地构建）
+    _sidecar_alt = project_root / "sidecars" / "qtrading-pg-sidecar" / _sidecar_exe_name
+    if _sidecar_alt.exists():
+        binaries += [(str(_sidecar_alt), "sidecars")]
+
 excludes = [
     "tkinter",
     "test",
