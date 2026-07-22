@@ -1,0 +1,4 @@
+fix(test): 同步集成测试断言至 S14 修复 (updated→skipped)
+
+S14 修复将 historical.py 中 skipped 日期计入 result.skipped 而非 result.updated，
+集成测试 test_resume_marks_missing_quality_as_resync 的断言需同步更新。

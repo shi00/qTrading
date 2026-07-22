@@ -735,7 +735,8 @@ class TestBreakpointResumeCoreTables:
         strategy.sync_daily_market_snapshot.assert_awaited_once()
         called_date = strategy.sync_daily_market_snapshot.await_args[0][0]
         assert called_date == d2
-        assert result.updated == 1
+        # S14 修复：skipped 日期计入 result.skipped 而非 result.updated
+        assert result.skipped == 1
         assert result.added == 1
 
 
