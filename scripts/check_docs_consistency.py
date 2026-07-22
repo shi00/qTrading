@@ -86,6 +86,7 @@ CHECKED_DOCS: list[Path] = [
     *(ROOT / "docs" / "patterns").glob("*.md"),
     *(ROOT / "docs" / "architecture").glob("*.md"),
     *(ROOT / "docs" / "adr").glob("*.md"),
+    *(ROOT / "docs" / "reviews").glob("*.md"),
     ROOT / "docs" / "README.md",
     ROOT / "README.md",
     ROOT / "CHANGELOG.md",

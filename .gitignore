@@ -113,11 +113,12 @@ e2e-artifacts/
 Plans*.md
 .claude/
 
-# 8. Code reviews
-reviews/
+# 8. Code reviews (仅忽略根目录的本地 review 工作产物，docs/reviews/ 不受影响)
+/reviews/
 
 # 9. Static analysis reports (auto-generated, not source code)
 pyright_report.txt
 
 # 10. Plans directory
 docs/plans/
+
