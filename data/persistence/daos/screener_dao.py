@@ -9,6 +9,7 @@ import sqlalchemy as sa
 
 from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
 from data.persistence.models import Base, ScreeningHistory, get_model_columns
+from data.sync.base import safe_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 from .base_dao import BaseDao, EngineDisposedError
@@ -384,7 +385,7 @@ class ScreenerDao(BaseDao):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.warning("[ScreenerDao] Failed to update prediction result: %s", e)
+                logger.warning("[ScreenerDao] Failed to update prediction result: %s", safe_error(e))
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:

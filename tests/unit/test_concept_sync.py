@@ -417,29 +417,6 @@ class TestLimitListSync:
         assert len(result.errors) > 0
 
     @pytest.mark.asyncio
-    async def test_cancel_after_clear_today(self):
-        """覆盖 concept_sync.py:203-204：clear_today_limit_concepts 完成后、拉取 limit_list 前触发取消。
-
-        验证：第二次 _check_cancelled 命中 → 返回 CANCELLED，不调用 get_limit_list。
-        """
-        ctx = _make_ctx()
-        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
-        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
-        ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
-        strategy = LimitListSyncStrategy(ctx)
-
-        async def _cancel_after_clear(*args, **kwargs):
-            strategy.cancel()
-            return 0
-
-        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(side_effect=_cancel_after_clear)
-
-        result = await strategy.run(trade_date="20240614")
-
-        assert result.status == SyncStatus.CANCELLED.value
-        ctx.api.get_limit_list.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_cancel_after_limit_list_fetch(self):
         """覆盖 concept_sync.py:236-237：limit_list 拉取完成后、upsert 前触发取消。
 
@@ -525,6 +502,98 @@ class TestLimitListSync:
         with pytest.raises(PermissionError) as exc_info:
             await strategy.run(trade_date="20240614")
         assert isinstance(exc_info.value, PermissionError)
+
+
+class TestLimitListSyncAtomicity:
+    """S11 fix: 验证 fetch→clear→upsert 顺序，确保 fetch 失败/取消/空数据时旧数据保留。
+
+    覆盖 concept_sync.py LimitListSyncStrategy._run_impl 的原子性契约：
+    - 权限不足 → SUCCESS + warning，clear 未调用，旧数据保留
+    - 空数据 → SUCCESS，clear 未调用，旧数据保留
+    - 取消信号 → CANCELLED，clear 未调用，旧数据保留
+    - fetch 成功 → clear + upsert 都执行，顺序为 clear→upsert
+    """
+
+    @pytest.mark.asyncio
+    async def test_fetch_permission_error_preserves_old_data(self):
+        """权限不足时 clear_today_limit_concepts 不应被调用，旧数据保留。"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(
+            side_effect=TushareAPIPermissionError("limit_list", "积分不足"),
+        )
+
+        strategy = LimitListSyncStrategy(ctx)
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert len(result.warnings) > 0
+        ctx.cache.stock_dao.clear_today_limit_concepts.assert_not_called()
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_empty_preserves_old_data(self):
+        """fetch 返回空 DataFrame 时 clear_today_limit_concepts 不应被调用，旧数据保留。"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+
+        strategy = LimitListSyncStrategy(ctx)
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.added == 0
+        ctx.cache.stock_dao.clear_today_limit_concepts.assert_not_called()
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_fetch_preserves_old_data(self):
+        """fetch 之前触发取消信号时 clear_today_limit_concepts 不应被调用，旧数据保留。
+
+        覆盖第一次 _check_cancelled 命中场景。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
+
+        strategy = LimitListSyncStrategy(ctx)
+        strategy.cancel()
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.api.get_limit_list.assert_not_called()
+        ctx.cache.stock_dao.clear_today_limit_concepts.assert_not_called()
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_success_clears_and_upserts(self):
+        """fetch 成功后 clear 和 upsert 都被调用，顺序为 clear→upsert。"""
+        ctx = _make_ctx()
+        call_order: list[str] = []
+
+        async def _record_clear(*args, **kwargs):
+            call_order.append("clear")
+            return 0
+
+        async def _record_upsert(*args, **kwargs):
+            call_order.append("upsert")
+            return 2
+
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(side_effect=_record_clear)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(side_effect=_record_upsert)
+        ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
+
+        strategy = LimitListSyncStrategy(ctx)
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.added == 2
+        ctx.cache.stock_dao.clear_today_limit_concepts.assert_called_once_with()
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_called_once()
+        assert call_order == ["clear", "upsert"]
 
 
 # --- AIConceptTagSyncStrategy ---

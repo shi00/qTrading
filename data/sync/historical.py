@@ -426,7 +426,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             original_count = len(trade_dates)
             trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
             skipped = original_count - len(trade_dates)
-            result.updated += skipped
+            result.skipped += skipped
 
             if skipped > 0:
                 logger.debug(
@@ -572,7 +572,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     backoff,
                     retry_round,
                 )
-                await asyncio.sleep(backoff)
+                # S3: backoff 期间可被取消信号中断，避免长达 30s 不可取消等待
+                # asyncio.wait_for 在 task 被 cancel 时 raise CancelledError 自动传播（R2 合规）
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=backoff)
+                except TimeoutError:
+                    pass  # backoff 正常结束，未收到取消信号
+                else:
+                    break  # backoff 期间收到取消信号，退出 batch 循环
             else:
                 retry_round = 0
 
@@ -684,6 +691,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
         if trade_date is not None:
             trade_date = to_date(trade_date)
 
+        # S2: 入口取消检查，避免取消后仍启动 14+ IO
+        if self._shutdown_event.is_set():
+            logger.debug("[HistoricalSync] DaySync | Shutdown signaled before sync for %s", trade_date)
+            return False
+
         # Check cache (Test compatibility & Efficiency)
         if not force:
             # Check ALL synced tables exist before skipping
@@ -756,6 +768,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
             try:
                 tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in MAJOR_INDICES]
                 results = await gather_return_exceptions_propagating_cancel(*tasks)
+                # S9: 检测 TushareAPIPermissionError，标记 skipped_permission 避免下次重试
+                for r in results:
+                    if isinstance(r, TushareAPIPermissionError):
+                        logger.debug(
+                            "[HistoricalSync] DaySync | PERMISSION_DENIED for indices (skipped): %s",
+                            safe_error(r),
+                        )
+                        return ("index", None, "permission_denied")
                 valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)
@@ -796,6 +816,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         futures.append(fetch_indices())
 
         results_list = await asyncio.gather(*futures)
+        # S2: fetch 完成后检查取消信号，避免取消后仍执行 14+ DB 写入
+        if self._shutdown_event.is_set():
+            logger.debug("[HistoricalSync] DaySync | Shutdown signaled after fetch for %s", trade_date)
+            return False
         # Parse results: Map key -> (data, error_type)
         # error_type can be: None, "permission_denied", or Exception
         data_map = {k: v for k, v, e in results_list}
@@ -803,9 +827,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
         error_map = {k: e for k, v, e in results_list if isinstance(e, Exception)}
 
         if "quotes" in error_map:
-            raise error_map["quotes"]
+            logger.warning(
+                "[HistoricalSync] DaySync | ⚠️ Critical fetch failed for quotes (%s), "
+                "continuing other tables (S8: error isolation)",
+                safe_error(error_map["quotes"]),
+            )
         if "basic" in error_map:
-            raise error_map["basic"]
+            logger.warning(
+                "[HistoricalSync] DaySync | ⚠️ Critical fetch failed for basic (%s), "
+                "continuing other tables (S8: error isolation)",
+                safe_error(error_map["basic"]),
+            )
 
         # Save Logic
         cache = self.context.cache
@@ -872,13 +904,21 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         raise
                     if critical:
                         logger.error(
-                            "[HistoricalSync] DaySync | ❌ Critical save failed for %s (%s): %s",
+                            "[HistoricalSync] DaySync | ❌ Critical save failed for %s (%s): %s, "
+                            "continuing other tables (S8: error isolation)",
                             key,
                             error_info["code"],
                             safe_error(e),
                             exc_info=True,
                         )
-                        raise e
+                        # S8: critical 表 save 失败不 raise，返回 SAVE_FAILED 让其他表继续同步；
+                        # 仅当所有 critical 表都失败时才在方法末尾 raise 触发 circuit breaker
+                        return {
+                            "saved": None,
+                            "fetched": fetched_count,
+                            "success": False,
+                            "result_status": SYNC_RESULT_SAVE_FAILED,
+                        }
                     if severity == "recoverable":
                         logger.warning(
                             "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed (%s): %s, skipping sync_status update",
@@ -955,6 +995,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Yield control
         await asyncio.sleep(0)
+        # S2: critical 表 save 完成后检查取消信号
+        if self._shutdown_event.is_set():
+            logger.debug("[HistoricalSync] DaySync | Shutdown after critical saves for %s", trade_date)
+            return False
 
         # 4. Others (Non-critical, can fail silently or log)
         limit_result = await save_if_ok("limit", cache.save_limit_list)
@@ -965,6 +1009,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         lhb_inst_result = await save_if_ok("lhb_inst", cache.save_top_inst)
         stk_limit_result = await save_if_ok("stk_limit", cache.save_stk_limit)
         await asyncio.sleep(0)
+        # S2: 非关键表 save 中间检查取消信号
+        if self._shutdown_event.is_set():
+            logger.debug("[HistoricalSync] DaySync | Shutdown during non-critical saves for %s", trade_date)
+            return False
         block_result = await save_if_ok("block", cache.save_block_trade)
         mf_result = await save_if_ok("mf", cache.save_moneyflow)
         await asyncio.sleep(0)
@@ -974,6 +1022,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # Yield before northbound special processing
         await asyncio.sleep(0)
+        # S2: northbound 处理前检查取消信号
+        if self._shutdown_event.is_set():
+            logger.debug("[HistoricalSync] DaySync | Shutdown before northbound for %s", trade_date)
+            return False
 
         north_result = {"saved": None, "fetched": 0, "success": False}
         try:
@@ -1162,6 +1214,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
             index_basic_result,
             stk_limit_result,
         )
+
+        # S8: 仅当所有 critical 表（quotes + basic）都失败时才 raise，触发 circuit breaker
+        # 单个 critical 表失败不阻断其他表同步（错误隔离）
+        critical_failure_statuses = (SYNC_RESULT_FETCH_FAILED, SYNC_RESULT_SAVE_FAILED)
+        quotes_failed = quotes_rows.get("result_status") in critical_failure_statuses
+        basic_failed = basic_rows.get("result_status") in critical_failure_statuses
+        if quotes_failed and basic_failed:
+            raise RuntimeError(
+                f"All critical tables (quotes, basic) failed for {trade_date}, triggering circuit breaker"
+            )
+
         return True
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)

@@ -4,7 +4,6 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
-import functools
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -114,6 +113,19 @@ class TestTushareClientSetToken:
         client.set_token("new_token")
         assert client.token == "new_token"
         mock_ts.set_token.assert_called_with("new_token")
+
+    def test_set_token_clears_capability_cache(self, tushare_client_mocks):
+        """T4.7: set_token 后 _capability_cache 应被清空。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_available("api1")
+        client.mark_api_available("api2")
+        client.mark_api_unavailable("api3")
+        assert len(client._capability_cache) == 3
+
+        client.set_token("new_token")
+
+        assert client._capability_cache == {}
+        assert len(client._capability_cache) == 0
 
 
 class TestTushareClientTokenBreakerProperty:
@@ -271,21 +283,29 @@ class TestTushareClientHandleApiCallPaginated:
 
     @pytest.mark.asyncio
     async def test_multi_page_concat(self, tushare_client_mocks):
-        """多页拼接：首页满页 + 次页部分页，验证 pd.concat 拼接与 returned_len < full_page_size 中断逻辑。"""
+        """多页拼接：首页满页 + 次页部分页（末页）+ 第三页空，验证 pd.concat 拼接与空页中断逻辑。
+
+        B9 修复后：分页终止条件改为空页判断（而非 returned_len < full_page_size），
+        故需第三页返回空 DataFrame 触发中断。
+        """
         client, _, _ = tushare_client_mocks
         df1 = pd.DataFrame({"a": list(range(10))})  # 首页满页（10 行）
-        df2 = pd.DataFrame({"a": list(range(10, 15))})  # 次页部分（5 行）
+        df2 = pd.DataFrame({"a": list(range(10, 15))})  # 次页部分（5 行，末页）
         call_count = [0]
 
         async def mock_handle(func, **kwargs):
             call_count[0] += 1
-            return [df1, df2][call_count[0] - 1]
+            if call_count[0] == 1:
+                return df1
+            elif call_count[0] == 2:
+                return df2
+            return pd.DataFrame()  # 第三页空，触发中断
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
         assert result is not None
         assert len(result) == 15  # 10 + 5 拼接
-        assert call_count[0] == 2  # 第二页后因 returned_len < full_page_size 中断
+        assert call_count[0] == 3  # 第三页空页后中断
 
     @pytest.mark.asyncio
     async def test_none_values_filtered_from_kwargs(self, tushare_client_mocks):
@@ -302,9 +322,139 @@ class TestTushareClientHandleApiCallPaginated:
         assert "ts_code" in captured_kwargs
         assert "end_date" not in captured_kwargs
 
+    @pytest.mark.asyncio
+    async def test_max_pages_zero_returns_none(self, tushare_client_mocks):
+        """T7: max_pages=0 应返回 None，不抛异常，不调用 _handle_api_call。
+
+        while page < max_pages 循环不执行，df_list 为空，返回 None。
+        """
+        client, _, _ = tushare_client_mocks
+        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+
+        result = await client._handle_api_call_paginated(MagicMock(), max_pages=0)
+
+        assert result is None
+        client._handle_api_call.assert_not_called()
+
+
+class TestPaginatedPermissionErrorPropagation:
+    """B10 修复：分页中途 TushareAPIPermissionError 向上传播（不视为普通分页失败吞掉）。
+
+    验证：
+    - 第 1 页成功，第 2 页抛 TushareAPIPermissionError → 向上传播（不返回部分结果）
+    - 第 1 页抛 TushareAPIPermissionError → 向上传播
+    - 对照：普通 Exception 在第 2 页仍返回部分结果（B10 修复不破坏原有行为）
+    """
+
+    @pytest.mark.asyncio
+    async def test_permission_error_on_second_page_propagates(self, tushare_client_mocks):
+        """第 1 页成功，第 2 页抛 TushareAPIPermissionError，应向上传播而非返回部分结果。"""
+        client, _, _ = tushare_client_mocks
+        df1 = pd.DataFrame({"a": list(range(10))})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return df1
+            raise TushareAPIPermissionError("test_api", "permission denied on page 2")
+
+        client._handle_api_call = mock_handle
+        with pytest.raises(TushareAPIPermissionError, match="permission denied on page 2"):
+            await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+
+    @pytest.mark.asyncio
+    async def test_permission_error_on_first_page_propagates(self, tushare_client_mocks):
+        """第 1 页抛 TushareAPIPermissionError，应向上传播。"""
+        client, _, _ = tushare_client_mocks
+
+        async def mock_handle(func, **kwargs):
+            raise TushareAPIPermissionError("test_api", "permission denied on page 1")
+
+        client._handle_api_call = mock_handle
+        with pytest.raises(TushareAPIPermissionError, match="permission denied on page 1"):
+            await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+
+    @pytest.mark.asyncio
+    async def test_non_permission_error_on_second_page_returns_partial(self, tushare_client_mocks):
+        """对照测试：第 2 页普通 Exception 仍返回部分结果（B10 修复不破坏原有行为）。"""
+        client, _, _ = tushare_client_mocks
+        df1 = pd.DataFrame({"a": list(range(10))})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return df1
+            raise Exception("API error on page 2")
+
+        client._handle_api_call = mock_handle
+        result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+        assert result is not None
+        assert len(result) == 10
+
+    @pytest.mark.asyncio
+    async def test_middle_page_non_permission_error_returns_partial(self, tushare_client_mocks, caplog):
+        """T6: 第三页（page=2）失败（非权限错误）应返回部分结果并记 warning。
+
+        覆盖分页中间页失败的边界 case（已有测试仅覆盖第 2 页失败）。
+        """
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        df1 = pd.DataFrame({"a": list(range(10))})
+        df2 = pd.DataFrame({"a": list(range(10, 20))})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return df1
+            if call_count[0] == 2:
+                return df2
+            # 第三页（page=2）失败
+            raise Exception("API error on page 3")
+
+        client._handle_api_call = mock_handle
+        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
+            result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+
+        assert result is not None
+        assert len(result) == 20  # df1 + df2 拼接
+        assert call_count[0] == 3  # 第三页失败后中断
+        # 验证记 warning 日志（page 索引从 0 开始，第三页对应 page=2）
+        assert any(
+            "Pagination failed on page 2" in rec.message and rec.levelno == logging.WARNING for rec in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_middle_page_permission_error_propagates(self, tushare_client_mocks):
+        """T6: 第五页（page=4）抛 TushareAPIPermissionError 应向上传播（P1 Task 12 修复）。
+
+        覆盖分页中间页权限错误传播的边界 case（已有测试仅覆盖第 2 页权限错误）。
+        """
+        client, _, _ = tushare_client_mocks
+        df = pd.DataFrame({"a": list(range(10))})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 4:
+                return df  # 前 4 页成功
+            # 第五页（page=4）抛权限错误
+            raise TushareAPIPermissionError("test_api", "permission denied on page 5")
+
+        client._handle_api_call = mock_handle
+        with pytest.raises(TushareAPIPermissionError, match="permission denied on page 5"):
+            await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+
+        # 验证第 5 页被调用
+        assert call_count[0] == 5
+
 
 class TestTushareClientGetTradeDates:
-    def test_no_pro_raises(self):
+    def test_no_pro_returns_empty(self):
+        """B11 修复：pro is None 时 get_trade_dates 降级返回 []（与 is_trading_day 契约一致）。"""
         with (
             patch("data.external.tushare_client.ts"),
             patch("data.external.tushare_client.ConfigHandler") as mock_ch,
@@ -314,8 +464,8 @@ class TestTushareClientGetTradeDates:
             mock_ch.get_request_max_retries.return_value = 3
             mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
-            with pytest.raises(Exception, match="Tushare Token not set"):
-                client.get_trade_dates("20240101", "20240630")
+            result = client.get_trade_dates("20240101", "20240630")
+            assert result == []
 
     def test_success(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
@@ -926,17 +1076,23 @@ class TestIsTradingDayInvalidDate:
 
 
 class TestTushareClientHandleApiCallPartial:
-    """Coverage for partial func handling and rate limiter consume/on_success."""
+    """Coverage for bound method api_name extraction and rate limiter consume/on_success.
+
+    B7 修复后 partial 分支已删除，func 统一通过 __name__ 提取 api_name。
+    """
 
     @pytest.mark.asyncio
-    async def test_partial_func_extracts_api_name(self, tushare_client_mocks):
+    async def test_bound_method_extracts_api_name(self, tushare_client_mocks):
+        """bound method 的 __name__ 应被正确提取为 api_name（B7：partial 分支已删除）。"""
         client, _, _ = tushare_client_mocks
-        mock_pro_func = MagicMock()
-        mock_pro_func.__name__ = "daily"
-        partial_func = functools.partial(mock_pro_func, "daily")
-        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
-        result = await client._handle_api_call(partial_func)
+        mock_func = MagicMock()
+        mock_func.__name__ = "daily"
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+            result = await client._handle_api_call(mock_func)
         assert result is not None
+        # 验证 api_name="daily" 被正确标记为 available
+        assert client.is_api_available("daily") is True
 
     @pytest.mark.asyncio
     async def test_date_kwargs_formatted(self, tushare_client_mocks):
@@ -973,8 +1129,10 @@ class TestTushareClientHandleApiCallPartial:
             return pd.DataFrame({"a": [1]})
 
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=fake_wait_for):
-            partial_func = functools.partial(client.pro.top10_holders, "top10_holders")
-            result = await client._handle_api_call(partial_func)
+            # B7 修复后 partial 分支已删除，用带 __name__ 的 MagicMock 模拟 bound method
+            mock_func = MagicMock()
+            mock_func.__name__ = "top10_holders"
+            result = await client._handle_api_call(mock_func)
             assert result is not None
             api_limiter.consume_async.assert_called_once()
             api_limiter.on_success.assert_called_once()
@@ -997,6 +1155,31 @@ class TestTushareClientHandleApiCallPartial:
             assert result is not None
             rate_limiter.consume_async.assert_called_once()
             rate_limiter.on_success.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_func_extracts_api_name(self, tushare_client_mocks):
+        """T1/B7：functools.partial 包装的 func 走 str(func) fallback 路径提取 api_name。
+
+        B7 修复删除了 partial 分支（不可达且语义错误），统一通过
+        getattr(func, "__name__", str(func)) 提取。partial 对象无 __name__ 属性，
+        走 str(func) fallback，capability cache 以 str(partial) 为 key。
+        """
+        import functools
+
+        client, _, _ = tushare_client_mocks
+
+        def daily(trade_date: str):
+            return pd.DataFrame({"a": [1]})
+
+        partial_func = functools.partial(daily, trade_date="20240101")
+        expected_api_name = str(partial_func)
+
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+            result = await client._handle_api_call(partial_func)
+        assert result is not None
+        # 验证 api_name 走 str(func) fallback 路径，capability cache 以 str(partial) 为 key
+        assert client.is_api_available(expected_api_name) is True
 
 
 class TestTushareClientHandleApiCallErrors:
@@ -1654,6 +1837,30 @@ class TestTushareClientProbeAndEffectiveTables:
         assert client.is_api_available("daily") is False
 
     @pytest.mark.asyncio
+    async def test_probe_false_over_90_percent_logs_error(self, caplog):
+        """T4.6: probe False 比例 >90% 时记 ERROR 告警日志（Token 可能无效）。"""
+        import logging
+
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        async def fake_probe_call(api_name, func, **params):
+            raise TushareAPIPermissionError(api_name, "权限不足")
+
+        client._handle_probe_call = fake_probe_call
+        with caplog.at_level(logging.ERROR, logger="data.external.tushare_client"):
+            results = await client.probe_api_capabilities()
+
+        # 验证所有 results 为 False（points_5000 档位 probe 27 项，全部权限错误）
+        assert len(results) == 27
+        assert all(v is False for v in results.values())
+        # 验证 ERROR 日志被调用，包含 False / permission denied / Token 关键词
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "False" in r.message and "permission denied" in r.message and "Token" in r.message for r in error_records
+        )
+
+    @pytest.mark.asyncio
     async def test_probe_progress_callback(self):
         """progress_callback 应被调用 N 次（N = filtered_configs 长度）。"""
         client = self._make_probed_client(tier="points_5000")
@@ -1878,3 +2085,305 @@ class TestTushareClientProbeAndEffectiveTables:
         assert payload["last_probe_time"] == "2024-06-15T10:30:00"
         assert "token_hash" in payload
         assert "capabilities" in payload
+
+    @pytest.mark.asyncio
+    async def test_probe_in_progress_concurrent_protection(self):
+        """T9: 多协程同时调用 probe_api_capabilities 时的并发保护。
+
+        验证：
+        - 第一个协程触发 probe，设置 _probe_in_progress=True
+        - 第二个协程在 probe 进行中进入时，立即返回当前缓存快照，不调用 _handle_probe_call
+        - probe 完成后 _probe_in_progress 恢复 False
+        """
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # 预设缓存，验证第二个协程返回快照
+        client.mark_api_available("daily")
+
+        first_probe_started = asyncio.Event()
+        release_first_probe = asyncio.Event()
+
+        async def fake_probe_call(api_name, func, **params):
+            # 任何 API 调用都通知第二个协程可以进入，并阻塞等待 release
+            first_probe_started.set()
+            await release_first_probe.wait()
+            return None
+
+        client._handle_probe_call = fake_probe_call
+
+        async def second_probe():
+            # 等第一个 probe 进入 _handle_probe_call 后再启动
+            await first_probe_started.wait()
+            # 此时第一个 probe 正在进行（_probe_in_progress=True）
+            assert client._probe_in_progress is True
+            # 第二个 probe 应立即返回缓存快照（互斥保护）
+            return await client.probe_api_capabilities()
+
+        first_task = asyncio.create_task(client.probe_api_capabilities())
+        second_task = asyncio.create_task(second_probe())
+
+        # 第二个 probe 应先于第一个完成（互斥返回缓存）
+        second_result = await asyncio.wait_for(second_task, timeout=2.0)
+        # 验证第二个 probe 返回缓存快照（daily=True）
+        assert second_result.get("daily") is True
+        # 验证第一个 probe 仍在进行中（第二个 probe 完成时第一个还未释放）
+        assert client._probe_in_progress is True
+
+        # 释放第一个 probe，让它完成
+        release_first_probe.set()
+        first_result = await asyncio.wait_for(first_task, timeout=2.0)
+
+        # 验证 probe 完成后 _probe_in_progress 已恢复 False
+        assert client._probe_in_progress is False
+        # 第一个 probe 完成后 daily 仍为 True
+        assert first_result.get("daily") is True
+
+
+class TestRateLimiterConcurrency:
+    """T8: 并发 _handle_api_call 验证 rate_limiter 串行化与 B1+B17 局部变量捕获修复。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_handle_api_call_serializes_consume(self, tushare_client_mocks):
+        """通过 asyncio.gather 并发调用 _handle_api_call，验证：
+        1. consume_async 被串行调用（用 asyncio.Lock 强制串行化以追踪调用顺序，无交错）
+        2. B1+B17 修复：consume/on_success 全部作用于同一捕获的 limiter 实例，
+           即使 self._rate_limiter 在网络 await 期间被替换为新实例
+        """
+        client, _, _ = tushare_client_mocks
+
+        # 准备 original_limiter：consume_async 使用 asyncio.Lock 强制串行化以追踪调用顺序
+        serialize_lock = asyncio.Lock()
+        call_log: list[str] = []
+
+        original_limiter = MagicMock()
+        original_limiter.on_success = MagicMock()
+        original_limiter.current_rate_per_min = 500.0
+
+        async def mock_consume_async(*_args, **_kwargs):
+            async with serialize_lock:
+                call_log.append("start")
+                await asyncio.sleep(0)  # yield to event loop，允许其他协程排队
+                call_log.append("end")
+
+        original_limiter.consume_async = mock_consume_async
+
+        client._rate_limiter = original_limiter
+        client._api_limiters = {}  # 跳过 per-API limiter，避免干扰
+
+        # 准备 new_limiter：模拟 set_token/reload_rate_limiters 在网络 await 期间替换 self._rate_limiter
+        new_limiter = MagicMock()
+        new_limiter.on_success = MagicMock()
+
+        fixed_df = pd.DataFrame({"a": [1]})
+
+        def replace_limiter_side_effect(*_args, **_kwargs):
+            # 模拟网络调用期间 self._rate_limiter 被替换
+            client._rate_limiter = new_limiter
+            return fixed_df
+
+        # 准备 mock func
+        mock_func = MagicMock()
+        mock_func.__name__ = "test_api"
+
+        loop = asyncio.get_running_loop()
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(side_effect=replace_limiter_side_effect),
+        ):
+            # 并发调用 3 次 _handle_api_call
+            results = await asyncio.gather(
+                client._handle_api_call(mock_func),
+                client._handle_api_call(mock_func),
+                client._handle_api_call(mock_func),
+            )
+
+        # 验证所有调用成功返回
+        assert len(results) == 3
+        for r in results:
+            assert r is not None
+
+        # 验证 consume_async 被串行调用：start/end 配对，无交错
+        # 期望：["start", "end", "start", "end", "start", "end"]
+        assert len(call_log) == 6
+        for i in range(0, 6, 2):
+            assert call_log[i] == "start"
+            assert call_log[i + 1] == "end"
+
+        # 验证 B1+B17 修复：original_limiter 被使用，new_limiter 未被使用
+        # on_success 在每次成功后调用，共 3 次
+        assert original_limiter.on_success.call_count == 3
+        new_limiter.on_success.assert_not_called()
+
+
+class TestIsRateLimitKeywordPrecision:
+    """B8 修复：is_rate_limit 关键字 "抱歉" 过于宽泛，改为 "抱歉，每分钟"/"抱歉，频次"。
+
+    验证：
+    - "抱歉，每分钟" 匹配 rate_limit 路径（reduce_rate 被调用）
+    - "抱歉"（无后缀）不匹配 rate_limit 路径（走 retry_exhausted）
+    - "检测到" 不再匹配 rate_limit 路径
+    """
+
+    @pytest.mark.asyncio
+    async def test_apology_with_minute_suffix_triggers_rate_limit(self, tushare_client_mocks):
+        """抱歉，每分钟... 触发 rate_limit 路径（reduce_rate 被调用）。"""
+        client, _, _ = tushare_client_mocks
+        client.max_retries = 2
+        client._rate_limiter = MagicMock()
+        client._rate_limiter.consume_async = AsyncMock()
+        client._rate_limiter.reduce_rate = MagicMock()
+        client._rate_limiter.on_success = MagicMock()
+        client._rate_limiter.current_rate_per_min = 100.0
+        client._api_limiters = {}
+
+        call_count = [0]
+
+        async def mock_wait_for(coro, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("抱歉，每分钟最多访问200次")
+            return pd.DataFrame({"a": [1]})
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
+                result = await client._handle_api_call(MagicMock())
+                assert result is not None
+        # reduce_rate 被调用（rate_limit 路径）
+        client._rate_limiter.reduce_rate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_bare_apology_does_not_trigger_rate_limit(self, tushare_client_mocks):
+        """纯 "抱歉" 无后缀不触发 rate_limit 路径（走 retry_exhausted）。"""
+        client, _, _ = tushare_client_mocks
+        client.max_retries = 1
+        client._rate_limiter = MagicMock()
+        client._rate_limiter.consume_async = AsyncMock()
+        client._rate_limiter.reduce_rate = MagicMock()
+        client._api_limiters = {}
+
+        async def mock_wait_for(coro, timeout=None):
+            raise Exception("抱歉，系统繁忙")  # "抱歉" 但非限流
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with pytest.raises(Exception, match="抱歉"):
+                await client._handle_api_call(MagicMock())
+        # reduce_rate 不应被调用（非 rate_limit 路径）
+        client._rate_limiter.reduce_rate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_detected_keyword_no_longer_triggers_rate_limit(self, tushare_client_mocks):
+        """B8 修复："检测到" 关键字已移除，不再触发 rate_limit 路径。"""
+        client, _, _ = tushare_client_mocks
+        client.max_retries = 1
+        client._rate_limiter = MagicMock()
+        client._rate_limiter.consume_async = AsyncMock()
+        client._rate_limiter.reduce_rate = MagicMock()
+        client._api_limiters = {}
+
+        async def mock_wait_for(coro, timeout=None):
+            raise Exception("检测到异常访问")
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with pytest.raises(Exception, match="检测到"):
+                await client._handle_api_call(MagicMock())
+        # reduce_rate 不应被调用（"检测到" 不再匹配 rate_limit）
+        client._rate_limiter.reduce_rate.assert_not_called()
+
+
+class TestPaginatedTruncationFlag:
+    """B12 修复：分页达到 max_pages 时在返回的 DataFrame 上设置 df.attrs["truncated"] = True。"""
+
+    @pytest.mark.asyncio
+    async def test_truncated_flag_set_when_max_pages_reached(self, tushare_client_mocks):
+        """达到 max_pages 时返回的 DataFrame 应设置 attrs["truncated"] = True。"""
+        client, _, _ = tushare_client_mocks
+        df = pd.DataFrame({"a": list(range(10))})
+
+        async def mock_handle(func, **kwargs):
+            return df
+
+        client._handle_api_call = mock_handle
+        result = await client._handle_api_call_paginated(MagicMock(), max_pages=1)
+        assert result is not None
+        assert result.attrs.get("truncated") is True
+
+    @pytest.mark.asyncio
+    async def test_truncated_flag_not_set_when_normal_completion(self, tushare_client_mocks):
+        """正常完成（空页中断）时返回的 DataFrame 不应设置 attrs["truncated"]。"""
+        client, _, _ = tushare_client_mocks
+        df1 = pd.DataFrame({"a": list(range(10))})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return df1
+            return pd.DataFrame()  # 空页中断
+
+        client._handle_api_call = mock_handle
+        result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+        assert result is not None
+        assert result.attrs.get("truncated") is not True
+
+
+class TestProbeClientParamError:
+    """B13 修复：_handle_probe_call 检测 client_param_error 分类为 False。
+
+    验证：
+    - "必填参数" 错误 → _handle_probe_call 抛 TushareAPIPermissionError
+    - _probe_one 分类为 False
+    - 记 ERROR 日志
+    """
+
+    @pytest.mark.asyncio
+    async def test_probe_call_raises_on_client_param_error(self, tushare_client_mocks):
+        """_handle_probe_call 遇 client_param_error 抛 TushareAPIPermissionError。"""
+        client, _, _ = tushare_client_mocks
+        func = MagicMock()
+        func.__name__ = "test_api"
+        loop = asyncio.get_running_loop()
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(side_effect=Exception("必填参数 ts_code 未提供")),
+        ):
+            with pytest.raises(TushareAPIPermissionError, match="client_param_error"):
+                await client._handle_probe_call("test_api", func, trade_date="20240101")
+
+    @pytest.mark.asyncio
+    async def test_probe_one_classifies_client_param_error_as_false(self, tushare_client_mocks):
+        """_probe_one 将 client_param_error 分类为 False。"""
+        client, _, _ = tushare_client_mocks
+        func = MagicMock()
+        func.__name__ = "test_api"
+        loop = asyncio.get_running_loop()
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(side_effect=Exception("缺少参数 trade_date")),
+        ):
+            semaphore = asyncio.Semaphore(1)
+            result = await client._probe_one(semaphore, "test_api", {})
+            assert result[0] == "test_api"
+            assert result[1] is False
+
+    @pytest.mark.asyncio
+    async def test_probe_call_logs_error_on_client_param_error(self, tushare_client_mocks, caplog):
+        """_handle_probe_call 遇 client_param_error 记 ERROR 日志。"""
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        func = MagicMock()
+        func.__name__ = "test_api"
+        loop = asyncio.get_running_loop()
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(side_effect=Exception("invalid parameter: ts_code")),
+        ):
+            with caplog.at_level(logging.ERROR, logger="data.external.tushare_client"):
+                with pytest.raises(TushareAPIPermissionError):
+                    await client._handle_probe_call("test_api", func, trade_date="20240101")
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("client param error" in r.message for r in error_records)

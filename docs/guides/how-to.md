@@ -48,6 +48,22 @@
 4. 方法挂 `@log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)`。
 5. 若需走代理，使用 `utils/proxy_manager.py`。
 
+### 5.1 Tushare 集成工作流（简述）
+
+新增/修改 Tushare API 接入时遵循以下工作流：
+
+1. **客户端封装**：在 `data/external/tushare_client.py` 的 `TushareProApi` Protocol 中声明 API callable，并在对应 wrapper 方法中调用 `self._handle_api_call(...)` 统一限流/重试/熔断。
+2. **积分档位映射**：若新 API 有积分要求，在 `data/constants.py` 的 `TUSHARE_POINT_TIERS` 与 `TushareClient._TIER_API_COVERAGE` 中追加（保持单一真相源）。
+3. **同步策略**：在 `data/sync/` 下对应 syncer 文件中实现 `ISyncStrategy.sync()`，通过 `SyncContext` 注入 `cancel_event`，分块调用 `TushareClient` wrapper。
+4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
+5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
+6. **质量门控**：syncer 写入前挂 `@require_quality(QualityTier.X)`，同步后由 `QuoteDAO.get_sync_quality_score()` 评估质量分数。
+7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`，主动退出时 `raise asyncio.CancelledError`（R2 红线）。
+8. **错误处理**：`except asyncio.CancelledError: raise`；`TushareAPIPermissionError` 捕获后跳过对应 API；其他异常经 `classify_error()` 分类。
+9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API。
+
+详细设计模式（限流/质量门控/错误处理/取消传播）见 [data-sync.md](../patterns/data-sync.md#tushare-syncer-设计模式)。
+
 ### 6. 新增与升级依赖
 
 1. **编辑依赖配置**：

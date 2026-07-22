@@ -487,6 +487,53 @@ class TestRuntimePermissionPersistence:
             # 熔断快速失败路径在调用 func 之前抛出
             mock_func.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_breaker_recovers_after_set_token(self, tushare_client_mocks):
+        """T4.5: 熔断 → set_token 重置 → 再次调用不再快速失败（端到端恢复）。"""
+        client, _, _ = tushare_client_mocks
+        client._bg_tasks = set()
+
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+            patch.object(client, "_persist_capability_safely", new_callable=AsyncMock),
+        ):
+            # 第一次调用：func 抛 token 无效错误，触发熔断（_token_invalid=True）
+            mock_func_bad = MagicMock()
+            mock_func_bad.__name__ = "moneyflow_hsgt"
+            mock_func_bad.side_effect = Exception("您的token不对，请确认。")
+
+            with pytest.raises(TushareAPIPermissionError):
+                await client._handle_api_call(mock_func_bad, trade_date="20240101")
+            assert client._token_invalid is True
+
+        # set_token 重置熔断
+        client.set_token("new_token_after_invalid")
+        assert client._token_invalid is False
+
+        # 第二次调用：验证不再快速失败，成功返回结果
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+        ):
+            mock_func_good = MagicMock()
+            mock_func_good.__name__ = "moneyflow_hsgt"
+            loop = asyncio.get_running_loop()
+            with patch.object(
+                loop,
+                "run_in_executor",
+                new=AsyncMock(return_value=MagicMock()),
+            ):
+                result = await client._handle_api_call(mock_func_good, trade_date="20240101")
+            assert result is not None
+
+        # 清理 bg_tasks
+        for t in list(client._bg_tasks):
+            t.cancel()
+        client._bg_tasks.clear()
+
     def test_set_token_new_token_resets_breaker(self, tushare_client_mocks):
         """set_token 传入新 token 时重置熔断标志。"""
         client, _, _ = tushare_client_mocks
@@ -575,3 +622,144 @@ class TestBlockTradeStrategyRequiredApis:
 
         result = strategy.check_dependencies(context)
         assert result["missing_apis"] == []
+
+
+class TestProbeTokenConsistency:
+    """B3+B5/B19 修复：probe 竞态与 _capability_cache 持锁。
+
+    验证：
+    - probe 入口快照 token，异常回滚时若 token 变化则不回滚（路径 A 污染修复）
+    - probe 完成写入前检查 token 一致性，不一致则丢弃结果（路径 B 污染修复）
+    - 所有 _capability_cache 访问持锁（间接验证：回滚用 clear+update 而非引用替换）
+    """
+
+    def _make_client(self, tier="points_120"):
+        """创建 client 并 mock 档位（points_120 仅 probe daily + shibor_lpr，简化测试）。"""
+        with (
+            patch("data.external.tushare_client.ts") as mock_ts,
+            patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+        ):
+            mock_ts.pro_api.return_value = MagicMock()
+            mock_ch.get_token.return_value = "test_token"
+            mock_ch.get_tushare_timeout.return_value = 30
+            mock_ch.get_request_max_retries.return_value = 3
+            mock_ch.get_tushare_point_tier.return_value = tier
+            client = TushareClient(token="test_token")
+        client._get_tushare_point_tier = lambda: tier
+        return client
+
+    @pytest.mark.asyncio
+    async def test_probe_discards_results_when_token_changed(self):
+        """B3 路径 B：probe 完成写入前 token 变化则丢弃结果（不写入新 probe 结果）。"""
+        client = self._make_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client.mark_api_unavailable("daily")  # 预设 daily=False
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                # 模拟 probe 期间 set_token 改变 token + 清空 cache
+                client.set_token("new_token_during_probe")
+            return None  # probe 成功 → daily=True
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        # token 变化后，probe 结果被丢弃，daily 不被写入（set_token 已清空 cache）
+        assert client.is_api_available("daily") is None
+        assert client.token == "new_token_during_probe"
+
+    @pytest.mark.asyncio
+    async def test_probe_skip_rollback_when_token_changed_on_exception(self):
+        """B3 路径 A：异常回滚时若 token 变化则不回滚（避免污染新 token 的 cache）。"""
+        client = self._make_client(tier="points_120")
+        client.mark_api_unavailable("daily")  # 预设 daily=False
+
+        async def persist_with_token_change():
+            # 模拟 persist 期间 set_token 改变 token + 清空 cache
+            client.set_token("new_token_after_exception")
+            raise RuntimeError("persist failed")
+
+        client.persist_capabilities_to_app_state = persist_with_token_change
+
+        async def fake_probe_call(api_name, func, **params):
+            return None  # probe 成功 → daily=True
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        # token 变化后，回滚被跳过，daily=False 不被恢复（set_token 已清空 cache）
+        assert client.is_api_available("daily") is None
+        assert client.token == "new_token_after_exception"
+
+    @pytest.mark.asyncio
+    async def test_probe_rollback_when_token_unchanged_on_exception(self):
+        """B3：异常回滚时若 token 不变则回滚到入口快照（不保留 probe 写入的新值）。"""
+        client = self._make_client(tier="points_120")
+        client.mark_api_unavailable("daily")  # 预设 daily=False
+
+        client.persist_capabilities_to_app_state = AsyncMock(side_effect=RuntimeError("persist failed"))
+
+        async def fake_probe_call(api_name, func, **params):
+            return None  # probe 成功 → daily=True
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        # token 不变，回滚到入口快照，daily=False 保留（不保留 probe 写入的 True）
+        assert client.is_api_available("daily") is False
+        assert client.token == "test_token"
+
+    @pytest.mark.asyncio
+    async def test_probe_skip_rollback_when_token_changed_on_cancel(self):
+        """B3 路径 A：CancelledError 回滚时若 token 变化则不回滚。"""
+        client = self._make_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client.mark_api_unavailable("daily")  # 预设 daily=False
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                # 模拟 probe 期间 set_token 改变 token + 清空 cache
+                client.set_token("new_token_after_cancel")
+                raise asyncio.CancelledError()
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        with pytest.raises(asyncio.CancelledError):
+            await client.probe_api_capabilities()
+
+        # token 变化后，回滚被跳过，daily=False 不被恢复（set_token 已清空 cache）
+        assert client.is_api_available("daily") is None
+        assert client.token == "new_token_after_cancel"
+        # 互斥标志应释放（finally 块）
+        assert client._probe_in_progress is False
+
+
+class TestResetSingletonBgTasks:
+    """B4 修复：_reset_singleton 后旧协程的 _persist_capability_safely task 不被添加到旧实例 _bg_tasks。"""
+
+    @pytest.mark.asyncio
+    async def test_old_coroutine_skips_persist_after_reset(self, tushare_client_mocks):
+        """_reset_singleton 后，飞行中的 _handle_api_call 协程命中权限错误路径时，
+        不应将 _persist_capability_safely task 添加到旧实例的 _bg_tasks。"""
+        client, _, _ = tushare_client_mocks
+        client._bg_tasks = set()
+
+        # 保存原 _instance，模拟 _reset_singleton 后 _instance=None
+        original_instance = TushareClient._instance
+        TushareClient._instance = None
+        try:
+            mock_func = MagicMock()
+            mock_func.__name__ = "daily"
+            mock_func.side_effect = Exception("权限不足，积分不够")
+
+            with patch.object(client, "_persist_capability_safely", new_callable=AsyncMock) as mock_persist:
+                with pytest.raises(TushareAPIPermissionError):
+                    await client._handle_api_call(mock_func, ts_code="000001.SZ")
+
+            # B4 修复：self is not TushareClient._instance（None），不创建 task
+            assert len(client._bg_tasks) == 0
+            mock_persist.assert_not_called()
+            # mark_api_unavailable 仍被调用（cache 更新不受 B4 影响）
+            assert client.is_api_available("daily") is False
+        finally:
+            TushareClient._instance = original_instance

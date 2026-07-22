@@ -1,13 +1,18 @@
-"""Phase 2F: concept_sync 循环内取消信号测试。
+"""Phase 2F + S7: concept_sync 循环内取消信号测试。
 
 验证 AKShareConceptSyncStrategy 和 LimitListSyncStrategy 的 _run_impl 循环体
-每 200 条检查 _check_cancelled，响应取消信号（Phase 2F 新增行为）。
+响应取消信号：
+- AKShareConceptSyncStrategy: S7 修复后改为时间维度（每 2 秒）检查 _check_cancelled，
+  旧实现"每 200 条"在单 board 最坏 7s+ 时最坏 1000s 才响应取消，远超 2s 红线。
+- LimitListSyncStrategy: 仍按每 200 条检查（Phase 2F 行为）。
 
 AIConceptTagSyncStrategy 已有每条都检查 _cancelled + cancel_event.is_set()
 （concept_sync.py:366-372），比"每 200 条"更严格，由既有测试 test_concept_sync.py
 覆盖，此处不重复。DataProcessor.run_ai_concept_tagging 的取消由
 test_data_processor_ai_concept.py 覆盖。
 """
+
+import datetime
 
 import pandas as pd
 import pytest
@@ -66,28 +71,31 @@ def _make_limit_list_df(n: int) -> pd.DataFrame:
 
 
 class TestAKShareLoopCancellation:
-    """Phase 2F: AKShareConceptSyncStrategy 循环体每 200 条检查 _check_cancelled。
+    """S7: AKShareConceptSyncStrategy 循环体按时间维度（每 2 秒）检查 _check_cancelled。
 
-    覆盖 concept_sync.py:143 新增的循环内取消检查点。_check_cancelled 调用顺序：
-    1. line 78: _run_impl 入口
-    2. line 88: get_concept_list 返回后
-    3. line 143: 循环内 i=200（Phase 2F 新增）
-    4. line 148: gather 返回后（仅当循环内未取消）
+    覆盖 concept_sync.py 循环内取消检查点。_check_cancelled 调用顺序：
+    1. _run_impl 入口
+    2. get_concept_list 返回后
+    3. 循环内距上次检查 >= 2s 时（S7 新增）
+    4. gather 返回后（仅当循环内未取消）
     """
 
     @pytest.mark.asyncio
     @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-    # filterwarnings: 循环内取消时，i=0..199 已创建的 sync_one_board coroutine
-    # 不会被 await（return 发生在 i=200 检查点），触发 RuntimeWarning。
+    # filterwarnings: 循环内取消时，已创建的 sync_one_board coroutine
+    # 不会被 await（return 发生在循环内检查点），触发 RuntimeWarning。
     # 这是验证循环内取消行为的必要副作用，非生产代码问题。
-    async def test_loop_cancel_at_200(self):
-        """201 条 board，第 3 次 _check_cancelled（循环内 i=200）返回 True。
+    async def test_loop_cancel_after_2s(self):
+        """循环内 get_now() 距上次检查 >= 2s，第 3 次 _check_cancelled 返回 True。
 
-        验证：返回 CANCELLED，gather 未被调用（循环在 i=200 提前 return）。
+        时间序列：last_cancel_check = T0；循环第 1 次迭代 get_now() 返回 T0+3s
+        （差 3s >= 2s，触发 _check_cancelled）→ 返回 True → return。
+
+        验证：返回 CANCELLED，gather 未被调用（循环提前 return）。
         """
         ctx = _make_ctx()
         strategy = AKShareConceptSyncStrategy(ctx)
-        boards_df = _make_boards_df(201)
+        boards_df = _make_boards_df(2)
 
         call_count = 0
 
@@ -99,10 +107,25 @@ class TestAKShareLoopCancellation:
                 return True
             return False
 
+        # 时间序列：
+        # - index 0: 循环前 last_cancel_check = get_now() → T0
+        # - index 1+: 循环内 get_now() → T0+3s（差 3s >= 2s 触发检查）
+        t0 = datetime.datetime(2024, 6, 14, 9, 30, 0, tzinfo=datetime.UTC)
+        t_loop = datetime.datetime(2024, 6, 14, 9, 30, 3, tzinfo=datetime.UTC)
+        time_sequence = [t0, t_loop]
+        time_idx = 0
+
+        def mock_get_now():
+            nonlocal time_idx
+            t = time_sequence[time_idx] if time_idx < len(time_sequence) else t_loop
+            time_idx += 1
+            return t
+
         with (
             patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
             patch.object(strategy, "_check_cancelled", side_effect=check_side_effect),
             patch("data.sync.concept_sync.gather_return_exceptions_propagating_cancel") as mock_gather,
+            patch("data.sync.concept_sync.get_now", side_effect=mock_get_now),
         ):
             MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
 
@@ -113,8 +136,10 @@ class TestAKShareLoopCancellation:
             mock_gather.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_loop_no_cancel_under_200(self):
-        """2 条 board，循环内不触发取消（i % 200 != 0）。
+    async def test_loop_no_cancel_within_2s(self):
+        """循环内每次 get_now() 距上次检查 < 2s，不触发 _check_cancelled。
+
+        所有 get_now() 返回同一时间 T0，差 0s < 2s，循环内检查点不触发。
 
         验证：正常完成，_check_cancelled 调用 3 次（入口 + concept_list 后 + gather 后），
         循环内检查点不触发。
@@ -123,9 +148,12 @@ class TestAKShareLoopCancellation:
         strategy = AKShareConceptSyncStrategy(ctx)
         boards_df = _make_boards_df(2)
 
+        fixed_time = datetime.datetime(2024, 6, 14, 9, 30, 0, tzinfo=datetime.UTC)
+
         with (
             patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
             patch.object(strategy, "_check_cancelled", return_value=False) as mock_check,
+            patch("data.sync.concept_sync.get_now", return_value=fixed_time),
         ):
             MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
             MockClient.return_value.get_concept_constituents = AsyncMock(
@@ -142,18 +170,17 @@ class TestAKShareLoopCancellation:
 class TestLimitListLoopCancellation:
     """Phase 2F: LimitListSyncStrategy 循环体每 200 条检查 _check_cancelled。
 
-    覆盖 concept_sync.py:232 新增的循环内取消检查点。_check_cancelled 调用顺序：
-    1. line 199: _run_impl 入口
-    2. line 205: clear_today_limit_concepts 返回后
-    3. line 232: 循环内 i=200（Phase 2F 新增）
-    4. line 246: 循环结束后（仅当循环内未取消）
+    S11 修复后顺序为 fetch→clear+upsert，_check_cancelled 调用顺序：
+    1. _run_impl 入口
+    2. 循环内 i=200（Phase 2F 新增）
+    3. 循环结束后（仅当循环内未取消）
     """
 
     @pytest.mark.asyncio
     async def test_loop_cancel_at_200(self):
-        """201 条 limit_list，第 3 次 _check_cancelled（循环内 i=200）返回 True。
+        """201 条 limit_list，第 2 次 _check_cancelled（循环内 i=200）返回 True。
 
-        验证：返回 CANCELLED，upsert_limit_concepts 未被调用。
+        验证：返回 CANCELLED，clear_today_limit_concepts 与 upsert_limit_concepts 均未被调用。
         """
         ctx = _make_ctx()
         strategy = LimitListSyncStrategy(ctx)
@@ -168,7 +195,7 @@ class TestLimitListLoopCancellation:
         def check_side_effect(result):
             nonlocal call_count
             call_count += 1
-            if call_count == 3:
+            if call_count == 2:
                 result.status = "cancelled"
                 return True
             return False
@@ -177,14 +204,15 @@ class TestLimitListLoopCancellation:
             result = await strategy.run()
 
             assert result.status == "cancelled"
-            assert call_count == 3
+            assert call_count == 2
+            ctx.cache.stock_dao.clear_today_limit_concepts.assert_not_called()
             ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_loop_no_cancel_under_200(self):
         """2 条记录，循环内不触发取消（i % 200 != 0）。
 
-        验证：正常完成，_check_cancelled 调用 3 次（入口 + clear 后 + 循环后），
+        验证：正常完成，_check_cancelled 调用 2 次（入口 + 循环后），
         循环内检查点不触发。
         """
         ctx = _make_ctx()
@@ -199,4 +227,4 @@ class TestLimitListLoopCancellation:
             result = await strategy.run()
 
             assert result.status == "success"
-            assert mock_check.call_count == 3
+            assert mock_check.call_count == 2

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.quality_gate import QualityTier
-from data.sync.base import SyncContext, SyncResult
+from data.sync.base import SyncContext, SyncResult, SyncStatus
 from data.sync.sw_industry import SwIndustrySyncStrategy
 
 pytestmark = pytest.mark.unit
@@ -457,6 +457,66 @@ class TestSyncMembersExceptions:
             and ("⚠️" in r.message or "Recoverable error" in r.message or "Operational error" in r.message)
         ]
         assert len(warning_logs) == 1
+
+
+class TestSyncMembersPartialFailure:
+    """S16：循环错误分支标记 partial + errors 记录。
+
+    部分成员 fetch 失败时，status 必须置为 partial，errors 必须记录失败
+    index_code，且成功数据仍正常 save（不中断循环）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_marks_status_partial_and_records_errors(self):
+        """部分 index_code fetch 失败：status=partial，errors 记录失败 index_code，成功数据仍 save。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=2)
+        classify_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI", "801020.SI", "801030.SI"],
+                "sw_level": ["L1", "L1", "L1"],
+            }
+        )
+        # 第一、三个失败，第二个成功
+        ctx.api.get_index_member_all = AsyncMock(
+            side_effect=[RuntimeError("blip 1"), _make_member_df("801020.SI"), RuntimeError("blip 3")]
+        )
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        # 两条错误记录，分别包含两个失败的 index_code
+        assert len(result.errors) == 2
+        assert any("801010.SI" in err for err in result.errors)
+        assert any("801030.SI" in err for err in result.errors)
+        # 成功数据被 save
+        strategy.member_dao.save_sw_industry_member.assert_awaited_once()
+        assert result.added == 2
+
+    @pytest.mark.asyncio
+    async def test_single_failure_in_loop_marks_partial(self):
+        """单个 index_code 失败 + 其余成功：status=partial，errors 恰好 1 条。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=1)
+        classify_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI", "801020.SI"],
+                "sw_level": ["L1", "L1"],
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(side_effect=[RuntimeError("blip"), _make_member_df("801020.SI")])
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert len(result.errors) == 1
+        assert "801010.SI" in result.errors[0]
+        strategy.member_dao.save_sw_industry_member.assert_awaited_once()
+        assert result.added == 1
 
 
 class TestRecordSkippedPermission:

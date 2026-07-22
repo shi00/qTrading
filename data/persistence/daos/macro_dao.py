@@ -5,6 +5,7 @@ import pandas as pd
 import sqlalchemy as sa
 
 from data.persistence.models import MacroEconomy, ShiborDaily, get_model_columns, get_model_pk_columns
+from data.sync.base import safe_error
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -45,6 +46,27 @@ class MacroDao(BaseDao):
         cols = get_model_columns(ShiborDaily)
         pk_columns = get_model_pk_columns(ShiborDaily)
         available = [c for c in cols if c in df.columns]
+        return await self._save_upsert(
+            df,
+            "shibor_daily",
+            available,
+            pk_columns=pk_columns,
+        )
+
+    async def save_lpr_daily(self, df: pd.DataFrame) -> int:
+        """Save LPR (Loan Prime Rate) data independently by record_date primary key.
+
+        S15 fix: LPR 发布日可能为周末（shibor 主表无该日行），独立 upsert 到
+        shibor_daily 表的 lpr_1y/lpr_5y 列，避免依赖 shibor record_date 匹配
+        导致数据丢失。仅写入 record_date/lpr_1y/lpr_5y 三列，_save_upsert 仅
+        更新 columns 参数指定的列，其他 shibor 列不受影响。
+        """
+        if df is None or df.empty:
+            return 0
+
+        pk_columns = get_model_pk_columns(ShiborDaily)
+        columns = ["record_date", "lpr_1y", "lpr_5y"]
+        available = [c for c in columns if c in df.columns]
         return await self._save_upsert(
             df,
             "shibor_daily",
@@ -108,7 +130,7 @@ class MacroDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[MacroDao] Failed to get shibor latest: %s", e)
+            logger.warning("[MacroDao] Failed to get shibor latest: %s", safe_error(e))
             return pd.DataFrame()
 
     async def get_macro_economy_latest(self, as_of_date=None) -> pd.DataFrame:
@@ -167,5 +189,5 @@ class MacroDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[MacroDao] Failed to get macro economy latest: %s", e)
+            logger.warning("[MacroDao] Failed to get macro economy latest: %s", safe_error(e))
             return pd.DataFrame()

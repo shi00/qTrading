@@ -453,11 +453,11 @@ class TestMacroSyncSyncShiborDaily:
 
 
 class TestMacroSyncSyncShiborDailyWithLpr:
-    """Phase 3G §4.3.4：_sync_shibor_daily 同时拉取 LPR 并按 date 合并入库。"""
+    """Phase 3G §4.3.4：_sync_shibor_daily 同时拉取 LPR 并独立入库（S15 fix）。"""
 
     @pytest.mark.asyncio
     async def test_sync_shibor_daily_includes_lpr(self):
-        """shibor + LPR 数据同时拉取时，按 date merge 后传入 save_shibor_daily。"""
+        """shibor + LPR 数据同时拉取时，shibor 入 save_shibor_daily，LPR 独立入 save_lpr_daily。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -489,6 +489,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         strategy.dao = MagicMock()
         strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
         strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy.dao.save_lpr_daily = AsyncMock(return_value=1)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
             ctx.processor = MagicMock()
@@ -498,13 +499,18 @@ class TestMacroSyncSyncShiborDailyWithLpr:
             result = SyncResult()
             await strategy._sync_shibor_daily(result)
 
-        # 验证 save_shibor_daily 被调用，且传入的 df 包含 LPR 列
+        # S15 fix: shibor 入库时 df 不含 LPR 列（独立 upsert）
         strategy.dao.save_shibor_daily.assert_awaited_once()
         saved_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
-        assert "lpr_1y" in saved_df.columns
-        assert "lpr_5y" in saved_df.columns
-        # 验证 merge 后 LPR 值正确
-        row = saved_df[saved_df["record_date"] == "20240614"].iloc[0]
+        assert "lpr_1y" not in saved_df.columns
+        assert "lpr_5y" not in saved_df.columns
+
+        # LPR 通过独立 save_lpr_daily 入库
+        strategy.dao.save_lpr_daily.assert_awaited_once()
+        lpr_saved_df: pd.DataFrame = strategy.dao.save_lpr_daily.call_args.args[0]
+        assert "lpr_1y" in lpr_saved_df.columns
+        assert "lpr_5y" in lpr_saved_df.columns
+        row = lpr_saved_df[lpr_saved_df["record_date"] == "20240614"].iloc[0]
         assert row["lpr_1y"] == 3.45
         assert row["lpr_5y"] == 3.95
 
@@ -1172,6 +1178,88 @@ class TestMacroSyncIndexWeightsIndividualError:
                 await strategy._sync_index_weights(result)
 
 
+class TestSyncIndexWeightsPartialFailure:
+    """S18 fix: _sync_index_weights 循环内单个 index fetch 失败时，
+    应标记 result.status=partial 并将失败原因记入 result.errors，
+    避免部分失败时 status 仍为 success 误导监控。"""
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_marks_partial_status_and_records_error(self):
+        from data.constants import MAJOR_INDICES
+        from data.sync.base import SyncStatus
+
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.update_sync_status = AsyncMock()
+
+        call_count = 0
+        failed_idx_code = MAJOR_INDICES[0]
+
+        def mock_get_index_weight(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError(f"fetch failed for {failed_idx_code}")
+            return pd.DataFrame({"index_code": [kwargs.get("index_code", "000300.SH")]})
+
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(side_effect=mock_get_index_weight)
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)],
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+
+        # 循环未中断：应遍历全部 MAJOR_INDICES
+        assert call_count == len(MAJOR_INDICES)
+        # S18 fix: 部分失败应标记 partial
+        assert result.status == SyncStatus.PARTIAL.value
+        # errors 中应包含失败 index_code 的脱敏记录
+        assert any(f"index_code={failed_idx_code}:" in err for err in result.errors)
+        # 其他 index 数据仍应入库
+        assert result.added == 3 * (len(MAJOR_INDICES) - 1)
+
+    @pytest.mark.asyncio
+    async def test_all_indices_succeed_keeps_success_status(self):
+        """S18 反向验证：全部 index 成功时 status 不应被误改为 partial。"""
+        from data.constants import MAJOR_INDICES
+        from data.sync.base import SyncStatus
+
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(
+            return_value=pd.DataFrame({"index_code": ["000001.SH"]}),
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)],
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+
+        # 无失败时 status 应保持 success
+        assert result.status == SyncStatus.SUCCESS.value
+        assert len(result.errors) == 0
+        assert result.added == 2 * len(MAJOR_INDICES)
+
+
 class TestMacroSyncGetEffectiveTradeDateEdgeCases:
     @pytest.mark.asyncio
     async def test_trade_date_returns_date_object(self):
@@ -1404,3 +1492,88 @@ class TestMacroSyncPartialFailure:
         assert result.added >= 5
         # Sync should not be marked as fully failed
         assert result.status != "failed"
+
+
+class TestLprWeekendPersistence:
+    """S15: LPR 发布日为周末时，shibor 主表无该日行，LPR 数据不应丢失。"""
+
+    @pytest.mark.asyncio
+    async def test_lpr_weekend_date_persisted_independently(self):
+        """LPR 发布日为周末（shibor 主表无该日行）时，LPR 仍应独立入库。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        # shibor 数据：工作日 2024-06-14（周五）
+        ctx.api.get_shibor = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "record_date": ["20240614"],
+                    "on_rate": [1.8],
+                    "week_1": [1.9],
+                }
+            )
+        )
+        # LPR 数据：发布日 2024-06-15（周六），shibor 主表无该日
+        ctx.api.get_shibor_lpr = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "record_date": ["20240615"],
+                    "lpr_1y": [3.45],
+                    "lpr_5y": [3.95],
+                }
+            )
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy.dao.save_lpr_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 15)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        # shibor 入库（仅工作日数据）
+        strategy.dao.save_shibor_daily.assert_awaited_once()
+        shibor_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
+        assert "20240614" in shibor_df["record_date"].values
+
+        # LPR 独立入库（周末发布日不丢失）
+        strategy.dao.save_lpr_daily.assert_awaited_once()
+        lpr_df: pd.DataFrame = strategy.dao.save_lpr_daily.call_args.args[0]
+        assert "20240615" in lpr_df["record_date"].values
+        row = lpr_df[lpr_df["record_date"] == "20240615"].iloc[0]
+        assert row["lpr_1y"] == 3.45
+        assert row["lpr_5y"] == 3.95
+
+    @pytest.mark.asyncio
+    async def test_lpr_empty_not_saved(self):
+        """LPR 数据为空时不应调用 save_lpr_daily。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [1.8]}))
+        ctx.api.get_shibor_lpr = AsyncMock(return_value=pd.DataFrame())
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy.dao.save_lpr_daily = AsyncMock(return_value=0)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        strategy.dao.save_lpr_daily.assert_not_awaited()

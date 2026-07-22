@@ -126,20 +126,22 @@ class TestHistoricalSyncDailySnapshot:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_quotes_failure_raises(self):
+    async def test_quotes_failure_does_not_raise(self):
+        """S8: quotes fetch 失败不再 raise，仅当所有 critical 表失败才 raise。"""
         ctx = make_ctx()
         ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("API error"))
         strategy = HistoricalSyncStrategy(ctx)
-        with pytest.raises(Exception, match="API error"):
-            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
 
     @pytest.mark.asyncio
-    async def test_basic_failure_raises(self):
+    async def test_basic_failure_does_not_raise(self):
+        """S8: basic fetch 失败不再 raise，仅当所有 critical 表失败才 raise。"""
         ctx = make_ctx()
         ctx.api.get_daily_basic = AsyncMock(side_effect=Exception("API error"))
         strategy = HistoricalSyncStrategy(ctx)
-        with pytest.raises(Exception, match="API error"):
-            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_northbound_filter(self):
@@ -605,12 +607,13 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_save_if_ok_critical_save_exception_raises(self):
+    async def test_save_if_ok_critical_save_exception_does_not_raise(self):
+        """S8: 单个 critical 表 save 失败不再 raise，仅记错误并返回 True。"""
         ctx = make_ctx()
         ctx.cache.save_daily_quotes = AsyncMock(side_effect=Exception("critical save err"))
         strategy = HistoricalSyncStrategy(ctx)
-        with pytest.raises(Exception, match="critical save err"):
-            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_northbound_all_filtered_sample_codes(self):
@@ -958,6 +961,51 @@ class TestHistoricalSyncStkLimit:
         ctx.cache.save_stk_limit.assert_not_awaited()
 
 
+class TestResultUpdatedAccumulation:
+    """S14: 验证 result.skipped 正确累计跳过数量，result.updated 不被错误填充。"""
+
+    @pytest.mark.asyncio
+    async def test_skipped_dates_accumulate_to_skipped_field(self):
+        """已缓存且高质量达标的日期应累计到 result.skipped，而非 result.updated。"""
+        ctx = make_ctx()
+        # 两个交易日都已缓存
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        # 两个日期质量分数均达标（>= 80）
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        # 两个日期都被跳过 → result.skipped == 2
+        assert result.skipped == 2
+        # result.updated 不应被跳过数污染（S14 修复前为 result.updated == 2）
+        assert result.updated == 0
+        # 没有新同步 → result.added == 0
+        assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_low_quality_dates_not_counted_as_skipped(self):
+        """低质量日期不累计为 skipped，会进入重新同步流程（added 或 failed）。"""
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        # 20240614 低质量（< 80），20240613 高质量
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 50, "expected_base": 5000, "issues": ["low count"]},
+                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        # 仅 20240613 被跳过 → result.skipped == 1
+        assert result.skipped == 1
+        # result.updated 不应被污染
+        assert result.updated == 0
+
+
 class TestHistoricalSyncRunDeepBranches:
     @pytest.mark.asyncio
     async def test_trade_calendar_exception(self):
@@ -1132,3 +1180,171 @@ class TestHistoricalSyncRunEngineDisposedError:
         strategy._run_historical_sync = mock_run_hist
         with pytest.raises(EngineDisposedError):
             await strategy._run_impl()
+
+
+class TestSyncDailyMarketSnapshotCancellation:
+    """S2: 验证 sync_daily_market_snapshot 长循环中取消信号响应"""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_at_entry_returns_false(self):
+        """入口检查取消信号，返回 False，不执行任何 IO"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy._shutdown_event.set()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is False
+        ctx.api.get_daily_quotes.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_after_fetch_returns_false(self):
+        """fetch 完成后检查取消信号，返回 False，不执行 save"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+
+        original_get_quotes = ctx.api.get_daily_quotes
+
+        async def set_shutdown_after_fetch(*args, **kwargs):
+            df = await original_get_quotes(*args, **kwargs)
+            strategy._shutdown_event.set()
+            return df
+
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=set_shutdown_after_fetch)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is False
+        ctx.cache.save_daily_quotes.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_after_critical_saves_returns_false(self):
+        """critical 表 save 完成后检查取消信号，返回 False，不执行非 critical save"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+
+        async def set_shutdown_after_basic(*args, **kwargs):
+            strategy._shutdown_event.set()
+            return 10
+
+        ctx.cache.save_daily_indicators = AsyncMock(side_effect=set_shutdown_after_basic)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is False
+        ctx.cache.save_limit_list.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_before_northbound_returns_false(self):
+        """northbound 处理前检查取消信号，返回 False，不执行 sync_status 更新"""
+        ctx = make_ctx()
+        # 让 index_basic 返回非空数据，使 save_index_dailybasic 被调用
+        ctx.api.get_index_dailybasic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+
+        async def set_shutdown_after_index_basic(*args, **kwargs):
+            strategy._shutdown_event.set()
+            return 3
+
+        ctx.cache.save_index_dailybasic = AsyncMock(side_effect=set_shutdown_after_index_basic)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is False
+        ctx.cache.update_sync_status.assert_not_awaited()
+
+
+class TestCriticalTableErrorIsolation:
+    """S8: 验证 critical 表失败不终止整个同步（错误隔离）"""
+
+    @pytest.mark.asyncio
+    async def test_quotes_fetch_failure_continues_sync(self):
+        """quotes fetch 失败，basic 成功，不 raise，返回 True，basic save 仍执行"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("quotes fetch err"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        ctx.cache.save_daily_indicators.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_basic_save_failure_continues_sync(self):
+        """basic save 失败，quotes 成功，不 raise，返回 True，sync_status 仍更新"""
+        ctx = make_ctx()
+        ctx.cache.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        # 验证 basic 被标记为 save_failed（方法执行到 sync_status 更新阶段）
+        update_calls = ctx.cache.update_sync_status.await_args_list
+        basic_calls = [c for c in update_calls if c.args[0] == "daily_indicators"]
+        assert len(basic_calls) > 0
+        assert basic_calls[0].kwargs.get("status") == "save_failed"
+
+    @pytest.mark.asyncio
+    async def test_all_critical_fetch_failures_raises(self):
+        """quotes 和 basic fetch 都失败，raise RuntimeError 触发 circuit breaker"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("quotes err"))
+        ctx.api.get_daily_basic = AsyncMock(side_effect=Exception("basic err"))
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(RuntimeError, match="All critical tables"):
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+    @pytest.mark.asyncio
+    async def test_all_critical_save_failures_raises(self):
+        """quotes 和 basic save 都失败，raise RuntimeError 触发 circuit breaker"""
+        ctx = make_ctx()
+        ctx.cache.save_daily_quotes = AsyncMock(side_effect=Exception("quotes save err"))
+        ctx.cache.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(RuntimeError, match="All critical tables"):
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+    @pytest.mark.asyncio
+    async def test_single_critical_failure_does_not_trigger_circuit_breaker(self):
+        """单个 critical 表失败不触发 circuit breaker（不 raise，不计入 consecutive_failures）"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("quotes err"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = SyncResult()
+        with patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1):
+            await strategy._run_historical_sync(5, None, result)
+        assert not any("Circuit breaker" in e for e in result.errors)
+
+
+class TestFetchIndicesPermissionError:
+    """S9: 验证 fetch_indices 中 TushareAPIPermissionError 被标记为 skipped_permission"""
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_permission_error_marks_skipped(self):
+        """index_daily 抛 TushareAPIPermissionError，标记 skipped_permission"""
+        from data.external.tushare_client import TushareAPIPermissionError
+
+        ctx = make_ctx()
+        ctx.api.get_index_daily = AsyncMock(side_effect=TushareAPIPermissionError("index_daily", "no permission"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        update_calls = ctx.cache.update_sync_status.await_args_list
+        index_calls = [c for c in update_calls if c.args[0] == "index_daily"]
+        assert len(index_calls) > 0
+        assert index_calls[0].kwargs.get("status") == "skipped_permission"
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_partial_permission_error_marks_skipped(self):
+        """部分 index_daily 抛 TushareAPIPermissionError，仍标记 skipped_permission"""
+        from data.external.tushare_client import TushareAPIPermissionError
+
+        ctx = make_ctx()
+        call_count = 0
+
+        async def partial_permission(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TushareAPIPermissionError("index_daily", "no permission")
+            return pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+
+        ctx.api.get_index_daily = AsyncMock(side_effect=partial_permission)
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        update_calls = ctx.cache.update_sync_status.await_args_list
+        index_calls = [c for c in update_calls if c.args[0] == "index_daily"]
+        assert len(index_calls) > 0
+        assert index_calls[0].kwargs.get("status") == "skipped_permission"

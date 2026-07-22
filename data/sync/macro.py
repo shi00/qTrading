@@ -11,7 +11,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.error_classifier import classify_error, classify_severity
 from utils.time_utils import get_now, parse_date
 
-from .base import ISyncStrategy, SyncResult, safe_error
+from .base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
@@ -561,32 +561,18 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[MacroSync] Shibor | LPR fetch failed, continuing with shibor only (%s): %s",
                         error_info["code"],
-                        lpr_err,
+                        safe_error(lpr_err),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[MacroSync] Shibor | LPR fetch failed, continuing with shibor only (%s): %s",
                         error_info["code"],
-                        lpr_err,
+                        safe_error(lpr_err),
                         exc_info=True,
                     )
 
             if df is not None and not df.empty:
-                if lpr_df is not None and not lpr_df.empty:
-                    # how="left"：以 shibor 日频为主表，避免 LPR 缺失日引入 NaN 覆盖 shibor 列；
-                    # LPR 为月频数据，仅在发布日对齐 shibor 行写入，其他日 lpr_1y/lpr_5y 为 NaN
-                    # （_save_upsert 会将 NaN 转 None，因 macro_dao 未标记 null_protected，已有 LPR 值会被覆盖为 NULL）
-                    # 故仅当 LPR date 与 shibor date 有交集时才合并（交集非空即合并），否则跳过 LPR merge
-                    # 已知限制：LPR 发布日若为非工作日（周末），因 shibor 主表无该日行，该 LPR 数据会丢失；
-                    # 下次同步时 LPR API 仍返回该日数据，但 shibor 主表仍无该日行，数据持续丢失。
-                    # ceiling: 月频 LPR 单次丢失最多 1 条/月. upgrade: 改用独立 upsert 按 date 主键写入.
-                    # R17（迁移 0015）：shibor/shibor_lpr API 返回经 _COLUMN_RENAMES 重命名后，date → record_date
-                    common_dates = set(df["record_date"]).intersection(set(lpr_df["record_date"]))
-                    if common_dates:
-                        df = df.merge(lpr_df, on="record_date", how="left")
-                    else:
-                        logger.debug("[MacroSync] Shibor | LPR dates do not intersect shibor dates, skipping LPR merge")
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug("[MacroSync] Shibor | Saved %s records", count)
@@ -595,6 +581,14 @@ class MacroSyncStrategy(ISyncStrategy):
                     today,
                     count or 0,
                 )
+
+            # S15 fix: LPR 独立 upsert 到 shibor_daily 表的 lpr_1y/lpr_5y 列，
+            # 避免 LPR 发布日为周末时因 shibor 主表无该日行导致数据丢失。
+            if lpr_df is not None and not lpr_df.empty:
+                lpr_count = await self.dao.save_lpr_daily(lpr_df)
+                if lpr_count:
+                    result.added += lpr_count
+                    logger.debug("[MacroSync] Shibor | Saved %s LPR records", lpr_count)
 
         except EngineDisposedError:
             raise
@@ -751,6 +745,10 @@ class MacroSyncStrategy(ISyncStrategy):
                             safe_error(e),
                             exc_info=True,
                         )
+                    # S18 fix: 部分 index fetch 失败时标记 partial 并记录错误，
+                    # 避免状态保持 success 误导监控。system 级别已 raise 不会到此。
+                    result.status = SyncStatus.PARTIAL.value
+                    result.errors.append(f"index_code={idx_code}: {safe_error(e)}")
 
             await self.context.cache.update_sync_status(
                 "index_weight",

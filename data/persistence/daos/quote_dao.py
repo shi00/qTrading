@@ -23,6 +23,7 @@ from data.persistence.models import (
     get_model_columns,
     get_model_pk_columns,
 )
+from data.sync.base import safe_error
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -283,7 +284,7 @@ class QuoteDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[QuoteDao] Failed to get expected stock count for %s: %s", trade_date, e)
+            logger.warning("[QuoteDao] Failed to get expected stock count for %s: %s", trade_date, safe_error(e))
             return 0
 
     async def get_daily_quotes(
@@ -770,7 +771,7 @@ class QuoteDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[QuoteDao] Failed to get bulk counts for %s: %s", table_name, e)
+            logger.warning("[QuoteDao] Failed to get bulk counts for %s: %s", table_name, safe_error(e))
             return {}
 
     async def get_bulk_expected_stock_counts(
@@ -841,7 +842,7 @@ class QuoteDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[QuoteDao] Failed to get bulk expected counts: %s", e)
+            logger.warning("[QuoteDao] Failed to get bulk expected counts: %s", safe_error(e))
             return {}
 
     async def get_bulk_sync_quality_scores(

@@ -18,7 +18,7 @@ from data.sync.holder import (
     _PROGRESS_LOG_INTERVAL,
     _CHECKPOINT_INTERVAL,
 )
-from data.sync.base import SyncContext
+from data.sync.base import SyncContext, SyncResult, SyncStatus
 
 pytestmark = pytest.mark.unit
 
@@ -2228,3 +2228,252 @@ class TestRunImplRecoverableErrorPath:
         strategy._sync_stk_holdernumber = mock_sync
         result = await strategy._run_impl()
         assert result.status == "failed"
+
+
+# =============================================================================
+# S6 + S17: _sync_top10_holders 取消响应 + 部分失败标记 partial
+# =============================================================================
+
+
+class TestSyncTop10HoldersCancellation:
+    """S6: _sync_top10_holders 串行循环必须响应 _shutdown_event。
+
+    holder.py 5500 次串行调用，原仅检查 self._cancelled 标志位。
+    现已增加 _shutdown_event.is_set() 检查，break 退出循环。
+    cancel() 同时设置 _cancelled 与 _shutdown_event。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_sets_shutdown_event(self):
+        """cancel() 必须同时设置 _cancelled 与 _shutdown_event。"""
+        ctx = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy.cancel()
+        assert strategy._cancelled is True
+        assert strategy._shutdown_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_event_mid_iteration_breaks_loop(self):
+        """在迭代中途触发 _shutdown_event 后，下次循环顶部 break。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 6)]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        api_call_count = 0
+
+        async def mock_api(ts_code, period):
+            nonlocal api_call_count
+            api_call_count += 1
+            # 第 3 个股票后触发 shutdown_event
+            if api_call_count >= 3:
+                strategy._shutdown_event.set()
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Test"]})
+
+        ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        result = await strategy._sync_top10_holders("20240331")
+        # shutdown_event 触发后 break，返回 -1
+        assert result == -1
+        # 第 4 个股票不应被调用（break 在循环顶部）
+        assert api_call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_shutdown_event_at_start_returns_minus_one(self):
+        """shutdown_event 在循环开始前已设置时，第一次迭代即 break，返回 -1。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        strategy._shutdown_event.set()
+        result = await strategy._sync_top10_holders("20240331")
+        assert result == -1
+        # shutdown_event 在循环顶部 break，api 不应被调用
+        ctx.api.get_top10_holders.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_impl_clears_shutdown_event_at_start(self):
+        """_run_impl 开始时必须 clear _shutdown_event，避免上次 cancel 残留。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        # 模拟上次运行残留的 shutdown_event
+        strategy._shutdown_event.set()
+        assert strategy._shutdown_event.is_set()
+        # _run_impl 开始时应 clear
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        await strategy._run_impl()
+        # clear 后应不再被设置（除非 cancel 被调用）
+        assert not strategy._shutdown_event.is_set()
+
+
+class TestSyncTop10HoldersPartialFailure:
+    """S17: _sync_top10_holders 部分股票 fetch 失败时必须标记 PARTIAL 并记录 ts_code。
+
+    原代码部分失败时仍返回 total_rows，调用方无法区分全成功与部分失败。
+    现已增加 result 参数：部分失败时 status=PARTIAL，errors 记录失败 ts_code。
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_marks_partial_and_records_ts_code(self):
+        """部分股票失败时，result.status 应为 partial，result.errors 含失败 ts_code。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "FAIL.SZ", "000004.SZ"]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+
+        async def mock_api(ts_code, period):
+            if ts_code == "FAIL.SZ":
+                raise ValueError("mock failure")
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Test"]})
+
+        ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        result = SyncResult()
+        count = await strategy._sync_top10_holders("20240331", result)
+        # 1 个失败，3 个成功，未 abort，返回 total_rows > 0
+        assert count > 0
+        # status 应为 partial
+        assert result.status == SyncStatus.PARTIAL.value
+        # errors 应包含失败 ts_code
+        assert any("FAIL.SZ" in err for err in result.errors)
+        assert len(result.errors) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_failure_keeps_success_status(self):
+        """无失败时，result.status 应保持 success。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        result = SyncResult()
+        count = await strategy._sync_top10_holders("20240331", result)
+        assert count > 0
+        assert result.status == SyncStatus.SUCCESS.value
+        assert len(result.errors) == 0
+
+    @pytest.mark.asyncio
+    async def test_result_none_does_not_crash(self):
+        """result=None 时不应崩溃，保持原有行为（仅返回 count）。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "FAIL.SZ"]}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+
+        async def mock_api(ts_code, period):
+            if ts_code == "FAIL.SZ":
+                raise ValueError("mock failure")
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Test"]})
+
+        ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        # 不传 result，应保持向后兼容
+        count = await strategy._sync_top10_holders("20240331")
+        assert count > 0  # 部分成功，返回 total_rows
+
+    @pytest.mark.asyncio
+    async def test_abort_does_not_set_partial(self):
+        """连续错误 abort 时返回 -1，不应标记 partial（由 _run_impl 通过 errors 计数处理）。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 8)]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        result = SyncResult()
+        count = await strategy._sync_top10_holders("20240331", result)
+        # 连续 5 次错误 abort，返回 -1
+        assert count == -1
+        # abort 时不设 partial（_run_impl 通过 errors 计数处理）
+        assert result.status != SyncStatus.PARTIAL.value
+
+    @pytest.mark.asyncio
+    async def test_multiple_failures_all_recorded(self):
+        """多个失败股票都应记录到 result.errors。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL1.SZ", "OK2.SZ", "FAIL2.SZ", "OK3.SZ"]})
+        )
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.api = MagicMock()
+
+        async def mock_api(ts_code, period):
+            if ts_code.startswith("FAIL"):
+                raise ValueError(f"mock failure for {ts_code}")
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Test"]})
+
+        ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        result = SyncResult()
+        count = await strategy._sync_top10_holders("20240331", result)
+        assert count > 0
+        assert result.status == SyncStatus.PARTIAL.value
+        # 两个失败都应记录
+        assert any("FAIL1.SZ" in err for err in result.errors)
+        assert any("FAIL2.SZ" in err for err in result.errors)
+        assert len(result.errors) == 2
+
+    @pytest.mark.asyncio
+    async def test_run_impl_propagates_partial_from_top10(self):
+        """_run_impl 调用 _sync_top10_holders 时应传 result 参数，
+        部分失败时最终 status 应为 partial。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL.SZ", "OK2.SZ"]}))
+        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
+
+        async def mock_api(ts_code, period):
+            if ts_code == "FAIL.SZ":
+                raise ValueError("mock failure")
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Test"]})
+
+        ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        # _sync_pledge_stat / share_float / stk_holdertrade 返回 0 跳过
+        strategy._sync_pledge_stat = AsyncMock(return_value=(0, None))
+        strategy._sync_share_float = AsyncMock(return_value=(0, None))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))
+        result = await strategy._run_impl()
+        # 部分失败应传播到 _run_impl 的 result
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("FAIL.SZ" in err for err in result.errors)
