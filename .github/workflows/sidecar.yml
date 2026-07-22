@@ -127,21 +127,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # binary_path 相对于 defaults.run.working-directory（sidecars/qtrading-pg-sidecar）
+          # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
-            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
+            binary_path: target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
           - os: linux
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: qtrading-pg-sidecar-linux-x86_64
-            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
+            binary_path: target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
           - os: macos
             runner: macos-14
             target: aarch64-apple-darwin
             artifact_name: qtrading-pg-sidecar-macos-aarch64
-            binary_path: sidecars/qtrading-pg-sidecar/target/aarch64-apple-darwin/release/qtrading-pg-sidecar
+            binary_path: target/aarch64-apple-darwin/release/qtrading-pg-sidecar
     defaults:
       run:
         working-directory: sidecars/qtrading-pg-sidecar
@@ -181,9 +183,10 @@ jobs:
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
         with:
           name: ${{ matrix.artifact_name }}
+          # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
           path: |
-            ${{ matrix.binary_path }}
-            sidecar-manifest-${{ matrix.os }}.json
+            sidecars/qtrading-pg-sidecar/${{ matrix.binary_path }}
+            sidecars/qtrading-pg-sidecar/sidecar-manifest-${{ matrix.os }}.json
           if-no-files-found: error
           retention-days: 14
 
