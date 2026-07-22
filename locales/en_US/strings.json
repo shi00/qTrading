@@ -702,6 +702,8 @@
     "db_connection_settings": "Connection Settings",
     "db_info": "Database Information",
     "db_test_connection": "Test Connection",
+    "embedded_pg_ready": "Local database is ready",
+    "embedded_pg_no_config_needed": "No host/port/password configuration required",
     "settings_db_title": "Database Configuration",
     "settings_db_saved": "Database configuration saved",
     "settings_tab_database": "Database",

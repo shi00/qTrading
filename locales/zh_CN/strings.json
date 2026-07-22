@@ -599,6 +599,8 @@
     "db_connection_settings": "连接设置",
     "db_info": "数据库信息",
     "db_test_connection": "测试连接",
+    "embedded_pg_ready": "本地数据库已自动准备",
+    "embedded_pg_no_config_needed": "无需配置主机/端口/密码",
     "settings_db_title": "数据库配置",
     "settings_db_saved": "数据库配置已保存",
     "settings_tab_database": "数据库",
