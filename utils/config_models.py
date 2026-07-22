@@ -204,6 +204,39 @@ class AppConfig(BaseModel):
     scheduler_last_nightly_prediction: str = ""
     scheduler_last_ai_concept_refresh: str = ""
 
+    # Phase 2：Embedded PostgreSQL 内嵌模式配置（pg_plan §8.3）
+    # 模式开关由 QTRADING_DATABASE_MODE 环境变量 + embedded_pg_enabled 共同判定
+    # （app.bootstrap.prepare_database_runtime 实现）。
+    embedded_pg_enabled: bool = Field(
+        default=False, description="启用内嵌 PostgreSQL 模式（需配合 QTRADING_DATABASE_MODE=embedded）"
+    )
+    embedded_pg_sidecar_path: str = Field(
+        default="", description="sidecar binary 绝对路径；空则按平台默认搜索（sidecars/qtrading-pg-sidecar[.exe]）"
+    )
+    embedded_pg_data_root: str = Field(
+        default="", description="PGDATA 根目录；空则用 platformdirs 默认 <app data>/postgres/17"
+    )
+    embedded_pg_install_root: str = Field(
+        default="", description="PostgreSQL binaries 安装根目录；空则 <embedded_pg_data_root>/../install"
+    )
+    embedded_pg_log_dir: str = Field(
+        default="",
+        description="日志目录；空则 <app data>/postgres-logs（统一存储 sidecar/PG/Python 服务日志）",
+    )
+    embedded_pg_start_timeout_s: float = Field(
+        default=300.0, ge=10.0, le=600.0, description="sidecar ready 等待超时（首次需下载+解压 PG binaries）"
+    )
+    embedded_pg_stop_timeout_s: float = Field(default=60.0, ge=5.0, le=120.0, description="sidecar 停止等待超时")
+    embedded_pg_listen: str = Field(default="127.0.0.1", description="PG 监听地址（仅本机）")
+    embedded_pg_username: str = Field(default="qtrading", description="PG 超级用户名")
+    embedded_pg_database: str = Field(default="qtrading", description="默认业务库名")
+
+    # Phase 3：Settings DatabaseTab 高级模式开关（开启后显示外置 PostgreSQL 配置表单）
+    db_show_advanced: bool = Field(
+        default=False,
+        description="Settings DatabaseTab 高级模式开关（显示外置 PostgreSQL 表单）",
+    )
+
 
 @cache
 def get_default_config() -> dict[str, Any]:

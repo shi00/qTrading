@@ -417,7 +417,7 @@ graph TB
 ### 1. 环境要求
 
 * Python 3.13+
-* PostgreSQL 16+
+* PostgreSQL 16+（外置模式需要；内置模式由应用自带 PostgreSQL 17，无需用户安装）
 
 ### 2. 安装
 
@@ -432,10 +432,13 @@ uv pip install --system -r requirements.txt
 
 ### 3. 配置数据库
 
-创建 `.env` 文件（或设置系统环境变量）：
+qTrading 提供两种数据库模式：
+
+* **内置模式（默认，推荐新用户）**：应用自带 PostgreSQL 17 sidecar，首次启动自动准备本地数据库，无需任何配置。
+* **外置模式（高级）**：连接用户自建的 PostgreSQL 16+ 实例，需在 `.env` 文件或环境变量中配置 `DATABASE_URL`。
 
 ```bash
-# 必需：数据库连接
+# 外置模式才需要配置 DATABASE_URL；内置模式跳过此步
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock_screener
 ```
 

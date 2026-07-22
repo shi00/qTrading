@@ -107,6 +107,21 @@ class DatabaseConfigPanelViewModel(ObservableViewModelMixin[DatabaseConfigState]
         self._load_config_to_state()
         self._notify()
 
+    # --- Mode / preference queries (View 通过 VM 访问, 避免直接 import ConfigHandler) ---
+
+    @property
+    def is_embedded_mode(self) -> bool:
+        """是否为 embedded 模式 (P3-13: View 通过 VM 访问, 避免直接 import ConfigHandler)."""
+        return ConfigHandler.is_embedded_mode()
+
+    def load_show_advanced(self) -> bool:
+        """读取 db_show_advanced 配置 (P3-13: View 通过 VM 访问)."""
+        return bool(ConfigHandler.load_config().get("db_show_advanced", False))
+
+    def save_show_advanced(self, value: bool) -> None:
+        """持久化 db_show_advanced 配置 (P3-13: View 通过 VM 访问)."""
+        ConfigHandler.save_config({"db_show_advanced": value})
+
     # --- Update commands ---
 
     def update_host(self, value: str) -> None:

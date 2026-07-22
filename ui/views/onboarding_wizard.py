@@ -142,6 +142,29 @@ async def _validate_local_model(local_model_vm: LocalModelConfigPanelViewModel) 
     return False
 
 
+async def _validate_database_embedded() -> bool:
+    """Embedded 模式 database step 验证: always-true (P3-12).
+
+    bootstrap.py 在 onboarding 之前已启动 sidecar, 走到 onboarding 说明已 ready。
+    embedded 模式不验证表单字段 (R-A4: 通过 VM 切换行为, 不改 STEP_CONFIGS 索引)。
+    """
+    return True
+
+
+def _resolve_database_validator(
+    database_vm: DatabaseConfigPanelViewModel,
+) -> Callable[[], Awaitable[bool]]:
+    """按 database_vm.is_embedded_mode 切换 database step validator (P3-12).
+
+    R-A4: 保留 STEP_CONFIGS[1] 索引不变, 通过 VM 切换 validate 行为。
+    - embedded 模式 → _validate_database_embedded (always-true, 不验证表单)
+    - external 模式 → database_vm.save_config (原行为: test+create+save)
+    """
+    if database_vm.is_embedded_mode:
+        return _validate_database_embedded
+    return database_vm.save_config
+
+
 def _render_message(msg: Message | None) -> str:
     """渲染 Message 为本地化文本。"""
     if msg is None:
@@ -334,7 +357,7 @@ def OnboardingWizard(
 
     # --- Bind panel methods to onboarding VM (每次渲染用最新闭包绑定, idempotent) ---
     onboarding_vm.bind(
-        fn_validate_database=database_vm.save_config,
+        fn_validate_database=_resolve_database_validator(database_vm),
         fn_validate_token=tushare_vm.verify_token,
         fn_validate_cloud_ai=lambda: _validate_cloud_ai(llm_vm),
         fn_validate_local_model=lambda: _validate_local_model(local_model_vm),

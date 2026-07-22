@@ -181,8 +181,10 @@ async def perform_window_shutdown(
         True 表示 cleanup 成功；False 表示 cleanup 不完整（已 force_exit）
     """
     logger.info("[Main] Window close confirmed by user.")
-    coordinator.start_watchdog()
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
+    # Phase 2 Step 8 (_step8_stop_embedded_postgres, 35s) 加入后，步骤超时和 = 55s。
+    # watchdog 70s + do_cleanup 60s 容纳 55s 步骤之和 + 5s margin，保证 Step 8 graceful stop 完整执行。
+    coordinator.start_watchdog(70.0)
+    cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
     try:
         if not is_web_mode_fn():
             page.window.prevent_close = False
@@ -224,7 +226,9 @@ async def perform_upgrade_exit(
     3. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
     4. force_exit(1)
     """
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=1.0)
+    # upgrade exit 路径：step_timeout_s=10.0 给 Step 8 一线机会（stdin.close + 快速 wait）
+    # 而非 1.0s（旧值，Step 8 必然超时）。整体 timeout_s=5.0 仍约束总时长。
+    cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=10.0)
     if not cleanup_ok:
         logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
     try:
@@ -254,8 +258,9 @@ async def handle_disconnect(
     4. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
     5. cleanup_ok=False：log error，sleep 0.2s，force_exit(1)
     """
-    coordinator.start_watchdog(25)
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
+    # Phase 2 Step 8 加入后，disconnect 路径同步调整：watchdog 70s + do_cleanup 60s
+    coordinator.start_watchdog(70)
+    cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
     if cleanup_done_fn():
         return
     if cleanup_ok:

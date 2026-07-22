@@ -32,6 +32,7 @@ _CLEANUP_STEPS = [
     ("Step 5", "_step5_unload_ai_model", True, 2.0),
     ("Step 6", "_step6_shutdown_thread_pools", True, 2.0),
     ("Step 7", "_step7_close_database_managers", True, 1.0),
+    ("Step 8", "_step8_stop_embedded_postgres", True, 35.0),
 ]
 
 
@@ -480,3 +481,37 @@ class ShutdownCoordinator:
 
         DataExplorerQueryClient.close_all()
         logger.info("[Shutdown]   - DataExplorerQueryClient shared engine closed.")
+
+    async def _step8_stop_embedded_postgres(self) -> None:
+        """停止 EmbeddedPostgresService（如已启动）。Phase 2 §3.5。
+
+        - 未注册或未初始化：无操作
+        - 已启动：通过 asyncio.to_thread 包装同步 stop_sync，避免阻塞事件循环
+        - H1: asyncio.to_thread 内的 stop_sync 无法响应取消（线程不可强制终止），
+          使用 asyncio.wait_for(timeout=30.0) 兜底，超时后放弃等待线程（leaked
+          thread 会在 proc.wait 完成后自然退出），避免 Step 8 阻塞整个 shutdown
+        - 失败不抛异常（critical=True 已记 ERROR），但记录日志
+
+        R2 红线：CancelledError 是 BaseException 子类，不被 `except Exception` 捕获，
+        自然传播至 _run_async_step → do_cleanup，配合优雅停机。
+        """
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        try:
+            service = EmbeddedPostgresService.get_instance()
+        except RuntimeError:
+            # 单例未注册（external 模式或从未启动）— 无操作
+            return
+        try:
+            # H1: 30s < Step 8 default 35s，留 5s margin 给 force_exit
+            await asyncio.wait_for(asyncio.to_thread(service.stop_sync), timeout=30.0)
+            logger.info("[Shutdown] Step 8: EmbeddedPostgresService stopped.")
+        except TimeoutError:
+            # 线程仍在后台运行（stop_sync 中的 proc.wait 会完成），放弃等待
+            logger.warning("[Shutdown] Step 8: stop_sync timed out after 30s, abandoning thread.")
+        except Exception as e:
+            logger.error(
+                "[Shutdown] Step 8 stop embedded postgres failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )

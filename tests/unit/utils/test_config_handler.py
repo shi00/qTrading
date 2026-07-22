@@ -2093,3 +2093,80 @@ class TestConfigHandlerOldDoubaoMethodsRemoved:
             "set_doubao_schedule_time",
         ]:
             assert not hasattr(ConfigHandler, name), f"ConfigHandler.{name} 应已删除"
+
+
+class TestConfigHandlerIsEmbeddedMode:
+    """P3-7: ConfigHandler.is_embedded_mode() — embedded/external 模式单一入口点（R-B1）。
+
+    判定条件：QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
+    默认 external（与 bootstrap.prepare_database_runtime 现有逻辑一致）。
+    """
+
+    def test_embedded_mode_enabled_returns_true(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=embedded + embedded_pg_enabled=True → True"""
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True},
+        ):
+            assert ConfigHandler.is_embedded_mode() is True
+
+    def test_external_mode_returns_false(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=external + embedded_pg_enabled=True → False"""
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True},
+        ):
+            assert ConfigHandler.is_embedded_mode() is False
+
+    def test_embedded_env_but_config_disabled_returns_false(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=embedded + embedded_pg_enabled=False → False"""
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": False},
+        ):
+            assert ConfigHandler.is_embedded_mode() is False
+
+    def test_env_unset_defaults_external_returns_false(self, monkeypatch):
+        """QTRADING_DATABASE_MODE 未设置（默认 external）+ embedded_pg_enabled=True → False"""
+        monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True},
+        ):
+            assert ConfigHandler.is_embedded_mode() is False
+
+    def test_embedded_mode_case_insensitive(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=EMBEDDED（大写）+ embedded_pg_enabled=True → True"""
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "EMBEDDED")
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True},
+        ):
+            assert ConfigHandler.is_embedded_mode() is True
+
+    def test_embedded_env_config_missing_returns_false(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=embedded + load_config 返回 {}（配置缺失）→ False
+
+        embedded_pg_enabled 默认 False（AppConfig field default）。
+        """
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+        with patch.object(cfg_mod.ConfigHandler, "load_config", return_value={}):
+            assert ConfigHandler.is_embedded_mode() is False
+
+    def test_load_config_exception_returns_false(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=embedded + load_config 抛异常 → False（fallback 安全）"""
+        monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            side_effect=RuntimeError("config read error"),
+        ):
+            assert ConfigHandler.is_embedded_mode() is False

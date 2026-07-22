@@ -4,7 +4,14 @@ import sys
 import pytest
 
 
-pytestmark = pytest.mark.unit
+pytestmark = [
+    pytest.mark.unit,
+    # R18 一致性：subprocess 测试在 Windows + xdist 并行环境下会触发 worker crash
+    # （4 个 worker 同时启动 subprocess，Windows 进程创建开销大致 runner 资源耗尽）。
+    # 用 xdist_group 将这些测试锁定到同一 worker 串行运行，避免资源竞争。
+    # 参见 .github/workflows/ci_cd.yml E2E 测试用 -n 1 的同类问题处理。
+    pytest.mark.xdist_group("conftest_safety"),
+]
 
 
 class TestConftestSafety:
