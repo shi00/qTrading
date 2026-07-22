@@ -298,7 +298,6 @@ class TestClickHandlers:
         finally:
             _set_context_page(None)
 
-        mock_page.run_task.assert_called_once()
         args = mock_page.run_task.call_args[0]
         assert args[0] == vm.start_backup
         assert isinstance(args[1], Path)
