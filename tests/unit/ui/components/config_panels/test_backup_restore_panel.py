@@ -15,7 +15,7 @@
 import contextlib
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -34,6 +34,18 @@ from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
 from ui.viewmodels.backup_restore_view_model import BackupRestoreState
 
 pytestmark = pytest.mark.unit
+
+
+def _set_context_page(page: Any) -> None:
+    """注入 page 到 _context_page (cast Any 绕过类型检查)."""
+    from flet.controls.context import _context_page
+
+    _context_page.set(cast(Any, page))
+
+
+def _invoke_click(handler: Any) -> None:
+    """调用 click handler (cast Any 绕过 Optional 调用检查)."""
+    cast(Any, handler)(MagicMock())
 
 
 def _read_source() -> str:
@@ -277,16 +289,14 @@ class TestClickHandlers:
 
     def test_on_backup_click_calls_start_backup(self) -> None:
         """page 可用时调 page.run_task(vm.start_backup, path)."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
         mock_page = MagicMock()
-        _context_page.set(mock_page)
+        _set_context_page(mock_page)
         try:
             handler = panel_module._on_backup_click_factory(vm)
-            handler(MagicMock())
+            _invoke_click(handler)
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
 
         mock_page.run_task.assert_called_once()
         args = mock_page.run_task.call_args[0]
@@ -295,44 +305,38 @@ class TestClickHandlers:
 
     def test_on_backup_click_silent_on_runtime_error(self) -> None:
         """page 不可用 (RuntimeError, _context_page 为 None) 时静默处理, 不调 vm.start_backup."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
-        # _context_page.set(None) 让 ft.context.page property 抛 RuntimeError
-        _context_page.set(None)
+        # _set_context_page(None) 让 ft.context.page property 抛 RuntimeError
+        _set_context_page(None)
         try:
             handler = panel_module._on_backup_click_factory(vm)
-            handler(MagicMock())  # 不应抛异常
+            _invoke_click(handler)  # 不应抛异常
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
         vm.start_backup.assert_not_called()
 
     def test_on_backup_click_silent_when_page_none(self) -> None:
         """page 为 None 时静默处理 (ft.context.page 抛 RuntimeError 由 except 捕获)."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
-        _context_page.set(None)
+        _set_context_page(None)
         try:
             handler = panel_module._on_backup_click_factory(vm)
-            handler(MagicMock())
+            _invoke_click(handler)
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
         vm.start_backup.assert_not_called()
 
     def test_on_restore_wizard_click_uses_default_path_when_backup_path_none(self) -> None:
         """state.backup_path 为 None 时用默认路径调 vm.start_restore_wizard."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
         vm.state.backup_path = None
         mock_page = MagicMock()
-        _context_page.set(mock_page)
+        _set_context_page(mock_page)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm)
-            handler(MagicMock())
+            _invoke_click(handler)
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
 
         args = mock_page.run_task.call_args[0]
         assert args[0] == vm.start_restore_wizard
@@ -341,67 +345,59 @@ class TestClickHandlers:
 
     def test_on_restore_wizard_click_uses_state_backup_path_when_set(self) -> None:
         """state.backup_path 非 None 时用该路径调 vm.start_restore_wizard."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
         vm.state.backup_path = "/existing/backup.dump"
         mock_page = MagicMock()
-        _context_page.set(mock_page)
+        _set_context_page(mock_page)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm)
-            handler(MagicMock())
+            _invoke_click(handler)
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
 
         args = mock_page.run_task.call_args[0]
         assert args[1] == Path("/existing/backup.dump")
 
     def test_on_restore_wizard_click_silent_on_runtime_error(self) -> None:
         """page 不可用时静默处理 (ft.context.page 抛 RuntimeError)."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
-        _context_page.set(None)
+        _set_context_page(None)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm)
-            handler(MagicMock())  # 不应抛异常
+            _invoke_click(handler)  # 不应抛异常
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
         vm.start_restore_wizard.assert_not_called()
 
     def test_on_confirm_restore_click_calls_confirm_restore(self) -> None:
         """page 可用时调 page.run_task(vm.confirm_restore)."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
         mock_page = MagicMock()
-        _context_page.set(mock_page)
+        _set_context_page(mock_page)
         try:
             handler = panel_module._on_confirm_restore_click_factory(vm)
-            handler(MagicMock())
+            _invoke_click(handler)
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
 
         mock_page.run_task.assert_called_once_with(vm.confirm_restore)
 
     def test_on_confirm_restore_click_silent_on_runtime_error(self) -> None:
         """page 不可用时静默处理 (ft.context.page 抛 RuntimeError)."""
-        from flet.controls.context import _context_page
-
         vm = MagicMock()
-        _context_page.set(None)
+        _set_context_page(None)
         try:
             handler = panel_module._on_confirm_restore_click_factory(vm)
-            handler(MagicMock())  # 不应抛异常
+            _invoke_click(handler)  # 不应抛异常
         finally:
-            _context_page.set(None)
+            _set_context_page(None)
         vm.confirm_restore.assert_not_called()
 
     def test_on_cancel_restore_click_calls_cancel_restore(self) -> None:
         """cancel_restore 同步调用, 直接调 vm.cancel_restore()."""
         vm = MagicMock()
         handler = panel_module._on_cancel_restore_click_factory(vm)
-        handler(MagicMock())
+        _invoke_click(handler)
         vm.cancel_restore.assert_called_once_with()
 
 
