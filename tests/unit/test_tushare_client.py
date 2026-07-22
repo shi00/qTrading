@@ -2249,8 +2249,8 @@ class TestIsRateLimitKeywordPrecision:
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
                 assert result is not None
-        # reduce_rate 被调用（rate_limit 路径）
-        client._rate_limiter.reduce_rate.assert_called_once()
+        # reduce_rate 被调用（rate_limit 路径，factor=0.5 降频）
+        client._rate_limiter.reduce_rate.assert_called_once_with(factor=0.5)
 
     @pytest.mark.asyncio
     async def test_bare_apology_does_not_trigger_rate_limit(self, tushare_client_mocks):
@@ -2383,7 +2383,8 @@ class TestProbeClientParamError:
             new=AsyncMock(side_effect=Exception("invalid parameter: ts_code")),
         ):
             with caplog.at_level(logging.ERROR, logger="data.external.tushare_client"):
-                with pytest.raises(TushareAPIPermissionError):
+                with pytest.raises(TushareAPIPermissionError) as exc_info:
                     await client._handle_probe_call("test_api", func, trade_date="20240101")
+            assert exc_info.value.api_name == "test_api"
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert any("client param error" in r.message for r in error_records)

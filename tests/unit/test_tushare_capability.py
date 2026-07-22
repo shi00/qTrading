@@ -724,8 +724,9 @@ class TestProbeTokenConsistency:
             return None
 
         client._handle_probe_call = fake_probe_call
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await client.probe_api_capabilities()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         # token 变化后，回滚被跳过，daily=False 不被恢复（set_token 已清空 cache）
         assert client.is_api_available("daily") is None

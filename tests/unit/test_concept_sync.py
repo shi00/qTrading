@@ -592,7 +592,6 @@ class TestLimitListSyncAtomicity:
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added == 2
         ctx.cache.stock_dao.clear_today_limit_concepts.assert_called_once_with()
-        ctx.cache.stock_dao.upsert_limit_concepts.assert_called_once()
         assert call_order == ["clear", "upsert"]
 
 
