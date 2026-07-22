@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cache
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -238,7 +237,6 @@ class AppConfig(BaseModel):
     )
 
 
-@cache
 def get_default_config() -> dict[str, Any]:
     return AppConfig().model_dump()
 

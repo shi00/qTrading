@@ -194,10 +194,18 @@ class TestGetDefaultConfig:
         assert isinstance(result["sync_integrity"], dict)
         assert result["sync_integrity"]["quality_threshold"] == 80
 
-    def test_cache_returns_same_object(self):
+    def test_returns_independent_dict(self):
+        """每次调用返回独立 dict，修改返回值不影响后续调用（F6 修复后行为）。
+
+        历史：原实现用 @cache 返回共享可变 dict，调用方修改嵌套结构会污染全局缓存。
+        现在去掉 @cache，Pydantic model_dump() 每次返回全新深 dict。
+        """
         r1 = get_default_config()
         r2 = get_default_config()
-        assert r1 is r2
+        assert r1 is not r2
+        # 修改 r1 的嵌套结构不影响 r2
+        r1["sync_integrity"]["quality_threshold"] = 999
+        assert r2["sync_integrity"]["quality_threshold"] == 80
 
 
 class TestConfigValidationResult:

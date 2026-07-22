@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from utils.config_handler import ConfigHandler
+from utils.config_models import get_default_config
 
 pytestmark = pytest.mark.unit
 
@@ -83,7 +84,8 @@ class TestConfigHandler:
 
         ConfigHandler._clear_cache()
         config_data = ConfigHandler.load_config()
-        assert config_data == {}
+        # F7 修复后，配置文件异常时返回默认配置而非空 dict
+        assert config_data == get_default_config()
 
     def test_save_config_error(self, isolated_config):
         with patch("builtins.open", side_effect=PermissionError("Denied")):

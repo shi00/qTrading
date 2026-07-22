@@ -971,7 +971,7 @@ class TestMultiProviderCredentials:
         "load_config",
         return_value={"llm_custom_models": {}, "llm_provider_credentials": {}},
     )
-    @patch.object(cfg_mod.ConfigHandler, "save_config")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     @patch.object(cfg_mod.keyring, "set_password")
     def test_save_provider_credential_without_base_url_registers_provider(self, mock_set, mock_save, mock_load):
         result = cfg_mod.ConfigHandler.save_provider_credential(
@@ -993,7 +993,7 @@ class TestMultiProviderCredentials:
             "llm_provider_credentials": {"qwen": {}},
         },
     )
-    @patch.object(cfg_mod.ConfigHandler, "save_config")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     @patch.object(cfg_mod.keyring, "set_password")
     def test_save_provider_credential_models_limit_50(self, mock_set, mock_save, mock_load):
         result = cfg_mod.ConfigHandler.save_provider_credential(
@@ -1851,6 +1851,231 @@ class TestTusharePointTier:
             result = cfg_mod.ConfigHandler.set_tushare_point_tier("platinum")
             assert result is False
             mock_set.assert_not_called()
+
+
+class TestConfigReviewFixes:
+    """系统配置检视修复的回归测试（F1/F2/F3/F4/F7/F8/F9/F12/F13）。
+
+    覆盖行为变更项：返回值检查、缓存污染防护、异常分支统一、日志记录。
+    签名/死代码/冗余删除项（F5/F10/F11）不新增测试。
+    """
+
+    # === F1: save_db_config 检查返回值 ===
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    def test_save_db_config_returns_false_when_save_config_fails(self, mock_save):
+        """F1: save_config 失败时 save_db_config 返回 False"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="localhost", port=5432, user="postgres", password="secret", database="astock"
+        )
+        assert result is False
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=False)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_db_config_returns_false_when_save_db_password_fails(self, mock_save, mock_pwd):
+        """F1: save_db_password 失败时 save_db_config 返回 False"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="localhost", port=5432, user="postgres", password="secret", database="astock"
+        )
+        assert result is False
+
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_db_config_returns_true_when_all_succeed(self, mock_save, mock_pwd):
+        """F1: 全部成功时 save_db_config 返回 True"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="localhost", port=5432, user="postgres", password="secret", database="astock"
+        )
+        assert result is True
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_db_config_no_password_returns_true(self, mock_save):
+        """F1: 无密码时跳过 save_db_password，返回 True"""
+        result = cfg_mod.ConfigHandler.save_db_config(
+            host="localhost", port=5432, user="postgres", password="", database="astock"
+        )
+        assert result is True
+
+    # === F2: save_db_password 传播 save_config 返回值 ===
+
+    @patch.object(cfg_mod.keyring, "set_password")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    def test_save_db_password_returns_save_config_result_on_success_path(self, mock_save, mock_kr):
+        """F2: keyring 成功后，save_db_password 返回 save_config 的实际返回值（False）"""
+        result = cfg_mod.ConfigHandler.save_db_password("my_password")
+        assert result is False
+
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="encrypted")
+    @patch.object(cfg_mod.keyring, "delete_password")
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    def test_save_db_password_returns_save_config_result_on_encrypt_fallback(
+        self, mock_save, mock_set, mock_del, mock_enc
+    ):
+        """F2: 加密 fallback 路径，save_db_password 返回 save_config 的实际返回值（False）"""
+        result = cfg_mod.ConfigHandler.save_db_password("my_password")
+        assert result is False
+
+    # === F3: save_provider_credential 不污染 _config_cache ===
+
+    def test_save_provider_credential_does_not_pollute_cache_on_validation_failure(self):
+        """F3: save_config 验证失败时，_config_cache 中的 llm_provider_credentials 不被污染"""
+        original_credentials = {"existing_provider": {"base_url": "https://original.example.com"}}
+        cfg_mod.ConfigHandler._config_cache = {
+            "llm_provider_credentials": original_credentials,
+            "llm_custom_models": {"existing_provider": ["model-a"]},
+        }
+        try:
+            with (
+                patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
+                patch.object(cfg_mod.keyring, "set_password"),
+            ):
+                cfg_mod.ConfigHandler.save_provider_credential(
+                    provider="new_provider",
+                    api_key="new-key",
+                    base_url="https://new.example.com",
+                    models=["model-b"],
+                )
+                # 验证 _config_cache 未被污染
+                cached = cfg_mod.ConfigHandler._config_cache
+                assert "new_provider" not in cached["llm_provider_credentials"]
+                assert "new_provider" not in cached["llm_custom_models"]
+                # 原有数据保持不变
+                assert "existing_provider" in cached["llm_provider_credentials"]
+        finally:
+            cfg_mod.ConfigHandler._clear_cache()
+
+    def test_save_provider_credential_returns_false_when_save_config_fails(self):
+        """N1: save_provider_credential 必须传播 save_config 的返回值（False），不能无条件返回 True"""
+        cfg_mod.ConfigHandler._config_cache = {
+            "llm_provider_credentials": {},
+            "llm_custom_models": {},
+        }
+        try:
+            with (
+                patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
+                patch.object(cfg_mod.keyring, "set_password"),
+            ):
+                result = cfg_mod.ConfigHandler.save_provider_credential(
+                    provider="new_provider",
+                    api_key="new-key",
+                    base_url="https://new.example.com",
+                    models=["model-b"],
+                )
+                assert result is False
+        finally:
+            cfg_mod.ConfigHandler._clear_cache()
+
+    def test_save_provider_credential_returns_true_when_save_config_succeeds(self):
+        """N1: save_provider_credential 在 save_config 成功时返回 True"""
+        cfg_mod.ConfigHandler._config_cache = {
+            "llm_provider_credentials": {},
+            "llm_custom_models": {},
+        }
+        try:
+            with (
+                patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
+                patch.object(cfg_mod.keyring, "set_password"),
+            ):
+                result = cfg_mod.ConfigHandler.save_provider_credential(
+                    provider="new_provider",
+                    api_key="new-key",
+                    base_url="https://new.example.com",
+                    models=["model-b"],
+                )
+                assert result is True
+        finally:
+            cfg_mod.ConfigHandler._clear_cache()
+
+    # === F4: save_llm_config 加密 fallback 检查返回值 ===
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="encrypted")
+    @patch.object(cfg_mod.keyring, "delete_password")
+    @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
+    def test_save_llm_config_returns_false_when_encrypted_save_fails(self, mock_set, mock_del, mock_enc, mock_save):
+        """F4: 加密 fallback 路径 save_config 失败时返回 False"""
+        # 第一次 save_config（主配置）返回 True，第二次（加密 key）返回 False
+        mock_save.side_effect = [True, False]
+        result = cfg_mod.ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="test-key",
+        )
+        assert result is False
+
+    # === F7: load_config IO 错误返回默认配置 ===
+
+    def test_load_config_returns_defaults_on_io_error(self):
+        """F7: 配置文件 IO 异常时返回默认配置而非空 dict"""
+        cfg_mod.ConfigHandler._clear_cache()
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("builtins.open", side_effect=OSError("disk error")),
+            patch.object(cfg_mod, "logger") as mock_logger,
+        ):
+            result = cfg_mod.ConfigHandler.load_config()
+            # 应返回默认配置（含 db_host 等字段），而非空 dict
+            assert "db_host" in result
+            assert "llm_provider" in result
+            # 应记录 warning 日志
+            warning_calls = [c for c in mock_logger.warning.call_args_list if "Failed to load" in c[0][0]]
+            assert len(warning_calls) >= 1
+        cfg_mod.ConfigHandler._clear_cache()
+
+    # === F8: is_embedded_mode 加日志 ===
+
+    @patch.dict(cfg_mod.os.environ, {"QTRADING_DATABASE_MODE": "embedded"}, clear=False)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", side_effect=RuntimeError("unexpected"))
+    def test_is_embedded_mode_logs_warning_on_load_failure(self, mock_load):
+        """F8: load_config 失败时 is_embedded_mode 记录 warning 并返回 False"""
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            result = cfg_mod.ConfigHandler.is_embedded_mode()
+            assert result is False
+            warning_calls = [c for c in mock_logger.warning.call_args_list if "is_embedded_mode" in c[0][0]]
+            assert len(warning_calls) >= 1
+
+    # === F9: ensure_defaults 配置文件损坏加日志 ===
+
+    def test_ensure_defaults_logs_warning_on_corrupted_config(self, tmp_path):
+        """F9: 配置文件损坏时 ensure_defaults 记录 warning"""
+        corrupted_file = tmp_path / "corrupted.json"
+        corrupted_file.write_text("{ invalid json", encoding="utf-8")
+        cfg_mod.ConfigHandler._clear_cache()
+        with (
+            patch.object(cfg_mod, "CONFIG_FILE", str(corrupted_file)),
+            patch.object(cfg_mod, "logger") as mock_logger,
+            patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True),
+            patch.object(cfg_mod.ConfigHandler, "_migrate_custom_models_credentials", return_value=False),
+        ):
+            cfg_mod.ConfigHandler.ensure_defaults()
+            warning_calls = [c for c in mock_logger.warning.call_args_list if "unreadable" in c[0][0]]
+            assert len(warning_calls) >= 1
+        cfg_mod.ConfigHandler._clear_cache()
+
+    # === F12: set_local_ai_timeout 返回 save_config 结果 ===
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    def test_set_local_ai_timeout_returns_save_result(self, mock_save):
+        """F12: set_local_ai_timeout 返回 save_config 的实际返回值"""
+        result = cfg_mod.ConfigHandler.set_local_ai_timeout(120)
+        assert result is False
+
+    # === F13: get_max_io_workers 用 get_typed ===
+
+    def test_get_max_io_workers_returns_zero_on_invalid_value(self):
+        """F13: 非法值降级到 0（get_typed 行为）"""
+        cfg_mod.ConfigHandler._config_cache = {"max_io_workers": "not_a_number"}
+        try:
+            with patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=0) as mock_get_typed:
+                cfg_mod.ConfigHandler.get_max_io_workers()
+                # get_max_io_workers 内部会调用 get_typed("max_io_workers", int, 0)
+                # 当 io_workers <= 0 时，fallback 到 min(cpu_count, db_capacity)
+                # 这里 mock get_typed 返回 0，所以会走 fallback 路径
+                mock_get_typed.assert_any_call("max_io_workers", int, 0)
+        finally:
+            cfg_mod.ConfigHandler._clear_cache()
 
     def test_set_tushare_point_tier_accepts_all_5_points_tiers(self):
         """验证 5 档 points_* 值均被白名单接受。"""

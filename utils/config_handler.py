@@ -39,7 +39,6 @@ SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "db_password_encrypted", 
 
 class ConfigHandler:
     _config_cache = None
-    _last_load_time = 0
     _lock = rwlock.RWLockFair()
     _io_workers_cap_warned: bool = False
 
@@ -185,7 +184,11 @@ class ConfigHandler:
                     try:
                         with open(CONFIG_FILE, encoding="utf-8") as f:
                             current_config = json.load(f)
-                    except (json.JSONDecodeError, OSError):
+                    except (json.JSONDecodeError, OSError) as e:
+                        logger.warning(
+                            "[ConfigHandler] Config file unreadable, rebuilding from defaults: %s",
+                            DataSanitizer.sanitize_error(e),
+                        )
                         current_config = {}
                 else:
                     current_config = {}
@@ -292,8 +295,12 @@ class ConfigHandler:
                     return ConfigHandler._config_cache.copy()
                 # NOTE(lazy): 配置文件 IO 失败兜底. ceiling: 系统级磁盘故障/权限拒绝. upgrade: 引入文件可读性预检或重试.
                 except Exception as e:
-                    logger.warning("[ConfigHandler] Failed to load config file: %s", DataSanitizer.sanitize_error(e))
-                    return {}
+                    logger.warning(
+                        "[ConfigHandler] Failed to load config file, using defaults: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+                    ConfigHandler._config_cache = get_default_config()
+                    return ConfigHandler._config_cache.copy()
             return {}
 
     @staticmethod
@@ -479,7 +486,11 @@ class ConfigHandler:
             return False
         try:
             return bool(cls.load_config().get("embedded_pg_enabled", False))
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[ConfigHandler] is_embedded_mode load_config failed: %s",
+                DataSanitizer.sanitize_error(e),
+            )
             return False
 
     @staticmethod
@@ -642,8 +653,7 @@ class ConfigHandler:
             return True
         try:
             keyring.set_password(KEYRING_SERVICE_NAME, "db_password", password)
-            ConfigHandler.save_config({"db_password_encrypted": ""})
-            return True
+            return ConfigHandler.save_config({"db_password_encrypted": ""})
         # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.warning("Failed to save db_password to keyring: %s", DataSanitizer.sanitize_error(e), exc_info=True)
@@ -658,8 +668,7 @@ class ConfigHandler:
                 )
             try:
                 encrypted = SecurityManager.encrypt_data(password)
-                ConfigHandler.save_config({"db_password_encrypted": encrypted})
-                return True
+                return ConfigHandler.save_config({"db_password_encrypted": encrypted})
             except SecurityError as se:
                 logger.error(
                     "Cannot securely store db_password: %s. Please use environment variable DB_PASSWORD instead.",
@@ -699,7 +708,7 @@ class ConfigHandler:
 
         # db_url in user_settings.json is kept for informational/debug purposes only;
         # password is masked. Actual URL is always rebuilt by get_db_url() from components.
-        ConfigHandler.save_config(
+        if not ConfigHandler.save_config(
             {
                 "db_host": host,
                 "db_port": port,
@@ -707,11 +716,11 @@ class ConfigHandler:
                 "db_name": database,
                 "db_url": re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", db_url),
             }
-        )
+        ):
+            return False
 
         if password:
-            ConfigHandler.save_db_password(password)
-
+            return ConfigHandler.save_db_password(password)
         return True
 
     @staticmethod
@@ -807,8 +816,6 @@ class ConfigHandler:
             api_key: API Key (将加密存储)，为 None 时保持现有密钥不变，为空字符串时清除密钥
             **kwargs: 扩展字段 (如 Azure 的 api_version, azure_resource_name, azure_deployment_name)
         """
-        from utils.llm_providers import AZURE_DEFAULT_API_VERSION
-
         provider = provider.strip()
         model = model.strip()
         base_url = base_url.strip()
@@ -866,7 +873,8 @@ class ConfigHandler:
                     )
                     try:
                         encrypted_key = SecurityManager.encrypt_data(api_key)
-                        ConfigHandler.save_config({"ai_api_key": encrypted_key})
+                        if not ConfigHandler.save_config({"ai_api_key": encrypted_key}):
+                            return False
                     except SecurityError as se:
                         logger.error(
                             "Cannot securely store ai_api_key: %s. Please use environment variable AI_API_KEY instead.",
@@ -887,7 +895,8 @@ class ConfigHandler:
                         DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
-                ConfigHandler.save_config({"ai_api_key": ""})
+                if not ConfigHandler.save_config({"ai_api_key": ""}):
+                    return False
 
         return True
 
@@ -1038,7 +1047,7 @@ class ConfigHandler:
         """
         config = ConfigHandler.load_config()
 
-        provider_credentials = config.get("llm_provider_credentials", {})
+        provider_credentials = copy.deepcopy(config.get("llm_provider_credentials", {}))
         if not isinstance(provider_credentials, dict):
             provider_credentials = {}
 
@@ -1057,7 +1066,7 @@ class ConfigHandler:
         config_update["llm_provider_credentials"] = provider_credentials
 
         if models is not None:
-            custom_models = config.get("llm_custom_models", {})
+            custom_models = copy.deepcopy(config.get("llm_custom_models", {}))
             # Replace (not append) to allow UI to remove models
             updated_models = list(models)
             if len(updated_models) > 50:
@@ -1108,9 +1117,7 @@ class ConfigHandler:
                     provider_credentials[provider] = cred
                     config_update["llm_provider_credentials"] = provider_credentials
 
-        ConfigHandler.save_config(config_update)
-
-        return True
+        return ConfigHandler.save_config(config_update)
 
     @staticmethod
     def get_provider_credential(provider: str, fallback_to_global: bool = True) -> dict:
@@ -1269,26 +1276,26 @@ class ConfigHandler:
         return missing
 
     @staticmethod
-    def get_local_ai_timeout() -> int:
+    def get_local_ai_timeout() -> int | None:
         """
         Get local AI inference timeout in seconds.
         Value must come from user_settings.json.
         Returns:
-            int: Timeout seconds, or None if not configured (wait indefinitely)
+            int | None: Timeout seconds, or None if not configured (wait indefinitely)
         """
         try:
             val = ConfigHandler.get_setting("local_model_timeout")
-            return int(val) if val is not None else None  # type: ignore[arg-type]
+            return int(val) if val is not None else None  # type: ignore[arg-type]  # val is Any from get_setting
         except (ValueError, TypeError):
             # If config is corrupted/invalid, treat as not set (no default provided)
-            return None  # type: ignore[return-value]
+            return None
 
     @staticmethod
-    def set_local_ai_timeout(seconds: int):
+    def set_local_ai_timeout(seconds: int) -> bool:
         """Set local AI inference timeout (1-3600s)"""
         # Enforce bounds to be consistent with UI
         val = max(1, min(seconds, 3600))
-        ConfigHandler.save_config({"local_model_timeout": val})
+        return ConfigHandler.save_config({"local_model_timeout": val})
 
     @staticmethod
     def get_local_ai_config() -> dict:
@@ -1516,12 +1523,7 @@ class ConfigHandler:
         db_max_overflow = ConfigHandler.get_typed("db_max_overflow", int, 5)
         db_capacity = db_pool_size + db_max_overflow
 
-        config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", 0)
-        try:
-            io_workers = int(val)
-        except (ValueError, TypeError):
-            return 0
+        io_workers = ConfigHandler.get_typed("max_io_workers", int, 0)
 
         if io_workers <= 0:
             io_workers = min(os.cpu_count() or 4, db_capacity)
