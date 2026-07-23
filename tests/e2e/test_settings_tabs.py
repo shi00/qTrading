@@ -266,32 +266,16 @@ async def test_db_connection_test_and_save(e2e_page):
     test_btn_label = I18n.get("db_test_connection")
     await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
-    # DatabaseConfigService.test_connection 调 I18n.get() 返回翻译文本,
-    # VM 用 _raw_message 包装, View 渲染显示翻译文本 (面板级 status, 不走 toast).
-    # ConfigHandler.get_db_config 默认 host="" → VM validate() 返回 host_required
-    # (最常见路径). 若 host 有值则走 asyncpg, 可能返回 not_found/auth/refused 等.
-    # 兼容多种 validate 错误 + test_connection 结果.
+    # P1-9: 精确断言 - 缩小 possible_results 到唯一确定的结果.
+    # flet_app fixture config 无 db_host → ConfigHandler.get_db_config 返回 host="".
+    # CanvasKit 限制导致 fill_textbox 不生效 (INPUT value 保持原值), host 始终为空.
+    # VM validate() 检测 host.strip() 为空 → 确定性返回 wizard_err_host_required.
+    # 若环境变化导致 host 有值 (如配置文件被污染), 测试会失败暴露环境变化.
     possible_results = [
-        # validate 前置校验错误 (host/port/user/database 为空时触发)
         I18n.get("wizard_err_host_required"),
-        I18n.get("wizard_err_port_range"),
-        I18n.get("wizard_err_port_number"),
-        I18n.get("wizard_err_user_required"),
-        I18n.get("wizard_err_db_required"),
-        # test_connection 结果 (asyncpg 调用后)
-        I18n.get("db_err_not_found", database="astock"),
-        I18n.get("db_err_auth"),
-        I18n.get("db_err_refused"),
-        I18n.get("db_err_timeout"),
-        I18n.get("db_err_network"),
-        I18n.get("db_err_interrupted"),
-        I18n.get("db_err_proxy"),
-        I18n.get("db_err_db_error"),
-        I18n.get("db_err_unknown"),
-        I18n.get("db_msg_success"),
     ]
     hit = await _wait_for_any_text(e2e_page, possible_results, timeout_ms=30000)
-    assert hit, f"DB 测试连接未显示结果, 期望之一: {possible_results}"
+    assert hit, f"DB 测试连接未显示结果, 期望: {possible_results}"
     logger.info("DB 测试连接路径验证通过: %s", hit)
 
 
