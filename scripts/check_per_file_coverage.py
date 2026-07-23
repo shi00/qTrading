@@ -48,7 +48,7 @@ def match_threshold(file_path: str, default_threshold: int, layered: list[tuple[
 
     路径归一化为 / 分隔后匹配，前缀去掉尾部 / 后做 startswith 判断。
     """
-    normalized = PurePath(file_path).as_posix().lstrip("./")
+    normalized = PurePath(file_path.replace("\\", "/")).as_posix().lstrip("./")
     for prefix, threshold in layered:
         prefix_clean = prefix.rstrip("/")
         if prefix_clean and normalized.startswith(prefix_clean + "/"):
