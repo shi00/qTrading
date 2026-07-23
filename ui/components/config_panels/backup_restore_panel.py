@@ -2,9 +2,10 @@
 
 显示备份/恢复操作 UI:
 - "手动备份" 按钮 → vm.start_backup(output_path)
-- "恢复向导" 按钮 → vm.start_restore_wizard(input_path) → confirm_restore / cancel_restore
-- 备份/恢复进度状态显示 (progress_message / error_message / success_message)
-- 恢复前二次确认 (tri-state confirmation: pending → confirmed/cancelled)
+- "恢复向导" 按钮 → vm.start_restore_wizard(input_path) → confirm_restore / dismiss_offline_guidance
+- 备份进度状态显示 (progress_message / error_message / success_message)
+- 恢复前二次确认 (tri-state confirmation: pending → offline_guidance/cancelled)
+- 离线恢复指引 (D36: 不直接调 sidecar restore, 引导用户用离线维护脚本)
 
 CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 - 内部 VM 模式 (factory=BackupRestoreViewModel): hook 实例化 + dispose on unmount
@@ -103,6 +104,15 @@ def _on_cancel_restore_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEv
         vm.cancel_restore()
 
     return safe_on_click(_on_cancel_restore_click)
+
+
+def _on_dismiss_offline_guidance_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
+    """Create on_click handler for dismiss offline guidance button — calls vm.dismiss_offline_guidance (sync)."""
+
+    def _on_dismiss_offline_guidance_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+        vm.dismiss_offline_guidance()
+
+    return safe_on_click(_on_dismiss_offline_guidance_click)
 
 
 @ft.component
@@ -236,7 +246,7 @@ def BackupRestorePanel() -> ft.Container:
         )
 
     if state.confirm_state == "confirmed" or state.is_restoring:
-        # Step 3: 执行中
+        # Step 3: 执行中 (防御性渲染, 当前 VM 流程不进入此状态)
         restore_section_controls.append(
             ft.Text(
                 I18n.get("restore_step3_executing"),
@@ -244,6 +254,31 @@ def BackupRestorePanel() -> ft.Container:
                 color=AppColors.INFO,
             )
         )
+
+    if state.confirm_state == "offline_guidance":
+        # Step 3 (D36): 离线恢复指引 — 用户已确认, 显示离线恢复步骤 + "我已了解"按钮
+        restore_section_controls.append(
+            ft.Text(
+                I18n.get("restore_offline_guidance_title"),
+                size=AppStyles.FONT_SIZE_TITLE,
+                color=AppColors.INFO,
+                weight=ft.FontWeight.BOLD,
+            )
+        )
+        restore_section_controls.append(
+            ft.Text(
+                I18n.get("restore_offline_guidance"),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_PRIMARY,
+            )
+        )
+        dismiss_button = ft.Button(
+            content=I18n.get("restore_offline_guidance_dismiss"),
+            icon=ft.Icons.CHECK,
+            on_click=_on_dismiss_offline_guidance_click_factory(vm),
+            style=AppStyles.primary_button(),
+        )
+        restore_section_controls.append(dismiss_button)
 
     restore_progress_text = _render_message(state.progress_message if state.is_restoring else None)
     restore_progress_ctrl = ft.Text(

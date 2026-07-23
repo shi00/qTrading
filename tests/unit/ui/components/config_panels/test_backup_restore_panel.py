@@ -477,6 +477,23 @@ class TestBackupRestorePanelStateRendering:
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
         assert "restore_step3_executing" in text_values
 
+    def test_renders_offline_guidance_when_confirm_offline_guidance(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """confirm_state=offline_guidance 时渲染离线恢复指引 (D36): 标题 + 指引消息 + 我已了解按钮."""
+        state = BackupRestoreState(confirm_state="offline_guidance")
+        _, _, result, _ = _render_panel_with_state(state)
+        ctrls = _walk_controls(result)
+        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
+        assert "restore_offline_guidance_title" in text_values
+        assert "restore_offline_guidance" in text_values
+        dismiss_btns = [
+            b
+            for b in ctrls
+            if isinstance(b, ft.Button) and getattr(b, "content", None) == "restore_offline_guidance_dismiss"
+        ]
+        assert len(dismiss_btns) == 1
+
     def test_renders_cancelled_when_confirm_cancelled(self, mock_i18n_state, mock_app_colors_state) -> None:
         """confirm_state=cancelled 时渲染 restore_cancelled."""
         state = BackupRestoreState(confirm_state="cancelled")

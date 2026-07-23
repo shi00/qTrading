@@ -7,9 +7,10 @@ VM 是独立类，内部 VM 模式由 use_viewmodel(factory=...) 实例化。
 1. State frozen + 默认值
 2. start_backup() 调用 dump() 并更新 state (success/error/already-exists)
 3. start_restore_wizard() 设置 confirm_state=pending / 文件不存在处理
-4. confirm_restore() 调用 restore() + 状态转换
-5. cancel_restore() 清空 restore_path
-6. VM 只产出 Message (i18n key)，不调 I18n.get
+4. confirm_restore() 设置 confirm_state=offline_guidance + 显示指引消息 (D36: 不调 svc.restore)
+5. dismiss_offline_guidance() 清空 restore_path + confirm_state=idle
+6. cancel_restore() 清空 restore_path
+7. VM 只产出 Message (i18n key)，不调 I18n.get
 """
 
 from __future__ import annotations
@@ -191,54 +192,56 @@ class TestStartRestoreWizard:
 
 
 class TestConfirmRestore:
+    """D36: confirm_restore 不调用 svc.restore, 改为设置 confirm_state=offline_guidance + 显示指引消息."""
+
     @pytest.mark.asyncio
-    async def test_confirm_restore_calls_restore(self, vm, mock_maintenance_service):
-        # 先进入 pending
+    async def test_confirm_restore_does_not_call_restore(self, vm, mock_maintenance_service):
+        """confirm_restore 不调用 svc.restore (D36: 引导离线恢复, 不在 qTrading 运行中执行)."""
         input_path = Path("/tmp/backup.dump")
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
             await vm.start_restore_wizard(input_path)
-        # 再确认
         await vm.confirm_restore()
-        mock_maintenance_service.restore.assert_called_once_with(input_path)
-        called_path = mock_maintenance_service.restore.call_args[0][0]
-        assert isinstance(called_path, Path)
-        # Path("/tmp/...") 在 Windows 上会规范化为 \tmp\..., 比较应用 Path 而非 str
-        assert called_path == input_path
+        mock_maintenance_service.restore.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_success_updates_state(self, vm):
+    async def test_confirm_restore_sets_offline_guidance_state(self, vm):
+        """confirm_restore 后 confirm_state=offline_guidance + 显示指引消息."""
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
             await vm.start_restore_wizard(Path("/tmp/backup.dump"))
         await vm.confirm_restore()
+        assert vm.state.confirm_state == "offline_guidance"
         assert vm.state.is_restoring is False
-        assert vm.state.confirm_state == "idle"
-        assert vm.state.restore_path is None
-        assert vm.state.restore_success_message is not None
-        assert vm.state.restore_success_message.key == "restore_success"
-        assert vm.state.progress_message is None
+        assert vm.state.progress_message is not None
+        assert vm.state.progress_message.key == "restore_offline_guidance"
         assert vm.state.error_message is None
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_handles_error(self, mock_maintenance_service):
-        """restore() 抛异常时, confirm_state=idle + 设 error_message."""
-        mock_maintenance_service.restore = AsyncMock(side_effect=RuntimeError("restore failed"))
-        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+    async def test_confirm_restore_preserves_restore_path(self, vm):
+        """confirm_restore 保留 restore_path (供指引消息引用所选备份文件)."""
+        input_path = Path("/tmp/backup.dump")
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+            await vm.start_restore_wizard(input_path)
         await vm.confirm_restore()
-        assert vm.state.is_restoring is False
+        assert vm.state.restore_path == str(input_path)
+
+    @pytest.mark.asyncio
+    async def test_confirm_restore_handles_missing_restore_path(self, mock_maintenance_service):
+        """restore_path 为 None 时 (防御性), confirm_state=idle + 设 error_message."""
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        # 手动进入 pending 但 restore_path=None (防御性测试)
+        vm._set_state(confirm_state="pending", restore_path=None)
+        await vm.confirm_restore()
         assert vm.state.confirm_state == "idle"
-        assert vm.state.restore_path is None
         assert vm.state.error_message is not None
         assert vm.state.error_message.key == "restore_failed"
-        assert vm.state.restore_success_message is None
 
     @pytest.mark.asyncio
     async def test_confirm_restore_skip_when_not_pending(self, vm, mock_maintenance_service):
-        """confirm_state 不是 pending 时, 不调用 restore (防止重复触发)."""
+        """confirm_state 不是 pending 时, confirm_restore 不改 state (防止重复触发)."""
         # 默认 confirm_state=idle
         await vm.confirm_restore()
         mock_maintenance_service.restore.assert_not_called()
+        assert vm.state.confirm_state == "idle"
 
     @pytest.mark.asyncio
     async def test_confirm_restore_skip_after_cancel(self, vm, mock_maintenance_service):
@@ -249,6 +252,41 @@ class TestConfirmRestore:
         assert vm.state.confirm_state == "cancelled"
         await vm.confirm_restore()
         mock_maintenance_service.restore.assert_not_called()
+        assert vm.state.confirm_state == "cancelled"
+
+
+# --- dismiss_offline_guidance ---
+
+
+class TestDismissOfflineGuidance:
+    """D36: dismiss_offline_guidance 关闭指引, 重置 confirm_state=idle + 清空 restore_path."""
+
+    @pytest.mark.asyncio
+    async def test_dismiss_offline_guidance_resets_state(self, vm):
+        """从 offline_guidance 调用 dismiss, confirm_state=idle + 清空 restore_path + progress_message."""
+        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
+            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        await vm.confirm_restore()
+        assert vm.state.confirm_state == "offline_guidance"
+        # 调用 dismiss
+        vm.dismiss_offline_guidance()
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.progress_message is None
+
+    def test_dismiss_offline_guidance_skip_when_idle(self, mock_maintenance_service):
+        """confirm_state=idle 时, dismiss 不改 state."""
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        vm.dismiss_offline_guidance()
+        assert vm.state.confirm_state == "idle"
+
+    @pytest.mark.asyncio
+    async def test_dismiss_offline_guidance_skip_when_pending(self, vm):
+        """confirm_state=pending 时, dismiss 不生效 (应使用 cancel_restore)."""
+        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
+            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        vm.dismiss_offline_guidance()
+        assert vm.state.confirm_state == "pending"
 
 
 # --- cancel_restore ---
@@ -272,15 +310,15 @@ class TestCancelRestore:
         assert vm.state.confirm_state == "idle"
 
     @pytest.mark.asyncio
-    async def test_cancel_restore_skip_when_confirmed(self, vm):
-        """confirm_state=confirmed 时, cancel_restore 不应生效 (执行中不可取消)."""
+    async def test_cancel_restore_skip_when_offline_guidance(self, vm):
+        """confirm_state=offline_guidance 时, cancel_restore 不应生效 (应使用 dismiss_offline_guidance)."""
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
             await vm.start_restore_wizard(Path("/tmp/backup.dump"))
-        # 模拟进入 confirmed 状态
-        vm._set_state(confirm_state="confirmed")
+        await vm.confirm_restore()
+        assert vm.state.confirm_state == "offline_guidance"
         vm.cancel_restore()
-        # 状态保持 confirmed (取消无效)
-        assert vm.state.confirm_state == "confirmed"
+        # 状态保持 offline_guidance (cancel 无效, 应用 dismiss)
+        assert vm.state.confirm_state == "offline_guidance"
 
 
 # --- VM i18n contract ---
