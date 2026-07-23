@@ -135,7 +135,7 @@ class DataSanitizer:
     )
 
     _PATTERN_URL_CREDENTIALS = re.compile(
-        r"([a-z][a-z0-9+.\-]*)://([^:@\s]+):([^@\s]+)@",
+        r"([a-z][a-z0-9+.\-]*)://([^:@\s]*):([^@\s]+)@",
         re.IGNORECASE,
     )
 
@@ -256,6 +256,12 @@ class DataSanitizer:
                     DataSanitizer.sanitize_dict(item, sensitive_keys) if isinstance(item, dict) else item for item in v
                 ]
             else:
+                # R9: 非敏感 key 的 str 值也跑一遍 _known_secrets 精确替换，
+                # 避免已注册 secret 经非敏感 key 名（如自定义环境变量）泄露
+                if isinstance(v, str):
+                    for _secret in list(DataSanitizer._known_secrets):
+                        if _secret in v:
+                            v = v.replace(_secret, "***")
                 result[k] = v
 
         return result
@@ -295,6 +301,13 @@ class DataSanitizer:
             elif isinstance(arg, str) and len(arg) > 100:
                 clean_args.append(f"{arg[:50]}...(truncated)")
             else:
-                clean_args.append(repr(arg)[:100])
+                # R9: 非字符串位置参数（dict/list 等）的 repr 也跑一遍 _known_secrets 精确替换，
+                # 避免含 secret 字段的容器经 repr()[:100] 泄露明文。
+                # 先在完整 repr 上替换再截断，防止 secret 跨 [:100] 边界时前缀泄露
+                full_repr = repr(arg)
+                for _secret in list(DataSanitizer._known_secrets):
+                    if _secret in full_repr:
+                        full_repr = full_repr.replace(_secret, "***")
+                clean_args.append(full_repr[:100])
 
         return tuple(clean_args), clean_kwargs
