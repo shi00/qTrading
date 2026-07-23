@@ -423,8 +423,7 @@ struct RemovePathOnDrop(std::path::PathBuf);
 
 impl Drop for RemovePathOnDrop {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0)
-            .or_else(|_| std::fs::remove_file(&self.0));
+        let _ = std::fs::remove_dir_all(&self.0).or_else(|_| std::fs::remove_file(&self.0));
     }
 }
 

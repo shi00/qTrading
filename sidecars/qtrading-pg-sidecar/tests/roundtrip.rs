@@ -379,12 +379,11 @@ fn test_reset_password_succeeds() {
     assert_eq!(exit, 0, "first run should exit 0");
 
     // 2. 读取旧 password file 内容（paths.rs：data_dir.parent()/runtime/password）
-    let password_file = data_dir
-        .parent()
-        .unwrap()
-        .join("runtime")
-        .join("password");
-    assert!(password_file.exists(), "password file should exist after run");
+    let password_file = data_dir.parent().unwrap().join("runtime").join("password");
+    assert!(
+        password_file.exists(),
+        "password file should exist after run"
+    );
     let old_pwd = std::fs::read_to_string(&password_file).expect("read old password");
 
     // 3. 调 reset-password → exit 0（sidecar 已退出，锁可用）

@@ -1157,10 +1157,7 @@ mod tests {
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::DataDirArgs { data_dir };
-        assert_eq!(
-            reset_password(args).await,
-            Err(exit_codes::LOCK_CONFLICT)
-        );
+        assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1188,7 +1185,9 @@ mod tests {
         let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
         assert_eq!(restore_residuals.len(), 2, "should detect 2 residual dirs");
         assert!(
-            restore_residuals.iter().all(|p| p.contains("data.restore-")),
+            restore_residuals
+                .iter()
+                .all(|p| p.contains("data.restore-")),
             "all residuals should match pattern: {restore_residuals:?}"
         );
         assert!(dump_partials.is_empty(), "no dump partial expected");

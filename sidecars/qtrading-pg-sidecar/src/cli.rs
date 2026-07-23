@@ -176,7 +176,13 @@ mod tests {
 
     #[test]
     fn simple_commands_parse() {
-        for sub in ["stop", "status", "doctor", "maintenance-shell", "reset-password"] {
+        for sub in [
+            "stop",
+            "status",
+            "doctor",
+            "maintenance-shell",
+            "reset-password",
+        ] {
             let cli = parse(&["qtrading-pg-sidecar", sub, "--data-dir", "/d"]).unwrap();
             assert!(matches!(
                 cli.command,
