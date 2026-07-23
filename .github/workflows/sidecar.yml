@@ -45,12 +45,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # pg_plan §15.3 多平台构建矩阵（5 平台）
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
           - os: linux
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: linux-arm
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-intel
+            runner: macos-13
+            target: x86_64-apple-darwin
           - os: macos
             runner: macos-14
             target: aarch64-apple-darwin
@@ -129,6 +136,7 @@ jobs:
         include:
           # binary_path 相对于 defaults.run.working-directory（sidecars/qtrading-pg-sidecar）
           # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
+          # pg_plan §15.3 多平台构建矩阵（5 平台）
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -139,6 +147,16 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: qtrading-pg-sidecar-linux-x86_64
             binary_path: target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
+          - os: linux-arm
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: qtrading-pg-sidecar-linux-aarch64
+            binary_path: target/aarch64-unknown-linux-gnu/release/qtrading-pg-sidecar
+          - os: macos-intel
+            runner: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: qtrading-pg-sidecar-macos-x86_64
+            binary_path: target/x86_64-apple-darwin/release/qtrading-pg-sidecar
           - os: macos
             runner: macos-14
             target: aarch64-apple-darwin
@@ -173,7 +191,7 @@ jobs:
           python-version: '3.13'
 
       - name: Generate sidecar manifest
-        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证三平台一致
+        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证 5 平台一致
         shell: bash
         run: |
           python ../../scripts/generate_sidecar_manifest.py \
@@ -232,7 +250,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 对齐 build-artifacts job 的三平台 target 矩阵 (D35: Phase 5 DoD §17.0 三平台 release)
+          # 对齐 build-artifacts job 的 5 平台 target 矩阵 (pg_plan §15.3 多平台构建矩阵)
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -243,6 +261,16 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary_path: target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
             artifact_name: qtrading-pg-sidecar-linux-x86_64
+          - os: linux-arm
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary_path: target/aarch64-unknown-linux-gnu/release/qtrading-pg-sidecar
+            artifact_name: qtrading-pg-sidecar-linux-aarch64
+          - os: macos-intel
+            runner: macos-13
+            target: x86_64-apple-darwin
+            binary_path: target/x86_64-apple-darwin/release/qtrading-pg-sidecar
+            artifact_name: qtrading-pg-sidecar-macos-x86_64
           - os: macos
             runner: macos-14
             target: aarch64-apple-darwin
@@ -279,7 +307,7 @@ jobs:
         run: cargo build --target ${{ matrix.target }} --release
 
       - name: Generate sidecar manifest
-        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证三平台一致
+        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证 5 平台一致
         shell: bash
         run: |
           python ../../scripts/generate_sidecar_manifest.py \
