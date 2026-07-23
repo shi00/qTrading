@@ -45,6 +45,29 @@
 
 ## 历史核验记录
 
+### Flet 0.86 升级核验 @ 0.86 (2026-07-23)
+
+- **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
+- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **核验来源**:
+  - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
+  - 项目运行期验证: engineRevision 比对（0.86.1→0.86.2 均为 `a10d8ac38de835021c8d2f920dbf50a920ccc030`，未变化）；字体 URL 版本 `notosanssc/v37/` 未变化
+  - 项目单元测试:
+    - tests/unit/ui/test_flet_0_86_v1_api_compat.py (42 tests passed)
+    - tests/unit/ui/test_flet_0_86_private_api_compat.py
+    - tests/unit/ui/test_flet_0_86_charts_compat.py
+- **项目结论**: 继续使用
+  - 理由: 0.86.1→0.86.2 为 patch 升级（Flutter 3.44.2→3.44.7 bugfix），engineRevision 未变化，CanvasKit/字体资源无需更新；三套兼容性测试 42 项全部通过；无破坏性 API 变更
+- **需更新文件**:
+  - [x] pyproject.toml (三包版本号 0.86.1→0.86.2)
+  - [x] requirements.txt / requirements-optional.txt / requirements-dev.txt (uv pip compile 重新生成)
+  - [x] README.md (徽章 0.86.1→0.86.2)
+  - [x] ui/views/screener_view.py (注释泛化 0.86.1+→0.86+)
+  - [x] docs/flet/project-differences.md (最后验证日期 2026-07-20→2026-07-23)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/debt/known-technical-debt.md (3 项技术债复验状态更新)
+- **核验人**: AI 助手 (GLM-5.2)
+
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-20)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API

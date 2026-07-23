@@ -437,7 +437,7 @@ def ScreenerView(
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
         ext = "csv" if format_ == "csv" else "xlsx"
         default_filename = f"screener_results_{timestamp}.{ext}"
-        # Flet 0.86.1+ Web 模式: save_file 必须传 src_bytes, 否则抛 ValueError.
+        # Flet 0.86+ Web 模式: save_file 必须传 src_bytes, 否则抛 ValueError.
         # Flet 用 Blob + <a download>.click() 触发浏览器下载 (Playwright 可捕获 download 事件).
         # 桌面端: save_file 打开原生对话框返回路径, VM 写文件 (原逻辑保留).
         page = _get_page()
