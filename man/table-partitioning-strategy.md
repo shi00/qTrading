@@ -1,4 +1,6 @@
-﻿# 大表分区策略
+# 大表分区策略
+
+> STATUS: Planning（第一阶段评估完成，未实施）
 
 ## 背景
 
@@ -26,6 +28,9 @@ PostgreSQL 10+ 支持声明式分区，对应用层透明。
 
 ```sql
 -- 示例：按月分区 daily_quotes
+-- 注：PostgreSQL 分区表要求 PRIMARY KEY / UNIQUE 约束必须包含所有分区键列。
+-- 此处 (ts_code, trade_date) 已含分区键 trade_date，可声明为 PRIMARY KEY；
+-- 若分区键变更（如改为按 ts_code HASH 分区），需同步调整 PRIMARY KEY。
 CREATE TABLE daily_quotes (
     ts_code TEXT,
     trade_date DATE,

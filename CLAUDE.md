@@ -197,7 +197,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)。
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager/EmbeddedPostgresService/EmbeddedPgMaintenanceService）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)。
 
 ---
 
@@ -216,7 +216,9 @@ app → 编排所有层，仅被 main.py 调用
 | Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
-| 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
+| 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
+| Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
 | Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
+| man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
