@@ -854,7 +854,6 @@ def validate_schema_definitions(strict: bool = False):
         defined_tables = set(TABLE_DEFINITIONS.keys())
 
         IGNORED_TABLES = {
-            "stock_sync_status",
             "alembic_version",
         }
 

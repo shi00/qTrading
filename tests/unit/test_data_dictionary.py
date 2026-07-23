@@ -42,22 +42,6 @@ class TestValidateSchemaDefinitionsExtended:
         ), f"expected extra-defs warning, got: {[r.message for r in caplog.records]}"
 
     @patch("data.persistence.models.Base")
-    def test_validate_ignores_stock_sync_status(self, mock_base, caplog: pytest.LogCaptureFixture):
-        mock_col = MagicMock()
-        mock_col.name = "step4_completed_at"
-        mock_table = MagicMock()
-        mock_table.columns = [mock_col]
-        mock_metadata = MagicMock()
-        mock_metadata.tables = {"stock_sync_status": mock_table}
-        mock_base.metadata = mock_metadata
-        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
-            validate_schema_definitions()
-        # stock_sync_status 在 IGNORED_TABLES 中，不应触发任何提及该表名的警告
-        assert not any(r.levelno >= logging.WARNING and "stock_sync_status" in r.message for r in caplog.records), (
-            f"stock_sync_status should be ignored, but appeared in: {[r.message for r in caplog.records]}"
-        )
-
-    @patch("data.persistence.models.Base")
     def test_validate_ignores_alembic_version(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_col = MagicMock()
         mock_col.name = "version_num"
@@ -103,6 +87,44 @@ class TestValidateSchemaDefinitionsExtended:
         assert any(r.levelno == logging.ERROR and "ORM validation failed" in r.message for r in caplog.records), (
             f"expected error log for ORM validation failure, got: {[r.message for r in caplog.records]}"
         )
+
+
+class TestStockSyncStatusSchemaValidation:
+    """FIND-R1-007: D-2 修复 — stock_sync_status 参与 Schema 双向一致性校验。"""
+
+    def test_stock_sync_status_in_table_definitions(self):
+        """stock_sync_status SHALL 在 TABLE_DEFINITIONS 注册（D-2 修复后参与校验）。"""
+        assert "stock_sync_status" in TABLE_DEFINITIONS
+
+    def test_stock_sync_status_in_orm_metadata(self):
+        """stock_sync_status SHALL 在 ORM 元数据中（确保双向校验不产生 missing_defs）。"""
+        from data.persistence.models import Base
+
+        assert "stock_sync_status" in Base.metadata.tables
+
+    @patch("data.data_dictionary.TABLE_DEFINITIONS", new_callable=dict)
+    @patch("data.persistence.models.Base")
+    def test_stock_sync_status_not_in_ignored_tables(
+        self,
+        mock_base,
+        mock_table_defs,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """FIND-R1-007: stock_sync_status 不在 IGNORED_TABLES — 当 ORM 含 stock_sync_status
+        但 TABLE_DEFINITIONS 不含时，会产生 missing_defs 警告（证明不被 IGNORED_TABLES 排除）。"""
+        mock_table = MagicMock()
+        mock_table.columns = []
+        mock_metadata = MagicMock()
+        mock_metadata.tables = {"stock_sync_status": mock_table}
+        mock_base.metadata = mock_metadata
+        # TABLE_DEFINITIONS 为空，stock_sync_status 不在其中
+        mock_table_defs.clear()
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
+            validate_schema_definitions()
+        # stock_sync_status 不在 IGNORED_TABLES，应产生 missing_defs 警告
+        assert any(
+            "stock_sync_status" in r.message and "missing from TABLE_DEFINITIONS" in r.message for r in caplog.records
+        ), f"expected missing_defs warning for stock_sync_status, got: {[r.message for r in caplog.records]}"
 
 
 class TestTableDefinitionsQualityConfig:
