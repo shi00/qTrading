@@ -265,8 +265,14 @@ class MacroSyncStrategy(ISyncStrategy):
             start_m = _period_to_yyyymm(latest)
 
             df_m2 = await self.context.api.get_macro_data("cn_m", start_m=start_m)
+            if self._check_cancelled(result):
+                return
             df_cpi = await self.context.api.get_macro_data("cn_cpi", start_m=start_m)
+            if self._check_cancelled(result):
+                return
             df_ppi = await self.context.api.get_macro_data("cn_ppi", start_m=start_m)
+            if self._check_cancelled(result):
+                return
 
             # Phase 2D §3.2.6：cn_gdp 同步分支
             # v1.10.0 P0-1：cn_gdp API 期望 quarter 参数（如 "2024Q4"），与 cn_m/cn_cpi/cn_ppi
@@ -308,6 +314,9 @@ class MacroSyncStrategy(ISyncStrategy):
                         exc_info=True,
                     )
                 # GDP 失败不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
+
+            if self._check_cancelled(result):
+                return
 
             merged = self._merge_macro_data(df_m2, df_cpi, df_ppi, df_gdp)
 
@@ -460,7 +469,7 @@ class MacroSyncStrategy(ISyncStrategy):
             else:
                 # Fill missing publish_date (monthly rows where GDP concat left NaN)
                 mask = merged["publish_date"].isna()
-                if mask.any():
+                if bool(mask.any()):
                     merged.loc[mask, "publish_date"] = merged.loc[mask, "period"].apply(
                         lambda p: _compute_publish_date(p) if isinstance(p, datetime.date) else None
                     )
@@ -536,6 +545,8 @@ class MacroSyncStrategy(ISyncStrategy):
                 start_date=start_str,
                 end_date=end_str,
             )
+            if self._check_cancelled(result):
+                return
 
             # Phase 3G §4.3.4：同时拉取 LPR 数据，按 date 合并到同一 df 后入库
             # LPR 权限不足时降级为仅同步 shibor（与 shibor 同档位 points_120，通常一并可用）
@@ -571,6 +582,9 @@ class MacroSyncStrategy(ISyncStrategy):
                         safe_error(lpr_err),
                         exc_info=True,
                     )
+
+            if self._check_cancelled(result):
+                return
 
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
@@ -694,9 +708,12 @@ class MacroSyncStrategy(ISyncStrategy):
                 len(MAJOR_INDICES),
             )
 
+            if self._check_cancelled(result):
+                return
+
             iw_saved = 0
             for idx_code in MAJOR_INDICES:
-                if self._cancelled:
+                if self._check_cancelled(result):
                     break
 
                 try:
