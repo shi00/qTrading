@@ -491,6 +491,14 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          # Clean uv cache to release space used by build artifacts (litellm/llama-cpp-python).
+          # Run 29998695955 failed because runner disk filled up during coverage report output.
+          uv cache clean
+          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
       - name: Cache pytest
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -502,7 +510,7 @@ jobs:
         env:
           STRICT_SCHEMA_GATE: "1"
         timeout-minutes: 15
-        run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=json --junitxml=junit-unit.xml
+        run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py

@@ -18,7 +18,7 @@ class TestConftestSafety:
     def test_test_db_name_must_start_with_test_prefix(self):
         code = (
             "import os; os.environ['TEST_DB_NAME']='prod_db'; "
-            "import importlib; import tests.integration.conftest as m; importlib.reload(m)"
+            "import importlib; import tests.integration._db_config as m; importlib.reload(m)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -35,7 +35,7 @@ class TestConftestSafety:
         code = (
             "import os; os.environ.setdefault('CI_PG_PASSWORD','testpw'); "
             "os.environ.setdefault('TEST_DB_NAME','test_mysafe'); "
-            "import tests.integration.conftest as m; print('OK')"
+            "import tests.integration._db_config as m; print('OK')"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -52,7 +52,7 @@ class TestConftestSafety:
         assert "OK" in result.stdout or result.returncode == 0
 
     def test_reject_remote_db_host(self):
-        code = "import os; os.environ['TEST_DB_HOST']='db.prod.example.com'; import tests.integration.conftest as m"
+        code = "import os; os.environ['TEST_DB_HOST']='db.prod.example.com'; import tests.integration._db_config as m"
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
@@ -71,13 +71,18 @@ class TestConftestSafety:
 
 class TestConftestNoHardcodedPassword:
     def test_no_hardcoded_password_literal(self):
-        conftest_path = os.path.join(os.path.dirname(__file__), "..", "integration", "conftest.py")
-        with open(conftest_path, encoding="utf-8") as f:
-            content = f.read()
-        assert "astock_test_local_2024" not in content, (
-            "Hardcoded default password 'astock_test_local_2024' should be removed"
-        )
-        assert "test_ci_password_2024" not in content, "Hardcoded CI password 'test_ci_password_2024' should be removed"
+        integration_dir = os.path.join(os.path.dirname(__file__), "..", "integration")
+        # 密码派生逻辑已迁移到 _db_config.py，需同时检查 conftest.py 和 _db_config.py
+        for file_name in ("conftest.py", "_db_config.py"):
+            file_path = os.path.join(integration_dir, file_name)
+            with open(file_path, encoding="utf-8") as f:
+                content = f.read()
+            assert "astock_test_local_2024" not in content, (
+                f"Hardcoded default password 'astock_test_local_2024' should be removed in {file_name}"
+            )
+            assert "test_ci_password_2024" not in content, (
+                f"Hardcoded CI password 'test_ci_password_2024' should be removed in {file_name}"
+            )
 
     def test_password_derived_from_github_run_id(self):
         code = (
@@ -85,7 +90,7 @@ class TestConftestNoHardcodedPassword:
             "os.environ.pop('CI_PG_PASSWORD', None); "
             "os.environ['GITHUB_RUN_ID']='12345'; "
             "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
-            "import tests.integration.conftest as m; print(m.TEST_DB_PASSWORD)"
+            "import tests.integration._db_config as m; print(m.TEST_DB_PASSWORD)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -106,7 +111,7 @@ class TestConftestNoHardcodedPassword:
             "os.environ.pop('CI_PG_PASSWORD', None); "
             "os.environ.pop('GITHUB_RUN_ID', None); "
             "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
-            "import tests.integration.conftest as m; print(m.TEST_DB_PASSWORD)"
+            "import tests.integration._db_config as m; print(m.TEST_DB_PASSWORD)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -128,7 +133,7 @@ class TestConftestNoHardcodedPassword:
     def test_explicit_password_takes_precedence(self):
         code = (
             "import os; os.environ['TEST_DB_PASSWORD']='my_explicit_pw'; "
-            "import tests.integration.conftest as m; print(m.TEST_DB_PASSWORD)"
+            "import tests.integration._db_config as m; print(m.TEST_DB_PASSWORD)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -147,7 +152,7 @@ class TestConftestXdistIsolation:
             "import os; os.environ['PYTEST_XDIST_WORKER']='gw1'; "
             "os.environ.pop('TEST_DB_NAME', None); "
             "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
-            "import tests.integration.conftest as m; print(m.TEST_DB_NAME)"
+            "import tests.integration._db_config as m; print(m.TEST_DB_NAME)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -166,7 +171,7 @@ class TestConftestXdistIsolation:
         code = (
             "import os; os.environ.pop('PYTEST_XDIST_WORKER', None); "
             "os.environ.pop('TEST_DB_NAME', None); "
-            "import tests.integration.conftest as m; print(m.TEST_DB_NAME)"
+            "import tests.integration._db_config as m; print(m.TEST_DB_NAME)"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -187,7 +192,7 @@ class TestConftestXdistIsolation:
                 f"import os; os.environ['PYTEST_XDIST_WORKER']='{worker}'; "
                 "os.environ.pop('TEST_DB_NAME', None); "
                 "import sys; sys.modules['dotenv'] = type(sys)('dotenv'); sys.modules['dotenv'].load_dotenv = lambda *a, **k: None; "
-                "import tests.integration.conftest as m; print(m.TEST_DB_NAME)"
+                "import tests.integration._db_config as m; print(m.TEST_DB_NAME)"
             )
             result = subprocess.run(
                 [sys.executable, "-c", code],
