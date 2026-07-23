@@ -1,0 +1,76 @@
+# AI 代码检视门禁策略
+# 由 [ai-review.md §7.3 SEV-01 / §8 OUT-03](./ai-review.md) 引用。
+# 受信 CI 必须使用固定版本的独立策略求值器重新计算 gate.decisions 和 gate.verdict，
+# 不得信任模型自行给出的阻断结论。
+
+policyId: qtrading-ai-review-policy
+policyVersion: "1.0"
+evaluatorVersion: "1.0"
+
+# P0-P3 严重度定义（依据实际影响，非修复工作量）
+severityDefinitions:
+  P0:
+    description: "灾难性"
+    examples:
+      - "大范围不可用"
+      - "不可恢复数据损坏"
+      - "严重安全或合规事件"
+  P1:
+    description: "严重"
+    examples:
+      - "核心功能错误"
+      - "重要数据错误"
+      - "越权或持续故障"
+  P2:
+    description: "重要"
+    examples:
+      - "特定场景功能错误"
+      - "可靠性、兼容性、运维性明显不足"
+  P3:
+    description: "一般"
+    examples:
+      - "影响有限的健壮性、诊断性或维护性问题"
+
+# 阻断规则：哪些严重度阻断合并/发布
+blockingRules:
+  - severity: P0
+    blocks: [merge, release]
+    reason: "P0 通常阻断合并和发布"
+  - severity: P1
+    blocks: [release]
+    reason: "P1 通常要求发布前修复"
+  - severity: P2
+    blocks: []
+    conditional: true
+    reason: "是否阻断取决于系统风险、临时控制和验证证据"
+  - severity: P3
+    blocks: []
+    reason: "P3 与建议通常进入后续治理"
+
+# 豁免规则
+waiverRules:
+  requiredFields: [reason, approvedBy, expiresAt]
+  expiredBehavior: reverts_to_open
+  legalSafetyCorrectnessCannotBeWaived: true
+  reason: "法律、安全和基本正确性维度不得被普通路径排除关闭"
+
+# CI 退出码约定
+ciExitCodes:
+  pass: 0
+  fail: 1
+  indeterminate: 2
+  conditional_default: 1
+  conditional_allowed: 0  # 仅当策略明确允许且条件可机器验证时
+
+# 低置信度策略
+lowConfidencePolicy: "优先验证，不直接作为确定缺陷阻断"
+
+# 门禁语义
+gateSemantics:
+  pass: "在声明范围和证据下未发现达到门禁阈值的问题，不表示绝对无缺陷"
+  conditional: "仍有发布或合并前置条件；自动化默认视为非通过，除非项目策略明确定义可接受条件及责任人"
+  fail: "存在未豁免的阻断决定"
+  indeterminate: "决定门禁所需的关键证据不足"
+
+# 关键证据不足时的处理
+insufficientEvidencePolicy: "应输出'无法判断'，而不是'通过'"
