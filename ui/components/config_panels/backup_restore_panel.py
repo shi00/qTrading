@@ -12,10 +12,6 @@ CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 - View 通过 use_viewmodel(factory=...) 订阅 vm.state 变化触发重渲染
 - i18n 通过 ft.use_state(get_observable_state) 自动重渲染
 - View 不持有业务状态 (state 全部从 VM 读取)
-
-NOTE(lazy): 备份/恢复路径暂用固定默认值 (qtrading-backup.dump),
-  FilePicker 集成推迟到后续迭代. ceiling: 单机桌面端单用户场景.
-  upgrade: 接入 FilePicker 后移除默认路径.
 """
 
 from datetime import datetime
@@ -23,6 +19,7 @@ import logging
 from pathlib import Path
 
 import flet as ft
+import platformdirs
 
 from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
@@ -34,12 +31,25 @@ from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
 logger = logging.getLogger(__name__)
 
 
-# NOTE(lazy): 备份/恢复路径默认值 (FilePicker 集成前的权宜之计).
-# ceiling: 单机桌面端单用户场景. upgrade: 接入 FilePicker 后移除.
 def _generate_default_backup_path() -> Path:
-    """生成带时间戳的默认备份路径, 避免覆盖保护导致备份不可重复."""
+    """生成带时间戳的绝对默认备份路径 (P1-7).
+
+    返回 ``<app data>/backups/qtrading-backup-YYYYMMDD-HHMMSS.dump`` 绝对路径，
+    避免 CWD 不可预测导致备份文件丢失。备份目录不存在时尝试创建；
+    创建失败时 fall back 到 ``Path.cwd()`` 并记 warning（不阻塞用户操作）。
+    """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path(f"qtrading-backup-{timestamp}.dump")
+    backups_dir = Path(platformdirs.user_data_dir("qTrading")) / "backups"
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "[BackupRestorePanel] cannot create backups dir %s: %s; fall back to CWD",
+            backups_dir,
+            e,
+        )
+        return Path.cwd().resolve() / f"qtrading-backup-{timestamp}.dump"
+    return backups_dir.resolve() / f"qtrading-backup-{timestamp}.dump"
 
 
 def _render_message(msg: Message | None) -> str:

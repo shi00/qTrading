@@ -261,12 +261,13 @@ class TestRenderMessage:
 
 
 class TestGenerateDefaultBackupPath:
-    """_generate_default_backup_path 纯函数测试."""
+    """_generate_default_backup_path 纯函数测试 (P1-7: 绝对路径)."""
 
-    def test_returns_path_with_timestamp(self) -> None:
-        """返回带时间戳的 Path, 格式 qtrading-backup-YYYYMMDD-HHMMSS.dump."""
+    def test_returns_absolute_path_with_timestamp(self) -> None:
+        """返回绝对 Path, 格式 <backups>/qtrading-backup-YYYYMMDD-HHMMSS.dump (P1-7)."""
         path = panel_module._generate_default_backup_path()
         assert isinstance(path, Path)
+        assert path.is_absolute(), f"P1-7: path 应为绝对路径, 实际: {path}"
         assert path.name.startswith("qtrading-backup-")
         assert path.suffix == ".dump"
 
@@ -277,6 +278,45 @@ class TestGenerateDefaultBackupPath:
         path = panel_module._generate_default_backup_path()
         # qtrading-backup-20260722-151430.dump
         assert re.match(r"^qtrading-backup-\d{8}-\d{6}\.dump$", path.name), path.name
+
+    def test_parent_dir_is_backups_under_app_data(self) -> None:
+        """P1-7: 父目录为 <app data>/backups (platformdirs.user_data_dir)."""
+        import platformdirs
+
+        path = panel_module._generate_default_backup_path()
+        expected_parent = Path(platformdirs.user_data_dir("qTrading")) / "backups"
+        assert path.parent == expected_parent.resolve(), (
+            f"P1-7: 父目录应为 {expected_parent.resolve()}, 实际: {path.parent}"
+        )
+
+    def test_backups_dir_created_if_missing(self, tmp_path, monkeypatch) -> None:
+        """P1-7: backups 目录不存在时自动创建 (mkdir parents=True exist_ok=True)."""
+        import platformdirs
+
+        fake_app_data = tmp_path / "fake_app_data"
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(fake_app_data))
+        backups_dir = fake_app_data / "backups"
+        assert not backups_dir.exists()
+        path = panel_module._generate_default_backup_path()
+        assert backups_dir.exists(), f"P1-7: backups 目录应被创建, 实际不存在: {backups_dir}"
+        assert path.parent == backups_dir.resolve()
+
+    def test_falls_back_to_cwd_on_oserror(self, tmp_path, monkeypatch) -> None:
+        """P1-7: mkdir 失败 (OSError) 时 fall back 到 Path.cwd() 并记 warning."""
+        import platformdirs
+
+        # mock user_data_dir 返回一个无法创建的路径（指向一个已存在的文件）
+        blocking_file = tmp_path / "blocking_file"
+        blocking_file.write_text("x")
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(blocking_file))
+
+        path = panel_module._generate_default_backup_path()
+        assert path.is_absolute()
+        # fall back 到 cwd().resolve()
+        from pathlib import Path as _Path
+
+        assert path.parent == _Path.cwd().resolve()
+        assert path.name.startswith("qtrading-backup-")
 
 
 # ============================================================================
