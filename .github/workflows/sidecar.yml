@@ -97,10 +97,10 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: cargo llvm-cov (unit tests coverage, Linux only, advisory mode)
-        # NOTE(lazy): §17.0 要求 Rust unit 行覆盖率 ≥85%，但 Phase 1 合并时未设门禁，
-        # 当前实际覆盖率约 40-50%（run.rs/maint.rs/pgbin.rs 测试不足）。
-        # ceiling: 85%（§17.0 强制门禁）. upgrade: 补充 Rust unit 测试至 85% 后恢复 --fail-under-lines 85.
-        # Phase 5 DoD（§19）只要求"覆盖率报告归档"，不要求"达标"，故此处用 advisory 模式收集数据。
+        # NOTE(lazy): §17.0 要求 Rust unit 行覆盖率 ≥85%，但 Phase 1 合并时未设门禁.
+        # 实测 2026-07-23: TOTAL 61.15% (run.rs 10%/maint.rs 45%/pgbin.rs 45% 测试不足).
+        # ceiling: 85%（§17.0 强制门禁，D38）. upgrade: 补充 maint.rs/pgbin.rs/run.rs 单测至 85% 后恢复 --fail-under-lines 85（独立 PR 推进）.
+        # D38 决策: P0-5 拆为独立 PR，不阻塞 pg-plan-review 主 PR.
         if: matrix.os == 'linux'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
