@@ -154,6 +154,22 @@ class _FakeStdout:
         return self._line
 
 
+class _FakeStderr:
+    """Fake stderr for Popen mock. Yields preset lines then EOF."""
+
+    def __init__(self, lines: list[str] | None = None) -> None:
+        # 每行保留尾部换行（与真实 readline 行为一致）
+        self._lines = list(lines or [])
+        self._idx = 0
+
+    def readline(self) -> str:
+        if self._idx >= len(self._lines):
+            return ""  # EOF
+        line = self._lines[self._idx]
+        self._idx += 1
+        return line if line.endswith("\n") else line + "\n"
+
+
 class _FakePopen:
     """Fake subprocess.Popen for unit tests.
 
@@ -182,12 +198,18 @@ class _FakePopen:
         self._wait_calls = 0
         self._kill_calls = 0
         self._poll_value: int | None = None
-        self.stderr = stderr
+        # stderr=None 对应真实 Popen(stderr=subprocess.PIPE) 返回的管道；
+        # 测试需通过 set_stderr_lines 注入内容。stderr=<file handle> 表示直接重定向。
+        self.stderr = stderr if stderr is not None else _FakeStderr([])
         _FakePopen.instances.append(self)
 
     def set_stdout_line(self, line: str) -> None:
         self._stdout_line = line
         self.stdout = _FakeStdout(line)
+
+    def set_stderr_lines(self, lines: list[str]) -> None:
+        """注入 stderr 内容（替换 _FakeStderr 实例）。"""
+        self.stderr = _FakeStderr(lines)
 
     def set_wait_side_effect(self, exc: Exception) -> None:
         self._wait_side_effect = exc
@@ -1233,3 +1255,46 @@ class TestEmbeddedPostgresServiceLog:
         monkeypatch.setattr("builtins.open", fake_open)
         summary = service.collect_logs_summary()
         assert "<read error:" in summary["sidecar.log"]
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stderr_sanitized_before_persisted(self, fake_paths) -> None:
+        """D23: sidecar stderr 含密码时，落盘的 sidecar.stderr.log 中密码已被脱敏。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+            # 注册密码为 secret，便于 DataSanitizer 精确替换
+            DataSanitizer.register_secret("mock_pg_password_55432")
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                # 注入含明文密码的 stderr 行（模拟 sidecar panic 输出）
+                inst.set_stderr_lines(
+                    [
+                        "FATAL: connection failed password=mock_pg_password_55432\n",
+                        "postgresql://postgres:mock_pg_password_55432@127.0.0.1:55432/qtrading\n",
+                    ]
+                )
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                await service.start()
+
+            # 等 stderr reader thread 处理完（daemon thread，简短 sleep 让其消化）
+            import time
+
+            time.sleep(0.2)
+
+            stderr_log = service._log_dir / "sidecar.stderr.log"
+            assert stderr_log.exists(), "stderr log file should exist"
+            content = stderr_log.read_text(encoding="utf-8")
+            # 明文密码不应出现在文件中（已被 DataSanitizer 替换为 ***）
+            assert "mock_pg_password_55432" not in content, f"plaintext password leaked in stderr log: {content!r}"
+            # 脱敏后的内容应包含 *** 标记
+            assert "***" in content, f"sanitized marker not found in stderr log: {content!r}"
+        finally:
+            await service.stop()
