@@ -387,10 +387,11 @@ fn test_reset_password_succeeds() {
     let old_pwd = std::fs::read_to_string(&password_file).expect("read old password");
 
     // 3. 调 reset-password → exit 0（sidecar 已退出，锁可用）
-    let reset_code = reset_password_sidecar(&data_dir);
+    let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir);
     assert_eq!(
         reset_code, 0,
-        "reset-password should succeed when sidecar is stopped"
+        "reset-password should succeed when sidecar is stopped\n\
+         === SIDECAR STDERR ===\n{reset_stderr}\n=== END STDERR ==="
     );
 
     // 4. 读取新 password file 内容，验证已变更
@@ -421,7 +422,7 @@ fn test_reset_password_lock_conflict() {
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
 
     // 调 reset-password → exit 50（LOCK_CONFLICT）
-    let reset_code = reset_password_sidecar(&data_dir);
+    let (reset_code, _reset_stderr) = reset_password_sidecar(&data_dir);
     assert_eq!(
         reset_code, 50,
         "reset-password must be rejected while sidecar is running"
@@ -432,15 +433,20 @@ fn test_reset_password_lock_conflict() {
 
 // ---- 辅助函数 ----
 
-/// 执行 `reset-password` 命令，返回 exit code。
-fn reset_password_sidecar(data_dir: &Path) -> u8 {
+/// 执行 `reset-password` 命令，返回 (exit code, stderr)。
+/// 失败时调用方应将 stderr 纳入 assert 诊断信息，便于 CI 排查（Windows 上 postgres --single
+/// 启动失败的具体原因只能从 stderr 获取）。
+fn reset_password_sidecar(data_dir: &Path) -> (u8, String) {
     let output = std::process::Command::new(sidecar_path())
         .arg("reset-password")
         .arg("--data-dir")
         .arg(data_dir)
         .output()
         .expect("failed to run reset-password");
-    output.status.code().unwrap_or(255) as u8
+    (
+        output.status.code().unwrap_or(255) as u8,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 /// 启动一个短命辅助进程（用于 parent_pid 测试）。

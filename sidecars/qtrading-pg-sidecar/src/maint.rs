@@ -927,6 +927,26 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     }
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
+    // stale postmaster.pid 清理（§7.2，与 run.rs/commands.rs stop 同款逻辑）
+    // Windows 上 graded_stop 可能走 kill fallback 残留 postmaster.pid，导致
+    // `postgres --single` 拒绝启动（exit 16 PASSWORD_FAILED）。这里在 spawn 前清理。
+    if let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) {
+        if pgbin::process_alive(info.pid) {
+            eprintln!(
+                "[sidecar] PostgreSQL 已运行于该 PGDATA (pid {})，禁止 reset-password 并发操作。\n\
+                 请先执行 `qtrading-pg-sidecar stop --data-dir {}` 清理残留进程，再重试 reset-password。",
+                info.pid,
+                layout.data_dir.display()
+            );
+            return Err(exit_codes::LOCK_CONFLICT);
+        }
+        tracing::warn!(
+            "stale postmaster.pid (pid {}) removed before reset-password",
+            info.pid
+        );
+        let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
+    }
+
     let new_pwd = password::generate_password();
     let postgres_path = pgbin::tool_path(&layout.install_dir, "postgres");
     let data_dir_s = layout.data_dir.to_string_lossy().into_owned();
