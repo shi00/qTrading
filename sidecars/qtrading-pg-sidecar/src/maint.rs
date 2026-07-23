@@ -114,6 +114,10 @@ struct DoctorJson {
     last_start_error: Option<String>,
     last_stop_mode: Option<String>,
     kill_fallback_count: u32,
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中检测到的 `<data_dir_name>.restore-*` 目录。
+    restore_residuals: Vec<String>,
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中检测到的 `*.partial` 文件（dump 中断残留）。
+    dump_partials: Vec<String>,
     issues: Vec<Issue>,
 }
 
@@ -329,6 +333,28 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         ));
     }
 
+    // §13.7.44 / §7.5 残留物扫描：兄弟目录中 `<data_dir_name>.restore-*` 与 `*.partial`
+    // 由 dump/restore 中断产生，doctor 只读列出，不自动清理（用户确认后手动删除）
+    let (restore_residuals, dump_partials) = scan_residuals(&layout.data_dir);
+    if !restore_residuals.is_empty() {
+        issues.push(warning(
+            "restore_residual",
+            format!(
+                "检测到 restore 中断残留目录（§13.7.44）：{}；建议确认无重要数据后删除",
+                restore_residuals.join(", ")
+            ),
+        ));
+    }
+    if !dump_partials.is_empty() {
+        issues.push(warning(
+            "dump_partial",
+            format!(
+                "检测到 dump 中断残留 .partial 文件（§13.7.44）：{}；建议删除",
+                dump_partials.join(", ")
+            ),
+        ));
+    }
+
     let json = DoctorJson {
         schema: protocol::DOCTOR_SCHEMA,
         data_dir: layout.data_dir.to_string_lossy().replace('\\', "/"),
@@ -359,12 +385,59 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         last_start_error,
         last_stop_mode: st.as_ref().and_then(|s| s.last_stop_mode.clone()),
         kill_fallback_count,
+        restore_residuals,
+        dump_partials,
         issues,
     };
     protocol::print_json_line(&json).map_err(|e| {
         eprintln!("[sidecar] doctor JSON 输出失败: {e}");
         exit_codes::ARGUMENT_ERROR
     })
+}
+
+/// 扫描 data_dir 兄弟目录中的 dump/restore 中断残留物（§13.7.44 / §7.5）。
+///
+/// - `<data_dir_name>.restore-*` 目录：restore 中断残留（`restore()` 失败路径已自清理，
+///   但 sidecar 进程被 kill 时残留目录仍存在）
+/// - `*.partial` 文件：dump 中断残留（`dump()` 失败路径已自清理，但同上）
+///
+/// 仅扫描 `data_dir.parent`：restore/dump 默认输出路径在兄弟目录中（§12.2 / §13.7.44），
+/// 用户自定义路径（如 `~/backups/`）不在扫描范围内（YAGNI：扫描全盘不可行）。
+fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
+    let mut restore_residuals: Vec<String> = Vec::new();
+    let mut dump_partials: Vec<String> = Vec::new();
+
+    let parent = match data_dir.parent() {
+        Some(p) => p,
+        None => return (restore_residuals, dump_partials),
+    };
+    let data_dir_name = match data_dir.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return (restore_residuals, dump_partials),
+    };
+    let restore_prefix = format!("{data_dir_name}.restore-");
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(r) => r,
+        Err(_) => return (restore_residuals, dump_partials),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match entry.file_name().to_str() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // restore 残留目录：兄弟目录匹配 `<data_dir_name>.restore-*` 模式
+        if name.starts_with(&restore_prefix) && path.is_dir() {
+            restore_residuals.push(path.to_string_lossy().replace('\\', "/"));
+        }
+        // dump 残留文件：兄弟文件匹配 `*.partial` 模式
+        if name.ends_with(".partial") && path.is_file() {
+            dump_partials.push(path.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    (restore_residuals, dump_partials)
 }
 
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
@@ -1096,5 +1169,88 @@ mod tests {
         let ts = ts_compact();
         assert!(ts.ends_with('Z'));
         assert!(ts.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`<data_dir_name>.restore-*` 兄弟目录被识别为残留。
+    #[test]
+    fn scan_residuals_detects_restore_sibling_dir() {
+        let dir = unique_tmp("scan-restore");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 创建两个 restore 残留目录（不同时间戳），位于 data_dir 的兄弟目录
+        let residual1 = dir.join("data.restore-20260723T120000Z");
+        let residual2 = dir.join("data.restore-20260723T130000Z");
+        std::fs::create_dir_all(&residual1).unwrap();
+        std::fs::create_dir_all(&residual2).unwrap();
+        // 写入部分文件模拟半截状态
+        std::fs::write(residual1.join("PG_VERSION"), b"17\n").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert_eq!(restore_residuals.len(), 2, "should detect 2 residual dirs");
+        assert!(
+            restore_residuals.iter().all(|p| p.contains("data.restore-")),
+            "all residuals should match pattern: {restore_residuals:?}"
+        );
+        assert!(dump_partials.is_empty(), "no dump partial expected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`*.partial` 兄弟文件被识别为 dump 中断残留。
+    #[test]
+    fn scan_residuals_detects_dump_partial_file() {
+        let dir = unique_tmp("scan-partial");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 创建 dump 残留文件（位于 data_dir 的兄弟目录）
+        let partial = dir.join("weekly_backup.dump.partial");
+        std::fs::write(&partial, b"half dump").unwrap();
+        // 非 .partial 后缀的文件不应被识别
+        let normal = dir.join("weekly_backup.dump");
+        std::fs::write(&normal, b"full dump").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(restore_residuals.is_empty(), "no restore residual expected");
+        assert_eq!(dump_partials.len(), 1, "should detect 1 partial file");
+        assert!(
+            dump_partials[0].ends_with("weekly_backup.dump.partial"),
+            "partial path mismatch: {}",
+            dump_partials[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中无残留时返回空。
+    #[test]
+    fn scan_residuals_clean_dir_returns_empty() {
+        let dir = unique_tmp("scan-clean");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 仅创建正常文件（非 .partial / 非 restore-*）
+        std::fs::write(dir.join("readme.txt"), b"hi").unwrap();
+        std::fs::write(dir.join("backup.dump"), b"full").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(restore_residuals.is_empty());
+        assert!(dump_partials.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`<data_dir_name>.bak-*` 兄弟目录不应被识别为 restore 残留
+    /// （bak 目录是 restore 成功后的正常备份，非中断残留）。
+    #[test]
+    fn scan_residuals_ignores_bak_sibling_dirs() {
+        let dir = unique_tmp("scan-bak");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let bak = dir.join("data.bak-20260723T120000Z");
+        std::fs::create_dir_all(&bak).unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(
+            restore_residuals.is_empty(),
+            "bak dirs should not be reported as restore residuals: {restore_residuals:?}"
+        );
+        assert!(dump_partials.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

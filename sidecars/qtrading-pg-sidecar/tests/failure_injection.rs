@@ -1,6 +1,6 @@
 //! Rust sidecar 集成测试 — §17.6 失败注入场景。
 //!
-//! 9 场景：#3/#4/#8/#9/#23/#24/#26/#27/#31。
+//! 10 场景：#3/#4/#8/#9/#23/#24/#26/#27/#28/#31。
 //! 串行执行（--test-threads=1），避免端口/锁/PG 缓存冲突。
 //! 首个测试会下载+解压 PostgreSQL binaries（约 30MB），后续测试复用缓存。
 
@@ -273,6 +273,57 @@ fn test_inject_27_fat32_filesystem_rejected() {
         issues.iter().any(|i| i["code"] == "fs_unsupported"),
         "doctor should report fs_unsupported: {doc}"
     );
+}
+
+/// #28 restore 中断残留 → doctor 列出 `data.restore-*` 残留目录（§17.6 #28 / §13.7.44 / §7.5）。
+///
+/// 模拟方式：手动创建 `data.restore-<ts>` 兄弟目录（与 sidecar `restore()` 失败路径生成的
+/// 残留目录同构）。真实 kill-mid-restore 测试因 pg_restore 时序不可控而不可靠，故用
+/// 手动创建残留目录的方式验证 doctor 扫描逻辑（与 #31 手动创建 tmp 残留同款策略）。
+#[test]
+fn test_inject_28_restore_interruption_residual() {
+    let (_tmp, data_dir) = unique_data_dir("fi_28");
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+
+    // 模拟 restore 中断残留：创建 data.restore-<ts> 兄弟目录
+    let residual_dir = data_dir
+        .parent()
+        .unwrap()
+        .join("data.restore-20260723T120000Z");
+    std::fs::create_dir_all(&residual_dir).unwrap();
+    // 写入半截状态文件模拟中断
+    std::fs::write(residual_dir.join("PG_VERSION"), b"17\n").unwrap();
+
+    // doctor 应列出残留目录
+    let doc = doctor_json(&data_dir);
+    let residuals = doc["restore_residuals"]
+        .as_array()
+        .expect("restore_residuals array");
+    assert!(
+        !residuals.is_empty(),
+        "doctor should list restore residual: {doc}"
+    );
+    assert!(
+        residuals.iter().any(|r| r
+            .as_str()
+            .unwrap_or_default()
+            .contains("data.restore-20260723T120000Z")),
+        "residual path should match: {residuals:?}"
+    );
+    // issues 应含 restore_residual 警告
+    let issues = doc["issues"].as_array().expect("issues array");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["code"] == "restore_residual" && i["severity"] == "warning"),
+        "doctor should emit restore_residual warning issue: {doc}"
+    );
+
+    // 清理残留目录以便 TempDir cleanup
+    let _ = std::fs::remove_dir_all(&residual_dir);
 }
 
 /// #31 setup 解压中断残留 → 下次 run 清理 tmp 并重做 setup（§17.6 #31 / §16.2 AI-39）。

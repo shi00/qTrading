@@ -57,6 +57,9 @@ MOCK_DOCTOR_JSON: dict[str, object] = {
     "last_start_error": None,
     "last_stop_mode": "graceful",
     "kill_fallback_count": 0,
+    # §13.7.44 / §7.5 残留物扫描字段（sidecar v1+）
+    "restore_residuals": [],
+    "dump_partials": [],
     "issues": [],
 }
 
@@ -128,6 +131,47 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
         assert result.issues == []
         assert result.runtime_status == "running"
         assert result.last_start_error is None
+        # §13.7.44 / §7.5 残留物扫描字段（默认空列表）
+        assert result.restore_residuals == []
+        assert result.dump_partials == []
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_parses_residuals_fields(self, maintenance_service) -> None:
+        """doctor JSON 含残留物扫描字段时正确解析（§13.7.44 / §7.5）。"""
+        mock_with_residuals = dict(MOCK_DOCTOR_JSON)
+        mock_with_residuals["restore_residuals"] = [
+            "/fake/data.restore-20260723T120000Z",
+            "/fake/data.restore-20260723T130000Z",
+        ]
+        mock_with_residuals["dump_partials"] = ["/fake/weekly.dump.partial"]
+        mock_with_residuals["issues"] = [
+            {"code": "restore_residual", "severity": "warning", "message": "检测到 restore 中断残留目录"},
+            {"code": "dump_partial", "severity": "warning", "message": "检测到 dump 中断残留 .partial 文件"},
+        ]
+
+        with _patch_run_async(0, json.dumps(mock_with_residuals)):
+            result = await maintenance_service.doctor()
+
+        assert result.restore_residuals == [
+            "/fake/data.restore-20260723T120000Z",
+            "/fake/data.restore-20260723T130000Z",
+        ]
+        assert result.dump_partials == ["/fake/weekly.dump.partial"]
+        assert any(i["code"] == "restore_residual" for i in result.issues)
+        assert any(i["code"] == "dump_partial" for i in result.issues)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_backward_compat_missing_residuals_fields(self, maintenance_service) -> None:
+        """旧版 sidecar 无 restore_residuals/dump_partials 字段时向后兼容（默认空列表）。"""
+        mock_old = dict(MOCK_DOCTOR_JSON)
+        del mock_old["restore_residuals"]
+        del mock_old["dump_partials"]
+
+        with _patch_run_async(0, json.dumps(mock_old)):
+            result = await maintenance_service.doctor()
+
+        assert result.restore_residuals == []
+        assert result.dump_partials == []
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_doctor_schema_mismatch_raises_error(self, maintenance_service) -> None:
