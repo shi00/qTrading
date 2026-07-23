@@ -710,19 +710,25 @@ jobs:
           $targetDir = "sidecars\qtrading-pg-sidecar\target\release"
           New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
           # 下载 binary + sha256sums-x86_64-pc-windows-msvc.txt（评审 Security Required: 供应链完整性校验）
-          # sidecar.yml release job 每平台独立生成 sha256sums-<target>.txt（避免并发写冲突），
-          # build-windows job 仅需 Windows sidecar，故下载对应 target 的 sha256sums 文件
+          # sidecar.yml release job 上传 artifact_name（每平台唯一，避免 basename 冲突），
+          # Windows 平台 artifact_name 为 qtrading-pg-sidecar-windows-x86_64.exe，
+          # 下载后 rename 回 qtrading-pg-sidecar.exe（AStockScreener.spec 期望的 binary 名）
           $sha256sumsFileName = "sha256sums-x86_64-pc-windows-msvc.txt"
+          $artifactName = "qtrading-pg-sidecar-windows-x86_64.exe"
+          $expectedBinaryName = "qtrading-pg-sidecar.exe"
           gh release download $tagName `
             --repo $env:GITHUB_REPOSITORY `
-            --pattern "qtrading-pg-sidecar.exe" `
+            --pattern $artifactName `
             --pattern $sha256sumsFileName `
             --dir $targetDir
           if ($LASTEXITCODE -ne 0) {
             Write-Error "gh release download failed (exit: $LASTEXITCODE)"
             exit 1
           }
-          $sidecarPath = Join-Path $targetDir "qtrading-pg-sidecar.exe"
+          $downloadedPath = Join-Path $targetDir $artifactName
+          $sidecarPath = Join-Path $targetDir $expectedBinaryName
+          # rename artifact_name -> expected binary name（spec 期望名）
+          Move-Item -Path $downloadedPath -Destination $sidecarPath -Force
           $sha256Path = Join-Path $targetDir $sha256sumsFileName
           if (-not (Test-Path $sidecarPath)) {
             Write-Error "Sidecar binary not found at $sidecarPath after download"

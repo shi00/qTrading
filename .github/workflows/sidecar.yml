@@ -317,13 +317,16 @@ jobs:
 
       - name: Generate SHA256 checksums
         # 每平台生成独立 sha256sums-<target>.txt，避免并发写冲突
+        # 上传前 cp binary 为 artifact_name（每平台唯一），避免 4 个非 Windows 平台 basename
+        # 相同（qtrading-pg-sidecar）被 --clobber 互相覆盖（P1: release asset 名冲突）
         shell: bash
         run: |
           BINARY_PATH="${{ matrix.binary_path }}"
-          HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
-          BINARY_NAME=$(basename "$BINARY_PATH")
-          echo "$HASH  $BINARY_NAME" > "sha256sums-${{ matrix.target }}.txt"
-          echo "SHA256: $HASH  $BINARY_NAME"
+          ARTIFACT_NAME="${{ matrix.artifact_name }}"
+          cp "$BINARY_PATH" "$ARTIFACT_NAME"
+          HASH=$(sha256sum "$ARTIFACT_NAME" | awk '{print $1}')
+          echo "$HASH  $ARTIFACT_NAME" > "sha256sums-${{ matrix.target }}.txt"
+          echo "SHA256: $HASH  $ARTIFACT_NAME"
           cat "sha256sums-${{ matrix.target }}.txt"
 
       - name: Create release and upload assets
@@ -335,9 +338,9 @@ jobs:
           echo "Creating release for tag: $TAG"
           # gh release create 幂等：release 已存在时静默失败
           gh release create "$TAG" --generate-notes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
-          # 上传 binary + manifest + sha256sums（--clobber 覆盖已存在的 assets）
+          # 上传 artifact_name（每平台唯一）+ manifest + sha256sums（--clobber 覆盖已存在的 assets）
           gh release upload "$TAG" \
-            "${{ matrix.binary_path }}" \
+            "${{ matrix.artifact_name }}" \
             "sidecar-manifest-${{ matrix.os }}.json" \
             "sha256sums-${{ matrix.target }}.txt" \
             --clobber
