@@ -20,7 +20,7 @@
 1. CLAUDE.md — 项目宪法（AI 自动加载，含红线/架构边界/交互准则）
 2. CONTRIBUTING.md — 入口索引 + 最小命令 + PR 流程
 3. docs/ — 专项深入文档（本目录）
-4. man/ — 专题深度文档
+4. man/ — 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub）
 
 precedence: CLAUDE.md > CONTRIBUTING.md > docs/ > man/
 

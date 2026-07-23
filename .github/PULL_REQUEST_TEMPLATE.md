@@ -62,6 +62,11 @@ Relates to #XXX
 - [ ] 数据库新增字段补充索引、非空、默认约束
 - [ ] 已确认避免重复造轮子，优先复用了工程已有代码及成熟开源库
 - [ ] 本次修改引入的新问题已全部自查修复
+- [ ] Ruff lint + format 已通过（`ruff check .` + `ruff format --check .`）
+- [ ] Pyright 类型检查已通过（`pyright`）
+- [ ] 测试断言避免弱断言（`assert x` / `assertTrue`），使用精确断言（`assertEqual` / `assert x == y`）
+- [ ] 所有 `# type: ignore` 均带 `[reason]` 注释（R3 红线）
+- [ ] 所有 `# NOTE(lazy):` 标记含三要素（简化内容 / ceiling / upgrade）
 
 ## 👀 评审重点提示
 <!-- 告诉评审人重点检查模块、风险点、容易忽略的链路 -->

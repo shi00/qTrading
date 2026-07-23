@@ -42,3 +42,9 @@ ADR-0003 决定落地红线 R1~R18 机器可读映射，需要选择 `docs/gover
 - **JSON**：拒绝。无注释 + 引号噪音降低可读性；维护成本高于 YAML。
 - **TOML**：拒绝。`[[redlines]]` 数组表格语法对单层 5 字段结构过度繁琐；TOML 表达力优势在多层级配置，本场景无优势。
 - **Python 文件（`redlines.py` 定义常量列表）**：拒绝。机器可读但混入代码层；治理文件应在 docs/governance/ 而非代码层。
+
+## Errata
+
+> 2026-07-23 补充
+
+ADR-0004 Decision 第 4 点提及「新增 `pyyaml` 依赖」，但 `pyproject.toml` 未直接声明 `pyyaml`。实际情况：`pyyaml` 作为 `pre-commit` / `uv` 等工具的 transitive dependency 被间接安装，`scripts/check_redlines.py` 通过 `import yaml` 直接使用。本 ADR 不修正 Decision 文本（保留历史决策依据），但补充说明：若未来 `pre-commit` / `uv` 移除 `pyyaml` 依赖，需在 `pyproject.toml` 显式声明 `pyyaml`。
