@@ -897,18 +897,24 @@ async fn wait_for_enter() {
 
 // ---- reset-password ----
 
-/// 通过 `postgres --single` 单用户模式重置 postgres 用户密码（§13.7.8）。
+/// 通过临时 `pg_ctl` 启动的 postgres 实例 + 临时 trust pg_hba.conf 重置 postgres 用户密码（§13.7.8）。
 ///
-/// 单用户模式不需要密码认证（PostgreSQL 内部直接执行 SQL），适用于密码丢失场景。
-/// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries →
-///       生成新密码 → `postgres --single -D <dir> postgres` 通过 stdin 注入
-///       `ALTER USER postgres PASSWORD '<new>'` → 写入新 password file →
-///       重写 pg_hba.conf（scram-sha-256，确保新密码生效）→ register_secret。
+/// 历史方案 `postgres --single` 单用户模式在 Windows 上被 PostgreSQL 安全限制拒绝
+/// （`check_root()` 检测到 admin 用户组成员身份即 exit 1；GitHub Actions Windows runner
+/// 默认以 `runneradmin`/Administrators 组运行触发此限制）。`pg_ctl` 内部
+/// `CreateRestrictedProcess` 降权后才能在 Windows admin 下启动 postgres 多用户模式。
+///
+/// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries → stale pid 清理 →
+///       临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
+///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
+///       psql 连接执行 `ALTER USER postgres PASSWORD '<new>'`（trust 模式无需密码）→
+///       停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→ 写入新 password file →
+///       register_secret。
 ///
 /// exit code：
-/// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）
+/// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）/ PGDATA 已有活实例
 /// - 40 DATA_DIR_ABNORMAL：数据目录未初始化
-/// - 16 PASSWORD_FAILED：postgres --single 失败 / password file 写入失败
+/// - 16 PASSWORD_FAILED：临时实例启动失败 / ALTER USER 失败 / password file 写入失败
 /// - 30 DUMP_RESTORE_FAILED：pg_hba.conf 重写失败
 pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     logging::init(None);
@@ -928,8 +934,7 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
     // stale postmaster.pid 清理（§7.2，与 run.rs/commands.rs stop 同款逻辑）
-    // Windows 上 graded_stop 可能走 kill fallback 残留 postmaster.pid，导致
-    // `postgres --single` 拒绝启动（exit 16 PASSWORD_FAILED）。这里在 spawn 前清理。
+    // 临时实例启动前必须保证 PGDATA 无残留 pid 文件，否则 pg_ctl start 拒绝启动。
     if let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) {
         if pgbin::process_alive(info.pid) {
             eprintln!(
@@ -948,67 +953,53 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     }
 
     let new_pwd = password::generate_password();
-    let postgres_path = pgbin::tool_path(&layout.install_dir, "postgres");
-    let data_dir_s = layout.data_dir.to_string_lossy().into_owned();
-    // SQL 字符串字面量需用美元引号 $$ 避免 SQL 注入（new_pwd 是 URL-safe 字符集，理论上安全）
-    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;\n");
 
-    let mut cmd = tokio::process::Command::new(&postgres_path);
-    cmd.arg("--single")
-        .args(["-D", &data_dir_s])
-        // 单用户模式不监听 TCP，仅本地 IPC
-        .args(["-c", "listen_addresses="])
-        .arg("postgres")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        // tokio::process::Command 自带 creation_flags 方法（不需 CommandExt trait import）
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = cmd.spawn().map_err(|e| {
-        eprintln!(
-            "[sidecar] postgres --single 启动失败 {}：{e}",
-            postgres_path.display()
-        );
-        exit_codes::PASSWORD_FAILED
-    })?;
-
-    // 写入 SQL 到 stdin 触发执行，drop stdin 触发 EOF 让 postgres 退出
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        if let Err(e) = stdin.write_all(sql.as_bytes()).await {
-            eprintln!("[sidecar] 写入 SQL 到 postgres --single stdin 失败：{e}");
-            let _ = child.kill().await;
-            return Err(exit_codes::PASSWORD_FAILED);
-        }
-        let _ = stdin.shutdown().await;
-    }
-
-    let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await;
-    let output = match out {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            eprintln!("[sidecar] postgres --single wait 失败：{e}");
-            return Err(exit_codes::PASSWORD_FAILED);
-        }
-        Err(_) => {
-            eprintln!("[sidecar] postgres --single 超时 30s");
-            return Err(exit_codes::PASSWORD_FAILED);
-        }
-    };
-    if !output.status.success() {
-        eprintln!(
-            "[sidecar] postgres --single 失败 (code {:?})：{}",
-            output.status.code(),
-            logging::sanitize(String::from_utf8_lossy(&output.stderr).trim())
-        );
+    // 临时改 pg_hba.conf 为 trust（仅 127.0.0.1）：绕过密码认证以执行 ALTER USER。
+    // 出错路径由 HbaRestoreGuard RAII 恢复原 pg_hba.conf；成功路径在 write_security_baseline
+    // 重写后 disarm，避免恢复覆盖 scram-sha-256 新内容。
+    let hba_path = layout.data_dir.join("pg_hba.conf");
+    let mut hba_guard = HbaRestoreGuard::new(hba_path.clone());
+    const TRUST_HBA: &str = "host all all 127.0.0.1/32 trust\n";
+    if let Err(e) = std::fs::write(&hba_path, TRUST_HBA) {
+        eprintln!("[sidecar] pg_hba.conf 临时 trust 写入失败: {e}");
         return Err(exit_codes::PASSWORD_FAILED);
     }
+
+    // 启动临时 postgres 实例（postgresql_embedded 内部 pg_ctl，Windows admin 也能启动）。
+    // dummy 密码：trust 模式下 psql 健康检查不验证密码（PGPASSWORD 会被 postgres 忽略）。
+    const DUMMY_PWD: &str = "reset-trust-bypass-not-verified";
+    let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, DUMMY_PWD).await?;
+    let port = instance.port;
+    let install_dir = instance.layout.install_dir.clone();
+
+    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）
+    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;");
+    let alter_result = pgbin::psql(
+        &install_dir,
+        LISTEN_LOCAL,
+        port,
+        DEFAULT_USERNAME,
+        "postgres",
+        DUMMY_PWD,
+        &sql,
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // 无论 ALTER 成功与否都要停临时实例
+    instance.stop().await;
+
+    if let Err(e) = alter_result {
+        eprintln!("[sidecar] ALTER USER postgres PASSWORD 失败: {e}");
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 重写 pg_hba.conf（scram-sha-256，新密码生效，清除临时 trust 行）
+    if let Err(e) = setup::write_security_baseline(&layout.data_dir, LISTEN_LOCAL) {
+        eprintln!("[sidecar] pg_hba.conf 重写失败: {e}");
+        return Err(exit_codes::DUMP_RESTORE_FAILED);
+    }
+    hba_guard.disarm();
 
     // 写入新 password file（权限 0600 on Unix）
     if let Err(e) = password::write_password_file(&layout.password_file, &new_pwd) {
@@ -1019,17 +1010,38 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
-    // 重写 pg_hba.conf（保持 scram-sha-256 认证，新密码生效）
-    if let Err(e) = setup::write_security_baseline(&layout.data_dir, LISTEN_LOCAL) {
-        eprintln!("[sidecar] pg_hba.conf 重写失败：{e}");
-        return Err(exit_codes::DUMP_RESTORE_FAILED);
-    }
-
     // 注册新密码为 secret（R9：防止后续日志/异常泄露）
     logging::register_secret(&new_pwd);
 
     eprintln!("[sidecar] 密码已重置，请重启 qTrading");
     Ok(())
+}
+
+/// RAII guard：临时 trust pg_hba.conf 修改失败/出错路径下恢复原内容。
+/// 成功路径由 write_security_baseline 重写 pg_hba.conf 后调 disarm() 抑制恢复。
+struct HbaRestoreGuard {
+    path: PathBuf,
+    backup: Option<String>,
+}
+
+impl HbaRestoreGuard {
+    fn new(path: PathBuf) -> Self {
+        let backup = std::fs::read_to_string(&path).ok();
+        Self { path, backup }
+    }
+
+    /// 成功路径调用：避免恢复覆盖 write_security_baseline 已写入的 scram-sha-256 内容。
+    fn disarm(&mut self) {
+        self.backup = None;
+    }
+}
+
+impl Drop for HbaRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(content) = self.backup.take() {
+            let _ = std::fs::write(&self.path, content);
+        }
+    }
 }
 
 #[cfg(test)]
