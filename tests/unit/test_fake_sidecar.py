@@ -6,7 +6,7 @@
 - 用 ``json.loads`` 解析 stdout 验证 JSON 输出
 - ``run`` 子命令会等 stdin EOF 退出，测试需传 ``stdin=DEVNULL`` 让其立即 EOF
 
-测试用例 (11 个):
+测试用例 (12 个):
 - test_create_fake_sidecar_returns_executable_path
 - test_run_command_outputs_ready_json
 - test_status_command_outputs_running_json
@@ -14,6 +14,7 @@
 - test_doctor_command_outputs_valid_json
 - test_dump_command_writes_output_file
 - test_restore_command_succeeds_without_env
+- test_restore_command_outputs_target_data_dir_with_explicit
 - test_restore_command_fails_with_env
 - test_maintenance_shell_command_outputs_json
 - test_fake_sidecar_exit_code_env_override
@@ -140,9 +141,29 @@ def test_dump_command_writes_output_file(tmp_path: Path) -> None:
 
 
 def test_restore_command_succeeds_without_env(tmp_path: Path, monkeypatch) -> None:
-    """restore 子命令: 无 FAKE_SIDECAR_RESTORE_FAIL 时 exit 0。"""
+    """restore 子命令: 无 FAKE_SIDECAR_RESTORE_FAIL 时 exit 0 + 输出默认 target_data_dir (P1-10)。"""
     monkeypatch.delenv("FAKE_SIDECAR_RESTORE_FAIL", raising=False)
     wrapper = create_fake_sidecar(tmp_path)
+    data_dir = tmp_path / "data"
+    result = _run_sidecar(
+        wrapper,
+        "restore",
+        "--data-dir",
+        str(data_dir),
+        "--input",
+        str(tmp_path / "backup.dump"),
+    )
+    assert result.returncode == 0, f"restore 应 exit 0, 实际: {result.returncode}, stderr: {result.stderr}"
+    # P1-10: 验证 stdout 输出默认 target_data_dir (对齐 sidecar §12.2 原子切换)
+    expected_target = str(data_dir.parent / "data.restore-fake")
+    assert result.stdout.strip() == expected_target
+
+
+def test_restore_command_outputs_target_data_dir_with_explicit(tmp_path: Path, monkeypatch) -> None:
+    """restore 子命令: 显式 --target-data-dir 透传到 stdout (P1-10)。"""
+    monkeypatch.delenv("FAKE_SIDECAR_RESTORE_FAIL", raising=False)
+    wrapper = create_fake_sidecar(tmp_path)
+    target = tmp_path / "new_data"
     result = _run_sidecar(
         wrapper,
         "restore",
@@ -150,8 +171,12 @@ def test_restore_command_succeeds_without_env(tmp_path: Path, monkeypatch) -> No
         str(tmp_path / "data"),
         "--input",
         str(tmp_path / "backup.dump"),
+        "--target-data-dir",
+        str(target),
     )
     assert result.returncode == 0, f"restore 应 exit 0, 实际: {result.returncode}, stderr: {result.stderr}"
+    # P1-10: 显式 --target-data-dir 透传到 stdout
+    assert result.stdout.strip() == str(target)
 
 
 def test_restore_command_fails_with_env(tmp_path: Path) -> None:
