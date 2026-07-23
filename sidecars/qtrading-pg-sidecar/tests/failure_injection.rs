@@ -1,6 +1,7 @@
 //! Rust sidecar 集成测试 — §17.6 失败注入场景。
 //!
-//! 10 场景：#3/#4/#8/#9/#23/#24/#26/#27/#28/#31。
+//! 10 场景 + 1 对称补充：#3/#4/#8/#9/#23/#24/#26/#27/#28/#28b/#31。
+//! #28b 是 #28 的对称测试（dump .partial 残留 vs restore 目录残留）。
 //! 串行执行（--test-threads=1），避免端口/锁/PG 缓存冲突。
 //! 首个测试会下载+解压 PostgreSQL binaries（约 30MB），后续测试复用缓存。
 
@@ -280,6 +281,9 @@ fn test_inject_27_fat32_filesystem_rejected() {
 /// 模拟方式：手动创建 `data.restore-<ts>` 兄弟目录（与 sidecar `restore()` 失败路径生成的
 /// 残留目录同构）。真实 kill-mid-restore 测试因 pg_restore 时序不可控而不可靠，故用
 /// 手动创建残留目录的方式验证 doctor 扫描逻辑（与 #31 手动创建 tmp 残留同款策略）。
+///
+/// 清理策略：用 RAII guard（RemoveDirOnDrop）确保残留目录在 panic 时也被清理，
+/// 避免测试失败导致 CI 临时目录累积残留（P1-1）。
 #[test]
 fn test_inject_28_restore_interruption_residual() {
     let (_tmp, data_dir) = unique_data_dir("fi_28");
@@ -296,6 +300,8 @@ fn test_inject_28_restore_interruption_residual() {
     std::fs::create_dir_all(&residual_dir).unwrap();
     // 写入半截状态文件模拟中断
     std::fs::write(residual_dir.join("PG_VERSION"), b"17\n").unwrap();
+    // RAII guard: panic 安全清理残留目录（P1-1）
+    let _guard = RemovePathOnDrop(residual_dir.clone());
 
     // doctor 应列出残留目录
     let doc = doctor_json(&data_dir);
@@ -321,9 +327,55 @@ fn test_inject_28_restore_interruption_residual() {
             .any(|i| i["code"] == "restore_residual" && i["severity"] == "warning"),
         "doctor should emit restore_residual warning issue: {doc}"
     );
+}
 
-    // 清理残留目录以便 TempDir cleanup
-    let _ = std::fs::remove_dir_all(&residual_dir);
+/// #28b dump 中断残留 → doctor 列出 `*.partial` 残留文件（§17.6 #28 对称 / §13.7.44 / §7.5）。
+///
+/// 与 #28 对称：#28 验证 `data.restore-*` 目录残留扫描，本测试验证 `*.partial` 文件残留扫描。
+/// 模拟方式：手动创建 `backup.dump.partial` 兄弟文件（与 sidecar `dump()` 失败路径生成的
+/// 半截备份文件同构）。真实 kill-mid-dump 测试因 pg_dump 时序不可控而不可靠，故用
+/// 手动创建残留文件的方式验证 doctor 扫描逻辑。
+#[test]
+fn test_inject_28b_dump_partial_residual() {
+    let (_tmp, data_dir) = unique_data_dir("fi_28b");
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+
+    // 模拟 dump 中断残留：创建 backup.dump.partial 兄弟文件
+    let partial_file = data_dir
+        .parent()
+        .unwrap()
+        .join("backup-20260723T130000Z.dump.partial");
+    std::fs::write(&partial_file, b"partial dump content").unwrap();
+    // RAII guard: panic 安全清理残留文件（P1-2）
+    let _guard = RemovePathOnDrop(partial_file.clone());
+
+    // doctor 应列出残留文件
+    let doc = doctor_json(&data_dir);
+    let partials = doc["dump_partials"]
+        .as_array()
+        .expect("dump_partials array");
+    assert!(
+        !partials.is_empty(),
+        "doctor should list dump partial: {doc}"
+    );
+    assert!(
+        partials.iter().any(|p| p
+            .as_str()
+            .unwrap_or_default()
+            .contains("backup-20260723T130000Z.dump.partial")),
+        "partial path should match: {partials:?}"
+    );
+    // issues 应含 dump_partial 警告
+    let issues = doc["issues"].as_array().expect("issues array");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["code"] == "dump_partial" && i["severity"] == "warning"),
+        "doctor should emit dump_partial warning issue: {doc}"
+    );
 }
 
 /// #31 setup 解压中断残留 → 下次 run 清理 tmp 并重做 setup（§17.6 #31 / §16.2 AI-39）。
@@ -363,6 +415,18 @@ fn test_inject_31_setup_extraction_interruption() {
 }
 
 // ---- 辅助函数（与 roundtrip.rs 同款，YAGNI 不抽到 common） ----
+
+/// RAII guard: 作用域退出时（含 panic）删除目标路径（目录或文件）。
+/// 用于 #28/#28b 测试确保残留物被清理，避免 CI 临时目录累积（P1-1/P1-2）。
+/// 先尝试 remove_dir_all（目录），失败再尝试 remove_file（文件），兼容两者。
+struct RemovePathOnDrop(std::path::PathBuf);
+
+impl Drop for RemovePathOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0)
+            .or_else(|_| std::fs::remove_file(&self.0));
+    }
+}
 
 /// 启动一个短命辅助进程（用于 parent_pid 测试）。
 ///
