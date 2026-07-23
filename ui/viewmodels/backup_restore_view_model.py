@@ -47,17 +47,18 @@ class BackupRestoreState:
     - "pending": 已选备份文件, 等待用户确认
     - "offline_guidance": 用户已确认, 显示离线恢复指引消息 (D36: 不直接调 sidecar restore)
     - "cancelled": 用户已取消
+
+    注: is_restoring / restore_success_message / restore_step3_executing 已移除 (P1-7)，
+    D36 决策下 UI 不直接执行 restore，无执行中状态与成功消息。
     """
 
     is_backing_up: bool = False
-    is_restoring: bool = False
     backup_path: str | None = None
     restore_path: str | None = None
     progress_message: Message | None = None
     error_message: Message | None = None
     confirm_state: str = "idle"
     backup_success_message: Message | None = None
-    restore_success_message: Message | None = None
 
 
 class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
@@ -135,7 +136,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         """恢复向导 Step 1: 设置 restore_path + confirm_state="pending".
 
         - restore 文件存在性校验: 不存在时直接设 error_message, 不进入 pending
-        - 清空之前的 restore_success_message / error_message
+        - 清空之前的 error_message
         """
         if not input_path.exists():
             logger.warning("[BackupRestoreVM] restore file not found: %s", input_path)
@@ -149,7 +150,6 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             restore_path=str(input_path),
             confirm_state="pending",
             error_message=None,
-            restore_success_message=None,
         )
 
     async def confirm_restore(self) -> None:
@@ -161,7 +161,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
 
         - 仅当 confirm_state=="pending" 时执行 (防止重复触发)
         - restore_path 为 None 时直接设 error_message (防御性)
-        - 保留 restore_path 供指引消息引用 (用户可在指引中看到所选备份文件)
+        - 注入 backup_path 参数到指引消息: 用户可在指引中看到所选备份文件路径 (P1-4)
         """
         if self._state.confirm_state != "pending":
             logger.debug(
@@ -177,7 +177,10 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             return
         self._set_state(
             confirm_state="offline_guidance",
-            progress_message=Message("restore_offline_guidance"),
+            progress_message=Message(
+                "restore_offline_guidance",
+                params={"backup_path": self._state.restore_path or ""},
+            ),
             error_message=None,
         )
 

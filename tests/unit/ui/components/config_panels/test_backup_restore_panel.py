@@ -9,7 +9,10 @@
 6. VM 生命周期 (mount/dispose)
 7. 纯函数 (_render_message / _generate_default_backup_path)
 8. Click handler factory (page 可用 / RuntimeError 分支)
-9. 状态渲染分支 (pending/confirmed/cancelled/is_backing_up/各 message)
+9. 状态渲染分支 (pending/offline_guidance/cancelled/is_backing_up/各 message)
+
+注: is_restoring / restore_success_message / restore_step3_executing 相关测试已移除 (P1-7)，
+D36 决策下 UI 不直接执行 restore，无执行中状态与成功消息。
 """
 
 import contextlib
@@ -501,27 +504,20 @@ class TestBackupRestorePanelStateRendering:
         assert "restore_confirm_title" in text_values
         assert "restore_confirm_message" in text_values
 
-    def test_renders_step3_executing_when_confirm_confirmed(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """confirm_state=confirmed 时渲染 Step 3 执行中."""
-        state = BackupRestoreState(confirm_state="confirmed")
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "restore_step3_executing" in text_values
-
-    def test_renders_step3_executing_when_is_restoring(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_restoring=True 时渲染 Step 3 执行中."""
-        state = BackupRestoreState(is_restoring=True)
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "restore_step3_executing" in text_values
-
     def test_renders_offline_guidance_when_confirm_offline_guidance(
         self, mock_i18n_state, mock_app_colors_state
     ) -> None:
-        """confirm_state=offline_guidance 时渲染离线恢复指引 (D36): 标题 + 指引消息 + 我已了解按钮."""
-        state = BackupRestoreState(confirm_state="offline_guidance")
+        """confirm_state=offline_guidance 时渲染离线恢复指引 (D36): 标题 + 指引消息 + 我已了解按钮.
+
+        P1-4: guidance 文案通过 progress_message 渲染 (含 {backup_path} 占位符).
+        """
+        state = BackupRestoreState(
+            confirm_state="offline_guidance",
+            progress_message=Message(
+                "restore_offline_guidance",
+                params={"backup_path": "/tmp/backup.dump"},
+            ),
+        )
         _, _, result, _ = _render_panel_with_state(state)
         ctrls = _walk_controls(result)
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
@@ -571,16 +567,6 @@ class TestBackupRestorePanelStateRendering:
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
         assert "backup_success" in text_values
 
-    def test_renders_restore_success_message(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """restore_success_message 非 None 时渲染翻译文本."""
-        state = BackupRestoreState(
-            restore_success_message=Message("restore_success"),
-        )
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "restore_success" in text_values
-
     def test_renders_error_message(self, mock_i18n_state, mock_app_colors_state) -> None:
         """error_message 非 None 时渲染翻译文本."""
         state = BackupRestoreState(
@@ -591,17 +577,6 @@ class TestBackupRestorePanelStateRendering:
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
         assert "backup_failed" in text_values
 
-    def test_renders_restore_progress_when_restoring(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_restoring=True 且 progress_message 非 None 时渲染 restore_in_progress."""
-        state = BackupRestoreState(
-            is_restoring=True,
-            progress_message=Message("restore_in_progress"),
-        )
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "restore_in_progress" in text_values
-
     def test_backup_button_disabled_when_backing_up(self, mock_i18n_state, mock_app_colors_state) -> None:
         """is_backing_up=True 时 backup_button disabled=True."""
         state = BackupRestoreState(is_backing_up=True)
@@ -610,17 +585,6 @@ class TestBackupRestorePanelStateRendering:
         backup_btns = [b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "backup_button"]
         assert len(backup_btns) == 1
         assert backup_btns[0].disabled is True
-
-    def test_restore_button_disabled_when_restoring(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_restoring=True 时 restore_button disabled=True."""
-        state = BackupRestoreState(is_restoring=True)
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        restore_btns = [
-            b for b in ctrls if isinstance(b, ft.Button) and getattr(b, "content", None) == "restore_button"
-        ]
-        assert len(restore_btns) == 1
-        assert restore_btns[0].disabled is True
 
     def test_restore_button_hidden_when_pending(self, mock_i18n_state, mock_app_colors_state) -> None:
         """confirm_state=pending 时 restore_button visible=False."""

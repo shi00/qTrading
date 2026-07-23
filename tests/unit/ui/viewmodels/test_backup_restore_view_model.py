@@ -78,14 +78,12 @@ class TestStateImmutability:
     def test_state_default_values(self, mock_maintenance_service):
         vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
         assert vm.state.is_backing_up is False
-        assert vm.state.is_restoring is False
         assert vm.state.backup_path is None
         assert vm.state.restore_path is None
         assert vm.state.progress_message is None
         assert vm.state.error_message is None
         assert vm.state.confirm_state == "idle"
         assert vm.state.backup_success_message is None
-        assert vm.state.restore_success_message is None
 
 
 # --- start_backup ---
@@ -175,7 +173,6 @@ class TestStartRestoreWizard:
         assert vm.state.confirm_state == "pending"
         assert vm.state.restore_path == str(input_path)
         assert vm.state.error_message is None
-        assert vm.state.restore_success_message is None
 
     @pytest.mark.asyncio
     async def test_start_restore_wizard_file_not_found(self, vm):
@@ -205,14 +202,18 @@ class TestConfirmRestore:
 
     @pytest.mark.asyncio
     async def test_confirm_restore_sets_offline_guidance_state(self, vm):
-        """confirm_restore 后 confirm_state=offline_guidance + 显示指引消息."""
+        """confirm_restore 后 confirm_state=offline_guidance + 显示指引消息.
+
+        P1-4: progress_message 含 {backup_path} 参数.
+        """
+        input_path = Path("/tmp/backup.dump")
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+            await vm.start_restore_wizard(input_path)
         await vm.confirm_restore()
         assert vm.state.confirm_state == "offline_guidance"
-        assert vm.state.is_restoring is False
         assert vm.state.progress_message is not None
         assert vm.state.progress_message.key == "restore_offline_guidance"
+        assert vm.state.progress_message.params == {"backup_path": str(input_path)}
         assert vm.state.error_message is None
 
     @pytest.mark.asyncio
@@ -354,7 +355,6 @@ class TestVMi18nContract:
         assert vm.state.progress_message is None
         assert vm.state.error_message is None
         assert vm.state.backup_success_message is None
-        assert vm.state.restore_success_message is None
 
     def test_backup_success_message_has_path_param(self, vm, mock_dump_result):
         """backup_success_message 必须携带 path 参数 (供 View 渲染 I18n.get)."""
