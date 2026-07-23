@@ -44,7 +44,8 @@
   - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
-  - [AI 代码检视指南](./docs/reviews/code-review-guide.md)
+  - [AI 代码检视指南](./docs/reviews/ai-review.md)
+  - [AI 问题修复指南](./docs/bug-fix/core-protocol.md)
   - [文档索引](#文档索引)
 
 ---
@@ -644,7 +645,20 @@ except Exception as e:
 
 ### docs/reviews/ — AI 代码检视指南
 
-- [code-review-guide.md](./docs/reviews/code-review-guide.md) — 通用 AI 代码检视指南（三轮检视法 / 10 个质量维度 / 8 个专项 Profile / 项目特定 reviewProfile）
+- [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（约 180 行，51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
+- [review-profiles/](./docs/reviews/review-profiles/) — 9 个专项 Profile（Web/API、前端/移动、消息/管道、数据库/迁移、CLI/IaC、库/SDK、第三方/RPA、AI/ML/LLM、项目 Profile）
+- [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 10 个通用质量维度详细要点
+- [scenario-completeness.md](./docs/reviews/scenario-completeness.md) — 场景完整性与遗漏方法
+- [review-result.schema.json](./docs/reviews/review-result.schema.json) — 机器可读输出 Schema（JSON Schema Draft 2020-12，由程序验证）
+- [review-policy.yaml](./docs/reviews/review-policy.yaml) — 门禁策略（P0-P3 / 阻断规则 / 豁免 / CI 退出码，模型不决定最终门禁）
+- [appendix.md](./docs/reviews/appendix.md) — 附录（执行提示词 + 参考实践）
+- [evals/](./docs/reviews/evals/) — 评测集（已知缺陷 / 场景遗漏 / 提示注入 / 误报 / 信息不足样例）
+
+### docs/bug-fix/ — AI 问题修复指南
+
+- [core-protocol.md](./docs/bug-fix/core-protocol.md) — 核心执行协议（六状态门 + 风险信号触发 + 状态门判定 + 反模式自查）
+- [profiles.md](./docs/bug-fix/profiles.md) — 专项 Profile（测试失败 / 构建依赖 / 性能 / 并发 / 数据迁移 / 安全 / 外部不可用 / 生产事故）
+- [appendix.md](./docs/bug-fix/appendix.md) — 附录（详细方法 / 输入输出模板 / 提示词 / 参考实践）
 
 ---
 
