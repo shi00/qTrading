@@ -83,7 +83,7 @@ class TestSyncStrategiesUseRateLimiter:
     def test_tushare_client_has_rate_limiter(self):
         from data.external.tushare_client import TushareClient
 
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
         with (
             patch("data.external.tushare_client.ConfigHandler") as mock_ch,
             patch("utils.thread_pool.ThreadPoolManager"),
@@ -93,7 +93,7 @@ class TestSyncStrategiesUseRateLimiter:
             mock_ch.get_setting.return_value = False
             client = TushareClient()
             assert hasattr(client, "_rate_limiter") or hasattr(client, "_api_limiters")
-        TushareClient._instance = None
+        TushareClient._reset_singleton()
 
     @pytest.mark.asyncio
     async def test_rate_limiter_async_consume(self):

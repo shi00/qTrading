@@ -280,6 +280,40 @@ class TestDataProcessorSyncStockBasic:
         assert result == 0
 
 
+class TestDataProcessorErrorClassification:
+    """FIND-R2-001: D2 修复 — sync_stock_basic/sync_concepts 错误三分类测试。"""
+
+    @pytest.mark.asyncio
+    async def test_sync_stock_basic_system_error_raises(self):
+        """D2: system 级异常（如 MemoryError）raise 传播。"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        dp.api.get_stock_basic_all = AsyncMock(side_effect=MemoryError("oom"))
+        with patch("data.data_processor.classify_severity", return_value="system"):
+            with pytest.raises(MemoryError, match="oom"):
+                await dp.sync_stock_basic()
+
+    @pytest.mark.asyncio
+    async def test_sync_stock_basic_recoverable_error_returns_zero(self):
+        """D2: recoverable 级异常（如网络错误）降级返回 0。"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        dp.api.get_stock_basic_all = AsyncMock(side_effect=OSError("network timeout"))
+        with patch("data.data_processor.classify_severity", return_value="recoverable"):
+            result = await dp.sync_stock_basic()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_operational_error_returns_zero(self):
+        """D2: operational 级异常（如数据格式错误）降级返回 0。"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        dp.api.get_concept_list = AsyncMock(side_effect=ValueError("bad format"))
+        with patch("data.data_processor.classify_severity", return_value="operational"):
+            result = await dp.sync_concepts()
+        assert result == 0
+
+
 class TestDataProcessorSyncConcepts:
     @pytest.mark.asyncio
     async def test_cancelled(self):
@@ -318,8 +352,57 @@ class TestDataProcessorSyncConcepts:
             mock_aio.gather = AsyncMock(return_value=[detail_df])
             mock_aio.sleep = AsyncMock()
             mock_aio.CancelledError = asyncio.CancelledError
+
+            # A3 修复后 fetch_one 使用 asyncio.wait_for(cancel_event.wait(), timeout)
+            # 替代 asyncio.sleep；测试中将 wait_for 设为立即抛 TimeoutError 的
+            # async 函数，模拟 sleep 正常完成（避免等待 CONCEPT_DELAY 真实秒数）。
+            # 源码使用内置 TimeoutError（ruff UP041），不受 asyncio mock 影响。
+            # 显式 close 传入的协程以消除 "coroutine never awaited" warning。
+            async def _fake_wait_for(coro, timeout=None):
+                coro.close()
+                raise TimeoutError()
+
+            mock_aio.wait_for = _fake_wait_for
             result = await dp.sync_concepts()
             assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_cancel_event_set_during_wait_for(self):
+        """FIND-R1-005: A3 修复 — cancel_event 被 set 时 wait_for 立即返回，
+        随后 is_cancelled() True → raise CancelledError（由 gather 传播，R2 合规）。"""
+        dp = _make_dp()
+        df_c = pd.DataFrame({"code": ["TS1"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.clear_cancel()
+        with patch("data.data_processor.asyncio") as mock_aio:
+            mock_aio.Semaphore = asyncio.Semaphore
+            mock_aio.create_task = asyncio.create_task
+            mock_aio.gather = asyncio.gather
+            mock_aio.sleep = AsyncMock()
+            mock_aio.CancelledError = asyncio.CancelledError
+
+            # wait_for 不抛 TimeoutError，并在调用时 set cancel_event
+            # 模拟取消信号在 sleep 期间被 set → wait() 立即返回（不抛 TimeoutError）
+            async def _fake_wait_for_cancel(coro, timeout=None):
+                coro.close()
+                dp._get_cancel_event().set()
+                return None  # event 被 set 时 wait() 立即返回
+
+            mock_aio.wait_for = _fake_wait_for_cancel
+
+            # fetch_one raise CancelledError → gather 传播 → sync_concepts except 重新 raise
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
+                await dp.sync_concepts()
 
     @pytest.mark.asyncio
     async def test_exception(self):
@@ -853,6 +936,10 @@ class TestDataProcessorCancelControl:
     def test_clear_cancel(self):
         proc = DataProcessor.__new__(DataProcessor)
         proc._cancel_event = None
+        # FIND-R3-001: clear_cancel 访问 self.context.cancel_event（FIND-R1-004 修复），
+        # __new__ 绕过 __init__ 需补 context 属性避免 AttributeError
+        proc.context = MagicMock()
+        proc.context.cancel_event = None
         with patch("data.data_processor.get_loop_local") as mock_gll:
             mock_evt = MagicMock()
             mock_gll.return_value = mock_evt
@@ -946,6 +1033,30 @@ class TestDataProcessorRequestCancel:
         dp = DataProcessor()
         for _name, strategy in dp.strategies.items():
             strategy.cancel = MagicMock()
+        await dp.request_cancel()
+        assert dp.is_cancelled() is True
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_propagates_to_context_cancel_event(self):
+        """FIND-R1-006: A4 修复 — request_cancel 传播到 context.cancel_event。"""
+        dp = _make_dp()
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        mock_cancel_event = MagicMock()
+        dp.context.cancel_event = mock_cancel_event
+        await dp.request_cancel()
+        assert dp.is_cancelled() is True
+        mock_cancel_event.set.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_context_cancel_event_none_safe(self):
+        """FIND-R1-006: A4 修复 — context.cancel_event 为 None 时安全降级（不抛异常）。"""
+        dp = _make_dp()
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        # context.cancel_event 默认 None（无 run_ai_concept_tagging 注入）
+        assert dp.context.cancel_event is None
         await dp.request_cancel()
         assert dp.is_cancelled() is True
 
