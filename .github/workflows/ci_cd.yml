@@ -501,6 +501,7 @@ jobs:
       - name: Run Unit Tests
         env:
           STRICT_SCHEMA_GATE: "1"
+        timeout-minutes: 15
         run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=json --junitxml=junit-unit.xml
 
       - name: Check Per-File Coverage >= 80%

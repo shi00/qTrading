@@ -24,6 +24,7 @@ class TestConftestSafety:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={**os.environ, "TEST_DB_NAME": "prod_db", "CI_PG_PASSWORD": "testpw"},
         )
@@ -40,6 +41,7 @@ class TestConftestSafety:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={
                 **os.environ,
@@ -55,6 +57,7 @@ class TestConftestSafety:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={
                 **os.environ,
@@ -88,6 +91,7 @@ class TestConftestNoHardcodedPassword:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={**os.environ, "GITHUB_RUN_ID": "12345"},
         )
@@ -108,6 +112,7 @@ class TestConftestNoHardcodedPassword:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={
                 **os.environ,
@@ -129,6 +134,7 @@ class TestConftestNoHardcodedPassword:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={**os.environ, "TEST_DB_PASSWORD": "my_explicit_pw"},
         )
@@ -147,6 +153,7 @@ class TestConftestXdistIsolation:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={**os.environ, "PYTEST_XDIST_WORKER": "gw1"},
         )
@@ -165,6 +172,7 @@ class TestConftestXdistIsolation:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            timeout=60,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
             env={**os.environ, "PYTEST_XDIST_WORKER": ""},
         )
@@ -185,6 +193,7 @@ class TestConftestXdistIsolation:
                 [sys.executable, "-c", code],
                 capture_output=True,
                 text=True,
+                timeout=60,
                 cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
                 env={**os.environ, "PYTEST_XDIST_WORKER": worker},
             )
