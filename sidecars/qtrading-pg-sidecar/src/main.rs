@@ -33,6 +33,7 @@ async fn main() -> ExitCode {
         cli::Command::Dump(args) => maint::dump(args).await,
         cli::Command::Restore(args) => maint::restore(args).await,
         cli::Command::MaintenanceShell(args) => maint::maintenance_shell(args).await,
+        cli::Command::ResetPassword(args) => maint::reset_password(args).await,
         cli::Command::Version(args) => commands::version(args.json),
     };
     let code = match result {

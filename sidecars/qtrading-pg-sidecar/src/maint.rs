@@ -822,6 +822,123 @@ async fn wait_for_enter() {
     }
 }
 
+// ---- reset-password ----
+
+/// 通过 `postgres --single` 单用户模式重置 postgres 用户密码（§13.7.8）。
+///
+/// 单用户模式不需要密码认证（PostgreSQL 内部直接执行 SQL），适用于密码丢失场景。
+/// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries →
+///       生成新密码 → `postgres --single -D <dir> postgres` 通过 stdin 注入
+///       `ALTER USER postgres PASSWORD '<new>'` → 写入新 password file →
+///       重写 pg_hba.conf（scram-sha-256，确保新密码生效）→ register_secret。
+///
+/// exit code：
+/// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）
+/// - 40 DATA_DIR_ABNORMAL：数据目录未初始化
+/// - 16 PASSWORD_FAILED：postgres --single 失败 / password file 写入失败
+/// - 30 DUMP_RESTORE_FAILED：pg_hba.conf 重写失败
+pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
+    logging::init(None);
+    let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
+
+    let _lock = acquire_lock(&layout)?;
+    match setup::guard_data_dir(&layout.data_dir)? {
+        DataDirState::Existing => {}
+        DataDirState::Fresh => {
+            eprintln!(
+                "[sidecar] 数据目录未初始化，无密码可重置：{}",
+                layout.data_dir.display()
+            );
+            return Err(exit_codes::DATA_DIR_ABNORMAL);
+        }
+    }
+    setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
+
+    let new_pwd = password::generate_password();
+    let postgres_path = pgbin::tool_path(&layout.install_dir, "postgres");
+    let data_dir_s = layout.data_dir.to_string_lossy().into_owned();
+    // SQL 字符串字面量需用美元引号 $$ 避免 SQL 注入（new_pwd 是 URL-safe 字符集，理论上安全）
+    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;\n");
+
+    let mut cmd = tokio::process::Command::new(&postgres_path);
+    cmd.arg("--single")
+        .args(["-D", &data_dir_s])
+        // 单用户模式不监听 TCP，仅本地 IPC
+        .args(["-c", "listen_addresses="])
+        .arg("postgres")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        // tokio::process::Command 自带 creation_flags 方法（不需 CommandExt trait import）
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        eprintln!(
+            "[sidecar] postgres --single 启动失败 {}：{e}",
+            postgres_path.display()
+        );
+        exit_codes::PASSWORD_FAILED
+    })?;
+
+    // 写入 SQL 到 stdin 触发执行，drop stdin 触发 EOF 让 postgres 退出
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        if let Err(e) = stdin.write_all(sql.as_bytes()).await {
+            eprintln!("[sidecar] 写入 SQL 到 postgres --single stdin 失败：{e}");
+            let _ = child.kill().await;
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+        let _ = stdin.shutdown().await;
+    }
+
+    let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await;
+    let output = match out {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            eprintln!("[sidecar] postgres --single wait 失败：{e}");
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+        Err(_) => {
+            eprintln!("[sidecar] postgres --single 超时 30s");
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+    };
+    if !output.status.success() {
+        eprintln!(
+            "[sidecar] postgres --single 失败 (code {:?})：{}",
+            output.status.code(),
+            logging::sanitize(String::from_utf8_lossy(&output.stderr).trim())
+        );
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 写入新 password file（权限 0600 on Unix）
+    if let Err(e) = password::write_password_file(&layout.password_file, &new_pwd) {
+        eprintln!(
+            "[sidecar] 写入新 password file 失败 {}：{e}",
+            layout.password_file.display()
+        );
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 重写 pg_hba.conf（保持 scram-sha-256 认证，新密码生效）
+    if let Err(e) = setup::write_security_baseline(&layout.data_dir, LISTEN_LOCAL) {
+        eprintln!("[sidecar] pg_hba.conf 重写失败：{e}");
+        return Err(exit_codes::DUMP_RESTORE_FAILED);
+    }
+
+    // 注册新密码为 secret（R9：防止后续日志/异常泄露）
+    logging::register_secret(&new_pwd);
+
+    eprintln!("[sidecar] 密码已重置，请重启 qTrading");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,6 +1060,34 @@ mod tests {
             target_data_dir: None,
         };
         assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reset_password_rejects_uninitialized_dir() {
+        let dir = unique_tmp("resetpw-fresh");
+        let data_dir = dir.join("postgres/17/data");
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(
+            reset_password(args).await,
+            Err(exit_codes::DATA_DIR_ABNORMAL)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reset_password_lock_conflict() {
+        let dir = unique_tmp("resetpw-lock");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(
+            reset_password(args).await,
+            Err(exit_codes::LOCK_CONFLICT)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

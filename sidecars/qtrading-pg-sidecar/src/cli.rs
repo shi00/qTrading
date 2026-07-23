@@ -1,7 +1,8 @@
 //! CLI 定义（pg_plan §6.1 命令列表，clap derive）。
 //!
 //! Phase 1 范围：run/status/stop/version/doctor/dump/restore/maintenance-shell。
-//! `--password-source keyring` 与 `reset-password` 延后至后续 Phase（DoD 未列，YAGNI）。
+//! `--password-source keyring` 延后至后续 Phase（DoD 未列，YAGNI）。
+//! `reset-password` 已落地（§13.7.8，P1-1）。
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ pub enum Command {
     Restore(RestoreArgs),
     /// 临时维护实例：输出脱敏连接信息与 psql 路径，等待用户结束后关闭（需维护锁）
     MaintenanceShell(DataDirArgs),
+    /// 重置 postgres 用户密码（§13.7.8，需维护锁；通过 postgres --single 单用户模式）
+    ResetPassword(DataDirArgs),
     /// 版本与构建元数据
     Version(VersionArgs),
 }
@@ -173,7 +176,7 @@ mod tests {
 
     #[test]
     fn simple_commands_parse() {
-        for sub in ["stop", "status", "doctor", "maintenance-shell"] {
+        for sub in ["stop", "status", "doctor", "maintenance-shell", "reset-password"] {
             let cli = parse(&["qtrading-pg-sidecar", sub, "--data-dir", "/d"]).unwrap();
             assert!(matches!(
                 cli.command,
@@ -181,6 +184,7 @@ mod tests {
                     | Command::Status(_)
                     | Command::Doctor(_)
                     | Command::MaintenanceShell(_)
+                    | Command::ResetPassword(_)
             ));
         }
     }

@@ -6,6 +6,7 @@
 mod common;
 
 use common::*;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -362,7 +363,86 @@ fn test_kill_fallback_history_post_check() {
     cleanup_sidecar(&mut child2, &data_dir);
 }
 
+/// 12. reset-password 成功 roundtrip（§13.7.8）。
+///
+/// 验证：sidecar 正常停止后调 reset-password → exit 0 → password file 已更新 →
+/// 再次 run 验证新密码可连接（ready JSON status=running）。
+#[test]
+fn test_reset_password_succeeds() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_12");
+
+    // 1. run → ready → graceful_stop（sidecar 退出，释放维护锁）
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "first run should exit 0");
+
+    // 2. 读取旧 password file 内容（paths.rs：data_dir.parent()/runtime/password）
+    let password_file = data_dir
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join("password");
+    assert!(password_file.exists(), "password file should exist after run");
+    let old_pwd = std::fs::read_to_string(&password_file).expect("read old password");
+
+    // 3. 调 reset-password → exit 0（sidecar 已退出，锁可用）
+    let reset_code = reset_password_sidecar(&data_dir);
+    assert_eq!(
+        reset_code, 0,
+        "reset-password should succeed when sidecar is stopped"
+    );
+
+    // 4. 读取新 password file 内容，验证已变更
+    let new_pwd = std::fs::read_to_string(&password_file).expect("read new password");
+    assert_ne!(new_pwd, old_pwd, "password should be rotated");
+    assert!(!new_pwd.is_empty(), "new password should not be empty");
+
+    // 5. 再次 run → ready（验证新密码可连接，pg_hba.conf 已重写生效）
+    let mut child2 = spawn_run(&data_dir);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(
+        ready2["status"], "running",
+        "sidecar should ready with new password"
+    );
+
+    cleanup_sidecar(&mut child2, &data_dir);
+}
+
+/// 13. reset-password 锁冲突（§13.7.8 + §13.3）。
+///
+/// 验证：sidecar 运行中（持锁）调 reset-password → exit 50（LOCK_CONFLICT）。
+#[test]
+fn test_reset_password_lock_conflict() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_13");
+
+    // run → ready（sidecar 持锁运行中）
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+
+    // 调 reset-password → exit 50（LOCK_CONFLICT）
+    let reset_code = reset_password_sidecar(&data_dir);
+    assert_eq!(
+        reset_code, 50,
+        "reset-password must be rejected while sidecar is running"
+    );
+
+    cleanup_sidecar(&mut child, &data_dir);
+}
+
 // ---- 辅助函数 ----
+
+/// 执行 `reset-password` 命令，返回 exit code。
+fn reset_password_sidecar(data_dir: &Path) -> u8 {
+    let output = std::process::Command::new(sidecar_path())
+        .arg("reset-password")
+        .arg("--data-dir")
+        .arg(data_dir)
+        .output()
+        .expect("failed to run reset-password");
+    output.status.code().unwrap_or(255) as u8
+}
 
 /// 启动一个短命辅助进程（用于 parent_pid 测试）。
 ///
