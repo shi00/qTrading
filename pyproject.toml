@@ -119,7 +119,7 @@ markers = [
     "integration: Integration tests",
     "e2e: End-to-end tests",
     "slow: Slow tests (real sleeps, heavy I/O)",
-    "network: Tests requiring real network access",
+    "network: Tests requiring real network access (reserved marker, CI currently always executes)",
     "database: Tests requiring database connection",
     "migration: Tests that perform DDL (drop_all/create_all) on shared engine, should run serially",
     "ai: Tests requiring AI service",

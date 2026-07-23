@@ -173,6 +173,28 @@ class TestSanitizeError:
         assert "redis" in result
         assert "myuser" in result
 
+    def test_error_with_no_username_url_credentials(self):
+        """P3-security-URL-Credential-No-Username: 无用户名 URL 凭证（如 redis://:pass@host）也应被脱敏。
+
+        正则用户名捕获组 `([^:@\\s]*)` 允许空用户名，密码替换为 ***，
+        scheme 与 host 保留，输出形如 `redis://:***@host:6379`。
+        """
+        err = ValueError("Redis: redis://:my_secret_pass@host:6379/0")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_secret_pass" not in result
+        assert "***" in result
+        assert "redis" in result
+        assert "host:6379" in result
+
+    def test_error_with_no_username_compound_scheme_url_credentials(self):
+        """P3-security-URL-Credential-No-Username: 无用户名 + 复合 scheme（如 postgresql+asyncpg://:pass@host）也应被脱敏。"""
+        err = ValueError("DB connect: postgresql+asyncpg://:my_db_password@host:5432/mydb")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_db_password" not in result
+        assert "***" in result
+        assert "postgresql+asyncpg" in result
+        assert "host:5432" in result
+
     def test_error_with_access_token(self):
         err = ValueError("Failed: ?access_token=eyJhbGciOiJIUzI1NiJ9")
         result = DataSanitizer.sanitize_error(err)
@@ -434,6 +456,24 @@ class TestSanitizeDict:
         assert result["Token"] == "***"
         assert result["PASSWORD"] == "***"
 
+    def test_non_sensitive_key_with_registered_secret_replaced(self):
+        """P3-security-Sanitize-Args-Non-String-Repr 举一反三: sanitize_dict 非敏感 key 的 str 值含已注册 secret 时应替换。
+
+        旧实现 else 分支 `result[k] = v` 不查 _known_secrets，
+        utils/diagnostics.py 生产路径调用 sanitize_dict 处理环境变量/配置，
+        含 secret 的非敏感 key 名（如自定义环境变量）会泄露明文。
+        """
+        secret = "sk-dict-non-sensitive-key-secret"
+        DataSanitizer.register_secret(secret)
+        try:
+            data = {"custom_env_var": secret, "normal": "value"}
+            result = DataSanitizer.sanitize_dict(data)
+            assert secret not in result["custom_env_var"]
+            assert "***" in result["custom_env_var"]
+            assert result["normal"] == "value"
+        finally:
+            DataSanitizer._reset_known_secrets()
+
 
 class TestSanitizeArgs:
     def test_basic_args(self):
@@ -479,6 +519,51 @@ class TestSanitizeArgs:
         args, _ = DataSanitizer.sanitize_args(df)
         assert "DataFrame" in args[0]
         assert "shape=" in args[0]
+
+    def test_positional_dict_arg_with_registered_secret_replaced(self):
+        """P3-security-Sanitize-Args-Non-String-Repr: dict 位置参数含已注册 secret 时应精确替换为 ***。
+
+        旧实现 else 分支 `repr(arg)[:100]` 不查 secret，含 secret 字段的 dict 会泄露明文。
+        """
+        secret = "sk-registered-dict-secret-1234567890"
+        DataSanitizer.register_secret(secret)
+        try:
+            args, _ = DataSanitizer.sanitize_args({"token": secret})
+            assert secret not in args[0]
+            assert "***" in args[0]
+        finally:
+            DataSanitizer._reset_known_secrets()
+
+    def test_positional_list_arg_with_registered_secret_replaced(self):
+        """P3-security-Sanitize-Args-Non-String-Repr: list 位置参数含已注册 secret 时应精确替换为 ***。"""
+        secret = "sk-registered-list-secret-0987654321"
+        DataSanitizer.register_secret(secret)
+        try:
+            args, _ = DataSanitizer.sanitize_args([secret, "normal_value"])
+            assert secret not in args[0]
+            assert "***" in args[0]
+        finally:
+            DataSanitizer._reset_known_secrets()
+
+    def test_positional_dict_arg_with_secret_crossing_truncation_boundary(self):
+        """P1 修复: secret 跨 repr()[:100] 截断边界时，先在完整 repr 上替换再截断，防止前缀泄露。
+
+        旧实现先截断再替换，当 secret 跨 100 字符边界时，子串中只含 secret 前缀，
+        `if _secret in safe_repr` 为 False，不触发替换，secret 前缀以明文保留。
+        """
+        secret = "sk-boundary-crossing-secret-1234567890"
+        DataSanitizer.register_secret(secret)
+        try:
+            # 构造 dict 使 repr 前 100 字符只含 secret 前缀（secret 跨边界）
+            # repr({"k": "x"*67, "t": "sk-boundary-crossing-secret-1234567890"})
+            # 前 100 字符约: {'k': 'xxxx...xxx', 't': 'sk-boundary-cross (此处 secret 被截断)
+            long_value = "x" * 67
+            args, _ = DataSanitizer.sanitize_args({"k": long_value, "t": secret})
+            # secret 的前缀不应出现在截断后的输出中（最多含 *** 的一部分）
+            assert secret not in args[0]
+            assert "***" in args[0]
+        finally:
+            DataSanitizer._reset_known_secrets()
 
 
 class TestAIServiceErrorSanitization:
