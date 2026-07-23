@@ -22,9 +22,9 @@ classifiers = [
 #   * tushare: API methods and data formats vary between versions; client code is tightly coupled.
 #   * akshare: API methods, return types, and column names vary between versions; client code calls 5+ ak.stock_* methods and imports internal module stock_disclosure_cninfo.
 dependencies = [
-    "flet==0.86.1",
-    "flet-desktop==0.86.1",
-    "flet-charts==0.86.1",
+    "flet==0.86.2",
+    "flet-desktop==0.86.2",
+    "flet-charts==0.86.2",
     "tushare==1.4.29",
     "akshare==1.18.64",
     "requests>=2.34.0",
