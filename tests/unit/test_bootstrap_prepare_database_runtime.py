@@ -2,7 +2,7 @@
 
 测试分组（4 个）：
 - noop 路径：external 模式 / embedded_pg_enabled=False
-- 启动并注入 URL 路径：embedded + enabled=True
+- 启动并返回 URL 路径：embedded + enabled=True → 返回 ConnectionInfo.url（D15）
 - 失败传播路径：service.start raise → prepare_database_runtime 重新 raise
 
 Mock 策略（D17/D18）：
@@ -10,8 +10,8 @@ Mock 策略（D17/D18）：
 - monkeypatch EmbeddedPostgresService.from_config 返回 mock service
 - monkeypatch ConfigHandler.load_config 返回 dict（base = get_default_config()）
 - AppConfig.model_validate 真实运行（不 mock）
-- monkeypatch ConfigHandler.save_db_config 记录调用
-- 复用 tests/conftest.py 既有 keyring mock（save_db_config 内部写 keyring）
+- D15（pg-plan §22）：prepare_database_runtime 不再调 save_db_config，
+  改为返回 URL 供调用方用 override_db_url 包裹 CacheManager 构造
 """
 
 from __future__ import annotations
@@ -37,13 +37,12 @@ def _make_config_dict(**overrides) -> dict:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_prepare_database_runtime_noop_when_mode_external(monkeypatch, tmp_path: Path) -> None:
-    """env 未设 / =external → 不调 from_config、不调 save_db_config。"""
+    """env 未设 / =external → 不调 from_config、返回 None。"""
     monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
 
     from app.bootstrap import prepare_database_runtime
 
     from_config_calls: list[int] = []
-    save_db_config_calls: list[tuple] = []
 
     def _from_config(_cfg):
         from_config_calls.append(1)
@@ -53,27 +52,23 @@ async def test_prepare_database_runtime_noop_when_mode_external(monkeypatch, tmp
         "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
         classmethod(lambda cls, cfg: _from_config(cfg)),
     )
-    monkeypatch.setattr(
-        "utils.config_handler.ConfigHandler.save_db_config",
-        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
-    )
     # M5: mock load_config 返回 embedded_pg_enabled=False，避免触发 WARNING
     monkeypatch.setattr(
         "utils.config_handler.ConfigHandler.load_config",
         staticmethod(lambda: _make_config_dict(embedded_pg_enabled=False)),
     )
 
-    await prepare_database_runtime()
+    result = await prepare_database_runtime()
 
     assert from_config_calls == []
-    assert save_db_config_calls == []
+    assert result is None
 
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_prepare_database_runtime_warns_when_external_mode_but_config_enabled(
     monkeypatch, tmp_path: Path, caplog
 ) -> None:
-    """M5: mode=external 但 embedded_pg_enabled=True → 记 WARNING（用户可能误配置）。"""
+    """M5: mode=external 但 embedded_pg_enabled=True → 记 WARNING（用户可能误配置），返回 None。"""
     import logging
 
     monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
@@ -87,19 +82,14 @@ async def test_prepare_database_runtime_warns_when_external_mode_but_config_enab
     )
 
     from_config_calls: list[int] = []
-    save_db_config_calls: list[tuple] = []
 
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
         classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
     )
-    monkeypatch.setattr(
-        "utils.config_handler.ConfigHandler.save_db_config",
-        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
-    )
 
     with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
-        await prepare_database_runtime()
+        result = await prepare_database_runtime()
 
     # 验证 WARNING 日志含关键信息
     assert any("embedded_pg_enabled=True" in r.message and "will NOT start" in r.message for r in caplog.records), (
@@ -107,12 +97,12 @@ async def test_prepare_database_runtime_warns_when_external_mode_but_config_enab
     )
     # 验证不启动 service
     assert from_config_calls == []
-    assert save_db_config_calls == []
+    assert result is None
 
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_prepare_database_runtime_noop_when_config_disabled(monkeypatch, tmp_path: Path, caplog) -> None:
-    """env=embedded 但 embedded_pg_enabled=False → 记 WARNING，不调 service.start、不调 save_db_config。"""
+    """env=embedded 但 embedded_pg_enabled=False → 记 WARNING，不调 service.start、返回 None。"""
     monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
 
     from app.bootstrap import prepare_database_runtime
@@ -124,7 +114,6 @@ async def test_prepare_database_runtime_noop_when_config_disabled(monkeypatch, t
     )
 
     start_calls: list[int] = []
-    save_db_config_calls: list[tuple] = []
 
     mock_service = MagicMock()
     mock_service.start = AsyncMock(side_effect=lambda: start_calls.append(1))
@@ -132,18 +121,14 @@ async def test_prepare_database_runtime_noop_when_config_disabled(monkeypatch, t
         "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
         classmethod(lambda cls, _cfg: mock_service),
     )
-    monkeypatch.setattr(
-        "utils.config_handler.ConfigHandler.save_db_config",
-        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
-    )
 
     import logging
 
     with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
-        await prepare_database_runtime()
+        result = await prepare_database_runtime()
 
     assert start_calls == []
-    assert save_db_config_calls == []
+    assert result is None
     # 验证 WARNING 日志含关键信息
     assert any("embedded_pg_enabled=False" in r.message for r in caplog.records), (
         f"期望 WARNING 日志含 embedded_pg_enabled=False，实际：{[r.message for r in caplog.records]}"
@@ -151,8 +136,8 @@ async def test_prepare_database_runtime_noop_when_config_disabled(monkeypatch, t
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_prepare_database_runtime_starts_service_and_injects_url(monkeypatch, tmp_path: Path) -> None:
-    """env=embedded + enabled=True → mock service.start 返回 ConnectionInfo，验证 save_db_config 被调用。"""
+async def test_prepare_database_runtime_starts_service_and_returns_url(monkeypatch, tmp_path: Path) -> None:
+    """D15: env=embedded + enabled=True → mock service.start 返回 ConnectionInfo，验证返回 info.url。"""
     monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
 
     from app.bootstrap import prepare_database_runtime
@@ -172,8 +157,9 @@ async def test_prepare_database_runtime_starts_service_and_injects_url(monkeypat
     )
 
     # ConnectionInfo.url 含 password 用于 urlparse 解析
+    fake_url = "postgresql+asyncpg://qtrading:mock_password_55432@127.0.0.1:55432/qtrading"
     fake_info = ConnectionInfo(
-        url="postgresql+asyncpg://qtrading:mock_password_55432@127.0.0.1:55432/qtrading",
+        url=fake_url,
         port=55432,
         pid=12345,
         data_dir="/fake/pgdata",
@@ -185,27 +171,23 @@ async def test_prepare_database_runtime_starts_service_and_injects_url(monkeypat
         classmethod(lambda cls, _cfg: mock_service),
     )
 
+    # D15：mock save_db_config 验证不被调用（embedded URL 不再持久化）
     save_db_config_calls: list[dict] = []
     monkeypatch.setattr(
         "utils.config_handler.ConfigHandler.save_db_config",
         staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs) or True),
     )
 
-    await prepare_database_runtime()
+    result = await prepare_database_runtime()
 
-    # 验证 save_db_config 被调用且参数含正确 host/port/user/password/database
-    assert len(save_db_config_calls) == 1, f"期望 save_db_config 调用 1 次，实际：{len(save_db_config_calls)}"
-    kwargs = save_db_config_calls[0]
-    assert kwargs["host"] == "127.0.0.1"
-    assert kwargs["port"] == 55432
-    assert kwargs["user"] == "qtrading"
-    assert kwargs["password"] == "mock_password_55432"
-    assert kwargs["database"] == "qtrading"
+    # 验证返回 info.url（D15：不再 save_db_config 持久化）
+    assert result == fake_url, f"期望返回 ConnectionInfo.url，实际：{result}"
+    assert save_db_config_calls == [], f"D15: 不应调用 save_db_config，实际：{save_db_config_calls}"
 
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_prepare_database_runtime_propagates_start_failure(monkeypatch, tmp_path: Path) -> None:
-    """mock service.start raise EmbeddedPostgresStartError → prepare_database_runtime 重新 raise，不调 save_db_config。"""
+    """mock service.start raise EmbeddedPostgresStartError → prepare_database_runtime 重新 raise，不返回 URL。"""
     monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
 
     from app.bootstrap import prepare_database_runtime
@@ -223,16 +205,8 @@ async def test_prepare_database_runtime_propagates_start_failure(monkeypatch, tm
         classmethod(lambda cls, _cfg: mock_service),
     )
 
-    save_db_config_calls: list[tuple] = []
-    monkeypatch.setattr(
-        "utils.config_handler.ConfigHandler.save_db_config",
-        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
-    )
-
     with pytest.raises(EmbeddedPostgresStartError, match="fake start failure"):
         await prepare_database_runtime()
-
-    assert save_db_config_calls == []
 
 
 @pytest.mark.asyncio(loop_scope="function")

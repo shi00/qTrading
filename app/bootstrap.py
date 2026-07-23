@@ -335,22 +335,26 @@ def mask_sensitive(value):
     return DataSanitizer.sanitize_token(value)
 
 
-async def prepare_database_runtime() -> None:
+async def prepare_database_runtime() -> str | None:
     """根据数据库模式准备运行时（Phase 2 §3.4）。
 
-    - embedded: 启动 EmbeddedPostgresService → save_db_config 注入 URL（Priority 2 路径）
-    - external: 无操作（沿用既有 DATABASE_URL/db_* 配置）
+    - embedded: 启动 EmbeddedPostgresService → 返回 ``info.url``，由调用方用
+      ``override_db_url(target_url)`` 包裹 ``CacheManager()`` 构造（D15：不再持久化到 config）
+    - external: 返回 ``None``（沿用既有 DATABASE_URL/db_* 配置）
 
     必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
 
     模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 external）。
+
+    Returns:
+        embedded 模式且启动成功时返回 sidecar ``ConnectionInfo.url``；
+        external 模式 / 未启用 / 跳过时返回 ``None``。
 
     Raises:
         EmbeddedPostgresStartError: sidecar 启动失败时透传（不吞没，R2 红线要求
             CancelledError 也透传）。
     """
     import os
-    from urllib.parse import urlparse
 
     mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
     if mode != "embedded":
@@ -365,7 +369,7 @@ async def prepare_database_runtime() -> None:
                 "embedded PostgreSQL service will NOT start (external mode takes precedence)",
                 mode,
             )
-        return
+        return None
 
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService
     from utils.config_handler import ConfigHandler
@@ -374,7 +378,7 @@ async def prepare_database_runtime() -> None:
     config = AppConfig.model_validate(ConfigHandler.load_config())
     if not config.embedded_pg_enabled:
         logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
-        return
+        return None
 
     service = EmbeddedPostgresService.from_config(config)
     # H3: start 失败时清理单例，避免后续 CacheManager 误用残留状态
@@ -383,18 +387,11 @@ async def prepare_database_runtime() -> None:
     except Exception:
         EmbeddedPostgresService._reset_singleton()
         raise
-    # URL 由 service 构造为 postgresql+asyncpg://user:password@host:port/db
-    parsed = urlparse(info.url)
-    password = parsed.password or ""
-    ConfigHandler.save_db_config(
-        host=config.embedded_pg_listen,
-        port=info.port,
-        user=config.embedded_pg_username,
-        password=password,
-        database=config.embedded_pg_database,
-    )
     logger.info(
         "[Bootstrap] embedded postgres ready on %s:%s",
         config.embedded_pg_listen,
         info.port,
     )
+    # D15（pg-plan §22）：返回 URL 供调用方用 override_db_url 包裹 CacheManager 构造，
+    # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config）。
+    return info.url

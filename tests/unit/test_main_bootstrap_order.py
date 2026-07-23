@@ -76,3 +76,23 @@ def test_main_imports_log_exception_with_severity() -> None:
         "main 模块应导入 log_exception_with_severity（用于 prepare_database_runtime 失败时记 severity 日志）"
     )
     assert hasattr(main_mod, "sys"), "main 模块应导入 sys（用于 sys.exit(1) 强制退出）"
+
+
+def test_main_wraps_cache_manager_with_override_db_url() -> None:
+    """D15（pg-plan §22）：main() 用 override_db_url 包裹 CacheManager() 构造。
+
+    Phase 2 §3.4 旧实现：prepare_database_runtime 调 save_db_config 持久化 embedded URL
+    D15 新实现：prepare_database_runtime 返回 URL，main 用 override_db_url(url) 包裹
+    CacheManager() 构造（不再持久化到 config，避免污染用户配置）。
+
+    源码静态分析断言：
+    - main() 源码含 "override_db_url(" 调用
+    - main() 源码含 "with override_db_url(" 上下文管理器用法
+    """
+    source = inspect.getsource(main)
+    assert "override_db_url" in source, (
+        f"main() 源码应含 'override_db_url'（D15：包裹 CacheManager 构造），实际源码片段：\n{source[:2000]}"
+    )
+    assert "with override_db_url(" in source, (
+        f"main() 源码应含 'with override_db_url(' 上下文管理器用法（D15），实际源码片段：\n{source[:2000]}"
+    )

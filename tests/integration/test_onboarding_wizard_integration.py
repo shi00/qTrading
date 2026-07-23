@@ -108,7 +108,11 @@ class TestOnboardingDBIntegration:
 
     @pytest.mark.asyncio
     async def test_db_success_advances_to_token_step(self, isolated_config, mock_db_thread_pool):
-        """DB 验证成功 → OnboardingViewModel 状态前进到 token 步骤（step index 2）。"""
+        """DB 验证成功 → OnboardingViewModel 状态前进到 token 步骤（step index 2）。
+
+        P1-9: 精确断言 - 验证 DatabaseConfigService.test_connection 调用参数、
+        ConfigHandler.save_db_config 调用次数与参数、state 字段值（status_message key）。
+        """
         db_vm = _make_db_vm(isolated_config)
         _fill_valid_db_config(db_vm)
 
@@ -125,7 +129,7 @@ class TestOnboardingDBIntegration:
                     server_version="16.0",
                     database_exists=True,
                 ),
-            ),
+            ) as mock_test_connection,
             patch(
                 "data.persistence.db_config_service.DatabaseConfigService.ensure_tables_exist",
                 new_callable=AsyncMock,
@@ -136,39 +140,79 @@ class TestOnboardingDBIntegration:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
+            patch("utils.config_handler.ConfigHandler.save_db_config") as mock_save_db_config,
         ):
             await onboarding_vm.next_step()
 
+        # P1-9: 精确断言 - 验证 test_connection 调用参数
+        mock_test_connection.assert_awaited_once_with(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="password",
+            database="testdb",
+        )
+        # P1-9: 精确断言 - 验证 save_db_config 被调用一次且参数正确
+        mock_save_db_config.assert_called_once_with(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="password",
+            database="testdb",
+        )
         assert onboarding_vm.current_step == 2  # token step
         assert onboarding_vm.step_validated["database"] is True
         # DatabaseConfigPanelViewModel 显示保存成功状态
         assert db_vm.state.is_saving is False
         assert db_vm.state.status_type == "success"
+        # P1-9: 验证 status_message key（VM 只产出 i18n key, 不感知 locale）
+        assert db_vm.state.status_message is not None
+        assert db_vm.state.status_message.key == "db_msg_saved"
 
     @pytest.mark.asyncio
     async def test_db_auth_failure_stays_at_database_step(self, isolated_config, mock_db_thread_pool):
-        """DB 验证失败（认证错误）→ OnboardingViewModel 状态停留在 database 步骤。"""
+        """DB 验证失败（认证错误）→ OnboardingViewModel 状态停留在 database 步骤。
+
+        P1-9: 精确断言 - 验证 test_connection 调用参数、save_db_config 未被调用、
+        status_message key（_raw_msg_ 表示动态错误消息包装）。
+        """
         db_vm = _make_db_vm(isolated_config)
         _fill_valid_db_config(db_vm)
 
         onboarding_vm = _make_onboarding_vm_with_db(db_vm)
         onboarding_vm.current_step = 1  # database step
 
-        with patch(
-            "data.persistence.db_config_service.DatabaseConfigService.test_connection",
-            new_callable=AsyncMock,
-            return_value=ConnectionResult(
-                status=ConnectionStatus.AUTHENTICATION_ERROR,
-                message="Authentication failed",
-            ),
+        with (
+            patch(
+                "data.persistence.db_config_service.DatabaseConfigService.test_connection",
+                new_callable=AsyncMock,
+                return_value=ConnectionResult(
+                    status=ConnectionStatus.AUTHENTICATION_ERROR,
+                    message="Authentication failed",
+                ),
+            ) as mock_test_connection,
+            patch("utils.config_handler.ConfigHandler.save_db_config") as mock_save_db_config,
         ):
             await onboarding_vm.next_step()
 
+        # P1-9: 精确断言 - 验证 test_connection 调用参数
+        mock_test_connection.assert_awaited_once_with(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="password",
+            database="testdb",
+        )
+        # P1-9: 失败路径不应保存配置
+        mock_save_db_config.assert_not_called()
         assert onboarding_vm.current_step == 1  # stays at database
         assert not onboarding_vm.step_validated.get("database", False)
         # DatabaseConfigPanelViewModel 显示错误状态
         assert db_vm.state.status_type == "error"
         assert db_vm.state.is_saving is False
+        # P1-9: 验证 status_message key（_raw_msg_ 表示动态错误消息包装）
+        assert db_vm.state.status_message is not None
+        assert db_vm.state.status_message.key == "_raw_msg_"
 
     @pytest.mark.asyncio
     async def test_db_connection_error_stays_at_database_step(self, isolated_config, mock_db_thread_pool):

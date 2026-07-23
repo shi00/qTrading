@@ -62,21 +62,36 @@ Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop 
 
 #if TargetVariant == "embedded"
 [Code]
-// Phase 5 失败注入 #32：qTrading 运行中启动安装器被拒绝
+// Phase 5 失败注入 #32 + P1-11：qTrading 主进程或 sidecar 运行中启动安装器被拒绝
 // 使用 tasklist + find（Windows 原生，无需 PowerShell，Inno Setup Exec 调用 cmd 更稳定）
 // find 返回 0 表示找到匹配（进程存在），非 0 表示未找到
-function InitializeSetup(): Boolean;
+function IsProcessRunning(const ProcessName: String): Boolean;
 var
   ResultCode: Integer;
 begin
-  if Exec(ExpandConstant('{cmd}'), '/C tasklist /FI "IMAGENAME eq AStockScreener.exe" | find "AStockScreener.exe"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  Result := False;
+  if Exec(ExpandConstant('{cmd}'), '/C tasklist /FI "IMAGENAME eq ' + ProcessName + '" | find "' + ProcessName + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode = 0 then
-    begin
-      MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
-      Result := False;
-      Exit;
-    end;
+      Result := True;
+  end;
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  if IsProcessRunning('AStockScreener.exe') then
+  begin
+    MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  // P1-11: sidecar 运行中（用户手动启动维护实例或异常残留）也拒绝安装，
+  // 避免升级期间 sidecar 持有 PGDATA 文件锁导致 [UninstallRun] stop 失败
+  if IsProcessRunning('qtrading-pg-sidecar.exe') then
+  begin
+    MsgBox('qTrading 数据库服务正在运行，请先关闭 qTrading 后再升级。', mbError, MB_OK);
+    Result := False;
+    Exit;
   end;
   Result := True;
 end;

@@ -2,17 +2,22 @@
 
 提供数据库备份/恢复命令:
 - "手动备份" (start_backup): 调用 ``EmbeddedPgMaintenanceService.dump(output_path)``
-- "恢复向导" (start_restore_wizard → confirm_restore): 三步式确认流程
+- "恢复向导" (start_restore_wizard → confirm_restore): 引导离线恢复流程
   - Step 1 (start_restore_wizard): 设置 restore_path + confirm_state="pending"
-  - Step 2 (confirm_restore): confirm_state="confirmed" + 调用 ``restore(input_path)``
+  - Step 2 (confirm_restore): confirm_state="offline_guidance" + 显示离线恢复指引消息
+    (D36: UI 不直接执行 restore, 因为 §13.3 PGDATA 级操作必须持维护锁,
+     qTrading 运行中调用 sidecar restore 会因锁冲突失败 exit 50.
+     引导用户关闭 qTrading 后通过离线维护脚本执行 restore)
   - 取消 (cancel_restore): confirm_state="cancelled" + 清空 restore_path
+  - 关闭指引 (dismiss_offline_guidance): confirm_state="idle" + 清空 restore_path
 
 VM 不感知 locale: state 用 Message dataclass 产出 (key, params),
 View 渲染时 I18n.get(msg.key, **msg.params)。
 
 线程模型:
-- start_backup / confirm_restore 是 async 命令, 调用 MaintenanceService.dump/restore
-  (两者已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
+- start_backup 是 async 命令, 调用 MaintenanceService.dump
+  (dump 已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
+- confirm_restore 是 async 命令但不调用 sidecar (仅设 state 显示指引)
 - 异常处理: ``except Exception`` 设 error_message
   (R2: CancelledError 是 BaseException 子类, 自动透传, 不被捕获)
 """
@@ -40,19 +45,20 @@ class BackupRestoreState:
     confirm_state 取值:
     - "idle": 初始 / 已完成 / 已取消
     - "pending": 已选备份文件, 等待用户确认
-    - "confirmed": 用户已确认, 正在执行恢复
+    - "offline_guidance": 用户已确认, 显示离线恢复指引消息 (D36: 不直接调 sidecar restore)
     - "cancelled": 用户已取消
+
+    注: is_restoring / restore_success_message / restore_step3_executing 已移除 (P1-7)，
+    D36 决策下 UI 不直接执行 restore，无执行中状态与成功消息。
     """
 
     is_backing_up: bool = False
-    is_restoring: bool = False
     backup_path: str | None = None
     restore_path: str | None = None
     progress_message: Message | None = None
     error_message: Message | None = None
     confirm_state: str = "idle"
     backup_success_message: Message | None = None
-    restore_success_message: Message | None = None
 
 
 class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
@@ -67,8 +73,10 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
     命令:
     - start_backup(output_path) (async): 调用 dump() 更新 state
     - start_restore_wizard(input_path) (async): Step 1, 设置 restore_path + confirm_state="pending"
-    - confirm_restore() (async): Step 2→3, confirm_state="confirmed" + 调用 restore()
+    - confirm_restore() (async): Step 2, confirm_state="offline_guidance" + 显示离线恢复指引消息
+      (D36: 不直接调用 sidecar restore, 因 §13.3 维护锁在 qTrading 运行时会冲突)
     - cancel_restore() (sync): confirm_state="cancelled" + 清空 restore_path
+    - dismiss_offline_guidance() (sync): confirm_state="idle" + 清空 restore_path
 
     Args:
         maintenance_service: 可选 DI (测试注入); 为 None 时懒加载单例
@@ -128,7 +136,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         """恢复向导 Step 1: 设置 restore_path + confirm_state="pending".
 
         - restore 文件存在性校验: 不存在时直接设 error_message, 不进入 pending
-        - 清空之前的 restore_success_message / error_message
+        - 清空之前的 error_message
         """
         if not input_path.exists():
             logger.warning("[BackupRestoreVM] restore file not found: %s", input_path)
@@ -142,15 +150,18 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             restore_path=str(input_path),
             confirm_state="pending",
             error_message=None,
-            restore_success_message=None,
         )
 
     async def confirm_restore(self) -> None:
-        """恢复向导 Step 2→3: confirm_state="confirmed" + 调用 ``restore(input_path)``.
+        """恢复向导 Step 2: confirm_state="offline_guidance" + 显示离线恢复指引.
+
+        D36 决策: UI 不直接调用 ``svc.restore()``, 因为 §13.3 PGDATA 级操作必须持维护锁,
+        qTrading 运行中调用 sidecar restore 会因锁冲突失败 exit 50.
+        引导用户关闭 qTrading 后通过离线维护脚本 (qtrading-db-maintenance.bat/.sh) 执行 restore.
 
         - 仅当 confirm_state=="pending" 时执行 (防止重复触发)
         - restore_path 为 None 时直接设 error_message (防御性)
-        - 异常时设 error_message + confirm_state="idle"
+        - 注入 backup_path 参数到指引消息: 用户可在指引中看到所选备份文件路径 (P1-4)
         """
         if self._state.confirm_state != "pending":
             logger.debug(
@@ -158,39 +169,37 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
                 self._state.confirm_state,
             )
             return
-        restore_path_str = self._state.restore_path
-        if restore_path_str is None:
+        if self._state.restore_path is None:
             self._set_state(
                 error_message=Message("restore_failed"),
                 confirm_state="idle",
             )
             return
         self._set_state(
-            confirm_state="confirmed",
-            is_restoring=True,
-            progress_message=Message("restore_in_progress"),
+            confirm_state="offline_guidance",
+            progress_message=Message(
+                "restore_offline_guidance",
+                params={"backup_path": self._state.restore_path or ""},
+            ),
             error_message=None,
         )
-        try:
-            svc = self._get_maintenance_service()
-            input_path = Path(restore_path_str)
-            await svc.restore(input_path)
-            self._set_state(
-                is_restoring=False,
-                confirm_state="idle",
-                restore_path=None,
-                progress_message=None,
-                restore_success_message=Message("restore_success"),
+
+    def dismiss_offline_guidance(self) -> None:
+        """关闭离线恢复指引: confirm_state="idle" + 清空 restore_path.
+
+        仅当 confirm_state=="offline_guidance" 时生效.
+        """
+        if self._state.confirm_state != "offline_guidance":
+            logger.debug(
+                "[BackupRestoreVM] dismiss_offline_guidance skipped, confirm_state=%s",
+                self._state.confirm_state,
             )
-        except Exception as exc:
-            logger.error("[BackupRestoreVM] confirm_restore failed: %s", exc, exc_info=True)
-            self._set_state(
-                is_restoring=False,
-                confirm_state="idle",
-                restore_path=None,
-                progress_message=None,
-                error_message=Message("restore_failed"),
-            )
+            return
+        self._set_state(
+            confirm_state="idle",
+            restore_path=None,
+            progress_message=None,
+        )
 
     def cancel_restore(self) -> None:
         """取消恢复: confirm_state="cancelled" + 清空 restore_path.

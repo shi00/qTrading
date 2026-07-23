@@ -1,6 +1,8 @@
-﻿# installer_smoke_running_app.ps1
-# Phase 5 DoD §17.6 失败注入 #32 验证脚本
-# 验证 installer.iss InitializeSetup 前置检测：qTrading 运行中拒绝安装
+# installer_smoke_running_app.ps1
+# Phase 5 DoD §17.6 失败注入 #32 + P1-11 验证脚本
+# 验证 installer.iss InitializeSetup 前置检测：
+#   1. qTrading 主进程运行中拒绝安装 (#32)
+#   2. qtrading-pg-sidecar 运行中拒绝安装 (P1-11)
 # 用法: powershell -File scripts/installer_smoke_running_app.ps1 -InstallerPath <path>
 
 [CmdletBinding()]
@@ -100,8 +102,40 @@ try {
     Assert-True ($null -ne $procAfter) "qTrading still running (PID: $($proc.Id))"
     Assert-True (-not $procAfter.HasExited) "qTrading not exited"
 
+    # ---- P1-11: sidecar 运行中拒绝安装 ----
+    # 清理主进程，保留干净环境测试 sidecar 独立运行场景
+    Stop-QtradingGraceful
+    Start-Sleep -Seconds 2
+
+    Write-Step "6. Start qtrading-pg-sidecar (keep running, P1-11)"
+    $sidecarExe = Join-Path $AppInstallDir "_internal\sidecars\qtrading-pg-sidecar.exe"
+    if (-not (Test-Path $sidecarExe)) {
+        Write-Host "  sidecar binary not found at $sidecarExe" -ForegroundColor Yellow
+        Write-Host "  Skipping P1-11 sidecar rejection scenario (dev build without sidecar)" -ForegroundColor Yellow
+    } else {
+        # sidecar run 会驻留（等 stdin EOF 退出），用 Start-Process 启动后不等待
+        $sidecarProc = Start-Process -FilePath $sidecarExe -ArgumentList "run", "--data-dir", "$env:LOCALAPPDATA\qTrading\postgres\17\data", "--password-file", "$env:TEMP\fake_sidecar_pwd" -PassThru
+        Start-Sleep -Seconds 3
+        Assert-True (-not $sidecarProc.HasExited) "sidecar running (PID: $($sidecarProc.Id))"
+
+        # STEP 7: sidecar 运行中尝试安装（应被拒绝）
+        Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"
+        $installResult2 = & $InstallerPath /SILENT /NORESTART 2>&1
+        $installExitCode2 = $LASTEXITCODE
+
+        Write-Host "  Installer exit code: $installExitCode2"
+        Assert-True ($installExitCode2 -ne 0) "Installer rejected (exit code non-zero: $installExitCode2)"
+
+        # STEP 8: 验证 sidecar 仍在运行
+        Write-Step "8. Verify sidecar still running (not killed by installer)"
+        Start-Sleep -Seconds 2
+        $sidecarAfter = Get-Process -Id $sidecarProc.Id -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $sidecarAfter) "sidecar still running (PID: $($sidecarProc.Id))"
+        Assert-True (-not $sidecarAfter.HasExited) "sidecar not exited"
+    }
+
     Write-Host "`n=== RUNNING APP REJECTION SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "InitializeSetup correctly rejected install while qTrading running" -ForegroundColor Green
+    Write-Host "InitializeSetup correctly rejected install while qTrading or sidecar running" -ForegroundColor Green
 
     # 清理
     Stop-QtradingGraceful
