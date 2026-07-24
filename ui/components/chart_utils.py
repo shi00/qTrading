@@ -2,20 +2,17 @@
 K-Line Chart utilities using mplfinance.
 
 Generates professional candlestick charts with volume subplots and
-moving averages, rendered as in-memory PNG for inline display via ft.Image.
+moving averages, returning a ``matplotlib.figure.Figure`` for inline
+display via ``flet_charts.MatplotlibChartWithToolbar``.
 """
 
-import base64
-import io
 import logging
 
-import matplotlib
 import mplfinance as mpf
 import pandas as pd
 
-matplotlib.use("Agg")  # Non-interactive backend, safe for threading
-
 import flet as ft
+from matplotlib.figure import Figure
 
 from ui.theme import AppColors
 
@@ -56,24 +53,31 @@ def _build_style(is_dark: bool):
     )
 
 
-def generate_kline_png(
+def generate_kline_figure(
     df: pd.DataFrame,
     title: str = "",
-    width: int = 880,
-    height: int = 440,
-    theme_mode=None,
-) -> str:
+    figsize: tuple[float, float] = (8.8, 4.4),
+    theme_mode: str | None = None,
+) -> Figure:
     """
-    Generate a K-line chart PNG and return it as a **base64 encoded string**,
-    ready for ``ft.Image(src=...)`` (V1: src 直接支持 base64 字符串).
+    Generate a K-line chart and return it as a ``matplotlib.figure.Figure``,
+    ready for ``flet_charts.MatplotlibChartWithToolbar(figure=...)``.
+
+    The figure is detached from pyplot's global ``Gcf.figs`` registry to
+    prevent memory leak (flet_charts ``MatplotlibChart.will_unmount`` does
+    not close the figure). The caller owns the figure reference; when the
+    MatplotlibChart control is garbage-collected, the figure is freed.
+
+    Theme is detected once at generation time; switching theme after the
+    figure is rendered will NOT re-render (caller must re-invoke if needed).
 
     :param df: DataFrame requiring columns: trade_date, open, high, low, close.
                Optional: vol (volume).
     :param title: Chart title text.
-    :param width: Image width in pixels.
-    :param height: Image height in pixels.
+    :param figsize: Initial figure (width, height) in inches for aspect ratio.
+                    The MatplotlibChart control resizes adaptively.
     :param theme_mode: "light" | "dark" | None (auto-detect from AppColors).
-    :returns: base64 PNG string.
+    :returns: matplotlib.figure.Figure instance.
     """
     if df is None or df.empty:
         raise ValueError("Empty DataFrame — cannot render chart")
@@ -116,46 +120,24 @@ def generate_kline_png(
     # ── 3. Moving Averages ───────────────────────────────────────
     mav = (5, 10, 20)
 
-    # ── 4. Render to PNG buffer ──────────────────────────────────
-    buf = io.BytesIO()
-    dpi = 100
-    figsize = (width / dpi, height / dpi)
+    # ── 4. Render to Figure ──────────────────────────────────────
+    # returnfig=True returns (fig, axeslist). Detach the figure from pyplot's
+    # global Gcf.figs registry so it does not accumulate across dialog opens
+    # (flet_charts MatplotlibChart.will_unmount does not close the figure).
+    fig, _axes = mpf.plot(
+        chart_df,
+        type="candle",
+        style=style,
+        title=title,
+        mav=mav,
+        volume=has_volume,
+        figsize=figsize,
+        tight_layout=True,
+        returnfig=True,
+    )
+    from matplotlib._pylab_helpers import Gcf
 
-    try:
-        mpf.plot(
-            chart_df,
-            type="candle",
-            style=style,
-            title=title,
-            mav=mav,
-            volume=has_volume,
-            figsize=figsize,
-            tight_layout=True,
-            savefig=dict(fname=buf, dpi=dpi, bbox_inches="tight"),
-        )
-        buf.seek(0)
-
-        # ── 5. Base64 encode ─────────────────────────────────────
-        b64 = base64.b64encode(buf.read()).decode("ascii")
-        return b64
-    finally:
-        # 确保异常路径也释放资源（M17）
-        buf.close()
-        # ── 6. Cleanup matplotlib figures to prevent memory leak ─
-        import matplotlib.pyplot as plt
-
-        plt.close("all")
-
-
-# ── Legacy compatibility wrappers (kept for any external callers) ──
-
-
-def create_kline_chart(df, title="", theme_mode=None):
-    """Legacy wrapper — returns base64 PNG string instead of Plotly Figure."""
-    return generate_kline_png(df, title=title, theme_mode=theme_mode)
-
-
-def generate_kline_html(df, title="", theme_mode=None):
-    """Legacy wrapper — returns an <img> HTML tag with embedded base64 PNG."""
-    b64 = generate_kline_png(df, title=title, theme_mode=theme_mode)
-    return f'<html><body style="margin:0"><img src="data:image/png;base64,{b64}" style="width:100%"></body></html>'
+    fig_number = getattr(fig, "number", None)
+    if fig_number is not None:
+        Gcf.figs.pop(fig_number, None)
+    return fig

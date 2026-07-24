@@ -15,7 +15,9 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
+import flet_charts as fch
 import pytest
+from matplotlib.figure import Figure
 
 from data.data_processor import DataProcessor
 
@@ -830,7 +832,7 @@ class TestLoadChartAsyncFunction:
         from ui.components.stock_detail_dialog import _load_chart_async
 
         calls: list = []
-        await _load_chart_async(None, {}, "000001.SZ", calls.append, 860, 340)
+        await _load_chart_async(None, {}, "000001.SZ", calls.append)
         assert len(calls) == 1
         assert isinstance(calls[0], ft.Text)
 
@@ -844,7 +846,7 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
         # 第一次：loading（ProgressRing），第二次：no_history（Text）
         assert len(calls) == 2
         assert isinstance(calls[1], ft.Text)
@@ -857,13 +859,13 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
         # 第一次：loading，第二次：error
         assert len(calls) == 2
         assert isinstance(calls[1], ft.Text)
 
     @pytest.mark.asyncio
-    async def test_success_sets_ft_image(self):
+    async def test_success_sets_matplotlib_chart(self):
         import pandas as pd
 
         from ui.components.stock_detail_dialog import _load_chart_async
@@ -875,15 +877,19 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
+        fig = Figure()
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm.return_value.run_async = AsyncMock(return_value="base64pngdata")
-            await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append, 860, 340)
+            mock_tpm.return_value.run_async = AsyncMock(return_value=fig)
+            await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append)
 
-        # P3-15: set_chart_content 改为 ft.Column (含 ft.Image + K 线图例 Row)
+        # set_chart_content 改为 ft.Column (含 MatplotlibChartWithToolbar + K 线图例 Row)
         assert isinstance(calls[-1], ft.Column)
-        image_ctrl = next((c for c in calls[-1].controls if isinstance(c, ft.Image)), None)
-        assert image_ctrl is not None
-        assert image_ctrl.src == "base64pngdata"
+        chart_ctrl = next(
+            (c for c in calls[-1].controls if isinstance(c, fch.MatplotlibChartWithToolbar)),
+            None,
+        )
+        assert chart_ctrl is not None
+        assert chart_ctrl.figure is fig
 
     @pytest.mark.asyncio
     async def test_success_with_existing_vol_column(self):
@@ -898,13 +904,17 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
+        fig = Figure()
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm.return_value.run_async = AsyncMock(return_value="b64")
-            await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
+            mock_tpm.return_value.run_async = AsyncMock(return_value=fig)
+            await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
 
         assert isinstance(calls[-1], ft.Column)
-        image_ctrl = next((c for c in calls[-1].controls if isinstance(c, ft.Image)), None)
-        assert image_ctrl is not None
+        chart_ctrl = next(
+            (c for c in calls[-1].controls if isinstance(c, fch.MatplotlibChartWithToolbar)),
+            None,
+        )
+        assert chart_ctrl is not None
         # vol 列已存在，不应被覆盖
         assert list(df["vol"]) == [100, 200]
 
