@@ -636,16 +636,10 @@ jobs:
         include:
           - os: linux
             runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: qtrading-pg-sidecar-linux-x86_64
             binary_name: qtrading-pg-sidecar
-            sha256sums_file: sha256sums-x86_64-unknown-linux-gnu.txt
           - os: windows
             runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
             binary_name: qtrading-pg-sidecar.exe
-            sha256sums_file: sha256sums-x86_64-pc-windows-msvc.txt
 
     steps:
       - name: Checkout Code
@@ -670,72 +664,39 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
-      - name: Download sidecar binary
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: embedded-tests-${{ matrix.os }}
+
+      - name: Build sidecar binary from source
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
+          # postgresql_embedded build script 通过 GitHub API 下载 PostgreSQL binaries 清单，
+          # 未认证请求 60 次/小时/IP，传入 GITHUB_TOKEN 提升至 5000 次/小时（对齐 sidecar.yml）
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "Downloading sidecar binary from latest sidecar-v* release..."
-          # --exclude-drafts --exclude-pre-releases 确保取到最新稳定版（对齐 build-windows job 逻辑）
-          $releases = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --exclude-drafts --exclude-pre-releases | Where-Object { $_ -match "sidecar-v" }
-          if ($LASTEXITCODE -ne 0 -or -not $releases) {
-            # C1: release 不存在时降级 skip（不阻塞 PR），首次部署需创建 sidecar-v* tag
-            Write-Warning "No sidecar-v* stable release found. Embedded tests will be skipped. Create sidecar-v* tag (trigger sidecar.yml release job) to enable."
-            exit 0
-          }
-          $tagName = (($releases | Select-Object -First 1) -split "`t")[0]
-          Write-Host "Latest sidecar release: $tagName"
-          # 放置 binary 到 sidecars/qtrading-pg-sidecar/target/release/（对齐 from_config 开发模式路径）
-          $targetDir = "sidecars/qtrading-pg-sidecar/target/release"
-          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-          $artifactName = "${{ matrix.artifact_name }}"
-          $expectedBinaryName = "${{ matrix.binary_name }}"
-          $sha256sumsFileName = "${{ matrix.sha256sums_file }}"
-          gh release download $tagName `
-            --repo $env:GITHUB_REPOSITORY `
-            --pattern $artifactName `
-            --pattern $sha256sumsFileName `
-            --dir $targetDir
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "gh release download failed (exit: $LASTEXITCODE)"
+          cd sidecars/qtrading-pg-sidecar
+          cargo build --release
+          BINARY_PATH="target/release/${{ matrix.binary_name }}"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "ERROR: sidecar binary not found at $BINARY_PATH after cargo build"
             exit 1
-          }
-          $downloadedPath = Join-Path $targetDir $artifactName
-          $sidecarPath = Join-Path $targetDir $expectedBinaryName
-          # rename artifact_name -> expected binary name（tests/_sidecar_binary.py 期望的 binary 名）
-          Move-Item -Path $downloadedPath -Destination $sidecarPath -Force
-          if (-not (Test-Path $sidecarPath)) {
-            Write-Error "Sidecar binary not found at $sidecarPath after download"
-            exit 1
-          }
-          $fileInfo = Get-Item $sidecarPath
-          if ($fileInfo.Length -eq 0) {
-            Write-Error "Sidecar binary is 0 bytes (corrupt download)"
-            exit 1
-          }
-          Write-Host "Sidecar binary downloaded: $($fileInfo.Length) bytes"
-          # SHA256 校验（供应链完整性，对齐 build-windows job 的 P1-13 决策）
-          $sha256Path = Join-Path $targetDir $sha256sumsFileName
-          if (-not (Test-Path $sha256Path)) {
-            Write-Error "$sha256sumsFileName not found in release assets — supply chain integrity verification failed"
-            exit 1
-          }
-          $expectedLine = (Get-Content $sha256Path -Raw).Trim()
-          $expectedHash = ($expectedLine -split "\s+")[0].ToLower()
-          $actualHash = (Get-FileHash -Algorithm SHA256 $sidecarPath).Hash.ToLower()
-          if ($actualHash -ne $expectedHash) {
-            Write-Error "SHA256 mismatch! Expected: $expectedHash, Actual: $actualHash"
-            exit 1
-          }
-          Write-Host "SHA256 verified: $actualHash"
-          # 暴露给后续 step：SIDECAR_BINARY_PATH（tests/_sidecar_binary.py 定位）+ SIDECAR_SHA256（ensure_sidecar_sha256_file 写入 .sha256 文件）
-          $absolutePath = (Resolve-Path $sidecarPath).Path
-          echo "SIDECAR_BINARY_PATH=$absolutePath" >> $env:GITHUB_ENV
-          echo "SIDECAR_SHA256=$expectedHash" >> $env:GITHUB_ENV
+          fi
+          ABSOLUTE_PATH="$(pwd)/$BINARY_PATH"
+          echo "SIDECAR_BINARY_PATH=$ABSOLUTE_PATH" >> $GITHUB_ENV
+          # 计算 sha256 供 ensure_sidecar_sha256_file 写入 .sha256 文件（覆盖真实校验路径）
+          HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
+          echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
+          echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
 
       - name: Run integration tests (serial, -n 1 avoids sidecar concurrency)
-        if: env.SIDECAR_BINARY_PATH != ''
         env:
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
@@ -750,14 +711,14 @@ jobs:
             -v --tb=short -n 1 -p no:randomly --timeout=600 --timeout-method=thread
 
       - name: Get Playwright Version (Linux only, for E2E)
-        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        if: matrix.os == 'linux'
         shell: bash
         run: |
           PLAYWRIGHT_VERSION=$(python -c "from importlib.metadata import version; print(version('playwright'))")
           echo "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" >> $GITHUB_ENV
 
       - name: Cache Playwright Browsers (Linux only, for E2E)
-        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        if: matrix.os == 'linux'
         id: cache-playwright-embedded
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -765,11 +726,11 @@ jobs:
           key: playwright-${{ runner.os }}-chromium-${{ env.PLAYWRIGHT_VERSION }}
 
       - name: Install Playwright chromium (Linux only, for E2E)
-        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != '' && steps.cache-playwright-embedded.outputs.cache-hit != 'true'
+        if: matrix.os == 'linux' && steps.cache-playwright-embedded.outputs.cache-hit != 'true'
         run: playwright install chromium
 
       - name: Run E2E tests (Linux only; Windows skipif via @pytest.mark.skipif in test file)
-        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        if: matrix.os == 'linux'
         env:
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
