@@ -1447,3 +1447,38 @@ class TestReviewManagerEngineDisposedErrorR5:
         ]
         with pytest.raises(EngineDisposedError):
             await rm._batch_update_results(updates)
+
+
+class TestReviewManagerSystemLevelError:
+    """system 级异常（PermissionError）必须 raise 传播，不可被 except Exception 降级吞没。
+
+    覆盖 _get_pending_predictions / get_learning_context 的 classify_error + classify_severity
+    system 分支（if severity == "system": raise）。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_get_pending_predictions_propagates_system_error(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.get_latest_trade_date = AsyncMock(side_effect=PermissionError("permission denied"))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(PermissionError, match="permission denied") as exc_info:
+            await rm._get_pending_predictions()
+        assert str(exc_info.value) == "permission denied"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_get_learning_context_propagates_system_error(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(side_effect=PermissionError("permission denied"))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(PermissionError, match="permission denied") as exc_info:
+            await rm.get_learning_context()
+        assert str(exc_info.value) == "permission denied"
