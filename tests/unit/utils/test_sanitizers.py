@@ -367,8 +367,6 @@ class TestRegisterSecret:
 
     def test_register_secret_cap_emits_warning(self, caplog):
         """R-Sec-1: 达上限时 emit warning 让运维可感知（避免静默失败导致后续密码泄露）。"""
-        import logging
-
         # 填满到上限
         for i in range(DataSanitizer._MAX_KNOWN_SECRETS):
             DataSanitizer.register_secret(f"secret_value_{i:03d}_padding")
@@ -378,8 +376,8 @@ class TestRegisterSecret:
         with caplog.at_level(logging.WARNING, logger="utils.sanitizers"):
             DataSanitizer.register_secret("new_secret_overflow_xyz")
 
-        assert any("reached cap" in r.message and "skip register new secret" in r.message for r in caplog.records), (
-            f"期望 WARNING 日志含 'reached cap' 与 'skip register new secret'，实际：{[r.message for r in caplog.records]}"
+        assert any("reached cap" in r.message and "skip registering new entry" in r.message for r in caplog.records), (
+            f"期望 WARNING 日志含 'reached cap' 与 'skip registering new entry'，实际：{[r.message for r in caplog.records]}"
         )
         assert "new_secret_overflow_xyz" not in DataSanitizer._known_secrets
 

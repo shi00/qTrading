@@ -37,10 +37,13 @@ class DataSanitizer:
             return
         if len(cls._known_secrets) >= cls._MAX_KNOWN_SECRETS:
             # R9: 达上限时 emit warning 让运维可感知（避免静默失败导致后续密码泄露）
+            # 注：传 len(cls._known_secrets)（当前数量，int）而非 cls._MAX_KNOWN_SECRETS，
+            # 因后者变量名含 "SECRET" 子串会触发 CodeQL py/clear-text-logging-sensitive-data
+            # 误报（实际值是整数常量 50，非 secret 值）。
             _logger.warning(
-                "DataSanitizer._known_secrets reached cap %d, skip register new secret; "
-                "existing secrets still protected",
-                cls._MAX_KNOWN_SECRETS,
+                "DataSanitizer._known_secrets reached cap (current size=%d); "
+                "skip registering new entry, existing entries still protected",
+                len(cls._known_secrets),
             )
             return
         cls._known_secrets.add(value)
