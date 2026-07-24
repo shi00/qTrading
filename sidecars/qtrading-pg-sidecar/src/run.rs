@@ -1,4 +1,4 @@
-//! `run` supervisor（pg_plan §7.2/§7.3）：常驻进程，stdout 第 1 行 ready JSON（§6.2）。
+﻿//! `run` supervisor（pg_plan §7.2/§7.3）：常驻进程，stdout 第 1 行 ready JSON（§6.2）。
 //!
 //! 流程：维护锁 → preflight → binaries setup → initdb 守卫 → 密码 → initdb(Fresh) →
 //! 安全基线 → stale pid 清理 → 启动（端口重试 ≤3）→ 健康检查 → create database →
@@ -182,10 +182,12 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     let pg_pid = pgbin::read_postmaster_pid(&layout.data_dir).map(|i| i.pid);
 
     // 9. 健康检查（§7.5，exit 13；28P01 认证失败 → exit 16）。失败须清理已启动的 postgres。
+    tracing::info!("running health check on {}:{}", args.listen, port);
     if let Err(code) = health_check(&layout, &args, &password, port).await {
         stop_after_failed_start(&layout, pg_pid, "health check failed").await;
         return Err(code);
     }
+    tracing::info!("health check passed");
 
     // 9.5 kill fallback 后额外系统目录完整性检查（§7.3 / MAJ-1）
     // 上次 stop_mode=kill_fallback 时，crash recovery 可能掩盖数据页损坏；
@@ -205,10 +207,12 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     }
 
     // 10. create database（exit 14/16）
+    tracing::info!("ensuring database '{}' exists", args.database);
     if let Err(code) = ensure_database(&postgresql, &args.database).await {
         stop_after_failed_start(&layout, pg_pid, "create database failed").await;
         return Err(code);
     }
+    tracing::info!("database '{}' ready", args.database);
 
     // 11. runtime state → running（继承 kill_fallback_count 历史，§13.7.48）
     {
@@ -553,9 +557,11 @@ async fn ensure_database(postgresql: &PostgreSQL, database: &str) -> Result<(), 
     let classify = |e: postgresql_embedded::Error| -> u8 {
         let msg = e.to_string();
         if msg.contains("28P01") || msg.contains("password authentication failed") {
-            eprintln!("[sidecar] 认证失败（密码与 cluster 不匹配，§13.7.46）");
+            tracing::error!("ensure_database auth failed: {msg}");
+            eprintln!("[sidecar] auth failed: {msg}");
             exit_codes::PASSWORD_FAILED
         } else {
+            tracing::error!("ensure_database failed: {msg}");
             eprintln!("[sidecar] create database failed: {msg}");
             exit_codes::CREATE_DATABASE_FAILED
         }
