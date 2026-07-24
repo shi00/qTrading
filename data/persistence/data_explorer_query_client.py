@@ -62,7 +62,8 @@ class DataExplorerQueryClient:
     def close_all(cls) -> None:
         """关闭共享的同步引擎，供 ShutdownCoordinator 调用。
 
-        幂等：多次调用安全。
+        幂等：多次调用安全。close_all() 后 _shared_engine 置 None，
+        下次 _ensure_engine() 会尝试重新创建（若 DB URL 可用）。
         """
         with cls._engine_lock:
             if cls._shared_engine is not None:
@@ -76,6 +77,10 @@ class DataExplorerQueryClient:
         """
         Lazy initialization of the shared database engine (double-checked locking).
         Raises RuntimeError if database URL is not configured.
+
+        close_all() 后 _shared_engine 为 None，本方法会尝试重新创建引擎
+        （支持测试场景和正常重启）。若 DB URL 不可用则 raise RuntimeError，
+        该异常在查询方法的 try 块外抛出，不会被 except Exception 吞没。
         """
         if DataExplorerQueryClient._shared_engine is not None:
             return

@@ -41,8 +41,26 @@ def _reset_data_explorer_shared_engine():
     from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
     DataExplorerQueryClient._shared_engine = None
+    DataExplorerQueryClient._closed = False
     yield
     DataExplorerQueryClient._shared_engine = None
+    DataExplorerQueryClient._closed = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_metadata_manager_cache():
+    """Reset MetaDataManager._alias_cache before and after each unit test.
+
+    MetaDataManager uses a class-level mutable dict (_alias_cache) that is NOT
+    managed by singleton_registry. This fixture ensures clean state to prevent
+    cross-test pollution (CLAUDE.md R7), especially when I18n locale changes
+    between tests would otherwise leave stale cached aliases.
+    """
+    from data.persistence.metadata_manager import MetaDataManager
+
+    MetaDataManager.invalidate_cache()
+    yield
+    MetaDataManager.invalidate_cache()
 
 
 @pytest.fixture(autouse=True)

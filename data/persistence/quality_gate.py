@@ -48,8 +48,6 @@ def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
 
 def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
     """Shared logic to verify quality tier."""
-    import os
-
     if os.environ.get("E2E_TESTING") == "true":
         logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
