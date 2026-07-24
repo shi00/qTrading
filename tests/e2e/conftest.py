@@ -862,7 +862,14 @@ async def _ensure_e2e_db() -> None:
     ProactorEventLoop + asyncpg 兼容性问题。``asyncio.to_thread`` 在当前
     ProactorEventLoop 中调度，函数体在 default executor 线程中执行；新线程
     显式创建 ``SelectorEventLoop``（不修改全局 event_loop_policy，避免污染主线程）。
+
+    embedded 模式跳过：``QTRADING_DATABASE_MODE=embedded`` 时，app 内部
+    ``prepare_database_runtime()`` + ``TaskManager.init_db`` 管理 sidecar PG
+    的 DB 创建与迁移（``embedded_real_wizard_app`` 不传 ``DATABASE_URL``），
+    此 fixture 无需也不应预创建外置 ``test_astock`` DB（sidecar 未启动且端口随机）。
     """
+    if os.environ.get("QTRADING_DATABASE_MODE", "external").lower() == "embedded":
+        return
     from tests.integration.conftest import _ensure_test_db
 
     def _run_in_selector_loop() -> None:
