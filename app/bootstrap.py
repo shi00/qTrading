@@ -346,8 +346,8 @@ def mask_sensitive(value):
 async def prepare_database_runtime() -> str | None:
     """根据数据库模式准备运行时（Phase 2 §3.4）。
 
-    - embedded: 启动 EmbeddedPostgresService → 返回 ``info.url``，由调用方用
-      ``override_db_url(target_url)`` 包裹 ``CacheManager()`` 构造（D15：不再持久化到 config）
+    - embedded: 启动 EmbeddedPostgresService → 返回 ``info.url``，由调用方永久设置
+      ``config.DB_URL = url``（D15：不持久化到 config 文件，不设 DATABASE_URL 环境变量）
     - external: 返回 ``None``（沿用既有 DATABASE_URL/db_* 配置）
 
     必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
@@ -388,6 +388,19 @@ async def prepare_database_runtime() -> str | None:
         logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
         return None
 
+    # R-Arch-2/Ske-1：embedded 模式下若 DATABASE_URL 环境变量被外部误设，
+    # ConfigHandler.get_db_url() Priority 1 会返回该值覆盖 embedded URL，
+    # 导致 CacheManager 连错 DB 而 embedded sidecar 空转。emit WARNING 让用户感知。
+    # 不强制 unset 以避免影响子进程（spec.md §1.7 不变量：embedded URL 永不写入 DATABASE_URL）。
+    external_db_url = os.environ.get("DATABASE_URL")
+    if external_db_url:
+        logger.warning(
+            "[Bootstrap] QTRADING_DATABASE_MODE=embedded but DATABASE_URL env var is set; "
+            "this env var will take precedence over embedded URL in ConfigHandler.get_db_url() "
+            "(Priority 1 > Priority 3), causing CacheManager to connect to the wrong DB. "
+            "Please unset DATABASE_URL to use embedded PostgreSQL."
+        )
+
     service = EmbeddedPostgresService.from_config(config)
     # H3: start 失败时清理单例，避免后续 CacheManager 误用残留状态
     try:
@@ -400,8 +413,8 @@ async def prepare_database_runtime() -> str | None:
         config.embedded_pg_listen,
         info.port,
     )
-    # D15（pg-plan §22）：返回 URL 供调用方用 override_db_url 包裹 CacheManager 构造，
-    # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config）。
+    # D15（pg-plan §22）：返回 URL 供调用方永久设置 config.DB_URL，
+    # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config 文件）。
     return info.url
 
 

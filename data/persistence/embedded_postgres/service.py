@@ -323,6 +323,8 @@ class EmbeddedPostgresService:
         url = f"postgresql+asyncpg://{self._username}:{password}@{self._listen}:{port}/{self._database}"
         # R9: 注册完整 URL 为 secret，确保日志/异常中带密码的 URL 被 sanitize_error 精确脱敏
         DataSanitizer.register_secret(url)
+        # R9: 单独注册裸密码为 secret，防止 sidecar stderr 中裸密码（非完整 URL）未被脱敏（spec.md §1.5）
+        DataSanitizer.register_secret(password)
 
         # M4: 扩展字段从 ready JSON 解析（缺失字段使用 dataclass 默认值）
         postgres_version = str(ready.get("postgres_version", ""))

@@ -79,21 +79,28 @@ def test_main_imports_log_exception_with_severity() -> None:
     assert hasattr(main_mod, "sys"), "main 模块应导入 sys（用于 sys.exit(1) 强制退出）"
 
 
-def test_main_wraps_cache_manager_with_override_db_url() -> None:
-    """D15（pg-plan §22）：main() 用 override_db_url 包裹 CacheManager() 构造。
+def test_main_persists_embedded_db_url_in_config() -> None:
+    """D15（pg-plan §22）：main() 永久设置 config.DB_URL 而非用 override_db_url 包裹。
 
-    Phase 2 §3.4 旧实现：prepare_database_runtime 调 save_db_config 持久化 embedded URL
-    D15 新实现：prepare_database_runtime 返回 URL，main 用 override_db_url(url) 包裹
-    CacheManager() 构造（不再持久化到 config，避免污染用户配置）。
+    旧实现（已废弃）：prepare_database_runtime 返回 URL，main 用 override_db_url(url)
+    上下文管理器包裹 CacheManager() 构造。问题：with 块退出后 config.DB_URL 被还原为空，
+    导致 ConfigHandler.get_db_url() 在 with 块外返回空值，check_onboarding_needed 误判
+    需要重新 onboarding（spec.md §1.4）。
+
+    新实现：prepare_database_runtime 返回 URL 后，main 永久设置 config.DB_URL = embedded_url
+    （运行时变量，不持久化到 config 文件，不设 DATABASE_URL 环境变量）。
+    ConfigHandler.get_db_url() Priority 3 兜底返回 embedded URL。
 
     源码静态分析断言：
-    - main() 源码含 "override_db_url(" 调用
-    - main() 源码含 "with override_db_url(" 上下文管理器用法
+    - main() 源码含 "config.DB_URL = embedded_db_url"（永久设置）
+    - main() 源码不含 "with override_db_url("（不再用上下文管理器）
     """
     source = inspect.getsource(main)
-    assert "override_db_url" in source, (
-        f"main() 源码应含 'override_db_url'（D15：包裹 CacheManager 构造），实际源码片段：\n{source[:2000]}"
+    assert "config.DB_URL = embedded_db_url" in source, (
+        f"main() 源码应含 'config.DB_URL = embedded_db_url'（D15：永久设置 embedded URL），"
+        f"实际源码片段：\n{source[:2000]}"
     )
-    assert "with override_db_url(" in source, (
-        f"main() 源码应含 'with override_db_url(' 上下文管理器用法（D15），实际源码片段：\n{source[:2000]}"
+    assert "with override_db_url(" not in source, (
+        f"main() 源码不应含 'with override_db_url('（D15：已改为永久设置 config.DB_URL），"
+        f"实际源码片段：\n{source[:2000]}"
     )

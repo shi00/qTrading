@@ -8,9 +8,12 @@
 - DataFrame实际数据
 """
 
+import logging
 import re
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 
 class DataSanitizer:
@@ -33,7 +36,12 @@ class DataSanitizer:
         if not value or not isinstance(value, str) or len(value) < cls._MIN_SECRET_LEN:
             return
         if len(cls._known_secrets) >= cls._MAX_KNOWN_SECRETS:
-            # 达到上限时跳过新注册，避免无界增长；已有 secret 仍受保护
+            # R9: 达上限时 emit warning 让运维可感知（避免静默失败导致后续密码泄露）
+            _logger.warning(
+                "DataSanitizer._known_secrets reached cap %d, skip register new secret; "
+                "existing secrets still protected",
+                cls._MAX_KNOWN_SECRETS,
+            )
             return
         cls._known_secrets.add(value)
 
