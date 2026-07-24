@@ -1460,13 +1460,14 @@ class TestH3SafeTableNames:
 
         assert isinstance(_SAFE_TABLE_NAMES, frozenset)
 
-    def test_safe_table_names_contains_cn_m(self):
+    def test_safe_table_names_excludes_cn_m(self):
         """
-        测试白名单包含 cn_m 宏观数据表
+        D-1: cn_m 是 Tushare API 端点名（非表名），宏观数据实际存入 macro_economy 表。
+        白名单不应包含 phantom entry cn_m。
         """
         from data.persistence.daos.quote_dao import _SAFE_TABLE_NAMES
 
-        assert "cn_m" in _SAFE_TABLE_NAMES
+        assert "cn_m" not in _SAFE_TABLE_NAMES
 
     def test_get_default_synced_tables_filters_unsafe(self):
         """

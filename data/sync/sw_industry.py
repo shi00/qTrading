@@ -10,6 +10,7 @@
 
 import asyncio
 import logging
+import time
 import typing
 
 import pandas as pd
@@ -18,7 +19,6 @@ from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
-from data.persistence.quality_gate import QualityTier
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -30,20 +30,23 @@ logger = logging.getLogger(__name__)
 # 申万行业三级分类
 _SW_LEVELS: tuple[str, ...] = ("L1", "L2", "L3")
 
-# Phase 3F-1 §4.3.2：循环体每 200 个 index_code 检查一次取消信号
-_CANCEL_CHECK_INTERVAL = 200
+# A1: 循环体取消检查的时间间隔（秒）。
+# 项目硬约束："long-running 操作必须每 2 秒检查 cancel_event"。旧实现每 200 个
+# index_code 检查一次，每个迭代含网络 IO（约 1-2 秒），最坏需 200-400 秒才响应
+# 取消信号，违反 2s 红线。改用 time.monotonic() 时间维度测量。
+_CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
 
 class SwIndustrySyncStrategy(ISyncStrategy):
     """申万行业分类同步策略（全局快照，月度更新）。
 
     Phase 3F-1 §4.3.2：申万行业是基础元数据，全局快照（非交易日快照），
-    月度更新。声明 ``required_quality_tier = QualityTier.BRONZE``（仅需
-    stock_basic 可用即可同步行业分类，不依赖日线/财务数据连续性）。
-    """
+    月度更新，仅需 stock_basic 可用即可同步行业分类，不依赖日线/财务数据连续性。
 
-    # Phase 3F-1 §4.3.2：声明数据质量要求（遵循 PolarsBaseStrategy 类属性模式）
-    required_quality_tier = QualityTier.BRONZE
+    注：ISyncStrategy 是数据生产方（API → DB），不适用 PolarsBaseStrategy 的
+    ``required_quality_tier`` 类属性模式（CLAUDE.md §3.2 限定该模式仅用于
+    PolarsBaseStrategy）。质量门控应由消费方（策略层）声明，而非生产方。
+    """
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
@@ -172,7 +175,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_members(self, result: SyncResult, classify_df: pd.DataFrame) -> None:
-        """按 index_code 循环同步成分股映射，每 200 个检查取消信号。"""
+        """按 index_code 循环同步成分股映射，每 2 秒检查取消信号。"""
         if classify_df is None or classify_df.empty or "index_code" not in classify_df.columns:
             logger.debug("[SwIndustrySync] Members | No classify data, skipping member sync")
             return
@@ -189,15 +192,22 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             total_rows = 0
             errors = 0
 
+            # A1: 循环体按时间维度（每 2 秒）检查 _check_cancelled。旧实现每 200 条
+            # 检查一次，每个迭代含网络 IO（约 1-2 秒），最坏需 200-400 秒才响应取消
+            # 信号，违反 2s 红线。
+            last_cancel_check = time.monotonic()
+
             for i, index_code in enumerate(index_codes):
-                # Phase 3F-1 §4.3.2：循环体每 200 条检查 _check_cancelled
-                if i > 0 and i % _CANCEL_CHECK_INTERVAL == 0 and self._check_cancelled(result):
-                    logger.debug(
-                        "[SwIndustrySync] Members | Cancelled at i=%s/%s",
-                        i,
-                        total,
-                    )
-                    return
+                now = time.monotonic()
+                if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                    last_cancel_check = now
+                    if self._check_cancelled(result):
+                        logger.debug(
+                            "[SwIndustrySync] Members | Cancelled at i=%s/%s",
+                            i,
+                            total,
+                        )
+                        return
 
                 try:
                     df = await self.context.api.get_index_member_all(index_code=index_code)

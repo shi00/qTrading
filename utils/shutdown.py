@@ -470,6 +470,11 @@ class ShutdownCoordinator:
 
         DataExplorerQueryClient 使用类级别共享引擎，View 的 will_unmount 在应用退出时
         不会被触发，通过 close_all() 统一关闭共享引擎。
+
+        E-1 决策：本步关闭的是 DataExplorerQueryClient 独立的同步 sa.Engine，
+        与 Step 3 关闭的 CacheManager AsyncEngine 相互独立、无耦合。关闭顺序
+        合理：Step 3 已先 dispose 异步引擎并置 DAO.engine=None（R5 守护），
+        Step 4-6 无 DAO 操作，Step 7 才关闭同步引擎，Step 8 最后停止 PG 进程。
         """
         logger.info("[Shutdown] Step 7: Closing DataExplorerQueryClient shared engine...")
         # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）

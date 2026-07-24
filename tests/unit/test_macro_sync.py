@@ -1577,3 +1577,196 @@ class TestLprWeekendPersistence:
             await strategy._sync_shibor_daily(result)
 
         strategy.dao.save_lpr_daily.assert_not_awaited()
+
+
+class TestMacroSyncCancellationPoints:
+    """覆盖 macro.py 各 _check_cancelled 后的 return 语句
+    （L269/L272/L275/L319/L549/L587/L712）。
+
+    使用真实 asyncio.Event 作为 context.cancel_event，因 _check_cancelled
+    用 ``is True`` 严格匹配，MagicMock 的 is_set() 返回 Mock 对象非 True。
+    """
+
+    def _make_strategy_with_cancel_event(self):
+        """创建带真实 asyncio.Event 的 strategy。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+        )
+        # 使用真实 asyncio.Event（_check_cancelled 用 `is True` 严格匹配）
+        cancel_event = asyncio.Event()
+        ctx.cancel_event = cancel_event
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        return strategy, cancel_event
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_cancel_after_cn_m(self):
+        """L269: cn_m 拉取后触发取消 → return（后续 cn_cpi/cn_ppi 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+
+        async def _set_cancel_after_cn_m(*args, **kwargs):
+            cancel_event.set()
+            return pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+
+        strategy.context.api.get_macro_data = AsyncMock(side_effect=_set_cancel_after_cn_m)
+        strategy.dao.save_macro_economy = AsyncMock(return_value=0)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert result.status == "cancelled"
+        # 只调用了第一次 get_macro_data（cn_m），后续 cn_cpi/cn_ppi 未调用
+        assert strategy.context.api.get_macro_data.call_count == 1
+        strategy.dao.save_macro_economy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_cancel_after_cn_cpi(self):
+        """L272: cn_cpi 拉取后触发取消 → return（后续 cn_ppi 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+
+        call_count = [0]
+
+        async def _set_cancel_after_cn_cpi(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 2:  # cn_cpi
+                cancel_event.set()
+            return pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+
+        strategy.context.api.get_macro_data = AsyncMock(side_effect=_set_cancel_after_cn_cpi)
+        strategy.dao.save_macro_economy = AsyncMock(return_value=0)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert result.status == "cancelled"
+        assert strategy.context.api.get_macro_data.call_count == 2
+        strategy.dao.save_macro_economy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_cancel_after_cn_ppi(self):
+        """L275: cn_ppi 拉取后触发取消 → return（cn_gdp 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+
+        call_count = [0]
+
+        async def _set_cancel_after_cn_ppi(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 3:  # cn_ppi
+                cancel_event.set()
+            return pd.DataFrame({"period": ["202406"], "m2": [100.0]})
+
+        strategy.context.api.get_macro_data = AsyncMock(side_effect=_set_cancel_after_cn_ppi)
+        strategy.context.api.get_cn_gdp = AsyncMock()
+        strategy.dao.save_macro_economy = AsyncMock(return_value=0)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert result.status == "cancelled"
+        assert strategy.context.api.get_macro_data.call_count == 3
+        # cn_gdp 未被调用（取消在 cn_gdp 之前）
+        strategy.context.api.get_cn_gdp.assert_not_called()
+        strategy.dao.save_macro_economy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_cancel_after_cn_gdp(self):
+        """L319: cn_gdp 处理后触发取消 → return（save_macro_economy 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+
+        strategy.context.api.get_macro_data = AsyncMock(
+            return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0]})
+        )
+
+        async def _set_cancel_after_cn_gdp(*args, **kwargs):
+            cancel_event.set()
+            return pd.DataFrame({"period": ["2024Q3"], "gdp": [100.0]})
+
+        strategy.context.api.get_cn_gdp = AsyncMock(side_effect=_set_cancel_after_cn_gdp)
+        strategy.dao.save_macro_economy = AsyncMock(return_value=0)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+        assert result.status == "cancelled"
+        # save_macro_economy 不应被调用（取消在 save 之前）
+        strategy.dao.save_macro_economy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_cancel_after_get_shibor(self):
+        """L549: get_shibor 后触发取消 → return（save_shibor_daily 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        async def _set_cancel_after_get_shibor(*args, **kwargs):
+            cancel_event.set()
+            return pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]})
+
+        strategy.context.api.get_shibor = AsyncMock(side_effect=_set_cancel_after_get_shibor)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+        assert result.status == "cancelled"
+        # save_shibor_daily 不应被调用（取消在 save 之前）
+        strategy.dao.save_shibor_daily.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_cancel_after_lpr(self):
+        """L587: LPR 处理后触发取消 → return（save_shibor_daily 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        strategy.context.api.get_shibor = AsyncMock(
+            return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]})
+        )
+
+        async def _set_cancel_after_lpr(*args, **kwargs):
+            cancel_event.set()
+            return pd.DataFrame({"record_date": ["20240614"], "lpr_1y": [3.45]})
+
+        strategy.context.api.get_shibor_lpr = AsyncMock(side_effect=_set_cancel_after_lpr)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy.dao.save_lpr_daily = AsyncMock(return_value=1)
+
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+        assert result.status == "cancelled"
+        # save_shibor_daily 不应被调用（取消在 save 之前）
+        strategy.dao.save_shibor_daily.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_index_weights_cancel_before_loop(self):
+        """L712: 循环前触发取消 → return（get_index_weight 未调用）。"""
+        strategy, cancel_event = self._make_strategy_with_cancel_event()
+        strategy.context.cache.market_dao = MagicMock()
+        strategy.context.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        strategy.context.cache.save_index_weights = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        # 在 _get_effective_trade_date 返回后、循环前设置取消
+        # 通过 market_dao.get_latest_index_weight_date 的 side_effect 设置 cancel_event
+        async def _set_cancel_on_get_latest(*args, **kwargs):
+            cancel_event.set()
+            return None
+
+        strategy.context.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+            side_effect=_set_cancel_on_get_latest
+        )
+        strategy.context.api.get_index_weight = AsyncMock()
+
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+        assert result.status == "cancelled"
+        # get_index_weight 不应被调用（取消在循环之前）
+        strategy.context.api.get_index_weight.assert_not_called()

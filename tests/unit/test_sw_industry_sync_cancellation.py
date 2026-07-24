@@ -1,14 +1,19 @@
-"""Phase 3F-1：SwIndustrySyncStrategy 循环内取消信号测试。
+"""Phase 3F-1 + A1：SwIndustrySyncStrategy 循环内取消信号测试。
 
-验证 `_run_impl` 循环体每 200 个 index_code 检查 `_check_cancelled`，
-响应取消信号（Phase 3F-1 §4.3.2 新增行为）。
+验证 `_sync_members` 循环体按时间维度（每 2 秒）检查 `_check_cancelled`，
+响应取消信号（A1 修复后行为）。
+
+旧实现按条数维度（每 200 个 index_code）检查，每个迭代含网络 IO（约 1-2
+秒），最坏需 200-400 秒才响应取消信号，违反项目硬约束"long-running 操作
+必须每 2 秒检查 cancel_event"。A1 改用 `time.monotonic()` 时间维度测量。
 """
+
+import asyncio
 
 import pandas as pd
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from data.persistence.quality_gate import QualityTier
 from data.sync.base import SyncContext
 from data.sync.sw_industry import SwIndustrySyncStrategy
 
@@ -63,14 +68,6 @@ def _make_member_df(index_code: str) -> pd.DataFrame:
             "sw_l3_name": ["玉米"],
         }
     )
-
-
-class TestSwIndustryRequiredQualityTier:
-    """Phase 3F-1 §4.3.2：SwIndustrySyncStrategy 声明 required_quality_tier。"""
-
-    def test_required_quality_tier_is_bronze(self):
-        """required_quality_tier 必须为 QualityTier.BRONZE（基础元数据等级）。"""
-        assert SwIndustrySyncStrategy.required_quality_tier == QualityTier.BRONZE
 
 
 class TestSyncClassifyCancellation:
@@ -135,14 +132,24 @@ class TestSyncClassifyCancellation:
 
 
 class TestSyncMembersCancellation:
-    """Phase 3F-1 §4.3.2：_sync_members 循环体每 200 个 index_code 检查 _check_cancelled。"""
+    """A1: _sync_members 循环体按时间维度（每 2 秒）检查 _check_cancelled。
+
+    旧实现按条数维度（每 200 个 index_code）检查，每个迭代含网络 IO（约 1-2
+    秒），最坏需 200-400 秒才响应取消信号，违反 2s 红线。A1 改用
+    `time.monotonic()` 时间维度测量。
+    """
 
     @pytest.mark.asyncio
-    async def test_members_cancel_at_200(self):
-        """201 个 index_code，i=200 时 _check_cancelled 返回 True。
+    async def test_members_cancel_after_2_seconds(self):
+        """循环内 time.monotonic() 距上次检查 >= 2s，_check_cancelled 返回 True。
 
-        验证：循环提前 return，save_sw_industry_member 未被调用，get_index_member_all
-        只调用 200 次（i=0..199）。
+        时间序列：
+        - 循环前 last_cancel_check = T0（第 1 次 monotonic 调用）
+        - i=0: now=T0+1s（diff=1s < 2s，不触发），执行 api call
+        - i=1: now=T0+3s（diff=3s >= 2s，触发 _check_cancelled → True），提前 return
+
+        验证：循环提前 return，save_sw_industry_member 未被调用，
+        get_index_member_all 只调用 1 次（i=0）。
         """
         ctx = _make_ctx()
         strategy = SwIndustrySyncStrategy(ctx)
@@ -151,8 +158,8 @@ class TestSyncMembersCancellation:
 
         classify_df = pd.DataFrame(
             {
-                "index_code": [f"8010{i:04d}.SI" for i in range(201)],
-                "sw_level": ["L1"] * 201,
+                "index_code": ["801010.SI", "801020.SI"],
+                "sw_level": ["L1", "L1"],
             }
         )
 
@@ -161,14 +168,27 @@ class TestSyncMembersCancellation:
         def check_side_effect(result):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:  # i=200 时第 1 次检查返回 True
-                result.status = "cancelled"
-                return True
-            return False
+            result.status = "cancelled"
+            return True
 
-        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("80100000.SI"))
+        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
+
+        # 时间序列：
+        # - last_cancel_check = monotonic() → T0（第 1 次调用）
+        # - i=0: now = monotonic() → T0+1s（diff=1s < 2s，不触发），api call 执行
+        # - i=1: now = monotonic() → T0+3s（diff=3s >= 2s，触发 _check_cancelled → True）
+        t0 = 1000.0
+        time_sequence = [t0, t0 + 1.0, t0 + 3.0]
+        time_idx = 0
+
+        def mock_monotonic():
+            nonlocal time_idx
+            t = time_sequence[time_idx] if time_idx < len(time_sequence) else t0 + 3.0
+            time_idx += 1
+            return t
 
         with (
+            patch("data.sync.sw_industry.time.monotonic", side_effect=mock_monotonic),
             patch.object(strategy, "_check_cancelled", side_effect=check_side_effect),
             patch.object(strategy, "_record_skipped_permission", new=AsyncMock()),
         ):
@@ -178,14 +198,17 @@ class TestSyncMembersCancellation:
             await strategy._sync_members(result, classify_df)
 
         assert call_count == 1
-        assert ctx.api.get_index_member_all.await_count == 200
+        assert ctx.api.get_index_member_all.await_count == 1
         strategy.member_dao.save_sw_industry_member.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_members_no_cancel_under_200(self):
-        """2 个 index_code，循环内不触发取消（i=200 检查点不触达）。
+    async def test_members_no_cancel_within_2_seconds(self):
+        """循环内每次 time.monotonic() 距上次检查 < 2s，不触发 _check_cancelled。
 
-        验证：循环正常完成，save_sw_industry_member 被调用一次。
+        所有 time.monotonic() 返回同一时间 T0，diff=0s < 2s，循环内检查点不触发。
+
+        验证：循环正常完成，save_sw_industry_member 被调用一次，
+        _check_cancelled 在循环内不被调用。
         """
         ctx = _make_ctx()
         strategy = SwIndustrySyncStrategy(ctx)
@@ -199,23 +222,78 @@ class TestSyncMembersCancellation:
             }
         )
 
+        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
+
+        fixed_t = 1000.0
         with (
+            patch("data.sync.sw_industry.time.monotonic", return_value=fixed_t),
             patch.object(strategy, "_check_cancelled", return_value=False) as mock_check,
             patch.object(strategy, "_record_skipped_permission", new=AsyncMock()),
         ):
-            ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
-
             from data.sync.base import SyncResult
 
             result = SyncResult()
             await strategy._sync_members(result, classify_df)
 
-        # 循环内检查点不触达（i < 200），_check_cancelled 仅在调用入口被检查 0 次
-        # （_sync_members 内部不调用 _check_cancelled 入口）
         assert ctx.api.get_index_member_all.await_count == 2
         strategy.member_dao.save_sw_industry_member.assert_awaited_once()
-        # _check_cancelled 不应在循环内被调用（i=200 检查点未达）
+        # _check_cancelled 不应在循环内被调用（时间差 < 2s，检查点未触发）
         mock_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_members_cancel_event_set_propagates_within_2s(self):
+        """cancel_event 被 set 后，循环内 ≤2 秒响应取消（_check_cancelled 真实路径）。
+
+        不 mock _check_cancelled，使用真实实现读取 ctx.cancel_event.is_set()。
+
+        时间序列：
+        - 循环前 last_cancel_check = T0（第 1 次 monotonic 调用）
+        - i=0: now=T0+2s（diff=2s >= 2s，触发 _check_cancelled），cancel_event 已 set
+          → result.status="cancelled"，return
+
+        验证：result.status == "cancelled"，save_sw_industry_member 未被调用，
+        get_index_member_all 调用 0 次（i=0 检查点即取消，未及 api call）。
+        """
+        ctx = _make_ctx()
+        strategy = SwIndustrySyncStrategy(ctx)
+        strategy.member_dao = MagicMock()
+        strategy.member_dao.save_sw_industry_member = AsyncMock(return_value=0)
+
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        ctx.cancel_event = cancel_event
+
+        classify_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI", "801020.SI"],
+                "sw_level": ["L1", "L1"],
+            }
+        )
+
+        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
+
+        t0 = 1000.0
+        time_sequence = [t0, t0 + 2.0]
+        time_idx = 0
+
+        def mock_monotonic():
+            nonlocal time_idx
+            t = time_sequence[time_idx] if time_idx < len(time_sequence) else t0 + 2.0
+            time_idx += 1
+            return t
+
+        with (
+            patch("data.sync.sw_industry.time.monotonic", side_effect=mock_monotonic),
+            patch.object(strategy, "_record_skipped_permission", new=AsyncMock()),
+        ):
+            from data.sync.base import SyncResult
+
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert result.status == "cancelled"
+        ctx.api.get_index_member_all.assert_not_awaited()
+        strategy.member_dao.save_sw_industry_member.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_members_empty_classify_skips_loop(self):
