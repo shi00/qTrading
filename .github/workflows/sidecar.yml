@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
@@ -74,7 +74,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: ${{ matrix.target }}
@@ -96,7 +96,7 @@ jobs:
 
       - name: Install cargo-llvm-cov (Linux only)
         if: matrix.os == 'linux'
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9  # v2.84.0
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-llvm-cov
 
@@ -112,7 +112,7 @@ jobs:
 
       - name: Upload coverage report (Linux only)
         if: matrix.os == 'linux' && always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: rust-coverage-lcov
           path: lcov.info
@@ -160,7 +160,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
@@ -169,7 +169,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: release-${{ matrix.target }}
@@ -178,7 +178,7 @@ jobs:
         run: cargo build --target ${{ matrix.target }} --release
 
       - name: Setup Python (for generate_sidecar_manifest.py)
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.13'
 
@@ -192,7 +192,7 @@ jobs:
             --output sidecar-manifest-${{ matrix.os }}.json
 
       - name: Upload release artifact (含 manifest)
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ matrix.artifact_name }}
           # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
@@ -212,7 +212,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
@@ -220,7 +220,7 @@ jobs:
           toolchain: 1.97.0
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9  # v2.84.0
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
         with:
           tool: cargo-audit
 
@@ -269,7 +269,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
@@ -278,13 +278,13 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: release-${{ matrix.target }}
 
       - name: Setup Python (for generate_sidecar_manifest.py)
-        uses: actions/setup-python@ece7cb06caefa5fff74198d86498064678c61a1  # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.13'
 
