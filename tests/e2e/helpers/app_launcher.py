@@ -96,7 +96,12 @@ def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float 
         time.sleep(0.5)
 
 
-def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[subprocess.Popen, str]:
+def start_flet_app(
+    config_file: Path,
+    env_overrides: dict[str, str],
+    *,
+    startup_timeout_s: float = 60.0,
+) -> tuple[subprocess.Popen, str]:
     port = _free_port()
     env = {
         **os.environ,
@@ -131,7 +136,7 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     drain_thread.start()
     url = f"http://127.0.0.1:{port}"
     try:
-        wait_until_ready(url)
+        wait_until_ready(url, timeout_s=startup_timeout_s)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[E2E] Flet app not ready at %s, terminating process: %s", url, exc, exc_info=True)
         proc.terminate()

@@ -167,3 +167,86 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 #### 9.7 Python 服务封装
 
 工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。
+
+### 10. 运行 embedded 模式真实 sidecar 测试
+
+> 适用场景：验证内置 PostgreSQL（子进程启动）真实场景的端到端覆盖，包含真实 Rust sidecar binary + 真实 PostgreSQL 17。
+
+#### 10.1 测试范围
+
+| 测试文件 | 层级 | 覆盖内容 |
+|---------|------|---------|
+| `tests/integration/test_embedded_postgres_real_sidecar.py` | 集成 | 真实 sidecar 启动协议（ready JSON、password_file、sha256 校验、stop 释放进程、日志收集） |
+| `tests/integration/test_embedded_pg_migration_regression.py` | 集成 | embedded PG 上 Alembic 完整迁移回归（upgrade head / downgrade base / upgrade head / check） |
+| `tests/integration/test_embedded_pg_dao_rw.py` | 集成 | CacheManager + DAO 读写（StockDao / QuoteDao 批量 upsert、事务回滚） |
+| `tests/integration/test_embedded_pg_bootstrap.py` | 集成 | `prepare_database_runtime()` embedded 路径启动协调 + 完整 bootstrap 流程 |
+| `tests/e2e/test_onboarding_embedded_real.py` | E2E | 真实 sidecar 完整应用启动 + Onboarding UI 流程（Linux only，Windows skipif） |
+
+所有测试标记 `@pytest.mark.embedded_real`，使用 `real_embedded_pg` session-scoped fixture 共享 sidecar 实例（避免每个测试重复 initdb）。
+
+#### 10.2 本地运行前提
+
+sidecar binary 三种来源（按 `tests/_sidecar_binary.py::find_sidecar_binary()` 定位顺序）：
+
+1. **环境变量**（推荐）：`SIDECAR_BINARY_PATH` 指向 binary 绝对路径
+2. **开发模式默认路径**：`sidecars/qtrading-pg-sidecar[.exe]`（cwd-relative）
+3. **cargo build 产物**：`sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar[.exe]`
+
+**方式 A：从 GitHub Release 下载**（推荐，无需 Rust 工具链）
+
+```bash
+# 1. 查找最新 sidecar-v* release
+gh release list --repo <your-repo> --limit 100 --exclude-drafts --exclude-pre-releases | grep "sidecar-v"
+
+# 2. 下载对应平台 binary + sha256sums（以 Linux x86_64 为例）
+gh release download <tag> --repo <your-repo> \
+  --pattern qtrading-pg-sidecar-linux-x86_64 \
+  --pattern sha256sums-x86_64-unknown-linux-gnu.txt \
+  --dir sidecars/qtrading-pg-sidecar/target/release/
+
+# 3. rename 为期望的 binary 名
+mv sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar-linux-x86_64 \
+   sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar
+
+# 4. 设置环境变量（SHA256 从 sha256sums 文件提取）
+export SIDECAR_BINARY_PATH=$(pwd)/sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar
+export SIDECAR_SHA256=$(awk '{print $1}' sidecars/qtrading-pg-sidecar/target/release/sha256sums-x86_64-unknown-linux-gnu.txt)
+```
+
+**方式 B：cargo build**（需要 Rust 工具链）
+
+```bash
+cd sidecars/qtrading-pg-sidecar
+cargo build --release
+# binary 位于 sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar[.exe]
+```
+
+#### 10.3 运行命令
+
+```bash
+# 集成测试（串行 -n 1 避免 sidecar 实例并发竞争）
+python -m pytest tests/integration/test_embedded_postgres_real_sidecar.py \
+                 tests/integration/test_embedded_pg_migration_regression.py \
+                 tests/integration/test_embedded_pg_dao_rw.py \
+                 tests/integration/test_embedded_pg_bootstrap.py \
+                 -v --tb=short -n 1
+
+# E2E 测试（Linux only，Windows skipif）
+python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short
+```
+
+#### 10.4 skip 行为
+
+sidecar binary 缺失时（三种来源均未找到），`real_sidecar_binary` fixture 触发 `pytest.skip("real sidecar binary not found")`，所有 `embedded_real` 测试自动 skip（不 fail）。这确保本地开发不强制依赖 sidecar binary。
+
+#### 10.5 CI 集成
+
+CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（Linux + Windows matrix）：
+- 从最新 `sidecar-v*` stable release 下载 binary + sha256sums
+- SHA256 供应链完整性校验
+- 设置 `SIDECAR_BINARY_PATH` + `SIDECAR_SHA256` + `QTRADING_DATABASE_MODE=embedded` 环境变量
+- 串行运行集成测试（`-n 1 -p no:randomly` 禁用并发与随机化，避免 session fixture 状态冲突）+ Linux E2E 测试
+- `build-windows` job 依赖 `embedded-tests` 通过后才构建 release installer
+- 作为 main 分支必需检查阻塞 merge（需手动配置 branch protection）
+
+**首次部署注意**：若仓库尚未创建 `sidecar-v*` tag（无 GitHub release），`embedded-tests` job 的 download step 会输出 warning 并 `exit 0`（降级 skip，不阻塞 PR），后续测试 step 自动跳过。需先在 main 分支创建 `sidecar-v0.1.0` tag 并推送（触发 `sidecar.yml` release job 上传 4 平台 binary），embedded 测试才能真正运行。

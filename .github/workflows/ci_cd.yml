@@ -623,6 +623,171 @@ jobs:
             junit-*.xml
           retention-days: 14
 
+  embedded-tests:
+    name: Embedded PG Tests (${{ matrix.os }})
+    needs: lint-fast
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: qtrading-pg-sidecar-linux-x86_64
+            binary_name: qtrading-pg-sidecar
+            sha256sums_file: sha256sums-x86_64-unknown-linux-gnu.txt
+          - os: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
+            binary_name: qtrading-pg-sidecar.exe
+            sha256sums_file: sha256sums-x86_64-pc-windows-msvc.txt
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+
+      - name: Download sidecar binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Downloading sidecar binary from latest sidecar-v* release..."
+          # --exclude-drafts --exclude-pre-releases 确保取到最新稳定版（对齐 build-windows job 逻辑）
+          $releases = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --exclude-drafts --exclude-pre-releases | Where-Object { $_ -match "sidecar-v" }
+          if ($LASTEXITCODE -ne 0 -or -not $releases) {
+            # C1: release 不存在时降级 skip（不阻塞 PR），首次部署需创建 sidecar-v* tag
+            Write-Warning "No sidecar-v* stable release found. Embedded tests will be skipped. Create sidecar-v* tag (trigger sidecar.yml release job) to enable."
+            exit 0
+          }
+          $tagName = (($releases | Select-Object -First 1) -split "`t")[0]
+          Write-Host "Latest sidecar release: $tagName"
+          # 放置 binary 到 sidecars/qtrading-pg-sidecar/target/release/（对齐 from_config 开发模式路径）
+          $targetDir = "sidecars/qtrading-pg-sidecar/target/release"
+          New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+          $artifactName = "${{ matrix.artifact_name }}"
+          $expectedBinaryName = "${{ matrix.binary_name }}"
+          $sha256sumsFileName = "${{ matrix.sha256sums_file }}"
+          gh release download $tagName `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern $artifactName `
+            --pattern $sha256sumsFileName `
+            --dir $targetDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gh release download failed (exit: $LASTEXITCODE)"
+            exit 1
+          }
+          $downloadedPath = Join-Path $targetDir $artifactName
+          $sidecarPath = Join-Path $targetDir $expectedBinaryName
+          # rename artifact_name -> expected binary name（tests/_sidecar_binary.py 期望的 binary 名）
+          Move-Item -Path $downloadedPath -Destination $sidecarPath -Force
+          if (-not (Test-Path $sidecarPath)) {
+            Write-Error "Sidecar binary not found at $sidecarPath after download"
+            exit 1
+          }
+          $fileInfo = Get-Item $sidecarPath
+          if ($fileInfo.Length -eq 0) {
+            Write-Error "Sidecar binary is 0 bytes (corrupt download)"
+            exit 1
+          }
+          Write-Host "Sidecar binary downloaded: $($fileInfo.Length) bytes"
+          # SHA256 校验（供应链完整性，对齐 build-windows job 的 P1-13 决策）
+          $sha256Path = Join-Path $targetDir $sha256sumsFileName
+          if (-not (Test-Path $sha256Path)) {
+            Write-Error "$sha256sumsFileName not found in release assets — supply chain integrity verification failed"
+            exit 1
+          }
+          $expectedLine = (Get-Content $sha256Path -Raw).Trim()
+          $expectedHash = ($expectedLine -split "\s+")[0].ToLower()
+          $actualHash = (Get-FileHash -Algorithm SHA256 $sidecarPath).Hash.ToLower()
+          if ($actualHash -ne $expectedHash) {
+            Write-Error "SHA256 mismatch! Expected: $expectedHash, Actual: $actualHash"
+            exit 1
+          }
+          Write-Host "SHA256 verified: $actualHash"
+          # 暴露给后续 step：SIDECAR_BINARY_PATH（tests/_sidecar_binary.py 定位）+ SIDECAR_SHA256（ensure_sidecar_sha256_file 写入 .sha256 文件）
+          $absolutePath = (Resolve-Path $sidecarPath).Path
+          echo "SIDECAR_BINARY_PATH=$absolutePath" >> $env:GITHUB_ENV
+          echo "SIDECAR_SHA256=$expectedHash" >> $env:GITHUB_ENV
+
+      - name: Run integration tests (serial, -n 1 avoids sidecar concurrency)
+        if: env.SIDECAR_BINARY_PATH != ''
+        env:
+          QTRADING_DATABASE_MODE: embedded
+          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
+          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+        shell: bash
+        run: |
+          python -m pytest \
+            tests/integration/test_embedded_postgres_real_sidecar.py \
+            tests/integration/test_embedded_pg_migration_regression.py \
+            tests/integration/test_embedded_pg_dao_rw.py \
+            tests/integration/test_embedded_pg_bootstrap.py \
+            -v --tb=short -n 1 -p no:randomly --timeout=600 --timeout-method=thread
+
+      - name: Get Playwright Version (Linux only, for E2E)
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        shell: bash
+        run: |
+          PLAYWRIGHT_VERSION=$(python -c "from importlib.metadata import version; print(version('playwright'))")
+          echo "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" >> $GITHUB_ENV
+
+      - name: Cache Playwright Browsers (Linux only, for E2E)
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        id: cache-playwright-embedded
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ env.PLAYWRIGHT_VERSION }}
+
+      - name: Install Playwright chromium (Linux only, for E2E)
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != '' && steps.cache-playwright-embedded.outputs.cache-hit != 'true'
+        run: playwright install chromium
+
+      - name: Run E2E tests (Linux only; Windows skipif via @pytest.mark.skipif in test file)
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
+        env:
+          QTRADING_DATABASE_MODE: embedded
+          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
+          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+        shell: bash
+        run: |
+          python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: embedded-test-reports-${{ matrix.os }}
+          path: |
+            logs/e2e-flet-app.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   requirements-drift:
     name: Detect requirements drift
     runs-on: windows-latest
@@ -715,7 +880,7 @@ jobs:
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
-    needs: [ci-checks, ci-checks-windows, e2e-tests-windows]
+    needs: [ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 60
