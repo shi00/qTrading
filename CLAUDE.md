@@ -108,7 +108,7 @@
 
 ### 1.10 反幻觉护栏 (AI 特有红线)
 
-- **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `fastmcp run flet_mcp:mcp`；`.trae/mcp.json` 受 IDE 黑名单保护需用户手动创建），"not found" 结果对当前锁定版本具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级，版本见 `pyproject.toml`）。
+- **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `fastmcp run flet_mcp:mcp`；`.trae/mcp.json` 已被 `.gitignore` 排除需用户手动创建），"not found" 结果在 api.json 完整收录前提下具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级；若 flet-mcp 滞后发布见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §5；版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
 - **禁止臆造红线编号**：引用 R1~R18 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
