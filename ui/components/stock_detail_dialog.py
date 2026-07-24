@@ -525,7 +525,7 @@ async def _load_chart_async(
                 max_y=chart_data.max_y,
                 bottom_axis=fch.ChartAxis(labels=chart_data.date_labels),
                 tooltip=fch.CandlestickChartTooltip(max_width=200),
-                expand=True,
+                expand=2,
             ),
         ]
 
@@ -637,7 +637,7 @@ def StockDetailDialog(
             set_chart_content,
         )
 
-    ft.use_effect(_load_chart_effect, dependencies=[open_])
+    ft.use_effect(_load_chart_effect, dependencies=[open_, data.get("ts_code", "")])
 
     # --- 关闭处理（state 驱动，非 pop_dialog）---
     def _close(_e) -> None:

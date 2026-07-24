@@ -8,6 +8,7 @@ import pytest
 
 from matplotlib.figure import Figure
 from ui.components.chart_utils import KlineChartData, generate_kline_chart_data, generate_kline_figure
+from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
 
@@ -176,15 +177,15 @@ class TestGenerateKlineChartData:
             assert group.x == i
 
     def test_volume_rod_rise_color(self):
-        """Rise (close >= open) should use _RISE_COLOR (#F44336)."""
+        """Rise (close >= open) should use AppColors.UP_RED."""
         df = _make_ohlcv_df(n=1)
         result = generate_kline_chart_data(df)
         # close (10.2) > open (10.0) → rise
         rod = result.volume_groups[0].rods[0]
-        assert rod.color == "#F44336"
+        assert rod.color == AppColors.UP_RED
 
     def test_volume_rod_fall_color(self):
-        """Fall (close < open) should use _FALL_COLOR (#26A69A)."""
+        """Fall (close < open) should use AppColors.DOWN_GREEN."""
         dates = pd.bdate_range("2024-01-02", periods=1)
         df = pd.DataFrame(
             {
@@ -198,7 +199,7 @@ class TestGenerateKlineChartData:
         )
         result = generate_kline_chart_data(df)
         rod = result.volume_groups[0].rods[0]
-        assert rod.color == "#26A69A"
+        assert rod.color == AppColors.DOWN_GREEN
 
     def test_no_volume_column_empty_groups(self):
         df = _make_ohlcv_df()

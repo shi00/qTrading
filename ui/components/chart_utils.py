@@ -280,7 +280,7 @@ def generate_kline_chart_data(
                         fch.BarChartRod(
                             from_y=0,
                             to_y=vol_v,
-                            color=_RISE_COLOR if is_rise else _FALL_COLOR,
+                            color=AppColors.UP_RED if is_rise else AppColors.DOWN_GREEN,
                         )
                     ],
                 )
