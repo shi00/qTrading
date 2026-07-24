@@ -62,9 +62,11 @@ async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_w
     embedded_ready_text = I18n.get("embedded_pg_ready")
     await embedded_real_wizard_page.expect_text(embedded_ready_text)
 
-    # 4. 验证不显示 host/port/user/password 表单字段
-    db_host_label = I18n.get("db_host")
-    assert not await embedded_real_wizard_page.has_text(db_host_label)
+    # 4. 验证不显示 external 模式的表单输入框
+    #    (用外部模式独有按钮 "测试连接" 作为判断依据，
+    #     避免 "主机" 被 embedded_pg_no_config_needed 误匹配)
+    db_test_conn_btn = I18n.get("db_test_connection")
+    assert not await embedded_real_wizard_page.has_text(db_test_conn_btn)
 
     # 5. 点击 "验证并继续" 完成 database step
     btn_verify = I18n.get("wizard_btn_verify_next")
@@ -127,7 +129,7 @@ async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page
     await embedded_real_wizard_page.expect_text(embedded_no_config_text)
 
 
-async def test_real_embedded_app_db_queryable(embedded_real_wizard_app) -> None:
+async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None:
     """E2E: 真实 sidecar 启动后，应用日志间接验证 DB 已就绪 + 表已迁移 (spec §3.6 用例 2)。
 
     验证：
@@ -140,9 +142,13 @@ async def test_real_embedded_app_db_queryable(embedded_real_wizard_app) -> None:
     password_file 中，不输出到日志），改为验证日志含 ready + 迁移消息，间接验证
     DB 可查询性（实际 SQL 查询由集成测试 test_embedded_pg_bootstrap.py 覆盖）。
 
-    本测试不打开浏览器（仅用 ``embedded_real_wizard_app`` fixture 启动 app subprocess），
-    不涉及 CanvasKit 渲染，无需 Windows skipif。
+    注意：使用 ``embedded_real_wizard_page`` 而非 ``embedded_real_wizard_app``
+    是因为 Flet Web 模式下 ``main(page)`` 仅在第一个 page 连接时才执行，
+    若不连接浏览器则 sidecar 不会启动、日志为空。
     """
+    welcome_guide = I18n.get("wizard_welcome_guide")
+    await embedded_real_wizard_page.expect_text(welcome_guide)
+
     log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
     content = log_path.read_text(encoding="utf-8", errors="replace")
     assert "[Bootstrap] embedded postgres ready on 127.0.0.1:" in content, (
