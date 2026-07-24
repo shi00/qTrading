@@ -22,6 +22,7 @@ from data.sync.sw_industry import SwIndustrySyncStrategy
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
@@ -147,6 +148,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """
         logger.debug("[DataProcessor] Stop | Cancel requested")
         self._get_cancel_event().set()
+        # A4: 传播到 TaskManager 注入的 task-level cancel_event，确保
+        # TaskManager 视角能看到取消信号。context.cancel_event 来自 DI
+        # （threading.Event，见 run_ai_concept_tagging docstring），非类属性，R11 合规。
+        if self.context.cancel_event is not None:
+            self.context.cancel_event.set()
         self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
 
         # Propagate to all strategies
@@ -169,11 +175,17 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     def clear_cancel(self):
         """Clear cancel state before starting new operation."""
         self._get_cancel_event().clear()
+        # A4: 同步 clear context.cancel_event，避免取消信号残留导致后续 sync 误判
+        if self.context.cancel_event is not None:
+            self.context.cancel_event.clear()
 
     async def stop(self):
         """Signal all running tasks to stop. Async to ensure proper cleanup."""
         logger.debug("[DataProcessor] Stop | Global stop signal received.")
         self._get_cancel_event().set()
+        # A4: 同 request_cancel，传播到 TaskManager 注入的 task-level cancel_event。
+        if self.context.cancel_event is not None:
+            self.context.cancel_event.set()
 
         # Delegate cancellation to strategies
         try:
@@ -559,7 +571,28 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
         except Exception as e:
-            logger.error("[DataProcessor] Sync Basic | ❌ Failed: %s", safe_error(e), exc_info=True)
+            # D2: 接入 classify_error + classify_severity 区分 system 与 recoverable/operational。
+            # system 级（DB 连接失败、MemoryError 等）raise 传播至 initialize_system
+            # except 块；recoverable/operational 级（网络错误、限流、数据格式错误等）
+            # 降级返回 0。注：调用方 initialize_system 在 stock_count==0 时会 abort
+            # 整个 phase（baseline 行为，D2 未改变），故 recoverable/operational 错误
+            # 实际会触发 abort。
+            safe = safe_error(e)
+            error_info = classify_error(e, context="db")
+            severity = classify_severity(e, context="db")
+            if severity == "system":
+                logger.error(
+                    "[DataProcessor] Sync Basic | ❌ System error (%s): %s",
+                    error_info["code"],
+                    safe,
+                    exc_info=True,
+                )
+                raise
+            logger.warning(
+                "[DataProcessor] Sync Basic | ⚠️ Recoverable/operational error (%s): %s",
+                error_info["code"],
+                safe,
+            )
             return 0
         finally:
             with self._sync_lock:
@@ -604,7 +637,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     if self.is_cancelled():
                         return None
                     result = await self.api.get_concept_detail_by_id(c)
-                    await asyncio.sleep(CONCEPT_DELAY)
+                    # A3: 用 wait_for(cancel_event.wait(), timeout) 替代 asyncio.sleep，
+                    # 使 cancel_event 被 set 时立即响应（≤2s 红线），而非阻塞完整 CONCEPT_DELAY。
+                    # TimeoutError = sleep 正常完成；event 被 set 则 wait() 立即返回，
+                    # 随后 is_cancelled() 为 True 时 raise CancelledError，由
+                    # gather_return_exceptions_propagating_cancel 重新抛出（R2 合规）。
+                    try:
+                        await asyncio.wait_for(
+                            self._get_cancel_event().wait(),
+                            timeout=CONCEPT_DELAY,
+                        )
+                    except TimeoutError:
+                        pass  # 正常 sleep 完成
+                    if self.is_cancelled():
+                        raise asyncio.CancelledError()
                     return result
 
             # Create tasks eagerly but execute with semaphore
@@ -663,10 +709,25 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return count
 
         except Exception as e:
-            logger.error(
-                "[DataProcessor] Sync Concepts | ❌ Failed: %s",
-                safe_error(e),
-                exc_info=True,
+            # D2: 接入 classify_error + classify_severity 区分 system 与 recoverable/operational。
+            # system 级（DB 连接失败、MemoryError 等）raise 传播；recoverable/operational
+            # 级（网络错误、限流、数据格式错误等）降级返回 0。调用方 initialize_system
+            # 未检查 sync_concepts 返回值，故 recoverable/operational 错误不打断初始化流程。
+            safe = safe_error(e)
+            error_info = classify_error(e, context="db")
+            severity = classify_severity(e, context="db")
+            if severity == "system":
+                logger.error(
+                    "[DataProcessor] Sync Concepts | ❌ System error (%s): %s",
+                    error_info["code"],
+                    safe,
+                    exc_info=True,
+                )
+                raise
+            logger.warning(
+                "[DataProcessor] Sync Concepts | ⚠️ Recoverable/operational error (%s): %s",
+                error_info["code"],
+                safe,
             )
             return 0
 

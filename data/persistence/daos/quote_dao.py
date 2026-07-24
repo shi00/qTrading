@@ -68,7 +68,6 @@ _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
         "stock_basic",
         "macro_economy",
         "market_news",
-        "cn_m",
     }
 )
 

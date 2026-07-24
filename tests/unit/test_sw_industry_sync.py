@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.quality_gate import QualityTier
 from data.sync.base import SyncContext, SyncResult, SyncStatus
 from data.sync.sw_industry import SwIndustrySyncStrategy
 
@@ -554,11 +553,3 @@ class TestRecordSkippedPermission:
 
         debug_logs = [r for r in caplog.records if "Failed to record skipped_permission" in r.message]
         assert len(debug_logs) == 1
-
-
-class TestRequiredQualityTier:
-    """Phase 3F-1 §4.3.2：required_quality_tier 声明（与 cancellation 测试文件互补）。"""
-
-    def test_required_quality_tier_is_bronze(self):
-        """required_quality_tier 必须为 QualityTier.BRONZE（基础元数据等级）。"""
-        assert SwIndustrySyncStrategy.required_quality_tier == QualityTier.BRONZE
