@@ -1,0 +1,4 @@
+{
+  "description": "AStockScreener: project-level harness hook overrides (empty = use plugin defaults)",
+  "hooks": {}
+}
