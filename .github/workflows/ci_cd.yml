@@ -444,6 +444,7 @@ jobs:
           TEMP: D:\tmp
           TMP: D:\tmp
           TMPDIR: D:\tmp
+        shell: bash
         run: |
           mkdir -p D:/tmp
           # Run E2E tests serially (-n 1) to avoid PostgreSQL connection contention.
@@ -560,6 +561,7 @@ jobs:
           TMP: D:\tmp
           TMPDIR: D:\tmp
         timeout-minutes: 15
+        shell: bash
         run: |
           mkdir -p D:/tmp
           python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
