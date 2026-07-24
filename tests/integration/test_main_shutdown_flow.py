@@ -358,11 +358,20 @@ async def test_window_close_during_shutdown_does_not_reopen_dialog(monkeypatch):
     confirm_btn.on_click(MagicMock())
     await started.wait()
 
+    # perform_window_shutdown 入口已显示 shutdown 进度对话框（shutdown_in_progress_*）
+    shutdown_progress_dialog = page.current_dialog
+    assert shutdown_progress_dialog is not None
+
     await on_event(SimpleNamespace(type="close"))
-    assert page.current_dialog is None
+    # 第二次 close 不应重新打开 close confirm dialog（shutdown_requested=True 跳过显示），
+    # current_dialog 应保持为 shutdown 进度对话框，不被替换为 close confirm dialog。
+    assert page.current_dialog is shutdown_progress_dialog
 
     release.set()
-    await asyncio.sleep(0)
+    # 多次 yield 让 _perform_window_shutdown task 跑完 cleanup→pop_dialog→destroy，
+    # 避免 teardown 取消 task 触发 CancelledError→force_exit→os._exit AssertionError 噪音。
+    for _ in range(3):
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
