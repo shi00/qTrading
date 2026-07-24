@@ -463,12 +463,17 @@ async fn health_check(
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("28P01") || msg.contains("password authentication failed") {
+                tracing::error!(
+                    "认证失败（密码与 cluster 不匹配，§13.7.46）：\
+                     改回原 data_dir、走 reset-password、或改用外置模式，三选一"
+                );
                 eprintln!(
                     "[sidecar] 认证失败（密码与 cluster 不匹配，§13.7.46）：\
                      改回原 data_dir、走 reset-password、或改用外置模式，三选一"
                 );
                 exit_codes::PASSWORD_FAILED
             } else {
+                tracing::error!("health check failed ({sql}): {msg}");
                 eprintln!("[sidecar] health check failed ({sql}): {msg}");
                 exit_codes::HEALTH_CHECK_FAILED
             }
@@ -516,6 +521,7 @@ async fn post_kill_fallback_check(
         )
         .await
         .map_err(|e| {
+            tracing::error!("kill fallback 后系统目录检查失败 ({name}): {e}（§7.3 / MAJ-1）");
             eprintln!("[sidecar] kill fallback 后系统目录检查失败 ({name}): {e}（§7.3 / MAJ-1）");
             exit_codes::HEALTH_CHECK_FAILED
         })?;
@@ -528,6 +534,10 @@ async fn post_kill_fallback_check(
             .and_then(|l| l.parse().ok())
             .unwrap_or(0);
         if count <= 0 {
+            tracing::error!(
+                "kill fallback 后系统目录 {name} 为空或损坏 (count={count})，\
+                 禁止继续启动以免扩大损坏（§7.3 / MAJ-1）"
+            );
             eprintln!(
                 "[sidecar] kill fallback 后系统目录 {name} 为空或损坏 (count={count})，\
                  禁止继续启动以免扩大损坏（§7.3 / MAJ-1）"
