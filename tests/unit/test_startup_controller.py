@@ -357,3 +357,67 @@ class TestStartupOnboardingComplete:
 
         mock_init.assert_awaited_once()
         assert ctrl.state == StartupState.READY
+
+
+class TestStartupEmbeddedPgScenario:
+    """UX 改进 spec §启动侧方案 A：embedded_pg_scenario 传递与跨状态保留."""
+
+    def test_default_scenario_is_none(self, controller):
+        ctrl, _ = controller
+        assert ctrl.context.embedded_pg_scenario is None
+
+    def test_scenario_injected_to_initial_context(self):
+        from app.bootstrap import EmbeddedPgStartupScenario
+
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=lambda s, ctx: None,
+            embedded_pg_scenario=EmbeddedPgStartupScenario.FIRST_RUN,
+        )
+        assert ctrl.context.embedded_pg_scenario == EmbeddedPgStartupScenario.FIRST_RUN
+
+    def test_scenario_preserved_across_transition(self):
+        """_transition 不重置 embedded_pg_scenario（未显式传入时保留旧值）."""
+        from app.bootstrap import EmbeddedPgStartupScenario
+
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=lambda s, ctx: None,
+            embedded_pg_scenario=EmbeddedPgStartupScenario.NORMAL,
+        )
+        ctrl._transition(StartupState.NEED_UPGRADE, error="db_upgrade_needed", detail="rev mismatch")
+        assert ctrl.context.embedded_pg_scenario == EmbeddedPgStartupScenario.NORMAL
+        assert ctrl.context.error == "db_upgrade_needed"
+
+    def test_scenario_explicit_override_in_transition(self):
+        """_transition 显式传入 embedded_pg_scenario 时覆盖旧值（用于测试或重置）."""
+        from app.bootstrap import EmbeddedPgStartupScenario
+
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=lambda s, ctx: None,
+            embedded_pg_scenario=EmbeddedPgStartupScenario.NORMAL,
+        )
+        ctrl._transition(
+            StartupState.INIT_FAILED,
+            error="db_init_failed",
+            embedded_pg_scenario=EmbeddedPgStartupScenario.FIRST_RUN,
+        )
+        assert ctrl.context.embedded_pg_scenario == EmbeddedPgStartupScenario.FIRST_RUN
+
+    @pytest.mark.asyncio
+    async def test_scenario_preserved_through_init_services_flow(self):
+        """端到端：scenario 经 __init__ 注入后，_init_services 多次 _transition 仍保留."""
+        from app.bootstrap import EmbeddedPgStartupScenario
+
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=lambda s, ctx: None,
+            embedded_pg_scenario=EmbeddedPgStartupScenario.FIRST_RUN,
+        )
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            await ctrl._init_services()
+
+        assert ctrl.state == StartupState.READY
+        assert ctrl.context.embedded_pg_scenario == EmbeddedPgStartupScenario.FIRST_RUN

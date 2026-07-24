@@ -34,7 +34,7 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
 # startup_views.py 由 main.py 直接装配（main.py:18），属于启动流程的延伸，
 # 不是 ui 层的正常业务导入。此处显式记录，避免阻塞边界门禁。
 KNOWN_EXCEPTIONS: set[str] = {
-    "ui/startup_views.py",  # imports app.startup_controller (main.py 装配延伸)
+    "ui/startup_views.py",  # imports app.bootstrap, app.startup_controller (main.py 装配延伸)
 }
 
 

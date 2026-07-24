@@ -22,8 +22,9 @@ from typing import Any
 import flet as ft
 
 # 架构例外 (§4.1): app 层应仅被 main.py 调用。此处的导入属于 main.py 启动流程
-# 的延伸 (main.py 装配 StartupView), 不是 ui 层的正常业务导入。
+# 的延伸 (main.py 装配 StartupView/LoadingView), 不是 ui 层的正常业务导入。
 # 已在 tests/unit/test_architecture_boundaries.py 的 KNOWN_EXCEPTIONS 中记录。
+from app.bootstrap import EmbeddedPgStartupScenario
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
@@ -73,14 +74,41 @@ class _StartupBridge:
 # --- 纯函数构建器 (可独立测试) ---
 
 
-def _build_loading_view() -> ft.Container:
-    """构造 loading 启动视图."""
+def _build_loading_view(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Container:
+    """构造 loading 启动视图.
+
+    根据 scenario 显示差异化文案（UX 改进 spec §启动侧方案 A）：
+    - ``None``：原有 "Initializing..." 文案（external 模式）
+    - ``FIRST_RUN``：标题 ``startup_embedded_pg_first_run_title`` + 提示 ``startup_embedded_pg_first_run_hint``
+    - ``NORMAL`` / ``UNKNOWN``：标题 ``startup_embedded_pg_normal_title`` + 提示 ``startup_embedded_pg_normal_hint``
+    """
+    children: list[ft.Control] = [ft.ProgressRing(width=40, height=40, stroke_width=3)]
+    if scenario is None:
+        # external 模式：原有 "Initializing..." 单行
+        children.append(ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=AppStyles.FONT_SIZE_TITLE))
+    else:
+        if scenario == EmbeddedPgStartupScenario.FIRST_RUN:
+            title_key, hint_key = (
+                "startup_embedded_pg_first_run_title",
+                "startup_embedded_pg_first_run_hint",
+            )
+        else:
+            # NORMAL / UNKNOWN 共用普通启动文案（spec §启动 UI 先渲染）
+            title_key, hint_key = (
+                "startup_embedded_pg_normal_title",
+                "startup_embedded_pg_normal_hint",
+            )
+        children.append(
+            ft.Text(
+                I18n.get(title_key),
+                size=AppStyles.FONT_SIZE_HEADLINE,
+                weight=ft.FontWeight.BOLD,
+            )
+        )
+        children.append(ft.Text(I18n.get(hint_key), size=AppStyles.FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY))
     return ft.Container(
         content=ft.Column(
-            [
-                ft.ProgressRing(width=40, height=40, stroke_width=3),
-                ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=AppStyles.FONT_SIZE_TITLE),
-            ],
+            children,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=20,
@@ -88,6 +116,25 @@ def _build_loading_view() -> ft.Container:
         expand=True,
         alignment=ft.Alignment.CENTER,
     )
+
+
+@ft.component
+def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Container:
+    """启动期 LoadingView 独立组件（prepare_database_runtime 期间临时显示）。
+
+    与 StartupView 的 LOADING 状态共用 ``_build_loading_view``，但独立挂载，
+    避免依赖 StartupController（cache_manager 尚未构造）。
+
+    调用场景：embedded 模式下，main.py 在 ``prepare_database_runtime`` 之前
+    ``page.render(LoadingView, scenario=...)`` 渲染一帧，让用户看到反馈；
+    ``prepare_database_runtime`` 完成后再 ``page.render(RootView, ...)`` 替换。
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
+    - 不持有业务状态；scenario 作为 prop 推送
+    """
+    ft.use_state(get_observable_state)
+    return _build_loading_view(scenario)
 
 
 def _build_upgrade_dialog(on_upgrade: Callable[[ft.ControlEvent], None]) -> ft.AlertDialog:
@@ -342,4 +389,5 @@ def StartupView(
 
         return _build_error_view(context, _on_retry, _on_reconfigure, _on_skip)
     # LOADING / NEED_UPGRADE / UPGRADE_* → loading 背景 (dialog 由 ft.use_dialog 声明式管理)
-    return _build_loading_view()
+    # 传递 context.embedded_pg_scenario 以显示差异化文案（embedded PG 启动期）
+    return _build_loading_view(scenario=context.embedded_pg_scenario)
