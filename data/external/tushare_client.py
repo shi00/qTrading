@@ -877,7 +877,10 @@ class TushareClient:
                     try:
                         progress_callback(completed_counter[0], total)
                     except Exception as cb_exc:  # pragma: no cover - UI 回调异常不应阻塞 probe
-                        logger.warning("[TushareClient] Probe progress_callback failed: %s", cb_exc)
+                        logger.warning(
+                            "[TushareClient] Probe progress_callback failed: %s",
+                            DataSanitizer.sanitize_error(cb_exc),
+                        )
                 return result
 
             results_list = await gather_return_exceptions_propagating_cancel(
@@ -888,7 +891,10 @@ class TushareClient:
                 if isinstance(item, Exception):
                     # _probe_one 已捕获内部异常，此处 Exception 不应发生；
                     # 防御性处理：跳过该 item
-                    logger.warning("[TushareClient] Probe returned unexpected exception: %s", item)
+                    logger.warning(
+                        "[TushareClient] Probe returned unexpected exception: %s",
+                        DataSanitizer.sanitize_error(item),
+                    )
                     continue
                 if isinstance(item, tuple):
                     api_name, available = item
@@ -955,7 +961,7 @@ class TushareClient:
             # B3+B5/B19 修复：持锁回滚 + token 一致性检查
             logger.warning(
                 "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
-                exc,
+                DataSanitizer.sanitize_error(exc),
             )
             if self.token == token_snapshot:
                 with self._capability_cache_lock:
