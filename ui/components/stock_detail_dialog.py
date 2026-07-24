@@ -20,9 +20,10 @@ from collections.abc import Callable
 from decimal import Decimal
 
 import flet as ft
+import flet_charts as fch
 
 from ui.components._markdown_safe import safe_open_url
-from ui.components.chart_utils import generate_kline_png
+from ui.components.chart_utils import generate_kline_figure
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -31,9 +32,6 @@ logger = logging.getLogger(__name__)
 # Tushare unit conversion constants
 TUSHARE_MV_UNIT = 10000  # Tushare returns market value in 万元, convert to 亿
 TUSHARE_AMOUNT_UNIT = 100000  # Tushare returns amount in 千元, convert to 亿
-
-# K 线图固定高度（宽度由对话框尺寸推算）
-_CHART_HEIGHT = 340
 
 
 def is_valid_number(val) -> bool:
@@ -463,8 +461,6 @@ async def _load_chart_async(
     stock_data: dict,
     ts_code: str,
     set_chart_content: Callable[[ft.Control], None],
-    chart_width: int,
-    chart_height: int,
 ) -> None:
     """异步加载 K 线图并通过 set_chart_content 更新状态。
 
@@ -513,25 +509,22 @@ async def _load_chart_async(
         if "vol" not in df.columns:
             df["vol"] = 0
 
-        # 通过 ThreadPoolManager 在 CPU 线程池生成 K 线 PNG（R16：避免阻塞主循环）
+        # 通过 ThreadPoolManager 在 CPU 线程池生成 K 线 figure（R16：避免阻塞主循环）
         chart_title = f"{stock_data.get('name', '')} ({ts_code})"
         from utils.thread_pool import TaskType, ThreadPoolManager
 
-        b64_png = await ThreadPoolManager().run_async(
+        figure = await ThreadPoolManager().run_async(
             TaskType.CPU,
-            generate_kline_png,
+            generate_kline_figure,
             df,
             title=chart_title,
-            width=chart_width,
-            height=chart_height,
         )
 
         set_chart_content(
             ft.Column(
                 [
-                    ft.Image(
-                        src=b64_png,
-                        fit=ft.BoxFit.CONTAIN,
+                    fch.MatplotlibChartWithToolbar(
+                        figure=figure,
                         expand=True,
                     ),
                     # P3-15 色盲友好: K 线图例文字标注涨/跌, 不依赖颜色区分
@@ -607,9 +600,8 @@ def StockDetailDialog(
 
     data = stock_data or {}
 
-    # 对话框尺寸 + K 线图宽度
+    # 对话框尺寸
     width, height = _dialog_size(page)
-    chart_width = max(width - 40, 600)
 
     # --- K 线图异步加载 effect（open 变为 True 时触发）---
     async def _load_chart_effect() -> None:
@@ -623,8 +615,6 @@ def StockDetailDialog(
             data,
             ts_code,
             set_chart_content,
-            chart_width,
-            _CHART_HEIGHT,
         )
 
     ft.use_effect(_load_chart_effect, dependencies=[open_])

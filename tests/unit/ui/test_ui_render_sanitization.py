@@ -717,8 +717,6 @@ class TestStockDetailDialogChartErrorPath:
                 stock_data={"ts_code": "000001.SZ", "name": "Test"},
                 ts_code="000001.SZ",
                 set_chart_content=set_chart_content,
-                chart_width=800,
-                chart_height=340,
             )
         )
 
