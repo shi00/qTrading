@@ -91,7 +91,7 @@ class EmbeddedPostgresService:
         start_timeout: float = 300.0,
         stop_timeout: float = 60.0,
         listen: str = "127.0.0.1",
-        username: str = "qtrading",
+        username: str = "postgres",
         database: str = "qtrading",
     ) -> None:
         with self._lock:

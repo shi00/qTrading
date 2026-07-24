@@ -227,7 +227,9 @@ class AppConfig(BaseModel):
     )
     embedded_pg_stop_timeout_s: float = Field(default=60.0, ge=5.0, le=120.0, description="sidecar 停止等待超时")
     embedded_pg_listen: str = Field(default="127.0.0.1", description="PG 监听地址（仅本机）")
-    embedded_pg_username: str = Field(default="qtrading", description="PG 超级用户名")
+    embedded_pg_username: str = Field(
+        default="postgres", description="PG 超级用户名（与 postgresql_embedded crate BOOTSTRAP_SUPERUSER 对齐）"
+    )
     embedded_pg_database: str = Field(default="qtrading", description="默认业务库名")
 
     # Phase 3：Settings DatabaseTab 高级模式开关（开启后显示外置 PostgreSQL 配置表单）
