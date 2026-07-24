@@ -133,18 +133,18 @@ class TestResolveColor:
     """_resolve_color 纯函数测试：验证 RED/GREEN/其他 颜色映射。"""
 
     def test_red_maps_to_up(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """'RED' → AppColors.UP（A股红涨）。"""
+        """'RED' → AppColors.UP_RED（A股红涨）。"""
         from ui.components.market_dashboard import _resolve_color
         from ui.theme import AppColors
 
-        assert _resolve_color("RED") == AppColors.UP
+        assert _resolve_color("RED") == AppColors.UP_RED
 
     def test_green_maps_to_down(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """'GREEN' → AppColors.DOWN（A股绿跌）。"""
+        """'GREEN' → AppColors.DOWN_GREEN（A股绿跌）。"""
         from ui.components.market_dashboard import _resolve_color
         from ui.theme import AppColors
 
-        assert _resolve_color("GREEN") == AppColors.DOWN
+        assert _resolve_color("GREEN") == AppColors.DOWN_GREEN
 
     def test_none_returns_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
         """None → AppColors.TEXT_SECONDARY（中性灰）。"""
@@ -172,8 +172,8 @@ class TestResolveColor:
         from ui.components.market_dashboard import _resolve_color
         from ui.theme import AppColors
 
-        assert _resolve_color("red") == AppColors.UP
-        assert _resolve_color("green") == AppColors.DOWN
+        assert _resolve_color("red") == AppColors.UP_RED
+        assert _resolve_color("green") == AppColors.DOWN_GREEN
 
 
 class TestBuildIndexCard:
@@ -197,7 +197,7 @@ class TestBuildIndexCard:
         # 第 3 项：change
         assert col.controls[2].value == "+1.2%"
         # color 解析为 UP
-        assert col.controls[2].color == AppColors.UP
+        assert col.controls[2].color == AppColors.UP_RED
 
     def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
         """空 info：value/change 显示 '--'。"""
@@ -249,7 +249,7 @@ class TestBuildHsgtCard:
         # 第 3 项：sub
         assert col.controls[2].value == "净流入"
         # value 的 color 解析为 UP
-        assert col.controls[1].color == AppColors.UP
+        assert col.controls[1].color == AppColors.UP_RED
 
     def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
         """空 info：value/sub 显示 '--'。"""
@@ -282,9 +282,9 @@ class TestBuildConceptCard:
         icon = row.controls[0]
         text = row.controls[1]
         assert icon.icon == ft.Icons.TRENDING_UP
-        assert icon.color == AppColors.UP
+        assert icon.color == AppColors.UP_RED
         assert text.value == "+3.5%"
-        assert text.color == AppColors.UP
+        assert text.color == AppColors.UP_RED
 
     def test_non_red_color_uses_down_and_trending_down_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
         """color 不含 'red' → is_up=False, color=DOWN, icon=TRENDING_DOWN。"""
@@ -298,7 +298,7 @@ class TestBuildConceptCard:
         row = col.controls[1]
         icon = row.controls[0]
         assert icon.icon == ft.Icons.TRENDING_DOWN
-        assert icon.color == AppColors.DOWN
+        assert icon.color == AppColors.DOWN_GREEN
 
     def test_missing_color_defaults_to_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
         """item 无 color → color_str='' → is_up=False → DOWN。"""
@@ -310,7 +310,7 @@ class TestBuildConceptCard:
 
         col = card.content
         row = col.controls[1]
-        assert row.controls[0].color == AppColors.DOWN
+        assert row.controls[0].color == AppColors.DOWN_GREEN
 
     def test_missing_name_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
         """item 无 name → 显示 '--'。"""

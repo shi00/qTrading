@@ -63,8 +63,6 @@ class ThemeColors(TypedDict):
 
     UP_RED: str
     DOWN_GREEN: str
-    UP: str
-    DOWN: str
     SUCCESS: str
     WARNING: str
     INFO: str
@@ -93,8 +91,6 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DARK: {
         "UP_RED": "#F44336",
         "DOWN_GREEN": "#4CAF50",
-        "UP": "#FF3333",
-        "DOWN": "#00E676",
         "SUCCESS": "#00E676",
         "WARNING": "#FFAB00",
         "INFO": "#2979FF",
@@ -120,8 +116,6 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         #   (原 Green 500 #4CAF50 在白底对比度仅 2.78). ceiling: 视觉一致以 WCAG 为准.
         #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
         "DOWN_GREEN": "#388E3C",
-        "UP": "#D32F2F",
-        "DOWN": "#388E3C",
         "SUCCESS": "#388E3C",
         # NOTE(lazy): WARNING 调整为 Orange 800 以满足 WCAG §1.4.3 对比度≥3.0
         #   (原 Amber 800 #FFA000 在白底对比度仅 2.04). ceiling: 视觉一致以 WCAG 为准.
@@ -147,8 +141,6 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.NAVY: {
         "UP_RED": "#EF4444",
         "DOWN_GREEN": "#22C55E",
-        "UP": "#F87171",
-        "DOWN": "#4ADE80",
         "SUCCESS": "#4ADE80",
         "WARNING": "#FBBF24",
         "INFO": "#38BDF8",
@@ -171,8 +163,6 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DRACULA: {
         "UP_RED": "#F44336",
         "DOWN_GREEN": "#4CAF50",
-        "UP": "#FF5555",  # Red
-        "DOWN": "#50FA7B",  # Green
         "SUCCESS": "#50FA7B",
         "WARNING": "#FFB86C",  # Orange
         "INFO": "#8BE9FD",  # Cyan
@@ -369,10 +359,6 @@ class AppColors:
     # ====================================================================
     UP_RED = "#F44336"
     DOWN_GREEN = "#4CAF50"
-    UP = "#FF3333"
-    DOWN = "#00E676"
-    RISE = UP
-    FALL = DOWN
     # 业务语义直通色 (随主题切换) — SUCCESS 成功 / WARNING 警告 / INFO 信息状态色
     SUCCESS = "#00E676"
     WARNING = "#FFAB00"
@@ -440,8 +426,6 @@ class AppColors:
                 setattr(cls, key, value)
 
         # 别名同步
-        cls.RISE = cls.UP
-        cls.FALL = cls.DOWN
         cls.TABLE_GRID_V = cls.TABLE_GRID
         cls.TABLE_GRID_H = cls.TABLE_GRID
 
@@ -601,9 +585,9 @@ class AppStyles:
     def price_change_color(value: float) -> str:
         """涨跌颜色 (Layer 2 — 自定义色)"""
         if value > 0:
-            return AppColors.UP
+            return AppColors.UP_RED
         if value < 0:
-            return AppColors.DOWN
+            return AppColors.DOWN_GREEN
         return ft.Colors.ON_SURFACE_VARIANT
 
 

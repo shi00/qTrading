@@ -131,7 +131,7 @@ def _build_metric_tile(
             spacing=4,
             alignment=ft.MainAxisAlignment.CENTER,
         ),
-        padding=15,
+        padding=16,
         bgcolor=AppColors.SURFACE_VARIANT,
         border_radius=6,
         expand=True,

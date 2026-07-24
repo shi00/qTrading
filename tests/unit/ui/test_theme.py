@@ -10,6 +10,7 @@ from ui.theme import (
     AppColors,
     AppColorsState,
     AppStyles,
+    ThemeColors,
     ThemeName,
     CUSTOM_COLOR_PRESETS,
 )
@@ -20,8 +21,6 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def _save_restore_appcolors():
     saved_attrs = {key: getattr(AppColors, key) for key in CUSTOM_COLOR_PRESETS[ThemeName.DARK]}
-    saved_attrs["RISE"] = AppColors.RISE
-    saved_attrs["FALL"] = AppColors.FALL
     saved_attrs["TABLE_GRID_V"] = AppColors.TABLE_GRID_V
     saved_attrs["TABLE_GRID_H"] = AppColors.TABLE_GRID_H
     saved_attrs["_CURRENT_THEME_NAME"] = AppColors._CURRENT_THEME_NAME
@@ -71,8 +70,8 @@ class TestAppColorsLoadTheme:
     )
     def test_applies_dark_preset_colors(self):
         AppColors.load_theme(ThemeName.DARK)
-        assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["UP"] == AppColors.UP
-        assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["DOWN"] == AppColors.DOWN
+        assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["UP_RED"] == AppColors.UP_RED
+        assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["DOWN_GREEN"] == AppColors.DOWN_GREEN
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
@@ -85,34 +84,8 @@ class TestAppColorsLoadTheme:
     )
     def test_applies_light_preset_colors(self):
         AppColors.load_theme(ThemeName.LIGHT)
-        assert CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["UP"] == AppColors.UP
-        assert CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["DOWN"] == AppColors.DOWN
-
-    @patch(
-        "ui.theme.THEME_MODE_MAP",
-        {
-            ThemeName.DARK: "DARK",
-            ThemeName.LIGHT: "LIGHT",
-            ThemeName.NAVY: "DARK",
-            ThemeName.DRACULA: "DARK",
-        },
-    )
-    def test_syncs_rise_alias(self):
-        AppColors.load_theme(ThemeName.LIGHT)
-        assert AppColors.RISE == AppColors.UP
-
-    @patch(
-        "ui.theme.THEME_MODE_MAP",
-        {
-            ThemeName.DARK: "DARK",
-            ThemeName.LIGHT: "LIGHT",
-            ThemeName.NAVY: "DARK",
-            ThemeName.DRACULA: "DARK",
-        },
-    )
-    def test_syncs_fall_alias(self):
-        AppColors.load_theme(ThemeName.LIGHT)
-        assert AppColors.FALL == AppColors.DOWN
+        assert CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["UP_RED"] == AppColors.UP_RED
+        assert CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["DOWN_GREEN"] == AppColors.DOWN_GREEN
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
@@ -303,11 +276,11 @@ class TestAppStylesDataTableRow:
 class TestAppStylesPriceChangeColor:
     def test_positive_returns_up(self):
         result = AppStyles.price_change_color(1.5)
-        assert result == AppColors.UP
+        assert result == AppColors.UP_RED
 
     def test_negative_returns_down(self):
         result = AppStyles.price_change_color(-2.0)
-        assert result == AppColors.DOWN
+        assert result == AppColors.DOWN_GREEN
 
     def test_zero_returns_on_surface_variant(self):
         result = AppStyles.price_change_color(0.0)
@@ -423,8 +396,8 @@ class TestLayer1Layer2NameSeparation:
     def test_layer2_business_colors_in_custom_presets(self):
         """Layer 2 业务色必须在 4 主题 CUSTOM_COLOR_PRESETS 中均有定义 (随主题切换)."""
         _, layer2 = self._classify_appcolors_attrs()
-        # 排除 RISE/FALL/TABLE_GRID_V/TABLE_GRID_H 等别名 (load_theme 中手动同步)
-        aliases = {"RISE", "FALL", "TABLE_GRID_V", "TABLE_GRID_H", "CARD_BG"}
+        # 排除 TABLE_GRID_V/TABLE_GRID_H 等别名 (load_theme 中手动同步)
+        aliases = {"TABLE_GRID_V", "TABLE_GRID_H", "CARD_BG"}
         # TABLE_ROW_HOVER 4 主题 preset 补值属于批次 3 P2-8, 批次 1 暂排除
         pending_batch3 = {"TABLE_ROW_HOVER"}
         layer2_non_alias = layer2 - aliases - pending_batch3
@@ -467,3 +440,30 @@ class TestWCAGContrastCompliance:
         """4 主题必须在 CUSTOM_COLOR_PRESETS 中均有定义。"""
         for theme in (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA):
             assert theme in CUSTOM_COLOR_PRESETS, f"{theme} 主题缺失于 CUSTOM_COLOR_PRESETS"
+
+
+# ============================================================================
+# 涨跌色单轨契约 (P2-1: 禁止 UP/DOWN/RISE/FALL 双轨复活)
+# ============================================================================
+
+
+class TestUpDownSingleTrackContract:
+    """涨跌语义色单轨契约 (P2-1): 仅 UP_RED/DOWN_GREEN 单轨，禁止 UP/DOWN/RISE/FALL 复活。"""
+
+    def test_theme_colors_no_up_down_fields(self):
+        """ThemeColors TypedDict 不得声明 UP/DOWN 字段 (单轨: 仅 UP_RED/DOWN_GREEN)。"""
+        assert "UP" not in ThemeColors.__annotations__
+        assert "DOWN" not in ThemeColors.__annotations__
+        assert "UP_RED" in ThemeColors.__annotations__
+        assert "DOWN_GREEN" in ThemeColors.__annotations__
+
+    def test_appcolors_no_dual_track_attrs(self):
+        """AppColors 不得存在 UP/DOWN/RISE/FALL 类属性 (双轨残留)。"""
+        for attr in ("UP", "DOWN", "RISE", "FALL"):
+            assert not hasattr(AppColors, attr), f"AppColors.{attr} 双轨残留，必须删除"
+
+    def test_presets_no_up_down_keys(self):
+        """4 主题 CUSTOM_COLOR_PRESETS 不得含 UP/DOWN key。"""
+        for theme in (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA):
+            assert "UP" not in CUSTOM_COLOR_PRESETS[theme], f"{theme} preset 含 UP key"
+            assert "DOWN" not in CUSTOM_COLOR_PRESETS[theme], f"{theme} preset 含 DOWN key"

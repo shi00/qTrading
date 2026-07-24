@@ -230,13 +230,13 @@ class TestMetricCardBody:
         assert isinstance(status_row.controls[0], ft.Icon)
         assert status_row.controls[0].color == "#FF0000"
         assert isinstance(status_row.controls[1], ft.Text)
-        # trend_up=True → AppColors.UP
+        # trend_up=True → AppColors.UP_RED
         from ui.theme import AppColors
 
-        assert status_row.controls[1].color == AppColors.UP
+        assert status_row.controls[1].color == AppColors.UP_RED
 
     def test_trend_down_uses_down_color(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """trend_up=False 时 trend_color 为 AppColors.DOWN。"""
+        """trend_up=False 时 trend_color 为 AppColors.DOWN_GREEN。"""
         from ui.components.settings_widgets import MetricCard
         from ui.theme import AppColors
 
@@ -247,7 +247,7 @@ class TestMetricCardBody:
         col = result.content
         status_row = col.controls[2]
         trend_text = status_row.controls[0]
-        assert trend_text.color == AppColors.DOWN
+        assert trend_text.color == AppColors.DOWN_GREEN
 
     def test_no_status_falls_back_to_primary(self, mock_i18n_state, mock_app_colors_state) -> None:
         """无 icon/trend：status_controls 为 [ft.Container()]（空占位）。"""

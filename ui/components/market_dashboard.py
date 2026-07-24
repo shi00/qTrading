@@ -25,9 +25,9 @@ def _resolve_color(color_str: str | None) -> str:
     """Resolve RED/GREEN/GREY color name to AppColors token."""
     name = (color_str or "").upper()
     if name == "RED":
-        return AppColors.UP
+        return AppColors.UP_RED
     if name == "GREEN":
-        return AppColors.DOWN
+        return AppColors.DOWN_GREEN
     return AppColors.TEXT_SECONDARY
 
 
@@ -106,7 +106,7 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
     """Build a single hot concept card — pure function."""
     color_str = item.color
     is_up = "red" in color_str
-    color = AppColors.UP if is_up else AppColors.DOWN
+    color = AppColors.UP_RED if is_up else AppColors.DOWN_GREEN
     icon = ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN
     return ft.Container(
         content=ft.Column(
@@ -134,7 +134,7 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
             ],
             spacing=5,
         ),
-        padding=15,
+        padding=16,
         bgcolor=AppColors.SURFACE,
         border_radius=4,
         border=ft.Border.all(1, AppColors.BORDER),
