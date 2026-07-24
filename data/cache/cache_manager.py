@@ -18,6 +18,7 @@ from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
+    EngineDisposedError,
 )  # Expose static helpers via BaseDao if needed, or keeping usage internal
 from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.financial_dao import FinancialDao
@@ -80,7 +81,6 @@ class CacheManager:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
-                cls._instance._disposed = False
                 cls._initialized = False
         return cls._instance
 
@@ -104,8 +104,10 @@ class CacheManager:
         if inst is not None and not inst._disposed:
             try:
                 if hasattr(inst, "engine") and inst.engine is not None:
-                    inst.engine.sync_engine.dispose()
+                    # R5 修复 #M5-005：先标记 _disposed 阻塞新查询，再 dispose 引擎，
+                    # 避免 dispose 期间新查询进入导致 ConnectionRefusedError
                     inst._disposed = True
+                    inst.engine.sync_engine.dispose()
             except Exception as e:
                 # P3-24: warning 与 data_processor.py:79 同级 atexit cleanup 场景对齐
                 # （atexit 异常属资源释放失败，需可见而非静默吞没）
@@ -210,24 +212,35 @@ class CacheManager:
     async def close(self):
         """Dispose the engine"""
         logger.debug("[CacheManager] State | Disposing engine...")
-        self._disposed = True
-        if self.engine is not None:
-            await self.engine.dispose()
-            self.engine = None
-            # 由 _DAO_REGISTRY 驱动 DAO.engine 清空，消除 17 行重复手写赋值
-            for attr_name, _ in self._DAO_REGISTRY:
-                getattr(self, attr_name).engine = None
-        # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
-        # 桌面模式下 close() 后进程退出，此重置不会被观测到；
-        # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
-        self._schema_initialized = False
-        try:
-            from data.persistence.daos.base_dao import BaseDao
-
-            BaseDao._get_maintenance_event().set()
-        except Exception as e:
-            logger.debug("[CacheManager] Maintenance event set failed during dispose: %s", e)
-        self._maintenance_event.set()
+        # P2 并发保护 #M5-010/#M5-011：避免并发 close() 重复 dispose
+        async with self._init_lock:
+            if self._disposed:
+                return
+            # R5 修复 #M5-001：与 clear_all_cache 对称，先 clear 事件阻塞后续查询进入 DAO 路径
+            self._maintenance_event.clear()
+            try:
+                BaseDao._get_maintenance_event().clear()
+            except Exception as e:
+                logger.debug("[CacheManager] Maintenance event clear failed during dispose: %s", safe_error(e))
+            try:
+                self._disposed = True
+                if self.engine is not None:
+                    await self.engine.dispose()
+                    self.engine = None
+                    # 由 _DAO_REGISTRY 驱动 DAO.engine 清空，消除 17 行重复手写赋值
+                    for attr_name, _ in self._DAO_REGISTRY:
+                        getattr(self, attr_name).engine = None
+                # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
+                # 桌面模式下 close() 后进程退出，此重置不会被观测到；
+                # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
+                self._schema_initialized = False
+            finally:
+                # R5 修复 #M5-001：与 clear_all_cache L359 对称，dispose 完成后 set 事件放行等待方
+                try:
+                    BaseDao._get_maintenance_event().set()
+                except Exception as e:
+                    logger.debug("[CacheManager] Maintenance event set failed during dispose: %s", safe_error(e))
+                self._maintenance_event.set()
 
         # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
         del_loop_local("cache_maint_event")
@@ -255,7 +268,7 @@ class CacheManager:
             try:
                 publish_time = pd.to_datetime(publish_time).to_pydatetime()
             except (ValueError, TypeError) as e:
-                logger.debug("[CacheManager] Failed to parse publish_time '%s': %s", publish_time, e)
+                logger.debug("[CacheManager] Failed to parse publish_time '%s': %s", publish_time, safe_error(e))
                 # H1 举一反三 fix: 与 server_default=now() 时区一致，写库使用 UTC tz-naive
                 publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
 
@@ -322,8 +335,7 @@ class CacheManager:
             except Exception as e:
                 logger.error(
                     "[CacheManager] Schema | Init failed critically: %s",
-                    e,
-                    exc_info=True,
+                    safe_error(e),
                 )
                 raise
 
@@ -339,8 +351,7 @@ class CacheManager:
         except Exception as e:
             logger.error(
                 "[CacheManager] Wipe | ❌ Error during hard reset: %s",
-                e,
-                exc_info=True,
+                safe_error(e),
             )
             raise
 
@@ -362,6 +373,9 @@ class CacheManager:
 
         BaseDao._get_maintenance_event().clear()
         try:
+            # R5 修复 #M5-002：在 None 检查之前加 _disposed 守卫，防止 disposed 引擎被复用
+            if self._disposed:
+                raise EngineDisposedError("CacheManager disposed during clear_all_cache")
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
             async with self.engine.begin() as conn:
@@ -374,7 +388,7 @@ class CacheManager:
                     # 权限不足时降级到 metadata.drop_all()
                     logger.warning(
                         "[CacheManager] CASCADE drop failed (%s), falling back to metadata.drop_all()",
-                        cascade_err,
+                        safe_error(cascade_err),
                     )
                     await conn.run_sync(metadata.drop_all)
                     await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
@@ -388,7 +402,7 @@ class CacheManager:
 
                 BaseDao._get_maintenance_event().set()
             except Exception as e:
-                logger.debug("[CacheManager] Failed to set BaseDao maintenance event: %s", e)
+                logger.debug("[CacheManager] Failed to set BaseDao maintenance event: %s", safe_error(e))
             self._maintenance_event.set()
 
     # --- DELAGATIONS START HERE ---
@@ -603,7 +617,7 @@ class CacheManager:
         if isinstance(date_range_result, BaseException):
             logger.warning(
                 "[CacheManager] Health | ⚠️ Date range query failed (non-fatal): %s",
-                date_range_result,
+                safe_error(date_range_result),
             )
         logger.debug(
             "[CacheManager] Health | Active stocks baseline: %s",
@@ -628,7 +642,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(
                 "[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): %s",
-                e,
+                safe_error(e),
             )
 
         # Tables Check (Dynamic iteration based on registry)
@@ -640,6 +654,9 @@ class CacheManager:
         # === Step 2: Parallel table health checks (each with own connection) ===
         if self.engine is None:
             raise RuntimeError("Database engine not initialized")
+        # R5 修复 #M5-003：捕获 engine 引用后立即检查 _disposed，防止并发 close() 期间使用已释放引擎
+        if self._disposed:
+            raise EngineDisposedError("CacheManager disposed during health check")
         engine = self.engine
 
         async def _check_single_table(table: str, meta: dict) -> tuple[str, dict]:
@@ -706,7 +723,10 @@ class CacheManager:
                                         break
                                 except Exception as exc:
                                     logger.debug(
-                                        "[CacheManager] Health | Date probe failed for %s.%s: %s", table, dc, exc
+                                        "[CacheManager] Health | Date probe failed for %s.%s: %s",
+                                        table,
+                                        dc,
+                                        safe_error(exc),
                                     )
                                     continue
                             if max_date:
@@ -725,7 +745,7 @@ class CacheManager:
                             logger.debug(
                                 "[CacheManager] Health | Freshness check skipped for %s: %s",
                                 table,
-                                exc,
+                                safe_error(exc),
                             )
 
                     depth_ratio = None
@@ -748,7 +768,7 @@ class CacheManager:
                             logger.debug(
                                 "[CacheManager] Health | Breadth calc failed for %s: %s",
                                 table,
-                                exc,
+                                safe_error(exc),
                             )
 
                     result = {
@@ -815,8 +835,7 @@ class CacheManager:
                     logger.error(
                         "[CacheManager] Health | ❌ Failed to check table %s: %s",
                         table,
-                        e,
-                        exc_info=True,
+                        safe_error(e),
                     )
                 return table, {
                     "covered": 0,
@@ -831,7 +850,7 @@ class CacheManager:
         gather_results = await gather_return_exceptions_propagating_cancel(*check_coros)
         for item in gather_results:
             if isinstance(item, BaseException):
-                logger.warning("[CacheManager] Health | Table check failed: %s", item)
+                logger.warning("[CacheManager] Health | Table check failed: %s", safe_error(item))
                 continue
             table_name, table_result = item  # type: ignore[misc]
             results[table_name] = table_result
@@ -1241,7 +1260,7 @@ class CacheManager:
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):
             if isinstance(raw, Exception):
-                logger.warning("[CacheManager] prefetch_auxiliary_data: %s query failed: %s", key, raw)
+                logger.warning("[CacheManager] prefetch_auxiliary_data: %s query failed: %s", key, safe_error(raw))
                 batch_results[key] = None
             else:
                 batch_results[key] = raw
@@ -1314,11 +1333,14 @@ class CacheManager:
             if tbl is None:
                 logger.warning("[CacheManager] Unknown table in check_table_has_data: %s", table_name)
                 return False
+            # R5 修复 #M5-004：在 None 检查之前加 _disposed 守卫，防止 disposed 引擎被复用
+            if self._disposed:
+                raise EngineDisposedError("CacheManager disposed during check_table_has_data")
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
             async with self.engine.connect() as conn:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None
         except Exception as e:
-            logger.warning("[CacheManager] check_table_has_data failed for %s: %s", table_name, e)
+            logger.warning("[CacheManager] check_table_has_data failed for %s: %s", table_name, safe_error(e))
             return False
