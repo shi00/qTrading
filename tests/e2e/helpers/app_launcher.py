@@ -21,10 +21,38 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_until_ready(url: str, timeout_s: float = 60.0) -> None:
-    deadline = time.monotonic() + timeout_s
+def _read_log_tail(log_path: Path, log_offset: int = 0, max_chars: int = 4000) -> str:
+    """读取日志文件尾部用于错误诊断（避免完整日志过大）。"""
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            f.seek(log_offset)
+            content = f.read()
+        return content[-max_chars:] if len(content) > max_chars else content
+    except (FileNotFoundError, OSError):
+        return f"(unable to read log at {log_path})"
+
+
+def wait_until_ready(
+    url: str,
+    proc: subprocess.Popen,
+    log_path: Path,
+    log_offset: int = 0,
+    timeout_s: float = 60.0,
+) -> None:
+    # E2E_TIMEOUT_MULTIPLIER 与 conftest.py 的 FletPage 超时倍数一致，
+    # CI 中设为 2.0（60s→120s），吸收 Windows runner 启动慢的抖动。
+    multiplier = float(os.environ.get("E2E_TIMEOUT_MULTIPLIER", "1.0"))
+    effective_timeout = timeout_s * multiplier
+    deadline = time.monotonic() + effective_timeout
     last_err: Exception | None = None
     while time.monotonic() < deadline:
+        # 子进程崩溃则立即报错，不用空等超时（WinError 10061 的根因之一）
+        if proc.poll() is not None:
+            log_tail = _read_log_tail(log_path, log_offset)
+            raise RuntimeError(
+                f"Flet app process (PID {proc.pid}) exited prematurely with code {proc.returncode} "
+                f"before becoming ready at {url}. Log tail:\n{log_tail}"
+            )
         try:
             r = httpx.get(url, timeout=3.0)
             if r.status_code == 200:
@@ -32,7 +60,10 @@ def wait_until_ready(url: str, timeout_s: float = 60.0) -> None:
         except httpx.HTTPError as e:
             last_err = e
         time.sleep(0.5)
-    raise RuntimeError(f"Flet app not ready at {url} within {timeout_s}s. Last error: {last_err}")
+    log_tail = _read_log_tail(log_path, log_offset)
+    raise RuntimeError(
+        f"Flet app not ready at {url} within {effective_timeout}s. Last error: {last_err}. Log tail:\n{log_tail}"
+    )
 
 
 def _drain_stdout(proc: subprocess.Popen) -> None:
@@ -136,7 +167,7 @@ def start_flet_app(
     drain_thread.start()
     url = f"http://127.0.0.1:{port}"
     try:
-        wait_until_ready(url, timeout_s=startup_timeout_s)
+        wait_until_ready(url, proc, log_path, log_offset, timeout_s=startup_timeout_s)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[E2E] Flet app not ready at %s, terminating process: %s", url, exc, exc_info=True)
         proc.terminate()
