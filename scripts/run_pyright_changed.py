@@ -19,6 +19,33 @@ import sys
 from pathlib import Path
 
 
+def _resolve_venv_python(project_root: Path) -> Path | None:
+    """定位 .venv 内的 Python 解释器，支持 worktree 共享主工作区 .venv。
+
+    R18 要求新特性在 worktree 中隔离开发，worktree 无独立 .venv，
+    共享主工作区（``.worktrees`` 的父目录）的 ``.venv``。
+    """
+    # 1. 当前 project_root 的 .venv
+    if sys.platform == "win32":
+        candidate = project_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = project_root / ".venv" / "bin" / "python"
+    if candidate.is_file():
+        return candidate
+
+    # 2. worktree 共享主工作区 .venv（.worktrees 的父目录）
+    if ".worktrees" in project_root.parts:
+        idx = project_root.parts.index(".worktrees")
+        main_workspace = Path(*project_root.parts[:idx])
+        if sys.platform == "win32":
+            candidate = main_workspace / ".venv" / "Scripts" / "python.exe"
+        else:
+            candidate = main_workspace / ".venv" / "bin" / "python"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _build_pyright_cmd(files: list[str]) -> list[str]:
     """构造 pyright 命令，自动检测项目根 .venv 并传 --pythonpath。
 
@@ -31,11 +58,8 @@ def _build_pyright_cmd(files: list[str]) -> list[str]:
     cmd = ["pyright", "--outputjson"]
     # 项目根 = 脚本所在目录的父目录（scripts/ 的父）
     project_root = Path(__file__).resolve().parent.parent
-    if sys.platform == "win32":
-        python_exe = project_root / ".venv" / "Scripts" / "python.exe"
-    else:
-        python_exe = project_root / ".venv" / "bin" / "python"
-    if python_exe.is_file():
+    python_exe = _resolve_venv_python(project_root)
+    if python_exe is not None:
         cmd.extend(["--pythonpath", str(python_exe)])
     cmd.extend(files)
     return cmd
