@@ -176,7 +176,7 @@ venv/Scripts/python.exe -c "from flet_mcp.api_store import ApiStore; store = Api
 # 4. 启动命令验证（验证 §3.1 启动命令能启动 stdio server）
 #    进程应持续运行等待 stdin 输入（Ctrl+C 退出），不报错即通过
 venv/Scripts/python.exe -c "from flet_mcp import mcp; mcp.run()"
-# 预期：进程启动后阻塞等待输入，stderr 输出 "Starting MCP server 'flet-mcp' with transport 'stdio'"
+# 预期：进程启动后阻塞等待 stdin 输入，不报错即通过（Ctrl+C 退出）
 ```
 
 **结论**：§3.2 工具清单签名准确，§3.3 场景 1/2 示例返回值与文档描述一致。§3.1 启动命令 `python -c "from flet_mcp import mcp; mcp.run()"` 验证可用（2026-07-24 补充）。
