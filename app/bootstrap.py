@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+import os
 from datetime import timedelta
-from typing import TypedDict
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
@@ -12,6 +17,9 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
+
+if TYPE_CHECKING:
+    from utils.config_models import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -395,3 +403,71 @@ async def prepare_database_runtime() -> str | None:
     # D15（pg-plan §22）：返回 URL 供调用方用 override_db_url 包裹 CacheManager 构造，
     # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config）。
     return info.url
+
+
+class EmbeddedPgStartupScenario(Enum):
+    """Embedded PostgreSQL 启动场景（UX 改进 spec §启动侧方案 A）。
+
+    用于 LoadingView 差异化文案：
+    - ``FIRST_RUN``: 首次启动（需解压 bundled binaries + initdb，预计 30-60s）
+    - ``NORMAL``: 普通启动（仅 PG 启动+健康检查，预计 2-5s）
+    - ``UNKNOWN``: 异常状态（marker 与 PG_VERSION 不一致，保守按 NORMAL 文案显示）
+    """
+
+    FIRST_RUN = "first_run"
+    NORMAL = "normal"
+    UNKNOWN = "unknown"
+
+
+def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupScenario | None:
+    """检测 embedded PostgreSQL 启动场景，供 LoadingView 显示差异化文案。
+
+    判定逻辑（spec §「Requirement: 启动场景检测」）：
+    - ``QTRADING_DATABASE_MODE != "embedded"`` → 返回 ``None``（external 模式不检测）
+    - ``config.embedded_pg_enabled == False`` → 返回 ``None``
+    - 否则检查 ``<install_dir>/.setup-complete`` 与 ``<data_dir>/PG_VERSION`` 存在性：
+      * 两者均不存在 → ``FIRST_RUN``
+      * 两者均存在 → ``NORMAL``
+      * 不一致 → ``UNKNOWN`` + WARNING 日志（不阻塞启动）
+
+    路径解析复用 ``EmbeddedPostgresService.from_config`` 的逻辑：构造单例后读取
+    ``_data_dir`` / ``_install_dir`` 私有属性。单例 idempotent，后续
+    ``prepare_database_runtime`` 再次调用 ``from_config`` 会返回同一实例。
+
+    Args:
+        config: ``AppConfig`` 实例
+
+    Returns:
+        ``EmbeddedPgStartupScenario`` 枚举值；external 模式或未启用时返回 ``None``
+    """
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    if mode != "embedded":
+        logger.debug("[Bootstrap] detect skipped: QTRADING_DATABASE_MODE=%s (not embedded)", mode)
+        return None
+    if not config.embedded_pg_enabled:
+        logger.debug("[Bootstrap] detect skipped: embedded_pg_enabled=False")
+        return None
+
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    # 复用 from_config 路径解析；service 为单例，已初始化时 from_config 直接返回。
+    service = EmbeddedPostgresService.from_config(config)
+    install_marker = Path(service._install_dir) / ".setup-complete"  # type: ignore[attr-defined]  # [reason: EmbeddedPostgresService 未暴露公开 install_dir 属性，复用 from_config 路径解析需访问私有属性；后续可暴露公开属性重构]
+    pg_version = Path(service._data_dir) / "PG_VERSION"  # type: ignore[attr-defined]  # [reason: 同上，复用 from_config 路径解析访问私有 data_dir]
+
+    marker_exists = install_marker.exists()
+    pg_version_exists = pg_version.exists()
+
+    if not marker_exists and not pg_version_exists:
+        return EmbeddedPgStartupScenario.FIRST_RUN
+    if marker_exists and pg_version_exists:
+        return EmbeddedPgStartupScenario.NORMAL
+    logger.warning(
+        "[Bootstrap] embedded PG startup scenario UNKNOWN: "
+        "install_marker=%s (%s), pg_version=%s (%s); treating as NORMAL for UX",
+        marker_exists,
+        install_marker,
+        pg_version_exists,
+        pg_version,
+    )
+    return EmbeddedPgStartupScenario.UNKNOWN

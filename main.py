@@ -104,9 +104,41 @@ async def main(page: ft.Page):
 
     ConfigHandler.ensure_defaults()
 
-    # Phase 2 §3.4：embedded 模式下启动 sidecar 并返回 URL（D15：不持久化到 config）
-    from app.bootstrap import prepare_database_runtime
+    # UX 改进 spec §启动侧方案 A：embedded 模式下提前渲染 LoadingView
+    # 必须先初始化 i18n / 窗口几何 / 主题 / toast，否则 page.render(LoadingView) 无文案可显示。
+    # external 模式下 prepare_database_runtime() 立即返回 None，提前这几步对用户无感知。
+    I18n.initialize(ConfigHandler.get_locale())
+    page.locale_configuration = build_locale_configuration(I18n.current_locale())
+    page.title = I18n.get("app_title")
+    page.window.icon = "icon.png"
 
+    is_web_mode = os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
+    await setup_window_geometry(page, is_web_mode=is_web_mode)
+    page.padding = 0
+    apply_page_theme(page)
+    page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
+
+    # 启动场景检测（external 模式或未启用 embedded PG 时返回 None，跳过 LoadingView 提前渲染）
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario, prepare_database_runtime
+    from utils.config_models import AppConfig
+
+    config_for_detect = AppConfig.model_validate(ConfigHandler.load_config())
+    try:
+        scenario = detect_embedded_pg_startup_scenario(config_for_detect)
+    except Exception as e:
+        # detect 为 UX 增强函数，失败不应阻塞启动；降级为 UNKNOWN 让 LoadingView 仍渲染
+        # （detect 抛异常仅在 embedded 模式下，external 模式第一行即返回 None 不抛异常）
+        logger.warning("[Main] detect_embedded_pg_startup_scenario failed, fallback to UNKNOWN: %s", e, exc_info=True)
+        scenario = EmbeddedPgStartupScenario.UNKNOWN
+
+    # embedded 模式：先渲染 LoadingView 一帧让用户看到反馈，再进入 prepare_database_runtime 阻塞等待
+    if scenario is not None:
+        from ui.startup_views import LoadingView
+
+        page.render(LoadingView, scenario=scenario)
+        await asyncio.sleep(0.05)  # 让 Flet 刷新一帧（spec SubTask 3.3）
+
+    # Phase 2 §3.4：embedded 模式下启动 sidecar 并返回 URL（D15：不持久化到 config）
     # H2: prepare_database_runtime 失败时记 critical 日志并退出（不让 CacheManager 在无 DB 时启动）
     try:
         embedded_db_url = await prepare_database_runtime()
@@ -117,10 +149,6 @@ async def main(page: ft.Page):
 
     ProxyManager.apply_smart_proxy_policy()
 
-    I18n.initialize(ConfigHandler.get_locale())
-
-    page.locale_configuration = build_locale_configuration(I18n.current_locale())
-
     # D15（pg-plan §22）：embedded 模式下用 override_db_url 包裹 CacheManager() 构造，
     # 不再依赖 save_db_config 持久化的 URL。
     if embedded_db_url:
@@ -130,9 +158,6 @@ async def main(page: ft.Page):
             cache_manager = CacheManager()
     else:
         cache_manager = CacheManager()
-
-    page.title = I18n.get("app_title")
-    page.window.icon = "icon.png"
 
     from utils.shutdown import ShutdownCoordinator
 
@@ -190,13 +215,6 @@ async def main(page: ft.Page):
 
     page.on_error = on_error
 
-    await setup_window_geometry(page, is_web_mode=_is_web_mode())
-
-    page.padding = 0
-    apply_page_theme(page)
-
-    page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
-
     def show_toast(message, type="info", action_text=None, on_action=None):
         # P2-10: action_text/on_action 透传 ToastManager.show (导出引导"打开文件夹")
         page.toast.show(message, type, action_text=action_text, on_action=on_action)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
@@ -219,6 +237,7 @@ async def main(page: ft.Page):
         on_state_change=bridge.notify,
         on_show_toast=_on_show_toast,
         on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
+        embedded_pg_scenario=scenario,
     )
 
     page.render(

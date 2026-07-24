@@ -7,10 +7,14 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import TYPE_CHECKING
 
 from app.bootstrap import check_onboarding_needed, initialize_services
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
+
+if TYPE_CHECKING:
+    from app.bootstrap import EmbeddedPgStartupScenario
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,10 @@ class StartupContext:
     detail: str | None = None
     current_rev: str | None = None
     head_rev: str | None = None
+    # UX 改进 spec §启动侧方案 A：embedded PG 启动场景，由 main.py 在
+    # prepare_database_runtime 之前 detect 后注入，供 LoadingView 显示差异化文案。
+    # None 表示 external 模式或未启用 embedded PG（显示原有 "Initializing..." 文案）。
+    embedded_pg_scenario: EmbeddedPgStartupScenario | None = None
 
 
 class StartupController:
@@ -51,13 +59,16 @@ class StartupController:
         on_state_change: Callable[[StartupState, StartupContext], None],
         on_show_toast: Callable[[str, str], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        embedded_pg_scenario: EmbeddedPgStartupScenario | None = None,
     ):
         self._cache_manager = cache_manager
         self._on_state_change = on_state_change
         self._on_show_toast = on_show_toast
         self._on_exit = on_exit
         self._state = StartupState.LOADING
-        self._context = StartupContext()
+        # UX 改进 spec §启动侧方案 A：保留 embedded_pg_scenario 到初始 context，
+        # 供 StartupView 的 LOADING 状态显示差异化文案。_transition 会跨状态保留此字段。
+        self._context = StartupContext(embedded_pg_scenario=embedded_pg_scenario)
         # Phase 2A.1 Task 2A.1.9：保存 initialize_services 返回的 fire-and-forget
         # auto probe 任务，供 main.py 注册到 ShutdownCoordinator。
         self._auto_probe_task: asyncio.Task | None = None
@@ -77,6 +88,10 @@ class StartupController:
 
     def _transition(self, new_state: StartupState, **context_kwargs):
         self._state = new_state
+        # UX 改进 spec §启动侧方案 A：embedded_pg_scenario 跨状态转换保留
+        # （由 __init__ 注入，controller 内部状态转换不重置此字段）
+        if "embedded_pg_scenario" not in context_kwargs:
+            context_kwargs["embedded_pg_scenario"] = self._context.embedded_pg_scenario
         self._context = StartupContext(**context_kwargs)
         self._on_state_change(new_state, self._context)
 

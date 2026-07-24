@@ -11,15 +11,16 @@
 from __future__ import annotations
 
 import inspect
+import re
 
 from main import main
 
 
 def test_main_imports_prepare_database_runtime() -> None:
-    """源码含 from app.bootstrap import prepare_database_runtime。"""
+    """源码含 from app.bootstrap import ... prepare_database_runtime（ruff isort 可能合并多符号导入）。"""
     source = inspect.getsource(main)
-    assert "from app.bootstrap import prepare_database_runtime" in source, (
-        f"main() 源码应含 'from app.bootstrap import prepare_database_runtime'，实际源码片段：\n{source[:1500]}"
+    assert re.search(r"from app\.bootstrap import .*prepare_database_runtime", source), (
+        f"main() 源码应含 'from app.bootstrap import ... prepare_database_runtime'，实际源码片段：\n{source[:1500]}"
     )
 
 

@@ -282,3 +282,178 @@ async def test_prepare_database_runtime_does_not_reset_singleton_on_cancelled(mo
     assert isinstance(exc_info.value, asyncio.CancelledError)
 
     assert reset_calls == [], f"CancelledError 不应触发 _reset_singleton，实际：{reset_calls}"
+
+
+# --- detect_embedded_pg_startup_scenario 单元测试（UX 改进 spec §启动侧方案 A） ---
+
+
+def _make_mock_service_with_paths(install_dir: Path, data_dir: Path) -> MagicMock:
+    """构造 mock EmbeddedPostgresService，暴露 _install_dir / _data_dir 私有属性。
+
+    detect 函数复用 from_config 路径解析后访问这两个私有属性，测试时通过 mock 注入。
+    """
+    service = MagicMock()
+    service._install_dir = install_dir  # type: ignore[attr-defined]  # [reason: MagicMock 替身注入私有属性，模拟 EmbeddedPostgresService.from_config 路径解析结果]
+    service._data_dir = data_dir  # type: ignore[attr-defined]  # [reason: 同上，注入 _data_dir 私有属性]
+    return service
+
+
+def test_detect_scenario_returns_none_when_mode_external(monkeypatch) -> None:
+    """env 未设 / =external → 返回 None（不检测）。"""
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+
+    from_config_calls: list[int] = []
+
+    def _from_config(_cls, _cfg):
+        from_config_calls.append(1)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(_from_config),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result is None
+    assert from_config_calls == [], "external 模式不应调用 from_config"
+
+
+def test_detect_scenario_returns_none_when_embedded_disabled(monkeypatch) -> None:
+    """env=embedded 但 embedded_pg_enabled=False → 返回 None。"""
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=False))
+
+    from_config_calls: list[int] = []
+
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result is None
+    assert from_config_calls == [], "embedded_pg_enabled=False 不应调用 from_config"
+
+
+def test_detect_scenario_first_run_when_both_missing(monkeypatch, tmp_path: Path) -> None:
+    """install marker 与 PG_VERSION 均不存在 → FIRST_RUN。"""
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    install_dir = tmp_path / "install"
+    data_dir = tmp_path / "data"
+    install_dir.mkdir()
+    data_dir.mkdir()
+    # 不创建 .setup-complete 和 PG_VERSION
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: _make_mock_service_with_paths(install_dir, data_dir)),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result == EmbeddedPgStartupScenario.FIRST_RUN
+
+
+def test_detect_scenario_normal_when_both_exist(monkeypatch, tmp_path: Path) -> None:
+    """install marker 与 PG_VERSION 均存在 → NORMAL。"""
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    install_dir = tmp_path / "install"
+    data_dir = tmp_path / "data"
+    install_dir.mkdir()
+    data_dir.mkdir()
+    (install_dir / ".setup-complete").write_text("sha256:fake\n")
+    (data_dir / "PG_VERSION").write_text("17.0\n")
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: _make_mock_service_with_paths(install_dir, data_dir)),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result == EmbeddedPgStartupScenario.NORMAL
+
+
+def test_detect_scenario_unknown_when_only_marker_exists(monkeypatch, tmp_path: Path, caplog) -> None:
+    """仅 install marker 存在 → UNKNOWN + WARNING 日志。"""
+    import logging
+
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    install_dir = tmp_path / "install"
+    data_dir = tmp_path / "data"
+    install_dir.mkdir()
+    data_dir.mkdir()
+    (install_dir / ".setup-complete").write_text("sha256:fake\n")
+    # 不创建 PG_VERSION
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: _make_mock_service_with_paths(install_dir, data_dir)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
+        result = detect_embedded_pg_startup_scenario(config)
+
+    assert result == EmbeddedPgStartupScenario.UNKNOWN
+    assert any(
+        "UNKNOWN" in r.message and "install_marker=True" in r.message and "pg_version=False" in r.message
+        for r in caplog.records
+    ), f"期望 WARNING 日志含 UNKNOWN + marker=True + pg_version=False，实际：{[r.message for r in caplog.records]}"
+
+
+def test_detect_scenario_unknown_when_only_pg_version_exists(monkeypatch, tmp_path: Path, caplog) -> None:
+    """仅 PG_VERSION 存在 → UNKNOWN + WARNING 日志。"""
+    import logging
+
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    install_dir = tmp_path / "install"
+    data_dir = tmp_path / "data"
+    install_dir.mkdir()
+    data_dir.mkdir()
+    # 不创建 .setup-complete
+    (data_dir / "PG_VERSION").write_text("17.0\n")
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: _make_mock_service_with_paths(install_dir, data_dir)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
+        result = detect_embedded_pg_startup_scenario(config)
+
+    assert result == EmbeddedPgStartupScenario.UNKNOWN
+    assert any(
+        "UNKNOWN" in r.message and "install_marker=False" in r.message and "pg_version=True" in r.message
+        for r in caplog.records
+    ), f"期望 WARNING 日志含 UNKNOWN + marker=False + pg_version=True，实际：{[r.message for r in caplog.records]}"

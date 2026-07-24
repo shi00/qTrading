@@ -3,8 +3,8 @@
 抽取目的：将 main.py 中依赖 Flet Page 和 ShutdownCoordinator 的闭包改为可测的纯函数与类，
 为 main.py 重构（Task 6.3）做准备。
 
-依赖关系：app 层 → utils 层（ShutdownCoordinator 类型注解、UILogger、log_exception_with_severity），
-不导入 ui/services/strategies/data，符合 R1 分层架构。
+依赖关系：app 层 → utils 层（ShutdownCoordinator 类型注解、UILogger、log_exception_with_severity）
++ core 层（I18n 关闭进度对话框文案），不导入 ui/services/strategies/data，符合 R1 分层架构。
 """
 
 import asyncio
@@ -14,6 +14,7 @@ from collections.abc import Callable
 import flet as ft
 
 from app.error_logging import log_exception_with_severity
+from core.i18n import I18n
 from utils.log_decorators import UILogger
 from utils.shutdown import ShutdownCoordinator
 
@@ -171,34 +172,59 @@ async def perform_window_shutdown(
     """执行窗口关闭 shutdown 流程.
 
     流程：
-    1. 启动 watchdog
-    2. 执行 cleanup（timeout=20s）
-    3. 非 web_mode 时销毁窗口（destroy 失败仅记录日志，不阻塞流程）
-    4. cleanup 成功：cancel_watchdog，返回 True
-    5. cleanup 失败：log error，sleep 0.2s，force_exit(1)，返回 False
+    1. 入口立即显示非阻塞进度对话框（无 actions，不可手动取消）
+    2. 启动 watchdog
+    3. 执行 cleanup（timeout=60s, step_timeout=35s）
+    4. 非 web_mode 时销毁窗口（destroy 失败仅记录日志，不阻塞流程）
+    5. cleanup 成功：cancel_watchdog，关闭对话框，返回 True
+    6. cleanup 失败：log error，sleep 0.2s，force_exit(1)，对话框不关闭（进程即将退出），返回 False
 
     Returns:
         True 表示 cleanup 成功；False 表示 cleanup 不完整（已 force_exit）
     """
     logger.info("[Main] Window close confirmed by user.")
+    # 立即显示关闭进度对话框，告知用户正在关闭数据库（避免窗口卡死无反馈）。
+    # modal=True 阻止点击对话框外部关闭；无 actions 时用户无确认/取消按钮（仅靠进程退出自然消除）。
+    shutdown_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(I18n.get("shutdown_in_progress_title")),
+        content=ft.Text(I18n.get("shutdown_in_progress_content")),
+    )
+    page.show_dialog(shutdown_dialog)  # type: ignore[arg-type]  # [reason: ft.AlertDialog 为 DialogControl 子类，page.show_dialog 运行时接受]
     # Phase 2 Step 8 (_step8_stop_embedded_postgres, 35s) 加入后，步骤超时和 = 55s。
     # watchdog 70s + do_cleanup 60s 容纳 55s 步骤之和 + 5s margin，保证 Step 8 graceful stop 完整执行。
     coordinator.start_watchdog(70.0)
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
     try:
-        if not is_web_mode_fn():
-            page.window.prevent_close = False
-            await page.window.destroy()
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
+    except asyncio.CancelledError:
+        # do_cleanup 被取消（如 session 断开/外部取消）：走失败路径强制退出，
+        # 避免对话框残留 + 进程悬挂 + shutdown_requested 被重置后重入。
+        logger.warning("[Main] do_cleanup was cancelled, forcing process exit.")
+        await asyncio.sleep(0.2)
+        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，_force_exit 后 os._exit 强退不会执行到 raise]
+        raise  # R2: 不吞没 CancelledError（_force_exit 被替换为非强退实现时兜底）
     except Exception as e:
-        log_exception_with_severity(
-            e,
-            context="general",
-            operation_label="Main window destroy failed",
-        )
+        logger.error("[Main] do_cleanup raised unexpectedly: %s", e, exc_info=True)
+        await asyncio.sleep(0.2)
+        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: 同上]
+        return False
     if cleanup_ok:
         coordinator.cancel_watchdog()
+        # cleanup 成功，先关闭进度对话框再销毁窗口（destroy 后 page 连接断开，pop_dialog 可能无效）
+        page.pop_dialog()
         logger.info("[Main] Graceful window shutdown completed without force-exit.")
+        try:
+            if not is_web_mode_fn():
+                page.window.prevent_close = False
+                await page.window.destroy()
+        except Exception as e:
+            log_exception_with_severity(
+                e,
+                context="general",
+                operation_label="Main window destroy failed",
+            )
         return True
+    # cleanup 失败：对话框不关闭，进程即将被 force_exit 强制退出（watchdog 兜底）
     logger.error(
         "[Main] Graceful shutdown incomplete, forcing process exit. Step results: %s",
         [

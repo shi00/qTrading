@@ -15,6 +15,7 @@
 # ShutdownCoordinator 的兼容性。统一在此文件局部禁用相关告警以避免大量
 # typing.cast 噪音，替身类的行为由测试用例本身验证。
 
+import asyncio
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -98,9 +99,11 @@ class _FakeCoordinator:
         *,
         cleanup_ok: bool = True,
         cleanup_done: bool = False,
+        cleanup_exc: BaseException | None = None,
     ) -> None:
         self.cleanup_done = cleanup_done
         self._cleanup_ok = cleanup_ok
+        self._cleanup_exc = cleanup_exc
         self.start_watchdog_calls = 0
         self.start_watchdog_args: list[float | None] = []
         self.cancel_watchdog_calls = 0
@@ -119,6 +122,8 @@ class _FakeCoordinator:
     async def do_cleanup(self, **kwargs: Any) -> bool:
         self.do_cleanup_calls += 1
         self.do_cleanup_kwargs = dict(kwargs)
+        if self._cleanup_exc is not None:
+            raise self._cleanup_exc
         return self._cleanup_ok
 
     def _force_exit(self, code: int) -> None:
@@ -428,6 +433,8 @@ class TestPerformWindowShutdown:
         assert coordinator.force_exit_codes == []
         assert page.window.destroy_calls == 1
         assert page.window.prevent_close is False
+        # cleanup 成功后进度对话框已关闭
+        assert page.dialog_stack == []
 
     @pytest.mark.asyncio
     async def test_web_mode_does_not_destroy_window(self) -> None:
@@ -441,6 +448,8 @@ class TestPerformWindowShutdown:
         assert page.window.destroy_calls == 0
         # prevent_close 未被修改
         assert page.window.prevent_close is True
+        # cleanup 成功后进度对话框已关闭（web_mode 不影响对话框关闭逻辑）
+        assert page.dialog_stack == []
 
     @pytest.mark.asyncio
     async def test_cleanup_failure_force_exits_and_returns_false(self) -> None:
@@ -455,6 +464,45 @@ class TestPerformWindowShutdown:
         assert result is False
         assert coordinator.cancel_watchdog_calls == 0
         assert coordinator.force_exit_codes == [1]
+        # cleanup 失败：进度对话框不关闭（进程即将被 force_exit 强制退出）
+        assert len(page.dialog_stack) == 1
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancelled_force_exits_and_reraises(self) -> None:
+        """do_cleanup 抛 CancelledError：force_exit(1) + re-raise（R2 合规，P1-1 修复）."""
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_exc=asyncio.CancelledError())
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；块外 force_exit_codes/dialog_stack 已强断言
+                await perform_window_shutdown(
+                    coordinator,
+                    page,
+                    is_web_mode_fn=lambda: False,
+                )
+        assert coordinator.force_exit_codes == [1]
+        # 对话框不关闭（进程即将被 force_exit 强制退出）
+        assert len(page.dialog_stack) == 1
+
+    @pytest.mark.asyncio
+    async def test_cleanup_exception_force_exits_and_returns_false(self) -> None:
+        """do_cleanup 抛其他 Exception：force_exit(1) + return False（P1-1 修复）.
+
+        注：真实 ShutdownCoordinator.do_cleanup 内部 except Exception 返回 False，
+        不会向调用方传播普通 Exception（仅 CancelledError 会 re-raise）。
+        本测试验证 perform_window_shutdown 的防御性 except 分支，生产中不可能触发。
+        """
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_exc=RuntimeError("cleanup boom"))
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            result = await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=lambda: False,
+            )
+        assert result is False
+        assert coordinator.force_exit_codes == [1]
+        # 对话框不关闭（进程即将被 force_exit 强制退出）
+        assert len(page.dialog_stack) == 1
 
     @pytest.mark.asyncio
     async def test_window_destroy_failure_logged_via_log_exception_with_severity(self) -> None:
@@ -474,6 +522,37 @@ class TestPerformWindowShutdown:
             )
         # 即使 destroy 失败，cleanup_ok=True 仍 cancel_watchdog 并返回 True
         assert coordinator.cancel_watchdog_calls == 1
+        # cleanup 成功后进度对话框已关闭
+        assert page.dialog_stack == []
+
+    @pytest.mark.asyncio
+    async def test_shutdown_progress_dialog_displayed_with_i18n_title_and_content(self) -> None:
+        """入口立即显示进度对话框，title/content 使用 i18n key 渲染，无 actions 不可取消.
+
+        使用 cleanup_ok=False 让对话框保留在 dialog_stack 中以便验证内容
+        （cleanup 成功路径会 pop 对话框，无法在事后断言内容）。
+        """
+        from core.i18n import I18n
+
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_ok=False)
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=lambda: False,
+            )
+        assert len(page.dialog_stack) == 1
+        dialog = page.dialog_stack[0]
+        assert isinstance(dialog, ft.AlertDialog)
+        assert dialog.modal is True
+        # 无 actions（不可手动取消）
+        assert not dialog.actions
+        # title/content 使用 i18n key 渲染（conftest _reset_i18n_state 默认 zh_CN）
+        assert dialog.title is not None
+        assert dialog.content is not None
+        assert dialog.title.value == I18n.get("shutdown_in_progress_title")
+        assert dialog.content.value == I18n.get("shutdown_in_progress_content")
 
 
 # ============================================================================

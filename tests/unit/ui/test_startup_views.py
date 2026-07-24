@@ -162,6 +162,58 @@ def test_build_loading_view(mock_i18n):
     assert len(_find_controls(view, ft.Text)) == 1
 
 
+def test_build_loading_view_scenario_none_keeps_original_text(mock_i18n):
+    """scenario=None（external 模式）→ 显示原有 wizard_status_init 文案，仅 1 个 Text."""
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=None)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 1
+    assert texts[0].value == "wizard_status_init"
+
+
+def test_build_loading_view_scenario_first_run(mock_i18n):
+    """FIRST_RUN → 标题 startup_embedded_pg_first_run_title + 提示 startup_embedded_pg_first_run_hint."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.FIRST_RUN)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+    assert texts[0].value == "startup_embedded_pg_first_run_title"
+    assert texts[1].value == "startup_embedded_pg_first_run_hint"
+
+
+def test_build_loading_view_scenario_normal(mock_i18n):
+    """NORMAL → 标题 startup_embedded_pg_normal_title + 提示 startup_embedded_pg_normal_hint."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.NORMAL)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+    assert texts[0].value == "startup_embedded_pg_normal_title"
+    assert texts[1].value == "startup_embedded_pg_normal_hint"
+
+
+def test_build_loading_view_scenario_unknown_uses_normal_text(mock_i18n):
+    """UNKNOWN → 与 NORMAL 共用普通启动文案（保守文案）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.UNKNOWN)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+    assert texts[0].value == "startup_embedded_pg_normal_title"
+    assert texts[1].value == "startup_embedded_pg_normal_hint"
+
+
+def test_loading_view_is_ft_component():
+    """LoadingView 必须用 @ft.component 装饰（声明式契约守护）."""
+    from ui.startup_views import LoadingView
+
+    assert hasattr(LoadingView, "__wrapped__"), "LoadingView 必须用 @ft.component 装饰"
+
+
 def test_build_upgrade_dialog(mock_i18n):
     on_upgrade = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):
