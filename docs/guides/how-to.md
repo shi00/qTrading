@@ -245,5 +245,8 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 - 从最新 `sidecar-v*` stable release 下载 binary + sha256sums
 - SHA256 供应链完整性校验
 - 设置 `SIDECAR_BINARY_PATH` + `SIDECAR_SHA256` + `QTRADING_DATABASE_MODE=embedded` 环境变量
-- 串行运行集成测试 + Linux E2E 测试
+- 串行运行集成测试（`-n 1 -p no:randomly` 禁用并发与随机化，避免 session fixture 状态冲突）+ Linux E2E 测试
+- `build-windows` job 依赖 `embedded-tests` 通过后才构建 release installer
 - 作为 main 分支必需检查阻塞 merge（需手动配置 branch protection）
+
+**首次部署注意**：若仓库尚未创建 `sidecar-v*` tag（无 GitHub release），`embedded-tests` job 的 download step 会输出 warning 并 `exit 0`（降级 skip，不阻塞 PR），后续测试 step 自动跳过。需先在 main 分支创建 `sidecar-v0.1.0` tag 并推送（触发 `sidecar.yml` release job 上传 4 平台 binary），embedded 测试才能真正运行。

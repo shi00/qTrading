@@ -155,6 +155,7 @@ class TestRealSidecarStopReleasesProcess:
         EmbeddedPostgresService._instance = None
 
         data_root: Path | None = None
+        service: EmbeddedPostgresService | None = None
         try:
             data_root = Path(tempfile.mkdtemp(prefix="stop_test_"))
             service = EmbeddedPostgresService(
@@ -185,6 +186,12 @@ class TestRealSidecarStopReleasesProcess:
             finally:
                 await engine.dispose()
         finally:
+            # M3: 兜底 stop，防止 start 成功后异常路径泄漏进程
+            if service is not None and service._process is not None:
+                try:
+                    await service.stop()
+                except Exception:
+                    pass  # noqa: BLE001 兜底，不覆盖原始异常
             if data_root is not None:
                 shutil.rmtree(data_root, ignore_errors=True)
             # 恢复原单例（real_embedded_pg 的 service 实例）

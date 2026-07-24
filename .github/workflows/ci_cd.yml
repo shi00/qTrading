@@ -667,8 +667,9 @@ jobs:
           # --exclude-drafts --exclude-pre-releases 确保取到最新稳定版（对齐 build-windows job 逻辑）
           $releases = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --exclude-drafts --exclude-pre-releases | Where-Object { $_ -match "sidecar-v" }
           if ($LASTEXITCODE -ne 0 -or -not $releases) {
-            Write-Error "No sidecar-v* stable release found. Please create sidecar-v* tag and run sidecar.yml release job first. (gh exit: $LASTEXITCODE)"
-            exit 1
+            # C1: release 不存在时降级 skip（不阻塞 PR），首次部署需创建 sidecar-v* tag
+            Write-Warning "No sidecar-v* stable release found. Embedded tests will be skipped. Create sidecar-v* tag (trigger sidecar.yml release job) to enable."
+            exit 0
           }
           $tagName = (($releases | Select-Object -First 1) -split "`t")[0]
           Write-Host "Latest sidecar release: $tagName"
@@ -721,6 +722,7 @@ jobs:
           echo "SIDECAR_SHA256=$expectedHash" >> $env:GITHUB_ENV
 
       - name: Run integration tests (serial, -n 1 avoids sidecar concurrency)
+        if: env.SIDECAR_BINARY_PATH != ''
         env:
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
@@ -732,17 +734,17 @@ jobs:
             tests/integration/test_embedded_pg_migration_regression.py \
             tests/integration/test_embedded_pg_dao_rw.py \
             tests/integration/test_embedded_pg_bootstrap.py \
-            -v --tb=short -n 1 --timeout=600 --timeout-method=thread
+            -v --tb=short -n 1 -p no:randomly --timeout=600 --timeout-method=thread
 
       - name: Get Playwright Version (Linux only, for E2E)
-        if: matrix.os == 'linux'
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
         shell: bash
         run: |
           PLAYWRIGHT_VERSION=$(python -c "from importlib.metadata import version; print(version('playwright'))")
           echo "PLAYWRIGHT_VERSION=$PLAYWRIGHT_VERSION" >> $GITHUB_ENV
 
       - name: Cache Playwright Browsers (Linux only, for E2E)
-        if: matrix.os == 'linux'
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
         id: cache-playwright-embedded
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -750,18 +752,18 @@ jobs:
           key: playwright-${{ runner.os }}-chromium-${{ env.PLAYWRIGHT_VERSION }}
 
       - name: Install Playwright chromium (Linux only, for E2E)
-        if: matrix.os == 'linux' && steps.cache-playwright-embedded.outputs.cache-hit != 'true'
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != '' && steps.cache-playwright-embedded.outputs.cache-hit != 'true'
         run: playwright install chromium
 
       - name: Run E2E tests (Linux only; Windows skipif via @pytest.mark.skipif in test file)
-        if: matrix.os == 'linux'
+        if: matrix.os == 'linux' && env.SIDECAR_BINARY_PATH != ''
         env:
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
         shell: bash
         run: |
-          python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short --timeout=600 --timeout-method=thread
+          python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
 
       - name: Upload test reports
         if: always()
@@ -865,7 +867,7 @@ jobs:
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
-    needs: [ci-checks, ci-checks-windows, e2e-tests-windows]
+    needs: [ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 60

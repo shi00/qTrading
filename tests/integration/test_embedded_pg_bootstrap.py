@@ -275,7 +275,6 @@ class TestFullBootstrapFlowEmbedded:
                     await cache.close()
                 except asyncio.CancelledError:
                     raise  # R2: 不吞 CancelledError
-                CacheManager._reset_singleton()
-
-        # 恢复原 CacheManager 单例（real_embedded_pg 的 embedded_pg_with_schema 可能已创建）
-        CacheManager._instance = original_cm_instance
+                finally:
+                    CacheManager._reset_singleton()
+                    CacheManager._instance = original_cm_instance  # M2: 移入 finally，异常路径也能恢复

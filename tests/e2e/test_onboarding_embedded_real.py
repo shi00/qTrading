@@ -29,6 +29,7 @@ import sys
 
 import pytest
 
+from tests.e2e.helpers.app_launcher import PROJECT_ROOT
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
@@ -124,3 +125,27 @@ async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page
     # 3. 验证 info_message 显示 (embedded_pg_no_config_needed)
     embedded_no_config_text = I18n.get("embedded_pg_no_config_needed")
     await embedded_real_wizard_page.expect_text(embedded_no_config_text)
+
+
+async def test_real_embedded_app_db_queryable(embedded_real_wizard_app) -> None:
+    """E2E: 真实 sidecar 启动后，应用日志间接验证 DB 已就绪 + 表已迁移 (spec §3.6 用例 2)。
+
+    验证：
+    1. 应用日志含 ``[Bootstrap] embedded postgres ready on 127.0.0.1:<port>``
+       — 证明真实 sidecar 启动 + PG 就绪
+    2. 应用日志含 ``[TaskManager] init_db``
+       — 证明 CacheManager.init_db 已执行（含 alembic 迁移，表已创建）
+
+    决策：测试进程无法跨进程获取 app 子进程的 sidecar URL（密码在子进程内存的
+    password_file 中，不输出到日志），改为验证日志含 ready + 迁移消息，间接验证
+    DB 可查询性（实际 SQL 查询由集成测试 test_embedded_pg_bootstrap.py 覆盖）。
+
+    本测试不打开浏览器（仅用 ``embedded_real_wizard_app`` fixture 启动 app subprocess），
+    不涉及 CanvasKit 渲染，无需 Windows skipif。
+    """
+    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+    content = log_path.read_text(encoding="utf-8", errors="replace")
+    assert "[Bootstrap] embedded postgres ready on 127.0.0.1:" in content, (
+        "应用日志未含 embedded postgres ready 消息，sidecar 可能未启动成功"
+    )
+    assert "[TaskManager] init_db" in content, "应用日志未含 init_db 消息，迁移可能未执行"
