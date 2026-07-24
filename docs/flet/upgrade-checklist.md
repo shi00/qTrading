@@ -16,7 +16,7 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 - [ ] `ft.Router` / `ft.Route` 声明式路由
 - [ ] `DialogControl` 子类清单（`AlertDialog`/`DatePicker`/`TimePicker`/`SnackBar`/`Banner`/`BottomSheet`）
 - [ ] V0→V1 迁移 API 表全部 21 项（见 [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表)）
-- [ ] `flet-mcp` 可用性验证（`venv/Scripts/fastmcp.exe run flet_mcp:mcp` 能启动，见 [mcp-usage.md](./mcp-usage.md)）；flet-mcp 版本与 flet 主包版本对齐
+- [ ] `flet-mcp` 可用性验证（`venv/Scripts/python.exe -c "from flet_mcp import mcp; mcp.run()"` 能启动，见 [mcp-usage.md](./mcp-usage.md)）；flet-mcp 版本与 flet 主包版本对齐
 
 ## 2. 兼容性测试与文档检查
 
