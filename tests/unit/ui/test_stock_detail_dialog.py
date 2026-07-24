@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import flet as ft
 import flet_charts as fch
 import pytest
-from matplotlib.figure import Figure
 
 from data.data_processor import DataProcessor
 
@@ -865,31 +864,36 @@ class TestLoadChartAsyncFunction:
         assert isinstance(calls[1], ft.Text)
 
     @pytest.mark.asyncio
-    async def test_success_sets_matplotlib_chart(self):
+    async def test_success_sets_candlestick_chart(self):
         import pandas as pd
 
         from ui.components.stock_detail_dialog import _load_chart_async
 
         # 非空 DataFrame，无 vol 列（覆盖添加 vol 列分支）
-        df = pd.DataFrame({"close": [10.0, 11.0, 12.0]})
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.bdate_range("2024-01-02", periods=3),
+                "open": [10.0, 11.0, 12.0],
+                "high": [10.5, 11.5, 12.5],
+                "low": [9.5, 10.5, 11.5],
+                "close": [10.2, 11.2, 12.2],
+            }
+        )
 
         mock_dp = MagicMock(spec=DataProcessor)
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
-        fig = Figure()
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm.return_value.run_async = AsyncMock(return_value=fig)
-            await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append)
 
-        # set_chart_content 改为 ft.Column (含 MatplotlibChartWithToolbar + K 线图例 Row)
+        # set_chart_content 为 ft.Column (含 CandlestickChart + K 线图例 Row)
         assert isinstance(calls[-1], ft.Column)
         chart_ctrl = next(
-            (c for c in calls[-1].controls if isinstance(c, fch.MatplotlibChartWithToolbar)),
+            (c for c in calls[-1].controls if isinstance(c, fch.CandlestickChart)),
             None,
         )
         assert chart_ctrl is not None
-        assert chart_ctrl.figure is fig
+        assert len(chart_ctrl.spots) == 3
 
     @pytest.mark.asyncio
     async def test_success_with_existing_vol_column(self):
@@ -898,25 +902,38 @@ class TestLoadChartAsyncFunction:
         from ui.components.stock_detail_dialog import _load_chart_async
 
         # 非空 DataFrame，已有 vol 列
-        df = pd.DataFrame({"close": [10.0, 11.0], "vol": [100, 200]})
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.bdate_range("2024-01-02", periods=2),
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.5, 10.5],
+                "close": [10.2, 11.2],
+                "vol": [100, 200],
+            }
+        )
 
         mock_dp = MagicMock(spec=DataProcessor)
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
-        fig = Figure()
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm.return_value.run_async = AsyncMock(return_value=fig)
-            await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
 
         assert isinstance(calls[-1], ft.Column)
         chart_ctrl = next(
-            (c for c in calls[-1].controls if isinstance(c, fch.MatplotlibChartWithToolbar)),
+            (c for c in calls[-1].controls if isinstance(c, fch.CandlestickChart)),
             None,
         )
         assert chart_ctrl is not None
         # vol 列已存在，不应被覆盖
         assert list(df["vol"]) == [100, 200]
+        # 成交量副图应存在
+        bar_ctrl = next(
+            (c for c in calls[-1].controls if isinstance(c, fch.BarChart)),
+            None,
+        )
+        assert bar_ctrl is not None
+        assert len(bar_ctrl.groups) == 2
 
 
 # ---------------------------------------------------------------------------
