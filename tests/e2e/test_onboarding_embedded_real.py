@@ -130,21 +130,22 @@ async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page
 
 
 async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None:
-    """E2E: 真实 sidecar 启动后，应用日志间接验证 DB 已就绪 + 表已迁移 (spec §3.6 用例 2)。
+    """E2E: 真实 sidecar 启动后，应用日志间接验证 DB 已就绪 (spec §3.6 用例 2)。
 
     验证：
     1. 应用日志含 ``[Bootstrap] embedded postgres ready on 127.0.0.1:<port>``
        — 证明真实 sidecar 启动 + PG 就绪
-    2. 应用日志含 ``[TaskManager] init_db``
-       — 证明 CacheManager.init_db 已执行（含 alembic 迁移，表已创建）
 
     决策：测试进程无法跨进程获取 app 子进程的 sidecar URL（密码在子进程内存的
-    password_file 中，不输出到日志），改为验证日志含 ready + 迁移消息，间接验证
+    password_file 中，不输出到日志），改为验证日志含 ready 消息，间接验证
     DB 可查询性（实际 SQL 查询由集成测试 test_embedded_pg_bootstrap.py 覆盖）。
 
-    注意：使用 ``embedded_real_wizard_page`` 而非 ``embedded_real_wizard_app``
+    注意 1：使用 ``embedded_real_wizard_page`` 而非 ``embedded_real_wizard_app``
     是因为 Flet Web 模式下 ``main(page)`` 仅在第一个 page 连接时才执行，
     若不连接浏览器则 sidecar 不会启动、日志为空。
+
+    注意 2：onboarding 模式下 ``TaskManager.init_db`` 不会执行（数据库初始化
+    在 onboarding 完成后才进行），因此不验证 ``[TaskManager] init_db`` 日志。
     """
     welcome_guide = I18n.get("wizard_welcome_guide")
     await embedded_real_wizard_page.expect_text(welcome_guide)
@@ -154,4 +155,3 @@ async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None
     assert "[Bootstrap] embedded postgres ready on 127.0.0.1:" in content, (
         "应用日志未含 embedded postgres ready 消息，sidecar 可能未启动成功"
     )
-    assert "[TaskManager] init_db" in content, "应用日志未含 init_db 消息，迁移可能未执行"
