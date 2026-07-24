@@ -9,6 +9,7 @@
 > - [升级检查清单](./upgrade-checklist.md) — Flet 版本升级时的验证步骤与文档同步要求
 > - [Flet API 核验记录模板](./api-verification-template.md) — 新增/变更 API 的核验记录模板
 > - [可访问性最低标准](./accessibility-baseline.md) — UI 可访问性基线要求
+> - [Flet MCP 使用规范](./mcp-usage.md) — AI 通过 flet-mcp 验证 Flet API 的操作指南
 
 ## 演进方向
 
