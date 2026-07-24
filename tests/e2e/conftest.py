@@ -1077,13 +1077,20 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
     使 app 内部 EmbeddedPostgresService 启动真实 Rust sidecar + 真实 PG 17。
 
     启动超时放宽到 300s（首次 initdb + PG binaries 下载可能较慢）。
+
+    独立 data_root：pytest-xdist 多 worker 各自启动 Flet 子进程，若共用默认
+    ``embedded_pg_data_root``（platformdirs ``~/.local/share/qTrading/postgres/17``），
+    多个 sidecar 并发启动会因 PGDATA 锁冲突 exit=50。为每个 worker session 分配
+    独立临时 data_root，避免跨 worker 冲突。
     """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data")
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
