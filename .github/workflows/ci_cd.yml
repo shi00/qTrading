@@ -663,6 +663,14 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
+          # Pre-install flet-web to prevent Flet 0.86 from auto-installing it at app startup.
+          # Without this, E2E tests on Linux fail because Flet tries to pip install flet-web
+          # at runtime into a system Python without a venv, causing:
+          #   "error: No virtual environment found; run `uv venv` to create an environment"
+          # and "OSError: [Errno 2] No such file or directory: '.../flet_web/web/flutter.js.map'"
+          # (root cause of Embedded PG Tests (linux) failure in run 30110045876).
+          # Same fix as the e2e-tests job (see line 322-326).
+          uv pip install --system flet-web==0.86.2
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
