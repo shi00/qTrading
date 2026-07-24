@@ -305,6 +305,14 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          # e2e-tests-windows 在 "Free disk space" 步骤主动调用 `uv cache clean`
+          # 释放 C 盘空间（run 29655213301/30058650851 触发）；若启用 uv 本地缓存，
+          # post-job 会执行 `uv cache prune --ci --force` 并因缓存目录已被删除而报错
+          # "Cache path D:\a\_temp\setup-uv-cache does not exist on disk"。
+          # 这些 job 对 uv 缓存是一次性消费，禁用即可消除 post-job 失败；
+          # pip 缓存仍由 actions/setup-python 提供。
+          enable-cache: false
 
       - name: Install dependencies
         run: |
@@ -507,6 +515,11 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          # 同 e2e-tests-windows：ci-checks-windows 在 "Free disk space" 步骤
+          # 主动 `uv cache clean`（litellm/llama-cpp-python build artifacts 大），
+          # 禁用 uv 本地缓存以避免 post-job `uv cache prune --ci --force` 报错。
+          enable-cache: false
 
       - name: Install dependencies
         shell: bash
