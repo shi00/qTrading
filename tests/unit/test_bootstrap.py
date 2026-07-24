@@ -72,6 +72,107 @@ class TestCheckOnboardingNeeded:
         assert check_onboarding_needed(None, None, None, False) is True
 
 
+class TestEmbeddedDbUrlRuntimeContract:
+    """R-QA-2/R-QA-3: 验证修复核心契约（spec.md §1.4/§1.6）。
+
+    修复核心契约：embedded 模式下 main.py 永久设置 config.DB_URL 后，
+    ConfigHandler.get_db_url() 应返回该 URL（Priority 3 兜底），
+    check_onboarding_needed 应不再误判需要重新 onboarding。
+
+    本测试是运行时验证（对比 test_main_persists_embedded_db_url_in_config 的源码静态分析），
+    不调用 main()，仅模拟 main.py 设置 config.DB_URL 后的行为链路。
+    """
+
+    def test_get_db_url_returns_embedded_url_after_persistent_set(self, monkeypatch):
+        """embedded 模式下 config.DB_URL 被永久设置后，get_db_url() 返回该 URL。
+
+        场景：embedded 模式启动后，main.py 已设置 config.DB_URL = embedded_url。
+        验证 ConfigHandler.get_db_url() 优先级链：
+          Priority 1 DATABASE_URL env → 未设置（mock）
+          Priority 2 db_host rebuild → db_host 为空（mock）跳过
+          Priority 3 config.DB_URL fallback → 返回 embedded URL
+        """
+        import config
+        from utils.config_handler import ConfigHandler
+
+        # 保存原值，测试后恢复
+        original_db_url = config.DB_URL
+        embedded_url = "postgresql+asyncpg://postgres:mock_password_12345@127.0.0.1:55432/qtrading"
+
+        try:
+            # 模拟 main.py 永久设置 config.DB_URL
+            config.DB_URL = embedded_url
+
+            # mock Priority 1 DATABASE_URL 未设置
+            monkeypatch.delenv("DATABASE_URL", raising=False)
+            # mock Priority 2 db_host 为空（embedded 模式下不持久化 db_host）
+            monkeypatch.setattr(
+                "utils.config_handler.ConfigHandler.get_typed",
+                staticmethod(lambda key, type_, default: default if key == "db_host" else type_(default)),
+            )
+
+            result = ConfigHandler.get_db_url()
+            assert result == embedded_url, (
+                f"embedded 模式下 get_db_url() 应返回 config.DB_URL（Priority 3 兜底），实际：{result}"
+            )
+        finally:
+            config.DB_URL = original_db_url
+
+    def test_check_onboarding_not_triggered_after_embedded_url_set(self, monkeypatch):
+        """R-QA-3: embedded 模式下 config.DB_URL 永久设置后，check_onboarding_needed 不误判。
+
+        场景：embedded 模式重启，onboarding_complete=True，token/api_key 已配置。
+        验证 check_onboarding_needed(get_db_url(), token, api_key, True) 返回 False。
+        """
+        import config
+        from utils.config_handler import ConfigHandler
+
+        original_db_url = config.DB_URL
+        embedded_url = "postgresql+asyncpg://postgres:mock_password_12345@127.0.0.1:55432/qtrading"
+
+        try:
+            config.DB_URL = embedded_url
+            monkeypatch.delenv("DATABASE_URL", raising=False)
+            monkeypatch.setattr(
+                "utils.config_handler.ConfigHandler.get_typed",
+                staticmethod(lambda key, type_, default: default if key == "db_host" else type_(default)),
+            )
+
+            db_url = ConfigHandler.get_db_url()
+            # spec.md §1.6：embedded 模式 + onboarding_complete=True + token/api_key 齐备 → 跳过 onboarding
+            result = check_onboarding_needed(db_url, "mock_token", "mock_api_key", True)
+            assert result is False, (
+                f"embedded 模式下 onboarding_complete=True 且凭证齐备时不应触发 onboarding，"
+                f"db_url={db_url!r}, result={result}"
+            )
+        finally:
+            config.DB_URL = original_db_url
+
+    def test_get_db_url_priority_1_database_url_env_overrides_embedded(self, monkeypatch):
+        """R-Arch-2 验证：DATABASE_URL env var (Priority 1) 覆盖 config.DB_URL (Priority 3)。
+
+        这是已知的 spec 前提（spec.md §1.4 假设 DATABASE_URL 未设置），
+        本测试验证该前提未成立时的实际行为，佐证 prepare_database_runtime 中 WARNING 的必要性。
+        """
+        import config
+        from utils.config_handler import ConfigHandler
+
+        original_db_url = config.DB_URL
+        embedded_url = "postgresql+asyncpg://postgres:embedded_pwd@127.0.0.1:55432/qtrading"
+        external_url = "postgresql+asyncpg://external_user:external_pwd@remote-host:5432/external_db"
+
+        try:
+            config.DB_URL = embedded_url
+            # mock DATABASE_URL env var 被外部误设
+            monkeypatch.setenv("DATABASE_URL", external_url)
+
+            result = ConfigHandler.get_db_url()
+            # Priority 1 命中，返回 external URL（覆盖 embedded URL）
+            assert result == external_url, f"Priority 1 DATABASE_URL 应覆盖 Priority 3 config.DB_URL，实际：{result}"
+        finally:
+            config.DB_URL = original_db_url
+
+
 class TestInitializeServices:
     @pytest.mark.asyncio
     async def test_success(self):

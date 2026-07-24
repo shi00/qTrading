@@ -606,6 +606,43 @@ class TestEmbeddedPostgresServiceStart:
             await service.stop()
 
     @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_registers_password_secret(self, fake_paths) -> None:
+        """R9: start() 构造 URL 后必须调 DataSanitizer.register_secret(password)。
+
+        验证：
+        1. start() 后 password 已注册到 DataSanitizer._known_secrets
+        2. DataSanitizer.sanitize_error 能将裸密码（非 URL 中）替换为 ***
+
+        场景：sidecar panic 输出中可能含裸密码（非完整 URL），需精确脱敏。
+        spec.md §1.5 Secret 注册契约：password 必须单独注册。
+        """
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                await service.start()
+                # 断言 1: 裸密码已注册到 _known_secrets
+                assert "mock_pg_password_55432" in DataSanitizer._known_secrets, (
+                    "password 未注册到 DataSanitizer._known_secrets"
+                )
+                # 断言 2: sanitize_error 能脱敏裸密码（非 URL 中的密码）
+                error_msg = "FATAL: auth failed for user postgres, password=mock_pg_password_55432"
+                sanitized = DataSanitizer.sanitize_error(error_msg)
+                assert "mock_pg_password_55432" not in sanitized, f"sanitize_error 未脱敏裸密码: {sanitized}"
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
     async def test_start_concurrent_returns_same_connection_info(self, fake_paths) -> None:
         """H5: 两个协程并发 await service.start() → 返回同一 ConnectionInfo，Popen 仅调用 1 次。
 

@@ -12,6 +12,11 @@
   - 完整 bootstrap 流程：``prepare_database_runtime()`` → ``override_db_url(url)``
     → ``CacheManager.init_db()`` → DAO 读写
 
+  注：产品代码 ``main.py`` 已改为永久设置 ``config.DB_URL = embedded_url``（spec.md §1.4，
+  D15 决策），不再使用 ``override_db_url`` 上下文管理器。本集成测试用 ``override_db_url``
+  作为**测试 fixture 临时覆盖 URL**（spec.md §1.4 明确保留该文件供测试使用），目的是
+  在不污染 ``config.DB_URL`` 模块级变量的前提下完成 CacheManager 单例隔离测试。
+
 依赖：
 - ``real_embedded_pg`` fixture（session-scoped 真实 PG 实例）
 - ``real_sidecar_binary`` fixture（提供 binary 路径给 config）
@@ -181,7 +186,7 @@ class TestFullBootstrapFlowEmbedded:
 
     验证 ``prepare_database_runtime()`` 返回的 URL 能被 ``CacheManager`` 正确使用：
     1. ``prepare_database_runtime()`` 返回 URL
-    2. ``override_db_url(url)`` 覆盖配置
+    2. ``override_db_url(url)`` 作为测试 fixture 临时覆盖 URL（产品代码 main.py 已改用 config.DB_URL 永久设置）
     3. ``CacheManager._reset_singleton()`` + ``CacheManager()`` + ``init_db()``
     4. ``cache.engine`` 可连
     5. ``cache.stock_dao`` 可读写
