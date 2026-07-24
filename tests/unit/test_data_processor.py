@@ -313,6 +313,16 @@ class TestDataProcessorErrorClassification:
             result = await dp.sync_concepts()
         assert result == 0
 
+    @pytest.mark.asyncio
+    async def test_sync_concepts_system_error_raises(self):
+        """D2: system 级异常（如 MemoryError）raise 传播（覆盖 L720/L726）。"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        dp.api.get_concept_list = AsyncMock(side_effect=MemoryError("oom"))
+        with patch("data.data_processor.classify_severity", return_value="system"):
+            with pytest.raises(MemoryError, match="oom"):
+                await dp.sync_concepts()
+
 
 class TestDataProcessorSyncConcepts:
     @pytest.mark.asyncio
@@ -401,7 +411,8 @@ class TestDataProcessorSyncConcepts:
             mock_aio.wait_for = _fake_wait_for_cancel
 
             # fetch_one raise CancelledError → gather 传播 → sync_concepts except 重新 raise
-            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
+            # R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播，CancelledError 无有意义 message 可 match
                 await dp.sync_concepts()
 
     @pytest.mark.asyncio
@@ -983,6 +994,18 @@ class TestDataProcessorClearCancel:
         dp.clear_cancel()
         assert dp.is_cancelled() is False
 
+    @pytest.mark.asyncio
+    async def test_clear_cancel_propagates_to_context_cancel_event(self):
+        """FIND-R1-006: A4 修复 — clear_cancel 传播到 context.cancel_event（覆盖 L180）。"""
+        dp = _make_dp()
+        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        mock_cancel_event = MagicMock()
+        dp.context.cancel_event = mock_cancel_event
+        dp._get_cancel_event().set()
+        dp.clear_cancel()
+        assert dp.is_cancelled() is False
+        mock_cancel_event.clear.assert_called_once_with()
+
 
 class TestDataProcessorGetFundamentalScreeningData:
     @pytest.mark.asyncio
@@ -1112,3 +1135,16 @@ class TestDataProcessorStop:
 
         # Verify cancel event is still set
         assert dp.is_cancelled() is True
+
+    @pytest.mark.asyncio
+    async def test_stop_propagates_to_context_cancel_event(self):
+        """FIND-R1-006: A4 修复 — stop 传播到 context.cancel_event（覆盖 L188）。"""
+        dp = _make_dp()
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        mock_cancel_event = MagicMock()
+        dp.context.cancel_event = mock_cancel_event
+        await dp.stop()
+        assert dp.is_cancelled() is True
+        mock_cancel_event.set.assert_called_once_with()
