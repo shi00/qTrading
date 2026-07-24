@@ -95,9 +95,9 @@ class TestEmbeddedPgMigrationRegression:
         await asyncio.to_thread(command.downgrade, cfg, "base")
 
         tables = await _get_table_names(info.url)
-        # base 状态：无业务表，无 alembic_version 表
+        # base 状态：业务表全部删除。alembic_version 表可能残留（alembic downgrade base
+        # 只清空版本记录，不一定删表，与外置 PG test_downgrade_to_base_removes_all_user_tables 对齐）
         assert "stock_basic" not in tables
-        assert "alembic_version" not in tables
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_embedded_pg_alembic_upgrade_head_after_downgrade(self, real_embedded_pg: ConnectionInfo) -> None:
