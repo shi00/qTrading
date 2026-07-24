@@ -23,7 +23,7 @@ import flet as ft
 import flet_charts as fch
 
 from ui.components._markdown_safe import safe_open_url
-from ui.components.chart_utils import generate_kline_figure
+from ui.components.chart_utils import generate_kline_chart_data
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -509,45 +509,65 @@ async def _load_chart_async(
         if "vol" not in df.columns:
             df["vol"] = 0
 
-        # 通过 ThreadPoolManager 在 CPU 线程池生成 K 线 figure（R16：避免阻塞主循环）
         chart_title = f"{stock_data.get('name', '')} ({ts_code})"
-        from utils.thread_pool import TaskType, ThreadPoolManager
 
-        figure = await ThreadPoolManager().run_async(
-            TaskType.CPU,
-            generate_kline_figure,
-            df,
-            title=chart_title,
+        # 数据转换为 flet-charts 原生数据结构（纯内存操作，无需 ThreadPoolManager）
+        chart_data = generate_kline_chart_data(df, title=chart_title)
+
+        # 构建 K 线主图 + 成交量副图
+        chart_controls: list[ft.Control] = [
+            fch.CandlestickChart(
+                spots=chart_data.spots,
+                interactive=True,
+                min_x=chart_data.min_x,
+                max_x=chart_data.max_x,
+                min_y=chart_data.min_y,
+                max_y=chart_data.max_y,
+                bottom_axis=fch.ChartAxis(labels=chart_data.date_labels),
+                tooltip=fch.CandlestickChartTooltip(max_width=200),
+                expand=True,
+            ),
+        ]
+
+        # 成交量副图（仅有量数据时显示）
+        if chart_data.volume_groups:
+            chart_controls.append(
+                fch.BarChart(
+                    groups=chart_data.volume_groups,
+                    interactive=True,
+                    min_y=0,
+                    max_y=chart_data.max_volume * 1.1,
+                    bottom_axis=fch.ChartAxis(labels=chart_data.date_labels),
+                    expand=True,
+                )
+            )
+
+        # P3-15 色盲友好: K 线图例文字标注涨/跌, 不依赖颜色区分
+        chart_controls.append(
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.UP_RED),
+                    ft.Text(
+                        I18n.get("detail_kline_rise"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Container(width=AppStyles.SPACING_MD),
+                    ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.DOWN_GREEN),
+                    ft.Text(
+                        I18n.get("detail_kline_fall"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=AppStyles.SPACING_XS,
+            )
         )
 
         set_chart_content(
             ft.Column(
-                [
-                    fch.MatplotlibChartWithToolbar(
-                        figure=figure,
-                        expand=True,
-                    ),
-                    # P3-15 色盲友好: K 线图例文字标注涨/跌, 不依赖颜色区分
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.UP_RED),
-                            ft.Text(
-                                I18n.get("detail_kline_rise"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            ft.Container(width=AppStyles.SPACING_MD),
-                            ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.DOWN_GREEN),
-                            ft.Text(
-                                I18n.get("detail_kline_fall"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        spacing=AppStyles.SPACING_XS,
-                    ),
-                ],
+                chart_controls,
                 expand=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             )
