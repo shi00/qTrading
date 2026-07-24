@@ -68,9 +68,9 @@ def _build_news_item(row: NewsRow, news_id: str) -> ft.Container:
 
     sentiment = _detect_sentiment(content)
     if sentiment == "positive":
-        bg_color = ft.Colors.with_opacity(0.1, AppColors.UP)
+        bg_color = ft.Colors.with_opacity(0.1, AppColors.UP_RED)
     elif sentiment == "negative":
-        bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN)
+        bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN_GREEN)
     else:
         bg_color = ft.Colors.TRANSPARENT
 

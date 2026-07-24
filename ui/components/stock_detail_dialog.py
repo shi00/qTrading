@@ -203,7 +203,7 @@ def _build_content(
     pct = stock_data.get("pct_chg", 0)
     # Guard against NaN from raw DataFrame data
     pct = float(pct) if is_valid_number(pct) else 0
-    pct_color = AppColors.UP if pct > 0 else AppColors.DOWN
+    pct_color = AppColors.UP_RED if pct > 0 else AppColors.DOWN_GREEN
     pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
 
     price_section = ft.Column(

@@ -942,7 +942,7 @@ def ScreenerView(
                 ),
                 border=ft.Border.all(1, AppColors.DIVIDER),
                 border_radius=8,
-                padding=15,
+                padding=16,
                 bgcolor=AppColors.SURFACE,
                 margin=ft.Margin.only(bottom=10),
             )
@@ -993,7 +993,7 @@ def ScreenerView(
             ),
             border=ft.Border.all(1, AppColors.DIVIDER),
             border_radius=8,
-            padding=15,
+            padding=16,
             bgcolor=AppColors.SURFACE,
             margin=ft.Margin.only(bottom=10),
         )

@@ -8,7 +8,7 @@
 - 移除所有命令式 API: set_value/set_label/update_theme/set_loading/set_text/update_locale/.update()
 - i18n 自动重渲染: SectionHeader/SettingRow 通过 ``ft.use_state(get_observable_state)`` 订阅
 - theme 自动重渲染: MetricCard 通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅
-  (trend 用的 UP/DOWN 为 Layer 2 自定义色，需随主题刷新)
+  (trend 用的 UP_RED/DOWN_GREEN 为 Layer 2 自定义色，需随主题刷新)
 - 状态驱动渲染: MetricCard 的 value/icon/status_color、ActionChip 的 is_loading/title/subtitle
   由消费方通过 props 推送触发重渲染（替代旧 set_value/set_loading/set_text）
 """
@@ -59,11 +59,11 @@ def MetricCard(
 ) -> ft.Container:
     """Display a single key metric with label, value, and status icon (declarative).
 
-    Layer 2 custom colors (UP/DOWN) for trend display require theme subscription
+    Layer 2 custom colors (UP_RED/DOWN_GREEN) for trend display require theme subscription
     via ``ft.use_state(AppColors.get_observable_state)`` for auto-rerender.
     Dynamic value/icon/status_color are pushed by the consumer via props.
     """
-    # Subscribe to theme changes (Layer 2 UP/DOWN colors auto-refresh)
+    # Subscribe to theme changes (Layer 2 UP_RED/DOWN_GREEN colors auto-refresh)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Status row (icon + trend) ---
@@ -72,7 +72,7 @@ def MetricCard(
     if icon:
         status_controls.append(ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_LG, color=resolved_color))
     if trend:
-        trend_color = AppColors.UP if trend_up else AppColors.DOWN
+        trend_color = AppColors.UP_RED if trend_up else AppColors.DOWN_GREEN
         status_controls.append(
             ft.Text(trend, size=AppStyles.FONT_SIZE_CAPTION, color=trend_color, weight=ft.FontWeight.BOLD),
         )
@@ -101,7 +101,7 @@ def MetricCard(
             spacing=4,
         ),
         expand=True,
-        padding=15,
+        padding=16,
         border_radius=12,
         bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.PRIMARY),
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY)),
@@ -180,7 +180,7 @@ def ActionChip(
         on_click=safe_on_click(on_click),
         ink=True,
         border_radius=12,
-        padding=15,
+        padding=16,
         bgcolor=bgcolor,
         disabled=disabled,
         opacity=opacity,
