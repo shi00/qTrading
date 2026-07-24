@@ -1,0 +1,144 @@
+# Harness v4 Configuration
+# Edit this file, then run `harness sync` to generate CC plugin files.
+#
+# プロジェクト憲法は CLAUDE.md (v0.9.0) が唯一権威。本ファイルは Harness
+# ツール連携用の設定であり、CLAUDE.md の紅線・アーキテクチャ境界に優先しない。
+
+[project]
+name = "AStockScreener"
+version = "0.9.0"
+description = "智能 A 股 AI 量化交易员"
+
+[env]
+CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1"
+
+[safety.permissions]
+# main/master への直接 push の扱い。
+# ask: 実行前にユーザー確認（既定） / deny: 禁止 / allow: 確認なしで許可
+protectedBranchPush = "ask"
+allow = [
+  # 読み取り系 git コマンド（安全）
+  "Bash(git status:*)",
+  "Bash(git diff:*)",
+  "Bash(git log:*)",
+  "Bash(git branch:*)",
+  "Bash(git show:*)",
+  "Bash(rg:*)",
+  # Python プロジェクトの品質ゲート（CLAUDE.md §1.9 検証コマンド）
+  "Bash(python -m pytest:*)",
+  "Bash(pytest:*)",
+  "Bash(ruff:*)",
+  "Bash(pyright:*)",
+  "Bash(pre-commit run:*)",
+  "Bash(alembic check:*)",
+  "Bash(alembic current:*)",
+  "Bash(alembic history:*)",
+]
+deny = [
+  "Bash(sudo:*)",
+  "Bash(rm -rf:*)",
+  "Bash(rm -fr:*)",
+  # 直接 DB 接続は DAO 経由を原則とする（CLAUDE.md §4 アーキテクチャ）
+  "Bash(psql:*)",
+  "Bash(mysql:*)",
+  "Bash(mongod:*)",
+  "Bash(mongo:*)",
+  # 自己書換防止: settings ファイルへの Write/Edit を禁止
+  # harness sync が .claude-plugin/settings.json へ生成する。直接編集は不可。
+  "Edit(.claude/settings*)",
+  "Write(.claude/settings*)",
+  "Edit(.claude-plugin/settings*)",
+  "Write(.claude-plugin/settings*)",
+  # 機密ファイル読み取り禁止（CLAUDE.md R9/R10 機密情報保護）
+  "Read(./.env)",
+  "Read(./.env.*)",
+  "Read(./secrets/**)",
+  "Read(**/*.pem)",
+  "Read(**/*.key)",
+  "Read(**/*id_rsa*)",
+  "Read(**/*id_ed25519*)",
+  "Read(**/.aws/**)",
+  "Read(**/.ssh/**)",
+]
+ask = [
+  "Bash(rm -r:*)",
+  "Bash(git reset --hard:*)",
+  "Bash(git push -f:*)",
+  "Bash(git push --force:*)",
+  "Bash(git push --force-with-lease:*)",
+  "Bash(git clean -f:*)",
+  "Bash(git clean -fdx:*)",
+  "Bash(git clean -fx:*)",
+  "Bash(git rebase:*)",
+  "Bash(git merge:*)",
+  # 依存関係の変更は pyproject.toml 経由が原則（CLAUDE.md §3.2）
+  "Bash(pip install:*)",
+  "Bash(pip uninstall:*)",
+  "Bash(uv add:*)",
+  "Bash(uv remove:*)",
+  # DB schema 変更は Alembic マイグレーション生成・検証が必要（CLAUDE.md §3.2）
+  "Bash(alembic upgrade:*)",
+  "Bash(alembic downgrade:*)",
+  "Bash(alembic revision:*)",
+]
+
+[safety.sandbox]
+failIfUnavailable = true
+
+[safety.sandbox.network]
+# クラウドメタデータ流出エンドポイント + パスートサイト
+deniedDomains = [
+  "169.254.169.254",
+  "metadata.google.internal",
+  "metadata.azure.com",
+  "pastebin.com",
+  "transfer.sh",
+  "0x0.st",
+  "paste.ee",
+  "termbin.com",
+  "ix.io",
+]
+
+[safety.sandbox.filesystem]
+denyRead = [
+  ".env",
+  ".env.*",
+  "!.env.example",
+  "secrets/**",
+  "**/*.pem",
+  "**/*.key",
+  "**/*id_rsa*",
+  "**/*id_ed25519*",
+  "**/.aws/**",
+  "**/.ssh/**",
+]
+allowRead = [
+  ".env.example",
+  ".env.sample",
+  "docs/**",
+]
+
+[tdd]
+adopt_todo_list_first = true
+adopt_triangulation = "guide-only"
+adopt_fake_implementation = false
+
+[tdd.enforce]
+# Local trial safe default: no behavior changes until explicitly enabled.
+enabled = false
+level = "off"
+hook_enabled = false
+default_max_red_log_age_minutes = 60
+bypass_audit_required = true
+
+[worker.self_review]
+default_rules = [
+  "dry-violation-none",
+  "plans-cc-markers-untouched",
+  "all-declared-symbols-called",
+  "dod-items-verified-with-evidence",
+  "no-existing-test-regression",
+  "tdd-red-evidence-attached",
+]
+extra_rules = []
+max_retries_before_escalate = 2
