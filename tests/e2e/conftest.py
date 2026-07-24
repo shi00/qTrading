@@ -298,14 +298,24 @@ def mock_keyring():
         sys.modules.pop("keyring", None)
 
 
-def _spawn(tmp_path_factory, config: dict, env_overrides: dict) -> tuple:
+def _spawn(
+    tmp_path_factory,
+    config: dict,
+    env_overrides: dict,
+    *,
+    startup_timeout_s: float = 60.0,
+) -> tuple:
     cfg_dir = tmp_path_factory.mktemp("e2e_cfg")
     cfg_file = cfg_dir / "user_settings.json"
     cfg_file.write_text(json.dumps(config), encoding="utf-8")
     # tushare SDK set_token() 写入 ~/tk.csv，受限环境（TRAE Sandbox）会拒绝。
     # 将 USERPROFILE 重定向到 session 临时目录，隔离 tushare 文件写入。
     e2e_home = str(tmp_path_factory.mktemp("e2e_home"))
-    proc, url = start_flet_app(cfg_file, {"USERPROFILE": e2e_home, **env_overrides})
+    proc, url = start_flet_app(
+        cfg_file,
+        {"USERPROFILE": e2e_home, **env_overrides},
+        startup_timeout_s=startup_timeout_s,
+    )
     return proc, url, cfg_file
 
 
@@ -1020,6 +1030,71 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
 async def embedded_wizard_page(e2e_browser, embedded_wizard_app: AppServer, request):
     """Function 级 Page（embedded 模式向导测试, P3-18）。"""
     fp = await _make_page(e2e_browser, embedded_wizard_app, request)
+    yield fp
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
+
+
+# =============================================================================
+# 真实 sidecar binary + 真实 embedded PG E2E fixture（embedded_real marker）
+# =============================================================================
+
+
+@pytest.fixture(scope="session")
+def real_sidecar_binary_e2e(tmp_path_factory):
+    """定位真实 sidecar binary，缺失则 skip（E2E 版本）。
+
+    与 ``tests/integration/conftest.py::real_sidecar_binary`` 同语义，
+    但 E2E conftest 是独立的，需重新定义。
+    """
+    from tests._sidecar_binary import ensure_sidecar_sha256_file, find_sidecar_binary
+
+    binary = find_sidecar_binary()
+    if binary is None:
+        pytest.skip(
+            "real sidecar binary not found; set SIDECAR_BINARY_PATH or build via "
+            "'cargo build --release' in sidecars/qtrading-pg-sidecar/"
+        )
+    ensure_sidecar_sha256_file(binary)
+    return binary
+
+
+@pytest.fixture(scope="session")
+def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e2e):
+    """真实 sidecar 版本的 embedded wizard app fixture。
+
+    与 ``embedded_wizard_app`` 区别：用真实 sidecar binary 替代 fake_sidecar，
+    使 app 内部 EmbeddedPostgresService 启动真实 Rust sidecar + 真实 PG 17。
+
+    启动超时放宽到 300s（首次 initdb + PG binaries 下载可能较慢）。
+    """
+    proc, url, cfg_file = _spawn(
+        tmp_path_factory,
+        config={
+            "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+        },
+        env_overrides={
+            "TS_TOKEN": "e2e-dummy-token",
+            "AI_API_KEY": "e2e-dummy-key",
+            "QTRADING_DATABASE_MODE": "embedded",
+            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+        },
+        startup_timeout_s=300.0,
+    )
+    app = AppServer(proc, url, cfg_file)
+    yield app
+    _terminate(proc)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def embedded_real_wizard_page(e2e_browser, embedded_real_wizard_app: AppServer, request):
+    """Function 级 Page（真实 sidecar embedded 模式向导测试）。"""
+    fp = await _make_page(e2e_browser, embedded_real_wizard_app, request)
     yield fp
     failed = any(
         getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed

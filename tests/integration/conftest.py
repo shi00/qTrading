@@ -9,6 +9,7 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -595,6 +596,7 @@ _ISOLATED_DB_FIXTURES = frozenset(
         "consistency_engine",
         "db_via_init_db",
         "db_via_alembic",
+        "real_embedded_pg",
     }
 )
 
@@ -673,3 +675,61 @@ async def cleanup_singletons_session():
                             "Failed to async close singleton %s during session teardown: %s", cls.__name__, e
                         )
     reset_all_singletons()
+
+
+# =============================================================================
+# 真实 sidecar binary + 真实 embedded PG fixture（embedded_real marker）
+# =============================================================================
+
+
+@pytest.fixture(scope="session")
+def real_sidecar_binary(tmp_path_factory) -> Path:
+    """定位真实 sidecar binary，缺失则 skip。
+
+    返回 binary 路径，并确保 ``<binary>.sha256`` 文件存在（覆盖真实校验路径）。
+    CI 通过 ``SIDECAR_BINARY_PATH`` + ``SIDECAR_SHA256`` 环境变量注入；
+    本地开发可通过 cargo build 生成或手动下载后设置环境变量。
+    """
+    from tests._sidecar_binary import ensure_sidecar_sha256_file, find_sidecar_binary
+
+    binary = find_sidecar_binary()
+    if binary is None:
+        pytest.skip(
+            "real sidecar binary not found; set SIDECAR_BINARY_PATH or build via "
+            "'cargo build --release' in sidecars/qtrading-pg-sidecar/"
+        )
+    assert binary is not None  # type narrowing: pytest.skip raises Skipped,但 pyright 不识别
+    ensure_sidecar_sha256_file(binary)
+    return binary
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def real_embedded_pg(real_sidecar_binary: Path, tmp_path_factory):
+    """启动真实 sidecar + 真实 PG，返回 ConnectionInfo。
+
+    session-scoped：避免每个测试重复 initdb（首次 30s+），所有 embedded_real
+    测试共享同一 sidecar 实例。
+
+    teardown：``service.stop()`` + ``_reset_singleton()``（R7 单例隔离）。
+    stop() 失败时透传 CancelledError（R2 红线）。
+    """
+    from data.persistence.embedded_postgres.protocol import ConnectionInfo
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    data_root = tmp_path_factory.mktemp("real_embedded_pg")
+    service = EmbeddedPostgresService(
+        sidecar_binary=real_sidecar_binary,
+        data_dir=data_root / "data",
+        install_dir=data_root / "install",
+        log_dir=data_root / "logs",
+        start_timeout=300.0,  # 首次 initdb + PG binaries 下载可能较慢
+    )
+    try:
+        info: ConnectionInfo = await service.start()
+        yield info
+    finally:
+        try:
+            await service.stop()
+        except asyncio.CancelledError:
+            raise  # R2: 不吞 CancelledError
+        EmbeddedPostgresService._reset_singleton()
