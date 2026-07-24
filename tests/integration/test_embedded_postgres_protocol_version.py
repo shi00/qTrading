@@ -69,6 +69,9 @@ class _FakePopen:
         self.argv = list(cmd)
         self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(stdout_line)
+        # stderr=None 模拟未启用 stderr 管道的场景，_start_stderr_reader_thread 检查
+        # `self._process.stderr is None` 后直接 return，不启动 reader 线程
+        self.stderr = None
         self._kill_calls = 0
         self._wait_calls = 0
         _FakePopen.instances.append(self)

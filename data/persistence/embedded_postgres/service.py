@@ -91,7 +91,7 @@ class EmbeddedPostgresService:
         start_timeout: float = 300.0,
         stop_timeout: float = 60.0,
         listen: str = "127.0.0.1",
-        username: str = "qtrading",
+        username: str = "postgres",
         database: str = "qtrading",
     ) -> None:
         with self._lock:
@@ -275,6 +275,11 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"sidecar binary not executable: {self._sidecar_binary}") from exc
 
+        # D23: 立即启动 stderr reader，确保 sidecar 启动失败（exit=13 等）时
+        # stderr 诊断信息也能被捕获到 sidecar.stderr.log（之前在 ready 后才启动，
+        # 失败路径下 sidecar.stderr.log 为空，无法定位根因）
+        self._start_stderr_reader_thread()
+
         ready_line = self._readline_with_timeout(self._process.stdout, self._start_timeout)
         if not ready_line:
             exit_code = self._process.poll()
@@ -344,10 +349,8 @@ class EmbeddedPostgresService:
         self._svc_logger.info("embedded postgres started on %s:%s (pid=%s)", self._listen, port, pid)
         # M9: 启动 daemon 线程持续读 sidecar stdout 写入日志文件，避免 stdout 缓冲区满
         # 阻塞 sidecar（虽然当前 sidecar ready 后不再写 stdout，但防御未来版本变化）
+        # 注意：stderr reader 已在 Popen 后立即启动（见上方），此处不再重复
         self._start_stdout_reader_thread()
-        # D23: 启动 daemon 线程逐行读 sidecar stderr → DataSanitizer 脱敏 → 写入文件，
-        # 避免 sidecar panic 输出中含密码/连接串被直接落盘
-        self._start_stderr_reader_thread()
         return self._connection_info
 
     def _start_stdout_reader_thread(self) -> None:

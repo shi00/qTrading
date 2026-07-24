@@ -24,7 +24,7 @@ class TestEmbeddedPgFields:
         assert config.embedded_pg_start_timeout_s == 300.0
         assert config.embedded_pg_stop_timeout_s == 60.0
         assert config.embedded_pg_listen == "127.0.0.1"
-        assert config.embedded_pg_username == "qtrading"
+        assert config.embedded_pg_username == "postgres"
         assert config.embedded_pg_database == "qtrading"
 
     def test_app_config_embedded_pg_fields_validate_ranges(self) -> None:

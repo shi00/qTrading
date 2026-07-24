@@ -862,7 +862,14 @@ async def _ensure_e2e_db() -> None:
     ProactorEventLoop + asyncpg 兼容性问题。``asyncio.to_thread`` 在当前
     ProactorEventLoop 中调度，函数体在 default executor 线程中执行；新线程
     显式创建 ``SelectorEventLoop``（不修改全局 event_loop_policy，避免污染主线程）。
+
+    embedded 模式跳过：``QTRADING_DATABASE_MODE=embedded`` 时，app 内部
+    ``prepare_database_runtime()`` + ``TaskManager.init_db`` 管理 sidecar PG
+    的 DB 创建与迁移（``embedded_real_wizard_app`` 不传 ``DATABASE_URL``），
+    此 fixture 无需也不应预创建外置 ``test_astock`` DB（sidecar 未启动且端口随机）。
     """
+    if os.environ.get("QTRADING_DATABASE_MODE", "external").lower() == "embedded":
+        return
     from tests.integration.conftest import _ensure_test_db
 
     def _run_in_selector_loop() -> None:
@@ -1070,13 +1077,20 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
     使 app 内部 EmbeddedPostgresService 启动真实 Rust sidecar + 真实 PG 17。
 
     启动超时放宽到 300s（首次 initdb + PG binaries 下载可能较慢）。
+
+    独立 data_root：pytest-xdist 多 worker 各自启动 Flet 子进程，若共用默认
+    ``embedded_pg_data_root``（platformdirs ``~/.local/share/qTrading/postgres/17``），
+    多个 sidecar 并发启动会因 PGDATA 锁冲突 exit=50。为每个 worker session 分配
+    独立临时 data_root，避免跨 worker 冲突。
     """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data")
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
