@@ -79,7 +79,7 @@
 | 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 docs/guides/how-to.md「3. 新增一个策略」 |
 | 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 docs/guides/how-to.md「1. 新增一张数据表」/「2. 新增一个 DAO」 |
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
-| 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
+| 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10）；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile）；项目红线见 §3、架构边界见 §4 |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md)（核心协议 + 稳定规则 ID + review-profiles 按需加载）；项目红线见 §3、架构边界见 §4 |
@@ -87,9 +87,9 @@
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 docs/guides/how-to.md「6. 新增与升级依赖」 |
 | 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 docs/guides/how-to.md「7. 新增回测配置」 |
-| 修改 UI 布局/响应式 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py` |
-| 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/` |
-| 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则 |
+| 修改 UI 布局/响应式 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
+| 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
+| 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
@@ -108,7 +108,7 @@
 
 ### 1.10 反幻觉护栏 (AI 特有红线)
 
-- **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。
+- **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `fastmcp run flet_mcp:mcp`；`.trae/mcp.json` 受 IDE 黑名单保护需用户手动创建），"not found" 结果对当前锁定版本具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级，版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
 - **禁止臆造红线编号**：引用 R1~R18 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
@@ -219,6 +219,7 @@ app → 编排所有层，仅被 main.py 调用
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
 | Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
 | Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
+| Flet MCP 使用规范（AI 验证 Flet API 的操作指南） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
