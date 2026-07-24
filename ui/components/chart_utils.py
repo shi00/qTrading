@@ -16,7 +16,7 @@ import mplfinance as mpf
 import pandas as pd
 from matplotlib.figure import Figure
 
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def generate_kline_chart_data(
             date_labels.append(
                 fch.ChartAxisLabel(
                     value=x,
-                    label=ft.Text(row["trade_date"].strftime("%m-%d"), size=10),
+                    label=ft.Text(row["trade_date"].strftime("%m-%d"), size=AppStyles.FONT_SIZE_CAPTION),
                 )
             )
 
