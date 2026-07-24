@@ -168,8 +168,7 @@ class NewsFetcher:
                     logger.warning(
                         "[News] CNINFO disclosure failed for %s: %s",
                         ts_code,
-                        e,
-                        exc_info=True,
+                        DataSanitizer.sanitize_error(e),
                     )
 
                 # -------------------------------------------------------------
@@ -199,7 +198,7 @@ class NewsFetcher:
 
                         return news_list
                 except Exception as e:
-                    logger.warning("[News] EM search failed for %s: %s", ts_code, e)
+                    logger.warning("[News] EM search failed for %s: %s", ts_code, DataSanitizer.sanitize_error(e))
 
                 return []
 
@@ -584,7 +583,6 @@ class NewsFetcher:
                     "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
                     count,
                     DataSanitizer.sanitize_error(e),
-                    exc_info=True,
                 )
             else:
                 logger.warning(
