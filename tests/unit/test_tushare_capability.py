@@ -243,11 +243,14 @@ class TestProbeApiCapabilities:
     async def test_returns_dict_with_results(self, tushare_client_mocks):
         client, _, _ = tushare_client_mocks
 
-        async def mock_handle(func, **kwargs):
+        # probe_api_capabilities 内部调用 _handle_probe_call（非 _handle_api_call），
+        # mock _handle_api_call 是无效的：真实 _handle_probe_call 会经过 TokenBucket
+        # 限速器（probe 桶 50/min, capacity 5），29 个探测被节流 ~26s。
+        async def mock_handle(api_name, func, **kwargs):
             return MagicMock()
 
         with (
-            patch.object(client, "_handle_api_call", side_effect=mock_handle),
+            patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_handle),
             patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
         ):
             results = await client.probe_api_capabilities()
@@ -274,11 +277,11 @@ class TestProbeApiCapabilities:
             "top10_holders",
         ]
 
-        async def mock_handle(func, **kwargs):
+        async def mock_handle(api_name, func, **kwargs):
             return MagicMock()
 
         with (
-            patch.object(client, "_handle_api_call", side_effect=mock_handle),
+            patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_handle),
             patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
         ):
             results = await client.probe_api_capabilities()
