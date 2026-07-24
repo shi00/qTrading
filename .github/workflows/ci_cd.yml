@@ -318,6 +318,24 @@ jobs:
           uv pip install --system flet-web==0.86.2
           pip install playwright pytest-playwright
 
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          # Clean caches to release space on C: drive (same fix as ci-checks-windows job).
+          # Run 30058650851: C: had 32GB free, filled up at 87% unit tests.
+          Write-Host "=== Disk space before cleanup ==="
+          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
+          uv cache clean
+          pip cache purge 2>$null
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== Disk space after cleanup ==="
+          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
       - name: Get Playwright Version
         shell: bash
         run: |
@@ -422,7 +440,12 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           E2E_ARTIFACT_DIR: "e2e-artifacts"
           E2E_TIMEOUT_MULTIPLIER: "2.0"
+          # Redirect temp dirs to D: drive (146GB free) to prevent C: exhaustion.
+          TEMP: D:\tmp
+          TMP: D:\tmp
+          TMPDIR: D:\tmp
         run: |
+          mkdir -p D:/tmp
           # Run E2E tests serially (-n 1) to avoid PostgreSQL connection contention.
           # Root cause of worker crashes in setup phase (run 29664725583):
           # 4 xdist workers concurrently init_db / run migrations / probe DB on the
@@ -494,9 +517,31 @@ jobs:
       - name: Free disk space
         shell: pwsh
         run: |
-          # Clean uv cache to release space used by build artifacts (litellm/llama-cpp-python).
+          # Clean caches to release space used by build artifacts and temp files.
           # Run 29998695955 failed because runner disk filled up during coverage report output.
+          # Run 30058650851 failed at 87% tests with "not enough space on disk" on C: drive
+          #   (C: had 32GB free, runner diagnostic logs + temp files filled it in ~8min).
+          # D: drive has ~146GB free — redirect temp dirs there to avoid C: exhaustion.
+          Write-Host "=== Disk space before cleanup ==="
+          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
+          # 1. uv cache (litellm/llama-cpp-python build artifacts)
           uv cache clean
+
+          # 2. pip cache (downloaded wheels)
+          pip cache purge 2>$null
+
+          # 3. Windows temp files (accumulated from prior steps/runs)
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # 4. Windows Update cache (large on GitHub-hosted Windows runners)
+          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # 5. Recycle Bin
+          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== Disk space after cleanup ==="
           Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
 
       - name: Cache pytest
@@ -509,8 +554,15 @@ jobs:
       - name: Run Unit Tests
         env:
           STRICT_SCHEMA_GATE: "1"
+          # Redirect temp dirs to D: drive (146GB free) to prevent C: (32GB free) exhaustion.
+          # Runner diagnostic logs + test temp files filled C: at 87% in run 30058650851.
+          TEMP: D:\tmp
+          TMP: D:\tmp
+          TMPDIR: D:\tmp
         timeout-minutes: 15
-        run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
+        run: |
+          mkdir -p D:/tmp
+          python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
