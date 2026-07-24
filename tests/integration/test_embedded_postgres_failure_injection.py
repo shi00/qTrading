@@ -370,12 +370,13 @@ class TestFi10CancelledErrorCleanup:
 # =============================================================================
 class TestFi02MigrationFailure:
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_fi_02_migration_failure(self, tmp_path: Path) -> None:
-        """§17.6 #2: sidecar 启动成功后 migration 失败 → RuntimeError 传播（R2）。
+    async def test_fi_02_migration_failure_propagates_and_cleans_up(self, tmp_path: Path) -> None:
+        """§17.6 #2: sidecar 启动成功后 migration 失败 → RuntimeError 传播 + sidecar 清理（R2）。
 
         验证：
         1. start() 成功，sidecar argv 含 "run" 子命令
-        2. DatabaseMigrator.init_db 失败时抛 RuntimeError（不被吞没）
+        2. DatabaseMigrator.init_db 失败时抛 RuntimeError（不被吞没，R2）
+        3. migration 失败后调用 service.stop() → sidecar 子进程被 kill 清理
         边界：不验证 last_migration_failed state（字段不存在）
         """
         from data.persistence.db_migrator import DatabaseMigrator
@@ -412,6 +413,12 @@ class TestFi02MigrationFailure:
             with patch.object(DatabaseMigrator, "init_db", _raise_migration_error):
                 with pytest.raises(RuntimeError, match="simulated migration failure"):
                     await DatabaseMigrator.init_db(None)
+
+            # migration 失败后调用 stop() → sidecar 子进程已清理（_process=None，不泄漏）
+            # stop() 走 graceful stop 路径（stdin.close → wait），_FakePopen.wait() 立即返回 exit_code=0
+            await service.stop()
+            assert service._process is None, "process should be cleaned up after stop"
+            assert _FakePopen.instances[0]._wait_calls >= 1, "sidecar should be waited on stop"
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
@@ -422,14 +429,16 @@ class TestFi02MigrationFailure:
 # =============================================================================
 class TestFi11TimezoneMismatch:
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_fi_11_timezone_mismatch(self, tmp_path: Path) -> None:
+    async def test_fi_11_doctor_tolerates_timezone_extra_field(self, tmp_path: Path) -> None:
         """§17.6 #11: Python 侧 time.tzname=UTC + sidecar JSON timezone=Asia/Shanghai。
 
         验证：
         1. doctor() 成功返回 DoctorResult（不抛异常）
         2. DoctorResult.schema/data_dir/initialized 匹配 JSON
         3. argv 正确（[sidecar, "doctor", "--data-dir", ...]）
-        边界：不验证时区检测（sidecar Rust 侧责任），不扩展 DoctorResult 字段（YAGNI）
+
+        边界：Python 侧仅验证 JSON 解析，时区检测由 Rust 侧 maint.rs 负责。
+        不扩展 DoctorResult 字段（YAGNI），额外字段 timezone 被静默忽略。
         """
         from services.embedded_pg_maintenance_service import (
             EXPECTED_DOCTOR_SCHEMA,

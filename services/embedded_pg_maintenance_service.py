@@ -61,6 +61,9 @@ class DoctorResult:
     runtime_status: str | None = None
     last_start_error: str | None = None
     issues: list[dict[str, str]] = field(default_factory=list)
+    # §13.7.44 / §7.5 残留物扫描（sidecar v1+，向后兼容：旧版 sidecar 无此字段时为空列表）
+    restore_residuals: list[str] = field(default_factory=list)
+    dump_partials: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,4 +352,6 @@ class EmbeddedPgMaintenanceService:
             runtime_status=data.get("runtime_status"),
             last_start_error=data.get("last_start_error"),
             issues=data.get("issues", []),
+            restore_residuals=data.get("restore_residuals", []),
+            dump_partials=data.get("dump_partials", []),
         )

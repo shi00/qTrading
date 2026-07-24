@@ -258,7 +258,9 @@ class EmbeddedPostgresService:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=self._stderr_file,
+                # D23: stderr 经 reader thread 行级脱敏后写入 _stderr_file，
+                # 避免 sidecar panic 输出中含密码/连接串被直接落盘
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -343,6 +345,9 @@ class EmbeddedPostgresService:
         # M9: 启动 daemon 线程持续读 sidecar stdout 写入日志文件，避免 stdout 缓冲区满
         # 阻塞 sidecar（虽然当前 sidecar ready 后不再写 stdout，但防御未来版本变化）
         self._start_stdout_reader_thread()
+        # D23: 启动 daemon 线程逐行读 sidecar stderr → DataSanitizer 脱敏 → 写入文件，
+        # 避免 sidecar panic 输出中含密码/连接串被直接落盘
+        self._start_stderr_reader_thread()
         return self._connection_info
 
     def _start_stdout_reader_thread(self) -> None:
@@ -377,6 +382,44 @@ class EmbeddedPostgresService:
         t = threading.Thread(
             target=_reader,
             name="embedded-pg-stdout-reader",
+            daemon=True,
+        )
+        t.start()
+
+    def _start_stderr_reader_thread(self) -> None:
+        """D23: 创建 daemon 线程逐行读 sidecar stderr → DataSanitizer 脱敏 → 写入文件。
+
+        - 线程为 daemon，随进程退出自动终止
+        - readline 阻塞直到 EOF（stop_sync 关闭 stdin → sidecar 退出 → stderr 关闭）
+        - 每行经 ``DataSanitizer.sanitize_error`` 脱敏后写入 ``_stderr_file``，
+          避免 sidecar panic 输出中含密码/连接串被直接落盘（R9）
+        - 线程异常不影响主流程，仅记 debug 日志
+        """
+        if self._process is None or self._process.stderr is None:
+            return
+
+        stderr = self._process.stderr
+        stderr_file = self._stderr_file
+
+        def _reader() -> None:
+            try:
+                while True:
+                    line = stderr.readline()
+                    if not line:
+                        break  # EOF
+                    sanitized = DataSanitizer.sanitize_error(line.rstrip("\n"))
+                    if stderr_file is not None:
+                        try:
+                            stderr_file.write(sanitized + "\n")  # type: ignore[attr-defined]
+                            stderr_file.flush()  # type: ignore[attr-defined]
+                        except Exception as e:  # file write fallback
+                            logger.debug("stderr reader write fallback: %s", e, exc_info=True)
+            except Exception as e:  # pragma: no cover  reader thread stderr fallback
+                logger.debug("stderr reader thread fallback: %s", e, exc_info=True)
+
+        t = threading.Thread(
+            target=_reader,
+            name="embedded-pg-stderr-reader",
             daemon=True,
         )
         t.start()

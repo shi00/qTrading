@@ -155,7 +155,18 @@ exclude_lines = [
 
 [tool.custom_coverage]
 # 单个文件覆盖率阈值，由 scripts/check_per_file_coverage.py 读取，不属于 coverage.py 的原生选项
+# per_file_minimum 是默认阈值（未匹配 per_file_minimum_by_path 的文件）
 per_file_minimum = 80
+# D37: 按目录分层覆盖率门禁 (services/strategies/data ≥90%, ui ≥85%, 其他 ≥80%)
+# 匹配规则：最长前缀匹配（路径归一化为 / 分隔后匹配，前缀不含前导 ./）
+# NOTE(lazy): 分层门禁当前 advisory 模式 (enforce_layered=false). ceiling: services/strategies/data ≥90%, ui ≥85%. upgrade: 补齐对应目录覆盖率至分层阈值后设为 true.
+enforce_layered = false
+
+[tool.custom_coverage.per_file_minimum_by_path]
+"services/" = 90
+"strategies/" = 90
+"data/" = 90
+"ui/" = 85
 
 [tool.importlinter]
 # R1 架构越界守护 (CLAUDE.md §3.1 R1 / §4.1)

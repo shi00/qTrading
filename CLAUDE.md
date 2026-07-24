@@ -70,6 +70,7 @@
 
 - 修复前先收集日志、分析错误栈、找到根本原因；给出方案时简要说明"为什么报错"和"为什么这样能修复"；涉及异步/并发问题时，必须考虑事件循环归属、线程归属、取消传播三个维度。
 - **举一反三 (Systematic Remediation)**：修复一个 Bug 时，若根本原因是一种错误的代码范式（如并发边界遗漏、API 参数误用、判空缺失），必须全局搜索排查同类隐患并在回复中列出排查清单。根因优先于症状（在共享函数加 guard 优于每个调用点各加 guard）；同类隐患 ≤ 3 个文件且逻辑紧密相关可在本次一并处理（须配套测试），> 3 个文件或跨多层须记录为独立重构任务延后处理。
+- 详细的问题修复执行协议（调查→复现→定因→修复→验证→交付六状态门 + 专项 Profile + 附录）见 [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)。
 
 ### 1.8 任务类型 → 必读文件 (决策树)
 
@@ -80,7 +81,8 @@
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
 | 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
-| 代码检视 / PR review | [docs/reviews/code-review-guide.md](./docs/reviews/code-review-guide.md)（三轮检视法 + 项目 Profile §7.9）；项目红线见 §3、架构边界见 §4 |
+| 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile）；项目红线见 §3、架构边界见 §4 |
+| AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md)（核心协议 + 稳定规则 ID + review-profiles 按需加载）；项目红线见 §3、架构边界见 §4 |
 | 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 docs/guides/how-to.md「6. 新增与升级依赖」 |
@@ -93,6 +95,7 @@
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | Git 操作 / 分支 / worktree | §3 R18、CONTRIBUTING.md「Git 工作流与分支策略」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（sidecar CLI 诊断/备份/恢复，涉及数据目录与 PGDATA 锁）；操作前确认应用已完全退出 |
 
 ### 1.9 关键验证命令
 
@@ -103,7 +106,7 @@
 - **CI 全量门禁**（CI 自动执行，本地一般不跑）：完整 CI 流水线，含 `downgrade base` → `upgrade head` 迁移回归等。
 - **不得声称未运行项已通过**；无法运行的验证需说明原因，不得跳过不报。
 
-### 1.10 反幻觉护栏（AI 特有红线）
+### 1.10 反幻觉护栏 (AI 特有红线)
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
@@ -194,7 +197,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)。
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager/EmbeddedPostgresService/EmbeddedPgMaintenanceService）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)。
 
 ---
 
@@ -213,6 +216,9 @@ app → 编排所有层，仅被 main.py 调用
 | Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
-| 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
+| 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
+| Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
 | Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
-| AI 代码检视指南（三轮检视法 / 质量维度 / 专项 Profile / 输出契约） | [docs/reviews/code-review-guide.md](./docs/reviews/code-review-guide.md) |
+| AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
+| AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
+| man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |

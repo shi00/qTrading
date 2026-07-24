@@ -11,14 +11,16 @@
 - [debt/](./debt/) — 已知架构技术债（含 Tushare 相关条目：P3-Tushare-Token-Invalid-Race / P3-Tushare-Client-Lazy-Markers）
 - [adr/](./adr/) — 架构决策记录（ADR）
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml）
-- [reviews/](./reviews/) — AI 代码检视指南（三轮检视法 / 质量维度 / 专项 Profile）
+- [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
+- [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
+- [coverage/](./coverage/) — 覆盖率报告（unit-only 阶段性报告，CI 合并报告为最终门禁）
 
 ## 文档层次
 
 1. CLAUDE.md — 项目宪法（AI 自动加载，含红线/架构边界/交互准则）
 2. CONTRIBUTING.md — 入口索引 + 最小命令 + PR 流程
 3. docs/ — 专项深入文档（本目录）
-4. man/ — 专题深度文档
+4. man/ — 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub）
 
 precedence: CLAUDE.md > CONTRIBUTING.md > docs/ > man/
 

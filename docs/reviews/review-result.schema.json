@@ -1,0 +1,584 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qtrading.local/schemas/ai-review-result-1.0.json",
+  "title": "AI Review Result 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "subject",
+    "provenance",
+    "review",
+    "findings",
+    "checks",
+    "coverage",
+    "residualRisks",
+    "gate"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "review": { "$ref": "#/$defs/review" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "checks": { "$ref": "#/$defs/checks" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "residualRisks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gate": { "$ref": "#/$defs/gate" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "gate": {
+            "properties": {
+              "decisions": {
+                "contains": {
+                  "type": "object",
+                  "required": ["blocking"],
+                  "properties": {
+                    "blocking": { "const": true }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gate": {
+            "properties": {
+              "verdict": { "const": "fail" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "review": {
+            "properties": {
+              "mode": { "const": "incremental" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "mergeBaseRevision": {
+                "type": "string",
+                "minLength": 40
+              },
+              "diffDigest": {
+                "type": "string",
+                "minLength": 16
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "review": {
+            "properties": {
+              "mode": { "const": "full" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "coverage": {
+            "properties": {
+              "totalFiles": { "minimum": 1 },
+              "fileInventory": { "minItems": 1 }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryId",
+        "targetRevisionType",
+        "targetRevision",
+        "mergeBaseRevision",
+        "diffDigest",
+        "reviewedFiles"
+      ],
+      "properties": {
+        "repositoryId": { "type": "string", "minLength": 1 },
+        "targetRevisionType": {
+          "enum": ["commit", "artifact_digest"]
+        },
+        "targetRevision": {
+          "type": "string",
+          "pattern": "^(?:[A-Fa-f0-9]{40,128}|sha256:[A-Fa-f0-9]{64})$"
+        },
+        "mergeBaseRevision": { "type": ["string", "null"] },
+        "diffDigest": { "type": ["string", "null"] },
+        "reviewedFiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewedAt",
+        "engine",
+        "engineVersion",
+        "promptVersion",
+        "toolVersions"
+      ],
+      "properties": {
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "engine": { "type": "string", "minLength": 1 },
+        "engineVersion": { "type": "string", "minLength": 1 },
+        "promptVersion": { "type": "string", "minLength": 1 },
+        "toolVersions": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policyId",
+        "policyVersion",
+        "evaluatorVersion",
+        "verdict",
+        "decisions"
+      ],
+      "properties": {
+        "policyId": { "type": "string", "minLength": 1 },
+        "policyVersion": { "type": "string", "minLength": 1 },
+        "evaluatorVersion": { "type": "string", "minLength": 1 },
+        "verdict": {
+          "enum": ["pass", "conditional", "fail", "indeterminate"]
+        },
+        "decisions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/gateDecision" }
+        }
+      }
+    },
+    "gateDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "blocking", "reason"],
+      "properties": {
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "blocking": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "target",
+        "baseline",
+        "baselineStatus",
+        "intent",
+        "verdict",
+        "verdictReason",
+        "scopeLimitations"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "incremental",
+            "full",
+            "release",
+            "specialized",
+            "incident"
+          ]
+        },
+        "target": { "type": "string", "minLength": 1 },
+        "baseline": { "type": ["string", "null"] },
+        "baselineStatus": {
+          "enum": ["verified", "partial", "unavailable"]
+        },
+        "intent": { "type": "string" },
+        "verdict": {
+          "enum": ["pass", "conditional", "fail", "indeterminate"]
+        },
+        "verdictReason": { "type": "string", "minLength": 1 },
+        "scopeLimitations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fingerprint",
+        "title",
+        "category",
+        "severity",
+        "confidence",
+        "changeRelation",
+        "dimension",
+        "ruleId",
+        "disposition",
+        "waiver",
+        "location",
+        "locationReason",
+        "trigger",
+        "actualBehavior",
+        "expectedBehavior",
+        "impact",
+        "evidence",
+        "recommendation",
+        "verification"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^F-[0-9]+$" },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "category": {
+          "enum": [
+            "defect",
+            "scenario_gap",
+            "test_gap",
+            "question",
+            "risk",
+            "suggestion"
+          ]
+        },
+        "severity": {
+          "type": ["string", "null"],
+          "enum": ["P0", "P1", "P2", "P3", null]
+        },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "changeRelation": {
+          "enum": [
+            "introduced",
+            "amplified",
+            "preexisting_related",
+            "out_of_scope",
+            "unknown"
+          ]
+        },
+        "dimension": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": ["string", "null"] },
+        "disposition": {
+          "enum": ["open", "resolved", "waived"]
+        },
+        "waiver": {
+          "oneOf": [
+            { "$ref": "#/$defs/waiver" },
+            { "type": "null" }
+          ]
+        },
+        "location": {
+          "oneOf": [
+            { "$ref": "#/$defs/location" },
+            { "type": "null" }
+          ]
+        },
+        "locationReason": { "type": ["string", "null"] },
+        "trigger": { "type": "string" },
+        "actualBehavior": { "type": "string" },
+        "expectedBehavior": { "type": "string" },
+        "impact": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "recommendation": { "type": "string" },
+        "verification": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "disposition": { "const": "waived" }
+            }
+          },
+          "then": {
+            "properties": {
+              "waiver": { "$ref": "#/$defs/waiver" }
+            }
+          },
+          "else": {
+            "properties": {
+              "waiver": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "startLine", "endLine"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "waiver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "approvedBy", "expiresAt"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "approvedBy": { "type": "string", "minLength": 1 },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "source",
+        "revision",
+        "location",
+        "checkId",
+        "artifactDigest",
+        "summary",
+        "trust",
+        "redacted"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "code_path",
+            "test_result",
+            "contract",
+            "static_analysis",
+            "runtime",
+            "external_reference"
+          ]
+        },
+        "source": { "type": "string", "minLength": 1 },
+        "revision": { "type": ["string", "null"] },
+        "location": {
+          "oneOf": [
+            { "$ref": "#/$defs/location" },
+            { "type": "null" }
+          ]
+        },
+        "checkId": { "type": ["string", "null"] },
+        "artifactDigest": { "type": ["string", "null"] },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "trust": {
+          "enum": [
+            "trusted_control",
+            "repository",
+            "tool_output",
+            "external"
+          ]
+        },
+        "redacted": { "type": "boolean" }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "revision": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "properties": {
+            "checkId": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "properties": {
+            "artifactDigest": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executed", "notExecuted"],
+      "properties": {
+        "executed": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/executedCheck" }
+        },
+        "notExecuted": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/notExecutedCheck" }
+        }
+      }
+    },
+    "executedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "redactedCommand",
+        "redactions",
+        "environment",
+        "exitCode",
+        "status",
+        "selectedCount",
+        "executedCount",
+        "skippedCount",
+        "durationMs",
+        "evidenceSummary",
+        "reportDigest",
+        "sideEffects"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "redactedCommand": { "type": "string", "minLength": 1 },
+        "redactions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "environment": { "type": "string", "minLength": 1 },
+        "exitCode": { "type": ["integer", "null"] },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "partial",
+            "skipped",
+            "cached",
+            "error",
+            "timeout"
+          ]
+        },
+        "selectedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "executedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "skippedCount": { "type": ["integer", "null"], "minimum": 0 },
+        "durationMs": { "type": ["integer", "null"], "minimum": 0 },
+        "evidenceSummary": { "type": "string" },
+        "reportDigest": { "type": ["string", "null"] },
+        "sideEffects": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": { "const": "passed" }
+            }
+          },
+          "then": {
+            "properties": {
+              "exitCode": { "const": 0 },
+              "executedCount": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "notExecutedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check", "reason", "alternative"],
+      "properties": {
+        "check": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "alternative": { "type": ["string", "null"] }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dimensions",
+        "scenarios",
+        "uncovered",
+        "totalFiles",
+        "fileInventory"
+      ],
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scenarios": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "uncovered": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "totalFiles": { "type": "integer", "minimum": 0 },
+        "fileInventory": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fileCoverage" }
+        }
+      }
+    },
+    "fileCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "status",
+        "highRisk",
+        "reason",
+        "authority"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["read", "excluded", "failed"] },
+        "highRisk": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "authority": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": { "const": "excluded" }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": { "type": "string", "minLength": 1 },
+              "authority": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

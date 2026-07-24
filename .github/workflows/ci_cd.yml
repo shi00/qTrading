@@ -491,6 +491,14 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          # Clean uv cache to release space used by build artifacts (litellm/llama-cpp-python).
+          # Run 29998695955 failed because runner disk filled up during coverage report output.
+          uv cache clean
+          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
+
       - name: Cache pytest
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -502,7 +510,7 @@ jobs:
         env:
           STRICT_SCHEMA_GATE: "1"
         timeout-minutes: 15
-        run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=json --junitxml=junit-unit.xml
+        run: python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
@@ -710,18 +718,27 @@ jobs:
           # AStockScreener.spec 期望 sidecar binary 位于 sidecars\qtrading-pg-sidecar\target\release\
           $targetDir = "sidecars\qtrading-pg-sidecar\target\release"
           New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-          # 下载 binary + sha256sums.txt（评审 Security Required: 供应链完整性校验）
+          # 下载 binary + sha256sums-x86_64-pc-windows-msvc.txt（评审 Security Required: 供应链完整性校验）
+          # sidecar.yml release job 上传 artifact_name（每平台唯一，避免 basename 冲突），
+          # Windows 平台 artifact_name 为 qtrading-pg-sidecar-windows-x86_64.exe，
+          # 下载后 rename 回 qtrading-pg-sidecar.exe（AStockScreener.spec 期望的 binary 名）
+          $sha256sumsFileName = "sha256sums-x86_64-pc-windows-msvc.txt"
+          $artifactName = "qtrading-pg-sidecar-windows-x86_64.exe"
+          $expectedBinaryName = "qtrading-pg-sidecar.exe"
           gh release download $tagName `
             --repo $env:GITHUB_REPOSITORY `
-            --pattern "qtrading-pg-sidecar.exe" `
-            --pattern "sha256sums.txt" `
+            --pattern $artifactName `
+            --pattern $sha256sumsFileName `
             --dir $targetDir
           if ($LASTEXITCODE -ne 0) {
             Write-Error "gh release download failed (exit: $LASTEXITCODE)"
             exit 1
           }
-          $sidecarPath = Join-Path $targetDir "qtrading-pg-sidecar.exe"
-          $sha256Path = Join-Path $targetDir "sha256sums.txt"
+          $downloadedPath = Join-Path $targetDir $artifactName
+          $sidecarPath = Join-Path $targetDir $expectedBinaryName
+          # rename artifact_name -> expected binary name（spec 期望名）
+          Move-Item -Path $downloadedPath -Destination $sidecarPath -Force
+          $sha256Path = Join-Path $targetDir $sha256sumsFileName
           if (-not (Test-Path $sidecarPath)) {
             Write-Error "Sidecar binary not found at $sidecarPath after download"
             exit 1
@@ -743,7 +760,9 @@ jobs:
             }
             Write-Host "SHA256 verified: $actualHash"
           } else {
-            Write-Warning "sha256sums.txt not found in release assets — skipping SHA256 verification (security risk)"
+            # P1-13: sha256sums-<target>.txt 缺失视为供应链完整性失败 (Security Required)
+            Write-Error "$sha256sumsFileName not found in release assets — supply chain integrity verification failed"
+            exit 1
           }
 
       - name: Install UPX
@@ -874,6 +893,22 @@ jobs:
             Write-Error "❌ Installer not found: $installerPath"
             exit 1
           }
+
+      - name: Smoke Test - Installer Scripts (embedded variant, release tags only, P1-12)
+        # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%,
+        # 仅在 release tag 时执行避免常规 PR/push 污染 CI 环境.
+        # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
+        if: matrix.variant == 'embedded' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $installerPath = "Output\AStockScreener-Setup-${{ matrix.variant }}.exe"
+          if (-not (Test-Path $installerPath)) {
+            Write-Error "Installer not found: $installerPath"
+            exit 1
+          }
+          Write-Host "Running installer smoke tests (crash_recovery + running_app, P1-12)..."
+          & powershell -File scripts/installer_smoke_crash_recovery.ps1 -InstallerPath $installerPath
+          & powershell -File scripts/installer_smoke_running_app.ps1 -InstallerPath $installerPath
 
       - name: Generate SHA256SUMS
         shell: pwsh

@@ -12,6 +12,8 @@
   / ``FAKE_SIDECAR_TIMEZONE`` / ``FAKE_SIDECAR_RESTORE_FAIL``
 - ``run`` 子命令模拟 sidecar 长驻进程 (输出 ready JSON 后等 stdin EOF 退出)
 - ``run`` 子命令写 password 到 ``--password-file`` (与真实 sidecar 行为一致)
+- ``restore`` 子命令输出 target_data_dir 到 stdout (对齐 sidecar §12.2 原子切换协议,
+  Python ``EmbeddedPgMaintenanceService.restore`` 用 ``stdout.strip()`` 取此值)
 """
 
 from __future__ import annotations
@@ -124,6 +126,16 @@ def cmd_dump(args):
 def cmd_restore(args):
     if os.environ.get("FAKE_SIDECAR_RESTORE_FAIL") == "1":
         sys.exit(11)
+    # 对齐 sidecar §12.2: 输出 target_data_dir 到 stdout
+    # (Python EmbeddedPgMaintenanceService.restore 用 stdout.strip() 取此值)
+    # 显式 --target-data-dir 透传; 缺省时模拟 sidecar 原子切换生成的 restore 目录
+    if args.target_data_dir:
+        target = args.target_data_dir
+    else:
+        data_dir = Path(args.data_dir)
+        target = str(data_dir.parent / f"{data_dir.name}.restore-fake")
+    sys.stdout.write(target + "\\n")
+    sys.stdout.flush()
     sys.exit(0)
 
 

@@ -114,6 +114,10 @@ struct DoctorJson {
     last_start_error: Option<String>,
     last_stop_mode: Option<String>,
     kill_fallback_count: u32,
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中检测到的 `<data_dir_name>.restore-*` 目录。
+    restore_residuals: Vec<String>,
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中检测到的 `*.partial` 文件（dump 中断残留）。
+    dump_partials: Vec<String>,
     issues: Vec<Issue>,
 }
 
@@ -329,6 +333,28 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         ));
     }
 
+    // §13.7.44 / §7.5 残留物扫描：兄弟目录中 `<data_dir_name>.restore-*` 与 `*.partial`
+    // 由 dump/restore 中断产生，doctor 只读列出，不自动清理（用户确认后手动删除）
+    let (restore_residuals, dump_partials) = scan_residuals(&layout.data_dir);
+    if !restore_residuals.is_empty() {
+        issues.push(warning(
+            "restore_residual",
+            format!(
+                "检测到 restore 中断残留目录（§13.7.44）：{}；建议确认无重要数据后删除",
+                restore_residuals.join(", ")
+            ),
+        ));
+    }
+    if !dump_partials.is_empty() {
+        issues.push(warning(
+            "dump_partial",
+            format!(
+                "检测到 dump 中断残留 .partial 文件（§13.7.44）：{}；建议删除",
+                dump_partials.join(", ")
+            ),
+        ));
+    }
+
     let json = DoctorJson {
         schema: protocol::DOCTOR_SCHEMA,
         data_dir: layout.data_dir.to_string_lossy().replace('\\', "/"),
@@ -359,12 +385,59 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         last_start_error,
         last_stop_mode: st.as_ref().and_then(|s| s.last_stop_mode.clone()),
         kill_fallback_count,
+        restore_residuals,
+        dump_partials,
         issues,
     };
     protocol::print_json_line(&json).map_err(|e| {
         eprintln!("[sidecar] doctor JSON 输出失败: {e}");
         exit_codes::ARGUMENT_ERROR
     })
+}
+
+/// 扫描 data_dir 兄弟目录中的 dump/restore 中断残留物（§13.7.44 / §7.5）。
+///
+/// - `<data_dir_name>.restore-*` 目录：restore 中断残留（`restore()` 失败路径已自清理，
+///   但 sidecar 进程被 kill 时残留目录仍存在）
+/// - `*.partial` 文件：dump 中断残留（`dump()` 失败路径已自清理，但同上）
+///
+/// 仅扫描 `data_dir.parent`：restore/dump 默认输出路径在兄弟目录中（§12.2 / §13.7.44），
+/// 用户自定义路径（如 `~/backups/`）不在扫描范围内（YAGNI：扫描全盘不可行）。
+fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
+    let mut restore_residuals: Vec<String> = Vec::new();
+    let mut dump_partials: Vec<String> = Vec::new();
+
+    let parent = match data_dir.parent() {
+        Some(p) => p,
+        None => return (restore_residuals, dump_partials),
+    };
+    let data_dir_name = match data_dir.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return (restore_residuals, dump_partials),
+    };
+    let restore_prefix = format!("{data_dir_name}.restore-");
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(r) => r,
+        Err(_) => return (restore_residuals, dump_partials),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match entry.file_name().to_str() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // restore 残留目录：兄弟目录匹配 `<data_dir_name>.restore-*` 模式
+        if name.starts_with(&restore_prefix) && path.is_dir() {
+            restore_residuals.push(path.to_string_lossy().replace('\\', "/"));
+        }
+        // dump 残留文件：兄弟文件匹配 `*.partial` 模式
+        if name.ends_with(".partial") && path.is_file() {
+            dump_partials.push(path.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    (restore_residuals, dump_partials)
 }
 
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
@@ -822,6 +895,155 @@ async fn wait_for_enter() {
     }
 }
 
+// ---- reset-password ----
+
+/// 通过临时 `pg_ctl` 启动的 postgres 实例 + 临时 trust pg_hba.conf 重置 postgres 用户密码（§13.7.8）。
+///
+/// 历史方案 `postgres --single` 单用户模式在 Windows 上被 PostgreSQL 安全限制拒绝
+/// （`check_root()` 检测到 admin 用户组成员身份即 exit 1；GitHub Actions Windows runner
+/// 默认以 `runneradmin`/Administrators 组运行触发此限制）。`pg_ctl` 内部
+/// `CreateRestrictedProcess` 降权后才能在 Windows admin 下启动 postgres 多用户模式。
+///
+/// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries → stale pid 清理 →
+///       临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
+///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
+///       psql 连接执行 `ALTER USER postgres PASSWORD '<new>'`（trust 模式无需密码）→
+///       停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→ 写入新 password file →
+///       register_secret。
+///
+/// exit code：
+/// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）/ PGDATA 已有活实例
+/// - 40 DATA_DIR_ABNORMAL：数据目录未初始化
+/// - 16 PASSWORD_FAILED：临时实例启动失败 / ALTER USER 失败 / password file 写入失败
+/// - 30 DUMP_RESTORE_FAILED：pg_hba.conf 重写失败
+pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
+    logging::init(None);
+    let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
+
+    let _lock = acquire_lock(&layout)?;
+    match setup::guard_data_dir(&layout.data_dir)? {
+        DataDirState::Existing => {}
+        DataDirState::Fresh => {
+            eprintln!(
+                "[sidecar] 数据目录未初始化，无密码可重置：{}",
+                layout.data_dir.display()
+            );
+            return Err(exit_codes::DATA_DIR_ABNORMAL);
+        }
+    }
+    setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
+
+    // stale postmaster.pid 清理（§7.2，与 run.rs/commands.rs stop 同款逻辑）
+    // 临时实例启动前必须保证 PGDATA 无残留 pid 文件，否则 pg_ctl start 拒绝启动。
+    if let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) {
+        if pgbin::process_alive(info.pid) {
+            eprintln!(
+                "[sidecar] PostgreSQL 已运行于该 PGDATA (pid {})，禁止 reset-password 并发操作。\n\
+                 请先执行 `qtrading-pg-sidecar stop --data-dir {}` 清理残留进程，再重试 reset-password。",
+                info.pid,
+                layout.data_dir.display()
+            );
+            return Err(exit_codes::LOCK_CONFLICT);
+        }
+        tracing::warn!(
+            "stale postmaster.pid (pid {}) removed before reset-password",
+            info.pid
+        );
+        let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
+    }
+
+    let new_pwd = password::generate_password();
+
+    // 临时改 pg_hba.conf 为 trust（仅 127.0.0.1）：绕过密码认证以执行 ALTER USER。
+    // 出错路径由 HbaRestoreGuard RAII 恢复原 pg_hba.conf；成功路径在 write_security_baseline
+    // 重写后 disarm，避免恢复覆盖 scram-sha-256 新内容。
+    let hba_path = layout.data_dir.join("pg_hba.conf");
+    let mut hba_guard = HbaRestoreGuard::new(hba_path.clone());
+    const TRUST_HBA: &str = "host all all 127.0.0.1/32 trust\n";
+    if let Err(e) = std::fs::write(&hba_path, TRUST_HBA) {
+        eprintln!("[sidecar] pg_hba.conf 临时 trust 写入失败: {e}");
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 启动临时 postgres 实例（postgresql_embedded 内部 pg_ctl，Windows admin 也能启动）。
+    // dummy 密码：trust 模式下 psql 健康检查不验证密码（PGPASSWORD 会被 postgres 忽略）。
+    const DUMMY_PWD: &str = "reset-trust-bypass-not-verified";
+    let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, DUMMY_PWD).await?;
+    let port = instance.port;
+    let install_dir = instance.layout.install_dir.clone();
+
+    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）
+    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;");
+    let alter_result = pgbin::psql(
+        &install_dir,
+        LISTEN_LOCAL,
+        port,
+        DEFAULT_USERNAME,
+        "postgres",
+        DUMMY_PWD,
+        &sql,
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // 无论 ALTER 成功与否都要停临时实例
+    instance.stop().await;
+
+    if let Err(e) = alter_result {
+        eprintln!("[sidecar] ALTER USER postgres PASSWORD 失败: {e}");
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 重写 pg_hba.conf（scram-sha-256，新密码生效，清除临时 trust 行）
+    if let Err(e) = setup::write_security_baseline(&layout.data_dir, LISTEN_LOCAL) {
+        eprintln!("[sidecar] pg_hba.conf 重写失败: {e}");
+        return Err(exit_codes::DUMP_RESTORE_FAILED);
+    }
+    hba_guard.disarm();
+
+    // 写入新 password file（权限 0600 on Unix）
+    if let Err(e) = password::write_password_file(&layout.password_file, &new_pwd) {
+        eprintln!(
+            "[sidecar] 写入新 password file 失败 {}：{e}",
+            layout.password_file.display()
+        );
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+
+    // 注册新密码为 secret（R9：防止后续日志/异常泄露）
+    logging::register_secret(&new_pwd);
+
+    eprintln!("[sidecar] 密码已重置，请重启 qTrading");
+    Ok(())
+}
+
+/// RAII guard：临时 trust pg_hba.conf 修改失败/出错路径下恢复原内容。
+/// 成功路径由 write_security_baseline 重写 pg_hba.conf 后调 disarm() 抑制恢复。
+struct HbaRestoreGuard {
+    path: PathBuf,
+    backup: Option<String>,
+}
+
+impl HbaRestoreGuard {
+    fn new(path: PathBuf) -> Self {
+        let backup = std::fs::read_to_string(&path).ok();
+        Self { path, backup }
+    }
+
+    /// 成功路径调用：避免恢复覆盖 write_security_baseline 已写入的 scram-sha-256 内容。
+    fn disarm(&mut self) {
+        self.backup = None;
+    }
+}
+
+impl Drop for HbaRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(content) = self.backup.take() {
+            let _ = std::fs::write(&self.path, content);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,10 +1168,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn reset_password_rejects_uninitialized_dir() {
+        let dir = unique_tmp("resetpw-fresh");
+        let data_dir = dir.join("postgres/17/data");
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(
+            reset_password(args).await,
+            Err(exit_codes::DATA_DIR_ABNORMAL)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reset_password_lock_conflict() {
+        let dir = unique_tmp("resetpw-lock");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ts_compact_is_dir_safe() {
         let ts = ts_compact();
         assert!(ts.ends_with('Z'));
         assert!(ts.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`<data_dir_name>.restore-*` 兄弟目录被识别为残留。
+    #[test]
+    fn scan_residuals_detects_restore_sibling_dir() {
+        let dir = unique_tmp("scan-restore");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 创建两个 restore 残留目录（不同时间戳），位于 data_dir 的兄弟目录
+        let residual1 = dir.join("data.restore-20260723T120000Z");
+        let residual2 = dir.join("data.restore-20260723T130000Z");
+        std::fs::create_dir_all(&residual1).unwrap();
+        std::fs::create_dir_all(&residual2).unwrap();
+        // 写入部分文件模拟半截状态
+        std::fs::write(residual1.join("PG_VERSION"), b"17\n").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert_eq!(restore_residuals.len(), 2, "should detect 2 residual dirs");
+        assert!(
+            restore_residuals
+                .iter()
+                .all(|p| p.contains("data.restore-")),
+            "all residuals should match pattern: {restore_residuals:?}"
+        );
+        assert!(dump_partials.is_empty(), "no dump partial expected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`*.partial` 兄弟文件被识别为 dump 中断残留。
+    #[test]
+    fn scan_residuals_detects_dump_partial_file() {
+        let dir = unique_tmp("scan-partial");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 创建 dump 残留文件（位于 data_dir 的兄弟目录）
+        let partial = dir.join("weekly_backup.dump.partial");
+        std::fs::write(&partial, b"half dump").unwrap();
+        // 非 .partial 后缀的文件不应被识别
+        let normal = dir.join("weekly_backup.dump");
+        std::fs::write(&normal, b"full dump").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(restore_residuals.is_empty(), "no restore residual expected");
+        assert_eq!(dump_partials.len(), 1, "should detect 1 partial file");
+        assert!(
+            dump_partials[0].ends_with("weekly_backup.dump.partial"),
+            "partial path mismatch: {}",
+            dump_partials[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：兄弟目录中无残留时返回空。
+    #[test]
+    fn scan_residuals_clean_dir_returns_empty() {
+        let dir = unique_tmp("scan-clean");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 仅创建正常文件（非 .partial / 非 restore-*）
+        std::fs::write(dir.join("readme.txt"), b"hi").unwrap();
+        std::fs::write(dir.join("backup.dump"), b"full").unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(restore_residuals.is_empty());
+        assert!(dump_partials.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §13.7.44 / §7.5 残留物扫描：`<data_dir_name>.bak-*` 兄弟目录不应被识别为 restore 残留
+    /// （bak 目录是 restore 成功后的正常备份，非中断残留）。
+    #[test]
+    fn scan_residuals_ignores_bak_sibling_dirs() {
+        let dir = unique_tmp("scan-bak");
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let bak = dir.join("data.bak-20260723T120000Z");
+        std::fs::create_dir_all(&bak).unwrap();
+
+        let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
+        assert!(
+            restore_residuals.is_empty(),
+            "bak dirs should not be reported as restore residuals: {restore_residuals:?}"
+        );
+        assert!(dump_partials.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

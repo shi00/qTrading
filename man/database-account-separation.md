@@ -1,5 +1,7 @@
 # Database Account Separation Guide
 
+> STATUS: Design Guide（设计性文档，仓库未提供自动化账号分离脚本）
+
 This document describes how to separate database accounts for production deployments, following the principle of least privilege.
 
 ## Overview

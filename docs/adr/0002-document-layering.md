@@ -4,6 +4,7 @@
 > Date: 2026-07-17
 > Owner: 架构维护者
 > Supersedes: CONTRIBUTING.md 历史版本中「3b/3c 过度工程不做」决策的部分前提（3b 由 ADR-0003 单独推翻）
+> 注：3c 部分后续由 ADR-0005 推翻（详见 ADR-0005）
 
 ## Context
 

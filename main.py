@@ -104,12 +104,12 @@ async def main(page: ft.Page):
 
     ConfigHandler.ensure_defaults()
 
-    # Phase 2 §3.4：embedded 模式下启动 sidecar 并注入 URL
+    # Phase 2 §3.4：embedded 模式下启动 sidecar 并返回 URL（D15：不持久化到 config）
     from app.bootstrap import prepare_database_runtime
 
     # H2: prepare_database_runtime 失败时记 critical 日志并退出（不让 CacheManager 在无 DB 时启动）
     try:
-        await prepare_database_runtime()
+        embedded_db_url = await prepare_database_runtime()
     except Exception as e:
         logger.critical("[Main] prepare_database_runtime failed: %s", e, exc_info=True)
         log_exception_with_severity(e, context="general", operation_label="prepare_database_runtime failed")
@@ -121,7 +121,15 @@ async def main(page: ft.Page):
 
     page.locale_configuration = build_locale_configuration(I18n.current_locale())
 
-    cache_manager = CacheManager()
+    # D15（pg-plan §22）：embedded 模式下用 override_db_url 包裹 CacheManager() 构造，
+    # 不再依赖 save_db_config 持久化的 URL。
+    if embedded_db_url:
+        from data.persistence.db_url_override import override_db_url
+
+        with override_db_url(embedded_db_url):
+            cache_manager = CacheManager()
+    else:
+        cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")
     page.window.icon = "icon.png"
