@@ -181,4 +181,4 @@ venv/Scripts/python.exe -c "from flet_mcp import mcp; mcp.run()"
 
 **结论**：§3.2 工具清单签名准确，§3.3 场景 1/2 示例返回值与文档描述一致。§3.1 启动命令 `python -c "from flet_mcp import mcp; mcp.run()"` 验证可用（2026-07-24 补充）。
 
-**复验触发器**：flet-mcp 包版本变化 / flet 主包版本变化 / mcp-usage.md §3.1、§3.2 或 §3.3 修改时，应按上述命令重新执行 smoke test 并更新本节记录。
+**复验触发器**：flet-mcp 包版本变化 / flet 主包版本变化 / fastmcp 版本变化（间接依赖，未显式锁定）/ mcp-usage.md §3.1、§3.2、§3.3 或 §5 修改时，应按上述命令重新执行 smoke test 并更新本节记录。
