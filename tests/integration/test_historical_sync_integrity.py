@@ -1516,6 +1516,8 @@ class TestM6CacheManagerCheckTableHasData:
                 engine, conn = self._make_mock_engine(execute_return_value=(1,))
                 cache.engine = engine
                 cache._mock_conn = conn  # 暴露给测试用例做断言
+                # M5.2.i 在 check_table_has_data 加了 _disposed 守卫，fixture 需同步设置
+                cache._disposed = False
                 cache._maintenance_mode = False
                 cache._maintenance_cv = MagicMock()
                 cache._maintenance_cv.wait = AsyncMock()
