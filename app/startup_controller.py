@@ -110,7 +110,7 @@ class StartupController:
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-            self._transition(StartupState.INIT_FAILED, error="init_exception", detail=str(e))
+            self._transition(StartupState.INIT_FAILED, error="init_exception", detail=DataSanitizer.sanitize_error(e))
             return
 
         # Phase 2A.1 Task 2A.1.9：保存 auto_probe_task 以便 main.py 注册到 ShutdownCoordinator
@@ -185,7 +185,9 @@ class StartupController:
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-            self._transition(StartupState.UPGRADE_FAILED, error="db_upgrade_failed", detail=str(e))
+            self._transition(
+                StartupState.UPGRADE_FAILED, error="db_upgrade_failed", detail=DataSanitizer.sanitize_error(e)
+            )
 
     async def proceed_after_upgrade_success(self):
         """User acknowledged upgrade success dialog: re-init services."""

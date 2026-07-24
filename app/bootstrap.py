@@ -43,7 +43,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         return {
             "success": False,
             "error": "db_upgrade_needed",
-            "detail": str(e),
+            "detail": DataSanitizer.sanitize_error(e),
             "current_rev": e.current_rev,
             "head_rev": e.head_rev,
             "auto_probe_task": None,
@@ -68,7 +68,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         return {
             "success": False,
             "error": "db_init_failed",
-            "detail": str(e),
+            "detail": DataSanitizer.sanitize_error(e),
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
@@ -111,7 +111,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         return {
             "success": False,
             "error": "task_manager_init_failed",
-            "detail": str(e),
+            "detail": DataSanitizer.sanitize_error(e),
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
