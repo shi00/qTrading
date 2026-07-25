@@ -354,6 +354,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -398,7 +400,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"Macro Monthly: {e}")
+            result.errors.append(f"Macro Monthly: {safe_error(e)}")
 
     @classmethod
     def _merge_macro_data(
@@ -618,6 +620,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -662,7 +666,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"Shibor: {e}")
+            result.errors.append(f"Shibor: {safe_error(e)}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_index_weights(self, result: typing.Any):
@@ -789,6 +793,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -833,4 +839,4 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"IndexWeight: {e}")
+            result.errors.append(f"IndexWeight: {safe_error(e)}")
