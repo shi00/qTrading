@@ -350,6 +350,40 @@ class AppServer:
             )
 
 
+async def _setup_canvaskit_intercept(page) -> None:
+    """为 page 设置 CanvasKit + 字体本地化拦截，强制离线化 E2E 测试。
+
+    提取为公共函数供 _make_page 和 _trigger_sidecar_startup_via_browser 复用。
+
+    [PITFALL FIX] 拦截外部资源请求，canvaskit/字体 命中本地缓存则 fulfill，
+    其余外部请求强制 abort（离线），避免 CI 网络波动导致白屏。
+    """
+
+    async def intercept_external(route, request):
+        url = request.url
+        if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
+            await route.continue_()
+            return
+        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+            filename = url.split("/")[-1]
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
+            if local_path.exists():
+                await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
+                return
+            await route.abort()
+            return
+        if "canvaskit" in url:
+            filename = url.split("/")[-1]
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
+            if local_path.exists():
+                content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
+                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+                return
+        await route.abort()
+
+    await page.route("**/*", intercept_external)
+
+
 async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
     app.assert_alive()
 
@@ -363,65 +397,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
 
-    # CRITICAL WORKAROUND for E2E Flakiness:
-    # Flet's web app downloads canvaskit.js and canvaskit.wasm from
-    # https://www.gstatic.com/flutter-canvaskit/<engineRevision>/ on startup.
-    # In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
-    # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
-    # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
-    # Other external requests (icons, rive, etc.) are aborted to force offline mode.
-    # NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
-    # 升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
-    # 可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
-    # [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
-    # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
-    # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
-    # 更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
-    # 解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
-    # 内部请求（Flet app 本身、data/blob URI）继续放行。
-    # [PITFALL FIX 2] CJK 回退字体（Noto Sans SC / Roboto）必须本地化，不可依赖 CDN：
-    # Flutter Web CanvasKit 运行时按需从 fonts.gstatic.com 下载 CJK 回退字体分片 (woff2)。
-    # 若字体请求被 abort 或网络超时，回退字体度量异常会使选股页结果表格布局高度塌陷
-    # (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
-    # 永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
-    # 解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
-    # 未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本或测试内容变化时需用
-    # diagnose_font_urls.py 重新捕获并更新本地缓存。
-    #
-    # 维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
-    #   PowerShell:
-    #     Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
-    #       -Pattern "notosanssc/v\d+/" -AllMatches |
-    #       ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
-    #   - 输出 notosanssc/v37/ → 本地缓存继续有效
-    #   - 输出其他版本号 → URL 变了，重跑 diagnose_font_urls.py 捕获新 URL 并下载替换
-    async def intercept_external(route, request):
-        url = request.url
-        # 内部请求（Flet app 本身、data/blob URI）直接放行
-        if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
-            await route.continue_()
-            return
-        # 字体 CDN：命中本地缓存则 fulfill，未命中 abort
-        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
-            filename = url.split("/")[-1]
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
-            if local_path.exists():
-                await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
-                return
-            await route.abort()
-            return
-        # 外部资源：仅 canvaskit 命中本地缓存
-        if "canvaskit" in url:
-            filename = url.split("/")[-1]
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
-            if local_path.exists():
-                content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
-                return
-        # 未命中本地缓存的外部请求：强制离线
-        await route.abort()
-
-    await page.route("**/*", intercept_external)
+    await _setup_canvaskit_intercept(page)
 
     try:
         await fp.open(app.url)
@@ -900,48 +876,76 @@ async def _trigger_sidecar_startup_via_browser(
     embedded_url_file: Path,
     *,
     timeout_s: float = 300.0,
-) -> None:
-    """创建临时浏览器 page 连接 Flet app，触发 main(page)，等待 sidecar 启动 + URL 文件写入。
+):
+    """创建临时浏览器 page 连接 Flet app，触发 main(page)，等待 sidecar 启动 + 页面初始化完成。
 
     根因：Flet Web 模式下 ``main(page)`` 仅在浏览器 page 连接（WebSocket）时才执行。
     ``flet_app`` fixture 启动 Flet web server 后无浏览器连接，``prepare_database_runtime``
     未被调用，sidecar 未启动，URL 文件未写入。本函数创建临时 page 触发 ``main(page)``，
-    等待 URL 文件出现后关闭临时 page（sidecar 已启动，不受 page 关闭影响）。
+    等待 URL 文件出现 + 页面完全初始化成功后**保持 page 打开**（不关闭），返回 context 给调用方。
 
-    临时 page 不需要 CanvasKit 拦截等（仅触发 WebSocket 连接），goto 用 ``commit``
-    状态避免等 canvaskit 加载。
+    保持 page 打开的原因：关闭 page 会触发 Flet 取消第一次 ``main(page)`` 协程，
+    可能导致 CacheManager 等单例资源被清理，第二次 ``main(page)``（e2e_page fixture）
+    的 DB 初始化失败。保持 page 打开让第一次 ``main(page)`` 持续运行，单例资源保持有效，
+    第二次 ``main(page)`` 复用已初始化的单例。context 由 ``seed_e2e_data`` fixture
+    在 teardown 时关闭。
+
+    为什么必须等页面初始化完成再播种数据：
+    - 第一次 main(page) 会执行完整初始化（sidecar 启动 + DB 迁移 + 服务初始化）
+    - 如果 sidecar 刚启动就播种数据，会与 main(page) 的 alembic upgrade 产生竞态
+    - 等导航栏文本出现（说明初始化完成）再播种，确保单例完全就绪
     """
     logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
     context = await e2e_browser.new_context()
     page = await context.new_page()
-    try:
-        # goto 只等 commit（HTTP 响应头），不等页面完全加载（canvaskit 等可能加载失败）。
-        # goto 返回后浏览器继续加载 JS 建立 WebSocket，触发 main(page)。
-        try:
-            await page.goto(flet_app.url, wait_until="commit", timeout=30000)
-        except Exception as e:
-            logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
+    await _setup_canvaskit_intercept(page)
 
-        # 等待 URL 文件出现（sidecar 启动完成 + prepare_database_runtime 写入）。
-        # 首次 initdb + PG 17 启动可能需要 1-3 分钟，超时 300s 留足余量。
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if embedded_url_file.exists():
-                elapsed = timeout_s - (deadline - time.monotonic())
-                logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
-                return
-            if not flet_app.is_alive():
-                raise RuntimeError(
-                    f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup. "
-                    "Check logs/e2e-flet-app.log for details."
-                )
-            await asyncio.sleep(2.0)
-        raise RuntimeError(
-            f"Timeout waiting for {embedded_url_file} within {timeout_s}s. "
-            "Sidecar may have failed to start. Check logs/e2e-flet-app.log for details."
-        )
-    finally:
-        await context.close()
+    try:
+        await page.goto(flet_app.url, wait_until="networkidle", timeout=60000)
+    except Exception as e:
+        logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
+
+    deadline = time.monotonic() + timeout_s
+    url_file_appeared = False
+    while time.monotonic() < deadline:
+        if not url_file_appeared and embedded_url_file.exists():
+            elapsed = timeout_s - (deadline - time.monotonic())
+            logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
+            url_file_appeared = True
+        if not flet_app.is_alive():
+            await context.close()
+            raise RuntimeError(
+                f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup. "
+                "Check logs/e2e-flet-app.log for details."
+            )
+        if url_file_appeared:
+            error_text = I18n.get("error_db_init_failed")
+            try:
+                error_locator = page.locator(f"text={error_text}")
+                if await error_locator.count() > 0:
+                    await context.close()
+                    raise RuntimeError(
+                        "Flet app shows DB initialization error UI during seeding setup. "
+                        "See sanitized log artifact: logs/e2e-flet-app.log"
+                    )
+            except Exception:
+                pass
+            nav_screener_text = I18n.get("nav_screener")
+            try:
+                nav_locator = page.locator(f"text={nav_screener_text}")
+                if await nav_locator.count() > 0:
+                    elapsed = timeout_s - (deadline - time.monotonic())
+                    logger.info("[E2E Seeding] page initialized after %.1fs", elapsed)
+                    return context
+            except Exception:
+                pass
+        await asyncio.sleep(2.0)
+    await context.close()
+    raise RuntimeError(
+        f"Timeout waiting for sidecar + page init within {timeout_s}s. "
+        "Sidecar may have failed to start or page init failed. "
+        "Check logs/e2e-flet-app.log for details."
+    )
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -969,16 +973,21 @@ async def seed_e2e_data(
     2. 本 fixture 创建临时浏览器 page 连接 Flet app，触发 ``main(page)``，
        等待 sidecar 启动 + URL 文件写入。
     3. 读取 URL 文件获取 sidecar URL，播种数据。
-    4. 关闭临时 page（sidecar 已启动，不受 page 关闭影响）。
+    4. 保持临时 page 打开直到 fixture teardown（防止第一次 ``main(page)`` 被取消
+       导致单例资源被清理，影响后续 ``e2e_page`` 的 DB 初始化）。
     external 模式下用 ``TEST_DATABASE_URL``（CI 提供的外置 PostgreSQL，向后兼容路径）。
     """
     # embedded 模式从文件读取 sidecar URL；external 模式用 TEST_DATABASE_URL
+    # keep_alive_context: 保持临时 page 打开，防止第一次 main(page) 被取消
+    keep_alive_context = None
     if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
         # Flet Web 模式下 main(page) 仅在浏览器连接时才执行。
         # flet_app fixture 启动 Flet web server 后无浏览器连接，sidecar 未启动。
         # 需创建临时 page 触发 main(page)，等待 URL 文件出现。
         if not embedded_url_file.exists():
-            await _trigger_sidecar_startup_via_browser(flet_app, e2e_browser, embedded_url_file, timeout_s=300.0)
+            keep_alive_context = await _trigger_sidecar_startup_via_browser(
+                flet_app, e2e_browser, embedded_url_file, timeout_s=300.0
+            )
         if not embedded_url_file.exists():
             raise RuntimeError(
                 f"embedded_url_file not found at {embedded_url_file}; "
@@ -1004,6 +1013,10 @@ async def seed_e2e_data(
 
     await asyncio.to_thread(_run_in_selector_loop)
     yield
+    # teardown: 关闭临时 page（所有测试完成后，不再需要保持第一次 main(page) 运行）
+    if keep_alive_context is not None:
+        await keep_alive_context.close()
+        logger.info("[E2E Seeding] keep-alive context closed")
 
 
 @pytest.fixture(scope="session")
