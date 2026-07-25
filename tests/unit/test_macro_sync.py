@@ -632,6 +632,108 @@ class TestMacroSyncSyncIndexWeights:
             assert call_args[0][2] == 14
 
     @pytest.mark.asyncio
+    async def test_cancel_in_loop_skips_update_sync_status(self):
+        """P3-MacroSync-BreakReturn-Inconsistency 回归：循环内取消时跳过 update_sync_status。
+
+        原实现 ``break`` 退出循环后会继续执行 ``update_sync_status``，
+        记录部分结果误导监控；与 ``_sync_macro_monthly`` / ``_sync_shibor_daily``
+        的 ``return`` 模式不一致。改为 ``return`` 后跳过状态写入，
+        已 fetch 的部分由 ``save_index_weights`` 幂等落库。
+        """
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.cancel_event = None  # 直接通过 _cancelled 标志触发，与基类 _check_cancelled 兼容
+
+        call_count = [0]
+
+        async def fake_get_index_weight(*args, **kwargs):
+            call_count[0] += 1
+            # 第一次 fetch 后触发取消，模拟用户在长循环中点取消
+            strategy._cancelled = True
+            return pd.DataFrame({"index_code": ["399300.SZ"]})
+
+        ctx.api.get_index_weight = fake_get_index_weight
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+
+        # 取消信号在第一个 index fetch 后触发，循环应在下一次 _check_cancelled 时 return
+        assert result.status == "cancelled"
+        # 关键断言：取消时不应调用 update_sync_status（与 sibling 方法一致）
+        ctx.cache.update_sync_status.assert_not_called()
+        # 已 fetch 的部分应已落库（幂等可重入，下次同步可继续）
+        ctx.cache.save_index_weights.assert_awaited_once()
+        assert result.added == 2
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_partial_failure_overwrites_status_and_skips_update(self):
+        """边界场景：partial 失败后再取消，cancel 应覆盖 partial 状态并跳过 update_sync_status。
+
+        验证点（Skeptic 检视发现）：
+        1. 第一个 index fetch 失败 → result.status = PARTIAL，error 记入 result.errors
+        2. 第二个 index fetch 成功并设置 _cancelled = True
+        3. 第三个迭代 _check_cancelled 返回 True → return
+        4. result.status 应被覆盖为 "cancelled"（cancel 优先于 partial）
+        5. result.errors 应保留 partial 失败的脱敏记录
+        6. update_sync_status 不应被调用（与循环内取消语义一致）
+        """
+        from data.constants import MAJOR_INDICES
+
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cancel_event = None
+
+        call_count = [0]
+        failed_idx_code = MAJOR_INDICES[0]
+
+        async def fake_get_index_weight(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError(f"fetch failed for {failed_idx_code}")
+            # 第二次 fetch 成功后触发取消，模拟用户在 partial 失败后点取消
+            strategy._cancelled = True
+            return pd.DataFrame({"index_code": [kwargs.get("index_code", "000300.SH")]})
+
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = fake_get_index_weight
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_index_weights(result)
+
+        # cancel 应覆盖 partial 状态（_check_cancelled 直接写 result.status）
+        assert result.status == "cancelled"
+        # partial 失败的错误记录应保留（不被 cancel 抹除）
+        assert any(f"index_code={failed_idx_code}:" in err for err in result.errors)
+        # 取消时不应调用 update_sync_status
+        ctx.cache.update_sync_status.assert_not_called()
+        # 第二个 index 的数据应已落库
+        ctx.cache.save_index_weights.assert_awaited_once()
+        assert result.added == 2
+
+    @pytest.mark.asyncio
     async def test_error(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
