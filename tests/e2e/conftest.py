@@ -548,17 +548,22 @@ def _generate_trade_dates(n_days: int = 60) -> list[date]:
     return trading
 
 
-async def _seed_e2e_data() -> None:
-    """向测试数据库播种 E2E 所需的基准数据。"""
+async def _seed_e2e_data(db_url: str) -> None:
+    """向测试数据库播种 E2E 所需的基准数据。
+
+    Args:
+        db_url: 目标数据库 URL。embedded 模式下为 sidecar 启动后写入文件的 URL；
+            external 模式下为 ``TEST_DATABASE_URL``（CI 提供的外置 PostgreSQL）。
+    """
     import asyncpg
     from tests._helpers import create_test_engine
     from data.persistence.db_migrator import DatabaseMigrator
     from data.persistence.db_url_override import override_db_url
 
     # Ensure tables are migrated before seeding
-    engine = create_test_engine(TEST_DATABASE_URL, echo=False)
+    engine = create_test_engine(db_url, echo=False)
     try:
-        with override_db_url(TEST_DATABASE_URL):
+        with override_db_url(db_url):
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
     except Exception as e:
         # R9: 脱敏后抛出，用 from None 显式抑制异常链，防原始异常（可能含 DB 连接串）泄漏进 junit XML
@@ -569,7 +574,7 @@ async def _seed_e2e_data() -> None:
     finally:
         await engine.dispose()
 
-    dsn = _parse_asyncpg_dsn(TEST_DATABASE_URL)
+    dsn = _parse_asyncpg_dsn(db_url)
     conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction():
@@ -865,12 +870,13 @@ async def _ensure_e2e_db() -> None:
 
     embedded 模式跳过：``QTRADING_DATABASE_MODE=embedded`` 时，app 内部
     ``prepare_database_runtime()`` + ``TaskManager.init_db`` 管理 sidecar PG
-    的 DB 创建与迁移（``embedded_real_wizard_app`` 不传 ``DATABASE_URL``），
-    此 fixture 无需也不应预创建外置 ``test_astock`` DB（sidecar 未启动且端口随机）。
+    的 DB 创建与迁移（``flet_app`` / ``wizard_app`` 通过 ``env_overrides`` 显式
+    设置 ``QTRADING_DATABASE_MODE=embedded`` + ``QTRADING_EMBEDDED_PG_URL_FILE``，
+    sidecar 启动后 URL 写入文件供主进程读取播种）。此 fixture 无需也不应预创建
+    外置 ``test_astock`` DB（sidecar 由 Flet 子进程启动，端口随机+密码在文件中）。
 
-    spec.md §3 不变量 1：``QTRADING_DATABASE_MODE`` 默认 ``"embedded"``，
-    与 ``app.bootstrap.prepare_database_runtime`` / ``utils.config_handler.is_embedded_mode``
-    入口点保持同步（§1.7 举一反三：同类默认值需全局一致）。
+    默认值 ``"embedded"``：与生产代码默认值一致（spec.md §3 不变量 1）。
+    external 模式（CI 显式设置 ``QTRADING_DATABASE_MODE=external``）下创建外置 DB。
     """
     if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
         return
@@ -888,23 +894,46 @@ async def _ensure_e2e_db() -> None:
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def seed_e2e_data(_ensure_e2e_db: None):
+async def seed_e2e_data(_ensure_e2e_db: None, flet_app: AppServer, embedded_url_file: Path):
     """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。
 
     显式依赖 ``_ensure_e2e_db`` 保证 DB 已创建（避免隐式时序脆弱性）。
+    显式依赖 ``flet_app`` 保证 sidecar 已启动 + URL 文件已写入（embedded 模式下
+    sidecar 由 ``flet_app`` fixture 启动，URL 写入 ``embedded_url_file``）。
 
     与 ``_ensure_e2e_db`` 同样在独立线程中用 ``SelectorEventLoop`` 跑：
     ``_seed_e2e_data`` 内部调用 ``DatabaseMigrator.init_db``（SQLAlchemy async
     engine + asyncpg driver）和 ``asyncpg.connect``，均受根因 1（ProactorEventLoop
     + asyncpg 不兼容）影响，必须在 ``SelectorEventLoop`` 中执行。
+
+    embedded 模式下（默认，与生产代码默认值一致，spec.md §3 不变量 1）从
+    ``embedded_url_file`` 读取 sidecar URL（sidecar 启动后由
+    ``prepare_database_runtime`` 写入）；external 模式下用 ``TEST_DATABASE_URL``
+    （CI 提供的外置 PostgreSQL，向后兼容路径）。
     """
+    # embedded 模式从文件读取 sidecar URL；external 模式用 TEST_DATABASE_URL
+    if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
+        # flet_app fixture 已启动 sidecar 并写入 URL 文件；此处直接读取
+        if not embedded_url_file.exists():
+            raise RuntimeError(
+                f"embedded_url_file not found at {embedded_url_file}; "
+                "sidecar may have failed to start or QTRADING_EMBEDDED_PG_URL_FILE not set"
+            )
+        db_url = embedded_url_file.read_text(encoding="utf-8").strip()
+        if not db_url:
+            raise RuntimeError(f"embedded_url_file is empty: {embedded_url_file}")
+        logger.info("[E2E Seeding] using embedded sidecar URL from %s", embedded_url_file)
+    else:
+        db_url = TEST_DATABASE_URL
+        logger.info("[E2E Seeding] using external TEST_DATABASE_URL")
+
     logger.info("[E2E Seeding] start _seed_e2e_data in SelectorEventLoop thread")
 
     def _run_in_selector_loop() -> None:
         # NOTE(lazy): Uses asyncio.SelectorEventLoop()/asyncio.new_event_loop() to run _seed_e2e_data in a dedicated selector loop on a worker thread (avoids ProactorEventLoop+asyncpg incompatibility on Windows). ceiling: asyncio.new_event_loop 在 Python 3.13 仍可用, 未来版本可能 deprecate (暂无明确版本). upgrade: 项目升级 Python 3.16 前改用 asyncio.Runner.
         loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         try:
-            loop.run_until_complete(_seed_e2e_data())
+            loop.run_until_complete(_seed_e2e_data(db_url))
         finally:
             loop.close()
 
@@ -913,7 +942,20 @@ async def seed_e2e_data(_ensure_e2e_db: None):
 
 
 @pytest.fixture(scope="session")
-def flet_app(tmp_path_factory, seed_e2e_data):
+def embedded_url_file(tmp_path_factory):
+    """提供 sidecar URL 文件路径（E2E 主进程与 Flet 子进程共享）。
+
+    Flet 子进程启动 sidecar 后，由 ``prepare_database_runtime`` 把 sidecar URL
+    写入此文件（路径通过 ``QTRADING_EMBEDDED_PG_URL_FILE`` 环境变量传递）。
+    E2E 主进程读取此文件获取 sidecar URL，用于连接 sidecar DB 播种数据。
+
+    生产代码默认不设置 ``QTRADING_EMBEDDED_PG_URL_FILE``，此文件仅 E2E 测试使用。
+    """
+    return tmp_path_factory.mktemp("embedded_url") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
     """
     [PITFALL_WARNING] 全局 Session 级 Flet App 与 状态污染 (Ripple Effect)
 
@@ -930,24 +972,33 @@ def flet_app(tmp_path_factory, seed_e2e_data):
     1. 【必须】所有修改了全局状态的测试用例，必须使用 `try...finally` 块确保将状态恢复到基准线！
     2. 对于语言切换等破坏性极强的状态，建议放在测试套件的末尾执行（通过文件命名或 pytest 排序）。
     3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
+
+    embedded 模式（spec.md §3 不变量 1）：与生产代码默认值一致，启动真实 sidecar +
+    真实 PG 17。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
+    供 ``seed_e2e_data`` fixture 读取后连接 sidecar DB 播种数据。
     """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data")
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
             "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
-            "DATABASE_URL": TEST_DATABASE_URL,
-            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            "QTRADING_DATABASE_MODE": "embedded",
+            "QTRADING_EMBEDDED_PG_URL_FILE": str(embedded_url_file),
             # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
             # null 后端：set/delete 为 no-op，get 返回 None。
             # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
             # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        startup_timeout_s=300.0,
     )
     app = AppServer(proc, url, cfg_file)
     yield app
@@ -955,17 +1006,29 @@ def flet_app(tmp_path_factory, seed_e2e_data):
 
 
 @pytest.fixture(scope="session")
-def wizard_app(tmp_path_factory):
+def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
+    """Onboarding wizard app（embedded 模式，与生产代码默认值一致）。
+
+    不设置 ``QTRADING_EMBEDDED_PG_URL_FILE``：onboarding 测试不依赖种子数据，
+    sidecar URL 无需写入文件供主进程读取。``flet_app`` fixture 才需要 URL 文件
+    （``seed_e2e_data`` 通过它连接 sidecar DB 播种）。
+    """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data_wizard")
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
-        config={"locale": "zh"},
+        config={
+            "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
+        },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
-            "DATABASE_URL": TEST_DATABASE_URL,
-            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            "QTRADING_DATABASE_MODE": "embedded",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        startup_timeout_s=300.0,
     )
     app = AppServer(proc, url, cfg_file)
     yield app
@@ -973,7 +1036,7 @@ def wizard_app(tmp_path_factory):
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page(e2e_browser, flet_app: AppServer, request):
+async def e2e_page(e2e_browser, flet_app: AppServer, seed_e2e_data: None, request):
     """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
 
     性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。

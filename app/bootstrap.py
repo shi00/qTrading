@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import os
 from datetime import timedelta
@@ -415,9 +416,33 @@ async def prepare_database_runtime() -> str | None:
         config.embedded_pg_listen,
         info.port,
     )
+    # E2E 测试支持：当设置 QTRADING_EMBEDDED_PG_URL_FILE 环境变量时，
+    # 把 sidecar URL 写入该文件，供 E2E 主进程读取后连接 sidecar DB 播种数据。
+    # 生产环境不设置此环境变量，无副作用。
+    # 安全：文件权限 0600（仅所有者可读写），URL 含密码；atexit 注册清理。
+    url_file_path = os.environ.get("QTRADING_EMBEDDED_PG_URL_FILE")
+    if url_file_path:
+        try:
+            url_file = Path(url_file_path)
+            url_file.parent.mkdir(parents=True, exist_ok=True)
+            url_file.write_text(info.url, encoding="utf-8")
+            os.chmod(url_file, 0o600)
+            atexit.register(_cleanup_embedded_pg_url_file, url_file)
+            logger.info("[Bootstrap] embedded postgres URL written to %s", url_file)
+        except OSError as e:
+            # URL 文件写入失败不阻塞启动，E2E 主进程会超时失败
+            logger.warning("[Bootstrap] failed to write embedded PG URL file: %s", e)
     # D15（pg-plan §22）：返回 URL 供调用方永久设置 config.DB_URL，
     # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config 文件）。
     return info.url
+
+
+def _cleanup_embedded_pg_url_file(url_file: Path) -> None:
+    """atexit 回调：清理 sidecar URL 文件（E2E 测试支持）。"""
+    try:
+        url_file.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug("[Bootstrap] failed to cleanup embedded PG URL file: %s", e)
 
 
 class EmbeddedPgStartupScenario(Enum):
