@@ -352,7 +352,9 @@ async def prepare_database_runtime() -> str | None:
 
     必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
 
-    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 external）。
+    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 embedded）。
+    spec.md §3 不变量 1：默认 embedded 与产品契约"无需任何配置"对齐，
+    用户显式设 ``QTRADING_DATABASE_MODE=external`` 才进入 external 分支。
 
     Returns:
         embedded 模式且启动成功时返回 sidecar ``ConnectionInfo.url``；
@@ -364,7 +366,7 @@ async def prepare_database_runtime() -> str | None:
     """
     import os
 
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
     if mode != "embedded":
         # M5: mode=external 但 config.embedded_pg_enabled=True → 记 WARNING（用户可能误配置）
         from utils.config_handler import ConfigHandler
@@ -447,13 +449,15 @@ def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupS
     ``_data_dir`` / ``_install_dir`` 私有属性。单例 idempotent，后续
     ``prepare_database_runtime`` 再次调用 ``from_config`` 会返回同一实例。
 
+    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（默认 ``embedded``，spec.md §3 不变量 1）。
+
     Args:
         config: ``AppConfig`` 实例
 
     Returns:
         ``EmbeddedPgStartupScenario`` 枚举值；external 模式或未启用时返回 ``None``
     """
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
     if mode != "embedded":
         logger.debug("[Bootstrap] detect skipped: QTRADING_DATABASE_MODE=%s (not embedded)", mode)
         return None

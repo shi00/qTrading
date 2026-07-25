@@ -1525,6 +1525,15 @@ class TestSimpleGetterSetters:
     def test_get_locale(self, mock_load):
         assert cfg_mod.ConfigHandler.get_locale() == "en"
 
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_locale_default_returns_zh_CN(self, mock_load):
+        """spec.md §3 不变量 4：空配置时 get_locale 默认返回 "zh_CN"。
+
+        与 build_locale_configuration 期望的 "lang_COUNTRY" 格式一致，
+        避免启动时走 ValueError 回退路径（无声回退不优雅）。
+        """
+        assert cfg_mod.ConfigHandler.get_locale() == "zh_CN"
+
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_locale(self, mock_set):
         cfg_mod.ConfigHandler.set_locale("zh")
@@ -2324,7 +2333,7 @@ class TestConfigHandlerIsEmbeddedMode:
     """P3-7: ConfigHandler.is_embedded_mode() — embedded/external 模式单一入口点（R-B1）。
 
     判定条件：QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
-    默认 external（与 bootstrap.prepare_database_runtime 现有逻辑一致）。
+    默认 embedded（spec.md §3 不变量 1：QTRADING_DATABASE_MODE 默认值为 "embedded"）。
     """
 
     def test_embedded_mode_enabled_returns_true(self, monkeypatch):
@@ -2357,15 +2366,20 @@ class TestConfigHandlerIsEmbeddedMode:
         ):
             assert ConfigHandler.is_embedded_mode() is False
 
-    def test_env_unset_defaults_external_returns_false(self, monkeypatch):
-        """QTRADING_DATABASE_MODE 未设置（默认 external）+ embedded_pg_enabled=True → False"""
+    def test_env_unset_defaults_embedded_returns_true(self, monkeypatch):
+        """QTRADING_DATABASE_MODE 未设置（默认 embedded）+ embedded_pg_enabled=True → True
+
+        spec.md §3 不变量 1: QTRADING_DATABASE_MODE 环境变量默认值为 "embedded"。
+        spec.md §3 不变量 3: ConfigHandler.is_embedded_mode() 在无环境变量、
+        无配置文件覆盖时返回 True（前提：embedded_pg_enabled=True，默认值见 §3 不变量 2）。
+        """
         monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
         with patch.object(
             cfg_mod.ConfigHandler,
             "load_config",
             return_value={"embedded_pg_enabled": True},
         ):
-            assert ConfigHandler.is_embedded_mode() is False
+            assert ConfigHandler.is_embedded_mode() is True
 
     def test_embedded_mode_case_insensitive(self, monkeypatch):
         """QTRADING_DATABASE_MODE=EMBEDDED（大写）+ embedded_pg_enabled=True → True"""
@@ -2377,14 +2391,16 @@ class TestConfigHandlerIsEmbeddedMode:
         ):
             assert ConfigHandler.is_embedded_mode() is True
 
-    def test_embedded_env_config_missing_returns_false(self, monkeypatch):
-        """QTRADING_DATABASE_MODE=embedded + load_config 返回 {}（配置缺失）→ False
+    def test_embedded_env_config_missing_returns_true(self, monkeypatch):
+        """QTRADING_DATABASE_MODE=embedded + load_config 返回 {}（配置缺失）→ True
 
-        embedded_pg_enabled 默认 False（AppConfig field default）。
+        spec.md §3 不变量 2：embedded_pg_enabled 默认 True（AppConfig field default）。
+        R-B1 单一判定函数契约：is_embedded_mode() 的 .get() default 与 AppConfig
+        field default 保持一致，配置缺失时走默认 True 分支。
         """
         monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
         with patch.object(cfg_mod.ConfigHandler, "load_config", return_value={}):
-            assert ConfigHandler.is_embedded_mode() is False
+            assert ConfigHandler.is_embedded_mode() is True
 
     def test_load_config_exception_returns_false(self, monkeypatch):
         """QTRADING_DATABASE_MODE=embedded + load_config 抛异常 → False（fallback 安全）"""

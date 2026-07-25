@@ -37,8 +37,12 @@ def _make_config_dict(**overrides) -> dict:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_prepare_database_runtime_noop_when_mode_external(monkeypatch, tmp_path: Path) -> None:
-    """env 未设 / =external → 不调 from_config、返回 None。"""
-    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    """env=external → 不调 from_config、返回 None。
+
+    spec.md §3 不变量 1：QTRADING_DATABASE_MODE 默认值为 "embedded"，
+    需显式设 env=external 才能进入 external 分支。
+    """
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
 
     from app.bootstrap import prepare_database_runtime
 
@@ -68,10 +72,14 @@ async def test_prepare_database_runtime_noop_when_mode_external(monkeypatch, tmp
 async def test_prepare_database_runtime_warns_when_external_mode_but_config_enabled(
     monkeypatch, tmp_path: Path, caplog
 ) -> None:
-    """M5: mode=external 但 embedded_pg_enabled=True → 记 WARNING（用户可能误配置），返回 None。"""
+    """M5: mode=external 但 embedded_pg_enabled=True → 记 WARNING（用户可能误配置），返回 None。
+
+    spec.md §3 不变量 1：QTRADING_DATABASE_MODE 默认值为 "embedded"，
+    需显式设 env=external 才能进入 external 分支触发 M5 WARNING。
+    """
     import logging
 
-    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
 
     from app.bootstrap import prepare_database_runtime
 
@@ -344,8 +352,12 @@ def _make_mock_service_with_paths(install_dir: Path, data_dir: Path) -> MagicMoc
 
 
 def test_detect_scenario_returns_none_when_mode_external(monkeypatch) -> None:
-    """env 未设 / =external → 返回 None（不检测）。"""
-    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    """env=external → 返回 None（不检测）。
+
+    spec.md §3 不变量 1：QTRADING_DATABASE_MODE 默认值为 "embedded"，
+    需显式设 env=external 才能进入 external 分支（不检测）。
+    """
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
 
     from app.bootstrap import detect_embedded_pg_startup_scenario
     from utils.config_models import AppConfig
@@ -502,3 +514,79 @@ def test_detect_scenario_unknown_when_only_pg_version_exists(monkeypatch, tmp_pa
         "UNKNOWN" in r.message and "install_marker=False" in r.message and "pg_version=True" in r.message
         for r in caplog.records
     ), f"期望 WARNING 日志含 UNKNOWN + marker=False + pg_version=True，实际：{[r.message for r in caplog.records]}"
+
+
+# --- 默认值契约测试（spec.md §3 不变量 1：QTRADING_DATABASE_MODE 默认 embedded）---
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_defaults_to_embedded_mode(monkeypatch, tmp_path: Path) -> None:
+    """env 未设（默认 embedded）+ embedded_pg_enabled=True → 进入 embedded 分支，启动 service 并返回 URL。
+
+    spec.md §3 不变量 1: QTRADING_DATABASE_MODE 环境变量默认值为 "embedded"。
+    用户旅程契约：新用户按 README 执行 `python main.py` 默认进入 embedded 模式，
+    无需任何环境变量配置即可启动 sidecar。
+    """
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.protocol import ConnectionInfo
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True)),
+    )
+
+    fake_url = "postgresql+asyncpg://qtrading:mock_password_55432@127.0.0.1:55432/qtrading"
+    fake_info = ConnectionInfo(
+        url=fake_url,
+        port=55432,
+        pid=12345,
+        data_dir="/fake/pgdata",
+    )
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(return_value=fake_info)
+
+    from_config_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or mock_service),
+    )
+
+    result = await prepare_database_runtime()
+
+    assert from_config_calls == [1], (
+        f"默认 embedded 模式应进入 embedded 分支并调用 from_config, 实际: {from_config_calls}"
+    )
+    assert result == fake_url, f"期望返回 ConnectionInfo.url, 实际: {result}"
+
+
+def test_detect_scenario_runs_when_env_unset_defaults_embedded(monkeypatch, tmp_path: Path) -> None:
+    """env 未设（默认 embedded）+ embedded_pg_enabled=True → 进入 embedded 分支并调用 from_config。
+
+    spec.md §3 不变量 1: QTRADING_DATABASE_MODE 环境变量默认值为 "embedded"。
+    detect_embedded_pg_startup_scenario 在默认配置下不应返回 None（不检测），
+    而是进入 embedded 分支基于 install marker / PG_VERSION 判定 scenario。
+    """
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    install_dir = tmp_path / "install"
+    data_dir = tmp_path / "data"
+    install_dir.mkdir()
+    data_dir.mkdir()
+    # 不创建 .setup-complete 和 PG_VERSION → FIRST_RUN
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: _make_mock_service_with_paths(install_dir, data_dir)),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result == EmbeddedPgStartupScenario.FIRST_RUN, (
+        f"默认 embedded 模式应进入 embedded 分支并返回 FIRST_RUN, 实际: {result}"
+    )

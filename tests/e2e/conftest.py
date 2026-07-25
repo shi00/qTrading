@@ -867,8 +867,12 @@ async def _ensure_e2e_db() -> None:
     ``prepare_database_runtime()`` + ``TaskManager.init_db`` 管理 sidecar PG
     的 DB 创建与迁移（``embedded_real_wizard_app`` 不传 ``DATABASE_URL``），
     此 fixture 无需也不应预创建外置 ``test_astock`` DB（sidecar 未启动且端口随机）。
+
+    spec.md §3 不变量 1：``QTRADING_DATABASE_MODE`` 默认 ``"embedded"``，
+    与 ``app.bootstrap.prepare_database_runtime`` / ``utils.config_handler.is_embedded_mode``
+    入口点保持同步（§1.7 举一反三：同类默认值需全局一致）。
     """
-    if os.environ.get("QTRADING_DATABASE_MODE", "external").lower() == "embedded":
+    if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
         return
     from tests.integration.conftest import _ensure_test_db
 

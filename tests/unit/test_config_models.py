@@ -60,7 +60,8 @@ class TestAppConfig:
         assert cfg.db_port == 5432
         assert cfg.llm_provider == "deepseek"
         assert cfg.theme_name == "dark"
-        assert cfg.locale == "zh"
+        # spec.md §3 不变量 4：locale 默认 "zh_CN"（与 build_locale_configuration 期望格式一致）
+        assert cfg.locale == "zh_CN"
         assert cfg.log_level == "INFO"
         assert cfg.max_io_workers == 0
         assert cfg.onboarding_complete is False

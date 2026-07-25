@@ -16,7 +16,8 @@ from utils.config_models import AppConfig
 class TestEmbeddedPgFields:
     def test_app_config_has_embedded_pg_fields_with_defaults(self) -> None:
         config = AppConfig()
-        assert config.embedded_pg_enabled is False
+        # spec.md §3 不变量 2：embedded_pg_enabled 默认 True（与 QTRADING_DATABASE_MODE 默认 embedded 对齐）
+        assert config.embedded_pg_enabled is True
         assert config.embedded_pg_sidecar_path == ""
         assert config.embedded_pg_data_root == ""
         assert config.embedded_pg_install_root == ""
