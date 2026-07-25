@@ -760,16 +760,17 @@ jobs:
   windows-skip-revalidation:
     # P3-WinE2E-Skip 技术债复验 job：临时取消 8 个 Windows skipif 用例的 skipif，
     # 在 windows-latest runner 实机运行以判断 Flet 0.86.2 下问题是否仍存在.
-    # 拆分为 2 个并行 matrix group 解决 45 分钟 timeout：
-    #   - no-sidecar (5 用例): fake sidecar + external DB，无需 Rust 构建
+    # 拆分为 3 个并行 matrix group 解决 timeout + 隔离卡死用例：
+    #   - no-sidecar (4 用例): 3 fake sidecar + 1 wizard，无需 Rust 构建（wizard 仅 3s 失败不影响）
     #   - real-sidecar (3 用例): 真实 sidecar binary，需 Rust 构建链路
+    #   - settings-slow (1 用例): test_settings_log_level_switch 单独跑（已知 34min 卡死，独立 60min timeout）
     # 触发：workflow_dispatch（手动触发复验，Task 2.5-2.7）.
     # 不加入 build-windows needs 列表（advisory，非 release 门禁）.
     name: Windows Skip Revalidation (${{ matrix.group }})
     needs: lint-fast
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     permissions:
       contents: read
     strategy:
@@ -777,17 +778,23 @@ jobs:
       matrix:
         include:
           - group: no-sidecar
-            # 5 用例：3 fake sidecar (test_onboarding_embedded.py) + 1 settings + 1 wizard
-            # settings/wizard 用例使用 external DB (e2e_page/wizard_page fixture)
+            # 4 用例：3 fake sidecar (test_onboarding_embedded.py) + 1 wizard
+            # wizard 用例使用 external DB (wizard_page fixture)，3s 快速失败不影响其他用例
             test_targets: >-
               tests/e2e/test_onboarding_embedded.py
-              tests/e2e/test_settings_flow.py::test_settings_log_level_switch
               tests/e2e/test_onboarding_wizard.py::test_wizard_db_validation_success
             needs_rust: 'false'
+            timeout_minutes: 30
           - group: real-sidecar
             # 3 用例：test_onboarding_embedded_real.py (embedded_real_wizard_page fixture)
             test_targets: tests/e2e/test_onboarding_embedded_real.py
             needs_rust: 'true'
+            timeout_minutes: 60
+          - group: settings-slow
+            # 1 用例：test_settings_log_level_switch（已知 34min 卡死，单独跑避免拖累其他 job）
+            test_targets: tests/e2e/test_settings_flow.py::test_settings_log_level_switch
+            needs_rust: 'false'
+            timeout_minutes: 60
 
     steps:
       - name: Checkout Code
