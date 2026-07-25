@@ -124,7 +124,7 @@ class _FakePopen:
 
 @pytest.fixture(autouse=True)
 def _reset_popen_instances() -> Iterator[None]:
-    """每个测试前清空 FakePopen 实例记录 + 清理 logger handler 隔离。"""
+    """每个测试前清空 FakePopen 实例记录 + 清理 logger handler + 清理 DataSanitizer 隔离。"""
     _FakePopen.instances.clear()
     _svc_logger = logging.getLogger("qtrading.embedded_postgres")
     for h in list(_svc_logger.handlers):
@@ -134,6 +134,10 @@ def _reset_popen_instances() -> Iterator[None]:
                 h.close()
             except Exception:
                 pass
+    # R7: 清空 DataSanitizer._known_secrets，避免 start() 注册的 URL/password 跨测试残留
+    from utils.sanitizers import DataSanitizer
+
+    DataSanitizer._reset_known_secrets()
     yield
     _FakePopen.instances.clear()
     for h in list(_svc_logger.handlers):
@@ -143,6 +147,8 @@ def _reset_popen_instances() -> Iterator[None]:
                 h.close()
             except Exception:
                 pass
+    # 测试后再清理一次，避免泄漏到下一个测试
+    DataSanitizer._reset_known_secrets()
 
 
 def _make_service(tmp_path: Path) -> EmbeddedPostgresService:

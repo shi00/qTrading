@@ -149,15 +149,14 @@ async def main(page: ft.Page):
 
     ProxyManager.apply_smart_proxy_policy()
 
-    # D15（pg-plan §22）：embedded 模式下用 override_db_url 包裹 CacheManager() 构造，
-    # 不再依赖 save_db_config 持久化的 URL。
+    # D15（pg-plan §22）：embedded 模式下永久设置 config.DB_URL（运行时变量，不持久化到
+    # config 文件，不设 DATABASE_URL 环境变量避免污染子进程）。
+    # ConfigHandler.get_db_url() Priority 3 兜底返回 embedded URL。
     if embedded_db_url:
-        from data.persistence.db_url_override import override_db_url
+        import config
 
-        with override_db_url(embedded_db_url):
-            cache_manager = CacheManager()
-    else:
-        cache_manager = CacheManager()
+        config.DB_URL = embedded_db_url
+    cache_manager = CacheManager()
 
     from utils.shutdown import ShutdownCoordinator
 

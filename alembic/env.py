@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 def get_database_url() -> str:
     """
     Get database URL from multiple sources.
-    Priority: Alembic config/attributes > ConfigHandler.get_db_url() > config.DB_URL > environment variable
+    Priority: Alembic config/attributes > ConfigHandler.get_db_url() > config.DB_URL > DATABASE_URL env var
+
+    ConfigHandler.get_db_url() 内部优先级：DATABASE_URL env > rebuild from db_host > config.DB_URL。
+    embedded 模式下 main.py 永久设置 config.DB_URL（spec.md §1.4），由 get_db_url() Priority 3 兜底。
 
     This lets application code bind migrations to the same engine it has already
     checked, while keeping CLI Alembic and onboarding configuration working.
@@ -44,12 +47,14 @@ def get_database_url() -> str:
 
     try:
         from utils.config_handler import ConfigHandler
+        from utils.sanitizers import DataSanitizer
 
         url = ConfigHandler.get_db_url()
         if url:
             return url
     except Exception as e:
-        logger.warning("Alembic env setup failed: %s", e, exc_info=True)
+        # R9: 异常消息可能含连接串（含密码），须经 DataSanitizer.sanitize_error 脱敏
+        logger.warning("Alembic env setup failed: %s", DataSanitizer.sanitize_error(e))
 
     if config.DB_URL:
         return config.DB_URL

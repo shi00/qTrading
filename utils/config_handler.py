@@ -692,8 +692,13 @@ class ConfigHandler:
 
         All runtime URL resolution should go through ConfigHandler.get_db_url(),
         which rebuilds the URL from stored components + keyring password on every
-        call.  We no longer mutate config.DB_URL / DB_URL_SYNC — those are
-        treated as read-only snapshots of the DATABASE_URL env var at import time.
+        call.  We no longer mutate config.DB_URL / DB_URL_SYNC in this method —
+        those are treated as read-only snapshots of the DATABASE_URL env var at
+        import time.
+
+        Note: ``main.py`` 在 embedded 模式启动时存在**例外**——会永久设置
+        ``config.DB_URL = embedded_url``（spec.md §1.4），由 ``get_db_url()``
+        Priority 3 兜底返回。该例外不经过本方法，与本方法的"不持久化"承诺不冲突。
         """
         from data.persistence.db_config_service import DatabaseConfigService
 

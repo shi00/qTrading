@@ -11,7 +11,7 @@ Mock 策略（D17/D18）：
 - monkeypatch ConfigHandler.load_config 返回 dict（base = get_default_config()）
 - AppConfig.model_validate 真实运行（不 mock）
 - D15（pg-plan §22）：prepare_database_runtime 不再调 save_db_config，
-  改为返回 URL 供调用方用 override_db_url 包裹 CacheManager 构造
+  改为返回 URL 供调用方永久设置 config.DB_URL（不持久化到 config 文件）
 """
 
 from __future__ import annotations
@@ -183,6 +183,51 @@ async def test_prepare_database_runtime_starts_service_and_returns_url(monkeypat
     # 验证返回 info.url（D15：不再 save_db_config 持久化）
     assert result == fake_url, f"期望返回 ConnectionInfo.url，实际：{result}"
     assert save_db_config_calls == [], f"D15: 不应调用 save_db_config，实际：{save_db_config_calls}"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_warns_when_database_url_env_set(monkeypatch, tmp_path: Path, caplog) -> None:
+    """R-Arch-2/Ske-1: embedded 模式 + DATABASE_URL env var 误设 → emit WARNING，仍启动 embedded PG。
+
+    场景：QTRADING_DATABASE_MODE=embedded + DATABASE_URL env var 被外部误设。
+    验证：记 WARNING 提示用户该 env var 会覆盖 embedded URL，但仍继续启动 embedded PG。
+    """
+    import logging
+
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://external:external@remote-host:5432/external")
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.protocol import ConnectionInfo
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True)),
+    )
+
+    fake_info = ConnectionInfo(
+        url="postgresql+asyncpg://postgres:mock_pwd@127.0.0.1:55432/qtrading",
+        port=55432,
+        pid=12345,
+        data_dir="/fake/pgdata",
+    )
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(return_value=fake_info)
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
+        result = await prepare_database_runtime()
+
+    # 验证 WARNING 日志含关键提示
+    assert any(
+        "DATABASE_URL env var is set" in r.message and "will take precedence over embedded URL" in r.message
+        for r in caplog.records
+    ), f"期望 WARNING 日志含 DATABASE_URL 误设提示，实际：{[r.message for r in caplog.records]}"
+    # 验证仍启动 embedded PG（不阻断启动）
+    assert result == fake_info.url
 
 
 @pytest.mark.asyncio(loop_scope="function")
