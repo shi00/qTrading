@@ -718,7 +718,11 @@ class MacroSyncStrategy(ISyncStrategy):
             iw_saved = 0
             for idx_code in MAJOR_INDICES:
                 if self._check_cancelled(result):
-                    break
+                    # 取消时直接 return，跳过 update_sync_status，避免部分成功被标记为 success。
+                    # 与 sibling 方法形式一致（都跳过 update_sync_status），但语义略不同：
+                    # 此处 save 已在循环内发生，sync_status.last_data_date 会暂时落后于
+                    # index_weight 表实际最新日期，由 save_index_weights 的 upsert 幂等性保证可重入。
+                    return
 
                 try:
                     df = await self.context.api.get_index_weight(
