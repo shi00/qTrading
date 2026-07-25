@@ -166,6 +166,10 @@ def _reset_fake_coordinator():
 
 def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     _FakeCoordinator.cleanup_result = cleanup_result
+    # 测试目标是 main.py 的窗口/对话框/disconnect 行为，不验证 embedded sidecar 启动。
+    # 显式 external 模式让 main.py 的 prepare_database_runtime() 立即返回 None，
+    # 避免在无 sidecar binary 的环境（如 unit-test Linux CI）触发 EmbeddedPostgresStartError。
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
