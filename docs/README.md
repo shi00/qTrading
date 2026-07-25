@@ -13,7 +13,6 @@
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml）
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
-- [coverage/](./coverage/) — 覆盖率报告（unit-only 阶段性报告，CI 合并报告为最终门禁）
 
 ## 文档层次
 
