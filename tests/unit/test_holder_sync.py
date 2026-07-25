@@ -1237,7 +1237,9 @@ class TestR5EngineDisposedReraises:
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_recording_engine_disposed(self):
-        """_sync_share_float 在 TushareAPIPermissionError 后记录状态时 EngineDisposedError 被吞没返回 -1。"""
+        """R5 守卫：_sync_share_float 在 TushareAPIPermissionError 后记录状态时若 update_sync_status 抛
+        EngineDisposedError，必须向上传播（不能吞没），避免在 disposed 引擎上继续操作。
+        """
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1245,12 +1247,15 @@ class TestR5EngineDisposedReraises:
         ctx.cache.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        count, date = await strategy._sync_share_float()
-        assert count == -1
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await strategy._sync_share_float()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdertrade_permission_recording_engine_disposed(self):
-        """_sync_stk_holdertrade 在 TushareAPIPermissionError 后记录状态时 EngineDisposedError 被吞没返回 -1。"""
+        """R5 守卫：_sync_stk_holdertrade 在 TushareAPIPermissionError 后记录状态时若 update_sync_status 抛
+        EngineDisposedError，必须向上传播（不能吞没），避免在 disposed 引擎上继续操作。
+        """
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
@@ -1258,8 +1263,9 @@ class TestR5EngineDisposedReraises:
         ctx.cache.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        count, date = await strategy._sync_stk_holdertrade()
-        assert count == -1
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await strategy._sync_stk_holdertrade()
+        assert "disposed" in str(exc_info.value)
 
 
 class TestR2CancelledErrorReraises:

@@ -156,7 +156,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                     )
                                 await asyncio.sleep(delay)
                             else:
-                                failed_boards.append(f"{board_name}: {e}")
+                                failed_boards.append(f"{board_name}: {safe_error(e)}")
                                 if severity == "recoverable":
                                     logger.warning(
                                         "[AKShareConceptSync] Failed board %s after %d retries (%s): %s",
@@ -509,7 +509,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    failed.append(f"{ts_code}: {e}")
+                    failed.append(f"{ts_code}: {safe_error(e)}")
                     error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
                     if severity == "system":

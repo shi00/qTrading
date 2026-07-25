@@ -738,7 +738,7 @@ class HolderSyncStrategy(ISyncStrategy):
                             "[HolderSync] pledge_stat | API error for end_date=%s (%s): %s",
                             end_date,
                             error_info["code"],
-                            api_err,
+                            safe_error(api_err),
                             exc_info=True,
                         )
                     else:
@@ -746,7 +746,7 @@ class HolderSyncStrategy(ISyncStrategy):
                             "[HolderSync] pledge_stat | API error for end_date=%s (%s): %s",
                             end_date,
                             error_info["code"],
-                            api_err,
+                            safe_error(api_err),
                             exc_info=True,
                         )
                     continue
@@ -785,6 +785,8 @@ class HolderSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -889,6 +891,8 @@ class HolderSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -992,6 +996,8 @@ class HolderSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
