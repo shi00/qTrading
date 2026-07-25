@@ -888,7 +888,7 @@ class TushareClient:
             )
             results: dict[str, bool | None] = {}
             for item in results_list:
-                if isinstance(item, Exception):
+                if isinstance(item, Exception):  # pragma: no cover - 防御性兜底，_probe_one 已捕获内部异常
                     # _probe_one 已捕获内部异常，此处 Exception 不应发生；
                     # 防御性处理：跳过该 item
                     logger.warning(
