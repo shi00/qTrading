@@ -703,6 +703,24 @@ def real_sidecar_binary(tmp_path_factory) -> Path:
     return binary
 
 
+def _dump_sidecar_logs(log_dir: Path) -> None:
+    """sidecar 启动失败时输出日志内容到 stdout，帮助 CI 诊断.
+
+    sidecar.log 由 Rust tracing 写入（含 initdb/start/health_check 详细信息）；
+    sidecar.stderr.log 由 Python stderr reader thread 脱敏后写入（启动失败时可能为空，
+    因为 reader thread 在成功路径才启动）。
+    """
+    for log_name in ("sidecar.log", "sidecar.stderr.log", "sidecar.stdout.log"):
+        log_path = log_dir / log_name
+        if log_path.exists():
+            try:
+                content = log_path.read_text(encoding="utf-8", errors="replace")
+                if content.strip():
+                    print(f"\n=== {log_name} ({log_path}) ===\n{content}\n=== end {log_name} ===\n", flush=True)
+            except Exception as e:  # noqa: BLE001 诊断函数不应因日志读取失败中断
+                print(f"\nFailed to read {log_name}: {e}", flush=True)
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def real_embedded_pg(real_sidecar_binary: Path, tmp_path_factory):
     """启动真实 sidecar + 真实 PG，返回 ConnectionInfo。
@@ -717,16 +735,21 @@ async def real_embedded_pg(real_sidecar_binary: Path, tmp_path_factory):
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
     data_root = tmp_path_factory.mktemp("real_embedded_pg")
+    log_dir = data_root / "logs"
     service = EmbeddedPostgresService(
         sidecar_binary=real_sidecar_binary,
         data_dir=data_root / "data",
         install_dir=data_root / "install",
-        log_dir=data_root / "logs",
+        log_dir=log_dir,
         start_timeout=300.0,  # 首次 initdb + PG binaries 下载可能较慢
     )
     try:
         info: ConnectionInfo = await service.start()
         yield info
+    except Exception:
+        # 诊断：sidecar 启动失败时输出日志内容，帮助定位根因
+        _dump_sidecar_logs(log_dir)
+        raise
     finally:
         try:
             await service.stop()

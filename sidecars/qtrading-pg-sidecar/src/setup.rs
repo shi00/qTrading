@@ -21,8 +21,14 @@ const EXTRACTION_GUARD: &str = "# qtrading-pg-sidecar extraction guard\n";
 
 pub const PG_HBA_TEMPLATE: &str = "\
 # qtrading-pg-sidecar managed - do not edit manually
-host all postgres 127.0.0.1/32 scram-sha-256
-host all postgres ::1/128      scram-sha-256
+# 允许任意用户从本机连接（scram-sha-256 认证 + sidecar 随机生成密码）
+# username 由 --username 参数决定（默认 postgres，Python service 用 qtrading），
+# 用 all 避免用户名与 pg_hba.conf 不匹配导致连接被拒（§13.7.51 健康检查失败根因）
+# local 规则：postgresql_embedded crate 在 Linux 上通过 Unix socket 连接（database_exists/create_database），
+# 缺少 local 规则会导致 28P01 认证失败（§13.7.52）
+local all all                   scram-sha-256
+host  all all 127.0.0.1/32      scram-sha-256
+host  all all ::1/128           scram-sha-256
 ";
 
 /// §7.6 受管参数（值与 doctor 校验共用此单一来源）。
@@ -514,7 +520,8 @@ mod tests {
         write_security_baseline(&dir, "127.0.0.1").unwrap();
         assert!(hba_matches_template(&dir));
         let hba = std::fs::read_to_string(dir.join("pg_hba.conf")).unwrap();
-        assert!(hba.contains("host all postgres 127.0.0.1/32 scram-sha-256"));
+        assert!(hba.contains("local all all                   scram-sha-256"));
+        assert!(hba.contains("host  all all 127.0.0.1/32      scram-sha-256"));
         assert!(!hba.contains("trust"));
         assert!(!hba.contains("0.0.0.0"));
         std::fs::write(dir.join("pg_hba.conf"), "host all all 0.0.0.0/0 trust\n").unwrap();

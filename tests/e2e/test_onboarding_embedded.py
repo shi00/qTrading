@@ -52,10 +52,11 @@ async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page
     embedded_ready_text = I18n.get("embedded_pg_ready")
     await embedded_wizard_page.expect_text(embedded_ready_text)
 
-    # 4. 验证不显示 host/port/user/password 表单字段
-    # (embedded 模式下 EmbeddedStatusCard 替代 ExternalPgForm，这些字段不应出现)
-    db_host_label = I18n.get("db_host")
-    assert not await embedded_wizard_page.has_text(db_host_label)
+    # 4. 验证不显示 external 模式的表单输入框
+    #    (用外部模式独有按钮 "测试连接" 作为判断依据，
+    #     避免 "主机" 被 embedded_pg_no_config_needed 误匹配)
+    db_test_conn_btn = I18n.get("db_test_connection")
+    assert not await embedded_wizard_page.has_text(db_test_conn_btn)
 
     # 5. 点击 "验证并继续" 完成 database step
     btn_verify = I18n.get("wizard_btn_verify_next")
