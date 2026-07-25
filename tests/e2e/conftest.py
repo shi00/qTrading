@@ -10,6 +10,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 import typing
 from datetime import date, timedelta
 from pathlib import Path
@@ -893,27 +894,91 @@ async def _ensure_e2e_db() -> None:
     await asyncio.to_thread(_run_in_selector_loop)
 
 
+async def _trigger_sidecar_startup_via_browser(
+    flet_app: AppServer,
+    e2e_browser,
+    embedded_url_file: Path,
+    *,
+    timeout_s: float = 300.0,
+) -> None:
+    """创建临时浏览器 page 连接 Flet app，触发 main(page)，等待 sidecar 启动 + URL 文件写入。
+
+    根因：Flet Web 模式下 ``main(page)`` 仅在浏览器 page 连接（WebSocket）时才执行。
+    ``flet_app`` fixture 启动 Flet web server 后无浏览器连接，``prepare_database_runtime``
+    未被调用，sidecar 未启动，URL 文件未写入。本函数创建临时 page 触发 ``main(page)``，
+    等待 URL 文件出现后关闭临时 page（sidecar 已启动，不受 page 关闭影响）。
+
+    临时 page 不需要 CanvasKit 拦截等（仅触发 WebSocket 连接），goto 用 ``commit``
+    状态避免等 canvaskit 加载。
+    """
+    logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
+    context = await e2e_browser.new_context()
+    page = await context.new_page()
+    try:
+        # goto 只等 commit（HTTP 响应头），不等页面完全加载（canvaskit 等可能加载失败）。
+        # goto 返回后浏览器继续加载 JS 建立 WebSocket，触发 main(page)。
+        try:
+            await page.goto(flet_app.url, wait_until="commit", timeout=30000)
+        except Exception as e:
+            logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
+
+        # 等待 URL 文件出现（sidecar 启动完成 + prepare_database_runtime 写入）。
+        # 首次 initdb + PG 17 启动可能需要 1-3 分钟，超时 300s 留足余量。
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if embedded_url_file.exists():
+                elapsed = timeout_s - (deadline - time.monotonic())
+                logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
+                return
+            if not flet_app.is_alive():
+                raise RuntimeError(
+                    f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup. "
+                    "Check logs/e2e-flet-app.log for details."
+                )
+            await asyncio.sleep(2.0)
+        raise RuntimeError(
+            f"Timeout waiting for {embedded_url_file} within {timeout_s}s. "
+            "Sidecar may have failed to start. Check logs/e2e-flet-app.log for details."
+        )
+    finally:
+        await context.close()
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def seed_e2e_data(_ensure_e2e_db: None, flet_app: AppServer, embedded_url_file: Path):
+async def seed_e2e_data(
+    _ensure_e2e_db: None,
+    flet_app: AppServer,
+    embedded_url_file: Path,
+    e2e_browser,
+):
     """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。
 
     显式依赖 ``_ensure_e2e_db`` 保证 DB 已创建（避免隐式时序脆弱性）。
-    显式依赖 ``flet_app`` 保证 sidecar 已启动 + URL 文件已写入（embedded 模式下
-    sidecar 由 ``flet_app`` fixture 启动，URL 写入 ``embedded_url_file``）。
+    显式依赖 ``flet_app`` 保证 Flet web server 已启动。
+    显式依赖 ``e2e_browser``：embedded 模式下需创建临时 page 触发 ``main(page)``，
+    使 ``prepare_database_runtime`` 启动 sidecar 并写入 URL 文件。
 
     与 ``_ensure_e2e_db`` 同样在独立线程中用 ``SelectorEventLoop`` 跑：
     ``_seed_e2e_data`` 内部调用 ``DatabaseMigrator.init_db``（SQLAlchemy async
     engine + asyncpg driver）和 ``asyncpg.connect``，均受根因 1（ProactorEventLoop
     + asyncpg 不兼容）影响，必须在 ``SelectorEventLoop`` 中执行。
 
-    embedded 模式下（默认，与生产代码默认值一致，spec.md §3 不变量 1）从
-    ``embedded_url_file`` 读取 sidecar URL（sidecar 启动后由
-    ``prepare_database_runtime`` 写入）；external 模式下用 ``TEST_DATABASE_URL``
-    （CI 提供的外置 PostgreSQL，向后兼容路径）。
+    embedded 模式下（默认，与生产代码默认值一致，spec.md §3 不变量 1）：
+    1. Flet Web 模式下 ``main(page)`` 仅在浏览器连接时才执行，``flet_app`` fixture
+       启动 Flet web server 后无浏览器连接，sidecar 不会启动。
+    2. 本 fixture 创建临时浏览器 page 连接 Flet app，触发 ``main(page)``，
+       等待 sidecar 启动 + URL 文件写入。
+    3. 读取 URL 文件获取 sidecar URL，播种数据。
+    4. 关闭临时 page（sidecar 已启动，不受 page 关闭影响）。
+    external 模式下用 ``TEST_DATABASE_URL``（CI 提供的外置 PostgreSQL，向后兼容路径）。
     """
     # embedded 模式从文件读取 sidecar URL；external 模式用 TEST_DATABASE_URL
     if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
-        # flet_app fixture 已启动 sidecar 并写入 URL 文件；此处直接读取
+        # Flet Web 模式下 main(page) 仅在浏览器连接时才执行。
+        # flet_app fixture 启动 Flet web server 后无浏览器连接，sidecar 未启动。
+        # 需创建临时 page 触发 main(page)，等待 URL 文件出现。
+        if not embedded_url_file.exists():
+            await _trigger_sidecar_startup_via_browser(flet_app, e2e_browser, embedded_url_file, timeout_s=300.0)
         if not embedded_url_file.exists():
             raise RuntimeError(
                 f"embedded_url_file not found at {embedded_url_file}; "
