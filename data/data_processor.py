@@ -484,7 +484,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             return False, I18n.get("status_recent")
         except Exception as e:
-            return True, f"error: {e}"
+            # R9: safe_error 脱敏，避免异常对象泄露 DB 密码/API token 等敏感信息
+            return True, f"error: {safe_error(e)}"
 
     # ... Other simple sync/get methods ...
 
