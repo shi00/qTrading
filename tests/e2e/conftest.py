@@ -52,6 +52,7 @@ def _create_e2e_mock_keyring() -> MagicMock:
 _E2E_MOCK_KEYRING = _create_e2e_mock_keyring()
 sys.modules["keyring"] = _E2E_MOCK_KEYRING
 
+from tests.e2e._windows_skip import add_windows_skip_option, strip_windows_skipif
 from tests.e2e.helpers.app_launcher import start_flet_app
 from tests.e2e.helpers.flet_page import FletPage
 
@@ -248,6 +249,11 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """注册 E2E 自定义 CLI 选项."""
+    add_windows_skip_option(parser)
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """E2E 测试强制 session loop scope，避免跨 loop 访问 session fixtures。
@@ -259,7 +265,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     因 session loop idle 而永久 hang。
 
     修复：强制 E2E 测试用 session loop，与 session-scope async fixtures 共享 loop。
+
+    P3-WinE2E-Skip 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
+    skipif 用例的 skipif markers，使其在 Windows runner 上实际运行以复验 Flet 0.86.2
+    下问题是否仍存在。详见 ``tests/e2e/_windows_skip.py``.
     """
+    # P3-WinE2E-Skip 复验：--run-windows-skip 时移除 skipif markers
+    unskipped = strip_windows_skipif(config, items)
+    if unskipped > 0:
+        logger.info("[E2E] --run-windows-skip: un-skipped %d Windows skipif items", unskipped)
+
     asyncio_marker = pytest.mark.asyncio(loop_scope="session")
     e2e_root = (config.rootpath / "tests" / "e2e").resolve()
     for item in items:
