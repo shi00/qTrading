@@ -965,7 +965,7 @@ async def _trigger_sidecar_startup_via_browser(
     e2e_browser,
     embedded_url_file: Path,
     *,
-    timeout_s: float = 300.0,
+    timeout_s: float = 600.0,
 ):
     """创建临时浏览器 page 连接 Flet app，触发 main(page)，等待 sidecar 启动 + 页面初始化完成。
 
@@ -984,10 +984,22 @@ async def _trigger_sidecar_startup_via_browser(
     - 第一次 main(page) 会执行完整初始化（sidecar 启动 + DB 迁移 + 服务初始化）
     - 如果 sidecar 刚启动就播种数据，会与 main(page) 的 alembic upgrade 产生竞态
     - 等导航栏文本出现（说明初始化完成）再播种，确保单例完全就绪
+
+    timeout_s=600：PR #291 CI run 30197078577 在 300s timeout 时被取消（sidecar URL
+    6s 出现，但 main(page) 后续流程：CacheManager.init_db → alembic upgrade head →
+    TaskManager.init_db → UI 渲染在 294s 内未完成）。alembic upgrade head 首次迁移
+    需创建 15+ 张表，Windows CI runner 上磁盘 IO 慢导致超时。600s 与 pytest-timeout
+    一致，留余量。长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
     """
     logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
     context = await e2e_browser.new_context()
     page = await context.new_page()
+    # 捕获浏览器 console/error 日志，便于定位 main(page) 卡死位置
+    page.on(
+        "console",
+        lambda msg: logger.debug("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text),
+    )
+    page.on("pageerror", lambda err: logger.debug("[E2E Seeding BROWSER ERROR] %s", err))
     await _setup_canvaskit_intercept(page)
 
     try:
@@ -997,11 +1009,13 @@ async def _trigger_sidecar_startup_via_browser(
 
     deadline = time.monotonic() + timeout_s
     url_file_appeared = False
+    last_diag_log = 0.0
     while time.monotonic() < deadline:
         if not url_file_appeared and embedded_url_file.exists():
             elapsed = timeout_s - (deadline - time.monotonic())
             logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
             url_file_appeared = True
+            last_diag_log = time.monotonic()
         if not flet_app.is_alive():
             await context.close()
             raise RuntimeError(
@@ -1029,7 +1043,42 @@ async def _trigger_sidecar_startup_via_browser(
                     return context
             except Exception:
                 pass
+            # 每 30 秒输出一次页面状态诊断，便于定位 main(page) 卡死位置
+            if time.monotonic() - last_diag_log >= 30.0:
+                elapsed = timeout_s - (deadline - time.monotonic())
+                try:
+                    title = await page.title()
+                    url = page.url
+                    logger.info(
+                        "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r)",
+                        elapsed,
+                        title,
+                        url,
+                    )
+                except Exception as diag_err:
+                    logger.info(
+                        "[E2E Seeding] still waiting for page init after %.1fs (diag failed: %s)",
+                        elapsed,
+                        diag_err,
+                    )
+                last_diag_log = time.monotonic()
         await asyncio.sleep(2.0)
+    # 超时前保存截图和页面内容，便于诊断
+    try:
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(ARTIFACT_DIR / "seed-timeout.png"))
+        content = await page.content()
+        (ARTIFACT_DIR / "seed-timeout.html").write_text(content, encoding="utf-8")
+        title = await page.title()
+        logger.error(
+            "[E2E Seeding] timeout after %.1fs: title=%r, url=%r, screenshot+html saved to %s",
+            timeout_s,
+            title,
+            page.url,
+            ARTIFACT_DIR,
+        )
+    except Exception as diag_err:
+        logger.error("[E2E Seeding] timeout diag failed: %s", diag_err)
     await context.close()
     raise RuntimeError(
         f"Timeout waiting for sidecar + page init within {timeout_s}s. "
@@ -1078,7 +1127,7 @@ async def seed_e2e_data(
         if not embedded_url_file.exists():
             logger.info("[E2E Seeding] embedded_url_file not found, triggering sidecar via browser")
             keep_alive_context = await _trigger_sidecar_startup_via_browser(
-                flet_app, e2e_browser, embedded_url_file, timeout_s=300.0
+                flet_app, e2e_browser, embedded_url_file, timeout_s=600.0
             )
         else:
             logger.info("[E2E Seeding] embedded_url_file already exists, sidecar auto-started")
