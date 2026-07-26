@@ -11,6 +11,8 @@ paths = [
   '''tests/unit/.*test.*\.py''',
   '''tests/integration/.*test.*\.py''',
   '''tests/e2e/.*test.*\.py''',
+  '''tests/e2e/mock_assets/.*\.woff2$''',
+  '''tests/e2e/mock_assets/.*\.wasm$''',
   '''config/example.*\.yaml$''',
   '''config/example.*\.yml$''',
   '''config/example.*\.json$''',
