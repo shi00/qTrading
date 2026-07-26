@@ -325,8 +325,6 @@ class HealthCheckMixin:
             if end_date is None:
                 logger.warning("[DataProcessor] HealthCheck | No trade date available, using today.")
                 end_date = get_now().date()
-            from utils.time_utils import parse_date
-
             end_date_obj = parse_date(end_date)
             from utils.config_handler import ConfigHandler
 
@@ -382,9 +380,7 @@ class HealthCheckMixin:
             gold_standard_dates = official_dates
             if api_latest_official and isinstance(api_latest_official, str):
                 try:
-                    from utils.time_utils import parse_date as _pd
-
-                    api_latest_date = _pd(api_latest_official).date()
+                    api_latest_date = parse_date(api_latest_official).date()
                     local_latest_str = str(official_dates[-1]) if official_dates else ""
                     if local_latest_str and api_latest_official > local_latest_str:
                         gold_standard_dates = official_dates + [api_latest_date]
