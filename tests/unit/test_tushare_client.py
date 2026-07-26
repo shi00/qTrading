@@ -452,6 +452,63 @@ class TestPaginatedPermissionErrorPropagation:
         assert call_count[0] == 5
 
 
+class TestTushareAPIPermissionErrorSanitization:
+    """R9: TushareAPIPermissionError 构造时对 message 脱敏，避免异常对象本身泄露明文 token。
+
+    覆盖 P3-M6-TushareAPIPermissionError-Url-Leak：
+    - message 含 URL ?token=xxx → 异常对象的 message/args[0]/__str__ 三处全部脱敏
+    - message 含 standalone token=xxx → 三处全部脱敏
+    - message 不含敏感字段 → 保持原文，不误脱敏
+    - args[0] 与 __str__ 与 .message 三处输出一致脱敏
+    """
+
+    def test_init_sanitizes_url_with_token_query(self):
+        """message 含 `?token=xxx` 时，异常对象应全部脱敏。"""
+        secret = "sk-test-token-abcdef123456"
+        raw_msg = f"Permission denied: https://api.tushare.io?token={secret}"
+        e = TushareAPIPermissionError("test_api", raw_msg)
+        assert secret not in e.message, f"e.message 仍含明文 token: {e.message}"
+        assert secret not in e.args[0], f"e.args[0] 仍含明文 token: {e.args[0]}"
+        assert secret not in str(e), f"str(e) 仍含明文 token: {str(e)}"
+
+    def test_init_sanitizes_standalone_token_kv(self):
+        """message 含 `token=xxx` 形式时，异常对象应全部脱敏。"""
+        secret = "sk-test-token-abcdef123456"
+        raw_msg = f"Permission denied: token={secret}"
+        e = TushareAPIPermissionError("test_api", raw_msg)
+        assert secret not in e.message
+        assert secret not in e.args[0]
+        assert secret not in str(e)
+
+    def test_init_preserves_normal_message(self):
+        """普通文本（如中文权限提示）应保持原文，不误脱敏。"""
+        raw_msg = "积分不足，权限拒绝"
+        e = TushareAPIPermissionError("test_api", raw_msg)
+        assert e.message == raw_msg
+        assert raw_msg in str(e)
+        assert raw_msg in e.args[0]
+
+    def test_args_str_message_consistency(self):
+        """args[0] / __str__ / .message 三处输出一致脱敏（同一明文均不出现）。"""
+        secret = "sk-test-token-abcdef123456"
+        raw_msg = f"https://api.tushare.io?token={secret} failed"
+        e = TushareAPIPermissionError("test_api", raw_msg)
+        # 三处均不应含明文 secret
+        assert secret not in e.message
+        assert secret not in e.args[0]
+        assert secret not in str(e)
+        # 三处均应含脱敏标记
+        assert "***" in e.message
+        assert "***" in e.args[0]
+        assert "***" in str(e)
+
+    def test_api_name_not_sanitized(self):
+        """api_name 是非敏感字段，应保持原值（不被 DataSanitizer 触及）。"""
+        e = TushareAPIPermissionError("test_api", "积分不足")
+        assert e.api_name == "test_api"
+        assert "test_api" in str(e)
+
+
 class TestTushareClientGetTradeDates:
     def test_no_pro_returns_empty(self):
         """B11 修复：pro is None 时 get_trade_dates 降级返回 []（与 is_trading_day 契约一致）。"""

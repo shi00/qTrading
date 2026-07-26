@@ -21,11 +21,9 @@
 - ``pytest.mark.embedded_real``
 
 Windows skipif：
-- 对齐 ``test_onboarding_embedded.py`` 的 CanvasKit 渲染问题 skipif
-- 用户决策：Windows E2E 保留 skipif（推荐）
+- P3-WinE2E-Skip 复验通过 (CI run 30138544395 + 30145028141, 11/11 通过率 100%)
+- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif (详见 docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md)
 """
-
-import sys
 
 import pytest
 
@@ -36,10 +34,6 @@ from ui.i18n import I18n
 pytestmark = [pytest.mark.e2e, pytest.mark.embedded_real]
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_wizard_page) -> None:
     """E2E: 真实 sidecar embedded 模式首次启动 Onboarding 全流程。
 
@@ -77,10 +71,6 @@ async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_w
     await embedded_real_wizard_page.expect_text(token_title, timeout_ms=TIMEOUTS.WIZARD_TOKEN)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_real_wizard_forward_then_back(embedded_real_wizard_page) -> None:
     """E2E: 真实 sidecar embedded 模式导航回退 (欢迎→database step→返回欢迎)。
 
@@ -106,10 +96,6 @@ async def test_embedded_real_wizard_forward_then_back(embedded_real_wizard_page)
     await embedded_real_wizard_page.expect_text(welcome_guide)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page) -> None:
     """E2E: 真实 sidecar embedded 模式 EmbeddedStatusCard 显示完整状态 (status + info)。
 

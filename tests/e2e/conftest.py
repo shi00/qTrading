@@ -53,6 +53,7 @@ def _create_e2e_mock_keyring() -> MagicMock:
 _E2E_MOCK_KEYRING = _create_e2e_mock_keyring()
 sys.modules["keyring"] = _E2E_MOCK_KEYRING
 
+from tests.e2e._windows_skip import add_windows_skip_option, strip_windows_skipif
 from tests.e2e.helpers.app_launcher import start_flet_app
 from tests.e2e.helpers.flet_page import FletPage
 
@@ -215,13 +216,21 @@ async def e2e_browser(e2e_playwright):
             "`cp <site-packages>/flet_web/web/canvaskit/canvaskit.wasm "
             "tests/e2e/mock_assets/canvaskit/`（版本必须与 pyproject.toml 锁定的 flet 版本一致）"
         )
-    # 启动期断言字体文件本地存在（CJK 回退字体离线化依赖）
+    # 启动期断言字体缓存完整覆盖 main.dart.js 中所有需缓存字体分片
+    # CanvasKit 按需加载，缓存缺失 → route handler abort → CJK 文本节点不生成 → E2E 超时
     fonts_dir = mock_root / "fonts"
-    if not fonts_dir.exists() or not any(fonts_dir.glob("*.woff2")):
+    from tests.e2e._font_urls import find_missing_fonts
+
+    missing_fonts = find_missing_fonts(fonts_dir)
+    if missing_fonts:
+        preview = ", ".join(missing_fonts[:5])
+        # R9: 不在错误信息中泄露绝对路径（含用户名/工作区路径）
         raise RuntimeError(
-            f"字体文件未找到于 {fonts_dir}. "
-            "E2E 离线化依赖 Noto Sans SC / Roboto woff2 字体分片，"
-            "请用 diagnose_font_urls.py 捕获实际请求 URL 并下载到 tests/e2e/mock_assets/fonts/ 目录"
+            f"E2E 字体缓存不完整，缺失 {len(missing_fonts)} 个分片（前 5 个: {preview}）。"
+            "E2E 离线化要求 tests/e2e/mock_assets/fonts/ 覆盖 main.dart.js 中所有需缓存字体分片"
+            "（notosanssc + roboto + notosans）。"
+            "请在本地运行 `python scripts/sync_e2e_fonts.py` 同步字体分片，"
+            "将 tests/e2e/mock_assets/fonts/ 下新增文件提交后推送。"
         )
     browser = await e2e_playwright.chromium.launch(
         channel=BROWSER_CHANNEL, headless=os.environ.get("E2E_HEADED", "0") != "1"
@@ -249,6 +258,11 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """注册 E2E 自定义 CLI 选项."""
+    add_windows_skip_option(parser)
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """E2E 测试强制 session loop scope，避免跨 loop 访问 session fixtures。
@@ -260,7 +274,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     因 session loop idle 而永久 hang。
 
     修复：强制 E2E 测试用 session loop，与 session-scope async fixtures 共享 loop。
+
+    P3-WinE2E-Skip 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
+    skipif 用例的 skipif markers，使其在 Windows runner 上实际运行以复验 Flet 0.86.2
+    下问题是否仍存在。详见 ``tests/e2e/_windows_skip.py``.
     """
+    # P3-WinE2E-Skip 复验：--run-windows-skip 时移除 skipif markers
+    unskipped = strip_windows_skipif(config, items)
+    if unskipped > 0:
+        logger.info("[E2E] --run-windows-skip: un-skipped %d Windows skipif items", unskipped)
+
     asyncio_marker = pytest.mark.asyncio(loop_scope="session")
     e2e_root = (config.rootpath / "tests" / "e2e").resolve()
     for item in items:
@@ -355,30 +378,74 @@ async def _setup_canvaskit_intercept(page) -> None:
 
     提取为公共函数供 _make_page 和 _trigger_sidecar_startup_via_browser 复用。
 
-    [PITFALL FIX] 拦截外部资源请求，canvaskit/字体 命中本地缓存则 fulfill，
-    其余外部请求强制 abort（离线），避免 CI 网络波动导致白屏。
+    CRITICAL WORKAROUND for E2E Flakiness:
+    Flet's web app downloads canvaskit.js and canvaskit.wasm from
+    https://www.gstatic.com/flutter-canvaskit/<engineRevision>/ on startup.
+    In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
+    causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
+    To fix this, we intercept canvaskit requests and serve them from local mock_assets.
+    Other external requests (icons, rive, etc.) are aborted to force offline mode.
+    NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
+    升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
+    可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
+
+    [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
+    坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
+    Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
+    更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
+    解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
+    内部请求（Flet app 本身、data/blob URI）继续放行。
+
+    [PITFALL FIX 2] CJK 回退字体（Noto Sans SC / Roboto）必须本地化，不可依赖 CDN：
+    Flutter Web CanvasKit 运行时按需从 fonts.gstatic.com 下载 CJK 回退字体分片 (woff2)。
+    若字体请求被 abort 或网络超时，回退字体度量异常会使选股页结果表格布局高度塌陷
+    (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
+    永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
+    解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
+    未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本变化时需重新同步。
+
+    维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
+      python scripts/sync_e2e_fonts.py
+      - 输出 [OK] → 本地缓存继续有效
+      - 输出 [ERROR] 缺失 → 自动下载缺失分片，提交 tests/e2e/mock_assets/fonts/ 后推送
+    字体 URL 解析逻辑见 tests/e2e/_font_urls.py
+    与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
     """
+
+    from tests.e2e._font_urls import extract_font_filename
 
     async def intercept_external(route, request):
         url = request.url
+        # 内部请求（Flet app 本身、data/blob URI）直接放行
         if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
             await route.continue_()
             return
+        # 字体 CDN：命中本地缓存则 fulfill，未命中 abort
         if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
-            filename = url.split("/")[-1]
+            # urlparse 去除 query 参数后再取 basename，避免 `?` 后内容污染 filename
+            # extract_font_filename 内部用 PurePosixPath 防御 Windows `\` 注入 path traversal
+            filename = extract_font_filename(urlparse(url).path)
+            if filename is None:
+                await route.abort()
+                return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
             if local_path.exists():
                 await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
                 return
             await route.abort()
             return
+        # 外部资源：仅 canvaskit 命中本地缓存
         if "canvaskit" in url:
-            filename = url.split("/")[-1]
+            filename = extract_font_filename(urlparse(url).path)
+            if filename is None:
+                await route.abort()
+                return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
             if local_path.exists():
                 content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
                 await route.fulfill(status=200, content_type=content_type, path=str(local_path))
                 return
+        # 未命中本地缓存的外部请求：强制离线
         await route.abort()
 
     await page.route("**/*", intercept_external)

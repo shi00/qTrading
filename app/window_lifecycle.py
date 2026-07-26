@@ -201,12 +201,12 @@ async def perform_window_shutdown(
         # 避免对话框残留 + 进程悬挂 + shutdown_requested 被重置后重入。
         logger.warning("[Main] do_cleanup was cancelled, forcing process exit.")
         await asyncio.sleep(0.2)
-        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，_force_exit 后 os._exit 强退不会执行到 raise]
-        raise  # R2: 不吞没 CancelledError（_force_exit 被替换为非强退实现时兜底）
+        coordinator.force_exit(1)
+        raise  # R2: 不吞没 CancelledError（force_exit 被替换为非强退实现时兜底）
     except Exception as e:
         logger.error("[Main] do_cleanup raised unexpectedly: %s", e, exc_info=True)
         await asyncio.sleep(0.2)
-        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: 同上]
+        coordinator.force_exit(1)
         return False
     if cleanup_ok:
         coordinator.cancel_watchdog()
@@ -234,7 +234,7 @@ async def perform_window_shutdown(
         ],
     )
     await asyncio.sleep(0.2)
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)
     return False
 
 
@@ -247,13 +247,15 @@ async def perform_upgrade_exit(
     """Upgrade 失败后的清理并强制退出.
 
     流程：
-    1. 执行 cleanup（timeout=5s, step_timeout=1s）
+    1. 执行 cleanup（timeout_s=5.0, step_timeout_s=10.0）
     2. cleanup 失败仅记录日志
     3. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
     4. force_exit(1)
     """
-    # upgrade exit 路径：step_timeout_s=10.0 给 Step 8 一线机会（stdin.close + 快速 wait）
-    # 而非 1.0s（旧值，Step 8 必然超时）。整体 timeout_s=5.0 仍约束总时长。
+    # upgrade exit 路径：timeout_s=5.0 是整个 cleanup 链的硬上限（asyncio.wait_for 总超时）。
+    # step_timeout_s=10.0 通过 min(default_timeout, step_timeout_s) 仅对 Step 8 (embedded postgres,
+    # default=35.0s) 生效，将其单步预算从默认 5.0s 抬升到 10.0s；Step 0~7 的 default_timeout 均 ≤5.0s
+    # 不受影响。但 Step 8 实际能跑的时间仍受 5.0s 总时长钳制（剩余 = 5.0s - 前序步骤累计耗时）。
     cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=10.0)
     if not cleanup_ok:
         logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
@@ -267,7 +269,7 @@ async def perform_upgrade_exit(
             context="general",
             operation_label="Main window destroy failed during upgrade exit",
         )
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)
 
 
 async def handle_disconnect(
@@ -295,4 +297,4 @@ async def handle_disconnect(
         return
     logger.error("[Main] External disconnect cleanup incomplete, forcing process exit.")
     await asyncio.sleep(0.2)
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)

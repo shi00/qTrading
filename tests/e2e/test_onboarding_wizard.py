@@ -135,8 +135,11 @@ async def test_wizard_db_validation_failure(wizard_page):
     assert not await wizard_page.has_text(token_title)
 
 
-# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题。
-# 单层 skipif 装饰器足够（移除函数内重复 pytest.skip），非 Windows 平台 + 集成测试覆盖成功路径。
+# Tech debt: P3-WinE2E-Skip — Windows CI 环境 CanvasKit 中文字体网络加载失败致 textbox a11y 节点未渲染。
+# 复验证据：CI run 30145028141 no-sidecar matrix FAILED，fill_textbox 在 wait_for(state='attached') 阶段超时。
+# 根因分析：docs/debt/win-e2e-skip-revalidation/2026-07-25-wizard-db-validation-failure-analysis.md
+# 决策记录：docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md
+# 替代覆盖：tests/integration/test_onboarding_wizard_integration.py
 # 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 # embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
 # （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
@@ -145,7 +148,9 @@ async def test_wizard_db_validation_failure(wizard_page):
 @pytest.mark.skipif(
     sys.platform == "win32" or os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
     reason=(
-        "Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题 (P3-WinE2E-Skip); "
+        "Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败"
+        "（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在"
+        " wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip); "
         "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
         "外部 DB 配置验证流程由集成测试覆盖"
     ),

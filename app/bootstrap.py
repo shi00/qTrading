@@ -130,20 +130,21 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     if os.environ.get("E2E_TESTING") == "true":
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
+        auto_probe_task = None
     else:
         SchedulerService().start()
         await NewsSubscriptionService().start()
         await MarketDataService().start()
 
-    await _warmup_tushare_capabilities()
+        await _warmup_tushare_capabilities()
 
-    _validate_failover_credentials()
+        _validate_failover_credentials()
 
-    # Phase 2A.1 Task 2A.1.10：启动期校验策略档位覆盖（warning 不 raise）
-    _validate_strategy_tier_coverage()
+        # Phase 2A.1 Task 2A.1.10：启动期校验策略档位覆盖（warning 不 raise）
+        _validate_strategy_tier_coverage()
 
-    # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
-    auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
+        # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
+        auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
 
     return {
         "success": True,

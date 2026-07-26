@@ -125,7 +125,7 @@ class _FakeCoordinator:
         self.do_cleanup_calls += 1
         return self.cleanup_result
 
-    def _force_exit(self, code):
+    def force_exit(self, code):
         import os
 
         os._exit(code)
