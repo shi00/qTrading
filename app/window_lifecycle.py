@@ -201,12 +201,12 @@ async def perform_window_shutdown(
         # 避免对话框残留 + 进程悬挂 + shutdown_requested 被重置后重入。
         logger.warning("[Main] do_cleanup was cancelled, forcing process exit.")
         await asyncio.sleep(0.2)
-        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，_force_exit 后 os._exit 强退不会执行到 raise]
-        raise  # R2: 不吞没 CancelledError（_force_exit 被替换为非强退实现时兜底）
+        coordinator.force_exit(1)
+        raise  # R2: 不吞没 CancelledError（force_exit 被替换为非强退实现时兜底）
     except Exception as e:
         logger.error("[Main] do_cleanup raised unexpectedly: %s", e, exc_info=True)
         await asyncio.sleep(0.2)
-        coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: 同上]
+        coordinator.force_exit(1)
         return False
     if cleanup_ok:
         coordinator.cancel_watchdog()
@@ -234,7 +234,7 @@ async def perform_window_shutdown(
         ],
     )
     await asyncio.sleep(0.2)
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)
     return False
 
 
@@ -269,7 +269,7 @@ async def perform_upgrade_exit(
             context="general",
             operation_label="Main window destroy failed during upgrade exit",
         )
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)
 
 
 async def handle_disconnect(
@@ -297,4 +297,4 @@ async def handle_disconnect(
         return
     logger.error("[Main] External disconnect cleanup incomplete, forcing process exit.")
     await asyncio.sleep(0.2)
-    coordinator._force_exit(1)  # type: ignore[attr-defined]  # [reason: ShutdownCoordinator._force_exit 为实例属性 callable，main.py 原逻辑亦直接访问]
+    coordinator.force_exit(1)

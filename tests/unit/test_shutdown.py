@@ -108,6 +108,13 @@ class TestShutdownCoordinatorInit:
         coord._force_exit(0)
         assert called_with == [0]
 
+    def test_force_exit_public_method_delegates_to_callback(self):
+        """公开 force_exit 方法应委托给构造时注入的 force_exit_callback。"""
+        called_with = []
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: called_with.append(code))
+        coord.force_exit(1)
+        assert called_with == [1]
+
     def test_custom_service_stop_delay(self):
         coord = ShutdownCoordinator(service_stop_delay=2.0)
         assert coord._service_stop_delay == 2.0
