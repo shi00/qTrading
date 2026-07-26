@@ -145,12 +145,21 @@ class _FakeStdin:
 
 
 class _FakeStdout:
-    """Fake stdout for Popen mock. Returns preset line on readline."""
+    """Fake stdout for Popen mock. Returns preset line once, then EOF.
+
+    真实管道 readline() 在对端关闭后返回 ""（EOF）。
+    若永不 EOF，service.py 的 reader thread 会死循环把同一行写到
+    sidecar.stdout.log，单次测试可产生 GB 级垃圾文件（实测 6GB+）。
+    """
 
     def __init__(self, line: str = "") -> None:
         self._line = line
+        self._returned = False
 
     def readline(self) -> str:
+        if self._returned:
+            return ""  # EOF
+        self._returned = True
         return self._line
 
 
@@ -685,9 +694,12 @@ class TestEmbeddedPostgresServiceStart:
         """M9: start() 后启动 daemon 线程读 stdout 写入 sidecar.stdout.log。
 
         验证：
-        1. start() 后 sidecar.stdout.log 文件存在
-        2. 文件内容含 ready JSON 行（reader 线程读取的第一行）
-        3. ConnectionInfo 含 M4 扩展字段（postgres_version/host/sidecar_pid/password_source）
+        1. start() 后 sidecar.stdout.log 文件存在（reader 线程启动并 open 文件）
+        2. ConnectionInfo 含 M4 扩展字段（postgres_version/host/sidecar_pid/password_source）
+
+        注意：真实管道下 ready JSON 被 service.start() 主流程 readline 消费，
+        reader thread 接管后读到的是 ready 之后的 stdout 事件。
+        mock sidecar ready 后不再写 stdout，故 sidecar.stdout.log 内容为空（EOF 立即触发）。
         """
         import time
 
@@ -717,17 +729,13 @@ class TestEmbeddedPostgresServiceStart:
                 assert info.password_source == FAKE_READY["password_source"], (
                     f"password_source 字段错误，实际：{info.password_source!r}"
                 )
-                # M9 断言: 等 reader 线程写入 sidecar.stdout.log（最多 2s）
+                # M9 断言: 等 reader 线程启动并创建 sidecar.stdout.log（最多 2s）
                 stdout_log = service._log_dir / "sidecar.stdout.log"
                 for _ in range(20):
-                    if stdout_log.exists() and stdout_log.read_text(encoding="utf-8"):
+                    if stdout_log.exists():
                         break
                     time.sleep(0.1)
                 assert stdout_log.exists(), f"M9: start() 后应创建 sidecar.stdout.log，实际未存在：{stdout_log}"
-                content = stdout_log.read_text(encoding="utf-8")
-                assert json.dumps(FAKE_READY) in content, (
-                    f"M9: sidecar.stdout.log 应含 ready JSON 行，实际：{content!r}"
-                )
         finally:
             await service.stop()
 
