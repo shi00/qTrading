@@ -84,8 +84,11 @@ class TushareAPIPermissionError(Exception):
 
     def __init__(self, api_name: str, message: str):
         self.api_name = api_name
-        self.message = message
-        super().__init__(f"Permission denied for API '{api_name}': {message}")
+        # R9: Tushare 返回的权限错误 message 可能包含完整 URL（含 token=...）或裸 token。
+        # 异常对象的 args/message/__str__ 三处统一在构造时脱敏，避免任何不经 safe_error()
+        # 的日志路径（如 logger.error("...: %s", e) / repr(e) / traceback 打印）泄露明文。
+        self.message = DataSanitizer.sanitize_error(message)
+        super().__init__(f"Permission denied for API '{api_name}': {self.message}")
 
     def __str__(self) -> str:
         return f"TushareAPIPermissionError(api={self.api_name}, message={self.message})"
