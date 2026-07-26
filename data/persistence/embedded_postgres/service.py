@@ -68,6 +68,13 @@ class EmbeddedPostgresService:
 
     使用双检锁 + ``_initialized`` 守卫保证单例；``from_config(AppConfig)`` 从配置解析路径。
     测试用 ``__init__`` 注入 fake path；生产用 ``from_config``。
+
+    并发契约（P3-M4-EmbeddedPg-StartStop-Lock-Ordering 文档化）：
+    - ``_start_lock`` 与 ``cls._lock`` 锁顺序未互锁，``_start_sync`` 持 ``_start_lock`` 设置
+      ``self._process``/``self._connection_info``，``stop_sync`` 持 ``cls._lock`` 操作同字段，
+      并发交错可能返回已被 stop 的进程引用。
+    - 调用方必须保证 ``start`` 与 ``stop`` 不并发调用。当前应用层仅在启动期调用 ``start``、
+      关闭期调用 ``stop``，不构成并发场景。
     """
 
     _instance: EmbeddedPostgresService | None = None
@@ -190,6 +197,8 @@ class EmbeddedPostgresService:
 
         H7: 挂 ``@log_async_operation`` 装饰器记录耗时与异常，threshold=GLOBAL_INIT（15s）
         匹配 sidecar 首次启动 initdb 可能较慢的场景；超过阈值记 WARNING 便于诊断。
+
+        并发契约：不可与 ``stop`` 并发调用（详见类 docstring）。
         """
         import asyncio
 
@@ -205,6 +214,9 @@ class EmbeddedPostgresService:
 
         H5: 使用 _start_lock 串行化并发调用，避免双 Popen。快速路径无锁检查
         已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
+
+        并发契约：``_start_lock`` 不与 ``cls._lock`` 互锁，调用方需保证不与
+        ``stop_sync`` 并发调用（详见类 docstring）。
         """
         # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
         if self._connection_info is not None and self._process is not None and self._process.poll() is None:
@@ -556,6 +568,8 @@ class EmbeddedPostgresService:
         清理 _process / _connection_info / _stderr_file。
 
         H7: 挂 ``@log_async_operation`` 记录 stop 耗时，便于发现 sidecar 关停卡死。
+
+        并发契约：不可与 ``start`` 并发调用（详见类 docstring）。
         """
         import asyncio
 
@@ -567,6 +581,8 @@ class EmbeddedPostgresService:
         M3: 持 ``cls._lock`` 保护，避免 _reset_singleton/_atexit_cleanup 与外部 stop()
         并发执行时双线程同时操作 ``self._process`` / ``self._stderr_file``。
         ``cls._lock`` 为 RLock，_reset_singleton/_atexit_cleanup 持锁调用同线程可重入。
+
+        并发契约：不可与 ``_start_sync`` 并发调用（详见类 docstring）。
         """
         with type(self)._lock:
             if self._process is None:
