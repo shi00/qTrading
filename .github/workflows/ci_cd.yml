@@ -519,7 +519,12 @@ jobs:
           TEMP: D:\tmp
           TMP: D:\tmp
           TMPDIR: D:\tmp
-        timeout-minutes: 15
+        # Windows 单测实际运行时间：main 分支最近成功 run #1004（2026-07-25）821s（13 分 41 秒），
+        # main 分支 run #999（2026-07-25 04:48）已实际触发 15 分钟 timeout（909s，failure），
+        # PR #291 触发的 Windows 单测运行 911s（15 分 11 秒）同样触发 timeout。
+        # 原 15 分钟余量仅 79s（~9%），Windows runner 性能波动 + 测试增量易突破。
+        # 提升至 20 分钟留 ~6.5 分钟余量（~32%），长期优化见 P3-Windows-Unit-Test-Timeout-Tight。
+        timeout-minutes: 20
         shell: bash
         run: |
           mkdir -p D:/tmp
