@@ -628,7 +628,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                     "[HistoricalSync] Retry | ⚠️ Failed %s (%s): %s",
                                     date,
                                     error_info["code"],
-                                    retry_e,
+                                    safe_error(retry_e),
                                     exc_info=True,
                                 )
                             else:
@@ -636,7 +636,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                     "[HistoricalSync] Retry | ⚠️ Failed %s (%s): %s",
                                     date,
                                     error_info["code"],
-                                    retry_e,
+                                    safe_error(retry_e),
                                     exc_info=True,
                                 )
                             failed_list.append(date)

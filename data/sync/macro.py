@@ -354,6 +354,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -398,7 +400,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"Macro Monthly: {e}")
+            result.errors.append(f"Macro Monthly: {safe_error(e)}")
 
     @classmethod
     def _merge_macro_data(
@@ -618,6 +620,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -662,7 +666,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"Shibor: {e}")
+            result.errors.append(f"Shibor: {safe_error(e)}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_index_weights(self, result: typing.Any):
@@ -714,7 +718,11 @@ class MacroSyncStrategy(ISyncStrategy):
             iw_saved = 0
             for idx_code in MAJOR_INDICES:
                 if self._check_cancelled(result):
-                    break
+                    # 取消时直接 return，跳过 update_sync_status，避免部分成功被标记为 success。
+                    # 与 sibling 方法形式一致（都跳过 update_sync_status），但语义略不同：
+                    # 此处 save 已在循环内发生，sync_status.last_data_date 会暂时落后于
+                    # index_weight 表实际最新日期，由 save_index_weights 的 upsert 幂等性保证可重入。
+                    return
 
                 try:
                     df = await self.context.api.get_index_weight(
@@ -789,6 +797,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except Exception as e:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
@@ -833,4 +843,4 @@ class MacroSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"IndexWeight: {e}")
+            result.errors.append(f"IndexWeight: {safe_error(e)}")

@@ -79,12 +79,21 @@ class _BlockingStdout:
 
 
 class _FakeStdout:
-    """Fake stdout that returns preset line on readline."""
+    """Fake stdout for Popen mock. Returns preset line once, then EOF.
+
+    真实管道 readline() 在对端关闭后返回 ""（EOF）。
+    若永不 EOF，service.py 的 reader thread 会死循环把同一行写到
+    sidecar.stdout.log，单次测试可产生 GB 级垃圾文件（实测 6GB+）。
+    """
 
     def __init__(self, line: str = "") -> None:
         self._line = line
+        self._returned = False
 
     def readline(self) -> str:
+        if self._returned:
+            return ""  # EOF
+        self._returned = True
         return self._line
 
 

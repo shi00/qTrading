@@ -170,7 +170,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"SwIndustry Classify: {e}")
+            result.errors.append(f"SwIndustry Classify: {safe_error(e)}")
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -305,7 +305,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            result.errors.append(f"SwIndustry Members: {e}")
+            result.errors.append(f"SwIndustry Members: {safe_error(e)}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _record_skipped_permission(self, table_name: str) -> None:
@@ -318,6 +318,8 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 status="skipped_permission",
                 last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
             )
+        except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
