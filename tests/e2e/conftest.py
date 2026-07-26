@@ -335,11 +335,25 @@ def _spawn(
     # tushare SDK set_token() 写入 ~/tk.csv，受限环境（TRAE Sandbox）会拒绝。
     # 将 USERPROFILE 重定向到 session 临时目录，隔离 tushare 文件写入。
     e2e_home = str(tmp_path_factory.mktemp("e2e_home"))
-    proc, url = start_flet_app(
-        cfg_file,
-        {"USERPROFILE": e2e_home, **env_overrides},
-        startup_timeout_s=startup_timeout_s,
-    )
+
+    # embedded 模式下，Flet 子进程应使用 sidecar 启动的 PG URL（config.DB_URL，
+    # 由 main.py:157 设置），而非 tests/conftest.py pytest_configure 设置的
+    # DATABASE_URL（指向外置 PG localhost:5432，embedded 模式下无服务）。
+    # ConfigHandler.get_db_url() Priority 1 (DATABASE_URL env) 会覆盖 Priority 3
+    # (config.DB_URL)，导致 Flet 子进程连接错误地址，DB 初始化失败后应用挂起
+    # （PR #291 CI run 30193441926 卡死 19 分钟根因）。
+    # subprocess.Popen 在调用时复制 env 快照，临时删除 + 恢复是安全的。
+    is_embedded = env_overrides.get("QTRADING_DATABASE_MODE", "").lower() == "embedded"
+    saved_db_url = os.environ.pop("DATABASE_URL", None) if is_embedded else None
+    try:
+        proc, url = start_flet_app(
+            cfg_file,
+            {"USERPROFILE": e2e_home, **env_overrides},
+            startup_timeout_s=startup_timeout_s,
+        )
+    finally:
+        if saved_db_url is not None:
+            os.environ["DATABASE_URL"] = saved_db_url
     return proc, url, cfg_file
 
 
