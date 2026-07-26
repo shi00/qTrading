@@ -11,12 +11,10 @@
 
 关键约束:
 - 禁 xFail (DoD 11 + user_profile 强制约束)
-- Windows skipif 合规 (skipif ≠ xFail，CanvasKit 渲染问题)
 - i18n key 来自 EmbeddedStatusCardViewModel: embedded_pg_ready / embedded_pg_no_config_needed
-- Windows CanvasKit 修复受阻: 保留 skipif, 记录为 P1-14 决策 (见 reviews/pg_plan.md §22)
+- Windows skipif 已移除: P3-WinE2E-Skip 复验通过 (CI run 30138544395 + 30145028141, 11/11 通过率 100%)
+- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif (详见 docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md)
 """
-
-import sys
 
 import pytest
 
@@ -26,10 +24,6 @@ from ui.i18n import I18n
 pytestmark = pytest.mark.e2e
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page) -> None:
     """E2E: embedded 模式首次启动 Onboarding 全流程 (P3-18, DoD 11, 禁 xFail)。
 
@@ -67,10 +61,6 @@ async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page
     await embedded_wizard_page.expect_text(token_title, timeout_ms=TIMEOUTS.WIZARD_TOKEN)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_wizard_forward_then_back(embedded_wizard_page) -> None:
     """E2E: embedded 模式导航回退 (欢迎→database step→返回欢迎) (P1-8).
 
@@ -98,10 +88,6 @@ async def test_embedded_wizard_forward_then_back(embedded_wizard_page) -> None:
     await embedded_wizard_page.expect_text(welcome_guide)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染问题 (P3-WinE2E-Skip)",
-)
 async def test_embedded_db_info_message_displayed(embedded_wizard_page) -> None:
     """E2E: embedded 模式 EmbeddedStatusCard 显示完整状态 (status + info) (P1-8).
 

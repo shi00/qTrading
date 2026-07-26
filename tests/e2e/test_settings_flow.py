@@ -76,12 +76,15 @@ async def test_settings_language_switch(e2e_page):
 
 
 @pytest.mark.mutates_config
-# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright snackbar 时序 + select_dropdown 性能问题。
-# 单层 skipif 装饰器足够；非 Windows 平台 + 集成测试覆盖 log level command/state 路径。
+# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit 下 select_dropdown 暴力搜索引发 Chromium 渲染线程死锁。
+# 复验证据：CI run 30145028141 settings-slow matrix 卡死 13+ 小时后手动取消。
+# 根因分析：docs/debt/win-e2e-skip-revalidation/2026-07-25-settings-log-level-switch-hang-analysis.md
+# 决策记录：docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md
+# 替代覆盖：tests/unit/ui/views/settings_tabs/test_system_tab.py:953 起 TestDoLogLevelChange
 # 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="Windows Flet/Playwright snackbar 时序问题 + select_dropdown 性能问题导致 30+ 分钟耗时 (P3-WinE2E-Skip)",
+    reason="Windows Flet/Playwright CanvasKit 下 select_dropdown 暴力搜索引发 Chromium 渲染线程死锁（match_keys 缺少 '日志/log' 扩展分支致触发器定位失败）+ snackbar 浮层文本在 CanvasKit 下渲染机制不明致 expect_text 不命中，单次测试 30+ 分钟耗时 (P3-WinE2E-Skip)",
 )
 async def test_settings_log_level_switch(e2e_page):
     """测试：System Tab 日志级别切换 — 切换到 DEBUG 后 snackbar 提示出现。
