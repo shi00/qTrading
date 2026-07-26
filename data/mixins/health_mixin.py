@@ -32,6 +32,7 @@ from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
 from core.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
 if TYPE_CHECKING:
@@ -172,7 +173,7 @@ class HealthCheckMixin:
             except Exception as e:
                 logger.error(
                     "[DataProcessor] FastCheck | ❌ Deep DB fallback totally failed: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
 
@@ -216,7 +217,7 @@ class HealthCheckMixin:
                     except Exception as e:
                         logger.warning(
                             "[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: %s",
-                            e,
+                            DataSanitizer.sanitize_error(e),
                         )
 
             except (ValueError, TypeError):
@@ -301,7 +302,7 @@ class HealthCheckMixin:
         except Exception as e:
             logger.error(
                 "[DataProcessor] FastCheck | ❌ Critical crash during evaluate: %s",
-                e,
+                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             # If we can't even read metadata, be conservative but don't block everything
@@ -408,7 +409,7 @@ class HealthCheckMixin:
             except Exception as e:
                 logger.error(
                     "[DataProcessor] QualityScan | ❌ Concept sweep crash: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 concept_count = 0
@@ -593,12 +594,14 @@ class HealthCheckMixin:
             self._health_cache = {"time": now, "data": result_dict}
             return result_dict
         except Exception as e:
+            # R9: 用 DataSanitizer.sanitize_error 脱敏，避免异常对象泄露 DB 密码/API token
+            safe = DataSanitizer.sanitize_error(e)
             logger.error(
                 "[DataProcessor] QualityScan | ❌ Deep engine health sweep crashed: %s",
-                e,
+                safe,
                 exc_info=True,
             )
-            return {"status": "red", "msg": f"Check failed: {e!s}"}
+            return {"status": "red", "msg": f"Check failed: {safe}"}
 
     @log_async_operation(
         operation_name="run_quality_scan",
@@ -827,12 +830,14 @@ class HealthCheckMixin:
             return result
 
         except Exception as e:
+            # R9: 用 DataSanitizer.sanitize_error 脱敏，避免异常对象泄露 DB 密码/API token
+            safe = DataSanitizer.sanitize_error(e)
             logger.error(
                 "[DataProcessor] QualityScan | ❌ Batch sampling crashed: %s",
-                e,
+                safe,
                 exc_info=True,
             )
-            return {"score": 0, "tier": 0, "error": str(e)}
+            return {"score": 0, "tier": 0, "error": safe}
         finally:
             # Ensure cancel state doesn't leak into subsequent operations
             self.clear_cancel()  # type: ignore[attr-defined]
