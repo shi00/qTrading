@@ -467,6 +467,7 @@ async def _setup_canvaskit_intercept(page) -> None:
 
 async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
     app.assert_alive()
+    logger.info("[E2E Page] creating new browser context for %s", request.node.name)
 
     context = await browser.new_context(viewport={"width": 1400, "height": 900})
     await context.tracing.start(screenshots=True, snapshots=True)
@@ -481,7 +482,9 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     await _setup_canvaskit_intercept(page)
 
     try:
+        logger.info("[E2E Page] opening %s", app.url)
         await fp.open(app.url)
+        logger.info("[E2E Page] page opened successfully for %s", request.node.name)
     except Exception as exc:
         logger.warning("[E2E] fp.open(%s) failed: %s", app.url, exc)
         if not app.is_alive():
@@ -619,10 +622,13 @@ async def _seed_e2e_data(db_url: str) -> None:
     from data.persistence.db_url_override import override_db_url
 
     # Ensure tables are migrated before seeding
+    logger.info("[E2E Seeding] creating test engine")
     engine = create_test_engine(db_url, echo=False)
     try:
         with override_db_url(db_url):
+            logger.info("[E2E Seeding] running DatabaseMigrator.init_db")
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
+            logger.info("[E2E Seeding] DatabaseMigrator.init_db completed")
     except Exception as e:
         # R9: 脱敏后抛出，用 from None 显式抑制异常链，防原始异常（可能含 DB 连接串）泄漏进 junit XML
         logger.warning("[E2E] DB migration failed during seed: %s", type(e).__name__)
@@ -631,9 +637,12 @@ async def _seed_e2e_data(db_url: str) -> None:
         raise RuntimeError(f"E2E seed aborted: DB migration failed: {DataSanitizer.sanitize_error(e)}") from None
     finally:
         await engine.dispose()
+        logger.info("[E2E Seeding] engine disposed")
 
     dsn = _parse_asyncpg_dsn(db_url)
+    logger.info("[E2E Seeding] connecting asyncpg to sidecar DB")
     conn = await asyncpg.connect(dsn)
+    logger.info("[E2E Seeding] asyncpg connected, starting seed transaction")
     try:
         async with conn.transaction():
             # 清理
@@ -1065,10 +1074,14 @@ async def seed_e2e_data(
         # Flet Web 模式下 main(page) 仅在浏览器连接时才执行。
         # flet_app fixture 启动 Flet web server 后无浏览器连接，sidecar 未启动。
         # 需创建临时 page 触发 main(page)，等待 URL 文件出现。
+        logger.info("[E2E Seeding] checking embedded_url_file: %s", embedded_url_file)
         if not embedded_url_file.exists():
+            logger.info("[E2E Seeding] embedded_url_file not found, triggering sidecar via browser")
             keep_alive_context = await _trigger_sidecar_startup_via_browser(
                 flet_app, e2e_browser, embedded_url_file, timeout_s=300.0
             )
+        else:
+            logger.info("[E2E Seeding] embedded_url_file already exists, sidecar auto-started")
         if not embedded_url_file.exists():
             raise RuntimeError(
                 f"embedded_url_file not found at {embedded_url_file}; "

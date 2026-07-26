@@ -415,7 +415,8 @@ jobs:
           # 串行避免多 sidecar 并发 initdb 冲突（PGDATA 锁）+ 减少资源争用。
           # 原 PostgreSQL 连接争用问题不再适用（embedded 模式无共享外置 DB），
           # 但串行仍是最稳定的执行方式（sidecar 启动 + PG 17 initdb 资源密集）。
-          python -m pytest tests/e2e/ -n 1 -v --tb=long --junitxml=junit-e2e.xml
+          python -m pytest tests/e2e/ -n 1 -v --tb=long --junitxml=junit-e2e.xml \
+            --timeout=600 --timeout-method=thread
 
       - name: Sanitize E2E artifacts
         if: always()
