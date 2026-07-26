@@ -275,7 +275,11 @@ jobs:
     name: E2E Tests (Windows)
     needs: lint-fast
     runs-on: windows-latest
-    timeout-minutes: 45
+    # E2E Tests embedded 模式实际运行时间：PR #291 改用 embedded 模式后，
+    # sidecar 构建 + PG 17 initdb + 44 个 E2E 测试总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消）。
+    # 外置 PostgreSQL 模式（main 分支）总时长 31 分钟（run 30151665758），embedded 模式更慢。
+    # 提升至 60 分钟留余量，长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
+    timeout-minutes: 60
     permissions:
       contents: read
 
