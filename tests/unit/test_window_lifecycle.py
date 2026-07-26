@@ -126,7 +126,7 @@ class _FakeCoordinator:
             raise self._cleanup_exc
         return self._cleanup_ok
 
-    def _force_exit(self, code: int) -> None:
+    def force_exit(self, code: int) -> None:
         self.force_exit_codes.append(code)
 
 

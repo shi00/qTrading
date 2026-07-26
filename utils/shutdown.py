@@ -99,6 +99,13 @@ class ShutdownCoordinator:
         except SystemExit:
             os._exit(code)
 
+    def force_exit(self, code: int) -> None:
+        """公开入口：委托给构造时注入的 ``force_exit_callback`` 或默认实现。
+
+        供 ``app/`` 层调用，避免跨模块访问 ``_force_exit`` 私有属性。
+        """
+        self._force_exit(code)
+
     @property
     def cleanup_done(self) -> bool:
         return self._cleanup_done
