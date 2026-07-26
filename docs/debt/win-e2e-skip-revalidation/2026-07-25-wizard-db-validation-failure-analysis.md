@@ -3,8 +3,10 @@
 > **归档时间**：2026-07-25
 > **分析对象**：`tests/e2e/test_onboarding_wizard.py::test_wizard_db_validation_success`
 > **触发场景**：P3-WinE2E-Skip 复验（`--run-windows-skip` 临时取消 skipif markers）
-> **CI run**：30138544395（commit af98983，no-sidecar matrix group）
-> **失败模式**：3 秒内失败（fixture setup 阶段）
+> **CI run**：30138544395（commit af98983，no-sidecar matrix group，no-sidecar 被 cancelled） + 30145028141（commit 6163095，no-sidecar matrix group FAILED）
+> **失败模式**：2 秒内失败（fill_textbox 阶段，非 fixture setup 阶段）
+>
+> **2026-07-25 更新**：基于 CI run 30145028141 实际日志证据，纠正原 B1 推测的根因 1（wizard_app fixture setup 失败）。实际根因为根因 5 变体（CanvasKit 字体网络加载失败致 textbox a11y 节点未渲染）。
 
 ## 1. 用例代码逻辑
 
@@ -81,44 +83,67 @@ def wizard_app(tmp_path_factory):
    - `_STARTUP_ERROR_PATTERNS`：`[Bootstrap] Database initialization failed` / `db_init_failed` / `Connection error getting revision` / `connection was closed in the middle of operation`
    - 任一错误模式命中 → `RuntimeError` → `proc.terminate()` → 异常上抛 → fixture setup 失败
 
-## 3. 失败根因清单（按可能性排序）
+## 3. 失败根因清单（基于 CI run 30145028141 实际日志证据）
 
-### 根因 1（最高可能）：wizard_app session fixture 启动失败 → 用例 setup 阶段失败
+### 根因 1（已确认，最高可能）：CanvasKit 中文字体网络加载失败 → textbox a11y 节点未渲染到 DOM
 
-**证据链**：
-- "3 秒内失败"是典型的 fixture setup 失败特征（非用例 call 阶段超时）
-- `start_flet_app` 启动期 `_check_startup_errors` 在 HTTP 200 后扫描日志 8 秒窗口，一旦命中 `db_init_failed` 立即 raise
-- session 级 fixture 失败会让所有依赖用例 setup 失败
+**CI 日志证据链**（CI run 30145028141，no-sidecar matrix group）：
 
-**可能触发场景**：
-- CI 环境 `DATABASE_URL` 或 `E2E_DATABASE_URL` 设置但 Postgres 不可达
-- `DatabaseMigrator.init_db` 失败（连接被拒绝、迁移失败）
-- `DB_PASSWORD` 环境变量与 `TEST_DATABASE_URL` 中解析的密码不一致
-- `_E2E_DB_PASSWORD` 经 `unquote_plus` 解码后与 CI 实际密码不匹配
+1. **失败位置**：`tests/e2e/test_onboarding_wizard.py:151` 调用 `await wizard_page.fill_textbox(I18n.get("db_host"), db["host"])` 在 label="主机" 时失败
+2. **失败异常**：`playwright._impl._errors.TimeoutError: Locator.wait_for: Timeout 3000ms exceeded.`
+3. **失败 selector**：`[aria-label*="主机"] >> nth=0`（fallback 路径，state="attached"）
+4. **主路径失败原因**：`loc_combined.wait_for(state="visible", timeout=8000)` 超时（textbox 不可见）
+5. **浏览器控制台错误（关键证据）**：
+   ```
+   [BROWSER CONSOLE] warning: Flutter Web engine failed to complete HTTP request to fetch
+   "https://fonts.gstatic.com/s/notosanssc/v37/k3kCo84MPvpLmixcA63oeAL7Iqp5IZJF9bmaG9_FnYkldv7JjxkkgFsFSSOPMOkySAZ73y9ViAt3acb8NexQ2w.110.woff2":
+   TypeError: Failed to fetch
+   [BROWSER CONSOLE] error: Failed to load resource: net::ERR_FAILED
+   ```
+   日志中重复出现 30+ 次相同错误（多个 woff2 字体文件均加载失败）。
 
-### 根因 2（中等可能）：复验 CI 基础设施缺失
+**机制**：
+- Windows CI runner（windows-latest）网络环境无法访问 `fonts.gstatic.com`
+- CanvasKit 渲染中文字体（NotoSansSC）依赖网络下载 woff2 字体文件
+- 字体加载失败 → CanvasKit 无法渲染 textbox 文本 → a11y 语义树不生成对应节点
+- `[aria-label*="主机"]` selector 找不到任何 DOM 节点 → `wait_for(state="attached")` 超时
 
-- `tests/e2e/mock_assets/canvaskit/canvaskit.wasm` 缺失（启动期断言）
-- `tests/e2e/mock_assets/fonts/*.woff2` 缺失（启动期断言）
-- 真实 Postgres 服务不可达
+**关键反证（证明非 fixture setup 失败）**：
+- 同一 CI run 中 3 个 fake-sidecar 用例 PASSED（不依赖 fill_textbox）
+- 同一 CI run 中 real-sidecar matrix group 3 用例全部 PASSED（同样不依赖 fill_textbox）
+- wizard_app fixture 启动成功（否则所有依赖用例都会 setup 失败，但实际只有此 1 用例失败）
+- 失败发生在用例 call 阶段（`fill_textbox` 调用），非 fixture setup 阶段
 
-### 根因 3（中等可能）：`_parse_db_url` 解析失败但表现为 skip
+### 根因 2（已排除）：wizard_app session fixture 启动失败
 
-- 正则 `postgresql\+asyncpg://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)` 严格匹配
-- 不匹配会 `pytest.skip(...)`（CI 显示 skipped，不算 failed）
-- 若 CI 显示是 "skipped" 而非 "failed"，则此根因成立
+**原 B1 推测**：fixture setup 阶段 3 秒内失败
 
-### 根因 4（较低可能）：Flet 子进程启动后立即崩溃
+**实际证据反驳**：
+- CI 日志显示失败堆栈在 `tests/e2e/test_onboarding_wizard.py:151`（用例代码内），非 conftest.py fixture setup
+- 同一 wizard_app fixture 也用于其他 wizard 测试（如 test_wizard_db_validation_failure），后者未失败
+- session fixture 启动失败会让所有依赖用例 setup 失败，但实际只有此 1 用例失败
 
-- Windows 环境下 `subprocess.Popen` 可能因路径分隔符、编码、权限等问题崩溃
+### 根因 3（已排除）：复验 CI 基础设施缺失
 
-### 根因 5（低可能）：CanvasKit textbox 渲染问题
+**原 B1 推测**：mock_assets 缺失 / Postgres 不可达
 
-**判定**：与"3 秒内失败"严重不符，textbox 渲染问题会表现为 `fill_textbox` 超时（30s+），**几乎可以排除**。
+**实际证据反驳**：
+- 同一 CI run 中 6 个 onboarding 用例（fake + real sidecar）PASSED，证明 CI 基础设施完整
+- Postgres 服务正常启动（CI step 14 "Start PostgreSQL Service (Windows)" success）
 
-### 根因 6（低可能）：向导状态隔离问题
+### 根因 4（已排除）：`_parse_db_url` 解析失败
 
-**判定**：状态隔离问题会让下游测试找不到按钮，表现为 `expect_text` 或 `click_button` 超时（30s+），与"3 秒失败"不符，**可排除**。
+**原 B1 推测**：正则不匹配触发 pytest.skip
+
+**实际证据反驳**：CI 显示 FAILED（非 SKIPPED），证明 `_parse_db_url` 解析成功
+
+### 根因 5（已排除）：Flet 子进程崩溃
+
+**实际证据反驳**：CI 日志显示 Flet 子进程正常响应 HTTP 200（`wait_until_ready` 通过），后续用例 call 阶段才失败
+
+### 根因 6（已排除）：向导状态隔离问题
+
+**实际证据反驳**：失败发生在第一个 `fill_textbox` 调用（主机字段），非状态污染导致的下游按钮找不到
 
 ## 4. skipif reason 更新判定
 
@@ -128,37 +153,31 @@ def wizard_app(tmp_path_factory):
 ### 判定：**需要更新**
 
 **理由**：
-1. 与实际失败模式不符（实际 3 秒内失败 vs reason 声称的 textbox 渲染超时）
-2. 上游调研确认 Flet 0.86.2 engineRevision 未变，CanvasKit 行为预期与 0.86.0 相同
-3. 技术债表已更新但 skipif reason 未同步
+1. 原部分正确：CanvasKit textbox 渲染问题确实存在，但触发机制是**字体网络加载失败**，非 Flet 本身渲染问题
+2. 原部分错误：向导状态隔离问题已排除（失败发生在第一个 fill_textbox 调用，非状态污染）
+3. 上游调研确认 Flet 0.86.2 engineRevision 未变，CanvasKit 行为预期与 0.86.0 相同
+4. 技术债表已更新但 skipif reason 未同步
 
 ### 建议新 reason 文本
 
 ```python
-reason="Windows E2E 复验失败：实际失败模式为 fixture setup 阶段 3s 内失败（疑似 wizard_app 启动失败或环境变量缺失），非原登记的 CanvasKit textbox 渲染问题。详见 docs/debt/win-e2e-skip-revalidation/ 复验归档 (P3-WinE2E-Skip)"
+reason="Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)"
 ```
 
-## 5. 诊断步骤
+## 5. 诊断步骤（已完成）
 
-1. **查看 CI run 的 setup 阶段日志**：
-   - 检查失败堆栈是否在 `start_flet_app` / `wait_until_ready` / `_check_startup_errors`
-   - 检查 `logs/e2e-flet-app.log` 中是否含 `db_init_failed` / `[Bootstrap] Database initialization failed`
-2. **检查 CI 环境变量**：
-   - `DATABASE_URL` / `E2E_DATABASE_URL` 是否设置
-   - `DB_PASSWORD` 是否与 URL 中解析的密码一致
-   - `CI_PG_PASSWORD` secret 是否正确注入
-3. **检查 Postgres 可达性**：
-   - CI job 是否有 Postgres service container
-   - Windows runner 上 Postgres 端口是否可达
-4. **检查 mock_assets**：
-   - `tests/e2e/mock_assets/canvaskit/canvaskit.wasm` 是否在 worktree 中存在
-   - `tests/e2e/mock_assets/fonts/*.woff2` 是否存在
+1. **查看 CI run 的失败阶段日志**：✅ 失败堆栈在 `tests/e2e/test_onboarding_wizard.py:151`（用例 call 阶段，非 fixture setup）
+2. **检查 CI 环境变量**：✅ `DATABASE_URL` 设置正确，`_parse_db_url` 解析成功（FAILED 非 SKIPPED）
+3. **检查 Postgres 可达性**：✅ Postgres 服务正常启动，6 个 onboarding 用例 PASSED 证明 DB 可达
+4. **检查浏览器控制台错误**：✅ 关键证据 - 30+ 次 NotoSansSC woff2 字体加载失败（`net::ERR_FAILED`）
+5. **反证 fixture setup 失败**：✅ wizard_app fixture 启动成功（其他依赖用例未失败）
 
 ## 6. 核心结论
 
-1. **skipif reason 与实际失败模式严重不符**：reason 说"CanvasKit textbox 渲染 + 向导状态隔离问题"，但实际失败模式（3 秒内失败）更符合 fixture setup 阶段失败
-2. **最可能根因**：`wizard_app` session fixture 启动失败（DB 不可达、环境变量缺失、PostgreSQL 服务问题）
-3. **建议**：先诊断 CI 失败堆栈确定根因，再决定是更新 reason 文本还是修复环境/代码
+1. **根因确认**：Windows CI 环境下 CanvasKit 中文字体（NotoSansSC）从 `fonts.gstatic.com` 网络加载失败（`net::ERR_FAILED`），textbox a11y 节点未渲染到 DOM，`fill_textbox` 在 `wait_for(state="attached")` 阶段超时
+2. **原 B1 推测修正**：原推测"fixture setup 阶段失败"错误；实际为"用例 call 阶段 fill_textbox 失败"
+3. **skipif reason 更新**：从"CanvasKit textbox 渲染 + 向导状态隔离问题"更精确为"CanvasKit 中文字体网络加载失败致 textbox a11y 节点未渲染"
+4. **修复方向（不在本 Phase 范围内）**：预下载 NotoSansSC woff2 字体到本地 `tests/e2e/mock_assets/fonts/`，配置 CanvasKit 离线字体加载（需修改 `tests/e2e/conftest.py` 启动配置）
 
 ## 7. 关键文件路径
 

@@ -86,6 +86,20 @@ class TestStripWindowsSkipif:
         assert result == 0
         assert len(items[0].own_markers) == 1
 
+    def test_removes_multiple_skipif_markers_on_same_item(self) -> None:
+        """With --run-windows-skip, all skipif markers on same item are removed (counted once)."""
+        config = _mock_config(run_windows_skip=True)
+        # 同一 item 上 2 个 skipif markers（模拟 win32 + py_version 双条件）
+        item = _MockItem(["skipif", "skipif", "e2e"])
+
+        result = strip_windows_skipif(config, [item])
+
+        # 返回值按 item 计数（非按 marker 计数）：1 个 item 被 un-skip
+        assert result == 1
+        # 所有 skipif markers 被移除，仅保留 e2e
+        assert len(item.own_markers) == 1
+        assert item.own_markers[0].name == "e2e"
+
     def test_simulate_8_win_e2e_skip_cases(self) -> None:
         """Simulate the 8 P3-WinE2E-Skip use cases: all have skipif, all un-skipped."""
         config = _mock_config(run_windows_skip=True)

@@ -45,6 +45,8 @@ def strip_windows_skipif(config: pytest.Config, items: list[pytest.Item]) -> int
         移除所有 skipif markers 而非仅 ``sys.platform == "win32"`` 条件的.
         这是安全决策：``--run-windows-skip`` 仅在 ``windows-skip-revalidation`` CI job
         中使用，该 job 仅运行 8 个 P3-WinE2E-Skip 用例文件，无其他 skipif markers.
+        未来扩展 test_targets 时需确保所有被收集的用例都应被 un-skip，避免误 un-skip
+        其他 skipif 用例（如 Python 版本 skipif / 依赖缺失 skipif）.
     """
     if not config.getoption("--run-windows-skip", default=False):
         return 0
