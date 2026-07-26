@@ -746,7 +746,7 @@ class TestE2ETestingShortCircuit:
 
     @pytest.mark.asyncio
     async def test_e2e_testing_skips_schedulers(self):
-        """E2E_TESTING=true → 不启动后台调度/数据轮询服务。"""
+        """E2E_TESTING=true → 不启动后台调度/数据轮询服务 + warmup/validate/auto_probe 均跳过。"""
         cm = MagicMock()
         cm.init_db = AsyncMock()
         cm.engine = MagicMock()
@@ -757,21 +757,26 @@ class TestE2ETestingShortCircuit:
             patch("app.bootstrap.SchedulerService") as mock_ss,
             patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
             patch("app.bootstrap.MarketDataService") as mock_mds,
-            patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
-            patch("app.bootstrap._validate_failover_credentials"),
-            patch("app.bootstrap._validate_strategy_tier_coverage"),
-            patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
+            patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock) as mock_warmup,
+            patch("app.bootstrap._validate_failover_credentials") as mock_validate_failover,
+            patch("app.bootstrap._validate_strategy_tier_coverage") as mock_validate_tier,
+            patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock) as mock_auto_probe,
         ):
             mock_tm.return_value.init_db = AsyncMock()
             result = await initialize_services(cm)
         assert result["success"] is True
+        assert result["auto_probe_task"] is None
         mock_ss.assert_not_called()
         mock_ns.assert_not_called()
         mock_mds.assert_not_called()
+        mock_warmup.assert_not_awaited()
+        mock_validate_failover.assert_not_called()
+        mock_validate_tier.assert_not_called()
+        mock_auto_probe.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_e2e_starts_schedulers(self):
-        """非 E2E 模式 → 正常启动 SchedulerService/NewsSubscriptionService/MarketDataService。"""
+        """非 E2E 模式 → 正常启动 SchedulerService/NewsSubscriptionService/MarketDataService + warmup/validate/auto_probe 均执行。"""
         import os
 
         cm = MagicMock()
@@ -785,9 +790,9 @@ class TestE2ETestingShortCircuit:
                 patch("app.bootstrap.SchedulerService") as mock_ss,
                 patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
                 patch("app.bootstrap.MarketDataService") as mock_mds,
-                patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
-                patch("app.bootstrap._validate_failover_credentials"),
-                patch("app.bootstrap._validate_strategy_tier_coverage"),
+                patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock) as mock_warmup,
+                patch("app.bootstrap._validate_failover_credentials") as mock_validate_failover,
+                patch("app.bootstrap._validate_strategy_tier_coverage") as mock_validate_tier,
                 patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
             ):
                 mock_tm.return_value.init_db = AsyncMock()
@@ -798,9 +803,16 @@ class TestE2ETestingShortCircuit:
             if saved is not None:
                 os.environ["E2E_TESTING"] = saved
         assert result["success"] is True
+        assert result["auto_probe_task"] is not None
         mock_ss.return_value.start.assert_called_once()
         mock_ns.return_value.start.assert_awaited_once()
         mock_mds.return_value.start.assert_awaited_once()
+        mock_warmup.assert_awaited_once()
+        mock_validate_failover.assert_called_once()  # noqa: weak-assertion sync validator takes no params, call count is the only verifiable signal
+        mock_validate_tier.assert_called_once()  # noqa: weak-assertion sync validator takes no params, call count is the only verifiable signal
+        # _maybe_auto_probe_on_startup 由 asyncio.create_task 调度（fire-and-forget），
+        # initialize_services 返回时 task 可能尚未 await，故仅断言被调度（auto_probe_task is not None），
+        # 不强制断言 await 计数。
 
 
 class TestMaskSensitiveEdgeCases:
