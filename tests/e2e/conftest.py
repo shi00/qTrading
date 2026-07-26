@@ -215,13 +215,21 @@ async def e2e_browser(e2e_playwright):
             "`cp <site-packages>/flet_web/web/canvaskit/canvaskit.wasm "
             "tests/e2e/mock_assets/canvaskit/`（版本必须与 pyproject.toml 锁定的 flet 版本一致）"
         )
-    # 启动期断言字体文件本地存在（CJK 回退字体离线化依赖）
+    # 启动期断言字体缓存完整覆盖 main.dart.js 中所有需缓存字体分片
+    # CanvasKit 按需加载，缓存缺失 → route handler abort → CJK 文本节点不生成 → E2E 超时
     fonts_dir = mock_root / "fonts"
-    if not fonts_dir.exists() or not any(fonts_dir.glob("*.woff2")):
+    from tests.e2e._font_urls import find_missing_fonts
+
+    missing_fonts = find_missing_fonts(fonts_dir)
+    if missing_fonts:
+        preview = ", ".join(missing_fonts[:5])
+        # R9: 不在错误信息中泄露绝对路径（含用户名/工作区路径）
         raise RuntimeError(
-            f"字体文件未找到于 {fonts_dir}. "
-            "E2E 离线化依赖 Noto Sans SC / Roboto woff2 字体分片，"
-            "请用 diagnose_font_urls.py 捕获实际请求 URL 并下载到 tests/e2e/mock_assets/fonts/ 目录"
+            f"E2E 字体缓存不完整，缺失 {len(missing_fonts)} 个分片（前 5 个: {preview}）。"
+            "E2E 离线化要求 tests/e2e/mock_assets/fonts/ 覆盖 main.dart.js 中所有需缓存字体分片"
+            "（notosanssc + roboto + notosans）。"
+            "请在本地运行 `python scripts/sync_e2e_fonts.py` 同步字体分片，"
+            "将 tests/e2e/mock_assets/fonts/ 下新增文件提交后推送。"
         )
     browser = await e2e_playwright.chromium.launch(
         channel=BROWSER_CHANNEL, headless=os.environ.get("E2E_HEADED", "0") != "1"
@@ -399,16 +407,16 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
     # 永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
     # 解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
-    # 未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本或测试内容变化时需用
-    # diagnose_font_urls.py 重新捕获并更新本地缓存。
+    # 未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本变化时需重新同步。
     #
     # 维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
-    #   PowerShell:
-    #     Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
-    #       -Pattern "notosanssc/v\d+/" -AllMatches |
-    #       ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
-    #   - 输出 notosanssc/v37/ → 本地缓存继续有效
-    #   - 输出其他版本号 → URL 变了，重跑 diagnose_font_urls.py 捕获新 URL 并下载替换
+    #   python scripts/sync_e2e_fonts.py
+    #   - 输出 [OK] → 本地缓存继续有效
+    #   - 输出 [ERROR] 缺失 → 自动下载缺失分片，提交 tests/e2e/mock_assets/fonts/ 后推送
+    # 字体 URL 解析逻辑见 tests/e2e/_font_urls.py
+    # 与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
+    from tests.e2e._font_urls import extract_font_filename
+
     async def intercept_external(route, request):
         url = request.url
         # 内部请求（Flet app 本身、data/blob URI）直接放行
@@ -417,7 +425,12 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             return
         # 字体 CDN：命中本地缓存则 fulfill，未命中 abort
         if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
-            filename = url.split("/")[-1]
+            # urlparse 去除 query 参数后再取 basename，避免 `?` 后内容污染 filename
+            # extract_font_filename 内部用 PurePosixPath 防御 Windows `\` 注入 path traversal
+            filename = extract_font_filename(urlparse(url).path)
+            if filename is None:
+                await route.abort()
+                return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
             if local_path.exists():
                 await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
@@ -426,7 +439,10 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             return
         # 外部资源：仅 canvaskit 命中本地缓存
         if "canvaskit" in url:
-            filename = url.split("/")[-1]
+            filename = extract_font_filename(urlparse(url).path)
+            if filename is None:
+                await route.abort()
+                return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
             if local_path.exists():
                 content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"

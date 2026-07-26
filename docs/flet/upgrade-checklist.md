@@ -30,37 +30,47 @@ python scripts/check_docs_consistency.py
 
 ## 3. E2E 离线资源检查
 
-Flet 升级时 `flet_web/web/main.dart.js` 中硬编码的字体 URL 可能随之变化，需验证 `tests/e2e/mock_assets/fonts/` 本地缓存是否继续有效。未验证会导致 E2E 测试确定性失败（字体分片不匹配 → 表格布局塌陷 → 行语义节点缺失 → 断言超时）。
+Flet 升级时 `flet_web/web/main.dart.js` 中硬编码的字体 URL 可能随之变化，需验证 `tests/e2e/mock_assets/fonts/` 本地缓存是否继续有效。未验证会导致 E2E 测试确定性失败（字体分片不匹配 → CJK 文本节点不生成 → Playwright 等待中文文本超时 → 整批 E2E 失败）。
 
-### 3.1 字体 URL 版本验证
+**背景**：`main.dart.js` 中硬编码了所有 Noto Sans 变体的字体注册（`A.m("FontName", "relpath")`），其中 `notosanssc` 有 ~100 个分片（按当前 flet 版本统计，跨版本可能变化，按 Unicode 范围切分），CanvasKit 按需加载应用实际渲染字符对应的分片。应用 locale=zh 只触发 `notosanssc`，但不同 UI 路径渲染不同字符 → 触发不同分片子集 → 缓存不完整时 CI 偶发失败。
 
-```powershell
-# <site-packages> 替换为实际 Python 环境 site-packages 路径
-Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
-  -Pattern "notosanssc/v\d+/" -AllMatches |
-  ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
-```
-
-判定：
-- 输出 `notosanssc/v37/` → 本地缓存继续有效，无需重下
-- 输出其他版本号 → URL 变了，按 3.2 重新捕获并下载
-
-### 3.2 字体分片重新下载（仅 URL 变化时执行）
+### 3.1 字体缓存完整性验证（一键命令）
 
 ```bash
-# 1. 捕获实际请求的字体 URL（PowerShell；从 flet_web 包内 main.dart.js 提取）
-Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
-  -Pattern "notosanssc/v\d+/" -AllMatches |
-  ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
+# 从项目根目录运行（需在 venv 中，且 flet_web 已安装）
+python scripts/sync_e2e_fonts.py
 
-# 2. 按捕获的 URL 下载 woff2 分片到 tests/e2e/mock_assets/fonts/
-#    （Noto Sans SC 通常 7 个分片 + Roboto 1 个，约 278KB）
-
-# 3. 重新验证 E2E 表格依赖测试
-python -m pytest tests/e2e/test_screener_flow.py -v -n 1 --timeout=180
+# 强制重新下载所有字体分片（即使本地已存在），用于：
+#   - 怀疑本地缓存文件损坏（如 git LFS/CRLF 误处理、磁盘错误）
+#   - main.dart.js 中字体 hash 变化但旧文件名巧合相同（极罕见）
+python scripts/sync_e2e_fonts.py --force
 ```
 
-### 3.3 CanvasKit 版本验证
+脚本行为：
+1. 定位 `flet_web/web/main.dart.js`（自动搜索 venv site-packages 与 user site-packages）
+2. 解析其中所有 `notosanssc` + `roboto` + `notosans` 字体分片相对路径
+3. 批量下载缺失分片到 `tests/e2e/mock_assets/fonts/`（幂等：已存在跳过，`--force` 例外）
+4. 原子写入：通过临时文件 + `os.replace` 保证 dest 不会半写入
+5. 校验完整性：本地缓存文件名集合必须覆盖解析的全部 URL
+
+判定：
+- 输出 `[OK] 字体缓存完整` → 缓存有效，无需额外操作
+- 输出 `[ERROR] 仍有 N 个字体分片缺失` → 网络问题导致部分下载失败，重试脚本
+- 脚本异常报 `flet_web 包未安装` → 先运行任意 E2E 用例触发 flet 自动安装，或手动 `pip install flet-web==<flet-version>`
+
+### 3.2 启动期断言（自动生效）
+
+`tests/e2e/conftest.py` 的 `e2e_browser` fixture 在 session 启动时自动调用 `tests/e2e/_font_urls.py::find_missing_fonts()` 校验缓存完整性。若缺失任何分片，fixture fail-fast 并提示运行 `sync_e2e_fonts.py`，避免 E2E 测试因字体未命中而偶发超时。
+
+### 3.3 何时需要重新同步字体
+
+- **flet 主版本/次版本升级**（如 0.86.x → 0.87.x）：`main.dart.js` 中字体 URL hash 或版本号可能变化 → 必须重新运行 `sync_e2e_fonts.py`
+- **flet patch 版本升级**（如 0.86.x → 0.86.x+1）：通常 `main.dart.js` 不变，但建议运行脚本验证（幂等，已存在文件跳过）
+- **应用新增 locale 支持**（如增加日文/韩文）：需在 `tests/e2e/_font_urls.py::REQUIRED_FONT_FAMILIES` 中补充对应字体族（如 `notosansjp`），再运行 `python scripts/sync_e2e_fonts.py` 同步新字体分片，将 `tests/e2e/mock_assets/fonts/` 下新增文件提交后推送
+
+> 注意：sync 脚本必须在 E2E 运行的同一 venv 中执行，确保解析到的 `flet_web` 与 E2E 实际使用的版本一致。
+
+### 3.4 CanvasKit 版本验证
 
 > 背景：Flet web app 启动时从 `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/` 加载 `canvaskit.js` 与 `canvaskit.wasm`。E2E 测试通过 [tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 拦截该请求并从 `tests/e2e/mock_assets/canvaskit/` 提供本地文件。canvaskit 版本由 Flutter `engineRevision` 决定（见 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig`），与 Flet Python 层版本无直接关系——同 minor 版本的不同 patch 可能共用相同 engineRevision（如 0.86.0 与 0.86.1），跨 minor 版本通常不同（如 0.85.3 → 0.86.0）。
 
