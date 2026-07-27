@@ -158,7 +158,7 @@ kiwisolver==1.5.0
     # via matplotlib
 korean-lunar-calendar==0.4.0
     # via exchange-calendars
-litellm==1.92.0
+litellm==1.93.0
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.34
     # via astockscreener (pyproject.toml)

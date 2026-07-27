@@ -41,7 +41,7 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "alembic>=1.18.5",
     "sqlparse>=0.5.5",
-    "litellm>=1.91.0",  # Upgrade to latest stable; aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
+    "litellm>=1.93.0",  # Upgrade to 1.93.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
     "llama-cpp-python>=0.3.33",
     "mplfinance>=0.12.10b0",
     "matplotlib>=3.11.0",
