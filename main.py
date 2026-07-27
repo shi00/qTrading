@@ -281,5 +281,11 @@ if __name__ == "__main__":  # pragma: no cover
     assets = os.path.join(os.path.dirname(__file__), "assets")
     run_kwargs = {"main": main, "assets_dir": assets}
     if os.environ.get("E2E_TESTING") == "true":
+        # E2E 环境强制 CANVAS_KIT 渲染器 + no_cdn：
+        # - CANVAS_KIT 避免 SKWASM（需要 crossOriginIsolated）在 Playwright 中不可用
+        # - no_cdn=True 让 Flet 从本地同源服务器提供 canvaskit 资源，
+        #   避免 import() 跨域 CDN 请求被 Playwright route.fulfill 拦截后
+        #   缺少 CORS 头导致 Flutter 引擎初始化卡死（canvases=0）
         run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
+        run_kwargs["no_cdn"] = True
     ft.run(**run_kwargs)
