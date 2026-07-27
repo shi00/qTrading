@@ -45,6 +45,30 @@
 
 ## 历史核验记录
 
+### Flet 0.86 升级核验 @ 0.86 最新补丁 (2026-07-27)
+
+- **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
+- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **核验来源**:
+  - 官方文档: https://github.com/flet-dev/flet/releases + PyPI JSON API（2026-07-26 发布最新补丁）
+  - Flet issue / PR: #6709/#6710 (MatplotlibChart 切 tab 冻结修复，本项目未用 MatplotlibChart 故不相关)
+  - 项目运行期验证: engineRevision 比对（前一补丁→最新补丁均为 `a10d8ac38de835021c8d2f920dbf50a920ccc030`，未变化）；`python scripts/sync_e2e_fonts.py` 输出 `[OK] 字体缓存完整`（103 字体，0 失败）；flet-mcp（与主包同步锁定版本）`get_api` 查询 `CandlestickChart`/`AlertDialog`/`use_dialog` 均返回完整 API
+  - 项目单元测试:
+    - tests/unit/ui/test_flet_0_86_v1_api_compat.py (42 tests passed in 20.25s)
+    - tests/unit/ui/test_flet_0_86_private_api_compat.py
+    - tests/unit/ui/test_flet_0_86_charts_compat.py
+- **项目结论**: 继续使用
+  - 理由: 0.86 系列内 patch 升级（无 breaking change，Flutter 引擎 3.44.7 未变，engineRevision 未变化），CanvasKit/字体资源无需更新；三套兼容性测试 42 项全部通过；flet-mcp 与主包同步发布，API 覆盖度验证通过；6 个 bug fix 中仅模态同帧关闭修复（#6 "setState() called during build"）与项目 AlertDialog+use_dialog 路径理论相关，E2E 冒烟待 CI 验证；ruff/pyright 0 errors
+- **需更新文件**:
+  - [x] pyproject.toml (四包版本号同步升级至 0.86 系列最新补丁: flet/flet-desktop/flet-charts/flet-mcp)
+  - [x] requirements.txt / requirements-optional.txt / requirements-dev.txt (uv pip compile 重新生成)
+  - [x] .github/workflows/ci_cd.yml (flet-web 同步升级至 0.86 系列最新补丁, 3 处)
+  - [x] README.md (徽章同步更新)
+  - [x] docs/flet/project-differences.md (最后验证日期 2026-07-23→2026-07-27)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/debt/known-technical-debt.md (engineRevision 未变，CanvasKit 行为预期不变，无需追加复验)
+- **核验人**: AI 助手 (GLM-5.2)
+
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-23)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
