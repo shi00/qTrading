@@ -22,6 +22,8 @@ from scripts.detect_flaky import (
     run_pytest_with_json_report,
 )
 
+pytestmark = [pytest.mark.unit, pytest.mark.meta]
+
 
 class TestParseJsonReport:
     """parse_json_report: 解析 pytest-json-report 文件，返回 {nodeid: outcome}."""

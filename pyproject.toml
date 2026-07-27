@@ -128,6 +128,7 @@ markers = [
     "mutates_config: marks tests that mutate global config (theme/language) and need restoration",
     "no_db: Tests that do not require database (skip DB schema initialization in integration autouse fixture)",
     "embedded_real: Tests requiring real Rust sidecar binary + real embedded PostgreSQL (skip if sidecar binary missing)",
+    "meta: Tests for scripts/* tooling (not business logic)",
 ]
 
 [tool.coverage.run]

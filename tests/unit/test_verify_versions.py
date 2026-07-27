@@ -9,7 +9,7 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 import verify_versions  # type: ignore[import-not-found]  # Resolved dynamically via sys.path
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.meta]
 
 
 def setup_test_files(
