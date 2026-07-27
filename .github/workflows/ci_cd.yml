@@ -262,6 +262,11 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: sbom-ci-checks.cdx.json
+          # CI 检查产物仅需作为 artifact 上传（见下一步），无需 attach 到 release。
+          # sbom-action v0.24.0 默认 upload-release-assets=true，当仓库存在匹配 release
+          # 时会尝试 attach，但本 job permissions: contents: read 不足，导致
+          # "Resource not accessible by integration"（run 30244639291/job 89908947183）。
+          upload-release-assets: false
 
       - name: Upload SBOM artifact
         if: always()
@@ -1386,6 +1391,12 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: sbom-${{ matrix.variant }}.cdx.json
+          # SBOM 作为 release-assets artifact 由 release-windows job 单独上传到 release
+          # （见 Upload Release Assets 步骤 + softprops/action-gh-release）。
+          # sbom-action 默认 upload-release-assets=true 会尝试直接 attach，但本 job
+          # permissions: contents: read 不足，重跑或 release 已存在时会复现
+          # "Resource not accessible by integration"（同 ci-checks 根因，举一反三修复）。
+          upload-release-assets: false
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
