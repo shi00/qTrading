@@ -12,6 +12,8 @@
 
 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量控制严格模式（默认开启，设为 `false` 关闭）。
 
+**`data/sync/` 层豁免说明**：`data/sync/` 作为数据同步入口，负责从外部 API（Tushare / AKShare 等）拉取并写入原始数据，是质量门控的数据**来源**而非消费方；下游 `strategies/` 与 `services/` 强制通过 `@require_quality` / `required_quality_tier` 声明所需质量等级后再消费 `data/sync/` 产出的数据。因此 `data/sync/` 层不声明 `required_quality_tier`，避免数据生产者自我断言其产出质量造成职责混淆。
+
 ### 性能监控装饰器
 
 `utils/log_decorators.py` 提供：

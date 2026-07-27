@@ -35,7 +35,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ### 质量门控（C15）
 
-- syncer 写入前必须经过 `@require_quality(QualityTier.X)` 装饰器指定所需质量等级；普通策略用装饰器，向量化 `PolarsBaseStrategy` 通过类属性 `required_quality_tier` 覆盖默认等级。
+- **`data/sync` 层豁免说明**：`data/sync/` 作为数据同步入口，职责是拉取外部数据并落库（写入 `quality_gate` 评分所需的源数据），自身不直接消费业务数据决策；下游策略层（`strategies/`）强制 `@require_quality` 门控，故 `data/sync` 层不声明 `required_quality_tier`、不挂 `@require_quality` 装饰器。质量评分由 `QuoteDAO.get_sync_quality_score()` 在 syncer 落库后异步评估，syncer 仅负责把数据写入 `*_quality_score` 表供后续策略消费。
 - 同步完成后由 `QuoteDAO.get_sync_quality_score()` 评估单日数据同步质量分数（基于相对基准法），低于阈值时标记该日为不完整，下次同步会自动补齐。
 - 跨源一致性校验（Tier 3 Gold）由 `data/persistence/data_quality.py` 与 `quality_gate.py` 负责，详情见 [config-quality-perf.md](./config-quality-perf.md)。
 
