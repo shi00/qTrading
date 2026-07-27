@@ -72,6 +72,48 @@ def extract_font_filename(path: str) -> str | None:
     return filename
 
 
+def extract_canvaskit_relpath(path: str) -> str | None:
+    """从 URL path 中提取 canvaskit 资源相对路径（保留子目录结构）。
+
+    被 ``tests/e2e/conftest.py`` route handler 复用，支持 flet 0.86.3 引入的
+    ``chromium`` / ``experimental_webparagraph`` 子目录变体。
+
+    采用「末尾两段」策略：若 URL path 末尾第 2 段是子目录标记，则保留
+    ``<subdir>/<filename>``，否则只保留 ``<filename>``。这样可统一处理
+    同源路径（``/<base>/canvaskit/[subdir]/<fn>``）和 CDN 路径
+    （``/flutter-canvaskit/<hash>/[subdir]/<fn>``），无需识别 hash 段。
+
+    URL path 模式（调用前应先 ``urlparse(url).path`` 去除 query/fragment）::
+
+        /<base>/canvaskit/<filename>                       → <filename>
+        /<base>/canvaskit/chromium/<filename>              → chromium/<filename>
+        /<base>/canvaskit/experimental_webparagraph/<fn>   → experimental_webparagraph/<fn>
+        /flutter-canvaskit/<hash>/<filename>               → <filename>
+        /flutter-canvaskit/<hash>/chromium/<filename>      → chromium/<filename>
+        /<base>/skwasm.js                                  → skwasm.js
+
+    安全性：
+        - 用 ``PurePosixPath`` 按 ``/`` 分割（跨平台一致），防御 Windows ``\\`` 注入
+        - 拒绝任何包含 ``.`` / ``..`` / 含 ``\\`` 的路径段
+        - 返回 None 表示路径异常，调用方应 abort 请求
+
+    Args:
+        path: URL path（如 ``"/canvaskit/chromium/canvaskit.js"``）。
+    """
+    subdir_markers = frozenset({"chromium", "experimental_webparagraph"})
+    parts = PurePosixPath(path).parts
+    if any(p in (".", "..") or "\\" in p for p in parts):
+        return None
+    if len(parts) >= 2 and parts[-2] in subdir_markers:
+        rel_parts = list(parts[-2:])
+    else:
+        basename = PurePosixPath(path).name
+        if not basename:
+            return None
+        rel_parts = [basename]
+    return "/".join(rel_parts)
+
+
 def find_flet_web_main_dart_js() -> Path:
     """定位已安装 flet_web 包的 web/main.dart.js 文件。
 
