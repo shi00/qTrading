@@ -624,9 +624,16 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             c_codes = df_c["code"].tolist()
 
             # concept_detail 有独立的严格速率限制（~20 req/min）
-            # 使用极低并发 + 主动延迟避免触发 backoff
-            CONCEPT_CONCURRENCY = 2
-            CONCEPT_DELAY = 3.0  # 每请求间隔秒数
+            # P3-SyncConcepts-Dual-RateLimit 修复：移除 CONCEPT_DELAY=3.0 限速语义，
+            # 让 _handle_api_call 的 per-API TokenBucket 成为唯一限速真相源。
+            # CONCEPT_CONCURRENCY 上调至 5（与 TokenBucket capacity=max(5, ...) 对齐），
+            # 仅作为并发上限保护，不参与限速。
+            # cancel 响应：fetch_one 在 API 调用前后均检查 is_cancelled()，cancel_event
+            # 被 set 后下一次 is_cancelled() 立即返回 True 并 raise CancelledError；
+            # gather_return_exceptions_propagating_cancel 重新抛出（R2 合规）。
+            # 不使用 wait_for(timeout=N) — 那会在 event 未 set 时强制等待 N 秒
+            # （per-request 限速副作用，与"TokenBucket 唯一限速真相源"冲突）。
+            CONCEPT_CONCURRENCY = 5
             sem = asyncio.Semaphore(CONCEPT_CONCURRENCY)
 
             async def fetch_one(c):
@@ -638,18 +645,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     if self.is_cancelled():
                         return None
                     result = await self.api.get_concept_detail_by_id(c)
-                    # A3: 用 wait_for(cancel_event.wait(), timeout) 替代 asyncio.sleep，
-                    # 使 cancel_event 被 set 时立即响应（≤2s 红线），而非阻塞完整 CONCEPT_DELAY。
-                    # TimeoutError = sleep 正常完成；event 被 set 则 wait() 立即返回，
-                    # 随后 is_cancelled() 为 True 时 raise CancelledError，由
-                    # gather_return_exceptions_propagating_cancel 重新抛出（R2 合规）。
-                    try:
-                        await asyncio.wait_for(
-                            self._get_cancel_event().wait(),
-                            timeout=CONCEPT_DELAY,
-                        )
-                    except TimeoutError:
-                        pass  # 正常 sleep 完成
+                    # Post-API cancel check: is_cancelled() 是 O(1) flag 读取，
+                    # 无等待语义；cancel_event 被 set 后立即返回 True。
                     if self.is_cancelled():
                         raise asyncio.CancelledError()
                     return result

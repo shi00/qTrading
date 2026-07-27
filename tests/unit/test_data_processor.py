@@ -356,30 +356,36 @@ class TestDataProcessorSyncConcepts:
         dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
         dp.cache.overwrite_concepts = AsyncMock(return_value=1)
         dp.clear_cancel()
-        with patch("data.data_processor.asyncio") as mock_aio:
-            mock_aio.Semaphore = asyncio.Semaphore
-            mock_aio.create_task = asyncio.create_task
-            mock_aio.gather = AsyncMock(return_value=[detail_df])
-            mock_aio.sleep = AsyncMock()
-            mock_aio.CancelledError = asyncio.CancelledError
-
-            # A3 修复后 fetch_one 使用 asyncio.wait_for(cancel_event.wait(), timeout)
-            # 替代 asyncio.sleep；测试中将 wait_for 设为立即抛 TimeoutError 的
-            # async 函数，模拟 sleep 正常完成（避免等待 CONCEPT_DELAY 真实秒数）。
-            # 源码使用内置 TimeoutError（ruff UP041），不受 asyncio mock 影响。
-            # 显式 close 传入的协程以消除 "coroutine never awaited" warning。
-            async def _fake_wait_for(coro, timeout=None):
-                coro.close()
-                raise TimeoutError()
-
-            mock_aio.wait_for = _fake_wait_for
-            result = await dp.sync_concepts()
-            assert result == 1
+        # P3-SyncConcepts-Dual-RateLimit: fetch_one 不再使用 wait_for，
+        # 改用纯 is_cancelled() check（O(1) flag 读取，无等待语义）。
+        # 正常路径：API 调用 → is_cancelled() False → return result。
+        result = await dp.sync_concepts()
+        assert result == 1
 
     @pytest.mark.asyncio
-    async def test_sync_concepts_cancel_event_set_during_wait_for(self):
-        """FIND-R1-005: A3 修复 — cancel_event 被 set 时 wait_for 立即返回，
-        随后 is_cancelled() True → raise CancelledError（由 gather 传播，R2 合规）。"""
+    async def test_sync_concepts_cancel_event_set_before_fetch_one(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ②: cancel_event.set() 后 fetch_one
+        在 API 调用前 is_cancelled() True → return None（fail fast，不消耗 semaphore）。"""
+        dp = _make_dp()
+        df_c = pd.DataFrame({"code": ["TS1"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+        dp.api.get_concept_detail_by_id = AsyncMock()
+        dp.cache.overwrite_concepts = AsyncMock(return_value=0)
+        # 在 fetch_one 进入前 set cancel_event
+        dp._get_cancel_event().set()
+        result = await dp.sync_concepts()
+        # sync_concepts 在 fetch_one 返回 None 后，results 为 [None]，all_dfs 为空，
+        # overwrite_concepts 被调用返回 0
+        assert result == 0
+        # API 不应被调用（fail fast 在 semaphore 前）
+        dp.api.get_concept_detail_by_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_cancel_event_set_after_api_call(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ②: cancel_event.set() 在 API 调用后
+        发生 → fetch_one 的 post-API is_cancelled() True → raise CancelledError。
+        gather_return_exceptions_propagating_cancel 传播 → sync_concepts except 重新 raise。
+        R2 红线契约：CancelledError 必须传播，不得吞没。"""
         dp = _make_dp()
         df_c = pd.DataFrame({"code": ["TS1"]})
         dp.api.get_concept_list = AsyncMock(return_value=df_c)
@@ -391,29 +397,133 @@ class TestDataProcessorSyncConcepts:
                 "name": ["Stock1"],
             }
         )
-        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+
+        # API 调用后立即 set cancel_event，模拟取消信号在 API 完成后到达
+        async def _api_then_set_cancel(c):
+            dp._get_cancel_event().set()
+            return detail_df
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_api_then_set_cancel)
         dp.cache.overwrite_concepts = AsyncMock(return_value=1)
         dp.clear_cancel()
-        with patch("data.data_processor.asyncio") as mock_aio:
-            mock_aio.Semaphore = asyncio.Semaphore
-            mock_aio.create_task = asyncio.create_task
-            mock_aio.gather = asyncio.gather
-            mock_aio.sleep = AsyncMock()
-            mock_aio.CancelledError = asyncio.CancelledError
+        # R2 红线契约：CancelledError 必须传播。强化断言：cancel 后 cache.overwrite_concepts
+        # 不应被调用（cancel 优先于保存），证明 CancelledError 在 gather 传播后立即 raise，
+        # 未进入保存分支。
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；后续 overwrite_concepts.assert_not_called 已强断言
+            await dp.sync_concepts()
+        dp.cache.overwrite_concepts.assert_not_called()
 
-            # wait_for 不抛 TimeoutError，并在调用时 set cancel_event
-            # 模拟取消信号在 sleep 期间被 set → wait() 立即返回（不抛 TimeoutError）
-            async def _fake_wait_for_cancel(coro, timeout=None):
-                coro.close()
-                dp._get_cancel_event().set()
-                return None  # event 被 set 时 wait() 立即返回
+    @pytest.mark.asyncio
+    async def test_sync_concepts_no_concept_delay_literal(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ①: CONCEPT_DELAY = 3.0 字面值赋值
+        从 data_processor.py 移除（grep 验证）。注释中提及 CONCEPT_DELAY 是允许的
+        （解释修复历史），但赋值语句 `CONCEPT_DELAY = ...` 必须不存在。"""
+        import inspect
 
-            mock_aio.wait_for = _fake_wait_for_cancel
+        from data.data_processor import DataProcessor
 
-            # fetch_one raise CancelledError → gather 传播 → sync_concepts except 重新 raise
-            # R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
-            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播，CancelledError 无有意义 message 可 match
-                await dp.sync_concepts()
+        source = inspect.getsource(DataProcessor.sync_concepts)
+        # 移除注释行后再检查（# 开头的行）
+        code_lines = [line for line in source.splitlines() if not line.strip().startswith("#")]
+        code_only = "\n".join(code_lines)
+        assert "CONCEPT_DELAY =" not in code_only, (
+            "CONCEPT_DELAY = ... 赋值语句应从 sync_concepts 移除（P3-SyncConcepts-Dual-RateLimit DoD ①）"
+        )
+        # 验证 3.0 字面值不在代码行中
+        assert "3.0" not in code_only, "sync_concepts 代码行不应残留 3.0 字面值（CONCEPT_DELAY=3.0 移除后）"
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_concurrency_is_five(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ④: CONCEPT_CONCURRENCY 上调到 5
+        （与 TokenBucket capacity=max(5, ...) 对齐，让 TokenBucket 成为唯一限速源）。"""
+        import inspect
+
+        from data.data_processor import DataProcessor
+
+        source = inspect.getsource(DataProcessor.sync_concepts)
+        assert "CONCEPT_CONCURRENCY = 5" in source, "CONCEPT_CONCURRENCY 应为 5（与 TokenBucket capacity 对齐）"
+        assert "CONCEPT_CONCURRENCY = 2" not in source, "CONCEPT_CONCURRENCY = 2 应被替换为 5"
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_no_wait_for_in_fetch_one(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ③: fetch_one 正常路径无额外 sleep/wait_for。
+        对抗性 review 发现：wait_for(timeout=2.0) 在 event 未 set 时会强制等待 2s，
+        等于 per-request 2s 限速，与"TokenBucket 唯一限速真相源"冲突。
+        验证 fetch_one 内不再调用 asyncio.wait_for（grep 源码）。"""
+        import inspect
+
+        from data.data_processor import DataProcessor
+
+        source = inspect.getsource(DataProcessor.sync_concepts)
+        # 移除注释行后再检查（# 开头的行）
+        code_lines = [line for line in source.splitlines() if not line.strip().startswith("#")]
+        code_only = "\n".join(code_lines)
+        assert "wait_for" not in code_only, (
+            "fetch_one 不应使用 asyncio.wait_for（对抗性 review：event 未 set 时强制等待 N 秒，"
+            "等于 per-request 限速，与 TokenBucket 唯一限速真相源冲突）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_fetch_one_no_extra_sleep_on_normal_path(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ③ 行为验证: fetch_one 正常路径
+        （cancel_event 未 set）不应有额外 sleep/wait_for 延迟。
+        通过测量 fetch_one 执行时间验证：< 100ms（无 2s/3s 限速延迟）。"""
+        import time
+
+        dp = _make_dp()
+        dp.clear_cancel()
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+
+        # 直接调用 sync_concepts 内部的 fetch_one 逻辑（通过反射获取闭包不可行，
+        # 改用整体 sync_concepts 调用并测量耗时，单个 concept 应在 100ms 内完成）
+        df_c = pd.DataFrame({"code": ["TS1"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+
+        start = time.monotonic()
+        result = await dp.sync_concepts()
+        elapsed = time.monotonic() - start
+
+        # 单个 concept + 无限速 sleep，应在 100ms 内完成（容错 500ms 适应 CI 慢环境）
+        assert result == 1
+        assert elapsed < 0.5, (
+            f"sync_concepts 单 concept 耗时 {elapsed:.3f}s > 0.5s，"
+            "可能残留限速 sleep/wait_for（DoD ③：正常路径无额外 sleep）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_concepts_token_bucket_is_rate_source(self):
+        """P3-SyncConcepts-Dual-RateLimit DoD ④ 行为验证: TokenBucket 是唯一限速源。
+        验证 fetch_one 不含任何 sleep/timeout 限速语义，仅依赖 _handle_api_call 的 TokenBucket。
+        通过源码检查：fetch_one 内无 asyncio.sleep / asyncio.wait_for / time.sleep 调用。"""
+        import inspect
+
+        from data.data_processor import DataProcessor
+
+        source = inspect.getsource(DataProcessor.sync_concepts)
+        # 提取 fetch_one 函数体
+        fetch_one_start = source.find("async def fetch_one")
+        assert fetch_one_start != -1, "fetch_one 函数应存在于 sync_concepts"
+        # fetch_one 函数体到下一个 async def 或到 sync_concepts 结束
+        next_def = source.find("\n            async def ", fetch_one_start + 1)
+        if next_def == -1:
+            next_def = source.find("\n            tasks = ", fetch_one_start)
+        fetch_one_body = source[fetch_one_start : next_def if next_def != -1 else len(source)]
+        # 移除注释行
+        code_lines = [line for line in fetch_one_body.splitlines() if not line.strip().startswith("#")]
+        code_only = "\n".join(code_lines)
+        # fetch_one 内不应有限速语义（sleep/wait_for）
+        assert "asyncio.sleep" not in code_only, "fetch_one 不应含 asyncio.sleep（限速应由 TokenBucket 负责）"
+        assert "time.sleep" not in code_only, "fetch_one 不应含 time.sleep（限速应由 TokenBucket 负责）"
+        assert "wait_for" not in code_only, "fetch_one 不应含 asyncio.wait_for（限速应由 TokenBucket 负责）"
 
     @pytest.mark.asyncio
     async def test_exception(self):
