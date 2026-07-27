@@ -63,8 +63,25 @@ def _build_tabs(show_snack: Callable, current_tab: int = 0, e2e_mode: bool = Fal
     AIService() → litellm import (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM;
     SystemTab 的 TierApiPanel 调用 TushareClient()。这些阻塞 Flet patch 下发导致
     E2E 浏览器超时 (与 app_layout.py _build_pages_stack E2E 优化一致)。
+
+    注意: 必须使用惰性构造 (lambda + 条件调用), 不能先构造所有 tab 再过滤,
+    否则 VM 构造链仍会执行 (DataSourceTab(...) 会立即触发 DataSourceViewModel.__init__).
     """
-    all_tabs: list[ft.Control] = [
+    if e2e_mode:
+        # 惰性工厂: 只对 current_tab 调用工厂, 其他返回空 Container
+        tab_factories: list[Callable[[], ft.Control]] = [
+            lambda: DataSourceTab(show_snack),
+            lambda: DatabaseTab(show_snack),
+            lambda: AIBrainTab(show_snack),
+            lambda: AutomationTab(show_snack),
+            lambda: NotificationsTab(show_snack),
+            lambda: SystemTab(show_snack),
+        ]
+        return [
+            tab_factories[i]() if i == current_tab else ft.Container(expand=True) for i in range(len(tab_factories))
+        ]
+    # 正常模式: 构造所有 tab
+    return [
         DataSourceTab(show_snack),
         DatabaseTab(show_snack),
         AIBrainTab(show_snack),
@@ -72,9 +89,6 @@ def _build_tabs(show_snack: Callable, current_tab: int = 0, e2e_mode: bool = Fal
         NotificationsTab(show_snack),
         SystemTab(show_snack),
     ]
-    if not e2e_mode:
-        return all_tabs
-    return [all_tabs[i] if i == current_tab else ft.Container(expand=True) for i in range(len(all_tabs))]
 
 
 def _show_snack_impl(
