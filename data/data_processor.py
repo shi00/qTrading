@@ -96,9 +96,12 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             token = ConfigHandler.get_token()
             self._current_token = token
+            logger.info("[DataProcessor] init: creating TushareClient")
             self.api = TushareClient(token=token)
+            logger.info("[DataProcessor] init: TushareClient created, creating CacheManager")
             self.cache = CacheManager()
 
+            logger.info("[DataProcessor] init: creating TradeCalendarService")
             self.trade_calendar = TradeCalendarService(self.cache, self.api)
 
             self._first_news_sync = True
@@ -106,12 +109,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._quality_tier = None  # None=Uninitialized, 0=Critical, 1=Bronze, 2=Silver, 3=Gold
 
             # Initialize Context & Strategies
+            logger.info("[DataProcessor] init: creating SyncContext")
             self.context = SyncContext(
                 api=self.api,
                 cache=self.cache,
                 config=ConfigHandler,
             )
             self.context._processor_ref = weakref.ref(self)
+            logger.info("[DataProcessor] init: creating sync strategies")
             self.strategies = {
                 "financial": FinancialSyncStrategy(self.context),
                 "historical": HistoricalSyncStrategy(self.context),
@@ -119,6 +124,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 "holder": HolderSyncStrategy(self.context),
                 "sw_industry": SwIndustrySyncStrategy(self.context),
             }
+            logger.info("[DataProcessor] init: sync strategies created")
 
             # Memory Cache for high-frequency small data
             self._trade_cal_cache = {}  # Cache structure: {'start': str, 'end': str, 'df': DataFrame}
@@ -132,6 +138,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._is_syncing_basic = False
 
             self.__class__._initialized = True
+            logger.info("[DataProcessor] init: completed")
 
     def _get_cancel_event(self):
         """Get or create cancel event dynamically per event loop."""

@@ -67,8 +67,12 @@ def HomeView(
     # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
     _ = viewport
 
+    logger.info("[HomeView] construction start, active=%s", active)
+
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
+    logger.info("[HomeView] calling use_viewmodel(HomeViewModel)")
     state, vm = use_viewmodel(HomeViewModel)
+    logger.info("[HomeView] use_viewmodel returned, state.loading=%s", getattr(state, "loading", "unknown"))
 
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
@@ -248,6 +252,7 @@ def HomeView(
             ]
         )
 
+    logger.info("[HomeView] construction complete, returning Container")
     return ft.Container(
         content=ft.Column(
             safe_controls(content_controls),

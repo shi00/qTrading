@@ -292,6 +292,7 @@ def AppLayout() -> ft.Container:
     )
 
     # --- 渲染 ---
+    logger.info("[AppLayout] construction start, current_tab=%s", current_tab)
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
         selected=nav_collapsed,
@@ -339,12 +340,14 @@ def AppLayout() -> ft.Container:
         on_change=safe_on_change(_on_nav_change),
     )
 
+    logger.info("[AppLayout] building pages stack")
     body = ft.Container(
         content=_build_pages_stack(int(current_tab), viewport),
         expand=True,
         padding=20,
         bgcolor=AppColors.BACKGROUND,
     )
+    logger.info("[AppLayout] construction complete, returning Container")
 
     return ft.Container(
         content=ft.Row(
