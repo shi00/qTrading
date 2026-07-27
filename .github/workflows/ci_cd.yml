@@ -411,14 +411,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p D:/tmp
-          # Run E2E tests serially: 用 -p no:xdist -p no:randomly 完全禁用插件，
-          # 绕过 pyproject.toml addopts="-n auto --dist=loadgroup" 的覆盖问题
-          # （命令行 -n 0 会被 addopts 覆盖，导致 xdist 仍启用，worker stdout
-          # 缓冲，卡死时日志全部丢失）。-p no:xdist 在插件加载阶段即禁用，
-          # addopts 中的 -n/--dist 参数被忽略。
+          # Run E2E tests serially with real-time logging.
+          # -o addopts="" 清空 pyproject.toml 的 addopts="-n auto --dist=loadgroup"，
+          # 避免 -p no:xdist 禁用插件后 -n/--dist 参数因无插件处理而报 "unrecognized arguments"。
+          # -p no:xdist -p no:randomly 完全禁用并行/随机插件，串行执行让 log_cli 实时输出。
           # log_cli=true --capture=no 实时输出测试日志，便于定位卡死位置。
           # pytest-timeout=600s 防止单测试卡死拖垮整个 job。
-          python -m pytest tests/e2e/ -p no:xdist -p no:randomly -v --tb=long --junitxml=junit-e2e.xml \
+          python -m pytest tests/e2e/ \
+            -o addopts="" \
+            -p no:xdist -p no:randomly \
+            -v --tb=long --junitxml=junit-e2e.xml \
             --timeout=600 --timeout-method=thread \
             -o log_cli=true --log-cli-level=INFO --capture=no
 
