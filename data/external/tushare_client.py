@@ -95,6 +95,17 @@ class TushareAPIPermissionError(Exception):
         return f"TushareAPIPermissionError(api={self.api_name}, message={self.message})"
 
 
+class TushareConfigError(Exception):
+    """Raised when TushareClient is used without a valid token configured.
+
+    P3-Tushare-Client-Lazy-Markers: replaces bare `raise Exception("Tushare Token not set")`
+    in _get_pro() helper to provide a structured, catchable error with a friendly message.
+    """
+
+    def __init__(self, message: str = "Tushare Token not set. Please set your token in settings."):
+        super().__init__(message)
+
+
 PERMISSION_DENIED_KEYWORDS = (
     "权限",
     "积分不足",
@@ -123,11 +134,9 @@ class TushareClient:
     """
 
     pro: TushareProApi
-    # NOTE(lazy): pro 运行时可能为 None（token 未设置），但声明为非 Optional 以避免 40+ 处
-    #   reportOptionalMemberAccess warning。调用方在 _handle_api_call 内部已有
-    #   `if not self.pro: raise` 检查提供有意义错误信息。. ceiling: 调用方直接访问
-    #   self.pro.xxx 时若 pro 为 None 会抛 AttributeError 而非友好错误. upgrade: 改用
-    #   _get_pro() helper 方法返回 TushareProApi（内部 raise），调用方统一改用 helper.
+    # P3-Tushare-Client-Lazy-Markers: pro 运行时可能为 None（token 未设置），但声明为
+    # 非 Optional 以避免 40+ 处 reportOptionalMemberAccess warning。调用方应通过
+    # _get_pro() helper 访问，helper 内部 raise TushareConfigError 提供友好错误。
     _instance = None
     _initialized = False
     _lock = threading.Lock()
@@ -503,6 +512,23 @@ class TushareClient:
         if self._config is not None:
             return self._config.get_token()
         return ConfigHandler.get_token()
+
+    def _get_pro(self) -> TushareProApi:
+        """Return the TushareProApi instance, raising TushareConfigError if token not set.
+
+        P3-Tushare-Client-Lazy-Markers: replaces direct `self.pro` access in call sites
+        that need a friendly error when token is not configured. Direct field access
+        `self.pro.xxx` would raise AttributeError instead of a structured, catchable error.
+
+        Returns:
+            The TushareProApi instance (non-None).
+
+        Raises:
+            TushareConfigError: If `self.pro` is None (token not set).
+        """
+        if not self.pro:
+            raise TushareConfigError()
+        return self.pro
 
     def _get_tushare_timeout(self):
         if self._config is not None:
@@ -1127,7 +1153,7 @@ class TushareClient:
         from utils.thread_pool import ThreadPoolManager
 
         if not self.pro:
-            raise Exception("Tushare Token not set. Please set your token in settings.")
+            raise TushareConfigError()
 
         # 捕获限速器为局部变量：consume_async 与网络 await 之间若被 set_token/reload_rate_limiters
         # 替换 self._rate_limiter/self._probe_rate_limiter，会破坏限流语义（B1+B17 竞态修复）。
@@ -1203,7 +1229,7 @@ class TushareClient:
         from utils.error_classifier import classify_error, classify_severity
 
         async with semaphore:
-            func = getattr(self.pro, api_name, None)
+            func = getattr(self._get_pro(), api_name, None)
             if func is None:
                 logger.warning("[TushareClient] Probe %s: API not found in SDK", api_name)
                 return (api_name, None)
@@ -1320,9 +1346,7 @@ class TushareClient:
 
             try:
                 if not self.pro:
-                    raise Exception(
-                        "Tushare Token not set. Please set your token in settings.",
-                    )
+                    raise TushareConfigError()
 
                 import contextvars
 
@@ -1611,7 +1635,7 @@ class TushareClient:
             end_date = f"{year}1231"
 
             if not self.pro:
-                raise Exception("Tushare Token not set")
+                raise TushareConfigError()
             # 锁外执行网络调用（trade_cal 是同步 IO，不应持锁阻塞其他线程）
             df = self.pro.trade_cal(
                 exchange="SSE",
@@ -1684,7 +1708,7 @@ class TushareClient:
         which implements optimized year-based caching.
         """
         if not self.pro:
-            raise Exception("Tushare Token not set. Please set your token in settings.")
+            raise TushareConfigError()
         kwargs = dict(exchange=exchange, start_date=start_date, end_date=end_date)
         if is_open is not None:
             kwargs["is_open"] = str(is_open)
