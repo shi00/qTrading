@@ -454,6 +454,12 @@ async def _setup_canvaskit_intercept(page) -> None:
         # flet 0.86.3 新增 skwasm/wimp 渲染器及 chromium/experimental_webparagraph 子目录变体；
         # 即使 E2E 强制 CANVAS_KIT，Flutter 引擎初始化时也可能请求这些文件（buildConfig 含多渲染器）。
         # chromium/canvaskit.js 与根目录 canvaskit.js 是不同文件（MD5 不同），必须按子目录路径匹配。
+        #
+        # CORS 头必要性：canvaskit.js / rive_native.js 通过动态 import() 加载（跨域 CDN 请求）。
+        # Playwright route.fulfill 默认不注入 CORS 头，浏览器会静默阻止 import()，
+        # 导致 Flutter 引擎初始化卡死（canvases=0 持续到测试超时）。
+        # Access-Control-Allow-Origin: * 允许跨域 import()；
+        # Cross-Origin-Resource-Policy: cross-origin 允许跨域 fetch()（WebAssembly.compileStreaming）。
         if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
             rel_path = extract_canvaskit_relpath(urlparse(url).path)
             if rel_path is None:
@@ -464,7 +470,15 @@ async def _setup_canvaskit_intercept(page) -> None:
             if local_path.exists():
                 content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
                 logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+                await route.fulfill(
+                    status=200,
+                    content_type=content_type,
+                    path=str(local_path),
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Cross-Origin-Resource-Policy": "cross-origin",
+                    },
+                )
                 return
             logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
             await route.abort()
@@ -472,6 +486,7 @@ async def _setup_canvaskit_intercept(page) -> None:
         # rive-native-wasm：命中本地缓存（flet 0.86.3 main.dart.js 硬编码 CDN 依赖）
         # rive_native.js 加载失败会阻塞 Flutter 引擎初始化，必须 fulfill 而非 abort。
         # CDN URL 模式：https://cdn.jsdelivr.net/npm/@rive-app/flutter-native-wasm@<ver>/wasm[_compatibility]/rive_native.[js|wasm]
+        # CORS 头同 canvaskit（rive_native.js 亦通过动态 import() 加载）。
         if "@rive-app/flutter-native-wasm" in url:
             path = urlparse(url).path
             # 提取 wasm/ 或 wasm_compatibility/ 段及其后文件名
@@ -497,7 +512,15 @@ async def _setup_canvaskit_intercept(page) -> None:
             if local_path.exists():
                 content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
                 logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+                await route.fulfill(
+                    status=200,
+                    content_type=content_type,
+                    path=str(local_path),
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Cross-Origin-Resource-Policy": "cross-origin",
+                    },
+                )
                 return
             logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
             await route.abort()
