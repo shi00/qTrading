@@ -14,6 +14,7 @@
 """
 
 import logging
+import os
 from collections.abc import Callable
 
 import flet as ft
@@ -54,9 +55,16 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     )
 
 
-def _build_tabs(show_snack: Callable) -> list[ft.Control]:
-    """Instantiate all 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab)."""
-    return [
+def _build_tabs(show_snack: Callable, current_tab: int = 0, e2e_mode: bool = False) -> list[ft.Control]:
+    """Instantiate 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab).
+
+    E2E 模式优化: ``e2e_mode=True`` 时只构造 ``current_tab`` 对应的 tab, 其他用空
+    ``ft.Container`` 占位。根因: DataSourceTab 的 DataSourceViewModel.__init__ →
+    AIService() → litellm import (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM;
+    SystemTab 的 TierApiPanel 调用 TushareClient()。这些阻塞 Flet patch 下发导致
+    E2E 浏览器超时 (与 app_layout.py _build_pages_stack E2E 优化一致)。
+    """
+    all_tabs: list[ft.Control] = [
         DataSourceTab(show_snack),
         DatabaseTab(show_snack),
         AIBrainTab(show_snack),
@@ -64,6 +72,9 @@ def _build_tabs(show_snack: Callable) -> list[ft.Control]:
         NotificationsTab(show_snack),
         SystemTab(show_snack),
     ]
+    if not e2e_mode:
+        return all_tabs
+    return [all_tabs[i] if i == current_tab else ft.Container(expand=True) for i in range(len(all_tabs))]
 
 
 def _show_snack_impl(
@@ -128,7 +139,8 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
         _show_snack_impl(_page, message, color, **kwargs)
 
     # --- Build tabs ---
-    tabs = _build_tabs(_show_snack)
+    is_e2e = os.environ.get("E2E_TESTING") == "true"
+    tabs = _build_tabs(_show_snack, current_tab=current_tab, e2e_mode=is_e2e)
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
     # --- Tab click handler ---
