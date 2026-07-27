@@ -280,7 +280,4 @@ if __name__ == "__main__":  # pragma: no cover
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
     run_kwargs = {"main": main, "assets_dir": assets}
-    if os.environ.get("E2E_TESTING") == "true":
-        run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
-        run_kwargs["no_cdn"] = True
     ft.run(**run_kwargs)
