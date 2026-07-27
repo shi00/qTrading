@@ -262,6 +262,12 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: sbom-ci-checks.cdx.json
+          # 禁用 release asset 上传：ci-checks job 仅持有 contents: read 权限，
+          # 默认 upload-release-assets: true 在 tag 推送时会尝试把 SBOM 附加到
+          # 对应 GitHub Release（需 contents: write），导致 "Resource not
+          # accessible by integration" 错误（run 30244639291/job/89908947183）。
+          # 发布产物的 SBOM 由 build-windows job 生成并经 release-windows job 上传。
+          upload-release-assets: false
 
       - name: Upload SBOM artifact
         if: always()
@@ -317,7 +323,7 @@ jobs:
           # Without this, 4 xdist workers concurrently pip install flet-web to the same
           # site-packages, triggering Windows file lock errors (WinError 32 / Permission denied)
           # and causing workers to crash in setup phase (root cause of run 29655213301).
-          uv pip install --system flet-web==0.86.2
+          uv pip install --system flet-web==0.86.3
           pip install playwright pytest-playwright
 
       - name: Free disk space
@@ -632,7 +638,7 @@ jobs:
           # and "OSError: [Errno 2] No such file or directory: '.../flet_web/web/flutter.js.map'"
           # (root cause of Embedded PG Tests (linux) failure in run 30110045876).
           # Same fix as the e2e-tests job (see line 322-326).
-          uv pip install --system flet-web==0.86.2
+          uv pip install --system flet-web==0.86.3
 
       - name: Install Rust toolchain (1.97.0)
         uses: dtolnay/rust-toolchain@stable
@@ -721,7 +727,7 @@ jobs:
 
   windows-skip-revalidation:
     # P3-WinE2E-Skip 技术债复验 job：临时取消 8 个 Windows skipif 用例的 skipif，
-    # 在 windows-latest runner 实机运行以判断 Flet 0.86.2 下问题是否仍存在.
+    # 在 windows-latest runner 实机运行以判断 Flet 0.86.x 下问题是否仍存在.
     # 拆分为 3 个并行 matrix group 解决 timeout + 隔离卡死用例：
     #   - no-sidecar (4 用例): 3 fake sidecar + 1 wizard，无需 Rust 构建（wizard 仅 3s 失败不影响）
     #   - real-sidecar (3 用例): 真实 sidecar binary，需 Rust 构建链路
@@ -794,7 +800,7 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
           # Pre-install flet-web 防止 Flet 0.86 启动时并发 pip install 触发 Windows 文件锁
-          uv pip install --system flet-web==0.86.2
+          uv pip install --system flet-web==0.86.3
           pip install playwright pytest-playwright
 
       - name: Free disk space
@@ -1348,6 +1354,10 @@ jobs:
           path: .
           format: cyclonedx-json
           output-file: sbom-${{ matrix.variant }}.cdx.json
+          # 同 ci-checks job：禁用 release asset 上传避免 contents: write 权限冲突。
+          # 本 job 的 SBOM 已通过下方 "Upload Release Assets (tag only)" 步骤纳入
+          # release-assets-${{ matrix.variant }} artifact，由 release-windows job 统一上传。
+          upload-release-assets: false
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1

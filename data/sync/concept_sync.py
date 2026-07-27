@@ -14,6 +14,7 @@ classify_error + classify_severity (§5.7).
 import asyncio
 import json
 import logging
+import time
 import typing
 
 from data.external.akshare_concept_client import AkshareConceptClient
@@ -25,7 +26,6 @@ from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
-from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -178,11 +178,13 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
 
             # Phase 2F + S7: 循环体按时间维度（每 2 秒）检查 _check_cancelled。
             # 旧实现每 200 条 board 检查一次，单 board 最坏 7s+，最坏 1000s 才响应取消，远超 2s 红线。
+            # M7.5: 改用 time.monotonic() 替代 get_now()，避免 NTP 时钟回退导致
+            # 取消检查永久失效（wall clock 可回退，monotonic clock 单调递增）。
             tasks: list = []
-            last_cancel_check = get_now()
+            last_cancel_check = time.monotonic()
             for _, row in df_boards.iterrows():
-                now = get_now()
-                if (now - last_cancel_check).total_seconds() >= _AKSHARE_CANCEL_CHECK_INTERVAL:
+                now = time.monotonic()
+                if now - last_cancel_check >= _AKSHARE_CANCEL_CHECK_INTERVAL:
                     last_cancel_check = now
                     if self._check_cancelled(result):
                         return result
@@ -267,10 +269,15 @@ class LimitListSyncStrategy(ISyncStrategy):
                 return result
 
             records: list[dict] = []
-            # Phase 2F: 循环体每 200 条检查 _check_cancelled，响应取消信号
-            for i, (_, row) in enumerate(df.iterrows()):
-                if i > 0 and i % 200 == 0 and self._check_cancelled(result):
-                    return result
+            # M7.9: 转时间维度取消检查（每 2s），纯模式对齐。
+            # 循环 <1s（内存遍历 DataFrame 行），时间维度检查永不触发，纯一致性。
+            last_cancel_check = time.monotonic()
+            for _i, (_, row) in enumerate(df.iterrows()):
+                now = time.monotonic()
+                if now - last_cancel_check >= _AKSHARE_CANCEL_CHECK_INTERVAL:
+                    last_cancel_check = now
+                    if self._check_cancelled(result):
+                        return result
                 ts_code = row.get("ts_code")
                 if not ts_code:
                     continue

@@ -4,10 +4,11 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+from itertools import count
 
 import pytest
 import datetime
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from data.external.tushare_client import TushareAPIPermissionError
@@ -1939,7 +1940,10 @@ class TestSyncTop10HoldersCancelDuringIteration:
         ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        result = await strategy._sync_top10_holders("20240331")
+        # M7.7: 转时间维度取消检查（每 2s）。mock time.monotonic 让每次迭代
+        # 间隔 3s（>= _CANCEL_CHECK_INTERVAL_SECONDS）以触发 _cancelled 检查。
+        with patch("data.sync.holder.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy._sync_top10_holders("20240331")
         # cancel 后 break，返回 -1
         assert result == -1
         # 第 4 个股票不应被调用（break 在循环顶部）
@@ -1959,7 +1963,9 @@ class TestSyncTop10HoldersCancelDuringIteration:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         strategy._cancelled = True
-        result = await strategy._sync_top10_holders("20240331")
+        # M7.7: 时间维度检查需要 mock time.monotonic 让首次迭代时间间隔 >= 2s 触发检查。
+        with patch("data.sync.holder.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy._sync_top10_holders("20240331")
         assert result == -1
         # cancel 在循环顶部 break，api 不应被调用
         ctx.api.get_top10_holders.assert_not_awaited()
@@ -2281,7 +2287,9 @@ class TestSyncTop10HoldersCancellation:
         ctx.api.get_top10_holders = AsyncMock(side_effect=mock_api)
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        result = await strategy._sync_top10_holders("20240331")
+        # M7.7: 时间维度检查需要 mock time.monotonic 让每次迭代间隔 >= 2s 触发检查。
+        with patch("data.sync.holder.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy._sync_top10_holders("20240331")
         # shutdown_event 触发后 break，返回 -1
         assert result == -1
         # 第 4 个股票不应被调用（break 在循环顶部）
@@ -2301,7 +2309,9 @@ class TestSyncTop10HoldersCancellation:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
         strategy._shutdown_event.set()
-        result = await strategy._sync_top10_holders("20240331")
+        # M7.7: 时间维度检查需要 mock time.monotonic 让首次迭代时间间隔 >= 2s 触发检查。
+        with patch("data.sync.holder.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy._sync_top10_holders("20240331")
         assert result == -1
         # shutdown_event 在循环顶部 break，api 不应被调用
         ctx.api.get_top10_holders.assert_not_awaited()

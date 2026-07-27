@@ -34,7 +34,7 @@ from scripts.sync_e2e_fonts import (  # noqa: E402
     main,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.meta]
 
 
 def _make_fake_response(data: bytes) -> MagicMock:

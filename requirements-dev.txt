@@ -132,16 +132,16 @@ filelock==3.29.7
     # via
     #   cachecontrol
     #   huggingface-hub
-flet==0.86.2
+flet==0.86.3
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
     #   flet-desktop
-flet-charts==0.86.2
+flet-charts==0.86.3
     # via astockscreener (pyproject.toml)
-flet-desktop==0.86.2
+flet-desktop==0.86.3
     # via astockscreener (pyproject.toml)
-flet-mcp==0.86.2
+flet-mcp==0.86.3
     # via astockscreener (pyproject.toml)
 fonttools==4.63.0
     # via matplotlib
@@ -237,7 +237,7 @@ korean-lunar-calendar==0.4.0
     # via exchange-calendars
 license-expression==30.4.4
     # via cyclonedx-python-lib
-litellm==1.92.0
+litellm==1.93.0
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.34
     # via astockscreener (pyproject.toml)
