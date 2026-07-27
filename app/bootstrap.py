@@ -130,6 +130,17 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     if os.environ.get("E2E_TESTING") == "true":
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
+        # E2E 预热: 在服务初始化阶段预加载 AIService (触发 litellm import，约 18s+)，
+        # 避免 UI 渲染时第一次导入阻塞 MainThread 导致 Flet patch 下发延迟、
+        # E2E 浏览器等待元素超时而失败。initialize_services 在 async 上下文中执行，
+        # 此时 UI 尚未挂载，预加载不影响用户感知。
+        try:
+            from services.ai_service import AIService
+
+            AIService()
+            logger.info("[Bootstrap] E2E warmup: AIService pre-initialized.")
+        except Exception as exc:
+            logger.warning("[Bootstrap] E2E warmup: AIService pre-init failed: %s", exc, exc_info=True)
         auto_probe_task = None
     else:
         SchedulerService().start()
