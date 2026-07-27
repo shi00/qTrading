@@ -430,25 +430,34 @@ async def _setup_canvaskit_intercept(page) -> None:
 
     async def intercept_external(route, request):
         url = request.url
-        # 内部请求（Flet app 本身、data/blob URI）直接放行
-        if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
-            await route.continue_()
-            return
-        # 字体 CDN：命中本地缓存则 fulfill，未命中 abort
-        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
-            # urlparse 去除 query 参数后再取 basename，避免 `?` 后内容污染 filename
-            # extract_font_filename 内部用 PurePosixPath 防御 Windows `\` 注入 path traversal
-            filename = extract_font_filename(urlparse(url).path)
+        is_internal = url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:"))
+        path = urlparse(url).path
+        # 字体请求（同源 + CDN）：命中本地缓存则 fulfill
+        # no_cdn 模式下 Flutter 从同源 assets/fonts/ 加载，本地 404 会阻塞 Windows 上的引擎初始化
+        if (not is_internal and ("fonts.gstatic.com" in url or "fonts.googleapis.com" in url)) or (
+            is_internal and "/fonts/" in path and path.endswith(".woff2")
+        ):
+            filename = extract_font_filename(path)
             if filename is None:
-                logger.warning("[E2E Intercept] font filename None, abort: %s", url)
-                await route.abort()
+                if not is_internal:
+                    logger.warning("[E2E Intercept] font filename None, abort: %s", url)
+                    await route.abort()
+                else:
+                    await route.continue_()
                 return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
             if local_path.exists():
+                logger.info("[E2E Intercept] fulfill font %s from %s", filename, url)
                 await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
                 return
-            logger.warning("[E2E Intercept] font not cached, abort: %s", url)
-            await route.abort()
+            if not is_internal:
+                logger.warning("[E2E Intercept] font not cached, abort: %s", url)
+                await route.abort()
+            else:
+                await route.continue_()
+            return
+        if is_internal:
+            await route.continue_()
             return
         # 外部资源：canvaskit/skwasm/wimp 命中本地缓存（支持子目录变体）
         # flet 0.86.3 新增 skwasm/wimp 渲染器及 chromium/experimental_webparagraph 子目录变体；
