@@ -619,6 +619,105 @@ class TestConfigHandlerGetTokenKeyringMigration:
         mock_set_pw.assert_called_once()
 
 
+class TestConfigMigrationWarnings:
+    """P3-Config-Return-Propagation-Gaps: 读时迁移路径失败告警测试。
+
+    覆盖 get_token 与 get_llm_config 两条迁移路径，验证：
+    ① save_config 返回 False 时触发 logger.warning；
+    ② 迁移失败不破坏返回值契约（get_token 返回 str，get_llm_config 返回 dict）；
+    ③ _persist_migration 助手本身的成功/失败返回值。
+    """
+
+    def test_persist_migration_returns_true_on_success(self):
+        """_persist_migration 成功时返回 True。"""
+        with patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True) as mock_save:
+            result = cfg_mod.ConfigHandler._persist_migration({"ts_token": ""}, "clear ts_token")
+            assert result is True
+            mock_save.assert_called_once_with({"ts_token": ""})
+
+    def test_persist_migration_returns_false_on_failure(self):
+        """_persist_migration 失败时返回 False 且触发 logger.warning。"""
+        with (
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
+            patch.object(cfg_mod.logger, "warning") as mock_warning,
+        ):
+            result = cfg_mod.ConfigHandler._persist_migration({"ts_token": ""}, "clear ts_token")
+            assert result is False
+            # 强断言：验证 warning 含 migration_name 与幂等提示
+            mock_warning.assert_called_once_with(
+                "[ConfigHandler] config migration failed: %s (will retry on next startup)",
+                "clear ts_token",
+            )
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ts_token": "encrypted_val"})
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_token")
+    @patch.object(cfg_mod.keyring, "set_password")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    @patch.object(cfg_mod.logger, "warning")
+    def test_get_token_warns_on_migration_failure(
+        self, mock_warning, mock_save, mock_set_pw, mock_decrypt, mock_load, mock_get_pw
+    ):
+        """P3-Config-Return-Propagation-Gaps: get_token 迁移失败时触发 logger.warning。"""
+        result = cfg_mod.ConfigHandler.get_token()
+        # 返回值契约不变：仍返回 token 字符串
+        assert result == "decrypted_token"
+        # 强断言：验证 warning 含 ts_token 迁移名称
+        mock_warning.assert_called_once_with(
+            "[ConfigHandler] config migration failed: %s (will retry on next startup)",
+            "clear ts_token after keyring migration",
+        )
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ts_token": "encrypted_val"})
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_token")
+    @patch.object(cfg_mod.keyring, "set_password")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.logger, "warning")
+    def test_get_token_no_warning_on_migration_success(
+        self, mock_warning, mock_save, mock_set_pw, mock_decrypt, mock_load, mock_get_pw
+    ):
+        """P3-Config-Return-Propagation-Gaps: get_token 迁移成功时不触发 warning。"""
+        result = cfg_mod.ConfigHandler.get_token()
+        assert result == "decrypted_token"
+        mock_warning.assert_not_called()
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_api_key": "encrypted_val"})
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_key")
+    @patch.object(cfg_mod.keyring, "set_password")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    @patch.object(cfg_mod.logger, "warning")
+    def test_get_llm_config_warns_on_migration_failure(
+        self, mock_warning, mock_save, mock_set_pw, mock_decrypt, mock_load, mock_get_pw
+    ):
+        """P3-Config-Return-Propagation-Gaps: get_llm_config 迁移失败时触发 logger.warning。"""
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        # 返回值契约不变：仍返回 dict 且 api_key 为迁移后的值
+        assert isinstance(result, dict)
+        assert result["api_key"] == "decrypted_key"
+        # 强断言：验证 warning 含 ai_api_key 迁移名称
+        mock_warning.assert_called_once_with(
+            "[ConfigHandler] config migration failed: %s (will retry on next startup)",
+            "clear ai_api_key after keyring migration",
+        )
+
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_api_key": "encrypted_val"})
+    @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_key")
+    @patch.object(cfg_mod.keyring, "set_password")
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.logger, "warning")
+    def test_get_llm_config_no_warning_on_migration_success(
+        self, mock_warning, mock_save, mock_set_pw, mock_decrypt, mock_load, mock_get_pw
+    ):
+        """P3-Config-Return-Propagation-Gaps: get_llm_config 迁移成功时不触发 warning。"""
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        assert isinstance(result, dict)
+        assert result["api_key"] == "decrypted_key"
+        mock_warning.assert_not_called()
+
+
 class TestConfigHandlerNoLockReentry:
     """C-P1-7: Verify save_config does not call load_config inside write lock,
     which would cause deadlock with RWLockFair (non-reentrant)."""

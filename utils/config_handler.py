@@ -391,6 +391,29 @@ class ConfigHandler:
             return False
 
     @staticmethod
+    def _persist_migration(update: dict, migration_name: str) -> bool:
+        """P3-Config-Return-Propagation-Gaps: 读时迁移路径持久化助手。
+
+        用于 get_token / get_llm_config 等"读时迁移"路径（清理过时字段、keyring 迁移后清空加密字段等），
+        这些路径的返回值契约是 str/dict，不能直接传播 save_config 的 bool 返回值。
+        失败时记 logger.warning 告警（下次启动会重新迁移，幂等无数据丢失风险），不破坏调用方返回值契约。
+
+        Args:
+            update: 要合并写入的配置片段（与 save_config 的 config_data 参数语义一致）。
+            migration_name: 迁移名称（用于日志告警，如 "clear ts_token after keyring migration"）。
+
+        Returns:
+            True 表示 save_config 成功；False 表示失败（已记 warning，调用方可忽略）。
+        """
+        success = ConfigHandler.save_config(update)
+        if not success:
+            logger.warning(
+                "[ConfigHandler] config migration failed: %s (will retry on next startup)",
+                migration_name,
+            )
+        return success
+
+    @staticmethod
     def get_token():
         # 1. 环境变量优先（最高优先级）
         env_token = os.environ.get(ENV_FALLBACK_MAP["ts_token"])
@@ -416,7 +439,9 @@ class ConfigHandler:
         if decrypted:
             try:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", decrypted)
-                ConfigHandler.save_config({"ts_token": ""})
+                # P3-Config-Return-Propagation-Gaps: 读时迁移路径改用 _persist_migration，
+                # 失败时记 warning 而非破坏 get_token 返回 str 的契约（下次启动重新迁移，幂等）。
+                ConfigHandler._persist_migration({"ts_token": ""}, "clear ts_token after keyring migration")
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
             # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
@@ -947,7 +972,9 @@ class ConfigHandler:
                 DataSanitizer.register_secret(api_key)
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
-                    ConfigHandler.save_config({"ai_api_key": ""})
+                    # P3-Config-Return-Propagation-Gaps: 读时迁移路径改用 _persist_migration，
+                    # 失败时记 warning 而非破坏 get_llm_config 返回 dict 的契约（下次启动重新迁移，幂等）。
+                    ConfigHandler._persist_migration({"ai_api_key": ""}, "clear ai_api_key after keyring migration")
                     logger.info("Migrated ai_api_key from config to keyring and cleared legacy value")
                 # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as exc:
