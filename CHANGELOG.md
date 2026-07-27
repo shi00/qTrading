@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## [0.9.0](https://github.com/shi00/qTrading/compare/v0.8.0...v0.9.0) (2026-07-27)
+
+
+### Features
+* **redline:** `scripts/check_redlines.py` 新增 `R_tushare_token_log` 检查（R9 红线专属守护）
+  * 扫描 `data/external/tushare_client.py` 中 logger 调用是否直接打印 `self.token` 明文
+  * 覆盖直接引用/f-string/format/%/dict 等包装形式
+  * 放行 `DataSanitizer.sanitize_token()` / `hashlib.sha256()` 等已脱敏形式
+* **flet:** upgrade 0.28.3 → 0.86.2（经 0.85.3/0.86.0/0.86.1 渐进升级，architecture-level rewrite）
+  * R1: ft.app(target=) → ft.run(main=, [web_renderer=])
+  * R2: page.on_resized → page.on_resize
+  * R3: page.open/close/dialog → page.show_dialog/pop_dialog
+  * R4: FilePicker 服务化（page.services 挂载）
+  * R5: 样式 helper classmethod 化
+  * R6: 按钮 text= → content=、ElevatedButton → Button
+  * R7: flet-charts 拆包
+  * R8: on_scroll_interval → scroll_interval
+  * R10: client_storage → shared_preferences
+  * R11: mock_flet 契约对齐 V1
+  * R12.a: Dropdown on_change → on_select
+  * R12.b: Tabs 三件套（TabBar + TabBarView）
+  * R13: e.delta_x → e.primary_delta（回退 local_delta.x）
+  * R14: TextField focused_border_color
+  * R15: Image src_base64 → src（直接支持 base64）
+  * window_icon → window.icon
+  * 删除 _schedule_async/_scheduled_tasks/_run_task 兼容垫片
+  * §8.2 spike 结论：V1 Prop.__set__ 值相等短路仍存在，但声明式 UI 改造后 refresh_dropdown_options() 生产零调用，已在 Phase R.4.1 删除（声明式下 options 由 state 派生，use_state 触发重建自动绕过值相等优化）
+
+
+### Bug Fixes
+* **data/sync:** M7 取消传播时间维度对齐（PR #309）
+  * 4 个 sync 文件 7 处循环转 `time.monotonic()` 时间维度检查（M7.3-M7.9）
+  * 修复 concept_sync NTP 时钟回退导致取消检查永久失效（P4 bug）
+  * data/sync 层 `@require_quality` 豁免文档化（M7.10）
+  * 949 测试通过 + ruff/pyright/pre-commit 全过
+
+
 ### Documentation
 * **tushare:** 修复 Tushare 文档缺失问题（C2-C19 检视报告）
   * `docs/debt/known-technical-debt.md` 补登记 `tushare_client.py` 2 处 NOTE(lazy) 标记（pro 字段类型注解 + points_15000 API 集），新增 P3-Tushare-Client-Lazy-Markers 条目
@@ -21,30 +58,18 @@
   * man/flet-best-practices.md 从 1310 行收敛为项目差异指南（193 行）
   * 已解决事项（Windows 测试泄漏、V0 垫片删除、声明式迁移收官）从活动规范移入本 changelog
 
-### Features
-* **redline:** `scripts/check_redlines.py` 新增 `R_tushare_token_log` 检查（R9 红线专属守护）
-  * 扫描 `data/external/tushare_client.py` 中 logger 调用是否直接打印 `self.token` 明文
-  * 覆盖直接引用/f-string/format/%/dict 等包装形式
-  * 放行 `DataSanitizer.sanitize_token()` / `hashlib.sha256()` 等已脱敏形式
-* **flet:** upgrade 0.28.3 → 0.85.3 (architecture-level rewrite)
-  * R1: ft.app(target=) → ft.run(main=, [web_renderer=])
-  * R2: page.on_resized → page.on_resize
-  * R3: page.open/close/dialog → page.show_dialog/pop_dialog
-  * R4: FilePicker 服务化（page.services 挂载）
-  * R5: 样式 helper classmethod 化
-  * R6: 按钮 text= → content=、ElevatedButton → Button
-  * R7: flet-charts 拆包
-  * R8: on_scroll_interval → scroll_interval
-  * R10: client_storage → shared_preferences
-  * R11: mock_flet 契约对齐 V1
-  * R12.a: Dropdown on_change → on_select
-  * R12.b: Tabs 三件套（TabBar + TabBarView）
-  * R13: e.delta_x → e.primary_delta（回退 local_delta.x）
-  * R14: TextField focused_border_color
-  * R15: Image src_base64 → src（直接支持 base64）
-  * window_icon → window.icon
-  * 删除 _schedule_async/_scheduled_tasks/_run_task 兼容垫片
-  * §8.2 spike 结论：V1 Prop.__set__ 值相等短路仍存在，但声明式 UI 改造后 refresh_dropdown_options() 生产零调用，已在 Phase R.4.1 删除（声明式下 options 由 state 派生，use_state 触发重建自动绕过值相等优化）
+
+### Refactoring
+* **test:** scripts/* tooling tests 新增 meta marker（Phase TO.2）
+
+
+### 历史空缺说明
+* v0.8.0 (2026-07-08) 为手动 annotated tag 创建于 2026-07-08 指向 commit edce43bd，未走 release-please 流程，CHANGELOG 未记录条目，本次补录占位
+* v0.9.0 pyproject/manifest 已提前 bump，本次补发 tag 与 GitHub Release 以修复版本表面一致性
+
+## [0.8.0](https://github.com/shi00/qTrading/compare/v0.7.0...v0.8.0) (2026-07-08)
+
+历史空缺补录：v0.8.0 tag 为手动 annotated tag 创建于 2026-07-08 指向 commit edce43bd，未走 release-please 流程，CHANGELOG 未记录条目，本次补录占位。
 
 ## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.9...v0.7.0) (2026-06-15)
 
