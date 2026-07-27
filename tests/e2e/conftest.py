@@ -456,48 +456,56 @@ async def _setup_canvaskit_intercept(page) -> None:
             else:
                 await route.continue_()
             return
-        if is_internal:
-            await route.continue_()
-            return
-        # 外部资源：canvaskit/skwasm/wimp 命中本地缓存（支持子目录变体）
+        # canvaskit/skwasm/wimp（同源 + CDN）：命中本地缓存则 fulfill
+        # no_cdn 模式下从同源加载，CDN 模式下从 gstatic.com 加载。
+        # Windows 上 Flet 服务器可能无法正确提供这些资源（路径/编码问题），
+        # 导致 canvases=0 卡死，因此无论同源还是跨域都统一从本地 mock_assets 提供。
         # flet 0.86.3 新增 skwasm/wimp 渲染器及 chromium/experimental_webparagraph 子目录变体；
         # 即使 E2E 强制 CANVAS_KIT，Flutter 引擎初始化时也可能请求这些文件（buildConfig 含多渲染器）。
         # chromium/canvaskit.js 与根目录 canvaskit.js 是不同文件（MD5 不同），必须按子目录路径匹配。
         #
-        # CORS 头必要性：canvaskit.js / rive_native.js 通过动态 import() 加载（跨域 CDN 请求）。
-        # Playwright route.fulfill 默认不注入 CORS 头，浏览器会静默阻止 import()，
-        # 导致 Flutter 引擎初始化卡死（canvases=0 持续到测试超时）。
-        # Access-Control-Allow-Origin: * 允许跨域 import()；
-        # Cross-Origin-Resource-Policy: cross-origin 允许跨域 fetch()（WebAssembly.compileStreaming）。
-        if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
-            rel_path = extract_canvaskit_relpath(urlparse(url).path)
+        # CORS 头：仅跨域请求需要（动态 import() 加载跨域脚本需要 CORS）；
+        # 同源请求不需要 CORS 头。
+        # Cross-Origin-Resource-Policy: cross-origin 用于跨域 fetch()（WebAssembly.compileStreaming）；
+        # 同源请求不需要。
+        if any(k in path for k in ("canvaskit", "skwasm", "wimp")):
+            rel_path = extract_canvaskit_relpath(path)
             if rel_path is None:
-                logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
-                await route.abort()
+                if not is_internal:
+                    logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
+                    await route.abort()
+                else:
+                    await route.continue_()
                 return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
             if local_path.exists():
                 content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
                 logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
+                headers: dict[str, str] = {}
+                if not is_internal:
+                    headers["Access-Control-Allow-Origin"] = "*"
+                    headers["Cross-Origin-Resource-Policy"] = "cross-origin"
                 await route.fulfill(
                     status=200,
                     content_type=content_type,
                     path=str(local_path),
-                    headers={
-                        "Access-Control-Allow-Origin": "*",
-                        "Cross-Origin-Resource-Policy": "cross-origin",
-                    },
+                    headers=headers,
                 )
                 return
-            logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
-            await route.abort()
+            if not is_internal:
+                logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
+                await route.abort()
+            else:
+                await route.continue_()
             return
-        # rive-native-wasm：命中本地缓存（flet 0.86.3 main.dart.js 硬编码 CDN 依赖）
+        # rive-native-wasm（同源 + CDN）：命中本地缓存
+        # flet 0.86.3 main.dart.js 硬编码 CDN 依赖，no_cdn 模式下也可能从同源请求。
         # rive_native.js 加载失败会阻塞 Flutter 引擎初始化，必须 fulfill 而非 abort。
         # CDN URL 模式：https://cdn.jsdelivr.net/npm/@rive-app/flutter-native-wasm@<ver>/wasm[_compatibility]/rive_native.[js|wasm]
-        # CORS 头同 canvaskit（rive_native.js 亦通过动态 import() 加载）。
-        if "@rive-app/flutter-native-wasm" in url:
-            path = urlparse(url).path
+        # 同源 URL 模式：/rive/wasm[_compatibility]/rive_native.[js|wasm]
+        if (not is_internal and "@rive-app/flutter-native-wasm" in url) or (
+            is_internal and "/rive/" in path and ("rive_native" in path or path.endswith(".wasm"))
+        ):
             # 提取 wasm/ 或 wasm_compatibility/ 段及其后文件名
             parts = PurePosixPath(path).parts
             # path traversal 防御
@@ -513,26 +521,36 @@ async def _setup_canvaskit_intercept(page) -> None:
                     rel_parts = list(parts[i:])
                     break
             if not rel_parts:
-                logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
-                await route.abort()
+                if not is_internal:
+                    logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
+                    await route.abort()
+                else:
+                    await route.continue_()
                 return
             rive_rel = "/".join(rel_parts)
             local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
             if local_path.exists():
                 content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
                 logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
+                headers: dict[str, str] = {}
+                if not is_internal:
+                    headers["Access-Control-Allow-Origin"] = "*"
+                    headers["Cross-Origin-Resource-Policy"] = "cross-origin"
                 await route.fulfill(
                     status=200,
                     content_type=content_type,
                     path=str(local_path),
-                    headers={
-                        "Access-Control-Allow-Origin": "*",
-                        "Cross-Origin-Resource-Policy": "cross-origin",
-                    },
+                    headers=headers,
                 )
                 return
-            logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
-            await route.abort()
+            if not is_internal:
+                logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
+                await route.abort()
+            else:
+                await route.continue_()
+            return
+        if is_internal:
+            await route.continue_()
             return
         # 未命中本地缓存的外部请求：强制离线
         logger.info("[E2E Intercept] abort external: %s", url)
