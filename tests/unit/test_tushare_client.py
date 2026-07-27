@@ -78,9 +78,13 @@ class TestTushareClientInit:
             mock_ts.pro_api.assert_not_called()
 
     def test_reinit_different_token_calls_set_token(self):
-        """Reinit with different token should call set_token."""
+        """Reinit with different token should trigger token update path.
+
+        修复后 __init__ 直接调用 _set_token_core（避免 set_token 在 async/sync 上下文中
+        抛 RuntimeError 回归），故 patch 目标改为 _set_token_core。
+        """
         client = _make_client("old_token")
-        with patch.object(client, "set_token") as mock_set:
+        with patch.object(client, "_set_token_core") as mock_core:
             with (
                 patch("data.external.tushare_client.ts"),
                 patch("data.external.tushare_client.ConfigHandler") as mock_ch,
@@ -90,7 +94,7 @@ class TestTushareClientInit:
                 mock_ch.get_request_max_retries.return_value = 3
                 mock_ch.get_tushare_point_tier.return_value = "points_5000"
                 TushareClient(token="new_token")
-                mock_set.assert_called_once_with("new_token")
+                mock_core.assert_called_once_with("new_token")
 
     def test_reinit_no_token_skips(self):
         """Reinit with no token should skip pro_api call."""
@@ -108,21 +112,23 @@ class TestTushareClientInit:
 
 
 class TestTushareClientSetToken:
-    def test_set_token(self, tushare_client_mocks):
+    @pytest.mark.asyncio
+    async def test_set_token(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        client.set_token("new_token")
+        await client.set_token_async("new_token")
         assert client.token == "new_token"
         mock_ts.set_token.assert_called_with("new_token")
 
-    def test_set_token_clears_capability_cache(self, tushare_client_mocks):
-        """T4.7: set_token 后 _capability_cache 应被清空。"""
+    @pytest.mark.asyncio
+    async def test_set_token_clears_capability_cache(self, tushare_client_mocks):
+        """T4.7: set_token_async 后 _capability_cache 应被清空。"""
         client, _, _ = tushare_client_mocks
         client.mark_api_available("api1")
         client.mark_api_available("api2")
         client.mark_api_unavailable("api3")
         assert len(client._capability_cache) == 3
 
-        client.set_token("new_token")
+        await client.set_token_async("new_token")
 
         assert client._capability_cache == {}
         assert len(client._capability_cache) == 0
@@ -140,12 +146,13 @@ class TestTushareClientTokenBreakerProperty:
         client._token_invalid = True
         assert client.is_token_invalid is True
 
-    def test_is_token_invalid_resets_on_set_token(self, tushare_client_mocks):
-        """set_token 应重置熔断标志（已有逻辑），is_token_invalid 随之返回 False。"""
+    @pytest.mark.asyncio
+    async def test_is_token_invalid_resets_on_set_token(self, tushare_client_mocks):
+        """set_token_async 应重置熔断标志（已有逻辑），is_token_invalid 随之返回 False。"""
         client, _, _ = tushare_client_mocks
         client._token_invalid = True
         assert client.is_token_invalid is True
-        client.set_token("new_token_after_invalid")
+        await client.set_token_async("new_token_after_invalid")
         assert client.is_token_invalid is False
 
     def test_is_token_invalid_is_readonly(self, tushare_client_mocks):

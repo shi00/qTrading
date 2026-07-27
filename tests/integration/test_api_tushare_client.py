@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -430,12 +431,17 @@ class TestSlowApiLimiters:
 
 
 class TestSetTokenRebuildsLimiters:
-    """测试 set_token 正确重建限流器（P0 级）"""
+    """测试 set_token_async 正确重建限流器（P0 级）
+
+    注：原 sync set_token 在 P3-Tushare-Token-Invalid-Race 修复后改为
+    run_coroutine_threadsafe 调度，需运行中事件循环。此处直接调用
+    set_token_async（经 asyncio.run 创建临时循环）以测试限流器重建逻辑。
+    """
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_set_token_rebuilds_rate_limiter(self, mock_set_token, mock_pro_api):
-        """set_token 更新 token 后重建通用限流器"""
+        """set_token_async 更新 token 后重建通用限流器"""
         with patch.object(TushareClient, "_resolve_rate_limit", return_value=120):
             client = TushareClient(token="old_token")
 
@@ -443,7 +449,7 @@ class TestSetTokenRebuildsLimiters:
             assert old_limiter is not None
 
             with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
-                client.set_token("new_token")
+                asyncio.run(client.set_token_async("new_token"))
 
                 assert client._rate_limiter is not None
                 assert abs(client._rate_limiter.rate - 200 / 60.0) < 0.005
@@ -451,12 +457,12 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_set_token_rebuilds_api_limiters(self, mock_set_token, mock_pro_api):
-        """set_token 后API限流器被重建"""
+        """set_token_async 后API限流器被重建"""
         with patch.object(TushareClient, "_resolve_rate_limit", return_value=120):
             client = TushareClient(token="old_token")
 
             with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
-                client.set_token("new_token")
+                asyncio.run(client.set_token_async("new_token"))
 
                 assert "top10_holders" in client._api_limiters
                 assert "concept_detail" in client._api_limiters
@@ -470,7 +476,7 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_set_token_clears_limiters_when_disabled(self, mock_set_token, mock_pro_api):
-        """set_token 时无限流配置应清空限流器"""
+        """set_token_async 时无限流配置应清空限流器"""
         with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="old_token")
 
@@ -478,7 +484,7 @@ class TestSetTokenRebuildsLimiters:
             assert len(client._api_limiters) > 0
 
             with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
-                client.set_token("new_token")
+                asyncio.run(client.set_token_async("new_token"))
 
                 assert client._rate_limiter is None
                 assert client._api_limiters == {}
@@ -486,14 +492,14 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_set_token_creates_limiter_when_previously_none(self, mock_set_token, mock_pro_api):
-        """set_token 时从无限流变为有限流应创建限流器"""
+        """set_token_async 时从无限流变为有限流应创建限流器"""
         with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client = TushareClient(token="old_token")
 
             assert client._rate_limiter is None
 
             with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
-                client.set_token("new_token")
+                asyncio.run(client.set_token_async("new_token"))
 
                 assert client._rate_limiter is not None
                 assert abs(client._rate_limiter.rate - 200 / 60.0) < 0.005
