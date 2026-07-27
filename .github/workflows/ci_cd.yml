@@ -759,7 +759,7 @@ jobs:
 
   windows-skip-revalidation:
     # P3-WinE2E-Skip 技术债复验 job：临时取消 8 个 Windows skipif 用例的 skipif，
-    # 在 windows-latest runner 实机运行以判断 Flet 0.86.2 下问题是否仍存在.
+    # 在 windows-latest runner 实机运行以判断 Flet 0.86.x 下问题是否仍存在.
     # 拆分为 3 个并行 matrix group 解决 timeout + 隔离卡死用例：
     #   - no-sidecar (4 用例): 3 fake sidecar + 1 wizard，无需 Rust 构建（wizard 仅 3s 失败不影响）
     #   - real-sidecar (3 用例): 真实 sidecar binary，需 Rust 构建链路
