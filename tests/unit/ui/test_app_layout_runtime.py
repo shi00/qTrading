@@ -512,3 +512,92 @@ class TestCleanupResize:
         run_unmount_effects(env["component"])
         # 验证 page.on_resize 已被置 None
         assert env["page"].on_resize is None
+
+
+# ============================================================================
+# E2E 模式: _build_pages_stack 只构造激活视图, 非激活视图用空 Container
+# ============================================================================
+
+
+class TestBuildPagesStackE2E:
+    """``_build_pages_stack`` E2E 模式惰性构造测试 (覆盖 app_layout.py L91-98).
+
+    E2E 模式 (``E2E_TESTING=true``) 下, 非激活视图不应调用 view_factory(),
+    避免 VM 构造链 (DataSourceViewModel → AIService → litellm import 18s+) 阻塞 MainThread.
+
+    直接渲染 ``_build_pages_stack`` Component (不通过 AppLayout 间接渲染),
+    因为 ``render_once`` 不递归渲染子 Component。
+    """
+
+    def test_e2e_mode_skips_non_active_view_construction(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """E2E 模式下非激活视图的 factory 不被调用 (只构造 current_tab=MARKET 对应的 HomeView)."""
+        from ui import app_layout as mod
+
+        # Mock 6 个子视图, 用 MagicMock 跟踪调用
+        view_mocks: dict[str, MagicMock] = {}
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+        ]:
+            mock = MagicMock(return_value=MagicMock(name=view_name))
+            view_mocks[view_name] = mock
+            monkeypatch.setattr(mod, view_name, mock)
+
+        # 启用 E2E 模式, current_tab=MARKET (0) → 只构造 HomeView
+        monkeypatch.setenv("E2E_TESTING", "true")
+        try:
+            component = make_component(
+                mod._build_pages_stack, 0, mod.ViewportState(width=0.0, height=0.0, breakpoint="compact")
+            )
+            render_once(component)
+        finally:
+            monkeypatch.delenv("E2E_TESTING", raising=False)
+
+        # E2E 模式 + current_tab=MARKET (0): 只有 HomeView 被构造 (active=True, viewport 透传)
+        viewport = mod.ViewportState(width=0.0, height=0.0, breakpoint="compact")
+        view_mocks["HomeView"].assert_called_once_with(active=True, viewport=viewport)
+        # 其他 5 个视图不应被调用
+        for view_name in ["ScreenerView", "BacktestView", "DataExplorerView", "TaskCenterView", "SettingsView"]:
+            view_mocks[view_name].assert_not_called(), f"E2E 模式下 {view_name} 不应被构造"
+
+    def test_normal_mode_constructs_all_views(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """正常模式下所有 6 个视图都被构造 (非 E2E 模式)."""
+        from ui import app_layout as mod
+
+        # Mock 6 个子视图
+        view_mocks: dict[str, MagicMock] = {}
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+        ]:
+            mock = MagicMock(return_value=MagicMock(name=view_name))
+            view_mocks[view_name] = mock
+            monkeypatch.setattr(mod, view_name, mock)
+
+        # 不启用 E2E 模式, current_tab=MARKET (0)
+        monkeypatch.delenv("E2E_TESTING", raising=False)
+        component = make_component(
+            mod._build_pages_stack, 0, mod.ViewportState(width=0.0, height=0.0, breakpoint="compact")
+        )
+        render_once(component)
+
+        # 正常模式下所有 6 个视图都被构造
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+        ]:
+            view_mocks[view_name].assert_called_once(), f"正常模式下 {view_name} 应被构造"

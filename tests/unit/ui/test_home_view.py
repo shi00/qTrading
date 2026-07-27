@@ -392,6 +392,33 @@ class TestHomeViewRuntime:
         assert "load_market_data" in mock_home_vm.method_calls
         assert "refresh_news" in mock_home_vm.method_calls
 
+    def test_e2e_mode_skips_data_loading(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """E2E 模式下 _init_and_load 跳过 vm.init/init_data/_load_data, 直接 set_loading(False).
+
+        覆盖 home_view.py L152-154 (E2E_TESTING 检查分支)。
+        根因: vm.init() → NewsSubscriptionService → AIService → litellm import (18s+)
+        阻塞 Flet patch 下发导致 E2E 浏览器超时。
+        """
+        from ui.views.home_view import HomeView
+
+        monkeypatch.setenv("E2E_TESTING", "true")
+        try:
+            component = make_component(HomeView)
+            page = _make_fake_page()
+            run_mount_effects(component, page=page)
+
+            # E2E 模式下不应调用 init/init_data/load_market_data/refresh_news
+            assert "init" not in mock_home_vm.method_calls
+            assert "init_data" not in mock_home_vm.method_calls
+            assert "load_market_data" not in mock_home_vm.method_calls
+            assert "refresh_news" not in mock_home_vm.method_calls
+            # 应直接设置 loading=False (set_loading 记录格式为 "set_loading:False")
+            assert "set_loading:False" in mock_home_vm.method_calls
+        finally:
+            monkeypatch.delenv("E2E_TESTING", raising=False)
+
     def test_unmount_triggers_dispose(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
         """卸载后 VM.dispose 被调用 (use_viewmodel cleanup)."""
         from ui.views.home_view import HomeView

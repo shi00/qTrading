@@ -317,6 +317,47 @@ class TestBuildTabs:
         args = self.mock_notify.call_args[0]
         assert len(args) == 1, "NotificationsTab 声明式重写后不应接收 page_ref"
 
+    def test_build_tabs_e2e_mode_only_constructs_active_tab(self):
+        """e2e_mode=True 时只构造 current_tab 对应的 tab, 其他 tab 工厂不被调用。
+
+        覆盖 E2E 模式惰性工厂分支 (settings_view.py L70-82)。
+        根因: 先构造所有 tab 再过滤会导致 DataSourceTab → DataSourceViewModel →
+        AIService → litellm import 18s+ 阻塞 MainThread。
+        """
+        from ui.views.settings_view import _build_tabs
+
+        show_snack = MagicMock()
+        # current_tab=2 (AIBrainTab), e2e_mode=True
+        tabs = _build_tabs(show_snack, current_tab=2, e2e_mode=True)
+
+        assert len(tabs) == 6
+        # 只有 AIBrainTab 被构造
+        self.mock_ai.assert_called_once_with(show_snack)
+        # 其他 tab 工厂不应被调用
+        self.mock_data.assert_not_called()
+        self.mock_db.assert_not_called()
+        self.mock_auto.assert_not_called()
+        self.mock_notify.assert_not_called()
+        self.mock_system.assert_not_called()
+        # 非激活 tab 是空 Container
+        assert tabs[0] is not tabs[2]
+        assert isinstance(tabs[0], ft.Container)
+        assert tabs[0].content is None  # 空 Container
+
+    def test_build_tabs_e2e_mode_current_tab_0_constructs_only_data_source(self):
+        """e2e_mode=True, current_tab=0 时只构造 DataSourceTab。"""
+        from ui.views.settings_view import _build_tabs
+
+        show_snack = MagicMock()
+        _build_tabs(show_snack, current_tab=0, e2e_mode=True)
+
+        self.mock_data.assert_called_once_with(show_snack)
+        self.mock_db.assert_not_called()
+        self.mock_ai.assert_not_called()
+        self.mock_auto.assert_not_called()
+        self.mock_notify.assert_not_called()
+        self.mock_system.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _TAB_CONFIG 配置守护
