@@ -440,26 +440,36 @@ async def _setup_canvaskit_intercept(page) -> None:
             # extract_font_filename 内部用 PurePosixPath 防御 Windows `\` 注入 path traversal
             filename = extract_font_filename(urlparse(url).path)
             if filename is None:
+                logger.warning("[E2E Intercept] font filename None, abort: %s", url)
                 await route.abort()
                 return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
             if local_path.exists():
                 await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
                 return
+            logger.warning("[E2E Intercept] font not cached, abort: %s", url)
             await route.abort()
             return
-        # 外部资源：仅 canvaskit 命中本地缓存
-        if "canvaskit" in url:
+        # 外部资源：canvaskit/skwasm/wimp 命中本地缓存
+        # flet 0.86.3 新增 skwasm/wimp 渲染器，即使 E2E 强制 CANVAS_KIT，
+        # Flutter 引擎初始化时可能请求这些文件（buildConfig 包含多渲染器）
+        if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
             filename = extract_font_filename(urlparse(url).path)
             if filename is None:
+                logger.warning("[E2E Intercept] ck filename None, abort: %s", url)
                 await route.abort()
                 return
             local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
             if local_path.exists():
                 content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
+                logger.info("[E2E Intercept] fulfill %s from %s", filename, url)
                 await route.fulfill(status=200, content_type=content_type, path=str(local_path))
                 return
+            logger.warning("[E2E Intercept] ck not cached, abort: %s (file=%s)", url, filename)
+            await route.abort()
+            return
         # 未命中本地缓存的外部请求：强制离线
+        logger.info("[E2E Intercept] abort external: %s", url)
         await route.abort()
 
     await page.route("**/*", intercept_external)
@@ -472,11 +482,16 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     context = await browser.new_context(viewport={"width": 1400, "height": 900})
     await context.tracing.start(screenshots=True, snapshots=True)
     page = await context.new_page()
-    page.on(
-        "console",
-        lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text),
-    )
-    page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
+
+    # 提高浏览器控制台日志级别：error/warning → INFO（CI 可见），log/debug → DEBUG
+    def _on_console(msg):
+        if msg.type in ("error", "warning"):
+            logger.info("[BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+        else:
+            logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+
+    page.on("console", _on_console)
+    page.on("pageerror", lambda err: logger.info("[BROWSER ERROR] %s", err))
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
 
     await _setup_canvaskit_intercept(page)
@@ -994,12 +1009,16 @@ async def _trigger_sidecar_startup_via_browser(
     logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
     context = await e2e_browser.new_context()
     page = await context.new_page()
-    # 捕获浏览器 console/error 日志，便于定位 main(page) 卡死位置
-    page.on(
-        "console",
-        lambda msg: logger.debug("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text),
-    )
-    page.on("pageerror", lambda err: logger.debug("[E2E Seeding BROWSER ERROR] %s", err))
+
+    # 捕获浏览器 console/error 日志：error/warning → INFO（CI 可见），log/debug → DEBUG
+    def _on_seeding_console(msg):
+        if msg.type in ("error", "warning"):
+            logger.info("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+        else:
+            logger.debug("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+
+    page.on("console", _on_seeding_console)
+    page.on("pageerror", lambda err: logger.info("[E2E Seeding BROWSER ERROR] %s", err))
     await _setup_canvaskit_intercept(page)
 
     try:
