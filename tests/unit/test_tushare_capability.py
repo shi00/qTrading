@@ -511,8 +511,8 @@ class TestRuntimePermissionPersistence:
                 await client._handle_api_call(mock_func_bad, trade_date="20240101")
             assert client._token_invalid is True
 
-        # set_token 重置熔断
-        client.set_token("new_token_after_invalid")
+        # set_token_async 重置熔断
+        await client.set_token_async("new_token_after_invalid")
         assert client._token_invalid is False
 
         # 第二次调用：验证不再快速失败，成功返回结果
@@ -537,21 +537,23 @@ class TestRuntimePermissionPersistence:
             t.cancel()
         client._bg_tasks.clear()
 
-    def test_set_token_new_token_resets_breaker(self, tushare_client_mocks):
-        """set_token 传入新 token 时重置熔断标志。"""
+    @pytest.mark.asyncio
+    async def test_set_token_new_token_resets_breaker(self, tushare_client_mocks):
+        """set_token_async 传入新 token 时重置熔断标志。"""
         client, _, _ = tushare_client_mocks
         client._token_invalid = True
 
-        client.set_token("new_token_xxx")
+        await client.set_token_async("new_token_xxx")
 
         assert client._token_invalid is False
 
-    def test_set_token_same_token_resets_breaker(self, tushare_client_mocks):
-        """set_token 传入相同 token 时也重置熔断标志。"""
+    @pytest.mark.asyncio
+    async def test_set_token_same_token_resets_breaker(self, tushare_client_mocks):
+        """set_token_async 传入相同 token 时也重置熔断标志。"""
         client, _, _ = tushare_client_mocks
         client._token_invalid = True
 
-        client.set_token(client.token)
+        await client.set_token_async(client.token)
 
         assert client._token_invalid is False
 
@@ -660,8 +662,8 @@ class TestProbeTokenConsistency:
 
         async def fake_probe_call(api_name, func, **params):
             if api_name == "daily":
-                # 模拟 probe 期间 set_token 改变 token + 清空 cache
-                client.set_token("new_token_during_probe")
+                # 模拟 probe 期间 set_token_async 改变 token + 清空 cache
+                await client.set_token_async("new_token_during_probe")
             return None  # probe 成功 → daily=True
 
         client._handle_probe_call = fake_probe_call
@@ -678,8 +680,8 @@ class TestProbeTokenConsistency:
         client.mark_api_unavailable("daily")  # 预设 daily=False
 
         async def persist_with_token_change():
-            # 模拟 persist 期间 set_token 改变 token + 清空 cache
-            client.set_token("new_token_after_exception")
+            # 模拟 persist 期间 set_token_async 改变 token + 清空 cache
+            await client.set_token_async("new_token_after_exception")
             raise RuntimeError("persist failed")
 
         client.persist_capabilities_to_app_state = persist_with_token_change
@@ -721,8 +723,8 @@ class TestProbeTokenConsistency:
 
         async def fake_probe_call(api_name, func, **params):
             if api_name == "daily":
-                # 模拟 probe 期间 set_token 改变 token + 清空 cache
-                client.set_token("new_token_after_cancel")
+                # 模拟 probe 期间 set_token_async 改变 token + 清空 cache
+                await client.set_token_async("new_token_after_cancel")
                 raise asyncio.CancelledError()
             return None
 
