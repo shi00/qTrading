@@ -1049,11 +1049,38 @@ async def _trigger_sidecar_startup_via_browser(
                 try:
                     title = await page.title()
                     url = page.url
+                    # 浏览器端 DOM 诊断：检查 Flutter Web 是否加载、文本是否在 DOM 中
+                    dom_diag = await page.evaluate(
+                        """() => {
+                            const diag = {};
+                            diag.bodyLength = document.body ? document.body.innerHTML.length : 0;
+                            diag.fltGlassPane = !!document.querySelector('flt-glass-pane');
+                            diag.fltSemantic = !!document.querySelector('flt-semantic');
+                            diag.fltSemanticsPlaceholder = !!document.querySelector('flt-semantics-placeholder');
+                            diag.canvases = document.querySelectorAll('canvas').length;
+                            // 查找所有文本节点（去除空白）
+                            const walker = document.createTreeWalker(
+                                document.body,
+                                NodeFilter.SHOW_TEXT,
+                                { acceptNode: (node) => node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
+                            );
+                            const texts = [];
+                            let node;
+                            while (node = walker.nextNode()) {
+                                texts.push(node.textContent.trim());
+                                if (texts.length >= 10) break;
+                            }
+                            diag.textSamples = texts;
+                            diag.navScreenerInDom = document.body.innerHTML.includes('智能选股');
+                            return diag;
+                        }"""
+                    )
                     logger.info(
-                        "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r)",
+                        "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r, dom_diag=%s)",
                         elapsed,
                         title,
                         url,
+                        dom_diag,
                     )
                 except Exception as diag_err:
                     logger.info(
