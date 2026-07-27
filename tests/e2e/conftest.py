@@ -13,7 +13,7 @@ import sys
 import time
 import typing
 from datetime import date, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import MagicMock
 from urllib.parse import unquote_plus, urlparse
 
@@ -467,6 +467,39 @@ async def _setup_canvaskit_intercept(page) -> None:
                 await route.fulfill(status=200, content_type=content_type, path=str(local_path))
                 return
             logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
+            await route.abort()
+            return
+        # rive-native-wasm：命中本地缓存（flet 0.86.3 main.dart.js 硬编码 CDN 依赖）
+        # rive_native.js 加载失败会阻塞 Flutter 引擎初始化，必须 fulfill 而非 abort。
+        # CDN URL 模式：https://cdn.jsdelivr.net/npm/@rive-app/flutter-native-wasm@<ver>/wasm[_compatibility]/rive_native.[js|wasm]
+        if "@rive-app/flutter-native-wasm" in url:
+            path = urlparse(url).path
+            # 提取 wasm/ 或 wasm_compatibility/ 段及其后文件名
+            parts = PurePosixPath(path).parts
+            # path traversal 防御
+            if any(p in (".", "..") or "\\" in p for p in parts):
+                logger.warning("[E2E Intercept] rive path traversal, abort: %s", url)
+                await route.abort()
+                return
+            # 查找 wasm / wasm_compatibility 段
+            rive_subdir_markers = frozenset({"wasm", "wasm_compatibility"})
+            rel_parts: list[str] = []
+            for i, p in enumerate(parts):
+                if p in rive_subdir_markers:
+                    rel_parts = list(parts[i:])
+                    break
+            if not rel_parts:
+                logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
+                await route.abort()
+                return
+            rive_rel = "/".join(rel_parts)
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
+            if local_path.exists():
+                content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
+                logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
+                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+                return
+            logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
             await route.abort()
             return
         # 未命中本地缓存的外部请求：强制离线
