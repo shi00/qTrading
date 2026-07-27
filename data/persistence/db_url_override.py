@@ -1,51 +1,47 @@
 """Database URL override context manager.
 
-Provides a thread-safe way to temporarily override the database URL
-used by config.DB_URL, DATABASE_URL environment variable, and
-ConfigHandler.get_db_url(). This is needed because Alembic's env.py
-reads the URL from these sources at import time, and we need to ensure
-it uses the correct URL during migrations run from within the application.
+Provides an async-safe, thread-local way to temporarily override the database
+URL returned by ``ConfigHandler.get_db_url()``. The override is visible to any
+code that calls ``ConfigHandler.get_db_url()`` within the context — including
+``CacheManager._get_connection_string`` (used in tests to redirect to test DBs)
+and Alembic's ``env.py`` fallback path.
+
+P3-M4-DbUrlOverride-Mock-In-Prod: previously this module used
+``unittest.mock.patch`` to patch ``ConfigHandler.get_db_url`` globally, which
+risked concurrent pollution if other threads called ``get_db_url()`` during the
+context. The new implementation delegates to ``ConfigHandler.with_db_url_override``
+which uses ``contextvars.ContextVar`` for async-safe thread-local storage.
+``ThreadPoolManager.run_async()`` propagates the context to worker threads via
+``contextvars.copy_context()``, so code running in the IO thread pool still sees
+the override while concurrent calls from unrelated threads do not.
 """
 
-import os
 from contextlib import contextmanager
-from unittest.mock import patch
+
+from utils.config_handler import ConfigHandler
 
 
 @contextmanager
 def override_db_url(target_url: str):
-    """Temporarily override database URL in config, environment, and ConfigHandler.
+    """Temporarily override the database URL returned by ``ConfigHandler.get_db_url()``.
 
-    This ensures that Alembic's env.py (which reads from ConfigHandler,
-    config.DB_URL, or DATABASE_URL env var) uses the correct URL during migrations.
+    The override is async-safe and thread-local (via ``contextvars.ContextVar``).
+    It is only visible in the current asyncio task / thread and tasks / threads
+    spawned from it via ``ThreadPoolManager.run_async()`` (which propagates the
+    context via ``contextvars.copy_context()``). Concurrent calls to
+    ``get_db_url()`` from unrelated threads are unaffected.
 
-    The override covers all three priority levels used by env.py's
-    get_database_url():
-      1. ConfigHandler.get_db_url()  (highest priority)
-      2. config.DB_URL
-      3. os.environ["DATABASE_URL"]  (lowest priority)
+    Note: direct ``loop.run_in_executor`` calls (bypassing ``ThreadPoolManager``)
+    do NOT propagate the override. All current production callers go through
+    ``ThreadPoolManager.run_async()``.
 
     Args:
         target_url: The database URL to use temporarily.
 
-    Usage:
+    Usage::
+
         with override_db_url("postgresql+asyncpg://user:pass@host/db"):
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
     """
-    import config
-
-    original_db_url = config.DB_URL
-    original_env_db_url = os.environ.get("DATABASE_URL")
-
-    config.DB_URL = target_url
-    os.environ["DATABASE_URL"] = target_url
-
-    with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=target_url):
-        try:
-            yield
-        finally:
-            config.DB_URL = original_db_url
-            if original_env_db_url is not None:
-                os.environ["DATABASE_URL"] = original_env_db_url
-            elif "DATABASE_URL" in os.environ:
-                del os.environ["DATABASE_URL"]
+    with ConfigHandler.with_db_url_override(target_url):
+        yield
