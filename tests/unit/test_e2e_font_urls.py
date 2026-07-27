@@ -25,6 +25,7 @@ from tests.e2e._font_urls import (
     extract_required_font_paths,
     find_missing_fonts,
     get_cached_font_filenames,
+    is_font_cdn_url,
 )
 
 pytestmark = pytest.mark.unit
@@ -372,6 +373,62 @@ class TestBuildFontDownloadUrl:
         url = build_font_download_url("notosanssc/v37/hash%20name.woff2")
 
         assert url == "https://fonts.gstatic.com/s/notosanssc/v37/hash%20name.woff2"
+
+
+class TestIsFontCdnUrl:
+    """Tests for is_font_cdn_url().
+
+    Security: 修复 CodeQL "Incomplete URL substring sanitization" (high severity)。
+    必须校验 URL host 而非子串匹配，防止 ``https://evil.com/?x=fonts.gstatic.com``
+    等伪造 URL 绕过拦截器。
+    """
+
+    def test_returns_true_for_gstatic_font_url(self) -> None:
+        """正常 gstatic 字体 URL → True。"""
+        assert is_font_cdn_url("https://fonts.gstatic.com/s/notosanssc/v37/hash.4.woff2") is True
+
+    def test_returns_true_for_googleapis_font_url(self) -> None:
+        """正常 googleapis 字体 CSS URL → True。"""
+        assert is_font_cdn_url("https://fonts.googleapis.com/css?family=Roboto") is True
+
+    def test_returns_false_for_evil_url_with_gstatic_in_query(self) -> None:
+        """CodeQL 关注点：域名出现在 query 而非 host 时必须返回 False。
+
+        旧子串匹配 ``"fonts.gstatic.com" in url`` 会被此 URL 绕过。
+        """
+        assert is_font_cdn_url("https://evil.com/?x=fonts.gstatic.com") is False
+
+    def test_returns_false_for_evil_url_with_googleapis_in_path(self) -> None:
+        """CodeQL 关注点：域名出现在 path 而非 host 时必须返回 False。"""
+        assert is_font_cdn_url("https://evil.com/path/fonts.googleapis.com/font.woff2") is False
+
+    def test_returns_false_for_evil_url_with_gstatic_substring_in_host(self) -> None:
+        """伪造 host 含目标域名子串（非精确匹配）→ False。
+
+        ``evil-fonts.gstatic.com.attacker.net`` 不是受信任 host。
+        """
+        assert is_font_cdn_url("https://evil-fonts.gstatic.com.attacker.net/x") is False
+
+    def test_returns_false_for_non_font_url(self) -> None:
+        """无关域名 URL → False。"""
+        assert is_font_cdn_url("https://example.com/font.woff2") is False
+
+    def test_returns_false_for_data_url(self) -> None:
+        """data: URL 无 host → False（conftest.py 已在上游用 is_internal 放行，
+        此处仅锁定 is_font_cdn_url 自身契约：无 host 不视为字体 CDN）。"""
+        assert is_font_cdn_url("data:text/css;base64,abc") is False
+
+    def test_returns_false_for_blob_url(self) -> None:
+        """blob: URL 无 host → False。"""
+        assert is_font_cdn_url("blob:https://example.com/abc") is False
+
+    def test_hostname_case_insensitive(self) -> None:
+        """urlparse().hostname 按 RFC 3986 转小写，大写 host 仍应匹配。"""
+        assert is_font_cdn_url("https://FONTS.GSTATIC.com/s/hash.woff2") is True
+
+    def test_returns_false_for_empty_string(self) -> None:
+        """空字符串 → False。"""
+        assert is_font_cdn_url("") is False
 
 
 class TestRequiredFontFamilies:

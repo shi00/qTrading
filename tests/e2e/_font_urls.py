@@ -28,6 +28,7 @@ import importlib.machinery
 import re
 import site
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 # 应用实际需要的字体族（locale=zh + 默认 UI 字体）
 # 升级 flet 时若应用新增其他 locale（如日文/韩文），需在此处补充对应字体族
@@ -112,6 +113,33 @@ def extract_canvaskit_relpath(path: str) -> str | None:
             return None
         rel_parts = [basename]
     return "/".join(rel_parts)
+
+
+# 受信任的字体 CDN host（route handler 仅拦截这些 host 的字体请求）
+# 使用 host 精确匹配而非子串匹配，防止 CodeQL "Incomplete URL substring sanitization"
+_FONT_CDN_HOSTS: frozenset[str] = frozenset({"fonts.gstatic.com", "fonts.googleapis.com"})
+
+
+def is_font_cdn_url(url: str) -> bool:
+    """判断 URL 是否指向受信任的字体 CDN（基于 host 精确匹配，非子串匹配）。
+
+    Security: 修复 CodeQL "Incomplete URL substring sanitization" (high severity)。
+    旧实现 ``"fonts.gstatic.com" in url`` 会被
+    ``https://evil.com/?x=fonts.gstatic.com`` 等伪造 URL 绕过；
+    本函数用 ``urlparse`` 解析 host 后做精确集合匹配。
+
+    被 ``tests/e2e/conftest.py`` route handler 调用，判断是否从本地
+    ``mock_assets/fonts/`` 提供字体资源。
+
+    Args:
+        url: 完整 URL（如 ``"https://fonts.gstatic.com/s/notosanssc/v37/hash.4.woff2"``）。
+
+    Returns:
+        True 表示 URL host 为 ``fonts.gstatic.com`` 或 ``fonts.googleapis.com``；
+        无 host 的 URL（data:/blob:）或非字体 CDN URL 返回 False。
+    """
+    hostname = urlparse(url).hostname
+    return hostname in _FONT_CDN_HOSTS
 
 
 def find_flet_web_main_dart_js() -> Path:

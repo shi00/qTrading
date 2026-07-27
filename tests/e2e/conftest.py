@@ -430,7 +430,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     #   - canvaskit chromium/experimental_webparagraph 子目录变体
     #   - skwasm / wimp 渲染器（Windows 上默认使用 skwasm）
     #   - rive-native-wasm（main.dart.js 硬编码的动画依赖，缺失会阻塞 Flutter 初始化）
-    from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename
+    from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename, is_font_cdn_url
 
     async def intercept_external(route, request):
         url = request.url
@@ -483,7 +483,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             await route.abort()
             return
         # 字体
-        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+        if is_font_cdn_url(url):
             filename = extract_font_filename(path)
             if filename is None:
                 logger.warning("[E2E Intercept] font filename None, abort: %s", url)
