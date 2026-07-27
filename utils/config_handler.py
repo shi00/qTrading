@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import copy
 import json
 import logging
@@ -41,6 +42,11 @@ class ConfigHandler:
     _config_cache = None
     _lock = rwlock.RWLockFair()
     _io_workers_cap_warned: bool = False
+    # P3-M4-DbUrlOverride-Mock-In-Prod: async-safe thread-local override for
+    # get_db_url(). Propagated to worker threads via contextvars.copy_context()
+    # in ThreadPoolManager.run_async(), so Alembic migrations running in the IO
+    # thread pool see the override while concurrent calls from other threads do not.
+    _db_url_override: contextvars.ContextVar[str | None] = contextvars.ContextVar("_db_url_override", default=None)
 
     DEFAULT_CONFIG = get_default_config()
 
@@ -414,6 +420,35 @@ class ConfigHandler:
         return success
 
     @staticmethod
+    @contextlib.contextmanager
+    def with_db_url_override(url: str):
+        """P3-M4-DbUrlOverride-Mock-In-Prod: temporarily override get_db_url() return value.
+
+        Uses ``contextvars.ContextVar`` for async-safe thread-local storage. The
+        override is only visible in the current asyncio task / thread (and tasks
+        / threads spawned from it via ``ThreadPoolManager.run_async()``, which
+        propagates the context via ``contextvars.copy_context()``). Concurrent
+        calls to ``get_db_url()`` from unrelated threads are unaffected.
+
+        Replaces the previous ``unittest.mock.patch`` approach in
+        ``data/persistence/db_url_override.py`` which patched the method globally
+        and could pollute concurrent callers.
+
+        Args:
+            url: The database URL to return from ``get_db_url()`` within the context.
+
+        Usage::
+
+            with ConfigHandler.with_db_url_override("postgresql+asyncpg://..."):
+                await DatabaseMigrator.init_db(engine, auto_migrate=True)
+        """
+        token = ConfigHandler._db_url_override.set(url)
+        try:
+            yield
+        finally:
+            ConfigHandler._db_url_override.reset(token)
+
+    @staticmethod
     def get_token():
         # 1. 环境变量优先（最高优先级）
         env_token = os.environ.get(ENV_FALLBACK_MAP["ts_token"])
@@ -608,6 +643,9 @@ class ConfigHandler:
         """Get PostgreSQL connection URL.
 
         Resolution priority (12-factor app compliance):
+        0. ``_db_url_override`` ContextVar — explicit override set by
+           ``with_db_url_override()`` (async-safe thread-local, used by Alembic
+           migrations run from within the application). Highest priority.
         1. ``DATABASE_URL`` environment variable — always wins when set, so
            deployments can override the persisted config without editing JSON.
         2. Rebuild from stored host/port/user/database + password via
@@ -617,6 +655,11 @@ class ConfigHandler:
         3. Fall back to ``config.DB_URL`` (snapshot of ``DATABASE_URL`` taken
            at import time) for pre-onboarding scenarios.
         """
+        # Priority 0: explicit override (async-safe thread-local via ContextVar)
+        override = ConfigHandler._db_url_override.get()
+        if override is not None:
+            return override
+
         # Priority 1: DATABASE_URL environment variable
         env_url = os.environ.get("DATABASE_URL")
         if env_url:
