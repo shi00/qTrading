@@ -1161,6 +1161,28 @@ async def _trigger_sidecar_startup_via_browser(
                             diag.fltSemantic = !!document.querySelector('flt-semantic');
                             diag.fltSemanticsPlaceholder = !!document.querySelector('flt-semantics-placeholder');
                             diag.canvases = document.querySelectorAll('canvas').length;
+                            // 检查 flt-glass-pane 的 shadow DOM（Flutter Web 可能把 canvas 放在 shadow DOM 里）
+                            const glassPane = document.querySelector('flt-glass-pane');
+                            if (glassPane && glassPane.shadowRoot) {
+                                diag.shadowCanvases = glassPane.shadowRoot.querySelectorAll('canvas').length;
+                                diag.shadowSceneHost = !!glassPane.shadowRoot.querySelector('flt-scene-host');
+                                diag.shadowInnerHtmlLen = glassPane.shadowRoot.innerHTML.length;
+                            } else {
+                                diag.shadowCanvases = 0;
+                                diag.shadowSceneHost = false;
+                                diag.shadowInnerHtmlLen = 0;
+                            }
+                            // 检查 WebGL 上下文
+                            diag.webglContexts = 0;
+                            const allCanvases = document.querySelectorAll('canvas');
+                            for (const c of allCanvases) {
+                                try {
+                                    if (c.getContext('webgl') || c.getContext('webgl2')) diag.webglContexts++;
+                                } catch(e) {}
+                            }
+                            // 检查 Flutter/Dart 全局变量
+                            diag.hasFlutter = typeof flutterApi !== 'undefined';
+                            diag.hasDart = typeof _flutterLoader !== 'undefined';
                             // 查找所有文本节点（去除空白）
                             const walker = document.createTreeWalker(
                                 document.body,
