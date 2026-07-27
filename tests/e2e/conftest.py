@@ -1198,7 +1198,12 @@ def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
     真实 PG 17。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
     供 ``seed_e2e_data`` fixture 读取后连接 sidecar DB 播种数据。
     """
+    print("[E2E DIAG] flet_app fixture: start", flush=True)
     data_root = tmp_path_factory.mktemp("embedded_pg_data")
+    print(f"[E2E DIAG] flet_app fixture: data_root={data_root}", flush=True)
+    print(f"[E2E DIAG] flet_app fixture: sidecar_binary={real_sidecar_binary_e2e}", flush=True)
+    print(f"[E2E DIAG] flet_app fixture: embedded_url_file={embedded_url_file}", flush=True)
+    print("[E2E DIAG] flet_app fixture: calling _spawn (startup_timeout_s=300)", flush=True)
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
@@ -1221,9 +1226,13 @@ def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
         },
         startup_timeout_s=300.0,
     )
+    print(f"[E2E DIAG] flet_app fixture: _spawn returned, proc.pid={proc.pid}, url={url}", flush=True)
     app = AppServer(proc, url, cfg_file)
+    print("[E2E DIAG] flet_app fixture: yielding app", flush=True)
     yield app
+    print("[E2E DIAG] flet_app fixture: teardown, terminating proc", flush=True)
     _terminate(proc)
+    print("[E2E DIAG] flet_app fixture: teardown done", flush=True)
 
 
 @pytest.fixture(scope="session")

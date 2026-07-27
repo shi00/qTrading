@@ -45,10 +45,13 @@ def wait_until_ready(
     effective_timeout = timeout_s * multiplier
     deadline = time.monotonic() + effective_timeout
     last_err: Exception | None = None
+    print(f"[E2E DIAG] wait_until_ready: url={url}, timeout={effective_timeout}s, pid={proc.pid}", flush=True)
+    probe_count = 0
     while time.monotonic() < deadline:
         # 子进程崩溃则立即报错，不用空等超时（WinError 10061 的根因之一）
         if proc.poll() is not None:
             log_tail = _read_log_tail(log_path, log_offset)
+            print(f"[E2E DIAG] wait_until_ready: proc exited, code={proc.returncode}", flush=True)
             raise RuntimeError(
                 f"Flet app process (PID {proc.pid}) exited prematurely with code {proc.returncode} "
                 f"before becoming ready at {url}. Log tail:\n{log_tail}"
@@ -56,10 +59,17 @@ def wait_until_ready(
         try:
             r = httpx.get(url, timeout=3.0)
             if r.status_code == 200:
+                print(f"[E2E DIAG] wait_until_ready: HTTP 200 after {probe_count} probes", flush=True)
                 return
+            if probe_count % 20 == 0:
+                print(f"[E2E DIAG] wait_until_ready: probe={probe_count}, status={r.status_code}", flush=True)
         except httpx.HTTPError as e:
             last_err = e
+            if probe_count % 20 == 0:
+                print(f"[E2E DIAG] wait_until_ready: probe={probe_count}, err={type(e).__name__}: {e}", flush=True)
+        probe_count += 1
         time.sleep(0.5)
+    print(f"[E2E DIAG] wait_until_ready: TIMEOUT after {effective_timeout}s, probes={probe_count}", flush=True)
     log_tail = _read_log_tail(log_path, log_offset)
     raise RuntimeError(
         f"Flet app not ready at {url} within {effective_timeout}s. Last error: {last_err}. Log tail:\n{log_tail}"
