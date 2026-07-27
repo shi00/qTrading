@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import logging
 import threading
+import time
 
 import pandas as pd
 
@@ -23,6 +24,12 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
+
+# M7.3/M7.4: 循环体取消检查的时间间隔（秒）。
+# 项目硬约束："long-running 操作必须每 2 秒检查 cancel_event"。旧实现完全无检查，
+# 嵌套循环可运行数小时不响应取消信号，违反 2s 红线。改用 time.monotonic()
+# 时间维度测量，参考 data/sync/sw_industry.py 模式。
+_CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
 
 def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -603,10 +610,16 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         semaphore = asyncio.Semaphore(adjusted_concurrency)
 
+        # M7.6: day 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
+        # 旧实现每迭代检查，快速迭代时冗余开销；慢迭代（单日 5-30s）时不影响响应。
+        last_cancel_check = time.monotonic()
         for day_str in dates_to_sync:
-            if self._shutdown_event.is_set():
-                logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
-                break
+            now = time.monotonic()
+            if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                last_cancel_check = now
+                if self._shutdown_event.is_set():
+                    logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
+                    break
 
             df_disclosure = await self.context.api.get_disclosure_date(date=day_str)
 
@@ -683,6 +696,16 @@ class FinancialSyncStrategy(ISyncStrategy):
             # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
             _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
             for batch_start in range(0, len(target_list), _BATCH_SIZE):
+                # M7.4: 内层 batch 循环补 _shutdown_event.is_set() 检查。旧实现
+                # 5-10s/batch 无检查，cancel 信号 set 后仍处理所有 batch，违反 2s
+                # 响应约束。参考 _run_full_sync L478 模式。
+                if self._shutdown_event.is_set():
+                    logger.debug(
+                        "[FinancialSync] Incremental | Cancelled during batch loop at batch_start=%s",
+                        batch_start,
+                    )
+                    break
+
                 batch_targets = target_list[batch_start : batch_start + _BATCH_SIZE]
                 batch = [sync_one_target(item) for item in batch_targets]
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch)
@@ -852,12 +875,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                         )
 
         # Iterate per-date (not all-at-once) to avoid task explosion
+        # M7.6: corporate actions 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
+        last_cancel_check = time.monotonic()
         for i, d in enumerate(dates):
-            if self._shutdown_event.is_set():
-                logger.debug(
-                    "[FinancialSync] BatchSync | Cancelled during corporate actions.",
-                )
-                break
+            now = time.monotonic()
+            if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                last_cancel_check = now
+                if self._shutdown_event.is_set():
+                    logger.debug(
+                        "[FinancialSync] BatchSync | Cancelled during corporate actions.",
+                    )
+                    break
 
             # Each date: 3 tables in parallel
             coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
@@ -1114,8 +1142,26 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         total_saved = 0
 
+        # M7.3: 嵌套循环按时间维度（每 2 秒）检查 _shutdown_event。旧实现完全无
+        # 取消检查，可运行数小时不响应取消信号，违反 2s 红线。参考
+        # data/sync/sw_industry.py 模式，使用 time.monotonic() 时间维度测量。
+        last_cancel_check = time.monotonic()
+
         for period_idx, period in enumerate(periods):
             for i, ts_code in enumerate(ts_codes):
+                now = time.monotonic()
+                if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                    last_cancel_check = now
+                    if self._shutdown_event.is_set():
+                        logger.debug(
+                            "[FinancialSync] Repair | Cancelled at period_idx=%s (%s) i=%s/%s",
+                            period_idx,
+                            period,
+                            i,
+                            len(ts_codes),
+                        )
+                        return total_saved
+
                 try:
                     await asyncio.sleep(
                         self._get_request_delay(is_heavy=True),
