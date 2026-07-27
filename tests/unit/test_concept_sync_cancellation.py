@@ -12,8 +12,6 @@ AIConceptTagSyncStrategy 已有每条都检查 _cancelled + cancel_event.is_set(
 test_data_processor_ai_concept.py 覆盖。
 """
 
-import datetime
-
 import pandas as pd
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -86,10 +84,12 @@ class TestAKShareLoopCancellation:
     # 不会被 await（return 发生在循环内检查点），触发 RuntimeWarning。
     # 这是验证循环内取消行为的必要副作用，非生产代码问题。
     async def test_loop_cancel_after_2s(self):
-        """循环内 get_now() 距上次检查 >= 2s，第 3 次 _check_cancelled 返回 True。
+        """循环内 time.monotonic() 距上次检查 >= 2s，第 3 次 _check_cancelled 返回 True。
 
-        时间序列：last_cancel_check = T0；循环第 1 次迭代 get_now() 返回 T0+3s
+        时间序列：last_cancel_check = T0；循环第 1 次迭代 time.monotonic() 返回 T0+3s
         （差 3s >= 2s，触发 _check_cancelled）→ 返回 True → return。
+
+        M7.5: 改用 time.monotonic() 替代 get_now()，避免 NTP 时钟回退导致取消检查失效。
 
         验证：返回 CANCELLED，gather 未被调用（循环提前 return）。
         """
@@ -108,14 +108,14 @@ class TestAKShareLoopCancellation:
             return False
 
         # 时间序列：
-        # - index 0: 循环前 last_cancel_check = get_now() → T0
-        # - index 1+: 循环内 get_now() → T0+3s（差 3s >= 2s 触发检查）
-        t0 = datetime.datetime(2024, 6, 14, 9, 30, 0, tzinfo=datetime.UTC)
-        t_loop = datetime.datetime(2024, 6, 14, 9, 30, 3, tzinfo=datetime.UTC)
+        # - index 0: 循环前 last_cancel_check = time.monotonic() → T0
+        # - index 1+: 循环内 time.monotonic() → T0+3s（差 3s >= 2s 触发检查）
+        t0 = 1000.0
+        t_loop = t0 + 3.0
         time_sequence = [t0, t_loop]
         time_idx = 0
 
-        def mock_get_now():
+        def mock_monotonic():
             nonlocal time_idx
             t = time_sequence[time_idx] if time_idx < len(time_sequence) else t_loop
             time_idx += 1
@@ -125,7 +125,7 @@ class TestAKShareLoopCancellation:
             patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
             patch.object(strategy, "_check_cancelled", side_effect=check_side_effect),
             patch("data.sync.concept_sync.gather_return_exceptions_propagating_cancel") as mock_gather,
-            patch("data.sync.concept_sync.get_now", side_effect=mock_get_now),
+            patch("data.sync.concept_sync.time.monotonic", side_effect=mock_monotonic),
         ):
             MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
 
@@ -137,9 +137,9 @@ class TestAKShareLoopCancellation:
 
     @pytest.mark.asyncio
     async def test_loop_no_cancel_within_2s(self):
-        """循环内每次 get_now() 距上次检查 < 2s，不触发 _check_cancelled。
+        """循环内每次 time.monotonic() 距上次检查 < 2s，不触发 _check_cancelled。
 
-        所有 get_now() 返回同一时间 T0，差 0s < 2s，循环内检查点不触发。
+        所有 time.monotonic() 返回同一时间 T0，差 0s < 2s，循环内检查点不触发。
 
         验证：正常完成，_check_cancelled 调用 3 次（入口 + concept_list 后 + gather 后），
         循环内检查点不触发。
@@ -148,12 +148,12 @@ class TestAKShareLoopCancellation:
         strategy = AKShareConceptSyncStrategy(ctx)
         boards_df = _make_boards_df(2)
 
-        fixed_time = datetime.datetime(2024, 6, 14, 9, 30, 0, tzinfo=datetime.UTC)
+        fixed_time = 1000.0
 
         with (
             patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
             patch.object(strategy, "_check_cancelled", return_value=False) as mock_check,
-            patch("data.sync.concept_sync.get_now", return_value=fixed_time),
+            patch("data.sync.concept_sync.time.monotonic", return_value=fixed_time),
         ):
             MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
             MockClient.return_value.get_concept_constituents = AsyncMock(
@@ -165,6 +165,61 @@ class TestAKShareLoopCancellation:
 
             assert result.status == "success"
             assert mock_check.call_count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    async def test_cancel_check_immune_to_ntp_rollback(self):
+        """M7.5: time.monotonic() 不受 NTP 时钟回退影响。
+
+        场景：NTP 将系统时钟回退 10 秒。若用 get_now()（wall clock），
+        now - last_cancel_check < 0，取消检查永不被触发。time.monotonic()
+        单调递增，即使 wall clock 回退，monotonic 时钟仍前进。
+
+        时间序列：
+        - index 0: last_cancel_check = T0 (monotonic)
+        - index 1: now = T0 + 3s (monotonic，不受 NTP 影响)
+        差 3s >= 2s → 触发 _check_cancelled → 返回 True → return。
+
+        验证：返回 CANCELLED，证明 monotonic clock 在 wall clock 回退时仍正常工作。
+        """
+        ctx = _make_ctx()
+        strategy = AKShareConceptSyncStrategy(ctx)
+        boards_df = _make_boards_df(2)
+
+        call_count = 0
+
+        def check_side_effect(result):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                result.status = "cancelled"
+                return True
+            return False
+
+        t0 = 1000.0
+        t_loop = t0 + 3.0
+        time_sequence = [t0, t_loop]
+        time_idx = 0
+
+        def mock_monotonic():
+            nonlocal time_idx
+            t = time_sequence[time_idx] if time_idx < len(time_sequence) else t_loop
+            time_idx += 1
+            return t
+
+        with (
+            patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
+            patch.object(strategy, "_check_cancelled", side_effect=check_side_effect),
+            patch("data.sync.concept_sync.gather_return_exceptions_propagating_cancel") as mock_gather,
+            patch("data.sync.concept_sync.time.monotonic", side_effect=mock_monotonic),
+        ):
+            MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
+
+            result = await strategy.run()
+
+            assert result.status == "cancelled"
+            assert call_count == 3
+            mock_gather.assert_not_called()
 
 
 class TestLimitListLoopCancellation:

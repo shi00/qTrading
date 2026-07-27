@@ -1,4 +1,5 @@
 import asyncio
+from itertools import count
 
 import pytest
 import datetime
@@ -351,6 +352,73 @@ class TestFinancialSyncRepair:
         await strategy.repair_financial_data(["000001.SZ"])
         saved_df = ctx.cache.save_financial_reports.call_args[0][0]
         assert list(saved_df.columns) == FINANCIAL_REPORT_SCHEMA_COLS
+
+
+class TestFinancialSyncRepairCancellation:
+    """M7.3: repair_financial_data 嵌套循环按时间维度（每 2 秒）检查 _shutdown_event。
+
+    旧实现完全无取消检查，可运行数小时不响应取消信号，违反项目硬约束
+    "long-running 操作必须每 2 秒检查 cancel_event"。
+    """
+
+    @pytest.mark.asyncio
+    async def test_repair_cancel_when_shutdown_event_set(self):
+        """循环内 time.monotonic() 距上次检查 >= 2s，且 _shutdown_event.is_set() → return。
+
+        时间序列：
+        - 循环前 last_cancel_check = T0（第 1 次 monotonic 调用）
+        - i=0: now=T0+2s（diff=2s >= 2s，触发检查），_shutdown_event 已 set → return
+
+        验证：循环 i=0 即 return，_fetch_comprehensive_financial_data 未被调用。
+        """
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+
+        # 预设取消信号
+        strategy._shutdown_event.set()
+
+        t0 = 1000.0
+        time_sequence = [t0, t0 + 2.0]
+        time_idx = 0
+
+        def mock_monotonic():
+            nonlocal time_idx
+            t = time_sequence[time_idx] if time_idx < len(time_sequence) else t0 + 2.0
+            time_idx += 1
+            return t
+
+        with (
+            patch("data.sync.financial.time.monotonic", side_effect=mock_monotonic),
+            patch.object(strategy, "_fetch_comprehensive_financial_data", new=AsyncMock()) as mock_fetch,
+        ):
+            result = await strategy.repair_financial_data(["000001.SZ", "000002.SZ"])
+
+        # 验证：取消信号在 fetch 前触发，fetch 未被调用
+        mock_fetch.assert_not_awaited()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_repair_no_cancel_completes_all_iterations(self):
+        """循环内 time.monotonic() 距上次检查 < 2s，不触发取消检查，循环正常完成。
+
+        所有 time.monotonic() 返回同一时间 T0，diff=0s < 2s，检查点不触发。
+        """
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+
+        fixed_t = 1000.0
+        with (
+            patch("data.sync.financial.time.monotonic", return_value=fixed_t),
+            patch.object(strategy, "_fetch_comprehensive_financial_data", new=AsyncMock()) as mock_fetch,
+        ):
+            mock_fetch.return_value = (
+                pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]}),
+                {"mainbz": 0, "audit": 0},
+            )
+            await strategy.repair_financial_data(["000001.SZ"])
+
+        # 验证：循环正常完成，fetch 被调用
+        assert mock_fetch.await_count >= 1
 
 
 class TestFinancialSyncCorporateActions:
@@ -1881,7 +1949,10 @@ class TestRunIncrementalSyncCancellation:
 
         ctx.api.get_disclosure_date = AsyncMock(side_effect=selective_disclosure)
         strategy = FinancialSyncStrategy(ctx)
-        result = await strategy.run()
+        # M7.6: day 循环转时间维度取消检查（每 2s）。mock time.monotonic 让每次迭代
+        # 间隔 3s（>= _CANCEL_CHECK_INTERVAL_SECONDS）以触发 _shutdown_event.is_set() 检查。
+        with patch("data.sync.financial.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy.run()
         assert result is not None
         # 只处理了第一天就 break
         assert call_count == 1
@@ -1898,6 +1969,65 @@ class TestRunIncrementalSyncCancellation:
         assert result is not None
         # 应处理所有日期（3 天 + 1 = 4 天）
         assert ctx.api.get_disclosure_date.await_count >= 3
+
+    @pytest.mark.asyncio
+    async def test_inner_batch_loop_breaks_on_shutdown(self):
+        """M7.4: _run_incremental_sync 内层 batch 循环在 _shutdown_event.is_set() 后 break。
+
+        构造 11 stocks 单日 + _BATCH_SIZE=5 → 3 batches。在第一个 batch 的 gather
+        完成后设置 _shutdown_event，验证后续 batch 未被处理（save_financial_reports
+        调用次数 ≤ 5 而非 11+）。
+
+        旧实现 L692 batch 循环无 _shutdown_event.is_set() 检查，所有 batch 都会
+        执行，违反 2s 响应约束（5-10s/batch）。
+        """
+        ctx = make_ctx()
+        # 触发增量同步路径（非 force=True）
+        three_days_ago = get_now() - datetime.timedelta(days=3)
+        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+
+        # 11 stocks 单日 → 3 batches（_BATCH_SIZE=5）
+        n_stocks = 11
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"00000{i:03d}.SZ" for i in range(n_stocks)],
+                    "end_date": ["20240331"] * n_stocks,
+                }
+            )
+        )
+
+        strategy = FinancialSyncStrategy(ctx)
+
+        # 在第一个 stock 的 fetch 完成后设置 shutdown。batch 1 的 5 个 stocks
+        # 通过 gather 并行启动，所有协程先递增计数再 await。需在 await 前捕获
+        # my_count，否则第一个完成时 fetch_call_count 已为 5，条件永不为 True。
+        # 第一个协程 my_count=1，完成后设置 shutdown；其余 4 个 my_count=2-5
+        # 不设置。batch 2 的 shutdown 检查触发 break。
+        original_fetch = strategy._fetch_comprehensive_financial_data
+        fetch_call_count = 0
+
+        async def fetch_and_set_shutdown(*args, **kwargs):
+            nonlocal fetch_call_count
+            fetch_call_count += 1
+            my_count = fetch_call_count  # 在 await 前捕获，避免并发计数竞态
+            result = await original_fetch(*args, **kwargs)
+            if my_count == 1:
+                strategy._shutdown_event.set()
+            return result
+
+        strategy._fetch_comprehensive_financial_data = fetch_and_set_shutdown
+
+        # 强制 _BATCH_SIZE=5：ConfigHandler.get_sync_batch_size()=10 → _BATCH_SIZE=max(5, 5)=5
+        with patch("data.sync.financial.ConfigHandler.get_sync_batch_size", return_value=10):
+            await strategy.run()
+
+        # 验证：第一个 batch (5 stocks) 完成后 shutdown 触发，后续 batch 未处理
+        # 旧实现：33 saves（3 days × 11 stocks）
+        # 新实现：≤5 saves（仅第一个 batch of day 1，day 2/3 被 day loop 拦截）
+        assert ctx.cache.save_financial_reports.await_count <= 5, (
+            f"Expected ≤5 saves (first batch only), got {ctx.cache.save_financial_reports.await_count}"
+        )
 
 
 class TestProcessOneStockCancellation:

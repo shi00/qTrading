@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import time
 import typing
 
 import pandas as pd
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 _SHIBOR_RESUME_OFFSET_DAYS = 1
 # Fallback lookback when date parsing fails
 _SHIBOR_FALLBACK_LOOKBACK_DAYS = 365
+
+# M7.8: 循环体取消检查的时间间隔（秒），参考 data/sync/sw_industry.py 模式。
+_CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
 
 def _parse_period(p: typing.Any):
@@ -716,13 +720,18 @@ class MacroSyncStrategy(ISyncStrategy):
                 return
 
             iw_saved = 0
+            # M7.8: 转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
+            last_cancel_check = time.monotonic()
             for idx_code in MAJOR_INDICES:
-                if self._check_cancelled(result):
-                    # 取消时直接 return，跳过 update_sync_status，避免部分成功被标记为 success。
-                    # 与 sibling 方法形式一致（都跳过 update_sync_status），但语义略不同：
-                    # 此处 save 已在循环内发生，sync_status.last_data_date 会暂时落后于
-                    # index_weight 表实际最新日期，由 save_index_weights 的 upsert 幂等性保证可重入。
-                    return
+                now = time.monotonic()
+                if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                    last_cancel_check = now
+                    if self._check_cancelled(result):
+                        # 取消时直接 return，跳过 update_sync_status，避免部分成功被标记为 success。
+                        # 与 sibling 方法形式一致（都跳过 update_sync_status），但语义略不同：
+                        # 此处 save 已在循环内发生，sync_status.last_data_date 会暂时落后于
+                        # index_weight 表实际最新日期，由 save_index_weights 的 upsert 幂等性保证可重入。
+                        return
 
                 try:
                     df = await self.context.api.get_index_weight(

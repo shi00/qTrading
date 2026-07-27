@@ -6,6 +6,7 @@
 import pytest
 import datetime
 import asyncio
+from itertools import count
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
@@ -661,7 +662,12 @@ class TestMacroSyncSyncIndexWeights:
         ctx.api.get_index_weight = fake_get_index_weight
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+        # M7.8: 转时间维度取消检查（每 2s）。mock time.monotonic 让每次迭代
+        # 间隔 3s（>= _CANCEL_CHECK_INTERVAL_SECONDS）以触发 _check_cancelled 检查。
+        with (
+            patch("data.sync.macro.time.monotonic", side_effect=count(0, 3.0)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
             ctx.processor = MagicMock()
             ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
                 return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
@@ -715,7 +721,12 @@ class TestMacroSyncSyncIndexWeights:
         ctx.api.get_index_weight = fake_get_index_weight
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+        # M7.8: 转时间维度取消检查（每 2s）。mock time.monotonic 让每次迭代
+        # 间隔 3s（>= _CANCEL_CHECK_INTERVAL_SECONDS）以触发 _check_cancelled 检查。
+        with (
+            patch("data.sync.macro.time.monotonic", side_effect=count(0, 3.0)),
+            patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1),
+        ):
             ctx.processor = MagicMock()
             ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
                 return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]

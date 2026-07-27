@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import time
 import typing
 
 import pandas as pd
@@ -22,6 +23,9 @@ _MAX_ERRORS = 5
 _PROGRESS_LOG_INTERVAL = 200
 
 _CHECKPOINT_INTERVAL = 5000
+
+# M7.7: 循环体取消检查的时间间隔（秒），参考 data/sync/sw_industry.py 模式。
+_CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
 
 class HolderSyncStrategy(ISyncStrategy):
@@ -349,10 +353,15 @@ class HolderSyncStrategy(ISyncStrategy):
                 period,
             )
 
+            # M7.7: 转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
+            last_cancel_check = time.monotonic()
             for i, ts_code in enumerate(ts_codes):
-                if self._cancelled or self._shutdown_event.is_set():
-                    logger.debug("[HolderSync] Stop | Cancelled during top10_holders iteration.")
-                    break
+                now = time.monotonic()
+                if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                    last_cancel_check = now
+                    if self._cancelled or self._shutdown_event.is_set():
+                        logger.debug("[HolderSync] Stop | Cancelled during top10_holders iteration.")
+                        break
 
                 try:
                     df = await self.context.api.get_top10_holders(
