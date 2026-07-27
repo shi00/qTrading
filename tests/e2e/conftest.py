@@ -426,7 +426,7 @@ async def _setup_canvaskit_intercept(page) -> None:
     与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
     """
 
-    from tests.e2e._font_urls import extract_font_filename
+    from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename
 
     async def intercept_external(route, request):
         url = request.url
@@ -450,22 +450,23 @@ async def _setup_canvaskit_intercept(page) -> None:
             logger.warning("[E2E Intercept] font not cached, abort: %s", url)
             await route.abort()
             return
-        # 外部资源：canvaskit/skwasm/wimp 命中本地缓存
-        # flet 0.86.3 新增 skwasm/wimp 渲染器，即使 E2E 强制 CANVAS_KIT，
-        # Flutter 引擎初始化时可能请求这些文件（buildConfig 包含多渲染器）
+        # 外部资源：canvaskit/skwasm/wimp 命中本地缓存（支持子目录变体）
+        # flet 0.86.3 新增 skwasm/wimp 渲染器及 chromium/experimental_webparagraph 子目录变体；
+        # 即使 E2E 强制 CANVAS_KIT，Flutter 引擎初始化时也可能请求这些文件（buildConfig 含多渲染器）。
+        # chromium/canvaskit.js 与根目录 canvaskit.js 是不同文件（MD5 不同），必须按子目录路径匹配。
         if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
-            filename = extract_font_filename(urlparse(url).path)
-            if filename is None:
-                logger.warning("[E2E Intercept] ck filename None, abort: %s", url)
+            rel_path = extract_canvaskit_relpath(urlparse(url).path)
+            if rel_path is None:
+                logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
                 await route.abort()
                 return
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
             if local_path.exists():
-                content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
-                logger.info("[E2E Intercept] fulfill %s from %s", filename, url)
+                content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
+                logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
                 await route.fulfill(status=200, content_type=content_type, path=str(local_path))
                 return
-            logger.warning("[E2E Intercept] ck not cached, abort: %s (file=%s)", url, filename)
+            logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
             await route.abort()
             return
         # 未命中本地缓存的外部请求：强制离线

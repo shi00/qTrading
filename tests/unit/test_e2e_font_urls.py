@@ -21,6 +21,7 @@ from tests.e2e import _font_urls
 from tests.e2e._font_urls import (
     REQUIRED_FONT_FAMILIES,
     build_font_download_url,
+    extract_canvaskit_relpath,
     extract_font_filename,
     extract_required_font_paths,
     find_missing_fonts,
@@ -111,6 +112,72 @@ class TestExtractFontFilename:
         # 不含 `\` 且不在 (".", "..") 中，安全
         assert "\\" not in result
         assert result not in (".", "..")
+
+
+class TestExtractCanvaskitRelpath:
+    """Tests for extract_canvaskit_relpath().
+
+    支持 flet 0.86.3 引入的 chromium/experimental_webparagraph 子目录变体。
+    覆盖同源路径与 CDN 路径两种 URL 模式，并验证 path traversal 防御。
+    """
+
+    def test_extracts_basename_from_same_origin_root(self) -> None:
+        """同源路径：``/<base>/canvaskit/<filename>`` → ``<filename>``。"""
+        assert extract_canvaskit_relpath("/canvaskit/canvaskit.js") == "canvaskit.js"
+
+    def test_extracts_chromium_subdir_from_same_origin(self) -> None:
+        """同源路径 chromium 子目录：保留 ``chromium/<filename>`` 相对路径。"""
+        assert extract_canvaskit_relpath("/canvaskit/chromium/canvaskit.js") == "chromium/canvaskit.js"
+
+    def test_extracts_experimental_webparagraph_subdir_from_same_origin(self) -> None:
+        """同源路径 experimental_webparagraph 子目录：保留子目录相对路径。"""
+        result = extract_canvaskit_relpath("/canvaskit/experimental_webparagraph/canvaskit.js")
+        assert result == "experimental_webparagraph/canvaskit.js"
+
+    def test_extracts_basename_from_cdn_path(self) -> None:
+        """CDN 路径：``/flutter-canvaskit/<hash>/<filename>`` → ``<filename>``（跳过 hash 段）。"""
+        assert extract_canvaskit_relpath("/flutter-canvaskit/abc123/canvaskit.js") == "canvaskit.js"
+
+    def test_extracts_chromium_subdir_from_cdn_path(self) -> None:
+        """CDN 路径 chromium 子目录：保留 ``chromium/<filename>`` 相对路径。"""
+        result = extract_canvaskit_relpath("/flutter-canvaskit/abc123/chromium/canvaskit.js")
+        assert result == "chromium/canvaskit.js"
+
+    def test_extracts_wasm_filename_from_same_origin(self) -> None:
+        """wasm 文件：``/<base>/canvaskit/canvaskit.wasm`` → ``canvaskit.wasm``。"""
+        assert extract_canvaskit_relpath("/canvaskit/canvaskit.wasm") == "canvaskit.wasm"
+
+    def test_extracts_chromium_wasm_subdir(self) -> None:
+        """chromium 子目录 wasm 文件：保留 ``chromium/canvaskit.wasm`` 相对路径。"""
+        assert extract_canvaskit_relpath("/canvaskit/chromium/canvaskit.wasm") == "chromium/canvaskit.wasm"
+
+    def test_extracts_skwasm_basename_without_canvaskit_marker(self) -> None:
+        """skwasm 资源（无 canvaskit 标记）：取 basename。"""
+        assert extract_canvaskit_relpath("/skwasm.js") == "skwasm.js"
+
+    def test_extracts_wimp_basename_without_canvaskit_marker(self) -> None:
+        """wimp 资源（无 canvaskit 标记）：取 basename。"""
+        assert extract_canvaskit_relpath("/wimp.wasm") == "wimp.wasm"
+
+    def test_returns_none_for_empty_string(self) -> None:
+        """空字符串 → basename 为空 → 返回 None。"""
+        assert extract_canvaskit_relpath("") is None
+
+    def test_returns_none_for_root_path(self) -> None:
+        """``/`` → basename 为空 → 返回 None。"""
+        assert extract_canvaskit_relpath("/") is None
+
+    def test_returns_none_for_dotdot_in_path(self) -> None:
+        """path traversal 防御：路径含 ``..`` 段 → 返回 None。"""
+        assert extract_canvaskit_relpath("/canvaskit/../etc/passwd") is None
+
+    def test_returns_none_for_dotdot_after_chromium_marker(self) -> None:
+        """path traversal 防御：chromium 标记后跟 ``..`` → 返回 None。"""
+        assert extract_canvaskit_relpath("/canvaskit/chromium/../../../etc/passwd") is None
+
+    def test_returns_none_for_backslash_injection(self) -> None:
+        r"""Windows ``\`` 注入防御：路径段含 ``\`` → 返回 None。"""
+        assert extract_canvaskit_relpath("/canvaskit/\\..\\..\\etc") is None
 
 
 class TestExtractRequiredFontPaths:
