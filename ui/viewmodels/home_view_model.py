@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -95,7 +96,16 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
     PAGE_SIZE = 20  # 常量,不放入 state
 
     def __init__(self):
-        self.processor = DataProcessor()
+        # E2E 模式下跳过 DataProcessor 创建：DataProcessor.__init__ 同步创建
+        # TushareClient，触发 matplotlib 字体缓存构建（27s+ 阻塞 MainThread），
+        # 导致 Flet patch 无法下发，E2E 浏览器 600s 内未检测到 NavigationRail。
+        # E2E 测试不依赖 HomeView 异步数据（test_home_view_loads 仅断言静态标签），
+        # _init_and_load effect 也会在 E2E 模式下提前 return，processor 不会被访问。
+        # 与 home_view.py:_init_and_load 的 E2E_TESTING 跳过逻辑配套。
+        if os.environ.get("E2E_TESTING") == "true":
+            self.processor = None  # type: ignore[assignment]  # [reason: E2E 模式下 processor 不会被访问]
+        else:
+            self.processor = DataProcessor()
 
         # Internal state (frozen snapshot)
         self._state = HomeState()
