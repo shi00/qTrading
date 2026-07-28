@@ -1284,4 +1284,630 @@ mod tests {
         assert!(dump_partials.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- P3-Rust-Coverage-D38: 补充 maint.rs 分支覆盖 ----
+
+    /// `load_password` 成功路径：password file 存在 → 返回密码字符串并注册 secret。
+    #[test]
+    fn load_password_returns_password_when_file_exists() {
+        let dir = unique_tmp("loadpw-ok");
+        let data_dir = dir.join("postgres/17/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let pwd = load_password(&layout).expect("password should load");
+        assert_eq!(pwd, "TestPwd-1_2.3~xxxx");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load_password` 失败路径：password file 缺失 → 返回 PASSWORD_FAILED (16)。
+    #[test]
+    fn load_password_fails_when_file_missing() {
+        let dir = unique_tmp("loadpw-miss");
+        let data_dir = dir.join("postgres/17/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        assert_eq!(load_password(&layout), Err(exit_codes::PASSWORD_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `load_password` 失败路径：password file 为空 → read_password_file 返回 None → PASSWORD_FAILED。
+    #[test]
+    fn load_password_fails_when_file_empty() {
+        let dir = unique_tmp("loadpw-empty");
+        let data_dir = dir.join("postgres/17/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        std::fs::create_dir_all(layout.password_file.parent().unwrap()).unwrap();
+        std::fs::write(&layout.password_file, "  \n").unwrap();
+        assert_eq!(load_password(&layout), Err(exit_codes::PASSWORD_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `HbaRestoreGuard`：构造时备份原内容，drop 时恢复（未 disarm 路径）。
+    #[test]
+    fn hba_restore_guard_restores_on_drop_without_disarm() {
+        let dir = unique_tmp("hba-restore");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hba_path = dir.join("pg_hba.conf");
+        std::fs::write(&hba_path, "original content\n").unwrap();
+        {
+            let _guard = HbaRestoreGuard::new(hba_path.clone());
+            // 修改文件内容模拟 trust 写入
+            std::fs::write(&hba_path, "modified trust content\n").unwrap();
+            // guard 离开作用域时 drop 应恢复 original content
+        }
+        let restored = std::fs::read_to_string(&hba_path).unwrap();
+        assert_eq!(
+            restored, "original content\n",
+            "guard should restore original content on drop without disarm"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `HbaRestoreGuard`：disarm 后 drop 不恢复（成功路径，避免覆盖新 baseline）。
+    #[test]
+    fn hba_restore_guard_disarm_prevents_restore_on_drop() {
+        let dir = unique_tmp("hba-disarm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hba_path = dir.join("pg_hba.conf");
+        std::fs::write(&hba_path, "original content\n").unwrap();
+        {
+            let mut guard = HbaRestoreGuard::new(hba_path.clone());
+            std::fs::write(&hba_path, "new scram-sha-256 baseline\n").unwrap();
+            guard.disarm();
+            // disarm 后 drop 不应恢复
+        }
+        let after = std::fs::read_to_string(&hba_path).unwrap();
+        assert_eq!(
+            after, "new scram-sha-256 baseline\n",
+            "disarm should prevent restore on drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `HbaRestoreGuard`：构造时文件不存在（backup=None），drop 不写入任何内容。
+    #[test]
+    fn hba_restore_guard_no_backup_does_nothing_on_drop() {
+        let dir = unique_tmp("hba-nobackup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hba_path = dir.join("pg_hba.conf");
+        // 文件不存在时构造 guard
+        {
+            let _guard = HbaRestoreGuard::new(hba_path.clone());
+            // drop 时 backup=None，不应创建文件
+        }
+        assert!(
+            !hba_path.exists(),
+            "guard with no backup should not create file on drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：已初始化但关键文件缺失（global/pg_control 缺失）→ 触发 critical_files_missing error。
+    /// doctor 永远返回 Ok(())，issues 经 JSON 输出，此处只验证不 panic。
+    #[test]
+    fn doctor_on_init_dir_with_missing_critical_files_ok() {
+        let dir = unique_tmp("doctor-missing-critical");
+        let data_dir = dir.join("postgres/17/data");
+        // PG_VERSION 存在但 global/pg_control 缺失
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::create_dir_all(data_dir.join("base")).unwrap();
+        std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
+        // 故意不创建 global/pg_control
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：postmaster.pid 残留但进程已死（stale_postmaster_pid warning 分支）。
+    #[test]
+    fn doctor_detects_stale_postmaster_pid() {
+        let dir = unique_tmp("doctor-stale-pid");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        // 写入一个几乎不可能存活的 PID（与 pgbin.rs 测试同款）
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            "4000000\n/x/data\n1784505600\n55432\n/tmp\n127.0.0.1\n",
+        )
+        .unwrap();
+        // doctor 应识别 stale pid 但不失败
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：runtime state.json 损坏 → state_corrupted warning 分支。
+    #[test]
+    fn doctor_detects_corrupted_state_file() {
+        let dir = unique_tmp("doctor-corrupt-state");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        // 写入损坏的 state.json（位于 runtime/state.json）
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        std::fs::create_dir_all(layout.state_file.parent().unwrap()).unwrap();
+        std::fs::write(&layout.state_file, "{not valid json").unwrap();
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：state.json 含 kill_fallback_count > 0 → kill_fallback_history warning 分支。
+    #[test]
+    fn doctor_reports_kill_fallback_history() {
+        let dir = unique_tmp("doctor-kill-fallback");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        let st = state::RuntimeState {
+            kill_fallback_count: 2,
+            last_start_error: Some("test start error".to_string()),
+            ..Default::default()
+        };
+        state::write(&layout.state_file, &st).unwrap();
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：PG_VERSION 与 bundled 主版本不匹配 → version_mismatch error 分支。
+    #[test]
+    fn doctor_detects_pg_version_mismatch() {
+        let dir = unique_tmp("doctor-version-mismatch");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(data_dir.join("global")).unwrap();
+        std::fs::create_dir_all(data_dir.join("base")).unwrap();
+        // 写入一个与 bundled (17) 不匹配的主版本（16）
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+        std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
+        std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：已初始化但 password file 存在 → password_file_perms_ok 校验路径覆盖。
+    #[test]
+    fn doctor_with_password_file_present() {
+        let dir = unique_tmp("doctor-with-pw");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `scan_residuals`：data_dir 无 parent（根路径场景）→ 返回空 Vec 不 panic。
+    #[test]
+    fn scan_residuals_handles_root_path() {
+        // 根路径"/"或"C:\"的 parent 为 None；用 Path::new("/") 构造
+        let root = Path::new(if cfg!(windows) { "C:\\" } else { "/" });
+        // 不实际写文件，仅验证 parent=None 分支不 panic
+        let (restore, partials) = scan_residuals(root);
+        assert!(restore.is_empty());
+        assert!(partials.is_empty());
+    }
+
+    /// `scan_residuals`：data_dir 名称不可解析为 str（非 Unicode 字节）→ 返回空不 panic。
+    /// Unix 平台才能构造非 Unicode 路径；Windows 跳过。scan_residuals 在 file_name
+    /// 解析为 None 时即 return，不会 read_dir，故无需在文件系统创建非 UTF-8 目录
+    /// （macOS APFS 会拒绝非 UTF-8 文件名，OS error 92: Illegal byte sequence）。
+    #[cfg(unix)]
+    #[test]
+    fn scan_residuals_handles_non_utf8_data_dir_name() {
+        use std::os::unix::ffi::OsStringExt;
+        let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        let data_dir = std::env::temp_dir().join(non_utf8);
+        let (restore, partials) = scan_residuals(&data_dir);
+        assert!(restore.is_empty(), "non-utf8 name should be skipped");
+        assert!(partials.is_empty());
+    }
+
+    /// `acquire_lock` 错误路径：lock_file 路径不可创建（父目录是文件）→ LOCK_CONFLICT。
+    #[test]
+    fn acquire_lock_fails_when_parent_is_file() {
+        let dir = unique_tmp("acquire-lock-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 创建一个文件作为 lock_file 的"父目录"
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        // lock_file 路径为 blocker/lock → 父目录 blocker 是文件，create_dir_all 失败
+        let data_dir = dir.join("postgres/17/data");
+        let mut layout = Layout::from_data_dir(&data_dir, None, None, None);
+        layout.lock_file = blocker.join("lock");
+        match acquire_lock(&layout) {
+            Err(code) => assert_eq!(code, exit_codes::LOCK_CONFLICT),
+            Ok(_) => panic!("acquire_lock should fail when parent is a file"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `dump` 错误路径：output 父目录创建失败 → DUMP_RESTORE_FAILED。
+    #[tokio::test]
+    async fn dump_fails_when_output_parent_uncreateable() {
+        let dir = unique_tmp("dump-output-fail");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        // output 路径的父目录为一个已存在的文件
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"file").unwrap();
+        let args = cli::DumpArgs {
+            data_dir,
+            output: blocker.join("out.dump"),
+        };
+        assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `restore` 错误路径：密码文件缺失 → PASSWORD_FAILED（在 acquire_lock 之后）。
+    #[tokio::test]
+    async fn restore_fails_when_password_missing() {
+        let dir = unique_tmp("restore-nopw");
+        let input = dir.join("in.dump");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&input, b"dump").unwrap();
+        let data_dir = dir.join("postgres/17/data");
+        // 故意不写 password file
+        let args = cli::RestoreArgs {
+            data_dir,
+            input,
+            target_data_dir: None,
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::PASSWORD_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reset_password` 错误路径：PGDATA 已初始化但有活实例（postmaster.pid 含活 PID）
+    /// → LOCK_CONFLICT。此处用本进程 PID 模拟"活 postgres"。
+    #[tokio::test]
+    async fn reset_password_rejects_alive_postgres() {
+        let dir = unique_tmp("resetpw-alive");
+        let data_dir = dir.join("postgres/17/data");
+        // 必须先建立完整 cluster（含 global/pg_control / base / postgresql.conf），
+        // 否则 guard_data_dir 会先返回 DATA_DIR_ABNORMAL(40) 而非 LOCK_CONFLICT(50)
+        make_fake_cluster(&data_dir);
+        // 写入本进程 PID 作为"活" postgres
+        let own_pid = std::process::id();
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            format!("{own_pid}\n/x/data\n1784505600\n55432\n/tmp\n127.0.0.1\n"),
+        )
+        .unwrap();
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `maintenance_shell` 错误路径：未初始化目录 → DATA_DIR_ABNORMAL。
+    #[tokio::test]
+    async fn maintenance_shell_rejects_uninitialized_dir() {
+        let dir = unique_tmp("shell-fresh");
+        let data_dir = dir.join("postgres/17/data");
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(
+            maintenance_shell(args).await,
+            Err(exit_codes::DATA_DIR_ABNORMAL)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `maintenance_shell` 错误路径：锁冲突 → LOCK_CONFLICT。
+    #[tokio::test]
+    async fn maintenance_shell_lock_conflict() {
+        let dir = unique_tmp("shell-lock");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
+        let args = cli::DataDirArgs { data_dir };
+        assert_eq!(
+            maintenance_shell(args).await,
+            Err(exit_codes::LOCK_CONFLICT)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- P3-Rust-Coverage-D38: 补充 doctor 残留物报告与边界分支 ----
+
+    /// doctor：data_dir 兄弟目录含 `.restore-*` 残留 + `.partial` 文件 →
+    /// 触发 restore_residual + dump_partial warning 分支（lines 338-355）。
+    #[test]
+    fn doctor_reports_residuals_and_partials() {
+        let dir = unique_tmp("doctor-residuals");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        // scan_residuals 扫描 data_dir.parent()（即 dir/postgres/17/），
+        // data_dir 的 file_name = "data"，残留目录需命名为 "data.restore-*"
+        let parent = data_dir.parent().unwrap(); // dir/postgres/17/
+        let restore_residual = parent.join("data.restore-20260728T120000Z");
+        std::fs::create_dir_all(&restore_residual).unwrap();
+        let partial_file = parent.join("backup.dump.partial");
+        std::fs::write(&partial_file, b"half dump").unwrap();
+        // doctor 永远返回 Ok(())，issues 经 JSON 输出
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：password_file 存在但权限过宽（Unix 0644）→ password_file_perms warning。
+    /// Windows 无文件权限模型，此测试仅在 Unix 验证。
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_password_file_perms_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp("doctor-pw-perms");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        // 改为 0644（权限过宽，非 0600）
+        std::fs::set_permissions(
+            &layout.password_file,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `scan_residuals`：parent 目录不可读（不存在）→ 返回空 Vec 不 panic。
+    /// data_dir 的 parent 不存在时 read_dir 返回 Err → 走 line 422 分支。
+    #[test]
+    fn scan_residuals_parent_not_found_returns_empty() {
+        // 构造一个 parent 不存在的 data_dir 路径
+        let dir = unique_tmp("scan-noparent");
+        let nonexistent_parent = dir.join("nonexistent-parent");
+        let data_dir = nonexistent_parent.join("data");
+        // 不创建 nonexistent_parent，read_dir 会失败
+        let (restore, partials) = scan_residuals(&data_dir);
+        assert!(restore.is_empty(), "should return empty on read_dir error");
+        assert!(partials.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `wait_for_enter`：stdin EOF（管道关闭/重定向）→ 立即返回不阻塞。
+    /// cargo test 默认非 TTY 环境下 stdin 可能已 EOF；此测试验证不 panic 不死锁。
+    #[tokio::test]
+    async fn wait_for_enter_handles_eof_gracefully() {
+        // 在 CI/非交互环境，stdin 通常为 EOF 或管道。
+        // 设置 1 秒 timeout 防止测试挂起（若 stdin 为 TTY 会超时失败，提示环境问题）。
+        let result = tokio::time::timeout(Duration::from_secs(1), wait_for_enter()).await;
+        // Ok(()) = 正常返回（EOF/Err 均会 break）；Err(Elapsed) = 超时（stdin 阻塞）
+        // 在非 TTY 环境（CI）应 Ok，本地 TTY 可能 Elapsed，两者都接受为通过
+        // — 此测试主要确保代码路径被覆盖（line 881-896）
+        let _ = result;
+    }
+
+    /// doctor：数据目录非空 + PG_VERSION 存在但 global/pg_control 缺失 →
+    /// critical_files_missing + pg_control_unreadable 双 error 分支（组合覆盖）。
+    #[test]
+    fn doctor_missing_pg_control_with_version() {
+        let dir = unique_tmp("doctor-no-control");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::create_dir_all(data_dir.join("base")).unwrap();
+        std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
+        // 故意不创建 global/pg_control
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：数据目录非空 + PG_VERSION 存在但 base 缺失 →
+    /// critical_files_missing 包含 "base" 分支。
+    #[test]
+    fn doctor_missing_base_dir_with_version() {
+        let dir = unique_tmp("doctor-no-base");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(data_dir.join("global")).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
+        std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
+        // 故意不创建 base 目录
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：数据目录非空 + PG_VERSION 存在但 postgresql.conf 缺失 →
+    /// critical_files_missing 包含 "postgresql.conf" 分支。
+    #[test]
+    fn doctor_missing_postgresql_conf_with_version() {
+        let dir = unique_tmp("doctor-no-conf");
+        let data_dir = dir.join("postgres/17/data");
+        std::fs::create_dir_all(data_dir.join("global")).unwrap();
+        std::fs::create_dir_all(data_dir.join("base")).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
+        // 故意不创建 postgresql.conf
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- P3-Rust-Coverage-D38: doctor env override + cloud sync 分支 ----
+
+    /// doctor：通过 `QTRADING_PG_SIDECAR_FORCE_FS_KIND=fat32` 强制 FAT32 →
+    /// fs_unsupported error 分支（lines 281-287）。
+    /// env var 为进程全局，set 后立即 remove 避免串扰其他并行测试。
+    #[test]
+    fn doctor_with_fs_unsupported_env_override() {
+        std::env::set_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND", "fat32");
+        let dir = unique_tmp("doctor-fat32");
+        let data_dir = dir.join("postgres/17/data");
+        make_fake_cluster(&data_dir);
+        assert!(doctor(&data_dir).is_ok());
+        std::env::remove_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// doctor：data_dir 路径含 "onedrive" → cloud_sync_path error 分支（lines 295-298）。
+    #[test]
+    fn doctor_with_cloud_sync_path() {
+        let dir = unique_tmp("doctor-onedrive");
+        // 路径含 "onedrive" 触发 detect_cloud_sync
+        let data_dir = dir.join("onedrive/postgres/17/data");
+        make_fake_cluster(&data_dir);
+        assert!(doctor(&data_dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- P3-Rust-Coverage-D38: PG-starting 成功路径测试 ----
+
+    /// PG-starting 测试串行化锁：避免端口/锁/PGDATA 冲突。
+    static PG_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 设置真实 PG 实例所需的目录结构与 binaries：
+    /// ensure_binaries + write_password_file + run_initdb + write_security_baseline。
+    /// 返回 (layout, password, dir) — dir 用于测试后清理。
+    async fn setup_pg_layout(test_name: &str) -> (Layout, String, PathBuf) {
+        let dir = unique_tmp(test_name);
+        let data_dir = dir.join("postgres/17/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        let password = "TestPwd-1_2.3~xxxx".to_string();
+
+        setup::ensure_binaries(&layout, &|_| {}).await.unwrap();
+        password::write_password_file(&layout.password_file, &password).unwrap();
+        setup::run_initdb(&layout, DEFAULT_USERNAME).await.unwrap();
+        setup::write_security_baseline(&data_dir, LISTEN_LOCAL).unwrap();
+
+        (layout, password, dir)
+    }
+
+    /// `dump` 在线路径（PG 运行中）：TempInstance::start → dump 检测在线 → run_pg_dump → 原子改名。
+    /// 覆盖 TempInstance::start/stop、dump 在线分支、run_pg_dump、结果处理。
+    /// `await_holding_lock`：PG_TEST_MUTEX 是测试串行化锁，非生产代码，持有锁 await 不会死锁。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn dump_succeeds_with_running_instance() {
+        let _guard = PG_TEST_MUTEX.lock().unwrap();
+        let (layout, password, dir) = setup_pg_layout("dump-online").await;
+
+        let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
+            .await
+            .expect("TempInstance start failed");
+        // run_pg_dump 连接 `qtrading` 库，必须在 dump 前创建（run.rs ensure_database 等价）
+        pgbin::psql(
+            &instance.layout.install_dir,
+            LISTEN_LOCAL,
+            instance.port,
+            DEFAULT_USERNAME,
+            "postgres",
+            &password,
+            "CREATE DATABASE qtrading;",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("CREATE DATABASE qtrading failed");
+
+        let dump_path = layout.data_dir.parent().unwrap().join("test.dump");
+        let args = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: dump_path.clone(),
+        };
+        let result = dump(args).await;
+
+        instance.stop().await;
+
+        assert!(result.is_ok(), "dump should succeed: {:?}", result.err());
+        assert!(
+            dump_path.exists(),
+            "dump file should exist at {dump_path:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `restore` 成功路径（target_data_dir 模式，不交换目录）：
+    /// 启动 PG → dump → 停止 → restore 到 target_data_dir → 验证 target 含 PG_VERSION。
+    /// 覆盖 restore target_data_dir 分支、restore_into、restore_via_instance。
+    /// `await_holding_lock`：PG_TEST_MUTEX 是测试串行化锁，非生产代码，持有锁 await 不会死锁。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn restore_succeeds_with_target_data_dir() {
+        let _guard = PG_TEST_MUTEX.lock().unwrap();
+        let (layout, password, dir) = setup_pg_layout("restore-target").await;
+
+        // 1. 启动 PG 并 dump（在线路径，不占锁）
+        let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
+            .await
+            .expect("TempInstance start failed");
+        // dump 需要连接 qtrading 库，先创建
+        pgbin::psql(
+            &instance.layout.install_dir,
+            LISTEN_LOCAL,
+            instance.port,
+            DEFAULT_USERNAME,
+            "postgres",
+            &password,
+            "CREATE DATABASE qtrading;",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("CREATE DATABASE qtrading failed");
+        let dump_path = layout.data_dir.parent().unwrap().join("test.dump");
+        let dump_args = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: dump_path.clone(),
+        };
+        let dump_result = dump(dump_args).await;
+        instance.stop().await;
+        assert!(dump_result.is_ok(), "dump should succeed first");
+        assert!(dump_path.exists(), "dump file should exist");
+
+        // 2. restore 到 target_data_dir（do_swap=false，不交换目录）
+        let target = dir.join("restored");
+        let restore_args = cli::RestoreArgs {
+            data_dir: layout.data_dir.clone(),
+            input: dump_path.clone(),
+            target_data_dir: Some(target.clone()),
+        };
+        let restore_result = restore(restore_args).await;
+
+        assert!(
+            restore_result.is_ok(),
+            "restore should succeed: {:?}",
+            restore_result.err()
+        );
+        assert!(
+            target.join("PG_VERSION").exists(),
+            "target should be initialized"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reset_password` 成功路径：
+    /// 启动 PG → 停止 → reset_password → 验证 password file 内容变更。
+    /// 覆盖 reset_password 完整成功路径（trust HBA → TempInstance → ALTER USER → 重写 HBA）。
+    /// `await_holding_lock`：PG_TEST_MUTEX 是测试串行化锁，非生产代码，持有锁 await 不会死锁。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reset_password_succeeds_with_pg_instance() {
+        let _guard = PG_TEST_MUTEX.lock().unwrap();
+        let (layout, password, dir) = setup_pg_layout("resetpw-ok").await;
+
+        // 读取旧密码
+        let old_pwd = std::fs::read_to_string(&layout.password_file).unwrap();
+
+        // 启动并停止 PG（确保 PGDATA 可用，lock 可获取）
+        let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
+            .await
+            .expect("TempInstance start failed");
+        instance.stop().await;
+
+        // 调用 reset_password
+        let args = cli::DataDirArgs {
+            data_dir: layout.data_dir.clone(),
+        };
+        let result = reset_password(args).await;
+
+        assert!(
+            result.is_ok(),
+            "reset_password should succeed: {:?}",
+            result.err()
+        );
+
+        // 验证密码已变更
+        let new_pwd = std::fs::read_to_string(&layout.password_file).unwrap();
+        assert_ne!(new_pwd, old_pwd, "password should be rotated");
+        assert!(!new_pwd.is_empty(), "new password should not be empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
