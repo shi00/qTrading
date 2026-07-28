@@ -328,11 +328,14 @@ class BaseDao:
 
         try:
             sql_template, params_fn = sql_fn(as_of_date)
+            kwargs: dict[str, typing.Any] = {}
+            if params_fn is not None:
+                kwargs["params_fn"] = params_fn
             df = await self.chunked_in_query(
                 self._read_db,
                 sql_template,
                 ts_codes,
-                params_fn=params_fn,
+                **kwargs,
             )
             if post_process is not None and df is not None and not df.empty:
                 df = post_process(df)
