@@ -532,39 +532,11 @@ async def _setup_canvaskit_intercept(page) -> None:
             await route.abort()
             return
 
-        # ===== 同源请求：移除 COEP/COOP/CORP 响应头，防止 CanvasKit 跨域资源加载被阻止 =====
-        # Flet 服务器默认设置 Cross-Origin-Embedder-Policy: require-corp，
-        # 导致通过动态 import() 加载的跨域 CanvasKit 资源被浏览器阻止，
-        # 使 Flutter 引擎初始化卡死（webglContexts=0，shadowCanvases=1 但无 GL 上下文）。
-        # COEP 需要 COOP 配合，二者一并移除。
-        # --disable-web-security / --disable-features=CrossOriginEmbedderPolicy 在
-        # CI 环境下无法完全禁用 COEP 检查，必须在响应头层面移除。
-        if request.method == "GET":
-            try:
-                response = await route.fetch()
-                headers = dict(response.headers)
-                removed = []
-                for h in list(headers.keys()):
-                    if h.lower() in (
-                        "cross-origin-embedder-policy",
-                        "cross-origin-opener-policy",
-                        "cross-origin-resource-policy",
-                    ):
-                        removed.append(h)
-                        del headers[h]
-                if removed:
-                    logger.debug("[E2E Intercept] stripped COEP/COOP from %s: %s", path, removed)
-                body = await response.body()
-                await route.fulfill(
-                    status=response.status,
-                    headers=headers,
-                    body=body,
-                    content_type=response.headers.get("content-type", ""),
-                )
-                return
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[E2E Intercept] fetch failed for %s: %s", path, e)
-
+        # ===== 同源请求：直接放行 =====
+        # COEP/COOP 已通过浏览器启动参数 --disable-web-security +
+        # --disable-features=CrossOriginEmbedderPolicy 在浏览器层面禁用，
+        # 无需在响应头层面移除。route.fetch() 会破坏 WebSocket 升级请求
+        # （Flet main(page) 依赖 WebSocket 触发），必须 route.continue_() 放行。
         await route.continue_()
 
     await page.route("**/*", intercept_external)
