@@ -1609,6 +1609,81 @@ jobs:
             release-assets/release-assets-embedded/*
           generate_release_notes: true
 
+  installer-smoke:
+    # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
+    # PR 阶段验证 installer.iss 的 ISCC 编译通过性，避免缺陷延迟到 release tag 阶段才暴露。
+    # 顶层 pull_request.paths 已限制 workflow 触发范围（含 installer.iss + scripts/**），
+    # 此处二次精准过滤：仅当 PR 修改 installer.iss 或 scripts/*installer* 时跑 ISCC 编译。
+    # 不生成 release artifact（不接入 actions/upload-artifact），仅验证编译通过。
+    name: Installer ISCC Smoke Test
+    needs: lint-fast
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Detect installer changes
+        id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # 二次精准过滤：仅当 PR 修改 installer.iss 或 scripts/*installer* 时跑 ISCC
+          # 避免 scripts/ 下非 installer 脚本修改触发无意义 ISCC 编译
+          if [ -z "$PR_NUMBER" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          FILES=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/files?per_page=100" \
+            | jq -r '.[].filename')
+          if echo "$FILES" | grep -E '^installer\.iss$|^scripts/.*installer.*'; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Installer-related changes detected."
+          else
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No installer-related changes, skipping ISCC smoke."
+          fi
+
+      - name: Install Inno Setup
+        if: steps.detect.outputs.skip == 'false'
+        run: choco install innosetup -y
+
+      - name: Create minimal stub layout
+        if: steps.detect.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          # installer.iss [Files] 段引用 dist\AStockScreener\* (主程序产物)
+          # PR smoke 阶段不跑 PyInstaller (耗时长)，创建最小 stub 让 ISCC 能扫描通过
+          # 验证 installer.iss 语法正确性，不生成有效 release artifact
+          New-Item -ItemType Directory -Force -Path "dist\AStockScreener" | Out-Null
+          New-Item -ItemType File -Force -Path "dist\AStockScreener\AStockScreener.exe" | Out-Null
+          Write-Host "Stub layout created for ISCC compile (TargetVariant=cpu)"
+
+      - name: Compile Installer with Inno Setup (smoke)
+        if: steps.detect.outputs.skip == 'false'
+        shell: cmd
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=cpu
+
+      - name: Verify Installer Compiled
+        if: steps.detect.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          $installerPath = "Output\AStockScreener-Setup-cpu.exe"
+          if (Test-Path $installerPath) {
+            Write-Host "ISCC smoke test passed: installer.iss compiled successfully"
+          } else {
+            Write-Error "ISCC smoke test failed: installer not found at $installerPath"
+            exit 1
+          fi
+
   flaky-detection:
     name: Flaky Test Detection (advisory)
     runs-on: ubuntu-latest
