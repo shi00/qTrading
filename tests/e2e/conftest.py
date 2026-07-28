@@ -1097,6 +1097,22 @@ async def _trigger_sidecar_startup_via_browser(
     except Exception as e:
         logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
 
+    # 触发 Flutter Web 语义节点初始化（与 FletPage.open 一致）。
+    # 根因：Flutter Web 在某些浏览器/环境下需要用户交互（click flt-semantics-placeholder）
+    # 才会初始化语义节点（flt-semantic）。不做这步，导航栏文本不会出现在 DOM 中，
+    # _trigger_sidecar_startup_via_browser 会一直等待 nav_screener 文本超时
+    # （PR #291 CI run 30349785480 卡死 554s 根因：DOM 诊断 fltSemanticsPlaceholder:True
+    # 但 fltSemantic:False，main(page) 服务端已完成但浏览器端语义节点未初始化）。
+    try:
+        await page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=45000)
+        ph = page.locator("flt-semantics-placeholder")
+        if await ph.count() > 0:
+            await ph.first.dispatch_event("click")
+            await page.wait_for_selector("flt-semantics", timeout=45000)
+        logger.info("[E2E Seeding] Flutter Web semantics initialized")
+    except Exception as e:
+        logger.warning("[E2E Seeding] Flutter Web semantics init failed (non-fatal): %s", e)
+
     deadline = time.monotonic() + timeout_s
     url_file_appeared = False
     last_diag_log = 0.0
