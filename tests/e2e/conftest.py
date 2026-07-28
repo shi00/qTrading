@@ -1089,7 +1089,11 @@ async def _trigger_sidecar_startup_via_browser(
     await _setup_canvaskit_intercept(page)
 
     try:
-        await page.goto(flet_app.url, wait_until="networkidle", timeout=60000)
+        # wait_until="domcontentloaded"：networkidle 因 WebSocket 持久连接永远不满足，
+        # 60s 超时后 Playwright 取消导航，中断 flutter_bootstrap.js 执行。
+        # domcontentloaded 在 DOM 解析完成后立即返回，不等待网络空闲，
+        # 让 Flutter Web 的异步脚本（flutter_bootstrap.js）继续执行。
+        await page.goto(flet_app.url, wait_until="domcontentloaded", timeout=60000)
     except Exception as e:
         logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
 
@@ -1166,8 +1170,9 @@ async def _trigger_sidecar_startup_via_browser(
                                 } catch(e) {}
                             }
                             // 检查 Flutter/Dart 全局变量
-                            diag.hasFlutter = typeof flutterApi !== 'undefined';
-                            diag.hasDart = typeof _flutterLoader !== 'undefined';
+                            // Flutter Web 0.86.x: _flutter.loader（不是 _flutterLoader）
+                            diag.hasFlutter = typeof _flutter !== 'undefined' && !!_flutter.loader;
+                            diag.hasDart = typeof _flutter !== 'undefined' && !!_flutter.loader;
                             // 查找所有文本节点（去除空白）
                             const walker = document.createTreeWalker(
                                 document.body,
@@ -1198,6 +1203,19 @@ async def _trigger_sidecar_startup_via_browser(
                         elapsed,
                         diag_err,
                     )
+                # 读取 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置
+                # 根因：浏览器端 DOM 诊断只能看到 Flutter Web 框架状态，无法看到 Python
+                # 服务端 main(page) 执行进度。main(page) 卡在 CacheManager/init_services
+                # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取 Flet app stdout
+                # 日志（logs/e2e-flet-app.log）能直接看到 main(page) 执行到了哪一步。
+                try:
+                    from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
+
+                    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+                    log_tail = _read_log_tail(log_path, max_chars=2000)
+                    logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
+                except Exception as log_err:  # noqa: BLE001
+                    logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
                 last_diag_log = time.monotonic()
         await asyncio.sleep(2.0)
     # 超时前保存截图和页面内容，便于诊断
