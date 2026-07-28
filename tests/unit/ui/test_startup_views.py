@@ -369,16 +369,19 @@ def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state,
 
     assert captured_tick_fn, "_tick 函数应被传给 page.run_task"  # noqa: weak-assertion <验证 tick_fn 被捕获是后续执行的前提>
 
-    # 在事件循环中执行 _tick 协程, 验证 CancelledError 被传播 (R2 红线)
+    # 在事件循环中执行 _tick 协程, 验证第一次 tick 完成状态递增, 且取消时 CancelledError 被传播 (R2 红线)
     async def run_test():
         task = asyncio.ensure_future(captured_tick_fn[0]())
-        # 让 _tick 进入 await asyncio.sleep(1)
-        await asyncio.sleep(0.1)
+        # 等待第一次 tick 完成 (sleep(1) + L176-177 递增与 set_state)，再于第二次 sleep 中取消
+        await asyncio.sleep(1.2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可, raises 即充分
             await task
 
     asyncio.run(run_test())
+
+    # 第一次 tick 后 set_state 触发 _schedule_update → session.schedule_update 被调用
+    assert page.session.scheduled_updates, "第一次 tick 后应调度组件更新 (elapsed_seconds 状态变更)"
 
 
 def test_build_upgrade_dialog(mock_i18n):
