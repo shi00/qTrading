@@ -14,8 +14,32 @@ from utils.sanitizers import DataSanitizer
 from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import CST_TZ, get_now
+from utils.error_classifier import classify_error, classify_severity
 
 logger = logging.getLogger(__name__)
+
+
+def _log_with_severity(
+    e: Exception,
+    msg: str,
+    *args,
+    context: str = "general",
+    exc_info: bool = False,
+) -> None:
+    """按 classify_severity 选择日志级别；classify_error 提供 code 一并记入。
+
+    降级语义由调用方保留（仍返回空列表/空字符串，不 raise）。
+    """
+    error_info = classify_error(e, context=context)
+    severity = classify_severity(e, context=context)
+    if severity == "system":
+        log_fn = logger.error
+    elif severity == "recoverable":
+        log_fn = logger.warning
+    else:  # operational
+        log_fn = logger.info
+    log_fn(f"{msg} [code=%s]", *args, error_info["code"], exc_info=exc_info)
+
 
 _US_MOVES_CACHE: TTLCache = TTLCache(maxsize=1, ttl=300)
 _US_MOVES_CACHE_LOCK = threading.Lock()  # Thread-safe lock for TTLCache access
@@ -65,8 +89,8 @@ def _ensure_dataframe(result, source: str = "") -> pd.DataFrame | None:
             return pd.DataFrame()
         try:
             return pd.DataFrame(result)
-        except Exception:
-            logger.warning("[NewsFetcher] Failed to convert list to DataFrame from %s", source)
+        except Exception as e:
+            _log_with_severity(e, "[NewsFetcher] Failed to convert list to DataFrame from %s", source)
             return None
     logger.warning("[NewsFetcher] Unexpected return type from %s: %s", source, type(result).__name__)
     return None
@@ -114,7 +138,11 @@ class NewsFetcher:
 
             market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
         except (ImportError, AttributeError, IndexError, TypeError) as exc:
-            logger.debug("[NewsFetcher] Failed to read akshare default market: %s", DataSanitizer.sanitize_error(exc))
+            _log_with_severity(
+                exc,
+                "[NewsFetcher] Failed to read akshare default market: %s",
+                DataSanitizer.sanitize_error(exc),
+            )
             market = "沪深京"  # Fallback to standard standard UTF-8 key
 
         # Run the IO bound akshare calls in the thread pool
@@ -164,7 +192,8 @@ class NewsFetcher:
                             if news_list:
                                 return news_list
                 except Exception as e:
-                    logger.warning(
+                    _log_with_severity(
+                        e,
                         "[News] CNINFO disclosure failed for %s: %s",
                         ts_code,
                         DataSanitizer.sanitize_error(e),
@@ -197,14 +226,20 @@ class NewsFetcher:
 
                         return news_list
                 except Exception as e:
-                    logger.warning("[News] EM search failed for %s: %s", ts_code, DataSanitizer.sanitize_error(e))
+                    _log_with_severity(
+                        e,
+                        "[News] EM search failed for %s: %s",
+                        ts_code,
+                        DataSanitizer.sanitize_error(e),
+                    )
 
                 return []
 
             try:
                 return _run_with_python_string_storage(_fetch_locked)
             except Exception as outer_e:
-                logger.error(
+                _log_with_severity(
+                    outer_e,
                     "[News] Fatal error fetching stock news for %s: %s",
                     ts_code,
                     DataSanitizer.sanitize_error(outer_e),
@@ -216,12 +251,15 @@ class NewsFetcher:
             # to prevent hanging the AI pipeline if the APIs are slow/dead.
             future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
             return await asyncio.wait_for(future, timeout=15.0)
-        except TimeoutError:
-            logger.warning("[News] Timeout fetching news for %s", ts_code)
+        except TimeoutError as e:
+            _log_with_severity(e, "[News] Timeout fetching news for %s", ts_code)
             return []
         except Exception as e:
-            logger.error(
-                "[News] Error dispatching news fetch task for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
+            _log_with_severity(
+                e,
+                "[News] Error dispatching news fetch task for %s: %s",
+                ts_code,
+                DataSanitizer.sanitize_error(e),
             )
             return []
 
@@ -309,7 +347,8 @@ class NewsFetcher:
                         dt = datetime.datetime.fromtimestamp(ctime_val, tz=CST_TZ)
                         time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as conversion_err:
-                        logger.debug(
+                        _log_with_severity(
+                            conversion_err,
                             "[NewsFetcher] Timestamp conversion fallback: %s",
                             DataSanitizer.sanitize_error(conversion_err),
                         )
@@ -327,7 +366,8 @@ class NewsFetcher:
 
         except RuntimeError as infra_err:
             # 基础设施错误（如线程池未初始化）不应计入 CLS API 连续失败计数
-            logger.warning(
+            _log_with_severity(
+                infra_err,
                 "[NewsFetcher] CLS fetch skipped due to infrastructure error: %s",
                 DataSanitizer.sanitize_error(infra_err),
             )
@@ -338,19 +378,22 @@ class NewsFetcher:
             if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
                 if _CLS_CONSECUTIVE_FAILURES == _CLS_FAILURE_THRESHOLD:
                     _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
-                    logger.error(
+                    _log_with_severity(
+                        e,
                         "[NewsFetcher] CLS API failed 3 consecutive times. Circuit breaker OPENED. Error: %s",
                         DataSanitizer.sanitize_error(e),
                     )
                 else:
                     # 半开探活失败：重置冷却计时器，使下一个 60s 窗口从此刻重新计时
                     _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
-                    logger.error(
+                    _log_with_severity(
+                        e,
                         "[NewsFetcher] CLS API failed in HALF-OPEN state. Cooldown reset. Error: %s",
                         DataSanitizer.sanitize_error(e),
                     )
             else:
-                logger.warning(
+                _log_with_severity(
+                    e,
                     "[NewsFetcher] CLS API request failed (%d/%d): %s",
                     _CLS_CONSECUTIVE_FAILURES,
                     _CLS_FAILURE_THRESHOLD,
@@ -444,11 +487,14 @@ class NewsFetcher:
                             else:
                                 logger.warning("[News] Sina US API returned empty data (consecutive: %d)", count)
                         return result
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
                         _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
                         count = _SINA_CONSECUTIVE_EMPTY["us_api"]
-                        log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
-                        log_fn("[News] Failed to decode JSON from Sina US API (consecutive: %d)", count)
+                        _log_with_severity(
+                            e,
+                            "[News] Failed to decode JSON from Sina US API (consecutive: %d)",
+                            count,
+                        )
                         return []
             _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
             count = _SINA_CONSECUTIVE_EMPTY["us_api"]
@@ -465,8 +511,12 @@ class NewsFetcher:
                     break
             except Exception as e:
                 last_error = e
-                logger.warning(
-                    "[News] US API attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, DataSanitizer.sanitize_error(e)
+                _log_with_severity(
+                    e,
+                    "[News] US API attempt %d/%d failed: %s",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    DataSanitizer.sanitize_error(e),
                 )
                 if attempt < MAX_RETRIES - 1:
                     import asyncio
@@ -525,7 +575,11 @@ class NewsFetcher:
             return result
 
         except Exception as e:
-            logger.error("[News] Error fetching US moves: %s", DataSanitizer.sanitize_error(e))
+            _log_with_severity(
+                e,
+                "[News] Error fetching US moves: %s",
+                DataSanitizer.sanitize_error(e),
+            )
             return "Global data error."
 
     @staticmethod
@@ -561,17 +615,19 @@ class NewsFetcher:
         except asyncio.CancelledError:
             logger.warning("[News] Hot concepts fetch cancelled during shutdown.")
             raise
-        except TimeoutError:
+        except TimeoutError as e:
             _SINA_CONSECUTIVE_FAILURES["concept"] += 1
             count = _SINA_CONSECUTIVE_FAILURES["concept"]
             if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
-                logger.error(
+                _log_with_severity(
+                    e,
                     "[News] Hot concepts fetch timed out (%.0fs). Consecutive failures: %d. Data source may be degraded.",
                     _HOT_CONCEPTS_TIMEOUT_SECONDS,
                     count,
                 )
             else:
-                logger.warning(
+                _log_with_severity(
+                    e,
                     "[News] Hot concepts fetch timed out (%.0fs). Consecutive failures: %d.",
                     _HOT_CONCEPTS_TIMEOUT_SECONDS,
                     count,
@@ -581,13 +637,15 @@ class NewsFetcher:
             _SINA_CONSECUTIVE_FAILURES["concept"] += 1
             count = _SINA_CONSECUTIVE_FAILURES["concept"]
             if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
-                logger.error(
+                _log_with_severity(
+                    e,
                     "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
                     count,
                     DataSanitizer.sanitize_error(e),
                 )
             else:
-                logger.warning(
+                _log_with_severity(
+                    e,
                     "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
                     count,
                     DataSanitizer.sanitize_error(e),
