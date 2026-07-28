@@ -545,6 +545,7 @@
     "exit_confirm_title": "Confirm Exit",
     "exit_confirm_content": "Are you sure you want to close the application? Background tasks will stop and cleanup will run.",
     "error_db_init_failed": "Database initialization failed",
+    "error_embedded_pg_start_failed": "Embedded database failed to start",
     "error_db_engine_missing": "Database engine not created, please check configuration",
     "warning_skip_db": "Skipped database initialization, some features unavailable",
     "retry": "Retry",

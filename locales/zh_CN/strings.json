@@ -452,6 +452,7 @@
     "exit_confirm_title": "确认退出",
     "exit_confirm_content": "确认关闭程序吗？后台任务将停止并执行清理。",
     "error_db_init_failed": "数据库初始化失败",
+    "error_embedded_pg_start_failed": "嵌入式数据库启动失败",
     "error_db_engine_missing": "数据库引擎未创建，请检查配置",
     "warning_skip_db": "跳过数据库初始化，部分功能不可用",
     "retry": "重试",
