@@ -26,19 +26,27 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
-def safe_error(e: Exception) -> str:
+def safe_error(e: Exception, show_traceback: bool = False) -> str:
     """R9 一致性：data/ 层异常日志共享脱敏入口。
 
     data/sync/*.py 与 data_processor.py 中 `logger.*("...: %s", e, exc_info=True)`
     调用统一经此函数脱敏，避免 40+ 处逐点 inline `DataSanitizer.sanitize_error(e)`。
 
+    P3-M5-SafeError-No-Traceback: 新增 ``show_traceback`` 参数。在 critical 路径
+    （如 ``cache_manager.init_db`` / ``hard_reset``）调用 ``safe_error(e, show_traceback=True)``
+    可保留经 ``DataSanitizer.sanitize_error`` 脱敏的 traceback，便于运维排查根因，
+    同时不违反 R9 红线（traceback 中的 token/路径/凭证已被脱敏）。
+
     Args:
         e: 原始异常对象。
+        show_traceback: 是否在返回值中包含脱敏后的 traceback。默认 False，
+            与原行为一致；critical 路径应显式传 True。
 
     Returns:
-        经 DataSanitizer.sanitize_error 脱敏后的字符串。
+        经 DataSanitizer.sanitize_error 脱敏后的字符串；若 ``show_traceback=True``
+        且 ``e`` 是 ``BaseException`` 实例，返回值含脱敏后的 traceback。
     """
-    return DataSanitizer.sanitize_error(e)
+    return DataSanitizer.sanitize_error(e, show_traceback=show_traceback)
 
 
 def _is_peak_disclosure_season() -> bool:
