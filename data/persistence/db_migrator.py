@@ -99,16 +99,20 @@ class DatabaseMigrator:
         Raises:
             DatabaseMigrationNeeded: If schema needs migration and auto-migrate is disabled
         """
-        logger.debug("[DatabaseMigrator] Checking database schema state...")
+        logger.info("[DatabaseMigrator] Checking database schema state (auto_migrate=%s)...", auto_migrate)
 
         if auto_migrate is None:
             auto_migrate = cls._should_auto_migrate()
 
+        logger.info("[DatabaseMigrator] Getting current revision from DB...")
         current_rev = await cls._get_current_revision(engine)
+        logger.info("[DatabaseMigrator] Current revision: %s", current_rev)
 
         # Fresh database: run the full Alembic chain from base to head.
         if current_rev is None:
+            logger.info("[DatabaseMigrator] Fresh database, starting Alembic upgrade to head...")
             await cls._run_alembic_upgrade(engine)
+            logger.info("[DatabaseMigrator] Alembic upgrade completed for fresh database.")
             return
 
         # Heal orphaned revision before checking head
@@ -227,6 +231,7 @@ class DatabaseMigrator:
         writes bound to the same database.
         """
         sync_database_url = cls._get_sync_database_url(engine)
+        logger.info("[DatabaseMigrator] Starting Alembic upgrade to head...")
 
         def run_upgrade() -> None:
             cfg = cls._get_alembic_config()
@@ -239,6 +244,7 @@ class DatabaseMigrator:
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, run_upgrade)
+            logger.info("[DatabaseMigrator] Alembic upgrade completed successfully.")
         except asyncio.CancelledError:
             logger.warning("[DatabaseMigrator] Migration cancelled during shutdown.")
             raise  # R2: CancelledError must propagate for graceful shutdown
