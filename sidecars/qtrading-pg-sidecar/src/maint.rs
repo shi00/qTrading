@@ -1484,21 +1484,18 @@ mod tests {
     }
 
     /// `scan_residuals`：data_dir 名称不可解析为 str（非 Unicode 字节）→ 返回空不 panic。
-    /// Unix 平台才能构造非 Unicode 路径；Windows 跳过。
+    /// Unix 平台才能构造非 Unicode 路径；Windows 跳过。scan_residuals 在 file_name
+    /// 解析为 None 时即 return，不会 read_dir，故无需在文件系统创建非 UTF-8 目录
+    /// （macOS APFS 会拒绝非 UTF-8 文件名，OS error 92: Illegal byte sequence）。
     #[cfg(unix)]
     #[test]
     fn scan_residuals_handles_non_utf8_data_dir_name() {
         use std::os::unix::ffi::OsStringExt;
         let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
-        let parent =
-            std::env::temp_dir().join(format!("qts-maint-test-nonutf8-{}", std::process::id()));
-        std::fs::create_dir_all(&parent).unwrap();
-        let data_dir = parent.join(non_utf8);
-        std::fs::create_dir_all(&data_dir).unwrap();
+        let data_dir = std::env::temp_dir().join(non_utf8);
         let (restore, partials) = scan_residuals(&data_dir);
         assert!(restore.is_empty(), "non-utf8 name should be skipped");
         assert!(partials.is_empty());
-        let _ = std::fs::remove_dir_all(&parent);
     }
 
     /// `acquire_lock` 错误路径：lock_file 路径不可创建（父目录是文件）→ LOCK_CONFLICT。
