@@ -279,3 +279,26 @@ def test_build_pre_init_error_view_truncates_long_message() -> None:
     source = repr(view)
     assert "x" * 200 in source
     assert "x" * 201 not in source  # 截断到 200
+
+
+def test_pre_init_error_view_component_renders() -> None:
+    """PreInitErrorView @ft.component wrapper 通过 render_once 驱动执行（diff coverage L203-204）。
+
+    使用 tests/unit/ui/component_renderer 的 render_once 在 Renderer 上下文中
+    执行组件函数体，覆盖 ft.use_state + return _build_pre_init_error_view 行。
+    """
+    import flet as ft
+
+    from tests.unit.ui.component_renderer import attach_fake_page, make_component, render_once
+    from ui.startup_views import PreInitErrorView
+
+    mock_i18n = MagicMock()
+    mock_i18n.get.side_effect = lambda k: k
+    with patch("ui.startup_views.I18n", mock_i18n):
+        component = make_component(
+            PreInitErrorView, error_message="test error", on_retry=MagicMock(), on_exit=MagicMock()
+        )
+        attach_fake_page(component)
+        view = render_once(component)
+
+    assert isinstance(view, ft.Container)
