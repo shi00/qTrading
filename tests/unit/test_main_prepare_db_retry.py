@@ -241,3 +241,41 @@ async def test_window_close_during_error_view_propagates_cancelled() -> None:
     # CancelledError 传播，不渲染 LoadingView（未到达 Retry 路径）
     loading_renders = [c for c in page.render.call_args_list if "LoadingView" in str(c)]
     assert len(loading_renders) == 0
+
+
+# ---------- _build_pre_init_error_view 纯函数测试（diff coverage）----------
+
+
+def test_build_pre_init_error_view_structure() -> None:
+    """_build_pre_init_error_view 返回含 icon/title/error_text/retry/exit 的 Container。"""
+    import flet as ft
+
+    from ui.startup_views import _build_pre_init_error_view
+
+    mock_i18n = MagicMock()
+    mock_i18n.get.side_effect = lambda k: k  # 返回 key 本身便于断言
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_pre_init_error_view("some error", on_retry=MagicMock(), on_exit=MagicMock())
+
+    assert isinstance(view, ft.Container)
+    # 验证含 error icon、标题文案、错误详情、retry/exit 按钮
+    source = repr(view)
+    assert "error_embedded_pg_start_failed" in source
+    assert "some error" in source
+    assert "retry" in source
+    assert "exit_program" in source
+
+
+def test_build_pre_init_error_view_truncates_long_message() -> None:
+    """error_message 超过 200 字符时截断。"""
+    from ui.startup_views import _build_pre_init_error_view
+
+    long_msg = "x" * 300
+    mock_i18n = MagicMock()
+    mock_i18n.get.side_effect = lambda k: k
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_pre_init_error_view(long_msg, on_retry=MagicMock(), on_exit=MagicMock())
+
+    source = repr(view)
+    assert "x" * 200 in source
+    assert "x" * 201 not in source  # 截断到 200

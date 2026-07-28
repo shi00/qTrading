@@ -137,27 +137,16 @@ def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Contain
     return _build_loading_view(scenario)
 
 
-@ft.component
-def PreInitErrorView(
+def _build_pre_init_error_view(
     error_message: str,
     on_retry: Callable[[ft.ControlEvent], None],
     on_exit: Callable[[ft.ControlEvent], None],
 ) -> ft.Container:
-    """prepare_database_runtime 失败时的错误视图（controller 构造前）。
+    """构造 prepare_database_runtime 失败的错误视图内容（纯函数，可独立测试）。
 
     P0-1: 与 ``_build_error_view`` 视觉样式一致，但不依赖
-    StartupContext/StartupController（此时 controller 尚未构造）。提供 Retry
-    （重试 prepare_database_runtime）和 Exit（退出程序）两个按钮。
-
-    调用场景：``_prepare_db_with_retry`` 捕获 ``prepare_database_runtime`` 异常后
-    ``page.render(PreInitErrorView, ...)`` 渲染错误页，用户点击 Retry/Exit 触发回调。
-
-    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - 不持有业务状态；error_message 作为 prop 推送
-    - 回调通过 props 注入，不持有 page 引用
+    StartupContext/StartupController（此时 controller 尚未构造）。
     """
-    ft.use_state(get_observable_state)
     return ft.Container(
         content=ft.Column(
             safe_controls(
@@ -191,6 +180,28 @@ def PreInitErrorView(
         expand=True,
         alignment=ft.Alignment.CENTER,
     )
+
+
+@ft.component
+def PreInitErrorView(
+    error_message: str,
+    on_retry: Callable[[ft.ControlEvent], None],
+    on_exit: Callable[[ft.ControlEvent], None],
+) -> ft.Container:
+    """prepare_database_runtime 失败时的错误视图（controller 构造前）。
+
+    P0-1: 提供 Retry（重试 prepare_database_runtime）和 Exit（退出程序）两个按钮。
+
+    调用场景：``_prepare_db_with_retry`` 捕获 ``prepare_database_runtime`` 异常后
+    ``page.render(PreInitErrorView, ...)`` 渲染错误页，用户点击 Retry/Exit 触发回调。
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
+    - 不持有业务状态；error_message 作为 prop 推送
+    - 回调通过 props 注入，不持有 page 引用
+    """
+    ft.use_state(get_observable_state)
+    return _build_pre_init_error_view(error_message, on_retry, on_exit)
 
 
 def _build_upgrade_dialog(on_upgrade: Callable[[ft.ControlEvent], None]) -> ft.AlertDialog:
