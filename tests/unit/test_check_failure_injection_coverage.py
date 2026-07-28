@@ -11,6 +11,7 @@ cross-validation：
 （该文件被 .gitignore 忽略，不入仓，worktree/CI 中不存在）。
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.meta]
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT_PATH = ROOT / "scripts" / "check_failure_injection_coverage.py"
+
+
+def _subprocess_env() -> dict[str, str]:
+    """构造子进程环境，强制 UTF-8 IO 编码（Windows 默认 code page 可能不支持 §）。"""
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
 
 # 真实仓库当前 Rust failure_injection.rs 的 11 个测试场景号
 # （来源：sidecars/qtrading-pg-sidecar/tests/failure_injection.rs 头部注释
@@ -99,6 +108,8 @@ def _run_script(rust_path: Path, pg_plan_path: Path) -> subprocess.CompletedProc
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
     )
 
 
