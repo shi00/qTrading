@@ -1,7 +1,7 @@
 """红线自动化检查脚本（R4/R12/R13/R14/R15 + UI 裸 ft.Colors 拦截 + Tushare token 日志脱敏）。
 
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
-- R4  SQL 注入：扫描 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
+- R4  SQL 注入：扫描 data/ 与 tests/ 目录下 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
 - R12 数据表未注册：对比 models.py 的 __tablename__ 与 data_dictionary.py 的 TABLE_DEFINITIONS
 - R13 DAO 未注册：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
@@ -141,6 +141,36 @@ def check_R4() -> list[str]:
     errors: list[str] = []
     data_dir = ROOT / "data"
     for p in _iter_py_files(data_dir):
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        errors.extend(_check_R4_in_tree(tree, p))
+    return errors
+
+
+# tests/ 目录扫描时跳过缓存与构建产物，但保留 tests 自身（复用 _SKIP_DIRS，移除 "tests" 以允许扫描）
+_TESTS_SCAN_SKIP_DIRS = _SKIP_DIRS - {"tests"}
+
+
+def check_R4_in_tests() -> list[str]:
+    """R4（tests/）：扫描 tests/ 目录下所有 .py 文件中的 asyncpg 原生查询 %s 占位符。
+
+    P3-CheckRedlines-Tests-Dir: 扩展 R4 检查至 tests/ 目录。仅启用 R4（SQL 注入）检查，
+    R12/R13/R14/R15 不适用于测试代码（测试中可自由定义 mock 类/单例/策略子类用于验证
+    装饰器逻辑，不应被红线检查拦截）。tests/ 目录默认在 _SKIP_DIRS 中被其他检查跳过，
+    本函数显式扫描 tests/ 目录。
+
+    反例识别：``@pytest.fixture`` 函数内的 ``"%s" % var`` 字符串格式化不被误报，因为
+    R4 检查仅匹配 ``conn.<method>("...%s...")`` 形式的 asyncpg 原生调用（第一个参数是
+    字符串字面量且包含 %s），``"%s" % var`` 是 BinOp 表达式，第一个参数不是 Constant，
+    天然不匹配。测试文件中构造 R4 测试用例的字符串字面量（如 ``code = 'await conn.execute("...%s...")'``）
+    也不会被误报，因为 AST 不会进入字符串字面量内部解析。
+    """
+    errors: list[str] = []
+    tests_dir = ROOT / "tests"
+    if not tests_dir.exists():
+        return errors
+    for p in _iter_py_files(tests_dir, exclude_dirs=_TESTS_SCAN_SKIP_DIRS):
         tree = _parse_module(p)
         if tree is None:
             continue
@@ -732,6 +762,7 @@ def main() -> int:
     """运行全部红线检查，返回退出码。"""
     checks: list[tuple[str, list[str]]] = [
         ("R4 SQL 注入", check_R4()),
+        ("R4 SQL 注入 (tests)", check_R4_in_tests()),
         ("R12 数据表未注册", check_R12()),
         ("R13 DAO 未注册", check_R13()),
         ("R14 策略未注册", check_R14()),
