@@ -424,9 +424,15 @@ pub fn read_control_data(install_dir: &Path, data_dir: &Path) -> Option<ControlD
     if !out.success() {
         return None;
     }
+    parse_control_data_output(&out.stdout)
+}
+
+/// 解析 `pg_controldata` stdout 为 ControlData；缺失关键字段返回 None。
+/// 抽出为独立纯函数便于单测覆盖解析分支（P3-Rust-Coverage-D38）。
+fn parse_control_data_output(stdout: &str) -> Option<ControlData> {
     let mut cluster_state = None;
     let mut data_checksums = None;
-    for line in out.stdout.lines() {
+    for line in stdout.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
@@ -538,5 +544,367 @@ mod tests {
     fn recovery_failure_missing_log_is_false() {
         let dir = unique_tmp("recovery-none");
         assert!(!start_log_indicates_recovery_failure(&dir));
+    }
+
+    /// §7.2 端口冲突特征：start.log 含 "could not bind" / "address already in use" 等被识别。
+    #[test]
+    fn port_conflict_patterns_detected() {
+        let dir = unique_tmp("port-conflict");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("start.log"),
+            "2026-07-20 LOG: starting\nFATAL: could not bind IPv4 address\n",
+        )
+        .unwrap();
+        assert!(start_log_indicates_port_conflict(&dir));
+        std::fs::write(dir.join("start.log"), "LOG: database system is ready\n").unwrap();
+        assert!(!start_log_indicates_port_conflict(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端口冲突：日志缺失时返回 false（与 recovery_failure_missing_log_is_false 对称）。
+    #[test]
+    fn port_conflict_missing_log_is_false() {
+        let dir = unique_tmp("port-conflict-none");
+        assert!(!start_log_indicates_port_conflict(&dir));
+    }
+
+    /// start_log_tail 仅取尾部 8KB，避免历史日志误判（§7.2）。
+    #[test]
+    fn start_log_tail_truncates_to_8kb() {
+        let dir = unique_tmp("log-tail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 写 16KB 历史日志 + 1KB 尾部特征
+        let mut content = String::with_capacity(20_000);
+        content.push_str(&"historical line\n".repeat(1000)); // ~15KB
+        content.push_str("could not locate a valid checkpoint record\n"); // 尾部特征
+        std::fs::write(dir.join("start.log"), &content).unwrap();
+        // 尾部特征在 8KB 窗口内，应被识别
+        assert!(start_log_indicates_recovery_failure(&dir));
+        // 把特征推到 16KB 之前（超出 8KB 窗口）→ 不应被识别
+        let mut content_far = String::with_capacity(20_000);
+        content_far.push_str("could not locate a valid checkpoint record\n");
+        content_far.push_str(&"historical line\n".repeat(1100)); // ~17KB 填充
+        std::fs::write(dir.join("start.log"), &content_far).unwrap();
+        assert!(
+            !start_log_indicates_recovery_failure(&dir),
+            "特征超出 8KB 尾部窗口不应被识别"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// start_log_contains 大小写不敏感（PATTERNS 与日志均转 lowercase 比较）。
+    #[test]
+    fn start_log_contains_is_case_insensitive() {
+        let dir = unique_tmp("log-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        // PostgreSQL 日志可能为 "FATAL: Could Not Bind" 等大小写混合
+        std::fs::write(
+            dir.join("start.log"),
+            "FATAL: Could Not Bind IPv4 Address\n",
+        )
+        .unwrap();
+        assert!(start_log_indicates_port_conflict(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ToolOutput::success 仅当 code == Some(0)。
+    #[test]
+    fn tool_output_success_logic() {
+        assert!(ToolOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+        .success());
+        assert!(!ToolOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+        .success());
+        assert!(!ToolOutput {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+        .success());
+    }
+
+    /// ToolError::Display：Io 透传底层错误，Timeout 固定 "timed out"。
+    #[test]
+    fn tool_error_display_formats() {
+        let io_err = std::io::Error::other("connection refused");
+        let e = ToolError::Io(io_err);
+        assert!(format!("{e}").contains("connection refused"));
+
+        let e = ToolError::Timeout;
+        assert_eq!(format!("{e}"), "timed out");
+    }
+
+    /// parse_control_data_output：完整有效输出 → 提取 cluster_state + data_checksums。
+    #[test]
+    fn parse_control_data_extracts_fields() {
+        let stdout = "\
+pg_control version number:            1300\n\
+Catalog version number:               202409242\n\
+Database system identifier:           7420397430118478233\n\
+Database cluster state:               shut down\n\
+pg_control last modified:             Mon Jul 21 15:30:00 2026\n\
+Latest checkpoint location:           0/16D9C80\n\
+Data page checksum version:           1\n\
+";
+        let cd = parse_control_data_output(stdout).expect("should parse");
+        assert_eq!(cd.cluster_state, "shut down");
+        assert!(cd.data_checksums, "version=1 → true");
+    }
+
+    /// parse_control_data_output：data_checksums=0 → false。
+    #[test]
+    fn parse_control_data_checksums_zero_is_false() {
+        let stdout = "\
+Database cluster state:               in production\n\
+Data page checksum version:           0\n\
+";
+        let cd = parse_control_data_output(stdout).expect("should parse");
+        assert_eq!(cd.cluster_state, "in production");
+        assert!(!cd.data_checksums, "version=0 → false");
+    }
+
+    /// parse_control_data_output：缺失 cluster_state → None。
+    #[test]
+    fn parse_control_data_missing_cluster_state_returns_none() {
+        let stdout = "Data page checksum version:           1\n";
+        assert!(parse_control_data_output(stdout).is_none());
+    }
+
+    /// parse_control_data_output：缺失 data_checksums → None。
+    #[test]
+    fn parse_control_data_missing_checksums_returns_none() {
+        let stdout = "Database cluster state:               shut down\n";
+        assert!(parse_control_data_output(stdout).is_none());
+    }
+
+    /// parse_control_data_output：无 ':' 分隔符的行被跳过，不影响其他行解析。
+    #[test]
+    fn parse_control_data_skips_lines_without_colon() {
+        let stdout = "\
+random garbage line without colon\n\
+Database cluster state:               shut down\n\
+another no colon line\n\
+Data page checksum version:           1\n\
+";
+        let cd = parse_control_data_output(stdout).expect("should parse");
+        assert_eq!(cd.cluster_state, "shut down");
+        assert!(cd.data_checksums);
+    }
+
+    /// parse_control_data_output：空输出 → None。
+    #[test]
+    fn parse_control_data_empty_output_returns_none() {
+        assert!(parse_control_data_output("").is_none());
+    }
+
+    // ---- P3-Rust-Coverage-D38: 补充 pgbin.rs 工具执行/停止路径覆盖 ----
+
+    /// 跨平台获取一个必定存在的简单可执行程序路径（echo 命令）。
+    fn echo_program() -> PathBuf {
+        #[cfg(windows)]
+        {
+            // Windows 没有 /bin/echo；用 cmd.exe /c echo 模拟成功工具调用
+            PathBuf::from("cmd.exe")
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/bin/echo")
+        }
+    }
+
+    fn echo_args(msg: &str) -> Vec<&str> {
+        #[cfg(windows)]
+        {
+            vec!["/c", "echo", msg]
+        }
+        #[cfg(not(windows))]
+        {
+            vec![msg]
+        }
+    }
+
+    /// `run_tool` 成功路径：执行 echo 命令 → ToolOutput.success() == true。
+    #[tokio::test]
+    async fn run_tool_executes_successfully() {
+        let prog = echo_program();
+        let args = echo_args("hello-cov");
+        let out = run_tool(&prog, &args, &[], Duration::from_secs(5))
+            .await
+            .expect("echo should succeed");
+        assert!(out.success(), "code={:?} stderr={}", out.code, out.stderr);
+        assert!(out.stdout.contains("hello-cov"), "stdout={}", out.stdout);
+    }
+
+    /// `run_tool` 失败路径：程序不存在 → ToolError::Io。
+    #[tokio::test]
+    async fn run_tool_nonexistent_program_returns_io_error() {
+        let prog = PathBuf::from("/nonexistent/path/that/does/not/exe");
+        let err = run_tool(&prog, &[], &[], Duration::from_secs(5))
+            .await
+            .expect_err("should fail");
+        assert!(
+            matches!(err, ToolError::Io(_)),
+            "expected Io error, got {err}"
+        );
+    }
+
+    /// `run_tool` 超时路径：sleep 命令超过 timeout → ToolError::Timeout。
+    #[tokio::test]
+    async fn run_tool_timeout_returns_timeout_error() {
+        #[cfg(windows)]
+        let (prog, args): (PathBuf, Vec<&'static str>) = (
+            PathBuf::from("cmd.exe"),
+            vec!["/c", "ping", "-n", "10", "127.0.0.1"],
+        );
+        #[cfg(not(windows))]
+        let (prog, args): (PathBuf, Vec<&'static str>) = (PathBuf::from("/bin/sleep"), vec!["10"]);
+        let err = run_tool(&prog, &args, &[], Duration::from_millis(100))
+            .await
+            .expect_err("should timeout");
+        assert!(
+            matches!(err, ToolError::Timeout),
+            "expected Timeout, got {err}"
+        );
+    }
+
+    /// `run_tool_blocking` 成功路径：执行 echo 命令 → ToolOutput.success() == true。
+    #[test]
+    fn run_tool_blocking_executes_successfully() {
+        let prog = echo_program();
+        let args = echo_args("blocking-cov");
+        let out = run_tool_blocking(&prog, &args, &[]).expect("echo should succeed");
+        assert!(out.success(), "code={:?} stderr={}", out.code, out.stderr);
+        assert!(out.stdout.contains("blocking-cov"), "stdout={}", out.stdout);
+    }
+
+    /// `run_tool_blocking` 失败路径：程序不存在 → std::io::Error。
+    #[test]
+    fn run_tool_blocking_nonexistent_program_returns_error() {
+        let prog = PathBuf::from("/nonexistent/path/that/does/not/exe");
+        assert!(run_tool_blocking(&prog, &[], &[]).is_err());
+    }
+
+    /// `psql` 失败路径：连接到不存在的端口 → ToolError::Io（连接拒绝）。
+    #[tokio::test]
+    async fn psql_connection_refused_returns_error() {
+        let dir = unique_tmp("psql-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // install_dir 不含 psql 二进制 → run_tool 会失败（Io error）
+        let err = psql(
+            &dir,
+            "127.0.0.1",
+            1, // 1 号端口几乎不可能有 postgres
+            "postgres",
+            "postgres",
+            "dummy",
+            "select 1",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("should fail");
+        // psql 二进制不存在 → Io error；即使存在也会因连接拒绝返回 Io error
+        assert!(
+            matches!(err, ToolError::Io(_)),
+            "expected Io error, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `read_control_data` 失败路径：install_dir 不含 pg_controldata → None。
+    #[test]
+    fn read_control_data_nonexistent_install_dir_returns_none() {
+        let dir = unique_tmp("controldata-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // install_dir 不含 bin/pg_controldata → run_tool_blocking 返回 Err → None
+        let result = read_control_data(&dir, &dir);
+        assert!(
+            result.is_none(),
+            "expected None for nonexistent pg_controldata"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `pg_ctl_stop` 失败路径：install_dir 不含 pg_ctl → 返回 false。
+    #[tokio::test]
+    async fn pg_ctl_stop_nonexistent_install_returns_false() {
+        let dir = unique_tmp("pgctl-stop-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stopped = pg_ctl_stop(&dir, &dir, "fast", 1).await;
+        assert!(!stopped, "should fail when pg_ctl binary missing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `wait_process_exit`：对不存在的 PID 应立即返回 true。
+    #[tokio::test]
+    async fn wait_process_exit_dead_pid_returns_true() {
+        let dead_pid = 4_000_000u32;
+        let exited = wait_process_exit(dead_pid, Duration::from_millis(100)).await;
+        assert!(exited, "dead pid should be detected as exited");
+    }
+
+    /// `wait_process_exit`：对自己进程 PID + 极短 timeout → false（仍在运行）。
+    #[tokio::test]
+    async fn wait_process_exit_alive_pid_timeout_returns_false() {
+        let own_pid = std::process::id();
+        let exited = wait_process_exit(own_pid, Duration::from_millis(50)).await;
+        assert!(
+            !exited,
+            "alive pid with short timeout should not be detected as exited"
+        );
+    }
+
+    /// `graded_stop`：install_dir 不含 pg_ctl → smart/fast 均失败 →
+    /// pid=Some(dead) 时 kill fallback 路径 → stopped=true（进程已死）。
+    #[tokio::test]
+    async fn graded_stop_nonexistent_pg_ctl_with_dead_pid() {
+        let dir = unique_tmp("graded-stop-dead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dead_pid = 4_000_000u32;
+        let outcome = graded_stop(&dir, &dir, Some(dead_pid)).await;
+        assert_eq!(outcome.mode, StopMode::KillFallback);
+        assert!(outcome.stopped, "dead pid should be detected as stopped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `graded_stop`：pid=None 且 pg_ctl 不可用 → KillFallback + stopped=false。
+    #[tokio::test]
+    async fn graded_stop_no_pid_returns_not_stopped() {
+        let dir = unique_tmp("graded-stop-nopid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outcome = graded_stop(&dir, &dir, None).await;
+        assert_eq!(outcome.mode, StopMode::KillFallback);
+        assert!(!outcome.stopped, "no pid + no pg_ctl → not stopped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `start_log_tail`：日志文件不存在 → 返回空字符串。
+    #[test]
+    fn start_log_tail_missing_file_returns_empty() {
+        let dir = unique_tmp("logtail-missing");
+        let tail = start_log_tail(&dir);
+        assert!(
+            tail.is_empty(),
+            "missing log file should return empty string"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `start_log_tail`：短日志 → 返回完整内容（不截断）。
+    #[test]
+    fn start_log_tail_short_log_returns_full_content() {
+        let dir = unique_tmp("logtail-short");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("start.log"), "short log line\n").unwrap();
+        let tail = start_log_tail(&dir);
+        assert_eq!(tail, "short log line\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
