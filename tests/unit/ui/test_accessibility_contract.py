@@ -41,10 +41,10 @@ UI_DIR = PROJECT_ROOT / "ui"
 ALLOWED_VIOLATIONS: dict[tuple[str, int, str], str] = {
     # startup_views.py DB 升级模态: 必需/进行中/失败状态意图性阻塞用户,
     # 不允许 close (DB 必须升级才能继续运行, 用户无其他选择).
-    # 行号随 _build_pre_init_error_view 提取而偏移 (142→209, 157→224, 192→259).
-    ("startup_views.py", 209, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
-    ("startup_views.py", 224, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
-    ("startup_views.py", 259, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
+    # 行号随 LoadingView elapsed_seconds 反馈功能添加而偏移 (209→262, 224→277, 259→312).
+    ("startup_views.py", 262, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
+    ("startup_views.py", 277, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
+    ("startup_views.py", 312, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
 }
 
 
@@ -436,7 +436,7 @@ dlg = ft.AlertDialog(
     def test_scanner_does_not_treat_exit_as_close(self):
         """DoD: 扫描器不把 on_click=on_exit 视为 close button (exit 是退出程序).
 
-        确保白名单 startup_views.py:209 的 missing_close 能被正确识别.
+        确保白名单 startup_views.py:262 的 missing_close 能被正确识别.
         """
         source = """
 import flet as ft
