@@ -316,4 +316,9 @@ if __name__ == "__main__":  # pragma: no cover
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
     run_kwargs = {"main": main, "assets_dir": assets}
+    if os.environ.get("E2E_TESTING") == "true":
+        # E2E 强制 CanvasKit：Flet 0.86.x 默认 skwasm 在 headless Windows CI 上
+        # 渲染管线卡死（字体测量 GPU stall 后无 frame 产出），main 分支一直用
+        # CanvasKit 且 E2E 稳定通过。被 3cff3ab1 调试改动误删，现恢复。
+        run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
     ft.run(**run_kwargs)
