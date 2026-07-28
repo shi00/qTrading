@@ -13,7 +13,8 @@ pub const RUNTIME_WARN_FREE_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Error, Debug)]
 pub enum PreflightFailure {
-    #[error("磁盘空间不足：{path} 剩余 {free_mb}MB < 500MB，请清理后重试")]
+    // "disk full" 关键字与 §17.6 #6 矩阵 + Python service.py _format_sidecar_exit_error 对齐
+    #[error("disk full (磁盘空间不足)：{path} 剩余 {free_mb}MB < 500MB，请清理后重试")]
     DiskSpace { path: PathBuf, free_mb: u64 },
     #[error(
         "目录不可写：{path}（已重试 3 次；若被杀软/索引服务锁定，请将 postgres/17/ 加入排除列表）"
@@ -189,6 +190,15 @@ fn ensure_writable(path: &Path) -> Result<(), PreflightFailure> {
 
 /// 完整 preflight；任一失败即返回首个错误（调用方映射 exit 15 并写 stderr）。
 pub fn run(layout: &Layout) -> Result<(), PreflightFailure> {
+    // 失败注入钩子（与 FsKind::from_env_override 同款语义；默认不激活）。
+    // 集成测试通过 env var 触发 disk full 路径，避免实际填满磁盘（§17.6 #6）。
+    if std::env::var("QTRADING_PG_SIDECAR_INJECT_DISK_FULL").is_ok() {
+        return Err(PreflightFailure::DiskSpace {
+            path: layout.data_dir.clone(),
+            free_mb: 0,
+        });
+    }
+
     // 1. 目录可写性（顺带创建 data_dir，initdb 允许空目录）
     ensure_writable(&layout.data_dir)?;
 
