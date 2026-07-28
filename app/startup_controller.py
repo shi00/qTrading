@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from app.bootstrap import check_onboarding_needed, initialize_services
+from app.bootstrap import check_onboarding_needed, initialize_services, reset_services_initialized
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
@@ -99,9 +99,12 @@ class StartupController:
 
     async def start(self, db_url, token, llm_api_key, onboarding_complete):
         """Determine if onboarding is needed, then init services."""
+        logger.info("[Startup] start() called, checking onboarding...")
         if check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
+            logger.info("[Startup] Onboarding needed, transitioning to NEED_ONBOARDING.")
             self._transition(StartupState.NEED_ONBOARDING)
             return
+        logger.info("[Startup] Onboarding not needed, calling _init_services().")
         await self._init_services()
 
     # --- Core: call initialize_services and branch on result ---
@@ -109,7 +112,13 @@ class StartupController:
     async def _init_services(self):
         self._transition(StartupState.LOADING)
         try:
+            logger.info("[Startup] Calling initialize_services()...")
             result = await initialize_services(self._cache_manager, show_toast_fn=self._on_show_toast)
+            logger.info(
+                "[Startup] initialize_services() returned: success=%s, error=%s",
+                result.get("success"),
+                result.get("error"),
+            )
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
@@ -167,6 +176,9 @@ class StartupController:
         """User clicked Reconfigure: close DB, reset onboarding, show wizard."""
         self._transition(StartupState.LOADING)
         await self._cache_manager.close()
+        # Skeptic-MAJOR-2 配套：重置 _services_initialized flag，
+        # 允许用户完成 onboarding 后重新执行 initialize_services。
+        reset_services_initialized()
         from utils.thread_pool import TaskType, ThreadPoolManager
         from utils.config_handler import ConfigHandler
 

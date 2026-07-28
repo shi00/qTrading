@@ -10,6 +10,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 import typing
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
@@ -344,11 +345,25 @@ def _spawn(
     # tushare SDK set_token() 写入 ~/tk.csv，受限环境（TRAE Sandbox）会拒绝。
     # 将 USERPROFILE 重定向到 session 临时目录，隔离 tushare 文件写入。
     e2e_home = str(tmp_path_factory.mktemp("e2e_home"))
-    proc, url = start_flet_app(
-        cfg_file,
-        {"USERPROFILE": e2e_home, **env_overrides},
-        startup_timeout_s=startup_timeout_s,
-    )
+
+    # embedded 模式下，Flet 子进程应使用 sidecar 启动的 PG URL（config.DB_URL，
+    # 由 main.py:157 设置），而非 tests/conftest.py pytest_configure 设置的
+    # DATABASE_URL（指向外置 PG localhost:5432，embedded 模式下无服务）。
+    # ConfigHandler.get_db_url() Priority 1 (DATABASE_URL env) 会覆盖 Priority 3
+    # (config.DB_URL)，导致 Flet 子进程连接错误地址，DB 初始化失败后应用挂起
+    # （PR #291 CI run 30193441926 卡死 19 分钟根因）。
+    # subprocess.Popen 在调用时复制 env 快照，临时删除 + 恢复是安全的。
+    is_embedded = env_overrides.get("QTRADING_DATABASE_MODE", "").lower() == "embedded"
+    saved_db_url = os.environ.pop("DATABASE_URL", None) if is_embedded else None
+    try:
+        proc, url = start_flet_app(
+            cfg_file,
+            {"USERPROFILE": e2e_home, **env_overrides},
+            startup_timeout_s=startup_timeout_s,
+        )
+    finally:
+        if saved_db_url is not None:
+            os.environ["DATABASE_URL"] = saved_db_url
     return proc, url, cfg_file
 
 
@@ -382,129 +397,176 @@ class AppServer:
             )
 
 
-async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
-    app.assert_alive()
+async def _setup_canvaskit_intercept(page) -> None:
+    """为 page 设置 CanvasKit + 字体本地化拦截，强制离线化 E2E 测试。
 
-    context = await browser.new_context(viewport={"width": 1400, "height": 900})
-    await context.tracing.start(screenshots=True, snapshots=True)
-    page = await context.new_page()
-    page.on(
-        "console",
-        lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text),
-    )
-    page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
-    fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
+    提取为公共函数供 _make_page 和 _trigger_sidecar_startup_via_browser 复用。
 
-    # CRITICAL WORKAROUND for E2E Flakiness:
-    # Flet's web app downloads canvaskit.js and canvaskit.wasm from
-    # https://www.gstatic.com/flutter-canvaskit/<engineRevision>/ on startup.
-    # In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
-    # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
-    # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
-    # Other external requests (icons, rive, etc.) are aborted to force offline mode.
-    # NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
-    # 升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
-    # 可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
-    # [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
-    # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
-    # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
-    # 更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
-    # 解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
-    # 内部请求（Flet app 本身、data/blob URI）继续放行。
-    # [PITFALL FIX 2] CJK 回退字体（Noto Sans SC / Roboto）必须本地化，不可依赖 CDN：
-    # Flutter Web CanvasKit 运行时按需从 fonts.gstatic.com 下载 CJK 回退字体分片 (woff2)。
-    # 若字体请求被 abort 或网络超时，回退字体度量异常会使选股页结果表格布局高度塌陷
-    # (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
-    # 永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
-    # 解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
-    # 未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本变化时需重新同步。
-    #
-    # 维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
-    #   python scripts/sync_e2e_fonts.py
-    #   - 输出 [OK] → 本地缓存继续有效
-    #   - 输出 [ERROR] 缺失 → 自动下载缺失分片，提交 tests/e2e/mock_assets/fonts/ 后推送
-    # 字体 URL 解析逻辑见 tests/e2e/_font_urls.py
-    # 与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
-    #
-    # [Flet 0.86.3 新增] 支持以下新资源类型：
-    #   - canvaskit chromium/experimental_webparagraph 子目录变体
-    #   - skwasm / wimp 渲染器（Windows 上默认使用 skwasm）
-    #   - rive-native-wasm（main.dart.js 硬编码的动画依赖，缺失会阻塞 Flutter 初始化）
+    CRITICAL WORKAROUND for E2E Flakiness:
+    Flet's web app downloads canvaskit.js and canvaskit.wasm from
+    https://www.gstatic.com/flutter-canvaskit/<engineRevision>/ on startup.
+    In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
+    causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
+    To fix this, we intercept canvaskit requests and serve them from local mock_assets.
+    Other external requests (icons, rive, etc.) are aborted to force offline mode.
+    NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
+    升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
+    可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
+
+    [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
+    坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
+    Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
+    更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
+    解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
+    内部请求（Flet app 本身、data/blob URI）继续放行。
+
+    [PITFALL FIX 2] CJK 回退字体（Noto Sans SC / Roboto）必须本地化，不可依赖 CDN：
+    Flutter Web CanvasKit 运行时按需从 fonts.gstatic.com 下载 CJK 回退字体分片 (woff2)。
+    若字体请求被 abort 或网络超时，回退字体度量异常会使选股页结果表格布局高度塌陷
+    (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
+    永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
+    解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
+    未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本变化时需重新同步。
+
+    维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
+      python scripts/sync_e2e_fonts.py
+      - 输出 [OK] → 本地缓存继续有效
+      - 输出 [ERROR] 缺失 → 自动下载缺失分片，提交 tests/e2e/mock_assets/fonts/ 后推送
+    字体 URL 解析逻辑见 tests/e2e/_font_urls.py
+    与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
+    """
+
     from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename, is_font_cdn_url
+
+    # 跨域资源 fulfill 时必须携带的 CORS/CORP 头。
+    # 原因：Flet 服务器设置 Cross-Origin-Embedder-Policy: require-corp，
+    # 即使浏览器禁用了 --disable-web-security，动态 import() 加载跨域
+    # CanvasKit/skwasm WASM 仍需 CORS + CORP 头才能通过 COEP 检查。
+    _CORS_CORP_HEADERS = {
+        "Access-Control-Allow-Origin": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    }
 
     async def intercept_external(route, request):
         url = request.url
         is_internal = url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:"))
         path = urlparse(url).path
-        if is_internal:
-            await route.continue_()
-            return
-        # canvaskit/skwasm/wimp
-        if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
-            rel_path = extract_canvaskit_relpath(path)
-            if rel_path is None:
-                logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
+
+        # ===== 跨域 CDN 请求：从本地 mock_assets 提供，添加 CORS/CORP 头 =====
+        if not is_internal:
+            # canvaskit/skwasm/wimp
+            if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
+                rel_path = extract_canvaskit_relpath(path)
+                if rel_path is None:
+                    logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
+                    await route.abort()
+                    return
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
+                if local_path.exists():
+                    content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
+                    logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type=content_type,
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
                 await route.abort()
                 return
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
-            if local_path.exists():
-                content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
-                logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+            # rive-native-wasm
+            if "@rive-app/flutter-native-wasm" in url:
+                parts = PurePosixPath(path).parts
+                if any(p in (".", "..") or "\\" in p for p in parts):
+                    logger.warning("[E2E Intercept] rive path traversal, abort: %s", url)
+                    await route.abort()
+                    return
+                rive_subdir_markers = frozenset({"wasm", "wasm_compatibility"})
+                rel_parts: list[str] = []
+                for i, p in enumerate(parts):
+                    if p in rive_subdir_markers:
+                        rel_parts = list(parts[i:])
+                        break
+                if not rel_parts:
+                    logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
+                    await route.abort()
+                    return
+                rive_rel = "/".join(rel_parts)
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
+                if local_path.exists():
+                    content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
+                    logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type=content_type,
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
+                await route.abort()
                 return
-            logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
+            # 字体（CodeQL 修复：用 is_font_cdn_url 精确匹配 host 而非子串）
+            if is_font_cdn_url(url):
+                filename = extract_font_filename(path)
+                if filename is None:
+                    logger.warning("[E2E Intercept] font filename None, abort: %s", url)
+                    await route.abort()
+                    return
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
+                if local_path.exists():
+                    logger.info("[E2E Intercept] fulfill font %s from %s", filename, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type="font/woff2",
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] font not cached, abort: %s", url)
+                await route.abort()
+                return
+            # 其他外部请求：强制离线
+            logger.info("[E2E Intercept] abort external: %s", url)
             await route.abort()
             return
-        # rive-native-wasm
-        if "@rive-app/flutter-native-wasm" in url:
-            parts = PurePosixPath(path).parts
-            if any(p in (".", "..") or "\\" in p for p in parts):
-                logger.warning("[E2E Intercept] rive path traversal, abort: %s", url)
-                await route.abort()
-                return
-            rive_subdir_markers = frozenset({"wasm", "wasm_compatibility"})
-            rel_parts: list[str] = []
-            for i, p in enumerate(parts):
-                if p in rive_subdir_markers:
-                    rel_parts = list(parts[i:])
-                    break
-            if not rel_parts:
-                logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
-                await route.abort()
-                return
-            rive_rel = "/".join(rel_parts)
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
-            if local_path.exists():
-                content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
-                logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
-                return
-            logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
-            await route.abort()
-            return
-        # 字体
-        if is_font_cdn_url(url):
-            filename = extract_font_filename(path)
-            if filename is None:
-                logger.warning("[E2E Intercept] font filename None, abort: %s", url)
-                await route.abort()
-                return
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
-            if local_path.exists():
-                logger.info("[E2E Intercept] fulfill font %s from %s", filename, url)
-                await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
-                return
-            logger.warning("[E2E Intercept] font not cached, abort: %s", url)
-            await route.abort()
-            return
-        # 其他外部请求：强制离线
-        logger.info("[E2E Intercept] abort external: %s", url)
-        await route.abort()
+
+        # ===== 同源请求：直接放行 =====
+        # COEP/COOP 已通过浏览器启动参数 --disable-web-security +
+        # --disable-features=CrossOriginEmbedderPolicy 在浏览器层面禁用，
+        # 无需在响应头层面移除。route.fetch() 会破坏 WebSocket 升级请求
+        # （Flet main(page) 依赖 WebSocket 触发），必须 route.continue_() 放行。
+        await route.continue_()
 
     await page.route("**/*", intercept_external)
 
+
+async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
+    app.assert_alive()
+    logger.info("[E2E Page] creating new browser context for %s", request.node.name)
+
+    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    await context.tracing.start(screenshots=True, snapshots=True)
+    page = await context.new_page()
+
+    # 提高浏览器控制台日志级别：error/warning → INFO（CI 可见），log/debug → DEBUG
+    def _on_console(msg):
+        if msg.type in ("error", "warning"):
+            logger.info("[BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+        else:
+            logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+
+    page.on("console", _on_console)
+    page.on("pageerror", lambda err: logger.info("[BROWSER ERROR] %s", err))
+    fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
+
+    await _setup_canvaskit_intercept(page)
+
     try:
+        logger.info("[E2E Page] opening %s", app.url)
         await fp.open(app.url)
+        logger.info("[E2E Page] page opened successfully for %s", request.node.name)
     except Exception as exc:
         logger.warning("[E2E] fp.open(%s) failed: %s", app.url, exc)
         if not app.is_alive():
@@ -629,18 +691,26 @@ def _generate_trade_dates(n_days: int = 60) -> list[date]:
     return trading
 
 
-async def _seed_e2e_data() -> None:
-    """向测试数据库播种 E2E 所需的基准数据。"""
+async def _seed_e2e_data(db_url: str) -> None:
+    """向测试数据库播种 E2E 所需的基准数据。
+
+    Args:
+        db_url: 目标数据库 URL。embedded 模式下为 sidecar 启动后写入文件的 URL；
+            external 模式下为 ``TEST_DATABASE_URL``（CI 提供的外置 PostgreSQL）。
+    """
     import asyncpg
     from tests._helpers import create_test_engine
     from data.persistence.db_migrator import DatabaseMigrator
     from data.persistence.db_url_override import override_db_url
 
     # Ensure tables are migrated before seeding
-    engine = create_test_engine(TEST_DATABASE_URL, echo=False)
+    logger.info("[E2E Seeding] creating test engine")
+    engine = create_test_engine(db_url, echo=False)
     try:
-        with override_db_url(TEST_DATABASE_URL):
+        with override_db_url(db_url):
+            logger.info("[E2E Seeding] running DatabaseMigrator.init_db")
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
+            logger.info("[E2E Seeding] DatabaseMigrator.init_db completed")
     except Exception as e:
         # R9: 脱敏后抛出，用 from None 显式抑制异常链，防原始异常（可能含 DB 连接串）泄漏进 junit XML
         logger.warning("[E2E] DB migration failed during seed: %s", type(e).__name__)
@@ -649,9 +719,12 @@ async def _seed_e2e_data() -> None:
         raise RuntimeError(f"E2E seed aborted: DB migration failed: {DataSanitizer.sanitize_error(e)}") from None
     finally:
         await engine.dispose()
+        logger.info("[E2E Seeding] engine disposed")
 
-    dsn = _parse_asyncpg_dsn(TEST_DATABASE_URL)
+    dsn = _parse_asyncpg_dsn(db_url)
+    logger.info("[E2E Seeding] connecting asyncpg to sidecar DB")
     conn = await asyncpg.connect(dsn)
+    logger.info("[E2E Seeding] asyncpg connected, starting seed transaction")
     try:
         async with conn.transaction():
             # 清理
@@ -946,10 +1019,15 @@ async def _ensure_e2e_db() -> None:
 
     embedded 模式跳过：``QTRADING_DATABASE_MODE=embedded`` 时，app 内部
     ``prepare_database_runtime()`` + ``TaskManager.init_db`` 管理 sidecar PG
-    的 DB 创建与迁移（``embedded_real_wizard_app`` 不传 ``DATABASE_URL``），
-    此 fixture 无需也不应预创建外置 ``test_astock`` DB（sidecar 未启动且端口随机）。
+    的 DB 创建与迁移（``flet_app`` / ``wizard_app`` 通过 ``env_overrides`` 显式
+    设置 ``QTRADING_DATABASE_MODE=embedded`` + ``QTRADING_EMBEDDED_PG_URL_FILE``，
+    sidecar 启动后 URL 写入文件供主进程读取播种）。此 fixture 无需也不应预创建
+    外置 ``test_astock`` DB（sidecar 由 Flet 子进程启动，端口随机+密码在文件中）。
+
+    默认值 ``"embedded"``：与生产代码默认值一致（spec.md §3 不变量 1）。
+    external 模式（CI 显式设置 ``QTRADING_DATABASE_MODE=external``）下创建外置 DB。
     """
-    if os.environ.get("QTRADING_DATABASE_MODE", "external").lower() == "embedded":
+    if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
         return
     from tests.integration.conftest import _ensure_test_db
 
@@ -964,33 +1042,326 @@ async def _ensure_e2e_db() -> None:
     await asyncio.to_thread(_run_in_selector_loop)
 
 
+async def _trigger_sidecar_startup_via_browser(
+    flet_app: AppServer,
+    e2e_browser,
+    embedded_url_file: Path,
+    *,
+    timeout_s: float = 600.0,
+):
+    """创建临时浏览器 page 连接 Flet app，触发 main(page)，等待 sidecar 启动 + 页面初始化完成。
+
+    根因：Flet Web 模式下 ``main(page)`` 仅在浏览器 page 连接（WebSocket）时才执行。
+    ``flet_app`` fixture 启动 Flet web server 后无浏览器连接，``prepare_database_runtime``
+    未被调用，sidecar 未启动，URL 文件未写入。本函数创建临时 page 触发 ``main(page)``，
+    等待 URL 文件出现 + 页面完全初始化成功后**保持 page 打开**（不关闭），返回 context 给调用方。
+
+    保持 page 打开的原因：关闭 page 会触发 Flet 取消第一次 ``main(page)`` 协程，
+    可能导致 CacheManager 等单例资源被清理，第二次 ``main(page)``（e2e_page fixture）
+    的 DB 初始化失败。保持 page 打开让第一次 ``main(page)`` 持续运行，单例资源保持有效，
+    第二次 ``main(page)`` 复用已初始化的单例。context 由 ``seed_e2e_data`` fixture
+    在 teardown 时关闭。
+
+    为什么必须等页面初始化完成再播种数据：
+    - 第一次 main(page) 会执行完整初始化（sidecar 启动 + DB 迁移 + 服务初始化）
+    - 如果 sidecar 刚启动就播种数据，会与 main(page) 的 alembic upgrade 产生竞态
+    - 等导航栏文本出现（说明初始化完成）再播种，确保单例完全就绪
+
+    timeout_s=600：PR #291 CI run 30197078577 在 300s timeout 时被取消（sidecar URL
+    6s 出现，但 main(page) 后续流程：CacheManager.init_db → alembic upgrade head →
+    TaskManager.init_db → UI 渲染在 294s 内未完成）。alembic upgrade head 首次迁移
+    需创建 15+ 张表，Windows CI runner 上磁盘 IO 慢导致超时。600s 与 pytest-timeout
+    一致，留余量。长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
+    """
+    logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
+    context = await e2e_browser.new_context()
+    page = await context.new_page()
+
+    # 捕获浏览器 console/error 日志：error/warning → INFO（CI 可见），log/debug → DEBUG
+    def _on_seeding_console(msg):
+        if msg.type in ("error", "warning"):
+            logger.info("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+        else:
+            logger.debug("[E2E Seeding BROWSER CONSOLE] %s: %s", msg.type, msg.text)
+
+    page.on("console", _on_seeding_console)
+    page.on("pageerror", lambda err: logger.info("[E2E Seeding BROWSER ERROR] %s", err))
+    await _setup_canvaskit_intercept(page)
+
+    try:
+        # wait_until="domcontentloaded"：networkidle 因 WebSocket 持久连接永远不满足，
+        # 60s 超时后 Playwright 取消导航，中断 flutter_bootstrap.js 执行。
+        # domcontentloaded 在 DOM 解析完成后立即返回，不等待网络空闲，
+        # 让 Flutter Web 的异步脚本（flutter_bootstrap.js）继续执行。
+        await page.goto(flet_app.url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        logger.warning("[E2E Seeding] goto %s failed (non-fatal): %s", flet_app.url, e)
+
+    # 触发 Flutter Web 语义节点初始化（与 FletPage.open 一致）。
+    # 根因：Flutter Web 在某些浏览器/环境下需要用户交互（click flt-semantics-placeholder）
+    # 才会初始化语义节点（flt-semantic）。不做这步，导航栏文本不会出现在 DOM 中，
+    # _trigger_sidecar_startup_via_browser 会一直等待 nav_screener 文本超时
+    # （PR #291 CI run 30349785480 卡死 554s 根因：DOM 诊断 fltSemanticsPlaceholder:True
+    # 但 fltSemantic:False，main(page) 服务端已完成但浏览器端语义节点未初始化）。
+    try:
+        await page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=45000)
+        ph = page.locator("flt-semantics-placeholder")
+        if await ph.count() > 0:
+            await ph.first.dispatch_event("click")
+            await page.wait_for_selector("flt-semantics", timeout=45000)
+        logger.info("[E2E Seeding] Flutter Web semantics initialized")
+    except Exception as e:
+        logger.warning("[E2E Seeding] Flutter Web semantics init failed (non-fatal): %s", e)
+
+    deadline = time.monotonic() + timeout_s
+    url_file_appeared = False
+    last_diag_log = 0.0
+    while time.monotonic() < deadline:
+        if not url_file_appeared and embedded_url_file.exists():
+            elapsed = timeout_s - (deadline - time.monotonic())
+            logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
+            url_file_appeared = True
+            last_diag_log = time.monotonic()
+        if not flet_app.is_alive():
+            await context.close()
+            raise RuntimeError(
+                f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup. "
+                "Check logs/e2e-flet-app.log for details."
+            )
+        if url_file_appeared:
+            error_text = I18n.get("error_db_init_failed")
+            try:
+                error_locator = page.locator(f"text={error_text}")
+                if await error_locator.count() > 0:
+                    await context.close()
+                    raise RuntimeError(
+                        "Flet app shows DB initialization error UI during seeding setup. "
+                        "See sanitized log artifact: logs/e2e-flet-app.log"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
+                logger.debug("[E2E Seeding] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
+            nav_screener_text = I18n.get("nav_screener")
+            try:
+                nav_locator = page.locator(f"text={nav_screener_text}")
+                if await nav_locator.count() > 0:
+                    elapsed = timeout_s - (deadline - time.monotonic())
+                    logger.info("[E2E Seeding] page initialized after %.1fs", elapsed)
+                    return context
+            except Exception as exc:  # noqa: BLE001
+                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
+                logger.debug("[E2E Seeding] nav_screener check failed (non-fatal): %s", exc, exc_info=True)
+            # 每 30 秒输出一次页面状态诊断，便于定位 main(page) 卡死位置
+            if time.monotonic() - last_diag_log >= 30.0:
+                elapsed = timeout_s - (deadline - time.monotonic())
+                try:
+                    title = await page.title()
+                    url = page.url
+                    # 浏览器端 DOM 诊断：检查 Flutter Web 是否加载、文本是否在 DOM 中
+                    dom_diag = await page.evaluate(
+                        """() => {
+                            const diag = {};
+                            diag.bodyLength = document.body ? document.body.innerHTML.length : 0;
+                            diag.fltGlassPane = !!document.querySelector('flt-glass-pane');
+                            diag.fltSemantic = !!document.querySelector('flt-semantic');
+                            diag.fltSemanticsPlaceholder = !!document.querySelector('flt-semantics-placeholder');
+                            diag.canvases = document.querySelectorAll('canvas').length;
+                            // 检查 flt-glass-pane 的 shadow DOM（Flutter Web 可能把 canvas 放在 shadow DOM 里）
+                            const glassPane = document.querySelector('flt-glass-pane');
+                            if (glassPane && glassPane.shadowRoot) {
+                                diag.shadowCanvases = glassPane.shadowRoot.querySelectorAll('canvas').length;
+                                diag.shadowSceneHost = !!glassPane.shadowRoot.querySelector('flt-scene-host');
+                                diag.shadowInnerHtmlLen = glassPane.shadowRoot.innerHTML.length;
+                            } else {
+                                diag.shadowCanvases = 0;
+                                diag.shadowSceneHost = false;
+                                diag.shadowInnerHtmlLen = 0;
+                            }
+                            // 检查 WebGL 上下文
+                            diag.webglContexts = 0;
+                            const allCanvases = document.querySelectorAll('canvas');
+                            for (const c of allCanvases) {
+                                try {
+                                    if (c.getContext('webgl') || c.getContext('webgl2')) diag.webglContexts++;
+                                } catch(e) {}
+                            }
+                            // 检查 Flutter/Dart 全局变量
+                            // Flutter Web 0.86.x: _flutter.loader（不是 _flutterLoader）
+                            diag.hasFlutter = typeof _flutter !== 'undefined' && !!_flutter.loader;
+                            diag.hasDart = typeof _flutter !== 'undefined' && !!_flutter.loader;
+                            // 查找所有文本节点（去除空白）
+                            const walker = document.createTreeWalker(
+                                document.body,
+                                NodeFilter.SHOW_TEXT,
+                                { acceptNode: (node) => node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
+                            );
+                            const texts = [];
+                            let node;
+                            while (node = walker.nextNode()) {
+                                texts.push(node.textContent.trim());
+                                if (texts.length >= 10) break;
+                            }
+                            diag.textSamples = texts;
+                            diag.navScreenerInDom = document.body.innerHTML.includes('智能选股');
+                            return diag;
+                        }"""
+                    )
+                    logger.info(
+                        "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r, dom_diag=%s)",
+                        elapsed,
+                        title,
+                        url,
+                        dom_diag,
+                    )
+                except Exception as diag_err:
+                    logger.info(
+                        "[E2E Seeding] still waiting for page init after %.1fs (diag failed: %s)",
+                        elapsed,
+                        diag_err,
+                    )
+                # 读取 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置
+                # 根因：浏览器端 DOM 诊断只能看到 Flutter Web 框架状态，无法看到 Python
+                # 服务端 main(page) 执行进度。main(page) 卡在 CacheManager/init_services
+                # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取 Flet app stdout
+                # 日志（logs/e2e-flet-app.log）能直接看到 main(page) 执行到了哪一步。
+                try:
+                    from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
+
+                    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+                    log_tail = _read_log_tail(log_path, max_chars=4000)
+                    logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
+                    # 额外读取 main_trace.log（绕过 logging/stdout 的直接文件日志），
+                    # 用于定位 page.render 是否阻塞、阻塞在哪一步。
+                    trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
+                    trace_tail = _read_log_tail(trace_path, max_chars=4000)
+                    logger.info("[E2E Seeding] main_trace.log tail:\n%s", trace_tail)
+                except Exception as log_err:  # noqa: BLE001
+                    logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
+                last_diag_log = time.monotonic()
+        await asyncio.sleep(2.0)
+    # 超时前保存截图和页面内容，便于诊断
+    try:
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(ARTIFACT_DIR / "seed-timeout.png"))
+        content = await page.content()
+        (ARTIFACT_DIR / "seed-timeout.html").write_text(content, encoding="utf-8")
+        title = await page.title()
+        logger.error(
+            "[E2E Seeding] timeout after %.1fs: title=%r, url=%r, screenshot+html saved to %s",
+            timeout_s,
+            title,
+            page.url,
+            ARTIFACT_DIR,
+        )
+        # 超时时也读取 main_trace.log，定位 page.render 阻塞点
+        try:
+            from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
+
+            trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
+            trace_tail = _read_log_tail(trace_path, max_chars=8000)
+            logger.error("[E2E Seeding] main_trace.log tail on timeout:\n%s", trace_tail)
+        except Exception as trace_err:  # noqa: BLE001
+            logger.error("[E2E Seeding] main_trace.log read failed: %s", trace_err)
+    except Exception as diag_err:
+        logger.error("[E2E Seeding] timeout diag failed: %s", diag_err)
+    await context.close()
+    raise RuntimeError(
+        f"Timeout waiting for sidecar + page init within {timeout_s}s. "
+        "Sidecar may have failed to start or page init failed. "
+        "Check logs/e2e-flet-app.log for details."
+    )
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def seed_e2e_data(_ensure_e2e_db: None):
+async def seed_e2e_data(
+    _ensure_e2e_db: None,
+    flet_app: AppServer,
+    embedded_url_file: Path,
+    e2e_browser,
+):
     """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。
 
     显式依赖 ``_ensure_e2e_db`` 保证 DB 已创建（避免隐式时序脆弱性）。
+    显式依赖 ``flet_app`` 保证 Flet web server 已启动。
+    显式依赖 ``e2e_browser``：embedded 模式下需创建临时 page 触发 ``main(page)``，
+    使 ``prepare_database_runtime`` 启动 sidecar 并写入 URL 文件。
 
     与 ``_ensure_e2e_db`` 同样在独立线程中用 ``SelectorEventLoop`` 跑：
     ``_seed_e2e_data`` 内部调用 ``DatabaseMigrator.init_db``（SQLAlchemy async
     engine + asyncpg driver）和 ``asyncpg.connect``，均受根因 1（ProactorEventLoop
     + asyncpg 不兼容）影响，必须在 ``SelectorEventLoop`` 中执行。
+
+    embedded 模式下（默认，与生产代码默认值一致，spec.md §3 不变量 1）：
+    1. Flet Web 模式下 ``main(page)`` 仅在浏览器连接时才执行，``flet_app`` fixture
+       启动 Flet web server 后无浏览器连接，sidecar 不会启动。
+    2. 本 fixture 创建临时浏览器 page 连接 Flet app，触发 ``main(page)``，
+       等待 sidecar 启动 + URL 文件写入。
+    3. 读取 URL 文件获取 sidecar URL，播种数据。
+    4. 保持临时 page 打开直到 fixture teardown（防止第一次 ``main(page)`` 被取消
+       导致单例资源被清理，影响后续 ``e2e_page`` 的 DB 初始化）。
+    external 模式下用 ``TEST_DATABASE_URL``（CI 提供的外置 PostgreSQL，向后兼容路径）。
     """
+    # embedded 模式从文件读取 sidecar URL；external 模式用 TEST_DATABASE_URL
+    # keep_alive_context: 保持临时 page 打开，防止第一次 main(page) 被取消
+    keep_alive_context = None
+    if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
+        # Flet Web 模式下 main(page) 仅在浏览器连接时才执行。
+        # flet_app fixture 启动 Flet web server 后无浏览器连接，sidecar 未启动。
+        # 需创建临时 page 触发 main(page)，等待 URL 文件出现。
+        logger.info("[E2E Seeding] checking embedded_url_file: %s", embedded_url_file)
+        if not embedded_url_file.exists():
+            logger.info("[E2E Seeding] embedded_url_file not found, triggering sidecar via browser")
+            keep_alive_context = await _trigger_sidecar_startup_via_browser(
+                flet_app, e2e_browser, embedded_url_file, timeout_s=600.0
+            )
+        else:
+            logger.info("[E2E Seeding] embedded_url_file already exists, sidecar auto-started")
+        if not embedded_url_file.exists():
+            raise RuntimeError(
+                f"embedded_url_file not found at {embedded_url_file}; "
+                "sidecar may have failed to start or QTRADING_EMBEDDED_PG_URL_FILE not set"
+            )
+        db_url = embedded_url_file.read_text(encoding="utf-8").strip()
+        if not db_url:
+            raise RuntimeError(f"embedded_url_file is empty: {embedded_url_file}")
+        logger.info("[E2E Seeding] using embedded sidecar URL from %s", embedded_url_file)
+    else:
+        db_url = TEST_DATABASE_URL
+        logger.info("[E2E Seeding] using external TEST_DATABASE_URL")
+
     logger.info("[E2E Seeding] start _seed_e2e_data in SelectorEventLoop thread")
 
     def _run_in_selector_loop() -> None:
         # NOTE(lazy): Uses asyncio.SelectorEventLoop()/asyncio.new_event_loop() to run _seed_e2e_data in a dedicated selector loop on a worker thread (avoids ProactorEventLoop+asyncpg incompatibility on Windows). ceiling: asyncio.new_event_loop 在 Python 3.13 仍可用, 未来版本可能 deprecate (暂无明确版本). upgrade: 项目升级 Python 3.16 前改用 asyncio.Runner.
         loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         try:
-            loop.run_until_complete(_seed_e2e_data())
+            loop.run_until_complete(_seed_e2e_data(db_url))
         finally:
             loop.close()
 
     await asyncio.to_thread(_run_in_selector_loop)
     yield
+    # teardown: 关闭临时 page（所有测试完成后，不再需要保持第一次 main(page) 运行）
+    if keep_alive_context is not None:
+        await keep_alive_context.close()
+        logger.info("[E2E Seeding] keep-alive context closed")
 
 
 @pytest.fixture(scope="session")
-def flet_app(tmp_path_factory, seed_e2e_data):
+def embedded_url_file(tmp_path_factory):
+    """提供 sidecar URL 文件路径（E2E 主进程与 Flet 子进程共享）。
+
+    Flet 子进程启动 sidecar 后，由 ``prepare_database_runtime`` 把 sidecar URL
+    写入此文件（路径通过 ``QTRADING_EMBEDDED_PG_URL_FILE`` 环境变量传递）。
+    E2E 主进程读取此文件获取 sidecar URL，用于连接 sidecar DB 播种数据。
+
+    生产代码默认不设置 ``QTRADING_EMBEDDED_PG_URL_FILE``，此文件仅 E2E 测试使用。
+    """
+    return tmp_path_factory.mktemp("embedded_url") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
     """
     [PITFALL_WARNING] 全局 Session 级 Flet App 与 状态污染 (Ripple Effect)
 
@@ -1007,42 +1378,74 @@ def flet_app(tmp_path_factory, seed_e2e_data):
     1. 【必须】所有修改了全局状态的测试用例，必须使用 `try...finally` 块确保将状态恢复到基准线！
     2. 对于语言切换等破坏性极强的状态，建议放在测试套件的末尾执行（通过文件命名或 pytest 排序）。
     3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
+
+    embedded 模式（spec.md §3 不变量 1）：与生产代码默认值一致，启动真实 sidecar +
+    真实 PG 17。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
+    供 ``seed_e2e_data`` fixture 读取后连接 sidecar DB 播种数据。
     """
+    print("[E2E DIAG] flet_app fixture: start", flush=True)
+    data_root = tmp_path_factory.mktemp("embedded_pg_data")
+    print(f"[E2E DIAG] flet_app fixture: data_root={data_root}", flush=True)
+    print(f"[E2E DIAG] flet_app fixture: sidecar_binary={real_sidecar_binary_e2e}", flush=True)
+    print(f"[E2E DIAG] flet_app fixture: embedded_url_file={embedded_url_file}", flush=True)
+    print("[E2E DIAG] flet_app fixture: calling _spawn (startup_timeout_s=300)", flush=True)
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
             "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
-            "DATABASE_URL": TEST_DATABASE_URL,
-            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            "QTRADING_DATABASE_MODE": "embedded",
+            "QTRADING_EMBEDDED_PG_URL_FILE": str(embedded_url_file),
+            "AUTO_MIGRATE": "true",
             # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
             # null 后端：set/delete 为 no-op，get 返回 None。
             # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
             # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        startup_timeout_s=300.0,
     )
+    print(f"[E2E DIAG] flet_app fixture: _spawn returned, proc.pid={proc.pid}, url={url}", flush=True)
     app = AppServer(proc, url, cfg_file)
+    print("[E2E DIAG] flet_app fixture: yielding app", flush=True)
     yield app
+    print("[E2E DIAG] flet_app fixture: teardown, terminating proc", flush=True)
     _terminate(proc)
+    print("[E2E DIAG] flet_app fixture: teardown done", flush=True)
 
 
 @pytest.fixture(scope="session")
-def wizard_app(tmp_path_factory):
+def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
+    """Onboarding wizard app（embedded 模式，与生产代码默认值一致）。
+
+    不设置 ``QTRADING_EMBEDDED_PG_URL_FILE``：onboarding 测试不依赖种子数据，
+    sidecar URL 无需写入文件供主进程读取。``flet_app`` fixture 才需要 URL 文件
+    （``seed_e2e_data`` 通过它连接 sidecar DB 播种）。
+    """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data_wizard")
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
-        config={"locale": "zh"},
+        config={
+            "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
+        },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
-            "DATABASE_URL": TEST_DATABASE_URL,
-            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        startup_timeout_s=300.0,
     )
     app = AppServer(proc, url, cfg_file)
     yield app
@@ -1050,7 +1453,7 @@ def wizard_app(tmp_path_factory):
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page(e2e_browser, flet_app: AppServer, request):
+async def e2e_page(e2e_browser, flet_app: AppServer, seed_e2e_data: None, request):
     """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
 
     性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
@@ -1106,6 +1509,7 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
     )
@@ -1177,6 +1581,7 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
         startup_timeout_s=300.0,

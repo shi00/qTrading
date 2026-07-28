@@ -539,19 +539,23 @@ class ConfigHandler:
         """判断是否为 embedded PostgreSQL 模式（R-B1 单一入口点）。
 
         判定条件：QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
-        默认 external（与 app.bootstrap.prepare_database_runtime 现有逻辑一致）。
+        默认 embedded（spec.md §3 不变量 1：与 app.bootstrap.prepare_database_runtime 一致）。
+        `.get()` default True 与 AppConfig.embedded_pg_enabled field default 保持一致
+        （R-B1 单一判定函数契约：load_config 返回不完整 dict 时也走默认 True 分支）。
         """
-        mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+        mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
         if mode != "embedded":
             return False
         try:
-            return bool(cls.load_config().get("embedded_pg_enabled", False))
+            return bool(cls.load_config().get("embedded_pg_enabled", True))
         except Exception as e:
             logger.warning(
                 "[ConfigHandler] is_embedded_mode load_config failed: %s",
                 DataSanitizer.sanitize_error(e),
             )
-            return False
+            # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致：
+            # load_config 失败时返回 True，避免误判为 external 模式导致行为不一致
+            return True
 
     @staticmethod
     def is_auto_update_enabled():
@@ -1572,7 +1576,8 @@ class ConfigHandler:
     # === Localization ===
     @staticmethod
     def get_locale():
-        return ConfigHandler.get_typed("locale", str, "zh")
+        # spec.md §3 不变量 4：默认 "zh_CN"（与 build_locale_configuration 期望格式一致）
+        return ConfigHandler.get_typed("locale", str, "zh_CN")
 
     @staticmethod
     def set_locale(locale):

@@ -712,6 +712,7 @@ class TaskManager:
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def init_db(self):
         """Initialize persistence layer. Called once from main.py after CacheManager.init_db()."""
+        logger.info("[TaskManager] init_db started")
         from data.cache.cache_manager import CacheManager
 
         cache = CacheManager()

@@ -174,7 +174,8 @@ class AppConfig(BaseModel):
     tushare_point_tier: str = Field(default="points_5000", pattern=rf"^({'|'.join(TUSHARE_POINT_TIERS)})$")
 
     theme_name: str = Field(default="dark", pattern="^(light|dark)$")
-    locale: str = Field(default="zh", pattern="^(zh|zh_CN|en|en_US)$")
+    # spec.md §3 不变量 4：locale 默认 "zh_CN"（与 build_locale_configuration 期望格式一致，避免 ValueError 回退）
+    locale: str = Field(default="zh_CN", pattern="^(zh|zh_CN|en|en_US)$")
 
     auto_update_enabled: bool = False
     auto_update_time: str = Field(default="16:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
@@ -206,8 +207,9 @@ class AppConfig(BaseModel):
     # Phase 2：Embedded PostgreSQL 内嵌模式配置（pg_plan §8.3）
     # 模式开关由 QTRADING_DATABASE_MODE 环境变量 + embedded_pg_enabled 共同判定
     # （app.bootstrap.prepare_database_runtime 实现）。
+    # spec.md §3 不变量 2：embedded_pg_enabled 默认 True，与产品契约"无需任何配置"对齐。
     embedded_pg_enabled: bool = Field(
-        default=False, description="启用内嵌 PostgreSQL 模式（需配合 QTRADING_DATABASE_MODE=embedded）"
+        default=True, description="启用内嵌 PostgreSQL 模式（默认 True，与 QTRADING_DATABASE_MODE=embedded 默认值对齐）"
     )
     embedded_pg_sidecar_path: str = Field(
         default="", description="sidecar binary 绝对路径；空则按平台默认搜索（sidecars/qtrading-pg-sidecar[.exe]）"

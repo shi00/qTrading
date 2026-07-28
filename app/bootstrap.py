@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import os
 from datetime import timedelta
@@ -27,6 +28,19 @@ logger = logging.getLogger(__name__)
 # Phase 2A.1 §3.2.10：距上次 probe 超过此阈值时启动期自动触发 probe
 _AUTO_PROBE_INTERVAL = timedelta(days=7)
 
+# Skeptic-MAJOR-2 修复：Flet Web 模式下每个浏览器 page 连接触发独立 main(page) 协程。
+# 第一次 main(page)（keep-alive context）已启动后台服务（scheduler/news/market_data/auto_probe），
+# 第二次 main(page)（e2e_page fixture 或用户刷新页面）若再次调用 initialize_services 会
+# 重复启动后台任务（TaskManager.init_db UPDATE task_history、auto_probe_task 等），
+# 导致竞态与资源泄漏。模块级 flag 保证 initialize_services 只执行一次副作用初始化。
+# reconfigure 路径需调用 reset_services_initialized() 重置 flag 以便重新初始化。
+_services_initialized = False
+
+# Skeptic-MAJOR-4 修复：atexit handler 线性泄漏。Flet Web 模式下每个 main(page) 调用
+# prepare_database_runtime，若 QTRADING_EMBEDDED_PG_URL_FILE 设置会无条件 atexit.register，
+# 导致 N+1 个 handler 指向同一 url_file。模块级 flag 保证只注册一次。
+_embedded_pg_url_file_atexit_registered = False
+
 
 class InitResult(TypedDict):
     success: bool
@@ -40,12 +54,30 @@ class InitResult(TypedDict):
 
 
 async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
+    global _services_initialized
     from utils.correlation import ensure_correlation_id
 
     ensure_correlation_id()
 
+    # Skeptic-MAJOR-2 修复：Flet Web 模式下第二个 main(page) 调用时跳过重复初始化。
+    # 单例服务（SchedulerService/NewsSubscriptionService/MarketDataService）自身有幂等 guard，
+    # 但 TaskManager.init_db() 不幂等（每次 UPDATE task_history）、auto_probe_task 每次创建新 task。
+    # 第一次成功初始化后直接返回成功结果，避免重复副作用。
+    if _services_initialized:
+        logger.debug("[Bootstrap] services already initialized, skipping duplicate initialize_services call")
+        return {
+            "success": True,
+            "error": None,
+            "detail": None,
+            "current_rev": None,
+            "head_rev": None,
+            "auto_probe_task": None,
+        }
+
     try:
+        logger.info("[Bootstrap] Calling cache_manager.init_db()...")
         await cache_manager.init_db()
+        logger.info("[Bootstrap] cache_manager.init_db() completed.")
     except DatabaseMigrationNeeded as e:
         logger.warning("[Bootstrap] Database needs migration: %s", e)
         return {
@@ -98,7 +130,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         }
 
     try:
+        logger.info("[Bootstrap] Calling TaskManager.init_db()...")
         await TaskManager().init_db()
+        logger.info("[Bootstrap] TaskManager.init_db() completed.")
     except Exception as e:
         error_info = classify_error(e, context="general")
         severity = classify_severity(e, context="general")
@@ -127,8 +161,20 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     import os
 
+    logger.info("[Bootstrap] After TaskManager init, checking E2E_TESTING env (=%s)...", os.environ.get("E2E_TESTING"))
     if os.environ.get("E2E_TESTING") == "true":
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
+        # E2E 预热: 在服务初始化阶段预加载 AIService (触发 litellm import，约 18s+)，
+        # 避免 UI 渲染时第一次导入阻塞 MainThread 导致 Flet patch 下发延迟、
+        # E2E 浏览器等待元素超时而失败。initialize_services 在 async 上下文中执行，
+        # 此时 UI 尚未挂载，预加载不影响用户感知。
+        try:
+            from services.ai_service import AIService
+
+            AIService()
+            logger.info("[Bootstrap] E2E warmup: AIService pre-initialized.")
+        except Exception as exc:
+            logger.warning("[Bootstrap] E2E warmup: AIService pre-init failed: %s", exc, exc_info=True)
         auto_probe_task = None
     else:
         SchedulerService().start()
@@ -145,6 +191,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
         auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
 
+    # Skeptic-MAJOR-2 修复：标记服务已初始化，防止后续 main(page) 重复调用
+    _services_initialized = True
+
     return {
         "success": True,
         "error": None,
@@ -153,6 +202,16 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         "head_rev": None,
         "auto_probe_task": auto_probe_task,
     }
+
+
+def reset_services_initialized() -> None:
+    """重置 _services_initialized flag，供 StartupController.reconfigure 调用。
+
+    reconfigure 会调 cache_manager.close() 重置 CacheManager 单例，
+    用户完成 onboarding 后需要重新执行 initialize_services。
+    """
+    global _services_initialized
+    _services_initialized = False
 
 
 async def _warmup_tushare_capabilities() -> None:
@@ -353,7 +412,9 @@ async def prepare_database_runtime() -> str | None:
 
     必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
 
-    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 external）。
+    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 embedded）。
+    spec.md §3 不变量 1：默认 embedded 与产品契约"无需任何配置"对齐，
+    用户显式设 ``QTRADING_DATABASE_MODE=external`` 才进入 external 分支。
 
     Returns:
         embedded 模式且启动成功时返回 sidecar ``ConnectionInfo.url``；
@@ -365,7 +426,7 @@ async def prepare_database_runtime() -> str | None:
     """
     import os
 
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
     if mode != "embedded":
         # M5: mode=external 但 config.embedded_pg_enabled=True → 记 WARNING（用户可能误配置）
         from utils.config_handler import ConfigHandler
@@ -414,9 +475,44 @@ async def prepare_database_runtime() -> str | None:
         config.embedded_pg_listen,
         info.port,
     )
+    # E2E 测试支持：当设置 QTRADING_EMBEDDED_PG_URL_FILE 环境变量时，
+    # 把 sidecar URL 写入该文件，供 E2E 主进程读取后连接 sidecar DB 播种数据。
+    # 生产环境不设置此环境变量，无副作用。
+    # 安全：文件权限 0600（仅所有者可读写），URL 含密码；atexit 注册清理。
+    url_file_path = os.environ.get("QTRADING_EMBEDDED_PG_URL_FILE")
+    if url_file_path:
+        try:
+            url_file = Path(url_file_path)
+            url_file.parent.mkdir(parents=True, exist_ok=True)
+            url_file.write_text(info.url, encoding="utf-8")
+            # Skeptic-MAJOR-4 修复：用模块级 flag 保证 atexit 只注册一次，
+            # 避免 Flet Web 模式下多个 main(page) 调用导致 handler 线性泄漏。
+            # MINOR-6 修复：先注册 atexit 再 chmod，避免 chmod 失败导致 atexit 被跳过。
+            global _embedded_pg_url_file_atexit_registered
+            if not _embedded_pg_url_file_atexit_registered:
+                atexit.register(_cleanup_embedded_pg_url_file, url_file)
+                _embedded_pg_url_file_atexit_registered = True
+                logger.info("[Bootstrap] embedded PG URL file atexit handler registered")
+            try:
+                os.chmod(url_file, 0o600)
+            except OSError as chmod_err:
+                # chmod 失败不阻塞：URL 文件已写入，atexit 已注册
+                logger.warning("[Bootstrap] os.chmod 0600 failed for URL file: %s", chmod_err)
+            logger.info("[Bootstrap] embedded postgres URL written to %s", url_file)
+        except OSError as e:
+            # URL 文件写入失败不阻塞启动，E2E 主进程会超时失败
+            logger.warning("[Bootstrap] failed to write embedded PG URL file: %s", e)
     # D15（pg-plan §22）：返回 URL 供调用方永久设置 config.DB_URL，
     # 不再调 ConfigHandler.save_db_config 持久化（embedded URL 不应写 config 文件）。
     return info.url
+
+
+def _cleanup_embedded_pg_url_file(url_file: Path) -> None:
+    """atexit 回调：清理 sidecar URL 文件（E2E 测试支持）。"""
+    try:
+        url_file.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug("[Bootstrap] failed to cleanup embedded PG URL file: %s", e)
 
 
 class EmbeddedPgStartupScenario(Enum):
@@ -448,13 +544,15 @@ def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupS
     ``_data_dir`` / ``_install_dir`` 私有属性。单例 idempotent，后续
     ``prepare_database_runtime`` 再次调用 ``from_config`` 会返回同一实例。
 
+    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（默认 ``embedded``，spec.md §3 不变量 1）。
+
     Args:
         config: ``AppConfig`` 实例
 
     Returns:
         ``EmbeddedPgStartupScenario`` 枚举值；external 模式或未启用时返回 ``None``
     """
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
     if mode != "embedded":
         logger.debug("[Bootstrap] detect skipped: QTRADING_DATABASE_MODE=%s (not embedded)", mode)
         return None

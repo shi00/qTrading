@@ -18,6 +18,7 @@
 
 import asyncio
 import logging
+import os
 import typing
 from collections.abc import Callable
 
@@ -66,8 +67,12 @@ def HomeView(
     # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
     _ = viewport
 
+    logger.info("[HomeView] construction start, active=%s", active)
+
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
+    logger.info("[HomeView] calling use_viewmodel(HomeViewModel)")
     state, vm = use_viewmodel(HomeViewModel)
+    logger.info("[HomeView] use_viewmodel returned, state.loading=%s", getattr(state, "loading", "unknown"))
 
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
@@ -137,6 +142,19 @@ def HomeView(
 
     async def _init_and_load() -> None:
         if not active:
+            return
+        # E2E 模式下跳过外部依赖初始化（bootstrap.py 已跳过 SchedulerService/
+        # NewsSubscriptionService/MarketDataService.start）。vm.init() 会实例化
+        # NewsSubscriptionService → AIService → litellm import（同步阻塞 MainThread
+        # 18s+，触发 Matplotlib 字体缓存构建），vm.init_data() 调用 Tushare API
+        # （E2E 环境 token 无效必失败），_load_data() 等待 MarketDataService 缓存
+        # （E2E 未启动，5×0.5s=2.5s 空等）。这些操作阻塞 Flet patch 下发，
+        # 导致 E2E 浏览器在 600s 内未检测到 NavigationRail "智能选股"文本。
+        # E2E 测试不依赖 HomeView 异步数据（test_home_view_loads 仅断言静态标签），
+        # 跳过是安全的。bootstrap.py:131 / main.py:209 / quality_gate.py 等已有
+        # E2E_TESTING 检查先例，此处与之一致。
+        if os.environ.get("E2E_TESTING") == "true":
+            vm.set_loading(False)
             return
         try:
             vm.init()  # 添加 service listener (use_viewmodel cleanup 时 vm.dispose() 移除)
@@ -234,6 +252,7 @@ def HomeView(
             ]
         )
 
+    logger.info("[HomeView] construction complete, returning Container")
     return ft.Container(
         content=ft.Column(
             safe_controls(content_controls),

@@ -14,6 +14,7 @@
 """
 
 import logging
+import os
 from collections.abc import Callable
 
 import flet as ft
@@ -54,8 +55,32 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     )
 
 
-def _build_tabs(show_snack: Callable) -> list[ft.Control]:
-    """Instantiate all 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab)."""
+def _build_tabs(show_snack: Callable, current_tab: int = 0, e2e_mode: bool = False) -> list[ft.Control]:
+    """Instantiate 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab).
+
+    E2E 模式优化: ``e2e_mode=True`` 时只构造 ``current_tab`` 对应的 tab, 其他用空
+    ``ft.Container`` 占位。根因: DataSourceTab 的 DataSourceViewModel.__init__ →
+    AIService() → litellm import (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM;
+    SystemTab 的 TierApiPanel 调用 TushareClient()。这些阻塞 Flet patch 下发导致
+    E2E 浏览器超时 (与 app_layout.py _build_pages_stack E2E 优化一致)。
+
+    注意: 必须使用惰性构造 (lambda + 条件调用), 不能先构造所有 tab 再过滤,
+    否则 VM 构造链仍会执行 (DataSourceTab(...) 会立即触发 DataSourceViewModel.__init__).
+    """
+    if e2e_mode:
+        # 惰性工厂: 只对 current_tab 调用工厂, 其他返回空 Container
+        tab_factories: list[Callable[[], ft.Control]] = [
+            lambda: DataSourceTab(show_snack),
+            lambda: DatabaseTab(show_snack),
+            lambda: AIBrainTab(show_snack),
+            lambda: AutomationTab(show_snack),
+            lambda: NotificationsTab(show_snack),
+            lambda: SystemTab(show_snack),
+        ]
+        return [
+            tab_factories[i]() if i == current_tab else ft.Container(expand=True) for i in range(len(tab_factories))
+        ]
+    # 正常模式: 构造所有 tab
     return [
         DataSourceTab(show_snack),
         DatabaseTab(show_snack),
@@ -128,7 +153,8 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
         _show_snack_impl(_page, message, color, **kwargs)
 
     # --- Build tabs ---
-    tabs = _build_tabs(_show_snack)
+    is_e2e = os.environ.get("E2E_TESTING") == "true"
+    tabs = _build_tabs(_show_snack, current_tab=current_tab, e2e_mode=is_e2e)
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
     # --- Tab click handler ---

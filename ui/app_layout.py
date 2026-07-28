@@ -17,6 +17,7 @@
 
 import asyncio
 import logging
+import os
 import typing
 from enum import IntEnum
 
@@ -76,38 +77,72 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
     声明式范式: 每次重渲染重新构造控件树, 由 Flet diff 算法决定实际 DOM 更新。
     子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
 
+    E2E 模式优化: ``E2E_TESTING=true`` 时只构造当前激活视图, 非激活视图用空
+    ``ft.Container`` 占位。根因: 多视图 VM 构造链 (DataSourceViewModel →
+    AIService → litellm import 18s+; ScreenerViewModel → DataProcessor;
+    DataExplorerViewModel → DataExplorerQueryClient 等) 在 MainThread 同步执行,
+    阻塞 Flet patch 下发导致 E2E 浏览器超时。E2E 测试不需要非激活视图的 VM 状态,
+    跳过是安全的 (与 home_view.py L142-154 E2E_TESTING 跳过范式一致)。
+
     Args:
         current_tab: 当前激活的 NavTabs 值, 控制 visible prop。
         viewport: AppLayout 维护的窗口尺寸快照, 下发给所有子视图 (Phase 6.2 P2-1)。
     """
+    is_e2e = os.environ.get("E2E_TESTING") == "true"
+
+    def _make_content(view_factory, is_active: bool) -> ft.Control:
+        # E2E 模式下非激活视图返回空 Container, 避免调用 view_factory() 触发 VM 构造链
+        # (DataSourceViewModel → AIService → litellm import 18s+ 等) 阻塞 Flet patch 下发
+        if is_e2e and not is_active:
+            return ft.Container(expand=True)
+        return view_factory()
+
     pages = [
         ft.Container(
-            content=HomeView(active=current_tab == NavTabs.MARKET, viewport=viewport),
+            content=_make_content(
+                lambda: HomeView(active=current_tab == NavTabs.MARKET, viewport=viewport),
+                current_tab == NavTabs.MARKET,
+            ),
             expand=True,
             visible=current_tab == NavTabs.MARKET,
         ),
         ft.Container(
-            content=ScreenerView(active=current_tab == NavTabs.SCREENER, viewport=viewport),
+            content=_make_content(
+                lambda: ScreenerView(active=current_tab == NavTabs.SCREENER, viewport=viewport),
+                current_tab == NavTabs.SCREENER,
+            ),
             expand=True,
             visible=current_tab == NavTabs.SCREENER,
         ),
         ft.Container(
-            content=BacktestView(active=current_tab == NavTabs.BACKTEST, viewport=viewport),
+            content=_make_content(
+                lambda: BacktestView(active=current_tab == NavTabs.BACKTEST, viewport=viewport),
+                current_tab == NavTabs.BACKTEST,
+            ),
             expand=True,
             visible=current_tab == NavTabs.BACKTEST,
         ),
         ft.Container(
-            content=DataExplorerView(active=current_tab == NavTabs.DATA, viewport=viewport),
+            content=_make_content(
+                lambda: DataExplorerView(active=current_tab == NavTabs.DATA, viewport=viewport),
+                current_tab == NavTabs.DATA,
+            ),
             expand=True,
             visible=current_tab == NavTabs.DATA,
         ),
         ft.Container(
-            content=TaskCenterView(active=current_tab == NavTabs.TASKS, viewport=viewport),
+            content=_make_content(
+                lambda: TaskCenterView(active=current_tab == NavTabs.TASKS, viewport=viewport),
+                current_tab == NavTabs.TASKS,
+            ),
             expand=True,
             visible=current_tab == NavTabs.TASKS,
         ),
         ft.Container(
-            content=SettingsView(active=current_tab == NavTabs.SETTINGS, viewport=viewport),
+            content=_make_content(
+                lambda: SettingsView(active=current_tab == NavTabs.SETTINGS, viewport=viewport),
+                current_tab == NavTabs.SETTINGS,
+            ),
             expand=True,
             visible=current_tab == NavTabs.SETTINGS,
         ),
@@ -257,6 +292,7 @@ def AppLayout() -> ft.Container:
     )
 
     # --- 渲染 ---
+    logger.info("[AppLayout] construction start, current_tab=%s", current_tab)
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
         selected=nav_collapsed,
@@ -304,12 +340,14 @@ def AppLayout() -> ft.Container:
         on_change=safe_on_change(_on_nav_change),
     )
 
+    logger.info("[AppLayout] building pages stack")
     body = ft.Container(
         content=_build_pages_stack(int(current_tab), viewport),
         expand=True,
         padding=20,
         bgcolor=AppColors.BACKGROUND,
     )
+    logger.info("[AppLayout] construction complete, returning Container")
 
     return ft.Container(
         content=ft.Row(

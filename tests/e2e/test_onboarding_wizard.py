@@ -101,6 +101,20 @@ async def test_wizard_forward_then_back(wizard_page):
     await wizard_page.expect_text(welcome_guide)
 
 
+# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题。
+# 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
+# embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
+# （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
+# embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
+# "验证失败"场景不存在；外部 DB 配置验证失败流程由集成测试覆盖（test_onboarding_wizard_integration.py）。
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
+    reason=(
+        "Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题 (P3-WinE2E-Skip); "
+        "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
+        "外部 DB 配置验证失败场景不存在（embedded 验证为 always-true）"
+    ),
+)
 async def test_wizard_db_validation_failure(wizard_page):
     """测试：数据库校验失败时停留在当前步骤。"""
     btn_start = I18n.get("wizard_btn_start")
@@ -127,9 +141,19 @@ async def test_wizard_db_validation_failure(wizard_page):
 # 决策记录：docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md
 # 替代覆盖：tests/integration/test_onboarding_wizard_integration.py
 # 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
+# embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
+# （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
+# embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
+# 外部 DB 配置验证流程由集成测试覆盖（test_onboarding_wizard_integration.py）。
 @pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)",
+    sys.platform == "win32" or os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
+    reason=(
+        "Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败"
+        "（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在"
+        " wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip); "
+        "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
+        "外部 DB 配置验证流程由集成测试覆盖"
+    ),
 )
 async def test_wizard_db_validation_success(wizard_page):
     """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。"""
