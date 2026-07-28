@@ -970,7 +970,7 @@ def ScreenerView(
                                     code_theme="atom-one-dark",  # type: ignore[arg-type]
                                     on_tap_link=safe_open_url,
                                 ),
-                                padding=10,
+                                padding=AppStyles.SPACING_SM,
                                 bgcolor=AppColors.BACKGROUND,
                                 border_radius=4,
                             )

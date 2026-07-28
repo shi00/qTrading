@@ -483,7 +483,7 @@ def TableViewerTab(
         options=_build_table_selector_options(state.tables_list, vm),
         height=36,
         text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=10,
+        content_padding=AppStyles.SPACING_SM,
     )
 
     filter_col = ft.Dropdown(
@@ -498,7 +498,7 @@ def TableViewerTab(
         options=_build_filter_col_options(state.current_table, state.table_columns, vm),
         height=36,
         text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=10,
+        content_padding=AppStyles.SPACING_SM,
     )
 
     filter_op = ft.Dropdown(
@@ -528,7 +528,7 @@ def TableViewerTab(
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         height=36,
         text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=10,
+        content_padding=AppStyles.SPACING_SM,
     )
 
     btn_query = ft.IconButton(
@@ -580,7 +580,7 @@ def TableViewerTab(
         ),
         alignment=ft.Alignment.CENTER,
         expand=True,
-        padding=40,
+        padding=AppStyles.EMPTY_STATE_PADDING,
         bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),
         border_radius=12,
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
@@ -655,7 +655,7 @@ def TableViewerTab(
 
     toolbar_container = ft.Column(
         [
-            ft.Container(content=toolbar_content, padding=10, bgcolor=AppColors.SURFACE),
+            ft.Container(content=toolbar_content, padding=AppStyles.SPACING_SM, bgcolor=AppColors.SURFACE),
             ft.ProgressBar(visible=is_loading, color=AppColors.PRIMARY),
         ],
         spacing=0,
@@ -879,7 +879,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                         ),
                     ],
                 ),
-                padding=10,
+                padding=AppStyles.SPACING_SM,
                 bgcolor=AppColors.SURFACE,
                 border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.BORDER)),
             ),
@@ -889,7 +889,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                     scroll=ft.ScrollMode.AUTO,
                 ),
                 expand=True,
-                padding=10,
+                padding=AppStyles.SPACING_SM,
             ),
             ft.Container(
                 content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),

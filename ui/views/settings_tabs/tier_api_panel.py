@@ -364,7 +364,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         width=AppStyles.CONTROL_WIDTH_MD,
         text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
-        content_padding=10,
+        content_padding=AppStyles.SPACING_SM,
         options=_build_tier_options(vm),
         on_select=safe_on_select(_on_tier_change),
         disabled=probe_in_progress,
