@@ -308,6 +308,7 @@ class CacheManager:
         dao = BaseDao(self.engine)
         return await dao._write_db(sql, params, suppress_errors=True)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_db(self, sql: str, params: tuple | list | None = None):
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params, suppress_errors=True)

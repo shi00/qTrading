@@ -365,6 +365,7 @@ class BaseDao:
 
         return [tuple(_to_native(v) for v in row) for row in df_clean.itertuples(index=False, name=None)]
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _write_db(
         self,
         sql: typing.Any,
@@ -479,6 +480,7 @@ class BaseDao:
         """
         return ",".join(['"' + c.replace('"', '""') + '"' for c in columns])
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _save_upsert(
         self,
         df: pd.DataFrame,

@@ -6,6 +6,7 @@
 import asyncio
 import datetime
 import inspect
+import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -2585,3 +2586,118 @@ class TestChunkedExecuteParallel:
             chunk_size=2,
         )
         assert result == 6
+
+
+class TestLogAsyncOperationCoverage:
+    """Task 6.2 (P3-M5-LogAsyncOperation-Coverage): 验证 @log_async_operation
+    装饰器挂载于 DAO 层核心方法，且慢操作触发 WARNING 告警。
+
+    DoD: ① _read_db/_read_db_select/_write_db/_save_upsert 全挂载
+         ② cache_manager.read_db 直接 SQL 路径挂载
+         ④ 新增慢操作告警单测（mock perf_counter 让耗时 > threshold，验证 logger.warning 触发）
+    """
+
+    def test_write_db_has_log_async_operation_decorator(self):
+        """DoD ①: _write_db 挂载 @log_async_operation 装饰器。"""
+        source = inspect.getsource(BaseDao._write_db)
+        assert "@log_async_operation" in source
+
+    def test_save_upsert_has_log_async_operation_decorator(self):
+        """DoD ①: _save_upsert 挂载 @log_async_operation 装饰器。"""
+        source = inspect.getsource(BaseDao._save_upsert)
+        assert "@log_async_operation" in source
+
+    def test_read_db_has_log_async_operation_decorator(self):
+        """DoD ①: _read_db 挂载 @log_async_operation 装饰器（已存在，回归保护）。"""
+        source = inspect.getsource(BaseDao._read_db)
+        assert "@log_async_operation" in source
+
+    def test_read_db_select_has_log_async_operation_decorator(self):
+        """DoD ①: _read_db_select 挂载 @log_async_operation 装饰器（已存在，回归保护）。"""
+        source = inspect.getsource(BaseDao._read_db_select)
+        assert "@log_async_operation" in source
+
+    def test_cache_manager_read_db_has_log_async_operation_decorator(self):
+        """DoD ②: cache_manager.read_db 直接 SQL 路径挂载 @log_async_operation。"""
+        from data.cache.cache_manager import CacheManager
+
+        source = inspect.getsource(CacheManager.read_db)
+        assert "@log_async_operation" in source
+
+    def test_base_dao_has_at_least_4_log_async_operation_decorators(self):
+        """DoD ①: grep @log_async_operation 在 base_dao.py 命中 ≥4 处。"""
+        import data.persistence.daos.base_dao as base_dao_mod
+
+        source = inspect.getsource(base_dao_mod.BaseDao)
+        count = source.count("@log_async_operation")
+        assert count >= 4, f"Expected >=4 @log_async_operation decorators, got {count}"
+
+    @pytest.mark.asyncio
+    async def test_write_db_slow_operation_triggers_warning(self, caplog):
+        """DoD ④: _write_db 慢操作（>200ms threshold）触发 @log_async_operation WARNING。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+
+        call_count = [0]
+
+        def mock_perf_counter():
+            call_count[0] += 1
+            return (call_count[0] - 1) * 0.3
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("time.perf_counter", side_effect=mock_perf_counter),
+        ):
+            mock_cm._instance = None
+            with caplog.at_level(logging.WARNING):
+                result = await dao._write_db("INSERT INTO t VALUES ($1)", params=(1,), conn=mock_conn)
+                assert result == 1
+            slow_warnings = [r for r in caplog.records if "SLOW" in r.message and ">200ms" in r.message]
+            assert len(slow_warnings) >= 1, (
+                f"Expected @log_async_operation SLOW warning with '>200ms', "
+                f"got records: {[r.message for r in caplog.records]}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_upsert_slow_operation_triggers_warning(self, caplog):
+        """DoD ④: _save_upsert 慢操作（>5000ms threshold）触发 @log_async_operation WARNING。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+
+        call_count = [0]
+
+        def mock_perf_counter():
+            call_count[0] += 1
+            return (call_count[0] - 1) * 6.0
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+            patch("time.perf_counter", side_effect=mock_perf_counter),
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            with caplog.at_level(logging.WARNING):
+                result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
+                assert result == 1
+            slow_warnings = [r for r in caplog.records if "SLOW" in r.message and ">5000ms" in r.message]
+            assert len(slow_warnings) >= 1, (
+                f"Expected @log_async_operation SLOW warning with '>5000ms', "
+                f"got records: {[r.message for r in caplog.records]}"
+            )
