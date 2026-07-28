@@ -6,11 +6,12 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
-import data.external.news_fetcher as nf_mod
+from data.external import news_fetcher as nf_mod
 from data.external.news_fetcher import (
     NewsFetcher,
     _run_with_python_string_storage,
     _log_with_severity,
+    _ensure_dataframe,
     _US_MOVES_CACHE,
     _SINA_CONSECUTIVE_EMPTY,
     _SINA_CONSECUTIVE_FAILURES,
@@ -1735,7 +1736,7 @@ class TestClassifyErrorIntegration:
     @pytest.mark.asyncio
     async def test_ensure_dataframe_conversion_failure_logs_code(self, caplog):
         """路径 1: _ensure_dataframe except Exception — 转换失败日志含 [code=]。"""
-        original_df = nf_mod.pd.DataFrame
+        original_df = pd.DataFrame
 
         class FailingDF(original_df):
             def __init__(self, *args, **kwargs):
@@ -1743,9 +1744,9 @@ class TestClassifyErrorIntegration:
                     raise Exception("convert error")
                 super().__init__(*args, **kwargs)
 
-        with patch.object(nf_mod.pd, "DataFrame", FailingDF):
+        with patch.object(pd, "DataFrame", FailingDF):
             with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
-                result = nf_mod._ensure_dataframe([{"a": 1}], source="test")
+                result = _ensure_dataframe([{"a": 1}], source="test")
         assert result is None
         code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
         assert code_records, "Expected [code=...] in log"
