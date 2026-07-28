@@ -1355,6 +1355,7 @@ def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
             "QTRADING_EMBEDDED_PG_URL_FILE": str(embedded_url_file),
+            "AUTO_MIGRATE": "true",
             # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
             # null 后端：set/delete 为 no-op，get 返回 None。
             # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
@@ -1393,6 +1394,7 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
         startup_timeout_s=300.0,
@@ -1459,6 +1461,7 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
     )
@@ -1530,6 +1533,7 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
+            "AUTO_MIGRATE": "true",
             "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
         startup_timeout_s=300.0,
