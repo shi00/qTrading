@@ -239,17 +239,21 @@ async def main(page: ft.Page):
         embedded_pg_scenario=scenario,
     )
 
+    logger.info("[Main] Before page.render(RootView)")
     page.render(
         RootView,
         controller=controller,
         bridge=bridge,
         run_task_fn=page.run_task,
     )
+    logger.info("[Main] After page.render(RootView)")
 
+    logger.info("[Main] Before ConfigHandler calls")
     db_url = ConfigHandler.get_db_url()
     token = ConfigHandler.get_token()
     llm_api_key = ConfigHandler.get_llm_config().get("api_key")
     onboarding_complete = ConfigHandler.is_onboarding_complete()
+    logger.info("[Main] After ConfigHandler calls")
 
     masked_token = mask_sensitive(token)
     masked_llm_key = mask_sensitive(llm_api_key)
@@ -261,7 +265,9 @@ async def main(page: ft.Page):
         onboarding_complete,
     )
 
+    logger.info("[Main] Before controller.start()")
     await controller.start(db_url, token, llm_api_key, onboarding_complete)
+    logger.info("[Main] After controller.start()")
 
     # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator
     # （仅在 initialize_services 成功执行后非 None；onboarding 路径不创建 task）

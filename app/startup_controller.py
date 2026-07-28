@@ -99,9 +99,12 @@ class StartupController:
 
     async def start(self, db_url, token, llm_api_key, onboarding_complete):
         """Determine if onboarding is needed, then init services."""
+        logger.info("[Startup] start() called, checking onboarding...")
         if check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
+            logger.info("[Startup] Onboarding needed, transitioning to NEED_ONBOARDING.")
             self._transition(StartupState.NEED_ONBOARDING)
             return
+        logger.info("[Startup] Onboarding not needed, calling _init_services().")
         await self._init_services()
 
     # --- Core: call initialize_services and branch on result ---
@@ -109,7 +112,13 @@ class StartupController:
     async def _init_services(self):
         self._transition(StartupState.LOADING)
         try:
+            logger.info("[Startup] Calling initialize_services()...")
             result = await initialize_services(self._cache_manager, show_toast_fn=self._on_show_toast)
+            logger.info(
+                "[Startup] initialize_services() returned: success=%s, error=%s",
+                result.get("success"),
+                result.get("error"),
+            )
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")

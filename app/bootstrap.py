@@ -46,7 +46,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     ensure_correlation_id()
 
     try:
+        logger.info("[Bootstrap] Calling cache_manager.init_db()...")
         await cache_manager.init_db()
+        logger.info("[Bootstrap] cache_manager.init_db() completed.")
     except DatabaseMigrationNeeded as e:
         logger.warning("[Bootstrap] Database needs migration: %s", e)
         return {
@@ -99,7 +101,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         }
 
     try:
+        logger.info("[Bootstrap] Calling TaskManager.init_db()...")
         await TaskManager().init_db()
+        logger.info("[Bootstrap] TaskManager.init_db() completed.")
     except Exception as e:
         error_info = classify_error(e, context="general")
         severity = classify_severity(e, context="general")
@@ -128,6 +132,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     import os
 
+    logger.info("[Bootstrap] After TaskManager init, checking E2E_TESTING env (=%s)...", os.environ.get("E2E_TESTING"))
     if os.environ.get("E2E_TESTING") == "true":
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
         # E2E 预热: 在服务初始化阶段预加载 AIService (触发 litellm import，约 18s+)，
