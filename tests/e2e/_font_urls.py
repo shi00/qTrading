@@ -28,6 +28,7 @@ import importlib.machinery
 import re
 import site
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 # 应用实际需要的字体族（locale=zh + 默认 UI 字体）
 # 升级 flet 时若应用新增其他 locale（如日文/韩文），需在此处补充对应字体族
@@ -70,6 +71,75 @@ def extract_font_filename(path: str) -> str | None:
     if not filename or "\\" in filename or filename in (".", ".."):
         return None
     return filename
+
+
+def extract_canvaskit_relpath(path: str) -> str | None:
+    """从 URL path 中提取 canvaskit 资源相对路径（保留子目录结构）。
+
+    被 ``tests/e2e/conftest.py`` route handler 复用，支持 flet 0.86.3 引入的
+    ``chromium`` / ``experimental_webparagraph`` 子目录变体。
+
+    采用「末尾两段」策略：若 URL path 末尾第 2 段是子目录标记，则保留
+    ``<subdir>/<filename>``，否则只保留 ``<filename>``。这样可统一处理
+    同源路径（``/<base>/canvaskit/[subdir]/<fn>``）和 CDN 路径
+    （``/flutter-canvaskit/<hash>/[subdir]/<fn>``），无需识别 hash 段。
+
+    URL path 模式（调用前应先 ``urlparse(url).path`` 去除 query/fragment）::
+
+        /<base>/canvaskit/<filename>                       → <filename>
+        /<base>/canvaskit/chromium/<filename>              → chromium/<filename>
+        /<base>/canvaskit/experimental_webparagraph/<fn>   → experimental_webparagraph/<fn>
+        /flutter-canvaskit/<hash>/<filename>               → <filename>
+        /flutter-canvaskit/<hash>/chromium/<filename>      → chromium/<filename>
+        /<base>/skwasm.js                                  → skwasm.js
+
+    安全性：
+        - 用 ``PurePosixPath`` 按 ``/`` 分割（跨平台一致），防御 Windows ``\\`` 注入
+        - 拒绝任何包含 ``.`` / ``..`` / 含 ``\\`` 的路径段
+        - 返回 None 表示路径异常，调用方应 abort 请求
+
+    Args:
+        path: URL path（如 ``"/canvaskit/chromium/canvaskit.js"``）。
+    """
+    subdir_markers = frozenset({"chromium", "experimental_webparagraph"})
+    parts = PurePosixPath(path).parts
+    if any(p in (".", "..") or "\\" in p for p in parts):
+        return None
+    if len(parts) >= 2 and parts[-2] in subdir_markers:
+        rel_parts = list(parts[-2:])
+    else:
+        basename = PurePosixPath(path).name
+        if not basename:
+            return None
+        rel_parts = [basename]
+    return "/".join(rel_parts)
+
+
+# 受信任的字体 CDN host（route handler 仅拦截这些 host 的字体请求）
+# 使用 host 精确匹配而非子串匹配，防止 CodeQL "Incomplete URL substring sanitization"
+_FONT_CDN_HOSTS: frozenset[str] = frozenset({"fonts.gstatic.com", "fonts.googleapis.com"})
+
+
+def is_font_cdn_url(url: str) -> bool:
+    """判断 URL 是否指向受信任的字体 CDN（基于 host 精确匹配，非子串匹配）。
+
+    Security: 修复 CodeQL "Incomplete URL substring sanitization" (high severity)。
+    旧实现 ``"fonts.gstatic.com" in url`` 会被
+    ``https://evil.com/?x=fonts.gstatic.com`` 等伪造 URL 绕过；
+    本函数用 ``urlparse`` 解析 host 后做精确集合匹配。
+
+    被 ``tests/e2e/conftest.py`` route handler 调用，判断是否从本地
+    ``mock_assets/fonts/`` 提供字体资源。
+
+    Args:
+        url: 完整 URL（如 ``"https://fonts.gstatic.com/s/notosanssc/v37/hash.4.woff2"``）。
+
+    Returns:
+        True 表示 URL host 为 ``fonts.gstatic.com`` 或 ``fonts.googleapis.com``；
+        无 host 的 URL（data:/blob:）或非字体 CDN URL 返回 False。
+    """
+    hostname = urlparse(url).hostname
+    return hostname in _FONT_CDN_HOSTS
 
 
 def find_flet_web_main_dart_js() -> Path:
