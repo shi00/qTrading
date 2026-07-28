@@ -2,13 +2,14 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
-from app.bootstrap import mask_sensitive
+from app.bootstrap import EmbeddedPgStartupScenario, mask_sensitive
 
 
 def _trace_log(msg: str) -> None:
@@ -48,6 +49,110 @@ from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
+
+
+async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:
+    """等待用户点击 Retry 或 Exit，返回 ``"retry"`` 或 ``"exit"``。
+
+    用 threading.Event + asyncio.to_thread 实现跨线程安全等待
+    （Flet on_click 回调可能在 Flet 内部线程，不在事件循环线程）。
+
+    finally 中先 set 两个 event 再 cancel task：asyncio.to_thread 的取消语义是
+    协程取消时底层线程不取消，threading.Event.wait() 无超时会永久阻塞，
+    必须通过 set event 唤醒线程避免线程泄漏（P1-1 修复）。
+
+    注意：result 必须在 finally set event 之前记录，否则 exit_event.is_set()
+    总是 True 导致永远返回 "exit"。
+    """
+    retry_task = asyncio.create_task(asyncio.to_thread(retry_event.wait))
+    exit_task = asyncio.create_task(asyncio.to_thread(exit_event.wait))
+    result = "retry"
+    try:
+        await asyncio.wait(
+            [retry_task, exit_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        result = "exit" if exit_event.is_set() else "retry"
+    finally:
+        # 先 set 两个 event 唤醒可能仍在阻塞的线程（避免线程泄漏），再 cancel task
+        retry_event.set()
+        exit_event.set()
+        for t in (retry_task, exit_task):
+            if not t.done():
+                t.cancel()
+    return result
+
+
+async def _prepare_db_with_retry(
+    page: ft.Page,
+    scenario: EmbeddedPgStartupScenario | None,
+) -> str | None:
+    """封装 prepare_database_runtime 的重试逻辑（P0-1）。
+
+    失败时渲染 PreInitErrorView，用户可选择 Retry 或 Exit。
+    - Retry: 重新渲染 LoadingView 后重试 prepare_database_runtime
+    - Exit: ``sys.exit(0)``（sidecar 已被 ``_reset_singleton`` 清理，无资源泄漏）
+
+    E2E / Web 模式保持原 ``sys.exit(1)`` 行为，避免无头浏览器等待 UI 交互超时
+    或 Web 多 session 状态冲突。
+
+    Raises:
+        CancelledError: 用户在错误页关窗口时，main(page) 协程被取消，
+            CancelledError 正确传播（R2 红线），sidecar 由 ``--parent-pid`` 兜底自杀。
+    """
+    while True:
+        try:
+            from app.bootstrap import prepare_database_runtime
+
+            return await prepare_database_runtime()
+        except Exception as e:
+            logger.critical("[Main] prepare_database_runtime failed: %s", e, exc_info=True)
+            log_exception_with_severity(
+                e,
+                context="general",
+                operation_label="prepare_database_runtime failed",
+            )
+
+            # E2E / Web 模式：失败立即退出，避免无头浏览器/UI 多 session 场景复杂化
+            if os.environ.get("E2E_TESTING") == "true" or os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in (
+                "true",
+                "1",
+                "yes",
+            ):
+                sys.exit(1)
+
+            from ui.startup_views import PreInitErrorView
+            from utils.sanitizers import DataSanitizer
+
+            error_message = DataSanitizer.sanitize_error(e)
+            retry_event = threading.Event()
+            exit_event = threading.Event()
+
+            def on_retry(_e: ft.ControlEvent, _ev: threading.Event = retry_event) -> None:
+                _ev.set()
+
+            def on_exit(_e: ft.ControlEvent, _ev: threading.Event = exit_event) -> None:
+                _ev.set()
+
+            page.render(
+                PreInitErrorView,
+                error_message=error_message,
+                on_retry=on_retry,
+                on_exit=on_exit,
+            )
+
+            action = await _wait_for_user_action(retry_event, exit_event)
+
+            if action == "exit":
+                logger.info("[Main] User chose to exit from PreInitErrorView")
+                sys.exit(0)
+
+            # Retry 路径：重新渲染 LoadingView，让用户看到重试状态
+            # scenario=None 时也渲染（_build_loading_view 对 None 显示通用文案）
+            from ui.startup_views import LoadingView
+
+            page.render(LoadingView, scenario=scenario)
+            await asyncio.sleep(0.05)  # 让 Flet 刷新一帧
 
 
 @ft.component
@@ -140,7 +245,7 @@ async def main(page: ft.Page):
     page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
 
     # 启动场景检测（external 模式或未启用 embedded PG 时返回 None，跳过 LoadingView 提前渲染）
-    from app.bootstrap import EmbeddedPgStartupScenario, detect_embedded_pg_startup_scenario, prepare_database_runtime
+    from app.bootstrap import detect_embedded_pg_startup_scenario
     from utils.config_models import AppConfig
 
     config_for_detect = AppConfig.model_validate(ConfigHandler.load_config())
@@ -160,13 +265,8 @@ async def main(page: ft.Page):
         await asyncio.sleep(0.05)  # 让 Flet 刷新一帧（spec SubTask 3.3）
 
     # Phase 2 §3.4：embedded 模式下启动 sidecar 并返回 URL（D15：不持久化到 config）
-    # H2: prepare_database_runtime 失败时记 critical 日志并退出（不让 CacheManager 在无 DB 时启动）
-    try:
-        embedded_db_url = await prepare_database_runtime()
-    except Exception as e:
-        logger.critical("[Main] prepare_database_runtime failed: %s", e, exc_info=True)
-        log_exception_with_severity(e, context="general", operation_label="prepare_database_runtime failed")
-        sys.exit(1)
+    # P0-1: prepare_database_runtime 失败不直接 sys.exit，显示 PreInitErrorView 供用户 Retry/Exit
+    embedded_db_url = await _prepare_db_with_retry(page, scenario)
 
     ProxyManager.apply_smart_proxy_policy()
 
