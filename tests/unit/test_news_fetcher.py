@@ -6,9 +6,12 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
+from data.external import news_fetcher as nf_mod
 from data.external.news_fetcher import (
     NewsFetcher,
     _run_with_python_string_storage,
+    _log_with_severity,
+    _ensure_dataframe,
     _US_MOVES_CACHE,
     _SINA_CONSECUTIVE_EMPTY,
     _SINA_CONSECUTIVE_FAILURES,
@@ -28,18 +31,16 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
     # 重置 CLS 熔断器状态，防止测试间状态泄漏
-    import data.external.news_fetcher as _nf_mod
-
-    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
-    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
     yield
     _US_MOVES_CACHE.clear()
     _SINA_CONSECUTIVE_EMPTY.clear()
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
-    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
-    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
 
 
 class TestRunWithPythonStringStorage:
@@ -446,8 +447,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_runtime_error_does_not_trigger_circuit_breaker(self, mock_tpm):
         """RuntimeError（基础设施错误）不递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
         mock_tpm.return_value = mock_manager
@@ -461,8 +460,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.requests.get")
     async def test_requests_exception_increments_circuit_breaker(self, mock_get, mock_tpm):
         """requests 异常递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_get.side_effect = requests.ConnectionError("network down")
 
         mock_manager = MagicMock()
@@ -478,8 +475,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.requests.get")
     async def test_http_error_increments_circuit_breaker(self, mock_get, mock_tpm):
         """HTTP 4xx/5xx 递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
@@ -1585,8 +1580,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm):
         """连续 3 次失败后熔断器开启。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_get.side_effect = requests.ConnectionError("network down")
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1605,8 +1598,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
         """熔断开启期间直接返回空列表，不发起网络调用。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         nf_mod._CLS_CIRCUIT_OPENED_AT = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0)).timestamp()
 
@@ -1625,8 +1616,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_half_open_recovery(self, mock_get, mock_tpm):
         """冷却期过后半开探活成功，熔断器关闭恢复。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
@@ -1656,8 +1645,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
         """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
@@ -1691,3 +1678,407 @@ class TestCLSCircuitBreaker:
             res = await NewsFetcher.get_latest_global_news()
             assert res == []
             mock_get.assert_called_once()
+
+
+class TestLogWithSeverity:
+    """直接测试 _log_with_severity helper：system→ERROR, recoverable→WARNING, operational→INFO。"""
+
+    def test_system_level_logs_error(self, caplog):
+        """system 级异常（PermissionError）→ logger.error。"""
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            _log_with_severity(PermissionError("denied"), "test message")
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records
+        assert all(r.levelno == logging.ERROR for r in code_records)
+        assert "permission" in code_records[0].getMessage()
+
+    def test_recoverable_level_logs_warning(self, caplog):
+        """recoverable 级异常（TimeoutError with 'timeout'）→ logger.warning。"""
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            _log_with_severity(TimeoutError("operation timeout"), "test message")
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records
+        assert all(r.levelno == logging.WARNING for r in code_records)
+        assert "timeout" in code_records[0].getMessage()
+
+    def test_operational_level_logs_info(self, caplog):
+        """operational 级异常（ValueError）→ logger.info。"""
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            _log_with_severity(ValueError("bad value"), "test message")
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records
+        assert all(r.levelno == logging.INFO for r in code_records)
+        assert "unknown" in code_records[0].getMessage()
+
+    def test_log_message_contains_code_marker(self, caplog):
+        """日志消息必须包含 [code=...] 标记。"""
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            _log_with_severity(Exception("connection refused"), "prefix %s", "arg")
+        msg = caplog.records[0].getMessage()
+        assert "[code=" in msg
+        assert "prefix arg" in msg
+        # general context: "connection" in error_str → code="network"
+        assert "network" in msg
+
+    def test_exc_info_passed_through(self, caplog):
+        """exc_info=True 时日志记录应包含异常信息。"""
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError as e:
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                _log_with_severity(e, "msg", exc_info=True)
+        assert any(r.exc_info is not None for r in caplog.records)
+
+
+class TestClassifyErrorIntegration:
+    """验证每个 except 路径都接入了 _log_with_severity（日志含 [code=] 标记）。"""
+
+    @pytest.mark.asyncio
+    async def test_ensure_dataframe_conversion_failure_logs_code(self, caplog):
+        """路径 1: _ensure_dataframe except Exception — 转换失败日志含 [code=]。"""
+        original_df = pd.DataFrame
+
+        class FailingDF(original_df):
+            def __init__(self, *args, **kwargs):
+                if args and isinstance(args[0], list) and args[0]:
+                    raise Exception("convert error")
+                super().__init__(*args, **kwargs)
+
+        with patch.object(pd, "DataFrame", FailingDF):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = _ensure_dataframe([{"a": 1}], source="test")
+        assert result is None
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch("data.external.news_fetcher.ak")
+    async def test_market_import_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+        """路径 2: get_stock_news except (ImportError, ...) — market 读取失败日志含 [code=]。"""
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        # Patch the import inside get_stock_news to raise ImportError
+        import builtins
+
+        real_import = builtins.__import__
+
+        def failing_import(name, *args, **kwargs):
+            if "stock_disclosure_cninfo" in name:
+                raise ImportError("no module")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", failing_import):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch("data.external.news_fetcher.ak")
+    async def test_cninfo_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+        """路径 3: get_stock_news except Exception (CNINFO) — 失败日志含 [code=]。"""
+        mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo connection error")
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch("data.external.news_fetcher.ak")
+    async def test_em_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+        """路径 4: get_stock_news except Exception (EM) — 失败日志含 [code=]。"""
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        mock_ak.stock_news_em.side_effect = Exception("em error")
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    async def test_fatal_error_logs_code(self, mock_run, mock_tpm, caplog):
+        """路径 5: get_stock_news except Exception (Fatal) — 致命错误日志含 [code=]。"""
+        mock_run.side_effect = Exception("fatal error")
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        # run_async 实际调用 _fetch()，触发 _run_with_python_string_storage side_effect
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        # wait_for 实际 await coro，让 _fetch 执行并触发 fatal error 日志
+        async def _real_wait_for(coro, *a, **kw):
+            return await coro
+
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=_real_wait_for,
+        ):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_timeout_logs_code(self, mock_tpm, caplog):
+        """路径 6: get_stock_news except TimeoutError — 超时日志含 [code=]。"""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
+
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError("timeout")),
+            ][1],
+        ):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_dispatch_error_logs_code(self, mock_tpm, caplog):
+        """路径 7: get_stock_news except Exception (dispatching) — 调度错误日志含 [code=]。"""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("dispatch error"))
+
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(Exception("dispatch error")),
+            ][1],
+        ):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records, "Expected [code=...] in log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_timestamp_conversion_failure_logs_code(self, mock_get, mock_tpm, caplog):
+        """路径 8: get_latest_global_news except Exception (Timestamp) — 转换失败日志含 [code=]。"""
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "测试", "content": "", "ctime": "not-a-number"},
+                ]
+            }
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert len(result) == 1
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "Timestamp" in r.getMessage()]
+        assert code_records, "Expected [code=...] in Timestamp conversion log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_runtime_error_logs_code_and_returns_empty(self, mock_tpm, caplog):
+        """路径 9: get_latest_global_news except RuntimeError — 降级返回 []，日志含 [code=]。"""
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
+        mock_tpm.return_value = mock_manager
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news()
+        assert result == []  # 降级语义不变
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "infrastructure" in r.getMessage()]
+        assert code_records, "Expected [code=...] in infrastructure error log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_cls_failure_logs_code_and_warning_level(self, mock_get, mock_tpm, caplog):
+        """路径 10: get_latest_global_news except Exception (CLS) — 连接错误日志含 [code=]，recoverable→WARNING。"""
+        mock_get.side_effect = requests.ConnectionError("network down")
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+        code_records = [
+            r for r in caplog.records if "[code=" in r.getMessage() and "CLS API request failed" in r.getMessage()
+        ]
+        assert code_records, "Expected [code=...] in CLS failure log"
+        # ConnectionError → recoverable → WARNING
+        assert all(r.levelno == logging.WARNING for r in code_records)
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_json_decode_failure_logs_code(self, mock_get, mock_tpm, caplog):
+        """路径 11: get_us_major_moves except json.JSONDecodeError — 解析失败日志含 [code=]。"""
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.text = "IO(not valid json);"
+        mock_get.return_value = mock_resp
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "decode JSON" in r.getMessage()]
+        assert code_records, "Expected [code=...] in JSON decode error log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_us_api_attempt_failure_logs_code(self, mock_tpm, caplog):
+        """路径 12: get_us_major_moves except Exception (attempt) — 重试失败日志含 [code=]。"""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("attempt connection error"))
+
+        with patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "US API attempt" in r.getMessage()]
+        assert code_records, "Expected [code=...] in US API attempt failure log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_us_moves_fetching_error_logs_code(self, mock_get, mock_tpm, caplog):
+        """路径 13: get_us_major_moves retry except Exception — json.loads 抛异常时重试日志含 [code=]。"""
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
+        mock_get.return_value = mock_resp
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        with patch(
+            "data.external.news_fetcher.json.loads",
+            side_effect=Exception("fetch error"),
+        ):
+            with patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock):
+                with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                    result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert "error" in result.lower()
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "US API attempt" in r.getMessage()]
+        assert code_records, "Expected [code=...] in US moves fetching error log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_hot_concepts_timeout_logs_code(self, mock_tpm, caplog):
+        """路径 14: get_hot_concepts except TimeoutError — 超时日志含 [code=]。"""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError("timeout"))
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts()
+        assert result == []
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "timed out" in r.getMessage()]
+        assert code_records, "Expected [code=...] in hot concepts timeout log"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
+    @patch("data.external.news_fetcher.ak")
+    async def test_hot_concepts_exception_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+        """路径 15: get_hot_concepts except Exception — 失败日志含 [code=]。"""
+        mock_ak.stock_sector_spot.side_effect = Exception("concept error")
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("concept error"))
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts()
+        assert result == []
+        code_records = [
+            r for r in caplog.records if "[code=" in r.getMessage() and "Hot concepts fetch failed" in r.getMessage()
+        ]
+        assert code_records, "Expected [code=...] in hot concepts failure log"
+
+
+class TestDegradationSemantics:
+    """验证降级语义：except 块仍返回空列表/空字符串，不 raise（DoD ④）。"""
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_runtime_error_returns_empty_list(self, mock_tpm):
+        """RuntimeError 时 get_latest_global_news 仍返回 []（不 raise）。"""
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("infra down"))
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_connection_error_returns_empty_list(self, mock_tpm):
+        """ConnectionError 时 get_latest_global_news 仍返回 []（不 raise）。"""
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=ConnectionError("network down"))
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_system_error_does_not_propagate(self, mock_tpm):
+        """即使 system 级异常（MemoryError）也被降级为返回 []，不 raise。"""
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=MemoryError("oom"))
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []

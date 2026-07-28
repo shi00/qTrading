@@ -1,0 +1,13 @@
+name: "CodeQL config"
+
+paths-ignore:
+  - "tests/**"
+  - "**/test_*.py"
+  - "**/conftest.py"
+  - "**/fixtures/**"
+  - "**/builders/**"
+  - "**/mock_assets/**"
+  - "**/helpers/**"
+
+queries:
+  - uses: security-and-quality
