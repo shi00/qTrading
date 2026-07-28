@@ -21,14 +21,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
+from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
-
-_RAW_MSG_KEY = "_raw_msg_"
 
 
 @dataclass(frozen=True)
@@ -55,7 +54,7 @@ class LocalModelConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
 
 
-class LocalModelConfigPanelViewModel(ObservableViewModelMixin[LocalModelConfigState]):
+class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[LocalModelConfigState]):
     """ViewModel for LocalModelConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -222,17 +221,6 @@ class LocalModelConfigPanelViewModel(ObservableViewModelMixin[LocalModelConfigSt
 
     def _show_success(self, message: Message) -> None:
         self._set_state(status_message=message, status_type="success")
-
-    def _show_error(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="error")
-
-    def _show_warning(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="warning")
-
-    @staticmethod
-    def _raw_message(text: str) -> Message:
-        """将动态字符串包装为 Message。I18n.get(_RAW_MSG_KEY, default=text) 返回 text。"""
-        return Message(_RAW_MSG_KEY, {"default": text})
 
     # --- async commands ---
 
