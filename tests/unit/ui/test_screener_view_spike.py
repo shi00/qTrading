@@ -56,7 +56,7 @@ class FakeScreenerState:
     data_version: int = 0
     strategies_loaded: bool = False
     strategies_with_dep: dict = field(default_factory=dict)
-    strategy_desc: str = ""
+    strategy_desc: Message | None = None
     strategy_desc_color: str = "default"
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
