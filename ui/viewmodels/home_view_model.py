@@ -96,14 +96,15 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
     PAGE_SIZE = 20  # 常量,不放入 state
 
     def __init__(self):
-        # E2E 模式下跳过 DataProcessor 创建：DataProcessor.__init__ 同步创建
-        # TushareClient，触发 matplotlib 字体缓存构建（27s+ 阻塞 MainThread），
-        # 导致 Flet patch 无法下发，E2E 浏览器 600s 内未检测到 NavigationRail。
-        # E2E 测试不依赖 HomeView 异步数据（test_home_view_loads 仅断言静态标签），
-        # _init_and_load effect 也会在 E2E 模式下提前 return，processor 不会被访问。
-        # 与 home_view.py:_init_and_load 的 E2E_TESTING 跳过逻辑配套。
+        # E2E 模式下跳过 DataProcessor 实例化：DataProcessor.__init__ 会同步初始化
+        # TushareClient（为 40+ API 创建 rate_limiter，耗时 34s+），阻塞 Flet 主线程
+        # 导致 patch 无法下发到浏览器、E2E 浏览器 600s 超时失败。E2E 模式下
+        # _init_and_load 已跳过所有数据加载（home_view.py L156），DataProcessor 不会被
+        # 实际使用。与 bootstrap.py:136 / home_view.py:156 / app_layout.py:91 等现有
+        # E2E_TESTING 范式一致。
+        self.processor: DataProcessor | None
         if os.environ.get("E2E_TESTING") == "true":
-            self.processor = None  # type: ignore[assignment]  # [reason: E2E 模式下 processor 不会被访问]
+            self.processor = None
         else:
             self.processor = DataProcessor()
 
@@ -205,6 +206,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
     async def init_data(self):
         """Initialize data processor"""
+        if self.processor is None:
+            return
         await self.processor.init_data()
 
     async def load_market_data(self):
@@ -305,6 +308,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             self._set_state(is_loading_more=False)
 
     async def _fetch_news_batch(self, page):
+        if self.processor is None:
+            return None
         try:
             offset = page * self.PAGE_SIZE
             return await self.processor.cache.get_market_news(
