@@ -734,13 +734,16 @@ class TestOversoldGetDynamicDescription(unittest.TestCase):
     def test_default_params(self):
         s = OversoldStrategy()
         result = s.get_dynamic_description({})
-        self.assertIn("RSI", result)
+        self.assertEqual(result.key, "strategy_oversold_dynamic_desc")
+        self.assertEqual(result.params["period"], 14)
+        self.assertEqual(result.params["threshold"], 30)
 
     def test_custom_params(self):
         s = OversoldStrategy()
         result = s.get_dynamic_description({"rsi_period": 7, "rsi_threshold": 25})
-        self.assertIn("7", result)
-        self.assertIn("25", result)
+        self.assertEqual(result.key, "strategy_oversold_dynamic_desc")
+        self.assertEqual(result.params["period"], 7)
+        self.assertEqual(result.params["threshold"], 25)
 
 
 class TestOversoldSortForAI(unittest.TestCase):

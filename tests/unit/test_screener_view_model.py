@@ -167,7 +167,7 @@ class TestScreenerViewModelDispose:
         assert vm.state.mode == "REALTIME"
         assert vm.state.logs == ()
         # R.2.6.2/R.2.6.3: 新增字段也需重置到默认值
-        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc is None
         assert vm.state.strategy_desc_color == "default"
         assert vm.state.status_message is None
 
@@ -1228,6 +1228,7 @@ class TestScreenerViewModelUpdateStrategyDesc:
 
     VM 不感知 AppColors (§3.2), state.strategy_desc_color 产出语义标识符
     ("default"/"warning"), View 渲染时映射到 AppColors.
+    state.strategy_desc 为 Message (desc_key + params), View 渲染时翻译.
     """
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -1237,7 +1238,7 @@ class TestScreenerViewModelUpdateStrategyDesc:
         """update_strategy_desc(None) 清空 desc + color=default."""
         vm = ScreenerViewModel()
         vm.update_strategy_desc(None)
-        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc is None
         assert vm.state.strategy_desc_color == "default"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -1245,36 +1246,42 @@ class TestScreenerViewModelUpdateStrategyDesc:
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_update_strategy_desc_with_strategy_obj_uses_dynamic_description(self, mock_dp, mock_sm, mock_rm):
         """update_strategy_desc(key) 当 strategy_obj 存在时调 get_dynamic_description(defaults)."""
+        from core.i18n import Message
+
         vm = ScreenerViewModel()
         mock_strategy = MagicMock()
         mock_strategy.get_parameters.return_value = [{"name": "rsi", "default": 30}]
-        mock_strategy.get_dynamic_description.return_value = "RSI<30 选股"
+        expected_msg = Message("strategy_rsi_desc", {"threshold": 30})
+        mock_strategy.get_dynamic_description.return_value = expected_msg
         vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
 
         vm.update_strategy_desc("rsi_strategy")
 
         mock_strategy.get_dynamic_description.assert_called_once_with({"rsi": 30})
-        assert vm.state.strategy_desc == "RSI<30 选股"
+        assert vm.state.strategy_desc == expected_msg
         assert vm.state.strategy_desc_color == "default"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_update_strategy_desc_with_missing_apis_sets_warning_color(self, mock_dp, mock_sm, mock_rm):
-        """update_strategy_desc(key) 当 dep_info.missing_apis 非空时 color='warning' + desc 追加警告."""
+        """update_strategy_desc(key) 当 dep_info.missing_apis 非空时 color='warning' + params 追加 missing_apis."""
+        from core.i18n import Message
+
         vm = ScreenerViewModel()
         mock_strategy = MagicMock()
         mock_strategy.get_parameters.return_value = []
-        mock_strategy.get_dynamic_description.return_value = "策略描述"
+        mock_strategy.get_dynamic_description.return_value = Message("strategy_value_desc", {})
         vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={"value": {"missing_apis": ["daily_basic"]}})
 
         vm.update_strategy_desc("value")
 
-        # P2-7: ⚠️ emoji 前缀删除, warning 语义由 strategy_desc_color 表达
-        assert "strategy_missing_apis" in vm.state.strategy_desc or "daily_basic" in vm.state.strategy_desc
-        assert "⚠️" not in vm.state.strategy_desc
+        # strategy_desc 为 Message, params 含 missing_apis 字段 (逗号分隔字符串)
+        assert vm.state.strategy_desc is not None
+        assert vm.state.strategy_desc.key == "strategy_value_desc"
+        assert vm.state.strategy_desc.params["missing_apis"] == "daily_basic"
         assert vm.state.strategy_desc_color == "warning"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -1282,32 +1289,38 @@ class TestScreenerViewModelUpdateStrategyDesc:
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_update_strategy_desc_with_params_uses_provided_params(self, mock_dp, mock_sm, mock_rm):
         """update_strategy_desc(key, params=...) 用提供的 params 而非默认参数调 get_dynamic_description."""
+        from core.i18n import Message
+
         vm = ScreenerViewModel()
         mock_strategy = MagicMock()
         mock_strategy.get_parameters.return_value = [{"name": "rsi", "default": 30}]
-        mock_strategy.get_dynamic_description.return_value = "RSI<15 选股"
+        expected_msg = Message("strategy_rsi_desc", {"threshold": 15})
+        mock_strategy.get_dynamic_description.return_value = expected_msg
         vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
 
         vm.update_strategy_desc("rsi_strategy", params={"rsi": 15})
 
         mock_strategy.get_dynamic_description.assert_called_once_with({"rsi": 15})
-        assert vm.state.strategy_desc == "RSI<15 选股"
+        assert vm.state.strategy_desc == expected_msg
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_update_strategy_desc_fallback_to_get_strategy_desc_when_no_obj(self, mock_dp, mock_sm, mock_rm):
         """update_strategy_desc(key) 当 strategy_obj 不存在时回退到 vm.get_strategy_desc(key)."""
+        from core.i18n import Message
+
         vm = ScreenerViewModel()
         vm.strategy_mgr.get_strategy = MagicMock(return_value=None)
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
-        vm.get_strategy_desc = MagicMock(return_value="回退描述")
+        fallback_msg = Message("strategy_unknown_desc", {})
+        vm.get_strategy_desc = MagicMock(return_value=fallback_msg)
 
         vm.update_strategy_desc("unknown")
 
         vm.get_strategy_desc.assert_called_once_with("unknown")
-        assert vm.state.strategy_desc == "回退描述"
+        assert vm.state.strategy_desc == fallback_msg
         assert vm.state.strategy_desc_color == "default"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -1323,7 +1336,7 @@ class TestScreenerViewModelUpdateStrategyDesc:
         vm.update_strategy_desc(None)
 
         assert len(snapshots) == 1
-        assert snapshots[0].strategy_desc == ""
+        assert snapshots[0].strategy_desc is None
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
@@ -1335,24 +1348,24 @@ class TestScreenerViewModelUpdateStrategyDesc:
 
         vm.update_strategy_desc("broken_strategy")
 
-        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc is None
         assert vm.state.strategy_desc_color == "default"
 
 
 class TestScreenerViewModelSetHistoryViewingStatus:
     """R.2.6.3: set_history_viewing_status command — 历史查看状态迁入 VM state.
 
-    VM 接收 View 传入的已格式化 date_str + 已翻译 label, 包装为 Message + params,
-    存入 state.status_message/status_color (§3.2 VM 不调 I18n.get).
+    VM 接收 raw strategy_name (i18n key) + run_id, 构造 Message 存入 state.
+    VM 不感知 locale (§3.2), View 渲染时翻译 label_key 后缀 params.
     """
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
-    def test_set_history_viewing_status_updates_state(self, mock_dp, mock_sm, mock_rm):
-        """set_history_viewing_status() 设置 status_message=Message('screener_history_viewing') + color='info'."""
+    def test_set_history_viewing_status_with_run_id(self, mock_dp, mock_sm, mock_rm):
+        """run_id 非空 → label='#run_id[:8]' (locale-independent, 直接存入 params)."""
         vm = ScreenerViewModel()
-        vm.set_history_viewing_status("2024-12-27", "#abc12345")
+        vm.set_history_viewing_status("2024-12-27", run_id="abc12345def")
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "screener_history_viewing"
         assert vm.state.status_message.params == {"date": "2024-12-27", "label": "#abc12345"}
@@ -1361,12 +1374,22 @@ class TestScreenerViewModelSetHistoryViewingStatus:
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
-    def test_set_history_viewing_status_with_strategy_label(self, mock_dp, mock_sm, mock_rm):
-        """set_history_viewing_status() 接受翻译后的策略名作为 label."""
+    def test_set_history_viewing_status_with_strategy_name(self, mock_dp, mock_sm, mock_rm):
+        """strategy_name 非空 → label_key=strategy_name (View 渲染时翻译)."""
         vm = ScreenerViewModel()
-        vm.set_history_viewing_status("2024-12-27", "价值策略")
+        vm.set_history_viewing_status("2024-12-27", strategy_name="strategy_value_name")
         assert vm.state.status_message is not None
-        assert vm.state.status_message.params == {"date": "2024-12-27", "label": "价值策略"}
+        assert vm.state.status_message.params == {"date": "2024-12-27", "label_key": "strategy_value_name"}
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_history_viewing_status_all_strategies(self, mock_dp, mock_sm, mock_rm):
+        """strategy_name=None, run_id=None → label_key='screener_all_strategies'."""
+        vm = ScreenerViewModel()
+        vm.set_history_viewing_status("2024-12-27")
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.params == {"date": "2024-12-27", "label_key": "screener_all_strategies"}
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
@@ -1376,7 +1399,7 @@ class TestScreenerViewModelSetHistoryViewingStatus:
         vm = ScreenerViewModel()
         snapshots: list = []
         vm.subscribe(lambda s: snapshots.append(s))
-        vm.set_history_viewing_status("2024-12-27", "价值策略")
+        vm.set_history_viewing_status("2024-12-27", strategy_name="strategy_value_name")
         assert len(snapshots) == 1
         assert snapshots[0].status_message is not None
         assert snapshots[0].status_message.key == "screener_history_viewing"
