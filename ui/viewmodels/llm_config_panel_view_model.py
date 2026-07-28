@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
+from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message
@@ -30,8 +31,6 @@ from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
-
-_RAW_MSG_KEY = "_raw_msg_"
 
 MODELS_API_COMPATIBLE = {
     "openai",
@@ -82,7 +81,7 @@ class LLMConfigState:
     custom_model_options: tuple[str, ...] = ()
 
 
-class LLMConfigPanelViewModel(ObservableViewModelMixin[LLMConfigState]):
+class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[LLMConfigState]):
     """ViewModel for LLMConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -337,23 +336,6 @@ class LLMConfigPanelViewModel(ObservableViewModelMixin[LLMConfigState]):
 
     def _show_success(self, message: Message) -> None:
         self._set_state(status_message=message, status_type="success")
-
-    def _show_error(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="error")
-
-    def _show_warning(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="warning")
-
-    def _show_info(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="info")
-
-    @staticmethod
-    def _raw_message(text: str) -> Message:
-        """将动态字符串包装为 Message。
-
-        I18n.get(_RAW_MSG_KEY, default=text) 对不存在的 key 返回 default。
-        """
-        return Message(_RAW_MSG_KEY, {"default": text})
 
     def _set_loading_state(self, loading: bool) -> None:
         if self._on_loading_change:
