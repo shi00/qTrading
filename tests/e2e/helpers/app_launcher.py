@@ -158,6 +158,12 @@ def start_flet_app(
     }
     log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # 清除上次运行留下的 main_trace.log（诊断专用，每次运行从空开始）
+    trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
+    try:
+        trace_path.unlink()
+    except FileNotFoundError:
+        pass
     # Record current log size so _check_startup_errors only inspects
     # output from *this* app instance, not leftover from previous runs.
     try:

@@ -2,12 +2,29 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
 from app.bootstrap import mask_sensitive
+
+
+def _trace_log(msg: str) -> None:
+    """E2E 诊断专用：直接写文件，绕过 logging/stdout，避免 Flet IPC 或缓冲吞没日志。"""
+    try:
+        from pathlib import Path
+
+        trace_path = Path("logs") / "main_trace.log"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(trace_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d}] {msg}\n")
+            f.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 from app.error_logging import log_exception_with_severity
 from app.startup_controller import StartupController
 from app.window_lifecycle import (
@@ -76,7 +93,8 @@ def RootView(
     返回的 ``ft.Container`` 继承 ``LayoutControl``, 其 ``right=20, bottom=20``
     属性作为 Stack 子项绝对定位, 视觉等价于原 ``page.overlay`` 挂载。
     """
-    return ft.Stack(
+    _trace_log("[RootView] constructing StartupView + ToastManagerView")
+    stack = ft.Stack(
         [
             StartupView(
                 controller=controller,
@@ -87,10 +105,13 @@ def RootView(
         ],
         expand=True,
     )
+    _trace_log("[RootView] construction complete, returning Stack")
+    return stack
 
 
 async def main(page: ft.Page):
     setup_logging()
+    _trace_log("[Main] main(page) entered")
 
     from utils.correlation import ensure_correlation_id
 
@@ -240,12 +261,19 @@ async def main(page: ft.Page):
     )
 
     logger.info("[Main] Before page.render(RootView)")
-    page.render(
-        RootView,
-        controller=controller,
-        bridge=bridge,
-        run_task_fn=page.run_task,
-    )
+    _trace_log("[Main] Before page.render(RootView)")
+    try:
+        page.render(
+            RootView,
+            controller=controller,
+            bridge=bridge,
+            run_task_fn=page.run_task,
+        )
+    except Exception as render_exc:
+        _trace_log(f"[Main] page.render raised: {type(render_exc).__name__}: {render_exc}")
+        logger.exception("[Main] page.render(RootView) raised exception")
+        raise
+    _trace_log("[Main] After page.render(RootView)")
     logger.info("[Main] After page.render(RootView)")
 
     logger.info("[Main] Before ConfigHandler calls")
@@ -266,7 +294,9 @@ async def main(page: ft.Page):
     )
 
     logger.info("[Main] Before controller.start()")
+    _trace_log("[Main] Before controller.start()")
     await controller.start(db_url, token, llm_api_key, onboarding_complete)
+    _trace_log("[Main] After controller.start()")
     logger.info("[Main] After controller.start()")
 
     # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator

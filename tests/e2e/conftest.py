@@ -1212,8 +1212,13 @@ async def _trigger_sidecar_startup_via_browser(
                     from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
 
                     log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
-                    log_tail = _read_log_tail(log_path, max_chars=2000)
+                    log_tail = _read_log_tail(log_path, max_chars=4000)
                     logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
+                    # 额外读取 main_trace.log（绕过 logging/stdout 的直接文件日志），
+                    # 用于定位 page.render 是否阻塞、阻塞在哪一步。
+                    trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
+                    trace_tail = _read_log_tail(trace_path, max_chars=4000)
+                    logger.info("[E2E Seeding] main_trace.log tail:\n%s", trace_tail)
                 except Exception as log_err:  # noqa: BLE001
                     logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
                 last_diag_log = time.monotonic()
@@ -1232,6 +1237,15 @@ async def _trigger_sidecar_startup_via_browser(
             page.url,
             ARTIFACT_DIR,
         )
+        # 超时时也读取 main_trace.log，定位 page.render 阻塞点
+        try:
+            from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
+
+            trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
+            trace_tail = _read_log_tail(trace_path, max_chars=8000)
+            logger.error("[E2E Seeding] main_trace.log tail on timeout:\n%s", trace_tail)
+        except Exception as trace_err:  # noqa: BLE001
+            logger.error("[E2E Seeding] main_trace.log read failed: %s", trace_err)
     except Exception as diag_err:
         logger.error("[E2E Seeding] timeout diag failed: %s", diag_err)
     await context.close()
