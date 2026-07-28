@@ -2137,10 +2137,12 @@ class TestConfigReviewFixes:
     @patch.dict(cfg_mod.os.environ, {"QTRADING_DATABASE_MODE": "embedded"}, clear=False)
     @patch.object(cfg_mod.ConfigHandler, "load_config", side_effect=RuntimeError("unexpected"))
     def test_is_embedded_mode_logs_warning_on_load_failure(self, mock_load):
-        """F8: load_config 失败时 is_embedded_mode 记录 warning 并返回 False"""
+        """F8: load_config 失败时 is_embedded_mode 记录 warning 并返回 True（保持默认 embedded 模式）"""
         with patch.object(cfg_mod, "logger") as mock_logger:
             result = cfg_mod.ConfigHandler.is_embedded_mode()
-            assert result is False
+            # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致：
+            # load_config 失败时返回 True，避免误判为 external 模式导致行为不一致
+            assert result is True
             warning_calls = [c for c in mock_logger.warning.call_args_list if "is_embedded_mode" in c[0][0]]
             assert len(warning_calls) >= 1
 
@@ -2502,11 +2504,15 @@ class TestConfigHandlerIsEmbeddedMode:
             assert ConfigHandler.is_embedded_mode() is True
 
     def test_load_config_exception_returns_false(self, monkeypatch):
-        """QTRADING_DATABASE_MODE=embedded + load_config 抛异常 → False（fallback 安全）"""
+        """QTRADING_DATABASE_MODE=embedded + load_config 抛异常 → True（保持默认 embedded 模式）
+
+        与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致：
+        load_config 失败时返回 True，避免误判为 external 模式导致行为不一致。
+        """
         monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
         with patch.object(
             cfg_mod.ConfigHandler,
             "load_config",
             side_effect=RuntimeError("config read error"),
         ):
-            assert ConfigHandler.is_embedded_mode() is False
+            assert ConfigHandler.is_embedded_mode() is True

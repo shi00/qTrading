@@ -553,7 +553,9 @@ class ConfigHandler:
                 "[ConfigHandler] is_embedded_mode load_config failed: %s",
                 DataSanitizer.sanitize_error(e),
             )
-            return False
+            # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致：
+            # load_config 失败时返回 True，避免误判为 external 模式导致行为不一致
+            return True
 
     @staticmethod
     def is_auto_update_enabled():

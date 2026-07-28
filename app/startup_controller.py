@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from app.bootstrap import check_onboarding_needed, initialize_services
+from app.bootstrap import check_onboarding_needed, initialize_services, reset_services_initialized
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
@@ -176,6 +176,9 @@ class StartupController:
         """User clicked Reconfigure: close DB, reset onboarding, show wizard."""
         self._transition(StartupState.LOADING)
         await self._cache_manager.close()
+        # Skeptic-MAJOR-2 配套：重置 _services_initialized flag，
+        # 允许用户完成 onboarding 后重新执行 initialize_services。
+        reset_services_initialized()
         from utils.thread_pool import TaskType, ThreadPoolManager
         from utils.config_handler import ConfigHandler
 
