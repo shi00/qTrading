@@ -340,7 +340,7 @@ class CacheManager:
             except Exception as e:
                 logger.error(
                     "[CacheManager] Schema | Init failed critically: %s",
-                    safe_error(e),
+                    safe_error(e, show_traceback=True),
                 )
                 raise
 
@@ -356,7 +356,7 @@ class CacheManager:
         except Exception as e:
             logger.error(
                 "[CacheManager] Wipe | ❌ Error during hard reset: %s",
-                safe_error(e),
+                safe_error(e, show_traceback=True),
             )
             raise
 
