@@ -322,3 +322,67 @@ class TestBuildNewsItem:
         row = self._make_row()
         item = _build_news_item(row, "42")
         assert item.key == "42"
+
+
+# ---------------------------------------------------------------------------
+# Pure function tests: _translate_title_code (code → i18n key mapping)
+# ---------------------------------------------------------------------------
+
+
+class TestTranslateTitleCode:
+    """Tests for title business code → i18n key mapping and translation.
+
+    data 层返回业务 code (如 "no_title"), View 层维护 code → i18n key 映射表,
+    在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
+    """
+
+    def test_mapping_table_contains_no_title(self):
+        """映射表必须包含 no_title → news_no_title 映射。"""
+        from ui.components.news_feed import NEWS_TITLE_CODE_TO_I18N_KEY
+
+        assert NEWS_TITLE_CODE_TO_I18N_KEY.get("no_title") == "news_no_title"
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def test_translate_title_code_empty(self):
+        from ui.components.news_feed import _translate_title_code
+
+        assert _translate_title_code("") == ""
+
+    def test_translate_title_code_none(self):
+        from ui.components.news_feed import _translate_title_code
+
+        assert _translate_title_code(None) == ""
+
+    def test_translate_title_code_no_title(self):
+        from ui.components.news_feed import _translate_title_code
+
+        # mocked I18n.get returns the key when no default
+        assert _translate_title_code("no_title") == "news_no_title"
+
+    def test_translate_title_code_unknown_code(self):
+        from ui.components.news_feed import _translate_title_code
+
+        assert _translate_title_code("unknown_code") == ""
+
+    def test_locale_switch_refreshes_translation(self):
+        """locale 切换时 _translate_title_code 应返回对应 locale 的翻译。
+
+        验证: 同一业务 code "no_title" 在不同 locale 下返回不同翻译字符串,
+        证明函数依赖 I18n 当前 locale (locale 切换触发组件重渲染时翻译自动刷新)。
+        """
+        from ui.components.news_feed import _translate_title_code
+
+        # 模拟中文 locale: news_no_title → "无标题"
+        with patch("ui.components.news_feed.I18n") as mock_zh:
+            mock_zh.get.side_effect = lambda key, default=None, **kw: {"news_no_title": "无标题"}.get(key, key)
+            assert _translate_title_code("no_title") == "无标题"
+
+        # 模拟英文 locale: news_no_title → "No Title"
+        with patch("ui.components.news_feed.I18n") as mock_en:
+            mock_en.get.side_effect = lambda key, default=None, **kw: {"news_no_title": "No Title"}.get(key, key)
+            assert _translate_title_code("no_title") == "No Title"
