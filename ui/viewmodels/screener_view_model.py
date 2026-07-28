@@ -9,7 +9,6 @@ from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
-from core.i18n import I18n
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
@@ -122,7 +121,9 @@ class ScreenerState:
     strategies_loaded: bool = False
     strategies_with_dep: dict[str, dict] = field(default_factory=dict)
     # Strategy description (R.2.6.2: 业务状态迁入 VM, View 映射 color 标识符到 AppColors)
-    strategy_desc: str = ""
+    # P3-ScreenerVM-I18n-Get-Residual: 改为 Message 结构 (desc_key + params),
+    # View 渲染时翻译 (§3.2 VM 不感知 locale).
+    strategy_desc: Message | None = None
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
     # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
@@ -303,13 +304,13 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     async def get_strategies(self) -> dict[str, str]:
         return self.strategy_mgr.get_all_names()
 
-    def get_strategy_desc(self, key: str) -> str:
-        # I18N_GET_ALLOWED: 返回翻译字符串供 update_strategy_desc 拼接为 state.strategy_desc (str).
-        # 迁移路径: state.strategy_desc 改为 Message 结构, View 渲染时翻译; 同时重设
-        # strategy_obj.get_dynamic_description(params) 返回值为 i18n key (而非翻译字符串),
-        # 整体与 R.3 strategy_name 标准化一并处理 (Task 3.1 遗留).
+    def get_strategy_desc(self, key: str) -> Message | None:
+        """获取策略描述的 Message (i18n key + params), VM 不感知 locale (§3.2).
+
+        View 渲染时通过翻译 ``msg.key`` + ``msg.params`` 为当前 locale 字符串.
+        """
         st = self.strategy_mgr.get_strategy(key)
-        return I18n.get(st.desc_key) if st else ""
+        return Message(st.desc_key, {}) if st else None
 
     def get_strategy_params(self, key: str) -> list:
         """Get dynamic parameter definitions for a strategy."""
@@ -428,20 +429,21 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
 
     def update_strategy_desc(self, selected_strategy: str | None, params: dict | None = None) -> None:
-        """更新策略描述和颜色到 state (R.2.6.2: 业务状态迁入 VM).
+        """更新策略描述 Message 和颜色到 state (R.2.6.2: 业务状态迁入 VM).
 
-        计算策略描述文本和颜色语义标识符, 存入 state.strategy_desc/strategy_desc_color.
-        View 渲染时映射 color 标识符到 AppColors (避免 VM 感知 UI 颜色, §3.2).
+        构造 ``state.strategy_desc`` 为 ``Message`` (desc_key + params), VM 不感知 locale
+        (§3.2). View 渲染时通过翻译 ``msg.key`` + ``msg.params`` 为当前 locale 字符串.
+
+        当 ``dep_info.missing_apis`` 非空时, 在 params 中追加 ``missing_apis`` 字段
+        (逗号分隔字符串) 并设 ``strategy_desc_color="warning"``; View 渲染时识别该字段
+        追加 ``strategy_missing_apis`` 翻译后缀.
 
         Args:
             selected_strategy: 策略 key, None 表示清空
             params: 动态参数 (可选, 用于 get_dynamic_description; None 时用策略默认参数)
         """
-        # I18N_GET_ALLOWED: strategy_desc 是 str 字段, 需拼接 warning_suffix (含翻译字符串)
-        # 形成 desc 字符串. 迁移路径: state.strategy_desc 改为 Message, 嵌套 desc_msg + missing_apis
-        # (与 R.3 strategy_name 标准化一并处理, Task 3.1 遗留).
         if not selected_strategy:
-            self._set_state(strategy_desc="", strategy_desc_color="default")
+            self._set_state(strategy_desc=None, strategy_desc_color="default")
             return
 
         try:
@@ -452,48 +454,57 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             if strategy_obj:
                 if params is None:
                     params = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
-                desc = strategy_obj.get_dynamic_description(params)
+                desc_msg = strategy_obj.get_dynamic_description(params)
             else:
-                desc = self.get_strategy_desc(selected_strategy)
+                desc_msg = self.get_strategy_desc(selected_strategy)
 
-            # NOTE(lazy): I18n.get(strategy_missing_apis) 及 get_strategy_desc 回退路径的翻译值拼入 desc 字符串,
-            # locale 切换后不自动刷新. ceiling: VM state 非 Message, 无 *_key params 翻译机制.
-            # upgrade: desc 改为 Message 结构或引入 desc_key+params 时统一修复 (与 R.2.5 同类, R.3 一并处理).
-            if dep_info.get("missing_apis"):
-                # P2-7: ⚠️ emoji 前缀删除, 由 color="warning" 在 View 层表达警示语义
-                warning_suffix = f"\n{I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
-                desc = f"{desc}{warning_suffix}"
+            if desc_msg is None:
+                self._set_state(strategy_desc=None, strategy_desc_color="default")
+                return
+
+            # missing_apis 非空时: params 追加 missing_apis 字段, color=warning
+            # View 渲染时识别 missing_apis 字段追加 "strategy_missing_apis" 翻译后缀
+            missing_apis = dep_info.get("missing_apis")
+            if missing_apis:
+                merged_params = dict(desc_msg.params)
+                merged_params["missing_apis"] = ", ".join(missing_apis)
+                desc_msg = Message(desc_msg.key, merged_params)
                 color = "warning"
             else:
                 color = "default"
 
-            self._set_state(strategy_desc=desc, strategy_desc_color=color)
+            self._set_state(strategy_desc=desc_msg, strategy_desc_color=color)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning("[ScreenerVM] update_strategy_desc failed: %s", e, exc_info=True)
-            self._set_state(strategy_desc="", strategy_desc_color="default")
+            self._set_state(strategy_desc=None, strategy_desc_color="default")
 
-    def set_history_viewing_status(self, date_str: str, label: str) -> None:
+    def set_history_viewing_status(
+        self,
+        date_str: str,
+        strategy_name: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         """设置历史查看状态到 state (R.2.6.3: 业务状态迁入 VM).
 
-        将历史查看状态包装为 Message + params, 存入 state.status_message/status_color.
-        View 传入已格式化的 date_str 和已翻译的 label (因 translate_strategy_name 是 View 层 i18n 函数),
-        VM 只存 key + params 不调 I18n.get (§3.2 VM 不感知 locale).
+        接收 raw ``strategy_name`` (i18n key) 和 ``run_id``, 构造 Message 存入 state.
+        VM 不感知 locale (§3.2), View 渲染时通过 ``_render_status_message`` 翻译
+        ``label_key`` 后缀 params 为当前 locale 字符串.
 
         Args:
             date_str: 已格式化的日期字符串 (如 "2024-12-27")
-            label: 已翻译的标签字符串 (如 "#abc12345" 或 "价值策略" 或 "全部策略")
+            strategy_name: raw 策略名 i18n key (如 "strategy_oversold_name"), None 表示无策略
+            run_id: 运行 ID, 优先于 strategy_name 显示 (locale-independent, 直接存入 label)
         """
-        # NOTE(lazy): label 为 View 层已翻译字符串 (translate_strategy_name 是 View 层函数),
-        # locale 切换后 state.status_message.params["label"] 残留旧 locale 翻译.
-        # ceiling: translate_strategy_name 未迁入 VM 或未引入 strategy_name_key 机制.
-        # upgrade: R.3 strategy_name 标准化后, label 改为传 raw strategy_name + View 渲染时翻译.
+        if run_id:
+            params: dict = {"date": date_str, "label": f"#{run_id[:8]}"}
+        elif strategy_name:
+            params = {"date": date_str, "label_key": strategy_name}
+        else:
+            params = {"date": date_str, "label_key": "screener_all_strategies"}
         self._set_state(
-            status_message=Message(
-                "screener_history_viewing",
-                {"date": date_str, "label": label},
-            ),
+            status_message=Message("screener_history_viewing", params),
             status_color="info",
         )
 
@@ -502,7 +513,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """检查策略档位是否足够，不足时返回 i18n key，否则 None。
 
         返回 i18n key（非翻译值），符合 §3.2 "VM 只产出 i18n key"。
-        View 渲染时 ``I18n.get(state.tier_hint)``。
+        View 渲染时翻译 ``state.tier_hint``。
         """
         if not selected_strategy:
             return None

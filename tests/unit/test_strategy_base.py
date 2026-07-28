@@ -77,10 +77,11 @@ def test_manager(strategies_ctx):
 def test_get_dynamic_description(strategies_ctx):
     s = strategies_ctx.mgr.get_strategy("value")
     desc = s.get_dynamic_description({})
-    from core.i18n import I18n
+    from core.i18n import Message
 
-    assert desc == I18n.get(s.desc_key)
-    assert desc != "strategy_value_desc"
+    assert isinstance(desc, Message)
+    assert desc.key == s.desc_key
+    assert desc.params == {}
 
 
 async def test_value_strategy(strategies_ctx):

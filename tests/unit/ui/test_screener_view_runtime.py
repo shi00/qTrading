@@ -357,8 +357,10 @@ class _FakeScreenerViewModel:
     def get_export_data(self) -> Any:
         return self._export_data
 
-    def set_history_viewing_status(self, date_str: str, label: str) -> None:
-        self.method_calls.append(f"set_history_viewing_status:{date_str}:{label}")
+    def set_history_viewing_status(
+        self, date_str: str, strategy_name: str | None = None, run_id: str | None = None
+    ) -> None:
+        self.method_calls.append(f"set_history_viewing_status:{date_str}:strategy_name={strategy_name}:run_id={run_id}")
 
     def change_page(self, delta: int) -> None:
         self.method_calls.append(f"change_page:{delta}")
@@ -1399,13 +1401,13 @@ class TestLoadHistoryForDate:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        # 验证 set_history_viewing_status 被调用 (label 含 #abc12345)
-        assert any("set_history_viewing_status" in c and "#abc12345" in c for c in fake_vm.method_calls), (
-            f"应调用 set_history_viewing_status with #abc12345, 实际: {fake_vm.method_calls}"
+        # 验证 set_history_viewing_status 被调用 (run_id 传入 VM, 由 VM 格式化 #run_id[:8])
+        assert any("set_history_viewing_status" in c and "run_id=abc12345def" in c for c in fake_vm.method_calls), (
+            f"应调用 set_history_viewing_status with run_id=abc12345def, 实际: {fake_vm.method_calls}"
         )
 
     def test_run_id_label_format(self, screener_view_env) -> None:
-        """_load_history_for_date: run_id 非空 → label = '#<run_id[:8]>'."""
+        """_load_history_for_date: run_id 非空 → 传 raw run_id 给 VM (VM 格式化 #run_id[:8])."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -1432,13 +1434,13 @@ class TestLoadHistoryForDate:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        # 验证 label = #abcdefgh (run_id[:8])
-        assert any("set_history_viewing_status" in c and "#abcdefgh" in c for c in fake_vm.method_calls), (
-            f"label 应含 #abcdefgh, 实际: {fake_vm.method_calls}"
+        # 验证 raw run_id 传入 VM (VM 负责格式化 #run_id[:8])
+        assert any("set_history_viewing_status" in c and "run_id=abcdefgh1234" in c for c in fake_vm.method_calls), (
+            f"应传 raw run_id=abcdefgh1234 给 VM, 实际: {fake_vm.method_calls}"
         )
 
     def test_all_strategies_label_when_no_run_id(self, screener_view_env) -> None:
-        """_load_history_for_date: run_id=None, strategy_name=None → label = all_strategies."""
+        """_load_history_for_date: run_id=None, strategy_name=None → VM 用 screener_all_strategies key."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -1466,10 +1468,11 @@ class TestLoadHistoryForDate:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        # 验证 label = i18n[screener_all_strategies]
+        # 验证 strategy_name=None, run_id=None 传入 VM (VM 用 screener_all_strategies key)
         assert any(
-            "set_history_viewing_status" in c and "i18n[screener_all_strategies]" in c for c in fake_vm.method_calls
-        ), f"label 应为 all_strategies, 实际: {fake_vm.method_calls}"
+            "set_history_viewing_status" in c and "strategy_name=None" in c and "run_id=None" in c
+            for c in fake_vm.method_calls
+        ), f"应传 strategy_name=None + run_id=None 给 VM, 实际: {fake_vm.method_calls}"
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: _load_history_for_date: vm.load_history_data 抛 CancelledError → 传播."""
@@ -2014,12 +2017,23 @@ class TestStatusRendering:
         assert any("i18n[sys_strategy_tier_hint]" in (t.value or "") for t in texts)
 
     def test_strategy_desc_rendered(self, screener_view_env) -> None:
-        """state.strategy_desc 非空 → 策略描述 Text 渲染."""
+        """state.strategy_desc 非空 → 策略描述 Text 渲染 (Message 经 _render_strategy_desc 翻译)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_state(strategy_desc="测试策略描述", strategies_loaded=True)
-        _rerender(env)
+        # P3-ScreenerVM-I18n-Get-Residual: state.strategy_desc 改为 Message 结构
+        # View 渲染时通过 _render_strategy_desc 调 I18n.get(msg.key) 翻译
+        from core.i18n import Message
+
+        fake_vm._set_state(
+            strategy_desc=Message("test_strategy_desc_key", {}),
+            strategies_loaded=True,
+        )
+        with patch(
+            "ui.views.screener_view.I18n.get",
+            side_effect=lambda key, *a, **kw: "测试策略描述" if key == "test_strategy_desc_key" else key,
+        ):
+            _rerender(env)
 
         texts = _get_texts(env)
         assert any("测试策略描述" in (t.value or "") for t in texts)
@@ -2029,8 +2043,19 @@ class TestStatusRendering:
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_state(strategy_desc="(!) 警告", strategy_desc_color="warning", strategies_loaded=True)
-        _rerender(env)
+        # P3-ScreenerVM-I18n-Get-Residual: state.strategy_desc 改为 Message 结构
+        from core.i18n import Message
+
+        fake_vm._set_state(
+            strategy_desc=Message("test_warning_desc_key", {}),
+            strategy_desc_color="warning",
+            strategies_loaded=True,
+        )
+        with patch(
+            "ui.views.screener_view.I18n.get",
+            side_effect=lambda key, *a, **kw: "(!) 警告" if key == "test_warning_desc_key" else key,
+        ):
+            _rerender(env)
 
         # 验证不抛异常 (颜色映射逻辑正确) (P2-7: ⚠️ → 文本符号)
         texts = _get_texts(env)
@@ -2051,6 +2076,152 @@ class TestStatusRendering:
         # 验证 run button enabled (disabled=False)
         run_btn = _get_run_button(env)
         assert run_btn.disabled is False, "task_unlocked + selected_strategy + !loading 后 run button 应启用"
+
+
+# ============================================================================
+# 表格数据渲染测试
+# ============================================================================
+
+
+class TestLocaleSwitchingAutoRefresh:
+    """P3-ScreenerVM-I18n-Get-Residual: locale 切换后 View 自动重新渲染 Message.
+
+    验证 MVVM §3.2 契约: VM 只产出 i18n key (Message), View 按当前 locale 渲染.
+    locale 切换后:
+    1. VM state 中的 Message 结构保持不变 (VM 不感知 locale)
+    2. View 重新渲染时使用新 locale 翻译 Message (无 stale 翻译残留)
+    """
+
+    def test_vm_state_strategy_desc_unchanged_on_locale_switch(self) -> None:
+        """VM state.strategy_desc 在 locale 切换后保持同一 Message 对象 (VM 不感知 locale).
+
+        P3-ScreenerVM-I18n-Get-Residual: state.strategy_desc 为 Message (key + params),
+        不含翻译后字符串, locale 切换不影响 state.
+        """
+        from core.i18n import Message
+        from ui.viewmodels.screener_view_model import ScreenerViewModel
+
+        with (
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+        ):
+            vm = ScreenerViewModel()
+
+        msg = Message("test_strategy_desc_key", {"param": "value"})
+        vm._set_state(strategy_desc=msg)
+
+        # 模拟 locale 切换: VM 不订阅 locale 变化, state.strategy_desc 应保持同一对象
+        assert vm.state.strategy_desc is msg
+        assert vm.state.strategy_desc.key == "test_strategy_desc_key"
+        assert vm.state.strategy_desc.params == {"param": "value"}
+
+    def test_vm_state_status_message_unchanged_on_locale_switch(self) -> None:
+        """VM state.status_message (含 name_key) 在 locale 切换后保持不变 (VM 不感知 locale).
+
+        P3-ScreenerVM-I18n-Get-Residual: status_message.params 中的 *_key 字段为
+        raw i18n key, 不在 VM 中翻译, locale 切换不影响 state.
+        """
+        from core.i18n import Message
+        from ui.viewmodels.screener_view_model import ScreenerViewModel
+
+        with (
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+        ):
+            vm = ScreenerViewModel()
+
+        msg = Message("screener_running_strategy", {"name_key": "strategy_value_name"})
+        vm._set_state(status_message=msg)
+
+        # 模拟 locale 切换: state.status_message 应保持原样 (name_key 仍为 raw key)
+        assert vm.state.status_message is msg
+        assert vm.state.status_message.params == {"name_key": "strategy_value_name"}
+
+    def test_view_re_renders_strategy_desc_on_locale_switch(self, screener_view_env) -> None:
+        """View 在 locale 切换后用新 locale 翻译 state.strategy_desc (Message 不变, 翻译变).
+
+        P3-ScreenerVM-I18n-Get-Residual: _render_strategy_desc 调 I18n.get(msg.key),
+        locale 切换后 I18n.get 返回新 locale 字符串, state.strategy_desc 保持不变.
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        mock_i18n = env["mock_i18n"]
+
+        from core.i18n import Message
+
+        # 设置 state.strategy_desc 为 Message (不依赖 locale)
+        fake_vm._set_state(
+            strategy_desc=Message("test_locale_key", {}),
+            strategies_loaded=True,
+        )
+
+        # 第一次渲染: 模拟 zh_CN locale, I18n.get 返回中文
+        mock_i18n.get.side_effect = lambda key, *a, **kw: f"中文[{key}]" if key == "test_locale_key" else f"i18n[{key}]"
+        _rerender(env)
+        texts = _get_texts(env)
+        assert any("中文[test_locale_key]" in (t.value or "") for t in texts), "初次渲染应显示中文翻译"
+
+        # 模拟 locale 切换到 en_US: I18n.get 返回英文
+        mock_i18n.get.side_effect = lambda key, *a, **kw: f"EN[{key}]" if key == "test_locale_key" else f"i18n[{key}]"
+        _rerender(env)
+        texts = _get_texts(env)
+        assert any("EN[test_locale_key]" in (t.value or "") for t in texts), "locale 切换后应显示英文翻译"
+
+        # 验证 state.strategy_desc 未变 (VM 不感知 locale)
+        assert fake_vm.state.strategy_desc.key == "test_locale_key"
+        assert fake_vm.state.strategy_desc.params == {}
+
+    def test_view_re_renders_status_message_with_name_key_on_locale_switch(self, screener_view_env) -> None:
+        """View 在 locale 切换后重新翻译 status_message 的 *_key params 为新 locale.
+
+        P3-ScreenerVM-I18n-Get-Residual: _render_status_message 翻译 *_key 后缀 params
+        (如 name_key=strategy_value_name → name=I18n.get('strategy_value_name')),
+        locale 切换后 *_key 翻译为新 locale 字符串, state.status_message 保持不变.
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        mock_i18n = env["mock_i18n"]
+
+        from core.i18n import Message
+
+        # 设置 state.status_message 为含 name_key 的 Message (模拟 run_strategy 产出)
+        fake_vm._set_state(
+            status_message=Message("screener_running_strategy", {"name_key": "strategy_value_name"}),
+            status_color="info",
+            strategies_loaded=True,
+        )
+
+        # 第一次渲染: 模拟 zh_CN locale
+        def _zh_get(key, *a, **kw):
+            if key == "screener_running_strategy":
+                return f"正在运行: {kw.get('name', key)}"
+            if key == "strategy_value_name":
+                return "价值策略"
+            return f"i18n[{key}]"
+
+        mock_i18n.get.side_effect = _zh_get
+        _rerender(env)
+        texts = _get_texts(env)
+        assert any("正在运行: 价值策略" in (t.value or "") for t in texts), "初次渲染应显示中文翻译"
+
+        # 模拟 locale 切换到 en_US
+        def _en_get(key, *a, **kw):
+            if key == "screener_running_strategy":
+                return f"Running: {kw.get('name', key)}"
+            if key == "strategy_value_name":
+                return "Value Strategy"
+            return f"i18n[{key}]"
+
+        mock_i18n.get.side_effect = _en_get
+        _rerender(env)
+        texts = _get_texts(env)
+        assert any("Running: Value Strategy" in (t.value or "") for t in texts), "locale 切换后应显示英文翻译"
+
+        # 验证 state.status_message 未变 (VM 不感知 locale, name_key 仍为 raw key)
+        assert fake_vm.state.status_message.key == "screener_running_strategy"
+        assert fake_vm.state.status_message.params == {"name_key": "strategy_value_name"}
 
 
 # ============================================================================
