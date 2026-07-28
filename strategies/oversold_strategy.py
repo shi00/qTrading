@@ -9,7 +9,7 @@ from data.persistence.quality_gate import QualityGateError, QualityTier, require
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
 from utils.sanitizers import DataSanitizer
@@ -176,14 +176,18 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             },
         ]
 
-    def get_dynamic_description(self, current_params: dict) -> str:
-        """Return description matching current slider params."""
+    def get_dynamic_description(self, current_params: dict) -> Message:
+        """Return description Message matching current slider params.
+
+        Returns ``Message("strategy_oversold_dynamic_desc", {"period": period, "threshold": threshold})``
+        so View renders via ``I18n.get(msg.key, **msg.params)`` (CLAUDE.md §3.2: VM 不感知 locale).
+        """
         period = current_params.get("rsi_period", 14)
         threshold = current_params.get("rsi_threshold", 30)
-        return I18n.get(
+        return Message(
             "strategy_oversold_dynamic_desc",
-            f"RSI({period}) < {threshold}",
-        ).format(period=period, threshold=threshold)
+            {"period": period, "threshold": threshold},
+        )
 
     def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:

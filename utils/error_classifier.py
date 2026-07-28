@@ -208,15 +208,20 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             return {"code": "auth", "message_key": "db_err_auth"}
         if "timeout" in error_str:
             return {"code": "timeout", "message_key": "db_err_timeout"}
+        # P3-M5-ClassifyError-System-Gap: 扩展 interrupted 识别（原 base_dao.py 手写字符串匹配移除）
+        # 注意：必须在 refused 分支之前匹配，因为 "no active connection" 含 "connect" 子串
         if (
             "closed in the middle of operation" in error_str
             or "connection was closed" in error_str
             or "interrupted" in error_str
+            or "no active connection" in error_str
+            or "database is closed" in error_str
+            or "connectiondoesnotexisterror" in error_str
         ):
             return {"code": "interrupted", "message_key": "db_err_interrupted"}
         if "winerror 64" in error_str:
             return {"code": "proxy", "message_key": "db_err_proxy"}
-        if "does not exist" in error_str:
+        if "does not exist" in error_str or "no such table" in error_str:
             import re
 
             match = re.search(r'database\s+["\']?([^"\'\s]+)["\']?\s+does\s+not\s+exist', error_str)

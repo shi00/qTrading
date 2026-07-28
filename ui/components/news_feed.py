@@ -27,6 +27,10 @@ from ui.viewmodels.home_view_model import NewsRow
 _POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
 _NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
 
+# data 层返回业务 code (如 "no_title"), View 层维护 code → i18n key 映射,
+# 在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
+NEWS_TITLE_CODE_TO_I18N_KEY: dict[str, str] = {"no_title": "news_no_title"}
+
 
 def _detect_sentiment(content: str) -> str:
     """Detect sentiment using word-boundary matching (case-insensitive)."""
@@ -53,6 +57,20 @@ def _translate_tag(raw_tag: str) -> str:
         tv = I18n.get(tk, default=t)
         translated_parts.append(tv)
     return ",".join(translated_parts) if translated_parts else raw_tag
+
+
+def _translate_title_code(code: str) -> str:
+    """Translate title business code to localized string.
+
+    data 层返回业务 code (如 "no_title"), View 层维护 code → i18n key 映射,
+    在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
+    """
+    if not code:
+        return ""
+    i18n_key = NEWS_TITLE_CODE_TO_I18N_KEY.get(code)
+    if i18n_key is None:
+        return ""
+    return I18n.get(i18n_key)
 
 
 def _build_news_item(row: NewsRow, news_id: str) -> ft.Container:

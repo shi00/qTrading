@@ -11,6 +11,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
@@ -80,15 +81,8 @@ class BaseDao:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
+            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+            if classify_error(e, "db")["code"] == "interrupted":
                 raise EngineDisposedError(
                     f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
                 ) from e
@@ -435,6 +429,7 @@ class BaseDao:
 
         return [tuple(_to_native(v) for v in row) for row in df_clean.itertuples(index=False, name=None)]
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _write_db(
         self,
         sql: typing.Any,
@@ -507,15 +502,8 @@ class BaseDao:
             raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
+            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+            if classify_error(e, "db")["code"] == "interrupted":
                 logger.warning(
                     "[%s] DB Closed during write (Shutdown): %s",
                     self.__class__.__name__,
@@ -556,6 +544,7 @@ class BaseDao:
         """
         return ",".join(['"' + c.replace('"', '""') + '"' for c in columns])
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _save_upsert(
         self,
         df: pd.DataFrame,
@@ -730,15 +719,8 @@ class BaseDao:
             raise
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
+            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+            if classify_error(e, "db")["code"] == "interrupted":
                 logger.warning(
                     "[%s] DB Closed during upsert (Shutdown): %s",
                     self.__class__.__name__,
@@ -861,16 +843,9 @@ class BaseDao:
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
 
+            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
             # Suppress connection-related errors during shutdown
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
+            if classify_error(e, "db")["code"] == "interrupted":
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,
@@ -993,15 +968,8 @@ class BaseDao:
         except Exception as e:
             elapsed = (time.perf_counter() - start_time) * 1000
 
-            err_str = str(e)
-            if any(
-                msg in err_str
-                for msg in [
-                    "no active connection",
-                    "database is closed",
-                    "ConnectionDoesNotExistError",
-                ]
-            ):
+            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+            if classify_error(e, "db")["code"] == "interrupted":
                 logger.warning(
                     "[%s] DB Closed during read (Shutdown): %s",
                     self.__class__.__name__,

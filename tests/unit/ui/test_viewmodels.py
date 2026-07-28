@@ -574,9 +574,7 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_tm.submit_task = MagicMock(side_effect=capture_factory)
         self.mock_tm.update_progress = MagicMock()
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await self.vm.run_strategy(strategy_key, save_results=save_results, params=params)
+        await self.vm.run_strategy(strategy_key, save_results=save_results, params=params)
 
         assert captured_factory is not None
         return captured_factory
@@ -593,9 +591,7 @@ class TestScreenerViewModelRunStrategyExecution:
         )
         self.mock_rm.save_results = AsyncMock()
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert self.vm._full_results is not None
         assert len(self.vm._full_results) > 0
@@ -612,9 +608,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert self.vm._full_results is not None
         self.mock_rm.save_results.assert_not_called()
@@ -627,10 +621,8 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_dp.init_data = AsyncMock()
         self.mock_dp.get_strategy_data = AsyncMock(return_value=None)
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with pytest.raises(RuntimeError, match="Strategy execution crashed"):
-                await captured_factory(task_id="task-123")
+        with pytest.raises(RuntimeError, match="Strategy execution crashed"):
+            await captured_factory(task_id="task-123")
 
     async def test_execute_screening_empty_screening_data(self):
         strategy = self._make_strategy()
@@ -640,10 +632,8 @@ class TestScreenerViewModelRunStrategyExecution:
             return_value={"screening_data": pd.DataFrame(), "trade_date": "2026-05-16"}
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with pytest.raises(RuntimeError, match="Strategy execution crashed"):
-                await captured_factory(task_id="task-123")
+        with pytest.raises(RuntimeError, match="Strategy execution crashed"):
+            await captured_factory(task_id="task-123")
 
     async def test_execute_screening_cancelled_error(self):
         strategy = self._make_strategy()
@@ -657,10 +647,8 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with pytest.raises(asyncio.CancelledError):
-                await captured_factory(task_id="task-123")
+        with pytest.raises(asyncio.CancelledError):
+            await captured_factory(task_id="task-123")
 
     async def test_execute_screening_quality_gate_error(self):
         from data.persistence.quality_gate import QualityGateError
@@ -676,9 +664,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            result = await captured_factory(task_id="task-123")
+        result = await captured_factory(task_id="task-123")
 
         assert result is not None
 
@@ -694,10 +680,8 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with pytest.raises(RuntimeError, match="Strategy execution crashed"):
-                await captured_factory(task_id="task-123")
+        with pytest.raises(RuntimeError, match="Strategy execution crashed"):
+            await captured_factory(task_id="task-123")
 
     async def test_execute_screening_empty_results(self):
         strategy = self._make_strategy()
@@ -711,9 +695,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert isinstance(self.vm._full_results, pd.DataFrame)
         assert self.vm._full_results.empty
@@ -730,9 +712,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert isinstance(self.vm._full_results, pd.DataFrame)
         assert self.vm._full_results.empty
@@ -748,15 +728,11 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
-                tp_instance = MagicMock()
-                tp_instance.run_async = AsyncMock(
-                    return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]})
-                )
-                MockTP.return_value = tp_instance
-                await captured_factory(task_id="task-123")
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]}))
+            MockTP.return_value = tp_instance
+            await captured_factory(task_id="task-123")
 
         assert self.vm._full_results is not None
         assert len(self.vm._full_results) > 0
@@ -779,9 +755,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert self.vm._full_results is not None
 
@@ -804,9 +778,7 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_dp.get_strategy_data = _get_data
         self.mock_dp.init_data = AsyncMock()
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await captured_factory(task_id="task-123")
+        await captured_factory(task_id="task-123")
 
         assert call_count == 2
         self.mock_dp.init_data.assert_awaited_once()
@@ -817,9 +789,7 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_sm.get_strategy.return_value = strategy
         self.mock_tm.submit_task.return_value = None
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await self.vm.run_strategy("momentum")
+        await self.vm.run_strategy("momentum")
 
         assert self.vm.state.loading is False
         assert self.vm.state.status_color == "warning"
@@ -832,9 +802,7 @@ class TestScreenerViewModelRunStrategyExecution:
         self.vm._set_state(page_no=5)
         self.vm._ai_buffer = [{"x": 1}]
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            await self.vm.run_strategy("momentum")
+        await self.vm.run_strategy("momentum")
 
         assert self.vm._full_results is None
         assert self.vm.state.page_no == 1
@@ -846,10 +814,8 @@ class TestScreenerViewModelRunStrategyExecution:
 
         self.mock_dp.get_strategy_data = AsyncMock(return_value={"screening_data": pd.DataFrame({"a": [1]})})
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            with pytest.raises(RuntimeError, match="Strategy execution crashed"):
-                await captured_factory(task_id="task-123")
+        with pytest.raises(RuntimeError, match="Strategy execution crashed"):
+            await captured_factory(task_id="task-123")
 
 
 class TestScreenerViewModelFlushAiBuffer:
@@ -1088,21 +1054,25 @@ class TestScreenerViewModelExportResults:
 
 class TestScreenerViewModelGetStrategyDesc:
     def test_with_valid_strategy(self, screener_vm, mock_sm):
+        """get_strategy_desc 返回 Message (desc_key + params), VM 不感知 locale (§3.2)."""
+        from core.i18n import Message
+
         mock_strategy = MagicMock()
         mock_strategy.desc_key = "strategy_desc_key"
         mock_sm.get_strategy.return_value = mock_strategy
 
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "A strategy description"
-            result = screener_vm.get_strategy_desc("momentum")
+        result = screener_vm.get_strategy_desc("momentum")
 
-        assert result == "A strategy description"
+        assert isinstance(result, Message)
+        assert result.key == "strategy_desc_key"
+        assert result.params == {}
         mock_sm.get_strategy.assert_called_once_with("momentum")
 
     def test_with_no_strategy(self, screener_vm, mock_sm):
+        """get_strategy_desc 策略不存在时返回 None."""
         mock_sm.get_strategy.return_value = None
         result = screener_vm.get_strategy_desc("nonexistent")
-        assert result == ""
+        assert result is None
 
 
 class TestScreenerViewModelOnAiProgress:

@@ -264,7 +264,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
             ],
             spacing=6,
         ),
-        **AppStyles.card(padding=14, border_radius=8, with_border=False),
+        **AppStyles.card(padding=AppStyles.SPACING_LG, border_radius=8, with_border=False),
         border=ft.Border.only(  # type: ignore[untyped]
             left=ft.BorderSide(3, left_border_color),
             top=ft.BorderSide(1, AppColors.BORDER),

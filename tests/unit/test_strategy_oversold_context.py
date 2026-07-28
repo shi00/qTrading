@@ -1101,14 +1101,16 @@ class TestGetDynamicDescription(unittest.TestCase):
     def test_default_params(self):
         """默认参数返回 RSI(14) < 30"""
         result = self.strategy.get_dynamic_description({})
-        self.assertIn("14", result)
-        self.assertIn("30", result)
+        self.assertEqual(result.key, "strategy_oversold_dynamic_desc")
+        self.assertEqual(result.params.get("period"), 14)
+        self.assertEqual(result.params.get("threshold"), 30)
 
     def test_custom_params(self):
         """自定义参数返回对应描述"""
         result = self.strategy.get_dynamic_description({"rsi_period": 6, "rsi_threshold": 25})
-        self.assertIn("6", result)
-        self.assertIn("25", result)
+        self.assertEqual(result.key, "strategy_oversold_dynamic_desc")
+        self.assertEqual(result.params.get("period"), 6)
+        self.assertEqual(result.params.get("threshold"), 25)
 
 
 class TestShouldIncludeContext(unittest.TestCase):

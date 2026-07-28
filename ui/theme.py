@@ -468,6 +468,11 @@ class AppStyles:
     SPACING_LG = 16
     SPACING_XL = 20
 
+    # --- Semantic Padding Tokens (语义化内边距) ---
+    # content_padding: Flet Dropdown 控件内容内边距, 对齐 SPACING_SM (紧凑交互控件)
+    # EMPTY_STATE_PADDING: 空状态/loading 状态全屏居中容器的内边距 (视觉留白, 远大于普通间距)
+    EMPTY_STATE_PADDING = 40
+
     # --- Responsive Column Configs (标准栅格配置，消除各视图重复硬编码 col={...}) ---
     COL_FULL = {"xs": 12}
     COL_HALF = {"xs": 12, "sm": 6}

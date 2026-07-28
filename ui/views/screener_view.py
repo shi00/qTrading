@@ -241,6 +241,23 @@ def _resolve_strategy_desc_color(color_key: str) -> str:
     return AppColors.TEXT_PRIMARY
 
 
+def _render_strategy_desc(msg: Message | None) -> str:
+    """渲染策略描述 Message 为当前 locale 字符串 (P3-ScreenerVM-I18n-Get-Residual, §3.2).
+
+    VM 通过 ``state.strategy_desc`` 产出 ``Message`` (desc_key + params), View 渲染时
+    翻译为当前 locale 字符串. 当 params 含 ``missing_apis`` 字段时, 追加
+    ``strategy_missing_apis`` 翻译后缀 (locale 切换后自动重新翻译).
+    """
+    if msg is None:
+        return ""
+    params = dict(msg.params)
+    missing_apis = params.pop("missing_apis", None)
+    text = I18n.get(msg.key, **params)
+    if missing_apis:
+        text += f" ({I18n.get('strategy_missing_apis')}: {missing_apis})"
+    return text
+
+
 def _format_history_date(date_str) -> tuple[str, str]:
     """格式化历史树日期: 返回 (display_date, internal_key)。"""
     if isinstance(date_str, (datetime.date, datetime.datetime)):
@@ -570,15 +587,8 @@ def ScreenerView(
         else:
             ts = str(trade_date)
             display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-        if run_id:
-            label = f"#{run_id[:8]}"
-        elif strategy_name:
-            # translate_strategy_name 可能返回 None, 回退到原始 strategy_name (R.2.6.3: 保证 label 为 str)
-            label = translate_strategy_name(strategy_name) or strategy_name
-        else:
-            label = I18n.get("screener_all_strategies")
-        # R.2.6.3: vm.set_history_viewing_status 内聚 status_message/color 到 VM state
-        vm.set_history_viewing_status(display, label)
+        # R.2.6.3: 传 raw strategy_name 给 VM, View 渲染时翻译 (§3.2 VM 不感知 locale)
+        vm.set_history_viewing_status(display, strategy_name=strategy_name, run_id=run_id)
         try:
             await vm.load_history_data(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
@@ -970,7 +980,7 @@ def ScreenerView(
                                     code_theme="atom-one-dark",  # type: ignore[arg-type]
                                     on_tap_link=safe_open_url,
                                 ),
-                                padding=10,
+                                padding=AppStyles.SPACING_SM,
                                 bgcolor=AppColors.BACKGROUND,
                                 border_radius=4,
                             )
@@ -1151,7 +1161,7 @@ def ScreenerView(
         [
             ft.Row([strategy_dropdown], spacing=10),
             ft.Text(
-                state.strategy_desc or I18n.get("screener_no_strategy_hint"),
+                _render_strategy_desc(state.strategy_desc) or I18n.get("screener_no_strategy_hint"),
                 size=AppStyles.FONT_SIZE_BODY,
                 color=_resolve_strategy_desc_color(state.strategy_desc_color),
                 no_wrap=False,
