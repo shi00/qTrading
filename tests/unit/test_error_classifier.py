@@ -171,6 +171,33 @@ class TestClassifyErrorDBContext:
         assert result["message_key"] == "db_err_orphaned_revision"
         assert result["format_args"] == {"error": "Can't locate revision identified by '0004'"}
 
+    # P3-M5-ClassifyError-System-Gap: 扩展 interrupted code 识别 asyncpg/SQLAlchemy
+    # 连接断开异常字符串（原 base_dao.py 手写字符串匹配移除）
+    def test_interrupted_no_active_connection(self):
+        result = classify_error(Exception("no active connection"), context="db")
+        assert result["code"] == "interrupted"
+        assert result["message_key"] == "db_err_interrupted"
+
+    def test_interrupted_database_is_closed(self):
+        result = classify_error(Exception("database is closed"), context="db")
+        assert result["code"] == "interrupted"
+        assert result["message_key"] == "db_err_interrupted"
+
+    def test_interrupted_connection_does_not_exist(self):
+        result = classify_error(Exception("ConnectionDoesNotExistError"), context="db")
+        assert result["code"] == "interrupted"
+        assert result["message_key"] == "db_err_interrupted"
+
+    def test_interrupted_closed_in_middle(self):
+        result = classify_error(Exception("closed in the middle of operation"), context="db")
+        assert result["code"] == "interrupted"
+        assert result["message_key"] == "db_err_interrupted"
+
+    # P3-M5-ClassifyError-System-Gap: 扩展 not_found code 识别 "no such table"
+    def test_not_found_no_such_table(self):
+        result = classify_error(Exception("no such table: stock_basic"), context="db")
+        assert result["code"] == "not_found"
+
 
 class TestClassifyErrorChartContext:
     def test_timeout(self):
@@ -379,6 +406,49 @@ class TestClassifySeverity:
     def test_oserror_disk_or_space_still_system(self):
         assert classify_severity(OSError("No space left on device")) == "system"
         assert classify_severity(OSError("disk full")) == "system"
+
+
+class TestClassifyErrorSystemGapIntegration:
+    """P3-M5-ClassifyError-System-Gap: 验证 cache_manager/base_dao 接入分类器后的关键路径。
+
+    覆盖 DoD ③ 三级分类断言：
+    - system 级 → raise（EngineDisposedError 转换路径）
+    - recoverable 级 → logger.warning（降级路径）
+    - operational 级 → logger.debug（业务降级路径）
+    """
+
+    def test_system_level_memory_error_classified_as_system(self):
+        """system 级：MemoryError 必须归为 system，触发 raise 路径。"""
+        assert classify_severity(MemoryError("out of memory"), "db") == "system"
+
+    def test_system_level_connection_interrupted_classified_for_engine_disposed(self):
+        """system 级等价路径：连接中断字符串识别为 interrupted code，触发 EngineDisposedError 转换。"""
+        for err_msg in [
+            "no active connection",
+            "database is closed",
+            "ConnectionDoesNotExistError",
+            "closed in the middle of operation",
+            "connection was closed",
+        ]:
+            result = classify_error(Exception(err_msg), "db")
+            assert result["code"] == "interrupted", f"Failed for: {err_msg}"
+
+    def test_recoverable_level_timeout_classified_as_recoverable(self):
+        """recoverable 级：timeout 归为 recoverable，触发 logger.warning 降级。"""
+        assert classify_severity(TimeoutError("db timeout"), "db") == "recoverable"
+
+    def test_recoverable_level_connection_refused_classified_as_recoverable(self):
+        """recoverable 级：connection refused 归为 recoverable（网络层可重试）。"""
+        assert classify_severity(Exception("connection refused"), "db") == "recoverable"
+
+    def test_operational_level_value_error_classified_as_operational(self):
+        """operational 级：ValueError 归为 operational，触发 logger.debug 业务降级。"""
+        assert classify_severity(ValueError("invalid format"), "db") == "operational"
+
+    def test_operational_level_not_found_classified_for_table_missing(self):
+        """operational 级等价路径：'no such table' 识别为 not_found code，cache_manager 走 warning 降级。"""
+        result = classify_error(Exception("no such table: stock_basic"), "db")
+        assert result["code"] == "not_found"
 
 
 class TestClassifySeverityIntegration:
