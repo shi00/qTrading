@@ -10,7 +10,6 @@ import pandas as pd
 import requests
 from cachetools import TTLCache
 
-from core.i18n import I18n
 from utils.sanitizers import DataSanitizer
 from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -291,10 +290,11 @@ class NewsFetcher:
                     continue
 
                 # 获取标题与内容（如果不存在 title 则回退至 content 截断）
+                # data 层不感知 locale，title 为空时返回业务 code "no_title"，
+                # 由 VM/View 层维护 code → i18n key 映射表在渲染时翻译。
                 title = item.get("title") or item.get("content", "")
                 title_str = str(title).strip()
-                if not title_str:
-                    title_str = I18n.get("news_no_title")
+                title_code = "no_title" if not title_str else ""
 
                 content_str = str(item.get("content") or "").strip()
 
@@ -317,7 +317,9 @@ class NewsFetcher:
                 else:
                     time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
 
-                news_list.append({"title": title_str, "content": content_str, "time": time_str})
+                news_list.append(
+                    {"title": title_str, "title_code": title_code, "content": content_str, "time": time_str}
+                )
 
             # 按时间降序排列
             news_list.sort(key=lambda x: x["time"], reverse=True)

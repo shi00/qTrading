@@ -6,7 +6,6 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
-from core.i18n import I18n
 from data.external.news_fetcher import (
     NewsFetcher,
     _run_with_python_string_storage,
@@ -382,8 +381,8 @@ class TestGetLatestGlobalNews:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher.requests.get")
-    async def test_empty_title_and_content_uses_i18n(self, mock_get, mock_tpm):
-        """title 和 content 均空时使用 I18n 默认值。"""
+    async def test_empty_title_and_content_returns_no_title_code(self, mock_get, mock_tpm):
+        """title 和 content 均空时返回业务 code "no_title"（data 层不感知 locale）。"""
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
@@ -402,7 +401,8 @@ class TestGetLatestGlobalNews:
         mock_tpm.return_value = mock_manager
 
         result = await NewsFetcher.get_latest_global_news(limit=5)
-        assert result[0]["title"] == I18n.get("news_no_title")
+        assert result[0]["title"] == ""
+        assert result[0]["title_code"] == "no_title"
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
