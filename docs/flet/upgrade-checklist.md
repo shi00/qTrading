@@ -84,6 +84,63 @@ python scripts/sync_e2e_fonts.py --force
 - [ ] **若 engineRevision 未变化**：跳过文件复制，但在升级 PR 描述中记录"engineRevision 未变，canvaskit 资源无需更新"
 - [ ] **运行 E2E 冒烟测试**（若本地环境支持）：验证 canvaskit 加载无回归
 
+### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet 0.86.x+）
+
+> 背景：Flet 0.86.x 引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
+
+**升级 Flet 时需验证**：
+
+- [ ] **检查 `site-packages/flet_web/web/canvaskit/` 目录结构**：确认是否存在 `chromium/` / `experimental_webparagraph/` 子目录，以及 `skwasm*.js/wasm` / `wimp.js/wasm` 文件
+  - 命令：`ls <site-packages>/flet_web/web/canvaskit/`
+- [ ] **同步新资源到 `tests/e2e/mock_assets/canvaskit/`**：保留子目录结构（如 `chromium/canvaskit.js`）
+  - 复制命令：`cp -r <site-packages>/flet_web/web/canvaskit/* tests/e2e/mock_assets/canvaskit/`
+- [ ] **验证拦截器逻辑**：[tests/e2e/_font_urls.py](../../tests/e2e/_font_urls.py) 的 `extract_canvaskit_relpath()` 函数支持子目录变体路径解析（含 path traversal 防御）；[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 通过关键字 `canvaskit` / `skwasm` / `wimp` 匹配并路由到本地文件
+- [ ] **若新版本引入其他渲染器**：在 `intercept_external` 的关键字列表中补充新渲染器名称
+
+> 排查指南：E2E 启动卡死且日志显示 `canvases: 0` 或 `webglContexts=0`，通常是 CanvasKit 资源未命中本地缓存。检查 `tests/e2e/mock_assets/canvaskit/` 目录结构是否与新版本 `site-packages/flet_web/web/canvaskit/` 一致。
+
+### 3.6 RiveNative 资源验证（Flet 0.86.x+）
+
+> 背景：Flet 0.86.x 的 `main.dart.js` 硬编码了 `@rive-app/flutter-native-wasm` CDN 依赖（`rive_native.js` / `rive_native.wasm`）。该请求被 E2E 拦截器 abort 后会阻塞 Flutter 引擎初始化。E2E 需预先缓存 RiveNative 资源到 `tests/e2e/mock_assets/rive/`，拦截器按 `@rive-app/flutter-native-wasm` 关键字匹配并从本地 `rive/<subdir>/<filename>` 提供。
+
+**升级 Flet 时需验证**：
+
+- [ ] **检查 `main.dart.js` 是否仍引用 `@rive-app/flutter-native-wasm`**：`grep -c "rive-app/flutter-native-wasm" <site-packages>/flet_web/web/main.dart.js`
+- [ ] **若仍引用**：确认 `tests/e2e/mock_assets/rive/wasm/` 与 `tests/e2e/mock_assets/rive/wasm_compatibility/` 下有 `rive_native.{js,wasm}` 文件；若缺失，从 CDN 下载对应版本到本地
+- [ ] **若不再引用**：删除 `tests/e2e/mock_assets/rive/` 目录，并在 `intercept_external` 中移除 `@rive-app/flutter-native-wasm` 匹配分支
+- [ ] **若新版本引用了其他 CDN 依赖**：在 `intercept_external` 中新增对应拦截分支，预先缓存资源到 `tests/e2e/mock_assets/`
+
+### 3.7 COEP + PNA 死锁与浏览器启动参数（Flet 0.86.x+）
+
+> 背景：Flet 0.86.x 设置 `Cross-Origin-Embedder-Policy: require-corp` 响应头，导致跨域 CanvasKit 资源加载被阻止（`webglContexts=0`）。尝试用 Playwright `route.fulfill()` 移除 COEP 头又会触发 Private Network Access（PNA）检查，阻止 Flet WebSocket 连接（`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`）。两者形成死锁。
+
+**解决方案**：[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `e2e_browser` fixture 在 `chromium.launch()` 中传入启动参数：
+
+```python
+args=[
+    "--disable-web-security",
+    "--disable-features=PrivateNetworkAccess,CrossOriginEmbedderPolicy",
+],
+```
+
+**升级 Flet 时需验证**：
+
+- [ ] **检查新版本是否仍设置 COEP 头**：`grep -i "Cross-Origin-Embedder-Policy" <site-packages>/flet_web/web/` 下文件
+- [ ] **若仍设置**：确认 `e2e_browser` fixture 的 `args` 参数包含上述两个启动参数
+- [ ] **若不再设置**：可移除 `--disable-features=CrossOriginEmbedderPolicy`，但 `--disable-web-security` 与 `--disable-features=PrivateNetworkAccess` 仍需保留（Flet WebSocket 走本地回环，PNA 检查可能仍触发）
+- [ ] **若新版本引入其他安全头导致类似死锁**：在 `args` 中补充对应 `--disable-features` 参数，并在本节记录
+
+> 注意：`--disable-web-security` 仅用于 E2E 测试环境，**禁止**用于生产。
+
+### 3.8 字体 URL 拦截安全（CodeQL 合规）
+
+> 背景：[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 通过 `is_font_cdn_url(url)` 判断是否拦截字体 CDN 请求（`fonts.gstatic.com` / `fonts.googleapis.com`）。该函数用 `urlparse().hostname` 精确匹配 host，而非子串匹配，防止 CodeQL "Incomplete URL substring sanitization" 告警。
+
+**升级 Flet 时需验证**：
+
+- [ ] **若新增字体 CDN host**：在 [tests/e2e/_font_urls.py](../../tests/e2e/_font_urls.py) 的 `_FONT_CDN_HOSTS` frozenset 中补充新 host
+- [ ] **CodeQL 检查通过**：升级 PR 的 CodeQL "Incomplete URL substring sanitization" 规则不应触发告警
+
 ## 4. 项目验证步骤
 
 - [ ] 运行 `ruff check .` → `ruff format --check .` → `pyright`

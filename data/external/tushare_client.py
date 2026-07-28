@@ -13,6 +13,7 @@ import tushare as ts
 
 from data.constants import TUSHARE_POINT_TIERS, attach_hsgt_column_units, attach_top_list_column_units
 from utils.config_handler import ConfigHandler
+from utils.loop_local import get_loop_local
 from utils.rate_limiter import TokenBucket
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -94,6 +95,17 @@ class TushareAPIPermissionError(Exception):
         return f"TushareAPIPermissionError(api={self.api_name}, message={self.message})"
 
 
+class TushareConfigError(Exception):
+    """Raised when TushareClient is used without a valid token configured.
+
+    P3-Tushare-Client-Lazy-Markers: replaces bare `raise Exception("Tushare Token not set")`
+    in _get_pro() helper to provide a structured, catchable error with a friendly message.
+    """
+
+    def __init__(self, message: str = "Tushare Token not set. Please set your token in settings."):
+        super().__init__(message)
+
+
 PERMISSION_DENIED_KEYWORDS = (
     "权限",
     "积分不足",
@@ -122,11 +134,9 @@ class TushareClient:
     """
 
     pro: TushareProApi
-    # NOTE(lazy): pro 运行时可能为 None（token 未设置），但声明为非 Optional 以避免 40+ 处
-    #   reportOptionalMemberAccess warning。调用方在 _handle_api_call 内部已有
-    #   `if not self.pro: raise` 检查提供有意义错误信息。. ceiling: 调用方直接访问
-    #   self.pro.xxx 时若 pro 为 None 会抛 AttributeError 而非友好错误. upgrade: 改用
-    #   _get_pro() helper 方法返回 TushareProApi（内部 raise），调用方统一改用 helper.
+    # P3-Tushare-Client-Lazy-Markers: pro 运行时可能为 None（token 未设置），但声明为
+    # 非 Optional 以避免 40+ 处 reportOptionalMemberAccess warning。调用方应通过
+    # _get_pro() helper 访问，helper 内部 raise TushareConfigError 提供友好错误。
     _instance = None
     _initialized = False
     _lock = threading.Lock()
@@ -348,6 +358,9 @@ class TushareClient:
                 # 显式重置 probe 互斥标志，避免上一测试用例残留 True 导致下一测试 probe 被跳过
                 if hasattr(cls._instance, "_probe_in_progress"):
                     cls._instance._probe_in_progress = False
+                # 显式重置事件循环引用，避免上一测试用例残留旧 loop 导致下一测试 set_token 调度到已关闭 loop
+                if hasattr(cls._instance, "_loop"):
+                    cls._instance._loop = None
             cls._instance = None
             cls._initialized = False
             # 显式重置类属性，防止测试通过 TushareClient._probe_in_progress = True
@@ -435,9 +448,18 @@ class TushareClient:
         )
 
     def __init__(self, token: str | None = None, *, config=None, clock=None):
+        # 捕获事件循环引用：若 __init__ 在 async 上下文中调用（如 bootstrap 流程），
+        # 立即捕获 loop；后续工作线程的 set_token 才能通过 run_coroutine_threadsafe 调度。
+        self._capture_loop()
+
         if self._initialized:
             if token and token != self.token:
-                self.set_token(token)
+                # 二次实例化时直接走 _set_token_core：set_token 是同步包装器，
+                # 在 async 上下文（已有运行 loop）或无 loop 同步上下文中均会抛 RuntimeError，
+                # 导致 bootstrap / scheduler_service → DataProcessor → refresh_token 链路回归。
+                # _token_invalid 直接原子写（False）：__init__ 路径不与 _handle_api_call 并发。
+                self._set_token_core(token)
+                self._token_invalid = False
             return
 
         with self._lock:
@@ -455,8 +477,13 @@ class TushareClient:
             self._capability_cache_lock = threading.Lock()
             self._bg_tasks: set[asyncio.Task] = set()
             # 全局 token 熔断标志：token 失效时置 True，阻止后续 API 调用避免无效重试刷屏。
-            # 由 set_token() 重置，_reset_singleton() 销毁实例时随实例回收。
+            # 由 set_token_async() 重置（经 _get_token_invalid_lock 保护），
+            # _reset_singleton() 销毁实例时随实例回收。
             self._token_invalid: bool = False
+            # 事件循环引用：__init__ 入口 _capture_loop() 已尝试捕获（async 上下文）；
+            # 此处仅确保属性存在（同步上下文无运行 loop 时为 None）。
+            if not hasattr(self, "_loop") or self._loop is None:
+                self._loop = None
             # Phase 2A.1 §3.2.10：上次 probe 时间，由 persist/load_capabilities_to_app_state 维护
             self._last_probe_time: datetime.datetime | None = None
 
@@ -486,6 +513,23 @@ class TushareClient:
             return self._config.get_token()
         return ConfigHandler.get_token()
 
+    def _get_pro(self) -> TushareProApi:
+        """Return the TushareProApi instance, raising TushareConfigError if token not set.
+
+        P3-Tushare-Client-Lazy-Markers: replaces direct `self.pro` access in call sites
+        that need a friendly error when token is not configured. Direct field access
+        `self.pro.xxx` would raise AttributeError instead of a structured, catchable error.
+
+        Returns:
+            The TushareProApi instance (non-None).
+
+        Raises:
+            TushareConfigError: If `self.pro` is None (token not set).
+        """
+        if not self.pro:
+            raise TushareConfigError()
+        return self.pro
+
     def _get_tushare_timeout(self):
         if self._config is not None:
             return self._config.get_tushare_timeout()
@@ -503,14 +547,84 @@ class TushareClient:
 
     @property
     def is_token_invalid(self) -> bool:
-        """Token 是否已失效（用户需重新 set_token 后才能恢复）。"""
+        """Token 是否已失效（用户需重新 set_token 后才能恢复）。
+
+        快照读取（无锁，依赖 bool 原子读写）；写入路径经 `_get_token_invalid_lock`
+        串行化，最终一致性由 `_handle_api_call` 入口锁保证。
+        """
+        # 同步属性不能 await lock；此处为快照读取。
+        # _token_invalid 是 bool（CPython 原子读写），异步路径写入经 loop-local
+        # asyncio.Lock 串行化（_handle_api_call / set_token_async），此处快照读取不会撕裂。
+        # 最终一致性由 _handle_api_call 入口的 token_invalid_lock 保证。
         return self._token_invalid
 
-    def set_token(self, token: str | None) -> bool:
-        """
-        Set token and clear capability cache.
+    def _get_token_invalid_lock(self) -> asyncio.Lock:
+        """获取绑定到当前事件循环的 _token_invalid 保护锁（R11 强制）。
 
-        Thread-safe: uses _lock to protect concurrent access.
+        禁止裸 asyncio.Lock 作为类属性（跨循环复用会死锁），必须通过 get_loop_local
+        获取以绑定当前运行循环。factory 返回新 asyncio.Lock 实例。
+        """
+        return get_loop_local(
+            "tushare_token_invalid_lock",
+            asyncio.Lock,
+        )
+
+    def _capture_loop(self) -> None:
+        """捕获当前运行的事件循环引用，供同步 set_token 调度使用。
+
+        在 async 方法（set_token_async / _handle_api_call 等）入口调用，确保 _loop
+        指向真正运行中的循环。无运行循环时静默跳过（_loop 保持 None）。
+
+        也在 __init__ 入口调用：若 TushareClient() 在 async 上下文中实例化
+        （如 app/bootstrap.py 的 _warmup_tushare_capabilities），可立即捕获事件循环，
+        后续工作线程的 set_token 调用才能通过 run_coroutine_threadsafe 调度。
+        """
+        existing = getattr(self, "_loop", None)
+        if existing is not None and existing.is_running():
+            return
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 无运行循环（同步上下文调用），保持原值（None 或上次捕获的已关闭 loop）
+            if not hasattr(self, "_loop"):
+                self._loop = None
+
+    def _set_token_core(self, token: str | None) -> None:
+        """Token 替换核心逻辑（可被 __init__ 与 set_token_async 复用，同步安全）。
+
+        职责：
+        - 设置 self.token；
+        - 同步 tushare SDK 全局 token + 重建 pro_api 引用；
+        - 重建 _rate_limiter / _api_limiters / _probe_rate_limiter；
+        - 清空 _capability_cache。
+
+        不持 asyncio.Lock，不涉及 _token_invalid（由调用方负责重置）。
+        调用方需自行持有 self._lock 以保护 _capability_cache dict 与 rate_limiter 引用替换。
+        """
+        old_token = self.token
+        self.token = token
+        ts.set_token(token)
+        # 显式传 token，避免依赖 tushare SDK 全局状态
+        self.pro = typing.cast(TushareProApi, ts.pro_api(token=token, timeout=self.timeout) if token else None)
+
+        self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
+
+        cache_size = len(self._capability_cache)
+        self._capability_cache.clear()
+
+        logger.info(
+            "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
+            DataSanitizer.sanitize_token(old_token or ""),
+            DataSanitizer.sanitize_token(token or ""),
+            cache_size,
+        )
+
+    async def set_token_async(self, token: str | None) -> bool:
+        """
+        Set token and clear capability cache (async, loop-local lock protected).
+
+        _token_invalid 读写经 _get_token_local_lock() 串行化，避免旧协程在 set_token
+        后将 _token_invalid 覆盖为 True（P3-Tushare-Token-Invalid-Race 修复）。
 
         Args:
             token: New Tushare API token
@@ -520,42 +634,84 @@ class TushareClient:
             False if no action needed (token unchanged).
 
         Note:
-            This method is synchronous. Caller (usually async context like verify_token)
-            should call probe_api_capabilities() if this returns True.
-
-        Example:
-            if client.set_token(new_token):
-                await client.probe_api_capabilities()
+            Async version. Sync callers from worker threads should use set_token()
+            which schedules this coroutine via run_coroutine_threadsafe.
         """
+        self._capture_loop()
+        # token 字符串与 capability_cache 操作走 threading.Lock（与原 set_token 一致，
+        # 保护 _capability_cache dict 与 rate_limiter 引用替换）。
+        # _token_invalid 重置走 loop-local asyncio.Lock（与 _handle_api_call 写入路径互斥）。
         with self._lock:
             if token == self.token:
                 # 同 token 提交时也重置熔断标志：用户可能在 Tushare 官网修复了 token 权限但 token 字符串不变
-                if self._token_invalid:
-                    self._token_invalid = False
-                    logger.info("[API] Token breaker reset (same token resubmitted)")
+                lock = self._get_token_invalid_lock()
+                async with lock:
+                    if self._token_invalid:
+                        self._token_invalid = False
+                        logger.info("[API] Token breaker reset (same token resubmitted)")
                 logger.debug("[API] Token unchanged, skipping cache clear")
                 return False
 
-            old_token = self.token
-            self.token = token
-            ts.set_token(token)
-            # 显式传 token，避免依赖 tushare SDK 全局状态
-            self.pro = typing.cast(TushareProApi, ts.pro_api(token=token, timeout=self.timeout) if token else None)
-
-            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
-
-            cache_size = len(self._capability_cache)
-            self._capability_cache.clear()
-            # 新 token 提交，重置熔断标志
-            self._token_invalid = False
-
-            logger.info(
-                "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
-                DataSanitizer.sanitize_token(old_token or ""),
-                DataSanitizer.sanitize_token(token or ""),
-                cache_size,
-            )
+            # 不同 token：替换 token、重建 pro_api、清空 cache（核心逻辑同步，可被 __init__ 复用）
+            self._set_token_core(token)
+            # 新 token 提交，重置熔断标志（经 loop-local lock 保护，与 _handle_api_call 写入互斥）
+            lock = self._get_token_invalid_lock()
+            async with lock:
+                self._token_invalid = False
             return True
+
+    def set_token(self, token: str | None) -> bool:
+        """
+        Set token (sync wrapper): schedule set_token_async on event loop.
+
+        Thread-safe: schedules the async version via run_coroutine_threadsafe and
+        blocks until completion. Failure raises instead of silent fallback.
+
+        Args:
+            token: New Tushare API token
+
+        Returns:
+            True if caller should trigger capability probe (cache was cleared or empty).
+            False if no action needed (token unchanged).
+
+        Raises:
+            RuntimeError: If called from within event loop thread (would deadlock) or
+                no event loop is running (no _loop reference captured).
+
+        Note:
+            From async context, use 'await client.set_token_async(token)' instead.
+            From worker threads (e.g., ThreadPoolManager tasks), this sync wrapper
+            schedules the coroutine on the captured event loop and waits.
+        """
+        # 检测是否在事件循环线程中调用（run_coroutine_threadsafe + future.result() 会死锁）
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # 不在事件循环线程，可以安全等待 future
+        else:
+            raise RuntimeError(
+                "set_token() cannot be called from within event loop thread; use 'await set_token_async()' instead"
+            )
+
+        # 检查是否有可用的运行中事件循环引用
+        if self._loop is None or not self._loop.is_running():
+            raise RuntimeError(
+                "set_token() requires a running event loop; "
+                "either call set_token_async() from async context or ensure event loop is running"
+            )
+
+        # 调度到事件循环执行，阻塞等待结果；失败时抛异常而非静默失败。
+        # future.result() 加 30s 超时：避免事件循环阻塞或协程死锁时调用线程无限等待。
+        future = asyncio.run_coroutine_threadsafe(self.set_token_async(token), self._loop)
+        try:
+            return future.result(timeout=30.0)
+        except TimeoutError:
+            future.cancel()
+            logger.warning(
+                "[API] set_token() timed out after 30s waiting for event loop; token=%s may not be updated",
+                DataSanitizer.sanitize_token(token or ""),
+            )
+            raise
 
     def is_api_available(self, api_name: str) -> bool | None:
         """
@@ -997,7 +1153,7 @@ class TushareClient:
         from utils.thread_pool import ThreadPoolManager
 
         if not self.pro:
-            raise Exception("Tushare Token not set. Please set your token in settings.")
+            raise TushareConfigError()
 
         # 捕获限速器为局部变量：consume_async 与网络 await 之间若被 set_token/reload_rate_limiters
         # 替换 self._rate_limiter/self._probe_rate_limiter，会破坏限流语义（B1+B17 竞态修复）。
@@ -1073,7 +1229,7 @@ class TushareClient:
         from utils.error_classifier import classify_error, classify_severity
 
         async with semaphore:
-            func = getattr(self.pro, api_name, None)
+            func = getattr(self._get_pro(), api_name, None)
             if func is None:
                 logger.warning("[TushareClient] Probe %s: API not found in SDK", api_name)
                 return (api_name, None)
@@ -1135,6 +1291,9 @@ class TushareClient:
 
         from utils.thread_pool import ThreadPoolManager
 
+        # 捕获事件循环引用，供同步 set_token 调度使用
+        self._capture_loop()
+
         # B7 修复：删除 functools.partial 死代码分支（所有调用方传入的 func 都是
         # bound method，不是 partial；partial 分支语义错误且不可达）。
         api_name = getattr(func, "__name__", str(func))
@@ -1158,15 +1317,20 @@ class TushareClient:
                 "[tushare_api] api_name='%s' -> api_limiter active (%.0f/min)", api_name, api_limiter.rate * 60
             )
 
+        # 入口快照 token：用于 _token_invalid 写入时检测 set_token_async 是否在 await 期间
+        # 替换了 token。若已替换，旧协程不应将 _token_invalid 覆盖为 True（避免误熔断新 token）。
+        # getattr 防御性读取：测试替身经 object.__new__(TushareClient) 创建时可能未设置 self.token。
+        entry_token = getattr(self, "token", None)
+
         # 全局 token 熔断：token 已失效时快速失败，避免每个 API 独立重试刷屏。
-        # NOTE(lazy): _token_invalid 读写未持锁（async 路径不能持 threading.Lock）.
-        #   ceiling: set_token 后被旧协程覆盖为 True 导致持续误熔断（极窄竞态窗口，需用户再次 set_token 自愈）.
-        #   upgrade: 改用 asyncio.Lock 或 atomic 标志位（如 asyncio.Event）替换 bool 字段.
-        if self._token_invalid:
-            raise TushareAPIPermissionError(
-                api_name,
-                "Token marked invalid; call set_token() to reset after updating",
-            )
+        # _token_invalid 读取经 loop-local asyncio.Lock 保护（R11：禁止裸 asyncio.Lock 类属性）。
+        token_invalid_lock = self._get_token_invalid_lock()
+        async with token_invalid_lock:
+            if self._token_invalid:
+                raise TushareAPIPermissionError(
+                    api_name,
+                    "Token marked invalid; call set_token() to reset after updating",
+                )
 
         # 捕获全局 rate_limiter 为局部变量：consume_async 与 on_success/reduce_rate 之间隔着网络 await，
         # 若 set_token/reload_rate_limiters 在 await 期间替换 self._rate_limiter，则 consume 在旧 limiter、
@@ -1182,9 +1346,7 @@ class TushareClient:
 
             try:
                 if not self.pro:
-                    raise Exception(
-                        "Tushare Token not set. Please set your token in settings.",
-                    )
+                    raise TushareConfigError()
 
                 import contextvars
 
@@ -1251,11 +1413,24 @@ class TushareClient:
                     # 仅 token 认证失败触发全局熔断；per-API 权限错误（如积分不足）不熔断
                     # is_token_invalid 已在上方独立计算（覆盖纯 token 报错不含权限关键字的情况）
                     if is_token_invalid:
-                        self._token_invalid = True
-                        logger.error(
-                            "[tushare_api] TOKEN_INVALID (%s): global breaker engaged — subsequent calls will fast-fail",
-                            api_name,
-                        )
+                        # 经 loop-local asyncio.Lock 保护写入：检测 entry_token 是否仍为当前 token。
+                        # 若 set_token_async 在 await 期间替换了 token，旧协程不应将 _token_invalid
+                        # 覆盖为 True（避免误熔断新 token，P3-Tushare-Token-Invalid-Race 修复）。
+                        async with token_invalid_lock:
+                            if self.token != entry_token:
+                                logger.warning(
+                                    "[tushare_api] TOKEN_INVALID (%s): token changed during call "
+                                    "(old=%s, new=%s), skip stale breaker set",
+                                    api_name,
+                                    DataSanitizer.sanitize_token(entry_token or ""),
+                                    DataSanitizer.sanitize_token(self.token or ""),
+                                )
+                            else:
+                                self._token_invalid = True
+                                logger.error(
+                                    "[tushare_api] TOKEN_INVALID (%s): global breaker engaged — subsequent calls will fast-fail",
+                                    api_name,
+                                )
                     # B4 修复：_reset_singleton 后旧协程持有的 self 仍指向旧实例，
                     # 新创建的 _persist_capability_safely task 会被添加到旧实例的 _bg_tasks，
                     # 新实例无法追踪。检查 self is TushareClient._instance 跳过。
@@ -1460,7 +1635,7 @@ class TushareClient:
             end_date = f"{year}1231"
 
             if not self.pro:
-                raise Exception("Tushare Token not set")
+                raise TushareConfigError()
             # 锁外执行网络调用（trade_cal 是同步 IO，不应持锁阻塞其他线程）
             df = self.pro.trade_cal(
                 exchange="SSE",
@@ -1533,7 +1708,7 @@ class TushareClient:
         which implements optimized year-based caching.
         """
         if not self.pro:
-            raise Exception("Tushare Token not set. Please set your token in settings.")
+            raise TushareConfigError()
         kwargs = dict(exchange=exchange, start_date=start_date, end_date=end_date)
         if is_open is not None:
             kwargs["is_open"] = str(is_open)

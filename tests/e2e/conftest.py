@@ -436,7 +436,7 @@ async def _setup_canvaskit_intercept(page) -> None:
     与 scripts/sync_e2e_fonts.py 共享 extract_font_filename，保证 path traversal 防御行为一致
     """
 
-    from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename
+    from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename, is_font_cdn_url
 
     async def intercept_external(route, request):
         url = request.url
@@ -489,7 +489,7 @@ async def _setup_canvaskit_intercept(page) -> None:
             await route.abort()
             return
         # 字体
-        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+        if is_font_cdn_url(url):
             filename = extract_font_filename(path)
             if filename is None:
                 logger.warning("[E2E Intercept] font filename None, abort: %s", url)
@@ -1086,8 +1086,9 @@ async def _trigger_sidecar_startup_via_browser(
                         "Flet app shows DB initialization error UI during seeding setup. "
                         "See sanitized log artifact: logs/e2e-flet-app.log"
                     )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
+                logger.debug("[E2E Seeding] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
             nav_screener_text = I18n.get("nav_screener")
             try:
                 nav_locator = page.locator(f"text={nav_screener_text}")
@@ -1095,8 +1096,9 @@ async def _trigger_sidecar_startup_via_browser(
                     elapsed = timeout_s - (deadline - time.monotonic())
                     logger.info("[E2E Seeding] page initialized after %.1fs", elapsed)
                     return context
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
+                logger.debug("[E2E Seeding] nav_screener check failed (non-fatal): %s", exc, exc_info=True)
             # 每 30 秒输出一次页面状态诊断，便于定位 main(page) 卡死位置
             if time.monotonic() - last_diag_log >= 30.0:
                 elapsed = timeout_s - (deadline - time.monotonic())

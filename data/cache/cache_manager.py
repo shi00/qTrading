@@ -242,9 +242,12 @@ class CacheManager:
                     logger.debug("[CacheManager] Maintenance event set failed during dispose: %s", safe_error(e))
                 self._maintenance_event.set()
 
-        # Cleanup loop-bound locks to prevent cross-test contamination in isolated async environments
-        del_loop_local("cache_maint_event")
-        del_loop_local("cache_init_lock")
+        # P3-M5-Close-DelLoopLocal-Risk 修复：close() 不删除 loop-local 锁实例。
+        # 测试隔离已由 _reset_singleton 方法处理（该方法调用 del_loop_local）；
+        # 生产路径 close() 删锁会导致 web 模式下 close → init_db 重新创建锁实例，
+        # 与旧锁引用不是同一对象，破坏 _init_lock 的并发保护语义。
+        # _maintenance_event 同样在 close() 内被 clear()/set() 访问，删锁后会破坏
+        # web 模式 event 实例一致性，故一并移除两个 del_loop_local 调用。
 
     # --- Maintenance & Helpers ---
     async def wait_for_maintenance(self):

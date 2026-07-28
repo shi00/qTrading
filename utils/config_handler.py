@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import copy
 import json
 import logging
@@ -41,6 +42,11 @@ class ConfigHandler:
     _config_cache = None
     _lock = rwlock.RWLockFair()
     _io_workers_cap_warned: bool = False
+    # P3-M4-DbUrlOverride-Mock-In-Prod: async-safe thread-local override for
+    # get_db_url(). Propagated to worker threads via contextvars.copy_context()
+    # in ThreadPoolManager.run_async(), so Alembic migrations running in the IO
+    # thread pool see the override while concurrent calls from other threads do not.
+    _db_url_override: contextvars.ContextVar[str | None] = contextvars.ContextVar("_db_url_override", default=None)
 
     DEFAULT_CONFIG = get_default_config()
 
@@ -391,6 +397,58 @@ class ConfigHandler:
             return False
 
     @staticmethod
+    def _persist_migration(update: dict, migration_name: str) -> bool:
+        """P3-Config-Return-Propagation-Gaps: 读时迁移路径持久化助手。
+
+        用于 get_token / get_llm_config 等"读时迁移"路径（清理过时字段、keyring 迁移后清空加密字段等），
+        这些路径的返回值契约是 str/dict，不能直接传播 save_config 的 bool 返回值。
+        失败时记 logger.warning 告警（下次启动会重新迁移，幂等无数据丢失风险），不破坏调用方返回值契约。
+
+        Args:
+            update: 要合并写入的配置片段（与 save_config 的 config_data 参数语义一致）。
+            migration_name: 迁移名称（用于日志告警，如 "clear ts_token after keyring migration"）。
+
+        Returns:
+            True 表示 save_config 成功；False 表示失败（已记 warning，调用方可忽略）。
+        """
+        success = ConfigHandler.save_config(update)
+        if not success:
+            logger.warning(
+                "[ConfigHandler] config migration failed: %s (will retry on next startup)",
+                migration_name,
+            )
+        return success
+
+    @staticmethod
+    @contextlib.contextmanager
+    def with_db_url_override(url: str):
+        """P3-M4-DbUrlOverride-Mock-In-Prod: temporarily override get_db_url() return value.
+
+        Uses ``contextvars.ContextVar`` for async-safe thread-local storage. The
+        override is only visible in the current asyncio task / thread (and tasks
+        / threads spawned from it via ``ThreadPoolManager.run_async()``, which
+        propagates the context via ``contextvars.copy_context()``). Concurrent
+        calls to ``get_db_url()`` from unrelated threads are unaffected.
+
+        Replaces the previous ``unittest.mock.patch`` approach in
+        ``data/persistence/db_url_override.py`` which patched the method globally
+        and could pollute concurrent callers.
+
+        Args:
+            url: The database URL to return from ``get_db_url()`` within the context.
+
+        Usage::
+
+            with ConfigHandler.with_db_url_override("postgresql+asyncpg://..."):
+                await DatabaseMigrator.init_db(engine, auto_migrate=True)
+        """
+        token = ConfigHandler._db_url_override.set(url)
+        try:
+            yield
+        finally:
+            ConfigHandler._db_url_override.reset(token)
+
+    @staticmethod
     def get_token():
         # 1. 环境变量优先（最高优先级）
         env_token = os.environ.get(ENV_FALLBACK_MAP["ts_token"])
@@ -416,7 +474,9 @@ class ConfigHandler:
         if decrypted:
             try:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", decrypted)
-                ConfigHandler.save_config({"ts_token": ""})
+                # P3-Config-Return-Propagation-Gaps: 读时迁移路径改用 _persist_migration，
+                # 失败时记 warning 而非破坏 get_token 返回 str 的契约（下次启动重新迁移，幂等）。
+                ConfigHandler._persist_migration({"ts_token": ""}, "clear ts_token after keyring migration")
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
             # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
@@ -585,6 +645,9 @@ class ConfigHandler:
         """Get PostgreSQL connection URL.
 
         Resolution priority (12-factor app compliance):
+        0. ``_db_url_override`` ContextVar — explicit override set by
+           ``with_db_url_override()`` (async-safe thread-local, used by Alembic
+           migrations run from within the application). Highest priority.
         1. ``DATABASE_URL`` environment variable — always wins when set, so
            deployments can override the persisted config without editing JSON.
         2. Rebuild from stored host/port/user/database + password via
@@ -594,6 +657,11 @@ class ConfigHandler:
         3. Fall back to ``config.DB_URL`` (snapshot of ``DATABASE_URL`` taken
            at import time) for pre-onboarding scenarios.
         """
+        # Priority 0: explicit override (async-safe thread-local via ContextVar)
+        override = ConfigHandler._db_url_override.get()
+        if override is not None:
+            return override
+
         # Priority 1: DATABASE_URL environment variable
         env_url = os.environ.get("DATABASE_URL")
         if env_url:
@@ -949,7 +1017,9 @@ class ConfigHandler:
                 DataSanitizer.register_secret(api_key)
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
-                    ConfigHandler.save_config({"ai_api_key": ""})
+                    # P3-Config-Return-Propagation-Gaps: 读时迁移路径改用 _persist_migration，
+                    # 失败时记 warning 而非破坏 get_llm_config 返回 dict 的契约（下次启动重新迁移，幂等）。
+                    ConfigHandler._persist_migration({"ai_api_key": ""}, "clear ai_api_key after keyring migration")
                     logger.info("Migrated ai_api_key from config to keyring and cleared legacy value")
                 # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as exc:

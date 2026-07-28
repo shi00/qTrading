@@ -10,7 +10,7 @@ import pandas as pd
 import datetime
 import requests
 
-from data.external.tushare_client import TushareAPIPermissionError, TushareClient
+from data.external.tushare_client import TushareAPIPermissionError, TushareClient, TushareConfigError
 
 pytestmark = pytest.mark.unit
 
@@ -78,9 +78,13 @@ class TestTushareClientInit:
             mock_ts.pro_api.assert_not_called()
 
     def test_reinit_different_token_calls_set_token(self):
-        """Reinit with different token should call set_token."""
+        """Reinit with different token should trigger token update path.
+
+        修复后 __init__ 直接调用 _set_token_core（避免 set_token 在 async/sync 上下文中
+        抛 RuntimeError 回归），故 patch 目标改为 _set_token_core。
+        """
         client = _make_client("old_token")
-        with patch.object(client, "set_token") as mock_set:
+        with patch.object(client, "_set_token_core") as mock_core:
             with (
                 patch("data.external.tushare_client.ts"),
                 patch("data.external.tushare_client.ConfigHandler") as mock_ch,
@@ -90,7 +94,7 @@ class TestTushareClientInit:
                 mock_ch.get_request_max_retries.return_value = 3
                 mock_ch.get_tushare_point_tier.return_value = "points_5000"
                 TushareClient(token="new_token")
-                mock_set.assert_called_once_with("new_token")
+                mock_core.assert_called_once_with("new_token")
 
     def test_reinit_no_token_skips(self):
         """Reinit with no token should skip pro_api call."""
@@ -108,21 +112,23 @@ class TestTushareClientInit:
 
 
 class TestTushareClientSetToken:
-    def test_set_token(self, tushare_client_mocks):
+    @pytest.mark.asyncio
+    async def test_set_token(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        client.set_token("new_token")
+        await client.set_token_async("new_token")
         assert client.token == "new_token"
         mock_ts.set_token.assert_called_with("new_token")
 
-    def test_set_token_clears_capability_cache(self, tushare_client_mocks):
-        """T4.7: set_token 后 _capability_cache 应被清空。"""
+    @pytest.mark.asyncio
+    async def test_set_token_clears_capability_cache(self, tushare_client_mocks):
+        """T4.7: set_token_async 后 _capability_cache 应被清空。"""
         client, _, _ = tushare_client_mocks
         client.mark_api_available("api1")
         client.mark_api_available("api2")
         client.mark_api_unavailable("api3")
         assert len(client._capability_cache) == 3
 
-        client.set_token("new_token")
+        await client.set_token_async("new_token")
 
         assert client._capability_cache == {}
         assert len(client._capability_cache) == 0
@@ -140,12 +146,13 @@ class TestTushareClientTokenBreakerProperty:
         client._token_invalid = True
         assert client.is_token_invalid is True
 
-    def test_is_token_invalid_resets_on_set_token(self, tushare_client_mocks):
-        """set_token 应重置熔断标志（已有逻辑），is_token_invalid 随之返回 False。"""
+    @pytest.mark.asyncio
+    async def test_is_token_invalid_resets_on_set_token(self, tushare_client_mocks):
+        """set_token_async 应重置熔断标志（已有逻辑），is_token_invalid 随之返回 False。"""
         client, _, _ = tushare_client_mocks
         client._token_invalid = True
         assert client.is_token_invalid is True
-        client.set_token("new_token_after_invalid")
+        await client.set_token_async("new_token_after_invalid")
         assert client.is_token_invalid is False
 
     def test_is_token_invalid_is_readonly(self, tushare_client_mocks):
@@ -153,6 +160,51 @@ class TestTushareClientTokenBreakerProperty:
         client, _, _ = tushare_client_mocks
         with pytest.raises(AttributeError):
             client.is_token_invalid = True  # type: ignore[misc]
+
+
+class TestTushareClientGetPro:
+    """P3-Tushare-Client-Lazy-Markers: _get_pro() helper 单测。
+
+    覆盖 token 未设置（pro is None）与 token 已设置（pro 非 None）两类场景，
+    验证 helper 在 token 未设置时抛 TushareConfigError 含友好消息。
+    """
+
+    def test_get_pro_raises_when_token_not_set(self):
+        """token 未设置时 _get_pro() 抛 TushareConfigError，消息含 'Token not set'。"""
+        with (
+            patch("data.external.tushare_client.ts"),
+            patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = ""
+            mock_ch.get_tushare_timeout.return_value = 30
+            mock_ch.get_request_max_retries.return_value = 3
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
+            client = TushareClient()
+            # P3-Tushare-Client-Lazy-Markers: _get_pro() raises TushareConfigError
+            # (structured, catchable) with friendly message instead of letting
+            # callers hit AttributeError on direct self.pro.xxx access.
+            with pytest.raises(TushareConfigError, match="Token not set"):
+                client._get_pro()
+
+    def test_get_pro_returns_pro_instance_when_token_set(self, tushare_client_mocks):
+        """token 已设置时 _get_pro() 返回 self.pro 实例（非 None）。"""
+        client, _, _ = tushare_client_mocks
+        # client.pro 在 tushare_client_mocks fixture 中已通过 ts.pro_api() 设置为 MagicMock
+        assert client.pro is not None
+        result = client._get_pro()
+        assert result is client.pro
+
+    def test_tushare_config_error_default_message(self):
+        """TushareConfigError 默认消息含 'Token not set' 与 'settings' 提示。"""
+        err = TushareConfigError()
+        assert "Token not set" in str(err)
+        assert "settings" in str(err)
+
+    def test_tushare_config_error_custom_message(self):
+        """TushareConfigError 支持自定义消息。"""
+        custom_msg = "Custom token error for testing"
+        err = TushareConfigError(custom_msg)
+        assert custom_msg in str(err)
 
 
 class TestTushareClientHandleApiCall:
@@ -167,7 +219,9 @@ class TestTushareClientHandleApiCall:
             mock_ch.get_request_max_retries.return_value = 1
             mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
-            with pytest.raises(Exception, match="Token not set"):
+            # P3-Tushare-Client-Lazy-Markers: _handle_api_call raises TushareConfigError
+            # (structured, catchable) instead of bare Exception when pro is None.
+            with pytest.raises(TushareConfigError, match="Token not set"):
                 await client._handle_api_call(lambda: None)
 
     @pytest.mark.asyncio
@@ -1397,7 +1451,9 @@ class TestTushareClientGetTradeCal:
             mock_ch.get_request_max_retries.return_value = 3
             mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
-            with pytest.raises(Exception, match="Tushare Token not set"):
+            # P3-Tushare-Client-Lazy-Markers: get_trade_cal 经 _load_trade_cal_year 路径
+            # 抛 TushareConfigError（结构化异常），与其他 no-pro 路径一致。
+            with pytest.raises(TushareConfigError, match="Token not set"):
                 await client.get_trade_cal("20240601", "20240630")
 
     @pytest.mark.asyncio
