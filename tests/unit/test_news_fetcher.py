@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
+import data.external.news_fetcher as nf_mod
 from data.external.news_fetcher import (
     NewsFetcher,
     _run_with_python_string_storage,
@@ -29,18 +30,16 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
     # 重置 CLS 熔断器状态，防止测试间状态泄漏
-    import data.external.news_fetcher as _nf_mod
-
-    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
-    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
     yield
     _US_MOVES_CACHE.clear()
     _SINA_CONSECUTIVE_EMPTY.clear()
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
-    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
-    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
 
 
 class TestRunWithPythonStringStorage:
@@ -447,8 +446,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.ThreadPoolManager")
     async def test_runtime_error_does_not_trigger_circuit_breaker(self, mock_tpm):
         """RuntimeError（基础设施错误）不递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
         mock_tpm.return_value = mock_manager
@@ -462,8 +459,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.requests.get")
     async def test_requests_exception_increments_circuit_breaker(self, mock_get, mock_tpm):
         """requests 异常递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_get.side_effect = requests.ConnectionError("network down")
 
         mock_manager = MagicMock()
@@ -479,8 +474,6 @@ class TestGetLatestGlobalNews:
     @patch("data.external.news_fetcher.requests.get")
     async def test_http_error_increments_circuit_breaker(self, mock_get, mock_tpm):
         """HTTP 4xx/5xx 递增熔断计数。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
@@ -1586,8 +1579,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm):
         """连续 3 次失败后熔断器开启。"""
-        import data.external.news_fetcher as nf_mod
-
         mock_get.side_effect = requests.ConnectionError("network down")
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1606,8 +1597,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
         """熔断开启期间直接返回空列表，不发起网络调用。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         nf_mod._CLS_CIRCUIT_OPENED_AT = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0)).timestamp()
 
@@ -1626,8 +1615,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_half_open_recovery(self, mock_get, mock_tpm):
         """冷却期过后半开探活成功，熔断器关闭恢复。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
@@ -1657,8 +1644,6 @@ class TestCLSCircuitBreaker:
     @patch("data.external.news_fetcher.requests.get")
     async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
         """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
-        import data.external.news_fetcher as nf_mod
-
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
@@ -1750,8 +1735,6 @@ class TestClassifyErrorIntegration:
     @pytest.mark.asyncio
     async def test_ensure_dataframe_conversion_failure_logs_code(self, caplog):
         """路径 1: _ensure_dataframe except Exception — 转换失败日志含 [code=]。"""
-        import data.external.news_fetcher as nf_mod
-
         original_df = nf_mod.pd.DataFrame
 
         class FailingDF(original_df):
