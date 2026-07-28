@@ -1,7 +1,8 @@
 //! Rust sidecar 集成测试 — §17.6 失败注入场景。
 //!
-//! 10 场景 + 1 对称补充：#3/#4/#8/#9/#23/#24/#26/#27/#28/#28b/#31。
+//! 12 场景 + 1 对称补充：#1/#3/#4/#6/#8/#9/#23/#24/#26/#27/#28/#28b/#31。
 //! #28b 是 #28 的对称测试（dump .partial 残留 vs restore 目录残留）。
+//! #1/#6 通过 env override 钩子注入（与 #27 FORCE_FS_KIND 同款语义）。
 //! 串行执行（--test-threads=1），避免端口/锁/PG 缓存冲突。
 //! 首个测试会下载+解压 PostgreSQL binaries（约 30MB），后续测试复用缓存。
 
@@ -412,6 +413,80 @@ fn test_inject_31_setup_extraction_interruption() {
     );
 
     cleanup_sidecar(&mut child, &data_dir);
+}
+
+/// #1 initdb failure (§17.6 #1)：env inject → exit 11 + stderr 含 "initdb failed"。
+///
+/// 通过 `QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL=1` env var 在 `setup::run_initdb()` 入口
+/// 短路返回 `INITDB_FAILED` (11)，避免实际破坏 PostgreSQL binaries。
+/// 与 #27 `QTRADING_PG_SIDECAR_FORCE_FS_KIND` 同款 env override 模式（非 cfg(test)）。
+#[test]
+fn test_inject_01_initdb_failure() {
+    let (_tmp, data_dir) = unique_data_dir("fi_01");
+
+    let mut child = std::process::Command::new(sidecar_path())
+        .arg("run")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sidecar");
+
+    // initdb 在 setup::ensure_binaries 之后触发；首次需下载 binaries，给 READY_TIMEOUT
+    let exit = wait_for_exit(&mut child, READY_TIMEOUT);
+    assert_eq!(exit, 11, "sidecar should exit 11 when initdb fails");
+
+    // 读 stderr 验证含 "initdb failed" 关键字（与 Python service.py _format_sidecar_exit_error 对齐）
+    let stderr = read_stderr(&mut child);
+    assert!(
+        stderr.contains("initdb failed"),
+        "stderr should contain 'initdb failed', got: {stderr:?}"
+    );
+}
+
+/// #6 disk full (§17.6 #6)：env inject → exit 15 + stderr 含 "disk full"。
+///
+/// 通过 `QTRADING_PG_SIDECAR_INJECT_DISK_FULL=1` env var 在 `preflight::run()` 入口
+/// 短路返回 `PreflightFailure::DiskSpace`，映射 exit 15。
+/// 与 #27 `QTRADING_PG_SIDECAR_FORCE_FS_KIND` 同款 env override 模式（非 cfg(test)）。
+#[test]
+fn test_inject_06_disk_full() {
+    let (_tmp, data_dir) = unique_data_dir("fi_06");
+
+    let mut child = std::process::Command::new(sidecar_path())
+        .arg("run")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("QTRADING_PG_SIDECAR_INJECT_DISK_FULL", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sidecar");
+
+    // preflight 在 setup 之前触发，无需等待 binaries 下载；但保留 READY_TIMEOUT 余量
+    let exit = wait_for_exit(&mut child, READY_TIMEOUT);
+    assert_eq!(exit, 15, "sidecar should exit 15 when disk full");
+
+    // 读 stderr 验证含 "disk full" 关键字（与 Python service.py _format_sidecar_exit_error 对齐）
+    let stderr = read_stderr(&mut child);
+    assert!(
+        stderr.contains("disk full"),
+        "stderr should contain 'disk full', got: {stderr:?}"
+    );
+}
+
+/// 从 child.stderr 读取全部内容为 String。wait_for_exit 后调用（child 已退出，pipe EOF）。
+fn read_stderr(child: &mut std::process::Child) -> String {
+    use std::io::Read;
+    let mut stderr = String::new();
+    if let Some(mut child_stderr) = child.stderr.take() {
+        let _ = child_stderr.read_to_string(&mut stderr);
+    }
+    stderr
 }
 
 // ---- 辅助函数（与 roundtrip.rs 同款，YAGNI 不抽到 common） ----

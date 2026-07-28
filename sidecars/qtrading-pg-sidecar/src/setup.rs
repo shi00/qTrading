@@ -310,6 +310,13 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
 
 /// 显式 initdb（§7.4）：--data-checksums + scram-sha-256 + UTF8。失败映射 exit 11。
 pub async fn run_initdb(layout: &Layout, username: &str) -> Result<(), u8> {
+    // 失败注入钩子（与 preflight FORCE_FS_KIND 同款语义；默认不激活）。
+    // 集成测试通过 env var 触发 initdb failure 路径，避免实际破坏 PostgreSQL binaries（§17.6 #1）。
+    if std::env::var("QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL").is_ok() {
+        eprintln!("[sidecar] initdb failed (code inject): injected failure (§17.6 #1)");
+        return Err(exit_codes::INITDB_FAILED);
+    }
+
     let data = layout.data_dir.to_string_lossy().into_owned();
     let pwfile = layout.password_file.to_string_lossy().into_owned();
     let out = pgbin::run_tool(
