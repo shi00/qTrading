@@ -35,6 +35,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R14,
     check_R15,
     check_R4,
+    check_R4_in_tests,
     check_R_no_bare_ft_colors_in_ui,
     main,
 )
@@ -133,6 +134,200 @@ class TestR4PureFunction:
         code = "async def f():\n    await conn.close()\n"
         errors = self._check(code)
         assert errors == []
+
+
+# ============================================================================
+# R4 (tests/) 函数测试：验证 check_R4_in_tests 的目录扫描与误报防护
+# ============================================================================
+
+
+class TestR4InTestsFunction:
+    """R4 (tests/) 函数测试：验证 check_R4_in_tests 的目录扫描行为与误报防护。
+
+    覆盖 P3-CheckRedlines-Tests-Dir 的关键场景：
+    - tests/ 目录下 R4 违规（conn.execute("...%s...")）应被检测
+    - tests/ 目录下 "%s" % var 字符串格式化不应被误报（BinOp 表达式，第一个参数非 Constant）
+    - tests/ 目录下字符串字面量含 R4 模式不应被误报（AST 不进入字符串内部）
+    - tests/ 目录下 @pytest.fixture 函数内的违规应被检测（fixture 不影响 AST 检查）
+    - tests/ 目录不存在时应返回空列表
+    """
+
+    def test_violation_in_tests_detected(self, tmp_path, monkeypatch):
+        """tests/ 目录下含 conn.execute("...%s...") 应被检测。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_bad.py").write_text(
+            'async def f():\n    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+        assert "%s" in errors[0]
+
+    def test_percent_format_not_flagged(self, tmp_path, monkeypatch):
+        """``"%s" % var`` 字符串格式化不应被误报（BinOp，第一个参数非 Constant）。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_format.py").write_text(
+            'def test_something():\n    msg = "%s is broken" % name\n    assert msg\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert errors == []
+
+    def test_string_literal_with_r4_pattern_not_flagged(self, tmp_path, monkeypatch):
+        """字符串字面量含 R4 模式（作为测试用例数据）不应被误报。
+
+        AST 不会进入字符串字面量内部解析，因此 ``code = 'await conn.execute("...%s...")'``
+        中的 ``code`` 是 Constant 字符串赋值，不是真实的 conn.execute 调用。
+        """
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_fixture.py").write_text(
+            "def test_r4_detection():\n"
+            "    code = 'await conn.execute(\"SELECT * FROM t WHERE id = %s\", x)'\n"
+            "    assert '%s' in code\n",
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert errors == []
+
+    def test_violation_in_pytest_fixture_detected(self, tmp_path, monkeypatch):
+        """@pytest.fixture 函数内的 R4 违规应被检测（fixture 不影响 AST 检查）。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_fixture_bad.py").write_text(
+            "import pytest\n"
+            "@pytest.fixture\n"
+            "async def bad_cursor():\n"
+            '    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n'
+            "    return None\n",
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+
+    def test_tests_dir_not_exists_returns_empty(self, tmp_path, monkeypatch):
+        """tests/ 目录不存在时应返回空列表。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert errors == []
+
+    def test_skip_cache_dirs(self, tmp_path, monkeypatch):
+        """__pycache__/.pytest_cache/.ruff_cache/.tmp 目录应被跳过。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        # 在缓存目录下放违规文件，应被跳过
+        for cache_dir in ("__pycache__", ".pytest_cache", ".ruff_cache", ".tmp"):
+            cache_path = tests_dir / cache_dir
+            cache_path.mkdir()
+            (cache_path / "cached_module.py").write_text(
+                'async def f():\n    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n',
+                encoding="utf-8",
+            )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert errors == []
+
+    def test_dollar_placeholder_not_flagged(self, tmp_path, monkeypatch):
+        """tests/ 目录下 $1 占位符（asyncpg 正确用法）不应被检测。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_ok.py").write_text(
+            'async def f():\n    await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", db)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert errors == []
+
+    def test_sync_call_without_await_detected(self, tmp_path, monkeypatch):
+        """同步调用（无 await）的 conn.execute 也应被检测。
+
+        _check_R4_in_tree 只匹配 Call 节点，不关心是否在 await 中。
+        测试代码中 mock 调用通常无 await，应同样受 R4 红线约束。
+        """
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_sync.py").write_text(
+            'def test_sync_call():\n    conn.execute("SELECT * FROM t WHERE id = %s", x)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+
+    def test_subdirectory_scanned_recursively(self, tmp_path, monkeypatch):
+        """tests/integration/ 子目录下的违规也应被递归扫描。"""
+        tests_dir = tmp_path / "tests"
+        integration_dir = tests_dir / "integration"
+        integration_dir.mkdir(parents=True)
+        (integration_dir / "test_integration.py").write_text(
+            'async def test_db():\n    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+
+    def test_non_conn_variable_name_detected(self, tmp_path, monkeypatch):
+        """变量名不是 conn 的 asyncpg 调用也应被检测。
+
+        _check_R4_in_tree 不依赖调用者变量名，只匹配 .<method>("...%s...") 模式。
+        """
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_db_var.py").write_text(
+            'async def f():\n    await db.execute("SELECT * FROM t WHERE id = %s", x)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+
+    def test_triple_quoted_string_detected(self, tmp_path, monkeypatch):
+        """三引号字符串字面量含 %s 也应被检测（AST 中是单个 Constant）。"""
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_triple.py").write_text(
+            'async def f():\n    await conn.execute("""SELECT * FROM t WHERE id = %s""", x)\n',
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R4_in_tests()
+        assert len(errors) == 1
+        assert "R4" in errors[0]
 
 
 # ============================================================================
@@ -400,6 +595,11 @@ class TestRedlineIntegrationOnCurrentCodebase:
         """R4：当前代码库无 asyncpg 原生查询 %s 占位符。"""
         errors = check_R4()
         assert errors == [], "R4 violations found:\n  " + "\n  ".join(errors)
+
+    def test_check_R4_in_tests_passes(self):
+        """R4（tests/）：当前 tests/ 目录无 asyncpg 原生查询 %s 占位符。"""
+        errors = check_R4_in_tests()
+        assert errors == [], "R4 (tests) violations found:\n  " + "\n  ".join(errors)
 
     def test_check_R12_passes(self):
         """R12：当前代码库 models.py 的 __tablename__ 与 TABLE_DEFINITIONS 一致。"""
