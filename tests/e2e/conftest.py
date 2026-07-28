@@ -1198,6 +1198,58 @@ async def embedded_real_wizard_page(e2e_browser, embedded_real_wizard_app: AppSe
     await _teardown_page(fp, request, failed=failed)
 
 
+@pytest.fixture(scope="session")
+def embedded_real_flet_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e2e):
+    """真实 sidecar + onboarding_complete=True 的主界面 fixture (P3-E2E-Sidecar-Ready-Path)。
+
+    与 ``embedded_real_wizard_app`` 区别：config 含 ``onboarding_complete: True``，
+    app 启动后直接进入主界面（执行 initialize_services → TaskManager.init_db → 渲染导航栏），
+    覆盖真实 sidecar ready → Python 解析 → DB 迁移 → 主界面渲染的完整端到端路径。
+
+    启动超时放宽到 300s（首次 initdb + PG binaries 下载可能较慢）。
+    独立 data_root：避免跨 worker/session 的 PGDATA 锁冲突（同 ``embedded_real_wizard_app``）。
+    """
+    data_root = tmp_path_factory.mktemp("embedded_pg_data")
+    proc, url, cfg_file = _spawn(
+        tmp_path_factory,
+        config={
+            "locale": "zh",
+            "onboarding_complete": True,
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
+        },
+        env_overrides={
+            "TS_TOKEN": "e2e-dummy-token",
+            "AI_API_KEY": "e2e-dummy-key",
+            "QTRADING_DATABASE_MODE": "embedded",
+            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+        },
+        startup_timeout_s=300.0,
+    )
+    app = AppServer(proc, url, cfg_file)
+    yield app
+    _terminate(proc)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def embedded_real_flet_page(e2e_browser, embedded_real_flet_app: AppServer, request):
+    """Function 级 Page（真实 sidecar + 主界面模式, P3-E2E-Sidecar-Ready-Path）。
+
+    与 ``embedded_real_wizard_page`` 区别：使用 ``embedded_real_flet_app``（onboarding_complete=True），
+    app 进入主界面而非 wizard。``check_db_error=True`` 检测 DB 初始化错误 UI（同 ``e2e_page``）。
+    """
+    fp = await _make_page(e2e_browser, embedded_real_flet_app, request, check_db_error=True)
+    if request.node.get_closest_marker("slow"):
+        fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
+    yield fp
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
+
+
 @pytest.fixture(autouse=True)
 def pristine_config(request):
     """配置快照/还原：仅对标记 ``mutates_config`` 的用例激活。
