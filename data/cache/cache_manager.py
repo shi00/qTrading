@@ -39,6 +39,7 @@ from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
+from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.time_utils import get_now, to_utc_for_db
@@ -109,9 +110,16 @@ class CacheManager:
                     inst._disposed = True
                     inst.engine.sync_engine.dispose()
             except Exception as e:
+                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+                severity = classify_severity(e, "db")
                 # P3-24: warning 与 data_processor.py:79 同级 atexit cleanup 场景对齐
                 # （atexit 异常属资源释放失败，需可见而非静默吞没）
-                logger.warning("CacheManager atexit cleanup failed: %s", safe_error(e), exc_info=True)
+                logger.warning(
+                    "CacheManager atexit cleanup failed (severity=%s): %s",
+                    severity,
+                    safe_error(e),
+                    exc_info=True,
+                )
 
     def __init__(self):
         with self._lock:
@@ -221,7 +229,13 @@ class CacheManager:
             try:
                 BaseDao._get_maintenance_event().clear()
             except Exception as e:
-                logger.debug("[CacheManager] Maintenance event clear failed during dispose: %s", safe_error(e))
+                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+                severity = classify_severity(e, "db")
+                logger.debug(
+                    "[CacheManager] Maintenance event clear failed during dispose (severity=%s): %s",
+                    severity,
+                    safe_error(e),
+                )
             try:
                 self._disposed = True
                 if self.engine is not None:
@@ -239,7 +253,13 @@ class CacheManager:
                 try:
                     BaseDao._get_maintenance_event().set()
                 except Exception as e:
-                    logger.debug("[CacheManager] Maintenance event set failed during dispose: %s", safe_error(e))
+                    # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+                    severity = classify_severity(e, "db")
+                    logger.debug(
+                        "[CacheManager] Maintenance event set failed during dispose (severity=%s): %s",
+                        severity,
+                        safe_error(e),
+                    )
                 self._maintenance_event.set()
 
         # P3-M5-Close-DelLoopLocal-Risk 修复：close() 不删除 loop-local 锁实例。
@@ -338,8 +358,11 @@ class CacheManager:
                 )
                 raise
             except Exception as e:
+                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+                severity = classify_severity(e, "db")
                 logger.error(
-                    "[CacheManager] Schema | Init failed critically: %s",
+                    "[CacheManager] Schema | Init failed critically (severity=%s): %s",
+                    severity,
                     safe_error(e, show_traceback=True),
                 )
                 raise
@@ -354,8 +377,11 @@ class CacheManager:
             await self.clear_all_cache()
             logger.info("[CacheManager] Wipe | Hard reset completed.")
         except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
             logger.error(
-                "[CacheManager] Wipe | ❌ Error during hard reset: %s",
+                "[CacheManager] Wipe | ❌ Error during hard reset (severity=%s): %s",
+                severity,
                 safe_error(e, show_traceback=True),
             )
             raise
@@ -407,7 +433,13 @@ class CacheManager:
 
                 BaseDao._get_maintenance_event().set()
             except Exception as e:
-                logger.debug("[CacheManager] Failed to set BaseDao maintenance event: %s", safe_error(e))
+                # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+                severity = classify_severity(e, "db")
+                logger.debug(
+                    "[CacheManager] Failed to set BaseDao maintenance event (severity=%s): %s",
+                    severity,
+                    safe_error(e),
+                )
             self._maintenance_event.set()
 
     # --- DELAGATIONS START HERE ---
@@ -645,8 +677,11 @@ class CacheManager:
                         global_expected_rows,
                     )
         except Exception as e:
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
             logger.warning(
-                "[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): %s",
+                "[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal, severity=%s): %s",
+                severity,
                 safe_error(e),
             )
 
@@ -831,15 +866,19 @@ class CacheManager:
 
                     return table, result
             except Exception as e:
-                if "no such table" in str(e):
+                # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+                classified = classify_error(e, "db")
+                if classified["code"] == "not_found":
                     logger.warning(
                         "[CacheManager] Health | ⚠️ Table %s missing/not created yet.",
                         table,
                     )
                 else:
+                    severity = classify_severity(e, "db")
                     logger.error(
-                        "[CacheManager] Health | ❌ Failed to check table %s: %s",
+                        "[CacheManager] Health | ❌ Failed to check table %s (severity=%s): %s",
                         table,
+                        severity,
                         safe_error(e),
                     )
                 return table, {
@@ -1347,5 +1386,12 @@ class CacheManager:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None
         except Exception as e:
-            logger.warning("[CacheManager] check_table_has_data failed for %s: %s", table_name, safe_error(e))
+            # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
+            severity = classify_severity(e, "db")
+            logger.warning(
+                "[CacheManager] check_table_has_data failed for %s (severity=%s): %s",
+                table_name,
+                severity,
+                safe_error(e),
+            )
             return False

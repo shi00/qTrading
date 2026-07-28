@@ -470,6 +470,30 @@ class TestCacheManagerClearAllCache:
             await mgr.clear_all_cache()
             mock_event.clear.assert_called_once_with()
 
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_maintenance_event_set_failure(self):
+        """P3-M5-ClassifyError-System-Gap: finally 块 BaseDao._get_maintenance_event().set() 抛异常时走 classify_severity 分支。"""
+        mgr = _make_mgr()
+        mock_engine_ctx, _ = _make_async_engine_ctx()
+        mgr.engine = MagicMock()
+        mgr.engine.begin = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch("utils.loop_local.get_loop_local") as mock_gll,
+            patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event") as mock_evt,
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_gll.return_value = MagicMock()
+            mock_gll.return_value.is_set = MagicMock(return_value=True)
+            mock_gll.return_value.clear = MagicMock()
+            mock_gll.return_value.set = MagicMock()
+            # .clear() 正常但 .set() 抛异常，触发 finally 块 except 路径 (L437-438)
+            mock_evt.return_value = MagicMock()
+            mock_evt.return_value.clear = MagicMock()
+            mock_evt.return_value.set = MagicMock(side_effect=RuntimeError("event set failed"))
+            mock_migrator.init_db = AsyncMock()
+            await mgr.clear_all_cache()
+
 
 class TestCacheManagerWaitForMaintenance:
     @pytest.mark.asyncio
@@ -705,6 +729,107 @@ class TestCacheManagerCheckComprehensiveHealth:
         ):
             result = await mgr.check_comprehensive_health()
             assert result["global_trade_days"] == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_baseline_calc_failure(self):
+        """P3-M5-ClassifyError-System-Gap: count_trade_days 抛异常时走 classify_severity 分支 (L681)。
+
+        get_date_range 返回有效元组使 baseline try 块被进入，但 count_trade_days 抛异常，
+        触发 except 块的 classify_severity 调用。
+        """
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=("20240101", "20240614"))
+        mgr.stock_dao.count_trade_days = AsyncMock(side_effect=Exception("count failed"))
+
+        mock_conn = self._make_health_conn()
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {},
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+            assert result["global_trade_days"] == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_table_query_not_found_error(self):
+        """P3-M5-ClassifyError-System-Gap: 表查询抛 'no such table' 时走 classify_error not_found 分支 (L870-L871)。
+
+        使用真实模型表名 'daily_quotes' 使 tbl 非空（进入 try 块），
+        conn.execute 抛 'no such table' 异常触发 classify_error code='not_found' 分支。
+        """
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=Exception("no such table: daily_quotes"))
+
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+            assert "daily_quotes" in result["tables"]
+            assert result["tables"]["daily_quotes"]["ratio"] == 0
+
+    @pytest.mark.asyncio
+    async def test_health_check_table_query_generic_error(self):
+        """P3-M5-ClassifyError-System-Gap: 表查询抛非 not_found 异常时走 else 分支 (L877)。
+
+        conn.execute 抛 'connection reset' 异常，classify_error code 非 'not_found'，
+        触发 else 分支的 classify_severity 调用。
+        """
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=Exception("connection reset by peer"))
+
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+            assert "daily_quotes" in result["tables"]
+            assert result["tables"]["daily_quotes"]["ratio"] == 0
 
 
 class TestCacheManagerCheckTableHasData:
