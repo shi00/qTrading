@@ -3,16 +3,14 @@
 Phase 3D §3.2：限售解禁数据，供 AI 分析解禁压力与减持风险。
 """
 
-import asyncio
 import datetime
 import logging
 
 import pandas as pd
 
 from data.persistence.models import ShareFloat, get_model_columns, get_model_pk_columns
-from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao, EngineDisposedError
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -57,22 +55,18 @@ class ShareFloatDao(BaseDao):
         Returns:
             DataFrame，包含所有匹配的解禁记录，按 ts_code, float_date 排序。
         """
-        if not ts_codes:
-            return pd.DataFrame()
 
-        try:
-            if as_of_date is None:
+        def sql_fn(as_of):
+            if as_of is None:
                 start_date = datetime.date.today()
-            elif isinstance(as_of_date, str):
-                start_date = datetime.datetime.strptime(as_of_date, "%Y%m%d").date()
-            elif isinstance(as_of_date, datetime.datetime):
-                start_date = as_of_date.date()
+            elif isinstance(as_of, str):
+                start_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()
+            elif isinstance(as_of, datetime.datetime):
+                start_date = as_of.date()
             else:
-                start_date = as_of_date
+                start_date = as_of
             end_date = start_date + datetime.timedelta(days=days)
-
-            return await self.chunked_in_query(
-                self._read_db,
+            return (
                 lambda placeholders, chunk_len, start_idx: (
                     f"""
                     SELECT ts_code, ann_date, float_date, float_share,
@@ -82,17 +76,11 @@ class ShareFloatDao(BaseDao):
                       AND float_date >= ${start_idx + chunk_len}
                       AND float_date <= ${start_idx + chunk_len + 1}
                     ORDER BY ts_code, float_date
-                """
+                    """
                 ),
-                ts_codes,
-                params_fn=lambda chunk: [start_date, end_date],
+                lambda chunk: [start_date, end_date],
             )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning(
-                "[ShareFloatDao] Failed to get share_float upcoming batch: %s", DataSanitizer.sanitize_error(e)
-            )
-            return pd.DataFrame()
+
+        return await self._batch_get_with_as_of_date(
+            sql_fn, ts_codes, as_of_date, "Failed to get share_float upcoming batch"
+        )

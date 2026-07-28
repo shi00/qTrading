@@ -195,8 +195,8 @@ class FinancialDao(BaseDao):
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
+        def sql_fn(as_of):
+            if as_of is not None:
 
                 def sql_template_fn(placeholders, chunk_len):
                     ann_date_param = chunk_len + 1
@@ -218,59 +218,49 @@ class FinancialDao(BaseDao):
                         ORDER BY ts_code, end_date DESC
                     """
 
-                df = await self.chunked_in_query(
-                    self._read_db,
-                    sql_template_fn,
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date, periods],
-                )
-            else:
+                return (sql_template_fn, lambda chunk: [as_of, periods])
 
-                def sql_template_fn_no_as_of(placeholders, chunk_len):
-                    limit_param = chunk_len + 1
-                    return f"""
-                        SELECT * FROM (
-                            SELECT
-                                ts_code, end_date, ann_date, report_type,
-                                total_revenue, revenue, n_income, n_income_attr_p,
-                                total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                                roe, roe_dt, grossprofit_margin, netprofit_margin,
-                                debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                                audit_result, n_cashflow_act, money_cap, accounts_receiv,
-                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                            FROM financial_reports
-                            WHERE ts_code IN ({placeholders})
-                        ) sub
-                        WHERE rn <= ${limit_param}
-                        ORDER BY ts_code, end_date DESC
-                    """
+            def sql_template_fn_no_as_of(placeholders, chunk_len):
+                limit_param = chunk_len + 1
+                return f"""
+                    SELECT * FROM (
+                        SELECT
+                            ts_code, end_date, ann_date, report_type,
+                            total_revenue, revenue, n_income, n_income_attr_p,
+                            total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                            roe, roe_dt, grossprofit_margin, netprofit_margin,
+                            debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                            audit_result, n_cashflow_act, money_cap, accounts_receiv,
+                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                        FROM financial_reports
+                        WHERE ts_code IN ({placeholders})
+                    ) sub
+                    WHERE rn <= ${limit_param}
+                    ORDER BY ts_code, end_date DESC
+                """
 
-                df = await self.chunked_in_query(
-                    self._read_db,
-                    sql_template_fn_no_as_of,
-                    ts_codes,
-                    params_fn=lambda chunk: [periods],
-                )
+            return (sql_template_fn_no_as_of, lambda chunk: [periods])
 
-            if df is not None and not df.empty and "rn" in df.columns:
+        def post_process(df):
+            if "rn" in df.columns:
                 df = df.drop(columns=["rn"])
-            return df if df is not None else pd.DataFrame()
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get financial history batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return df
+
+        return await self._batch_get_with_as_of_date(
+            sql_fn,
+            ts_codes,
+            as_of_date,
+            "Failed to get financial history batch",
+            post_process=post_process,
+        )
 
     async def get_fina_audit_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
@@ -280,40 +270,31 @@ class FinancialDao(BaseDao):
                           AND audit_result IS NOT NULL
                           AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC, ann_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            else:
-                return await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT DISTINCT ON (ts_code)
-                        ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
-                    FROM fina_audit
-                    WHERE ts_code IN ({placeholders})
-                      AND audit_result IS NOT NULL
-                    ORDER BY ts_code, end_date DESC, ann_date DESC
-                    """,
-                    ts_codes,
-                )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get audit batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return (
+                """
+                SELECT DISTINCT ON (ts_code)
+                    ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
+                FROM fina_audit
+                WHERE ts_code IN ({placeholders})
+                  AND audit_result IS NOT NULL
+                ORDER BY ts_code, end_date DESC, ann_date DESC
+                """,
+                None,
+            )
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get audit batch")
 
     async def get_dividend_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
@@ -321,38 +302,29 @@ class FinancialDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            else:
-                return await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
-                    FROM dividend
-                    WHERE ts_code IN ({placeholders})
-                    ORDER BY ts_code, end_date DESC
-                    """,
-                    ts_codes,
-                )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get dividend batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return (
+                """
+                SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
+                FROM dividend
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, end_date DESC
+                """,
+                None,
+            )
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get dividend batch")
 
     async def get_pledge_stat_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
@@ -361,39 +333,30 @@ class FinancialDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND end_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            else:
-                return await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT DISTINCT ON (ts_code)
-                        ts_code, end_date, pledge_count, pledge_ratio
-                    FROM pledge_stat
-                    WHERE ts_code IN ({placeholders})
-                    ORDER BY ts_code, end_date DESC
-                    """,
-                    ts_codes,
-                )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get pledge batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return (
+                """
+                SELECT DISTINCT ON (ts_code)
+                    ts_code, end_date, pledge_count, pledge_ratio
+                FROM pledge_stat
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, end_date DESC
+                """,
+                None,
+            )
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get pledge batch")
 
     async def get_fina_forecast_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
@@ -404,32 +367,24 @@ class FinancialDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC, ann_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            else:
-                return await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT DISTINCT ON (ts_code)
-                        ts_code, end_date, ann_date, type,
-                        p_change_min, p_change_max,
-                        net_profit_min, net_profit_max
-                    FROM fina_forecast
-                    WHERE ts_code IN ({placeholders})
-                    ORDER BY ts_code, end_date DESC, ann_date DESC
-                    """,
-                    ts_codes,
-                )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get forecast batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return (
+                """
+                SELECT DISTINCT ON (ts_code)
+                    ts_code, end_date, ann_date, type,
+                    p_change_min, p_change_max,
+                    net_profit_min, net_profit_max
+                FROM fina_forecast
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, end_date DESC, ann_date DESC
+                """,
+                None,
+            )
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get forecast batch")
 
     async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:
@@ -470,10 +425,9 @@ class FinancialDao(BaseDao):
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                df = await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
@@ -486,35 +440,34 @@ class FinancialDao(BaseDao):
                         ORDER BY ts_code, bz_sales DESC
                     """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            else:
-                df = await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                    FROM (
-                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
-                        FROM fina_mainbz
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE sub.dr = 1
-                    ORDER BY ts_code, bz_sales DESC
-                    """,
-                    ts_codes,
-                )
-            if df is not None and not df.empty:
-                if "dr" in df.columns:
-                    df = df.drop(columns=["dr"])
-            return df if df is not None else pd.DataFrame()
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[FinancialDao] Failed to get fina_mainbz batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+            return (
+                """
+                SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+                FROM (
+                    SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                    FROM fina_mainbz
+                    WHERE ts_code IN ({placeholders})
+                ) sub
+                WHERE sub.dr = 1
+                ORDER BY ts_code, bz_sales DESC
+                """,
+                None,
+            )
+
+        def post_process(df):
+            if "dr" in df.columns:
+                df = df.drop(columns=["dr"])
+            return df
+
+        return await self._batch_get_with_as_of_date(
+            sql_fn,
+            ts_codes,
+            as_of_date,
+            "Failed to get fina_mainbz batch",
+            post_process=post_process,
+        )
 
     async def verify_stock_financial_integrity(
         self,

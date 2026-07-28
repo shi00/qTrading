@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -282,6 +283,69 @@ class BaseDao:
             if isinstance(result, int):
                 total += result
         return total
+
+    async def _batch_get_with_as_of_date(
+        self,
+        sql_fn: typing.Callable[[typing.Any], tuple[typing.Any, typing.Callable[[list], list] | None]],
+        ts_codes: list[str],
+        as_of_date: typing.Any,
+        log_prefix: str,
+        *,
+        post_process: typing.Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
+        """批量查询模板：消除 13 个 get_*_batch 方法的双分支重复（P3-Duplicate-Batch-Get）。
+
+        封装空入参早返、try/except 异常兜底、post_process 后处理三个共性步骤。
+        sql_fn 由调用方提供闭包，按 as_of_date 是否为 None 返回对应的
+        (sql_template, params_fn) 元组——双分支选择下沉到调用方闭包，
+        模板只负责异常兜底与统一日志。
+
+        异常处理策略（与原 13 方法保持一致）：
+          - asyncio.CancelledError：raise（R2 红线）
+          - EngineDisposedError：raise（R5 红线）
+          - 其他 Exception：logger.warning + 返回空 DataFrame
+
+        Args:
+            sql_fn: ``callable(as_of_date) -> (sql_template, params_fn)``
+                sql_template 为 str 或 callable(placeholders, chunk_len, start_idx) -> str；
+                params_fn 为 ``callable(chunk) -> list`` 或 None。
+            ts_codes: 股票代码列表，空时直接返回空 DataFrame。
+            as_of_date: 截止日期，原样传给 sql_fn。
+            log_prefix: 异常日志前缀（如 "Failed to get express batch"）。
+            post_process: 可选后处理回调，对非空 DataFrame 调用并返回处理后的 DataFrame。
+
+        Returns:
+            pd.DataFrame，查询返回的 DataFrame；查询异常或返回 None 时返回空 DataFrame。
+        """
+        if not ts_codes:
+            return pd.DataFrame()
+
+        try:
+            sql_template, params_fn = sql_fn(as_of_date)
+            kwargs: dict[str, typing.Any] = {}
+            if params_fn is not None:
+                kwargs["params_fn"] = params_fn
+            df = await self.chunked_in_query(
+                self._read_db,
+                sql_template,
+                ts_codes,
+                **kwargs,
+            )
+            if post_process is not None and df is not None and not df.empty:
+                df = post_process(df)
+            return df if df is not None else pd.DataFrame()
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[%s] %s: %s",
+                self.__class__.__name__,
+                log_prefix,
+                DataSanitizer.sanitize_error(e),
+            )
+            return pd.DataFrame()
 
     @staticmethod
     def _to_date_str(val: datetime.date | str | None) -> str | None:
