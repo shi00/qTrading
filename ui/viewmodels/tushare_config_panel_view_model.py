@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 
 from data.constants import TUSHARE_POINT_TIERS
 from ui.viewmodels import Message
+from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message
@@ -29,8 +30,6 @@ from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
-
-_RAW_MSG_KEY = "_raw_msg_"
 
 
 @dataclass(frozen=True)
@@ -51,7 +50,7 @@ class TushareConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
 
 
-class TushareConfigPanelViewModel(ObservableViewModelMixin[TushareConfigState]):
+class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[TushareConfigState]):
     """ViewModel for TushareConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -124,21 +123,6 @@ class TushareConfigPanelViewModel(ObservableViewModelMixin[TushareConfigState]):
 
     def _show_success(self, message: Message) -> None:
         self._set_state(status_message=message, status_type="success")
-
-    def _show_error(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="error")
-
-    def _show_warning(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="warning")
-
-    @staticmethod
-    def _raw_message(text: str) -> Message:
-        """将动态字符串（如 service 返回的 message）包装为 Message。
-
-        I18n.get(_RAW_MSG_KEY, default=text) 对不存在的 key 返回 default，
-        即返回 text 本身。
-        """
-        return Message(_RAW_MSG_KEY, {"default": text})
 
     def _set_loading_state(self, loading: bool) -> None:
         """调 on_loading_change + 如果 show_internal_loading 则设置 is_verifying。"""
