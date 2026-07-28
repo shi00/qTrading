@@ -37,6 +37,13 @@ jobs:
         with:
           languages: python
           queries: security-and-quality
+          # Exclude py/call-to-non-callable: high false-positive rate in test
+          # code due to Mock objects (MagicMock/AsyncMock) and dynamic attribute
+          # assignment that CodeQL's points-to analysis cannot track.
+          # Type safety is enforced by pyright in CI.
+          config: |
+            queries:
+              - exclude: py/call-to-non-callable
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
