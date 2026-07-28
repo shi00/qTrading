@@ -438,74 +438,134 @@ async def _setup_canvaskit_intercept(page) -> None:
 
     from tests.e2e._font_urls import extract_canvaskit_relpath, extract_font_filename, is_font_cdn_url
 
+    # 跨域资源 fulfill 时必须携带的 CORS/CORP 头。
+    # 原因：Flet 服务器设置 Cross-Origin-Embedder-Policy: require-corp，
+    # 即使浏览器禁用了 --disable-web-security，动态 import() 加载跨域
+    # CanvasKit/skwasm WASM 仍需 CORS + CORP 头才能通过 COEP 检查。
+    _CORS_CORP_HEADERS = {
+        "Access-Control-Allow-Origin": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    }
+
     async def intercept_external(route, request):
         url = request.url
         is_internal = url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:"))
         path = urlparse(url).path
-        if is_internal:
-            await route.continue_()
-            return
-        # canvaskit/skwasm/wimp
-        if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
-            rel_path = extract_canvaskit_relpath(path)
-            if rel_path is None:
-                logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
+
+        # ===== 跨域 CDN 请求：从本地 mock_assets 提供，添加 CORS/CORP 头 =====
+        if not is_internal:
+            # canvaskit/skwasm/wimp
+            if any(k in url for k in ("canvaskit", "skwasm", "wimp")):
+                rel_path = extract_canvaskit_relpath(path)
+                if rel_path is None:
+                    logger.warning("[E2E Intercept] ck relpath None, abort: %s", url)
+                    await route.abort()
+                    return
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
+                if local_path.exists():
+                    content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
+                    logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type=content_type,
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
                 await route.abort()
                 return
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / rel_path
-            if local_path.exists():
-                content_type = "application/wasm" if rel_path.endswith(".wasm") else "application/javascript"
-                logger.info("[E2E Intercept] fulfill %s from %s", rel_path, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
+            # rive-native-wasm
+            if "@rive-app/flutter-native-wasm" in url:
+                parts = PurePosixPath(path).parts
+                if any(p in (".", "..") or "\\" in p for p in parts):
+                    logger.warning("[E2E Intercept] rive path traversal, abort: %s", url)
+                    await route.abort()
+                    return
+                rive_subdir_markers = frozenset({"wasm", "wasm_compatibility"})
+                rel_parts: list[str] = []
+                for i, p in enumerate(parts):
+                    if p in rive_subdir_markers:
+                        rel_parts = list(parts[i:])
+                        break
+                if not rel_parts:
+                    logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
+                    await route.abort()
+                    return
+                rive_rel = "/".join(rel_parts)
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
+                if local_path.exists():
+                    content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
+                    logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type=content_type,
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
+                await route.abort()
                 return
-            logger.warning("[E2E Intercept] ck not cached, abort: %s (rel=%s)", url, rel_path)
+            # 字体（CodeQL 修复：用 is_font_cdn_url 精确匹配 host 而非子串）
+            if is_font_cdn_url(url):
+                filename = extract_font_filename(path)
+                if filename is None:
+                    logger.warning("[E2E Intercept] font filename None, abort: %s", url)
+                    await route.abort()
+                    return
+                local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
+                if local_path.exists():
+                    logger.info("[E2E Intercept] fulfill font %s from %s", filename, url)
+                    await route.fulfill(
+                        status=200,
+                        content_type="font/woff2",
+                        path=str(local_path),
+                        headers=_CORS_CORP_HEADERS,
+                    )
+                    return
+                logger.warning("[E2E Intercept] font not cached, abort: %s", url)
+                await route.abort()
+                return
+            # 其他外部请求：强制离线
+            logger.info("[E2E Intercept] abort external: %s", url)
             await route.abort()
             return
-        # rive-native-wasm
-        if "@rive-app/flutter-native-wasm" in url:
-            parts = PurePosixPath(path).parts
-            if any(p in (".", "..") or "\\" in p for p in parts):
-                logger.warning("[E2E Intercept] rive path traversal, abort: %s", url)
-                await route.abort()
+
+        # ===== 同源请求：移除 COEP/COOP/CORP 响应头，防止 CanvasKit 跨域资源加载被阻止 =====
+        # Flet 服务器默认设置 Cross-Origin-Embedder-Policy: require-corp，
+        # 导致通过动态 import() 加载的跨域 CanvasKit 资源被浏览器阻止，
+        # 使 Flutter 引擎初始化卡死（webglContexts=0，shadowCanvases=1 但无 GL 上下文）。
+        # COEP 需要 COOP 配合，二者一并移除。
+        # --disable-web-security / --disable-features=CrossOriginEmbedderPolicy 在
+        # CI 环境下无法完全禁用 COEP 检查，必须在响应头层面移除。
+        if request.method == "GET":
+            try:
+                response = await route.fetch()
+                headers = dict(response.headers)
+                removed = []
+                for h in list(headers.keys()):
+                    if h.lower() in (
+                        "cross-origin-embedder-policy",
+                        "cross-origin-opener-policy",
+                        "cross-origin-resource-policy",
+                    ):
+                        removed.append(h)
+                        del headers[h]
+                if removed:
+                    logger.debug("[E2E Intercept] stripped COEP/COOP from %s: %s", path, removed)
+                body = await response.body()
+                await route.fulfill(
+                    status=response.status,
+                    headers=headers,
+                    body=body,
+                    content_type=response.headers.get("content-type", ""),
+                )
                 return
-            rive_subdir_markers = frozenset({"wasm", "wasm_compatibility"})
-            rel_parts: list[str] = []
-            for i, p in enumerate(parts):
-                if p in rive_subdir_markers:
-                    rel_parts = list(parts[i:])
-                    break
-            if not rel_parts:
-                logger.warning("[E2E Intercept] rive no subdir marker, abort: %s", url)
-                await route.abort()
-                return
-            rive_rel = "/".join(rel_parts)
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "rive" / rive_rel
-            if local_path.exists():
-                content_type = "application/wasm" if rive_rel.endswith(".wasm") else "application/javascript"
-                logger.info("[E2E Intercept] fulfill rive %s from %s", rive_rel, url)
-                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
-                return
-            logger.warning("[E2E Intercept] rive not cached, abort: %s (rel=%s)", url, rive_rel)
-            await route.abort()
-            return
-        # 字体
-        if is_font_cdn_url(url):
-            filename = extract_font_filename(path)
-            if filename is None:
-                logger.warning("[E2E Intercept] font filename None, abort: %s", url)
-                await route.abort()
-                return
-            local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
-            if local_path.exists():
-                logger.info("[E2E Intercept] fulfill font %s from %s", filename, url)
-                await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
-                return
-            logger.warning("[E2E Intercept] font not cached, abort: %s", url)
-            await route.abort()
-            return
-        # 其他外部请求：强制离线
-        logger.info("[E2E Intercept] abort external: %s", url)
-        await route.abort()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[E2E Intercept] fetch failed for %s: %s", path, e)
+
+        await route.continue_()
 
     await page.route("**/*", intercept_external)
 
