@@ -214,7 +214,7 @@ def HomeView(
                 content=ft.ProgressRing(width=48, height=48, stroke_width=4),
                 alignment=ft.Alignment.CENTER,
                 expand=True,
-                padding=40,
+                padding=AppStyles.EMPTY_STATE_PADDING,
             )
         )
     else:
