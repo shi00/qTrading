@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -31,6 +32,14 @@ from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
+
+
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
 
 
 def _get_localized_detail(detail: str) -> str:
@@ -74,12 +83,16 @@ class _StartupBridge:
 # --- 纯函数构建器 (可独立测试) ---
 
 
-def _build_loading_view(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Container:
+def _build_loading_view(
+    scenario: EmbeddedPgStartupScenario | None = None,
+    elapsed_seconds: int = 0,
+) -> ft.Container:
     """构造 loading 启动视图.
 
     根据 scenario 显示差异化文案（UX 改进 spec §启动侧方案 A）：
     - ``None``：原有 "Initializing..." 文案（external 模式）
     - ``FIRST_RUN``：标题 ``startup_embedded_pg_first_run_title`` + 提示 ``startup_embedded_pg_first_run_hint``
+      + （当 ``elapsed_seconds > 0``）追加 ``startup_embedded_pg_elapsed_seconds`` 已等待时间反馈
     - ``NORMAL`` / ``UNKNOWN``：标题 ``startup_embedded_pg_normal_title`` + 提示 ``startup_embedded_pg_normal_hint``
     """
     children: list[ft.Control] = [ft.ProgressRing(width=40, height=40, stroke_width=3)]
@@ -106,6 +119,15 @@ def _build_loading_view(scenario: EmbeddedPgStartupScenario | None = None) -> ft
             )
         )
         children.append(ft.Text(I18n.get(hint_key), size=AppStyles.FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY))
+        # P1-2: FIRST_RUN 场景下显示已等待时间，缓解首次启动的等待焦虑
+        if scenario == EmbeddedPgStartupScenario.FIRST_RUN and elapsed_seconds > 0:
+            children.append(
+                ft.Text(
+                    I18n.get("startup_embedded_pg_elapsed_seconds").format(seconds=elapsed_seconds),
+                    size=AppStyles.FONT_SIZE_BODY,
+                    color=AppColors.TEXT_SECONDARY,
+                )
+            )
     return ft.Container(
         content=ft.Column(
             children,
@@ -129,12 +151,43 @@ def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Contain
     ``page.render(LoadingView, scenario=...)`` 渲染一帧，让用户看到反馈；
     ``prepare_database_runtime`` 完成后再 ``page.render(RootView, ...)`` 替换。
 
+    P1-2: FIRST_RUN 场景下每秒更新已等待时间，缓解首次启动的等待焦虑。
+    定时器在 mount 时启动、unmount 时取消（R2: CancelledError 必须 raise）。
+
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 不持有业务状态；scenario 作为 prop 推送
     """
     ft.use_state(get_observable_state)
-    return _build_loading_view(scenario)
+
+    elapsed_seconds, set_elapsed_seconds = ft.use_state(0)
+    counter_ref = ft.use_ref(0)
+    timer_task_ref = ft.use_ref(None)
+
+    def _setup_timer() -> None:
+        page = _get_page()
+        if page is None:
+            return
+
+        async def _tick() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(1)
+                    counter_ref.current = (counter_ref.current or 0) + 1
+                    set_elapsed_seconds(counter_ref.current)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播，配合优雅停机
+
+        timer_task_ref.current = page.run_task(_tick)
+
+    def _cleanup_timer() -> None:
+        if timer_task_ref.current is not None:
+            timer_task_ref.current.cancel()
+            timer_task_ref.current = None
+
+    ft.use_effect(_setup_timer, dependencies=[], cleanup=_cleanup_timer)
+
+    return _build_loading_view(scenario, elapsed_seconds=elapsed_seconds)
 
 
 def _build_pre_init_error_view(

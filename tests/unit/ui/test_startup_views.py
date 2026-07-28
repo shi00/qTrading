@@ -207,11 +207,100 @@ def test_build_loading_view_scenario_unknown_uses_normal_text(mock_i18n):
     assert texts[1].value == "startup_embedded_pg_normal_hint"
 
 
+# --- P1-2: LoadingView 已等待时间反馈 ---
+
+
+def test_build_loading_view_first_run_with_elapsed_shows_elapsed(mock_i18n):
+    """P1-2: FIRST_RUN + elapsed_seconds=5 → 显示 \"已等待 5s\" 文本."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.FIRST_RUN, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    # 标题 + 提示 + 已等待时间 = 3 个 Text
+    assert len(texts) == 3
+    # 第三个 Text 是已等待时间（i18n key 格式化后返回 key 本身，mock_i18n.get 返回 key）
+    assert "startup_embedded_pg_elapsed_seconds" in texts[2].value
+
+
+def test_build_loading_view_first_run_zero_elapsed_no_show(mock_i18n):
+    """P1-2: FIRST_RUN + elapsed_seconds=0 → 不显示已等待时间（避免初始闪烁）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.FIRST_RUN, elapsed_seconds=0)
+    texts = _find_controls(view, ft.Text)
+    # 仅标题 + 提示 = 2 个 Text，无已等待时间
+    assert len(texts) == 2
+
+
+def test_build_loading_view_normal_no_elapsed(mock_i18n):
+    """P1-2: NORMAL + elapsed_seconds=5 → 不显示已等待时间（2-5s 等待不需要反馈）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.NORMAL, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+
+
+def test_build_loading_view_unknown_no_elapsed(mock_i18n):
+    """P1-2: UNKNOWN + elapsed_seconds=5 → 不显示已等待时间（保守文案）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.UNKNOWN, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+
+
 def test_loading_view_is_ft_component():
     """LoadingView 必须用 @ft.component 装饰（声明式契约守护）."""
     from ui.startup_views import LoadingView
 
     assert hasattr(LoadingView, "__wrapped__"), "LoadingView 必须用 @ft.component 装饰"
+
+
+def test_loading_view_component_starts_timer_on_mount(mock_i18n_state, mock_app_colors_state):
+    """P1-2: LoadingView 挂载时启动定时器（page.run_task 被调用）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    assert page.session.scheduled_effects, "use_effect setup 应被调度"
+    # page.run_task 被调用启动定时器
+    assert page.run_task.called  # noqa: weak-assertion <验证 page.run_task 被调用是测试目标本身，mock 无返回值可进一步断言>
+
+
+def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_app_colors_state):
+    """P1-2: LoadingView 卸载时取消定时器（task.cancel 被调用，R2 红线）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+        run_unmount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    mock_task = MagicMock()
+    page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    # 卸载组件，触发 cleanup
+    run_unmount_effects(component)
+
+    # cleanup 应取消 task
+    mock_task.cancel.assert_called_once()  # noqa: weak-assertion <验证 task.cancel 被调用是 R2 红线测试目标本身>
 
 
 def test_build_upgrade_dialog(mock_i18n):

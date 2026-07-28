@@ -786,6 +786,7 @@
     "startup_embedded_pg_first_run_hint": "First launch needs to extract and initialize PostgreSQL, estimated 30-60 seconds",
     "startup_embedded_pg_normal_title": "Starting Database",
     "startup_embedded_pg_normal_hint": "Estimated 2-5 seconds",
+    "startup_embedded_pg_elapsed_seconds": "Elapsed {seconds}s",
     "wizard_status_done": "Sync Complete",
     "wizard_status_cancelled": "Cancelled",
     "wizard_status_verifying": "Verifying...",
