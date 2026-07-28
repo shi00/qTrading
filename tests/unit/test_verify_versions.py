@@ -596,3 +596,128 @@ def test_main_manifest_fix_failure(tmp_path):
         with pytest.raises(SystemExit) as exc_info:
             verify_versions.main()
     assert exc_info.value.code == 1
+
+
+# ============================================================================
+# DoctorJson schema cross-check tests (P3-VerifyVersions-DoctorSchema)
+# ============================================================================
+
+# 正例 mock: Rust struct 与 Python dataclass 字段完全一致
+_MOCK_RUST_CONSISTENT = """\
+struct Issue {
+    code: &'static str,
+    message: String,
+}
+
+struct DoctorJson {
+    schema: &'static str,
+    data_dir: String,
+    initialized: bool,
+    pg_version: Option<u32>,
+    issues: Vec<Issue>,
+}
+"""
+
+_MOCK_PYTHON_CONSISTENT = """\
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True, slots=True)
+class DoctorResult:
+    schema: str
+    data_dir: str
+    initialized: bool
+    pg_version: int | None = None
+    issues: list[dict[str, str]] = field(default_factory=list)
+"""
+
+# 反例 mock 1: Rust 多一个字段(new_rust_only_field)Python 未同步
+_MOCK_RUST_EXTRA = """\
+struct DoctorJson {
+    schema: &'static str,
+    data_dir: String,
+    initialized: bool,
+    pg_version: Option<u32>,
+    issues: Vec<Issue>,
+    new_rust_only_field: String,
+}
+"""
+
+# 反例 mock 2: Python 多一个字段(new_python_only_field)Rust 未同步
+_MOCK_PYTHON_EXTRA = """\
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True, slots=True)
+class DoctorResult:
+    schema: str
+    data_dir: str
+    initialized: bool
+    pg_version: int | None = None
+    issues: list[dict[str, str]] = field(default_factory=list)
+    new_python_only_field: str = ""
+"""
+
+
+def test_doctor_schema_consistent(tmp_path):
+    """DoD ②: Rust/Python DoctorJson 字段一致时脚本通过(exit 0)."""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_CONSISTENT, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_CONSISTENT, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    assert errors == []
+
+    # main() 应不抛 SystemExit(隐式 exit 0)
+    with (
+        patch("check_doctor_schema.RUST_MAINT_PATH", rust_file),
+        patch("check_doctor_schema.PYTHON_SERVICE_PATH", python_file),
+    ):
+        check_doctor_schema.main()
+
+
+def test_doctor_schema_rust_extra(tmp_path):
+    """DoD ③: Rust 新增字段 Python 未同步时 fail(exit 非 0)并报告缺失字段."""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_EXTRA, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_CONSISTENT, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    assert len(errors) > 0
+    joined = "\n".join(errors)
+    assert "new_rust_only_field" in joined
+
+    with (
+        patch("check_doctor_schema.RUST_MAINT_PATH", rust_file),
+        patch("check_doctor_schema.PYTHON_SERVICE_PATH", python_file),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            check_doctor_schema.main()
+        assert exc_info.value.code != 0
+
+
+def test_doctor_schema_python_extra(tmp_path):
+    """DoD ④: Python 新增字段 Rust 未同步时 fail(exit 非 0)并报告冗余字段."""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_CONSISTENT, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_EXTRA, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    assert len(errors) > 0
+    joined = "\n".join(errors)
+    assert "new_python_only_field" in joined
+
+    with (
+        patch("check_doctor_schema.RUST_MAINT_PATH", rust_file),
+        patch("check_doctor_schema.PYTHON_SERVICE_PATH", python_file),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            check_doctor_schema.main()
+        assert exc_info.value.code != 0
