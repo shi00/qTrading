@@ -13,6 +13,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -301,6 +302,83 @@ def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_a
 
     # cleanup 应取消 task
     mock_task.cancel.assert_called_once()  # noqa: weak-assertion <验证 task.cancel 被调用是 R2 红线测试目标本身>
+
+
+def test_get_page_returns_none_outside_render_context():
+    """L41-42: 非渲染上下文调用 _get_page() 返回 None (不抛 RuntimeError).
+
+    conftest.py ``_reset_context_page`` autouse fixture 已清理 ``_context_page``，
+    此处直接调用 ``_get_page()`` 应进入 except 分支返回 None。
+    覆盖 ``_get_page`` 的 RuntimeError except 分支（diff-coverage 补齐）。
+    """
+    from ui.startup_views import _get_page
+
+    assert _get_page() is None
+
+
+def test_loading_view_setup_timer_early_return_when_no_page(mock_i18n_state, mock_app_colors_state):
+    """L170: LoadingView mount 时若 _get_page() 返回 None, 早退不启动定时器.
+
+    覆盖 ``_setup_timer`` 中 ``if page is None: return`` 的早退分支
+    （diff-coverage 补齐）。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+
+    # mock _get_page 返回 None, 模拟非渲染上下文 (如 page 尚未挂载)
+    with patch("ui.startup_views._get_page", return_value=None):
+        run_mount_effects(component, page=page)
+
+    # page.run_task 不应被调用 (page 为 None 时早退)
+    assert not page.run_task.called  # noqa: weak-assertion <验证 page.run_task 未被调用是早退分支测试目标本身>
+
+
+def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state, mock_app_colors_state):
+    """L173-179: _tick 协程每秒更新计数器, CancelledError 被传播 (R2 红线).
+
+    覆盖 ``_tick`` 协程体 (try/while/await/set/except/raise)。
+    通过捕获 ``page.run_task`` 接收的 coro, 在事件循环中执行验证 R2 红线。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    captured_tick_fn: list = []
+    mock_task = MagicMock()
+
+    def fake_run_task(tick_fn):
+        captured_tick_fn.append(tick_fn)
+        return mock_task
+
+    page.run_task = fake_run_task  # type: ignore[method-assign]
+
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    assert captured_tick_fn, "_tick 函数应被传给 page.run_task"  # noqa: weak-assertion <验证 tick_fn 被捕获是后续执行的前提>
+
+    # 在事件循环中执行 _tick 协程, 验证 CancelledError 被传播 (R2 红线)
+    async def run_test():
+        task = asyncio.ensure_future(captured_tick_fn[0]())
+        # 让 _tick 进入 await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可, raises 即充分
+            await task
+
+    asyncio.run(run_test())
 
 
 def test_build_upgrade_dialog(mock_i18n):
