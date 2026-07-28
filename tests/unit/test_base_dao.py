@@ -2585,3 +2585,176 @@ class TestChunkedExecuteParallel:
             chunk_size=2,
         )
         assert result == 6
+
+
+class TestBatchGetWithAsOfDate:
+    """P3-Duplicate-Batch-Get: _batch_get_with_as_of_date 模板单测。
+
+    覆盖 as_of_date 双分支 + 空入参 + 异常兜底(CancelledError/EngineDisposedError/Exception)。
+    模板消除 13 个 get_*_batch 方法的双分支重复(as_of_date 是否为 None)。
+    """
+
+    @pytest.mark.asyncio
+    async def test_batch_get_with_as_of_date_none(self):
+        """as_of_date=None 分支：sql_fn 接收 None，返回的 SQL 与 params_fn 直传 chunked_in_query。"""
+        dao = BaseDao(MagicMock())
+        captured = {}
+
+        def sql_fn(as_of_date):
+            captured["as_of_date"] = as_of_date
+            return ("SELECT * FROM t WHERE id IN ({placeholders})", None)
+
+        async def mock_chunked_in_query(read_fn, sql_template, ts_codes, *, params_fn=None, **kwargs):
+            captured["sql_template"] = sql_template
+            captured["params_fn"] = params_fn
+            return pd.DataFrame({"id": ["A", "B"]})
+
+        with patch.object(dao, "chunked_in_query", side_effect=mock_chunked_in_query):
+            result = await dao._batch_get_with_as_of_date(sql_fn, ["A", "B"], None, "test_log_prefix")
+
+        assert captured["as_of_date"] is None
+        assert captured["sql_template"] == "SELECT * FROM t WHERE id IN ({placeholders})"
+        assert captured["params_fn"] is None
+        assert list(result["id"]) == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_batch_get_with_as_of_date_value(self):
+        """as_of_date=date(2024,1,1) 分支：sql_fn 接收 date，返回带 as_of_date 参数的 SQL 与 params_fn。"""
+        import datetime
+
+        dao = BaseDao(MagicMock())
+        captured = {}
+        expected_date = datetime.date(2024, 1, 1)
+
+        def sql_fn(as_of_date):
+            captured["as_of_date"] = as_of_date
+            return (
+                "SELECT * FROM t WHERE id IN ({placeholders}) AND d <= $2",
+                lambda chunk: [as_of_date],
+            )
+
+        async def mock_chunked_in_query(read_fn, sql_template, ts_codes, *, params_fn=None, **kwargs):
+            captured["sql_template"] = sql_template
+            captured["params_fn"] = params_fn(["A"]) if params_fn else None
+            return pd.DataFrame({"id": ["A"]})
+
+        with patch.object(dao, "chunked_in_query", side_effect=mock_chunked_in_query):
+            result = await dao._batch_get_with_as_of_date(sql_fn, ["A"], expected_date, "test_log_prefix")
+
+        assert captured["as_of_date"] == expected_date
+        assert captured["sql_template"] == "SELECT * FROM t WHERE id IN ({placeholders}) AND d <= $2"
+        assert captured["params_fn"] == [expected_date]
+        assert list(result["id"]) == ["A"]
+
+    @pytest.mark.asyncio
+    async def test_batch_get_empty_ts_codes(self):
+        """空入参返回空 DataFrame，sql_fn 不被调用。"""
+        dao = BaseDao(MagicMock())
+        sql_fn_called = False
+
+        def sql_fn(as_of_date):
+            nonlocal sql_fn_called
+            sql_fn_called = True
+            return ("SELECT 1", None)
+
+        with patch.object(dao, "chunked_in_query") as mock_chunked:
+            result = await dao._batch_get_with_as_of_date(sql_fn, [], None, "test_log_prefix")
+
+        assert result.empty
+        assert not sql_fn_called
+        mock_chunked.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_batch_get_cancelled_error(self):
+        """asyncio.CancelledError 必须原样 raise（R2 红线）。"""
+        dao = BaseDao(MagicMock())
+
+        def sql_fn(as_of_date):
+            return ("SELECT 1", None)
+
+        with patch.object(dao, "chunked_in_query", side_effect=asyncio.CancelledError()):
+            with pytest.raises(asyncio.CancelledError):
+                await dao._batch_get_with_as_of_date(sql_fn, ["A"], None, "test_log_prefix")
+
+    @pytest.mark.asyncio
+    async def test_batch_get_engine_disposed(self):
+        """EngineDisposedError 必须原样 raise（R5 红线）。"""
+        dao = BaseDao(MagicMock())
+
+        def sql_fn(as_of_date):
+            return ("SELECT 1", None)
+
+        with patch.object(dao, "chunked_in_query", side_effect=EngineDisposedError("engine disposed")):
+            with pytest.raises(EngineDisposedError, match="engine disposed"):
+                await dao._batch_get_with_as_of_date(sql_fn, ["A"], None, "test_log_prefix")
+
+    @pytest.mark.asyncio
+    async def test_batch_get_generic_exception(self):
+        """Exception 降级返回空 DataFrame + logger.warning。"""
+        dao = BaseDao(MagicMock())
+
+        def sql_fn(as_of_date):
+            return ("SELECT 1", None)
+
+        with (
+            patch.object(dao, "chunked_in_query", side_effect=RuntimeError("db error")),
+            patch("data.persistence.daos.base_dao.logger") as mock_logger,
+        ):
+            result = await dao._batch_get_with_as_of_date(sql_fn, ["A"], None, "test_log_prefix")
+
+        assert result.empty
+        # log_prefix 与异常脱敏后字符串进入 warning 调用
+        call_args = mock_logger.warning.call_args
+        assert call_args is not None
+        assert call_args[0][0] == "[%s] %s: %s"
+        assert call_args[0][1] == "BaseDao"
+        assert call_args[0][2] == "test_log_prefix"
+
+    @pytest.mark.asyncio
+    async def test_batch_get_post_process_invoked(self):
+        """post_process 回调在 chunked_in_query 返回非空 DataFrame 时被调用。"""
+        dao = BaseDao(MagicMock())
+        post_called = {"count": 0}
+
+        def sql_fn(as_of_date):
+            return ("SELECT * FROM t WHERE id IN ({placeholders})", None)
+
+        async def mock_chunked_in_query(read_fn, sql_template, ts_codes, *, params_fn=None, **kwargs):
+            return pd.DataFrame({"id": ["A"], "rn": [1]})
+
+        def post_process(df):
+            post_called["count"] += 1
+            return df.drop(columns=["rn"])
+
+        with patch.object(dao, "chunked_in_query", side_effect=mock_chunked_in_query):
+            result = await dao._batch_get_with_as_of_date(
+                sql_fn, ["A"], None, "test_log_prefix", post_process=post_process
+            )
+
+        assert post_called["count"] == 1
+        assert "rn" not in result.columns
+        assert list(result["id"]) == ["A"]
+
+    @pytest.mark.asyncio
+    async def test_batch_get_post_process_skipped_on_empty(self):
+        """post_process 在 chunked_in_query 返回空 DataFrame 时不被调用。"""
+        dao = BaseDao(MagicMock())
+        post_called = {"count": 0}
+
+        def sql_fn(as_of_date):
+            return ("SELECT * FROM t WHERE id IN ({placeholders})", None)
+
+        async def mock_chunked_in_query(read_fn, sql_template, ts_codes, *, params_fn=None, **kwargs):
+            return pd.DataFrame()
+
+        def post_process(df):
+            post_called["count"] += 1
+            return df
+
+        with patch.object(dao, "chunked_in_query", side_effect=mock_chunked_in_query):
+            result = await dao._batch_get_with_as_of_date(
+                sql_fn, ["A"], None, "test_log_prefix", post_process=post_process
+            )
+
+        assert post_called["count"] == 0
+        assert result.empty

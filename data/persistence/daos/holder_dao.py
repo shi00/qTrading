@@ -180,8 +180,8 @@ class HolderDao(BaseDao):
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
+        def sql_fn(as_of):
+            if as_of is not None:
 
                 def sql_template_fn(placeholders, chunk_len):
                     ann_date_param = chunk_len + 1
@@ -194,38 +194,26 @@ class HolderDao(BaseDao):
                         ORDER BY ts_code, end_date DESC, hold_ratio DESC
                     """
 
-                return await self.chunked_in_query(
-                    self._read_db,
-                    sql_template_fn,
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
-                )
-            else:
-                return await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT DISTINCT ON (ts_code, end_date)
-                        ts_code, end_date, ann_date, holder_name, hold_ratio
-                    FROM top10_holders
-                    WHERE ts_code IN ({placeholders})
-                    ORDER BY ts_code, end_date DESC, hold_ratio DESC
-                    """,
-                    ts_codes,
-                )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[HolderDao] Failed to get top10 holders batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+                return (sql_template_fn, lambda chunk: [as_of])
+            return (
+                """
+                SELECT DISTINCT ON (ts_code, end_date)
+                    ts_code, end_date, ann_date, holder_name, hold_ratio
+                FROM top10_holders
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, end_date DESC, hold_ratio DESC
+                """,
+                None,
+            )
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get top10 holders batch")
 
     async def get_stk_holdernumber_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
         if not ts_codes:
             return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
+        def sql_fn(as_of):
+            if as_of is not None:
 
                 def sql_template_fn(placeholders, chunk_len):
                     ann_date_param = chunk_len + 1
@@ -242,40 +230,35 @@ class HolderDao(BaseDao):
                         ORDER BY ts_code, end_date DESC
                     """
 
-                df = await self.chunked_in_query(
-                    self._read_db,
-                    sql_template_fn,
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
-                )
-            else:
-                df = await self.chunked_in_query(
-                    self._read_db,
-                    """
-                    SELECT ts_code, end_date, ann_date, holder_num,
-                           holder_num_change, holder_num_ratio
-                    FROM (
-                        SELECT *,
-                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                        FROM stk_holdernumber
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
-                    WHERE rn <= 5
-                    ORDER BY ts_code, end_date DESC
-                    """,
-                    ts_codes,
-                )
-            if df is not None and not df.empty:
-                if "rn" in df.columns:
-                    df = df.drop(columns=["rn"])
-            return df if df is not None else pd.DataFrame()
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[HolderDao] Failed to get holder number batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+                return (sql_template_fn, lambda chunk: [as_of])
+            return (
+                """
+                SELECT ts_code, end_date, ann_date, holder_num,
+                       holder_num_change, holder_num_ratio
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                    FROM stk_holdernumber
+                    WHERE ts_code IN ({placeholders})
+                ) sub
+                WHERE rn <= 5
+                ORDER BY ts_code, end_date DESC
+                """,
+                None,
+            )
+
+        def post_process(df):
+            if "rn" in df.columns:
+                df = df.drop(columns=["rn"])
+            return df
+
+        return await self._batch_get_with_as_of_date(
+            sql_fn,
+            ts_codes,
+            as_of_date,
+            "Failed to get holder number batch",
+            post_process=post_process,
+        )
 
     async def get_existing_top10_ts_codes(self, period: str) -> set[str]:
         """

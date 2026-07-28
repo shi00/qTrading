@@ -4,15 +4,13 @@ Phase 3B §3.2：股权质押明细，与 pledge_stat（统计）互补，提供
 质押信息供 AI 分析。
 """
 
-import asyncio
 import logging
 
 import pandas as pd
 
 from data.persistence.models import PledgeDetail, get_model_columns, get_model_pk_columns
-from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao, EngineDisposedError
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +42,10 @@ class PledgeDetailDao(BaseDao):
         Returns:
             DataFrame，每个 ts_code 取最近一条 end_date 记录。
         """
-        if not ts_codes:
-            return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
@@ -61,13 +56,11 @@ class PledgeDetailDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND end_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            return await self.chunked_in_query(
-                self._read_db,
+            return (
                 """
                 SELECT DISTINCT ON (ts_code)
                     ts_code, end_date, pledge_amount,
@@ -77,12 +70,7 @@ class PledgeDetailDao(BaseDao):
                 WHERE ts_code IN ({placeholders})
                 ORDER BY ts_code, end_date DESC
                 """,
-                ts_codes,
+                None,
             )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[PledgeDetailDao] Failed to get pledge_detail batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get pledge_detail batch")

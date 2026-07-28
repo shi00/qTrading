@@ -3,16 +3,14 @@
 Phase 3E §3.2：股东增减持数据，供 AI 分析产业资本信号。
 """
 
-import asyncio
 import datetime
 import logging
 
 import pandas as pd
 
 from data.persistence.models import StkHoldertrade, get_model_columns, get_model_pk_columns
-from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao, EngineDisposedError
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -53,22 +51,18 @@ class StkHoldertradeDao(BaseDao):
         Returns:
             DataFrame，包含所有匹配的增减持记录，按 ts_code, ann_date 排序。
         """
-        if not ts_codes:
-            return pd.DataFrame()
 
-        try:
-            if as_of_date is None:
+        def sql_fn(as_of):
+            if as_of is None:
                 end_date = datetime.date.today()
-            elif isinstance(as_of_date, str):
-                end_date = datetime.datetime.strptime(as_of_date, "%Y%m%d").date()
-            elif isinstance(as_of_date, datetime.datetime):
-                end_date = as_of_date.date()
+            elif isinstance(as_of, str):
+                end_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()
+            elif isinstance(as_of, datetime.datetime):
+                end_date = as_of.date()
             else:
-                end_date = as_of_date
+                end_date = as_of
             start_date = end_date - datetime.timedelta(days=days)
-
-            return await self.chunked_in_query(
-                self._read_db,
+            return (
                 lambda placeholders, chunk_len, start_idx: (
                     f"""
                     SELECT ts_code, ann_date, holder_name, holder_type, in_de,
@@ -78,17 +72,11 @@ class StkHoldertradeDao(BaseDao):
                       AND ann_date >= ${start_idx + chunk_len}
                       AND ann_date <= ${start_idx + chunk_len + 1}
                     ORDER BY ts_code, ann_date
-                """
+                    """
                 ),
-                ts_codes,
-                params_fn=lambda chunk: [start_date, end_date],
+                lambda chunk: [start_date, end_date],
             )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning(
-                "[StkHoldertradeDao] Failed to get stk_holdertrade batch: %s", DataSanitizer.sanitize_error(e)
-            )
-            return pd.DataFrame()
+
+        return await self._batch_get_with_as_of_date(
+            sql_fn, ts_codes, as_of_date, "Failed to get stk_holdertrade batch"
+        )

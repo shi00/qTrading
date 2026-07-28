@@ -3,15 +3,13 @@
 Phase 2E §3.2.7：top_inst 已封装 API 激活，仅数据层。
 """
 
-import asyncio
 import logging
 
 import pandas as pd
 
 from data.persistence.models import TopInst, get_model_columns, get_model_pk_columns
-from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao, EngineDisposedError
+from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +41,10 @@ class TopInstDao(BaseDao):
         Returns:
             DataFrame，每个 ts_code 取最近一条 trade_date 记录。
         """
-        if not ts_codes:
-            return pd.DataFrame()
 
-        try:
-            if as_of_date is not None:
-                return await self.chunked_in_query(
-                    self._read_db,
+        def sql_fn(as_of):
+            if as_of is not None:
+                return (
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
@@ -60,13 +55,11 @@ class TopInstDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND trade_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, trade_date DESC
-                    """
+                        """
                     ),
-                    ts_codes,
-                    params_fn=lambda chunk: [as_of_date],
+                    lambda chunk: [as_of],
                 )
-            return await self.chunked_in_query(
-                self._read_db,
+            return (
                 """
                 SELECT DISTINCT ON (ts_code)
                     ts_code, trade_date, name, close, pct_change,
@@ -76,12 +69,7 @@ class TopInstDao(BaseDao):
                 WHERE ts_code IN ({placeholders})
                 ORDER BY ts_code, trade_date DESC
                 """,
-                ts_codes,
+                None,
             )
-        except asyncio.CancelledError:
-            raise
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            logger.warning("[TopInstDao] Failed to get top_inst batch: %s", DataSanitizer.sanitize_error(e))
-            return pd.DataFrame()
+
+        return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get top_inst batch")
