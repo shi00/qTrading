@@ -87,26 +87,36 @@ async def _prepare_db_with_retry(
     page: ft.Page,
     scenario: EmbeddedPgStartupScenario | None,
 ) -> str | None:
-    """封装 prepare_database_runtime 的重试逻辑（P0-1）。
+    """封装 prepare_database_runtime 的重试逻辑（P0-1 + P2-1）。
 
     失败时渲染 PreInitErrorView，用户可选择 Retry 或 Exit。
-    - Retry: 重新渲染 LoadingView 后重试 prepare_database_runtime
+    - Retry: 指数退避等待后重试 prepare_database_runtime（P2-1）
     - Exit: ``sys.exit(0)``（sidecar 已被 ``_reset_singleton`` 清理，无资源泄漏）
+
+    P2-1: 指数退避（1s, 2s, 4s, 8s, 16s, 30s 上限）给瞬时故障恢复时间；
+    连续失败 ≥3 次时 PreInitErrorView 追加诊断提示 + 日志路径，引导用户查看日志。
 
     E2E / Web 模式保持原 ``sys.exit(1)`` 行为，避免无头浏览器等待 UI 交互超时
     或 Web 多 session 状态冲突。
 
     Raises:
-        CancelledError: 用户在错误页关窗口时，main(page) 协程被取消，
+        CancelledError: 用户在错误页关窗口或退避等待期间，main(page) 协程被取消，
             CancelledError 正确传播（R2 红线），sidecar 由 ``--parent-pid`` 兜底自杀。
     """
+    failure_count = 0
     while True:
         try:
             from app.bootstrap import prepare_database_runtime
 
             return await prepare_database_runtime()
         except Exception as e:
-            logger.critical("[Main] prepare_database_runtime failed: %s", e, exc_info=True)
+            failure_count += 1
+            logger.critical(
+                "[Main] prepare_database_runtime failed (attempt %d): %s",
+                failure_count,
+                e,
+                exc_info=True,
+            )
             log_exception_with_severity(
                 e,
                 context="general",
@@ -125,6 +135,7 @@ async def _prepare_db_with_retry(
             from utils.sanitizers import DataSanitizer
 
             error_message = DataSanitizer.sanitize_error(e)
+            log_dir_hint = _resolve_embedded_pg_log_dir_hint()
             retry_event = threading.Event()
             exit_event = threading.Event()
 
@@ -139,6 +150,8 @@ async def _prepare_db_with_retry(
                 error_message=error_message,
                 on_retry=on_retry,
                 on_exit=on_exit,
+                failure_count=failure_count,
+                log_dir_hint=log_dir_hint,
             )
 
             action = await _wait_for_user_action(retry_event, exit_event)
@@ -147,12 +160,44 @@ async def _prepare_db_with_retry(
                 logger.info("[Main] User chose to exit from PreInitErrorView")
                 sys.exit(0)
 
-            # Retry 路径：重新渲染 LoadingView，让用户看到重试状态
-            # scenario=None 时也渲染（_build_loading_view 对 None 显示通用文案）
+            # Retry 路径：先渲染 LoadingView 让用户立即看到"正在重试"反馈，
+            # 再进入退避等待（避免退避期间仍显示错误页让用户误以为卡死）
             from ui.startup_views import LoadingView
 
             page.render(LoadingView, scenario=scenario)
             await asyncio.sleep(0.05)  # 让 Flet 刷新一帧
+
+            # P2-1: 指数退避（2^(n-1)，上限 30s），给瞬时故障恢复时间
+            # CancelledError 在 sleep 中正确传播（R2 红线）
+            backoff = min(2 ** (failure_count - 1), 30)
+            logger.info("[Main] Retrying prepare_database_runtime after %ss backoff", backoff)
+            await asyncio.sleep(backoff)
+
+
+def _resolve_embedded_pg_log_dir_hint() -> str | None:
+    """P2-1: 解析 embedded PG 日志目录路径，供 PreInitErrorView 诊断提示。
+
+    优先级：
+    1. ``AppConfig.embedded_pg_log_dir``（用户显式配置）
+    2. ``<platformdirs.user_data_dir>/postgres-logs``（embedded PG 默认日志目录）
+
+    解析失败时返回 ``None``（PreInitErrorView 不显示日志路径）。
+    """
+    try:
+        from pathlib import Path
+
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import AppConfig
+
+        config = AppConfig.model_validate(ConfigHandler.load_config())
+        if config.embedded_pg_log_dir:
+            return config.embedded_pg_log_dir
+        import platformdirs
+
+        return str(Path(platformdirs.user_data_dir("qTrading")) / "postgres-logs")
+    except Exception as e:
+        logger.warning("[Main] failed to resolve embedded PG log dir hint: %s", e, exc_info=True)
+        return None
 
 
 @ft.component

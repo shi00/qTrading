@@ -787,6 +787,8 @@
     "startup_embedded_pg_normal_title": "Starting Database",
     "startup_embedded_pg_normal_hint": "Estimated 2-5 seconds",
     "startup_embedded_pg_elapsed_seconds": "Elapsed {seconds}s",
+    "startup_embedded_pg_persistent_failure_hint": "Failed {count} consecutive times. This may be a persistent issue.",
+    "startup_embedded_pg_log_dir_hint": "Check log directory: {path}",
     "wizard_status_done": "Sync Complete",
     "wizard_status_cancelled": "Cancelled",
     "wizard_status_verifying": "Verifying...",

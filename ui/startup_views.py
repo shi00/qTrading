@@ -194,39 +194,59 @@ def _build_pre_init_error_view(
     error_message: str,
     on_retry: Callable[[ft.ControlEvent], None],
     on_exit: Callable[[ft.ControlEvent], None],
+    *,
+    failure_count: int = 0,
+    log_dir_hint: str | None = None,
 ) -> ft.Container:
     """构造 prepare_database_runtime 失败的错误视图内容（纯函数，可独立测试）。
 
     P0-1: 与 ``_build_error_view`` 视觉样式一致，但不依赖
     StartupContext/StartupController（此时 controller 尚未构造）。
+
+    P2-1: ``failure_count >= 3`` 时追加诊断提示（已连续失败 N 次 + 日志目录路径），
+    引导用户查看日志定位根本性故障，避免无限重试循环。
     """
-    return ft.Container(
-        content=ft.Column(
+    children: list[ft.Control] = [
+        ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.ICON_SIZE_XL),
+        ft.Text(
+            I18n.get("error_embedded_pg_start_failed"),
+            size=AppStyles.FONT_SIZE_HEADLINE,
+            weight=ft.FontWeight.BOLD,
+        ),
+        ft.Text(
+            error_message[:200],
+            color=AppColors.ERROR,
+            size=AppStyles.FONT_SIZE_LG,
+        ),
+    ]
+    # P2-1: 持续失败诊断引导（≥3 次才显示，避免首次失败吓到用户）
+    if failure_count >= 3:
+        hint_text = I18n.get("startup_embedded_pg_persistent_failure_hint").format(count=failure_count)
+        if log_dir_hint:
+            hint_text += "\n" + I18n.get("startup_embedded_pg_log_dir_hint").format(path=log_dir_hint)
+        children.append(
+            ft.Text(
+                hint_text,
+                size=AppStyles.FONT_SIZE_BODY,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+        )
+    children.append(
+        ft.Row(
             safe_controls(
                 [
-                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.ICON_SIZE_XL),
-                    ft.Text(
-                        I18n.get("error_embedded_pg_start_failed"),
-                        size=AppStyles.FONT_SIZE_HEADLINE,
-                        weight=ft.FontWeight.BOLD,
-                    ),
-                    ft.Text(
-                        error_message[:200],
-                        color=AppColors.ERROR,
-                        size=AppStyles.FONT_SIZE_LG,
-                    ),
-                    ft.Row(
-                        safe_controls(
-                            [
-                                ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=safe_on_click(on_retry)),
-                                ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit)),
-                            ]
-                        ),
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        spacing=20,
-                    ),
+                    ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=safe_on_click(on_retry)),
+                    ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit)),
                 ]
             ),
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=20,
+        )
+    )
+    return ft.Container(
+        content=ft.Column(
+            safe_controls(children),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=10,
         ),
@@ -240,10 +260,15 @@ def PreInitErrorView(
     error_message: str,
     on_retry: Callable[[ft.ControlEvent], None],
     on_exit: Callable[[ft.ControlEvent], None],
+    *,
+    failure_count: int = 0,
+    log_dir_hint: str | None = None,
 ) -> ft.Container:
     """prepare_database_runtime 失败时的错误视图（controller 构造前）。
 
     P0-1: 提供 Retry（重试 prepare_database_runtime）和 Exit（退出程序）两个按钮。
+
+    P2-1: ``failure_count >= 3`` 时追加诊断提示，引导用户查看日志。
 
     调用场景：``_prepare_db_with_retry`` 捕获 ``prepare_database_runtime`` 异常后
     ``page.render(PreInitErrorView, ...)`` 渲染错误页，用户点击 Retry/Exit 触发回调。
@@ -254,7 +279,13 @@ def PreInitErrorView(
     - 回调通过 props 注入，不持有 page 引用
     """
     ft.use_state(get_observable_state)
-    return _build_pre_init_error_view(error_message, on_retry, on_exit)
+    return _build_pre_init_error_view(
+        error_message,
+        on_retry,
+        on_exit,
+        failure_count=failure_count,
+        log_dir_hint=log_dir_hint,
+    )
 
 
 def _build_upgrade_dialog(on_upgrade: Callable[[ft.ControlEvent], None]) -> ft.AlertDialog:

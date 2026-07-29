@@ -384,6 +384,55 @@ def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state,
     assert page.session.scheduled_updates, "第一次 tick 后应调度组件更新 (elapsed_seconds 状态变更)"
 
 
+# --- P2-1: PreInitErrorView 持续失败诊断引导 ---
+
+
+def test_build_pre_init_error_view_low_failure_count_no_hint(mock_i18n):
+    """P2-1: failure_count < 3 时不显示诊断提示（避免首次失败吓到用户）。"""
+    from ui.startup_views import _build_pre_init_error_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_pre_init_error_view("error", on_retry=MagicMock(), on_exit=MagicMock(), failure_count=1)
+    source = repr(view)
+    # 不含诊断提示文案
+    assert "startup_embedded_pg_persistent_failure_hint" not in source
+
+
+def test_build_pre_init_error_view_persistent_failure_shows_hint(mock_i18n):
+    """P2-1: failure_count >= 3 时显示"已连续失败 N 次"诊断提示 + 日志路径 i18n key。"""
+    from ui.startup_views import _build_pre_init_error_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_pre_init_error_view(
+            "error",
+            on_retry=MagicMock(),
+            on_exit=MagicMock(),
+            failure_count=3,
+            log_dir_hint="/path/to/logs",
+        )
+    source = repr(view)
+    # 含诊断提示 i18n key（mock_i18n.get 返回 key 本身，format 无占位符不替换）
+    assert "startup_embedded_pg_persistent_failure_hint" in source
+    # 含日志路径 i18n key（路径通过 format 注入，mock 返回 key 本身）
+    assert "startup_embedded_pg_log_dir_hint" in source
+
+
+def test_build_pre_init_error_view_persistent_failure_no_log_dir(mock_i18n):
+    """P2-1: failure_count >= 3 但 log_dir_hint 为 None → 仅显示提示，不显示路径。"""
+    from ui.startup_views import _build_pre_init_error_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_pre_init_error_view(
+            "error",
+            on_retry=MagicMock(),
+            on_exit=MagicMock(),
+            failure_count=5,
+            log_dir_hint=None,
+        )
+    source = repr(view)
+    assert "startup_embedded_pg_persistent_failure_hint" in source
+
+
 def test_build_upgrade_dialog(mock_i18n):
     on_upgrade = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):

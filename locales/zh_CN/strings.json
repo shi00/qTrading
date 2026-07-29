@@ -682,6 +682,8 @@
     "startup_embedded_pg_normal_title": "正在启动数据库",
     "startup_embedded_pg_normal_hint": "预计 2-5 秒",
     "startup_embedded_pg_elapsed_seconds": "已等待 {seconds}s",
+    "startup_embedded_pg_persistent_failure_hint": "已连续失败 {count} 次，可能是根本性故障。",
+    "startup_embedded_pg_log_dir_hint": "请查看日志目录: {path}",
     "wizard_status_done": "同步完成",
     "wizard_status_cancelled": "已取消",
     "wizard_status_verifying": "验证中...",
