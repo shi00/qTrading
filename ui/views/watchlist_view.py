@@ -51,7 +51,7 @@ def _build_watchlist_row(
     return ft.Container(
         content=ft.Row(
             [
-                ft.Icon(ft.Icons.STAR_OUTLINED, color=AppColors.PRIMARY, size=20),
+                ft.Icon(ft.Icons.STAR_OUTLINED, color=AppColors.PRIMARY, size=AppStyles.FONT_SIZE_LG),
                 ft.Column(
                     [
                         ft.Text(
