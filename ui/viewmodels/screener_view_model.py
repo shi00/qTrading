@@ -176,31 +176,24 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._strategy_submitted = False
         self._active_task_id: str | None = None  # Task 3.2: 保存运行中 task_id 供 cancel_strategy
 
+        # Mixin 字段初始化（跨线程修复）
+        self._init_mixin_fields()
+
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
-
-    def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
-        """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
-        self._subscribers.append(callback)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning("ScreenerViewModel subscribed without running loop")
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
 
     def _set_state(self, **changes) -> None:
         """Update state fields and notify subscribers."""
+        # disposed guard 保留（与 Mixin 的 disposed guard 冗余但不报错，保留作为短路优化）
         if self._disposed:
             return
-        self._state = replace(self._state, **changes)
-        self._notify()
+        super()._set_state(**changes)
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None) -> None:
-        """Recompute pagination fields in state. Does NOT notify — caller must _set_state or _notify."""
+        """Recompute pagination fields in state, then notify via _set_state.
+
+        不再由 caller 手动 _notify()：走 Mixin._set_state 统一路径（disposed guard +
+        跨线程封送 + subscribers snapshot）。
+        """
         ps = page_size if page_size is not None else self._state.page_size
         if self._full_results is not None:
             total_items = len(self._full_results)
@@ -209,8 +202,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             total_items = 0
             total_pages = 0
         pn = page_no if page_no is not None else self._state.page_no
-        self._state = replace(
-            self._state,
+        self._set_state(
             page_size=ps,
             page_no=pn,
             total_items=total_items,
@@ -227,9 +219,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # 更新 state/subscriber (取消是协作式的, 任务可能仍执行到下一个 await)
         self._disposed = True
         self.unsubscribe_task_manager()
-        self._subscribers.clear()
         self._stream_buffers.clear()
-        self._main_loop = None
 
         for f in list(self._threadsafe_futures):
             f.cancel()
@@ -249,6 +239,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._ai_buffer = []
         self._realtime_snapshot = None
         self._state = ScreenerState()
+
+        # Mixin 统一清理: subscribers / _main_loop / pending handle / deque
+        super().dispose()
 
     def _on_background_task_done(self, task: asyncio.Task) -> None:
         """Done callback: 移除已完成任务并记录非取消异常.
@@ -294,10 +287,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except Exception as e:
                 logger.debug("[ScreenerVM] persist_splitter_width failed: %s", e, exc_info=True)
 
-        try:
-            loop = self._main_loop or asyncio.get_running_loop()
-        except RuntimeError:
-            return  # 无事件循环 (测试环境), 静默跳过
+        loop = self._get_loop_or_none()
+        if loop is None:
+            return  # 无事件循环 (测试环境/已 disposed), 静默跳过
         task = loop.create_task(_persist())
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
@@ -918,7 +910,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """Update pagination size and jump back to page 1."""
         if new_size > 0 and new_size != self._state.page_size:
             self._update_pagination(page_size=new_size, page_no=1)
-            self._notify()
 
     def clear_filters(self) -> None:
         """重置筛选/排序/分页/档位提示至默认值 (P1-3 #71).
@@ -1033,7 +1024,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         score = row_data.get("ai_score", 0)
         thinking = str(row_data.get("thinking", ""))
         entry = LogEntry(name=name, score=score, thinking=thinking)
-        self._state = replace(self._state, logs=self._state.logs + (entry,))
+        new_logs = self._state.logs + (entry,)
 
         # Task 3.1: 终结并发模式占位卡 (concurrency>1, is_analyzing=True).
         # _on_card_start_adapter 在并发模式创建 is_analyzing=True 占位卡; 结果到达时
@@ -1046,9 +1037,12 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             else c
             for c in self._state.stream_cards
         )
+        # 合并为单次 _set_state：2 次 state 写 + 1 次 notify → 1 次 replace + 1 次 _notify
+        # (修复 Skeptic P2 #5：语义等价，notify 次数从 2 次潜在可能性收敛为 1 次)
         if new_cards != self._state.stream_cards:
-            self._state = replace(self._state, stream_cards=new_cards)
-        self._notify()
+            self._set_state(logs=new_logs, stream_cards=new_cards)
+        else:
+            self._set_state(logs=new_logs)
 
         # 2. Buffer for Table Update
         self._ai_buffer.append(row_data)
@@ -1065,24 +1059,17 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             # Schedule update if not already pending
             if not self._flush_pending:
                 self._flush_pending = True
-                try:
-                    loop = asyncio.get_running_loop()
-                    if not self._main_loop:
-                        self._main_loop = loop
+                # 统一通过 Mixin 的 lazy getter 获取 loop（架构 P1-2 修复）
+                loop = self._get_loop_or_none()
+                if loop is not None and loop.is_running():
                     task = loop.create_task(self._flush_ai_buffer())
                     self._background_tasks.add(task)
                     task.add_done_callback(self._on_background_task_done)
-                except RuntimeError:
-                    if self._main_loop and self._main_loop.is_running():
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._flush_ai_buffer(),
-                            self._main_loop,
-                        )
-                        self._threadsafe_futures.add(future)
-                        future.add_done_callback(lambda f: self._threadsafe_futures.discard(f))
-                    else:
-                        self._flush_pending = False
-                        logger.error("Cannot schedule flush: No event loop available")
+                else:
+                    # 同步上下文（无 loop）场景：同步执行，不创建 task
+                    # （通常发生在单测中）
+                    self._flush_pending = False
+                    logger.warning("[ScreenerVM] Cannot schedule flush: no running loop; sync flush skipped")
 
     async def _flush_ai_buffer(self):
         """Flush buffer to main DataFrame"""

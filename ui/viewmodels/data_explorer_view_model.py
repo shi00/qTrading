@@ -116,26 +116,29 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
         self._disposed = False
 
+        # Mixin 字段初始化（跨线程修复）
+        self._init_mixin_fields()
+
     def _set_state(self, **changes: Any) -> None:
         """Update state fields and notify subscribers.
 
         disposed guard: dispose 后阻止延迟完成的异步任务更新 state/subscriber
-        (对齐 ScreenerViewModel, 见 screener_view_model.py).
+        (对齐 ScreenerViewModel, 见 screener_view_model.py). 与 Mixin._set_state
+        disposed guard 冗余但不冲突，保留作为短路优化。
         """
         if self._disposed:
             return
-        self._state = replace(self._state, **changes)
-        self._notify()
+        super()._set_state(**changes)
 
-    def _notify(self) -> None:
-        if self._disposed:
-            return
-        # 快照 subscribers 避免迭代中订阅者修改列表 (对齐 ObservableViewModelMixin 默认实现).
-        for cb in list(self._subscribers):
-            try:
-                cb(self._state)
-            except Exception as e:
-                logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
+    def _invoke_single_subscriber(self, cb: Callable[[DataExplorerState], None], snap: DataExplorerState) -> None:
+        """覆盖 per-cb 调用策略：DEVM-specific try/except + warning logging。
+
+        不再 override 终态骨架 _notify()（避免跨线程修复被绕过，架构 P0-1 修复）。
+        """
+        try:
+            cb(snap)
+        except Exception as e:
+            logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
 
     def dispose(self):
         """Release resources held by this ViewModel."""
@@ -159,7 +162,8 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         if self._db is not None:
             self._db.close()
             self._db = typing.cast(DataExplorerQueryClient, None)
-        self._subscribers.clear()
+        # Mixin 统一清理：subscribers / loop / pending handle / deque
+        super().dispose()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def init_tables(self):
