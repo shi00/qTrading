@@ -1,0 +1,7 @@
+fix(docs/i18n): watchlist 表 i18n key 补全 + README DAO 计数对齐 (Task 4.2 PR#360 CI fix)
+
+CI 失败修复:
+- test_dao_count_matches_readme: README.md DAO 计数 16→17, 列表加 Watchlist
+- test_data_dictionary_i18n_keys_exist: zh_CN/en_US strings.json 补全
+  tab_watchlist / col_stock_name / col_added_at / col_note 4 个 key
+  (col_ts_code 已存在)

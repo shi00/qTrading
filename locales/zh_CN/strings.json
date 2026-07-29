@@ -653,7 +653,7 @@
     "confirm_restore_button": "确认恢复",
     "cancel_restore_button": "取消",
     "restore_offline_guidance_title": "离线恢复指引",
-    "restore_offline_guidance": "恢复数据库需要关闭 qTrading，请在离线维护模式下执行。步骤：\n1. 关闭 qTrading\n2. 运行离线维护脚本：\n   - Windows: 开始菜单 → qTrading Database Maintenance，或 qtrading-db-maintenance.bat\n   - macOS/Linux: 终端运行 qtrading-db-maintenance.sh\n3. 执行 restore 命令：restore \"{backup_path}\"\n4. 重启 qTrading",
+    "restore_offline_guidance": '恢复数据库需要关闭 qTrading，请在离线维护模式下执行。步骤：\n1. 关闭 qTrading\n2. 运行离线维护脚本：\n   - Windows: 开始菜单 → qTrading Database Maintenance，或 qtrading-db-maintenance.bat\n   - macOS/Linux: 终端运行 qtrading-db-maintenance.sh\n3. 执行 restore 命令：restore "{backup_path}"\n4. 重启 qTrading',
     "restore_offline_guidance_dismiss": "我已了解",
     "settings_db_title": "数据库配置",
     "settings_db_saved": "数据库配置已保存",
@@ -1145,7 +1145,11 @@
     "tab_moneyflow_hsgt": "沪深港通资金流",
     "tab_task_history": "系统任务记录",
     "tab_app_state": "应用状态存储",
+    "tab_watchlist": "关注列表",
     "col_ts_code": "代码",
+    "col_stock_name": "股票名称",
+    "col_added_at": "加入时间",
+    "col_note": "备注",
     "col_symbol": "股票代码",
     "col_name": "名称",
     "col_id": "ID",
@@ -1819,5 +1823,5 @@
     "col_sw_l2_code": "二级行业代码",
     "col_sw_l2_name": "二级行业名称",
     "col_sw_l3_code": "三级行业代码",
-    "col_sw_l3_name": "三级行业名称"
+    "col_sw_l3_name": "三级行业名称",
 }
