@@ -41,10 +41,10 @@ UI_DIR = PROJECT_ROOT / "ui"
 ALLOWED_VIOLATIONS: dict[tuple[str, int, str], str] = {
     # startup_views.py DB 升级模态: 必需/进行中/失败状态意图性阻塞用户,
     # 不允许 close (DB 必须升级才能继续运行, 用户无其他选择).
-    # 行号随 LoadingView FIRST_RUN 定时器早退守卫添加而偏移 (293→297, 308→312, 343→347).
-    ("startup_views.py", 297, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
-    ("startup_views.py", 312, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
-    ("startup_views.py", 347, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
+    # 行号随 LoadingView 增加 backoff countdown 参数而偏移 (297→389, 312→404, 347→439).
+    ("startup_views.py", 389, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
+    ("startup_views.py", 404, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
+    ("startup_views.py", 439, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
 }
 
 
