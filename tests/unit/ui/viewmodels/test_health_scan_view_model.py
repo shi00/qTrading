@@ -17,7 +17,7 @@ data_processor/scan/on_progress/cleanup 业务逻辑迁移至本 VM 单测（声
 import asyncio
 from dataclasses import FrozenInstanceError
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -25,6 +25,7 @@ from ui.viewmodels.health_scan_view_model import (
     HealthScanState,
     HealthScanViewModel,
 )
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 pytestmark = pytest.mark.unit
 
@@ -175,23 +176,35 @@ class TestStartScan:
 
     @pytest.mark.asyncio
     async def test_start_scan_captures_main_loop(self):
-        """start_scan 在事件循环中调用时捕获 _main_loop（R11 loop-local 守卫）。"""
+        """start_scan 在事件循环中调用时捕获 _main_loop（R11 loop-local 守卫）。
+
+        Phase2 P2-4 修复后：Mixin.subscribe() 统一捕获 loop（替代旧的 start_scan 手动捕获）。
+        真实 View 总是先 subscribe 再 action，因此测试中 subscribe 先被调用。
+        """
         dp = _make_data_processor()
         vm = HealthScanViewModel(data_processor=dp)
+        # 模拟真实 View 初始化流程：先 subscribe（Mixin 捕获 loop/tid），再 action
+        unsub = vm.subscribe(lambda _s: None)
 
         await vm.start_scan()
 
         assert vm._main_loop is not None
         assert isinstance(vm._main_loop, asyncio.AbstractEventLoop)
+        unsub()
 
 
-# --- on_progress (R11 loop-local 守卫) ---
+# --- on_progress (Mixin 统一跨线程通知) ---
 
 
 class TestOnProgress:
     @pytest.mark.asyncio
-    async def test_on_progress_uses_run_coroutine_threadsafe(self):
-        """R11: on_progress 跨线程回调用 run_coroutine_threadsafe 调度回主 loop。"""
+    async def test_on_progress_updates_state_via_mixin(self):
+        """Phase2 P2-4: on_progress 回调通过 Mixin._set_state 通知, Mixin 负责跨线程安全。
+
+        旧实现：VM 手动调 run_coroutine_threadsafe 调度协程回主线程
+                → 风险：重复、遗漏、R11 同步原语跨循环复用
+        新实现：VM 只调 _set_state，Mixin 统一处理 loop 判定/节流/跨线程
+        """
         captured_cb: list[Any] = []
 
         async def fake_scan(*args: Any, **kwargs: Any) -> dict:
@@ -204,65 +217,61 @@ class TestOnProgress:
         dp = MagicMock()
         dp.run_quality_scan = fake_scan
         vm = HealthScanViewModel(data_processor=dp)
+        received: list[HealthScanState] = []
+        # 真实 View 先 subscribe 捕获 loop/tid
+        vm.subscribe(lambda s: received.append(s))
 
-        with patch("asyncio.run_coroutine_threadsafe") as mock_rct:
-            mock_future = MagicMock()
-            mock_rct.return_value = mock_future
-            await vm.start_scan()
-            # 关闭未等待的 coroutine（防止 RuntimeWarning）
-            if mock_rct.called:
-                coro = mock_rct.call_args.args[0]
-                if hasattr(coro, "close"):
-                    coro.close()
-
-        assert mock_rct.called, "on_progress 必须通过 run_coroutine_threadsafe 调度回主 loop"
-        call_args = mock_rct.call_args
-        # 第二个参数是 loop，必须是 AbstractEventLoop 实例
-        loop_arg = call_args.args[1]
-        assert isinstance(loop_arg, asyncio.AbstractEventLoop), "loop 参数必须是 AbstractEventLoop 实例"
-        assert loop_arg is vm._main_loop, "传入的 loop 必须是 start_scan 捕获的主 loop"
-
-    @pytest.mark.asyncio
-    async def test_on_progress_future_tracked_and_discarded(self):
-        """on_progress 调度后的 future 加入 _futures 集合，cancel_pending_futures 后清空。"""
-        captured_cb: list[Any] = []
-
-        async def fake_scan(*args: Any, **kwargs: Any) -> dict:
-            cb = kwargs.get("progress_callback")
-            if cb:
-                captured_cb.append(cb)
-                cb(5, 10, "scanning...")
-            return {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95}
-
-        dp = MagicMock()
-        dp.run_quality_scan = fake_scan
-        vm = HealthScanViewModel(data_processor=dp)
-
-        # 真实 future（不 mock run_coroutine_threadsafe）
         await vm.start_scan()
 
-        # cb 被调用过，future 已 add 到 _futures 集合
+        # cb 被调用过 → state 已更新（无需手动 RCT，Mixin 统一分发）
         assert len(captured_cb) == 1
-        # future 仍是 pending（loop 在 await 时才调度 coroutine，start_scan 同步返回时未执行）
-        # 但通过 add_done_callback(discard) 注册了清理回调，future done 后会自动从 _futures 移除
+        assert vm.state.progress == pytest.approx(0.5)
+        assert vm.state.status_text == "scanning..."
+        # 至少收到一次 progress 更新通知
+        assert any(s.progress == pytest.approx(0.5) for s in received)
+
+    @pytest.mark.asyncio
+    async def test_on_progress_future_tracking_legacy(self):
+        """cancel_pending_futures 仍可用（为旧代码/自定义 future 兼容）。
+
+        Phase2 P2-4 后：on_progress 不再调度 future（Mixin 直接 dispatch），
+        因此 VM 自己的 _futures 集合不填充（与 Mixin 无关）。
+        cancel_pending_futures 仍可由外部代码手动 add 的 future 触发。
+        """
+        dp = _make_data_processor()
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        # on_progress 不再使用 future（由 Mixin 统一分发）
+        # 手动填充 future 以验证 cancel_pending_futures 机制仍可用
+        mock_future = MagicMock()
+        mock_future.done.return_value = False
+        vm._futures.add(mock_future)
         assert len(vm._futures) == 1
-        # 手动 cancel 清理（模拟 use_effect cleanup 调 cancel_pending_futures）
+
         vm.cancel_pending_futures()
+        mock_future.cancel.assert_called_once()
         assert len(vm._futures) == 0
 
     @pytest.mark.asyncio
     async def test_update_progress_updates_state(self):
-        """_update_progress 直接调用时更新 progress/status_text state。"""
+        """on_progress (简化后直接 _set_state) 更新 progress/status_text state。
+
+        Phase2 P2-4: 移除了冗余的 _update_progress 包装协程；进度回调直接
+        走 _set_state → Mixin 通知分发。此处用等价的 _set_state 验证契约。
+        """
         dp = _make_data_processor()
         vm = HealthScanViewModel(data_processor=dp)
         received: list[HealthScanState] = []
         vm.subscribe(lambda s: received.append(s))
 
-        await vm._update_progress(3, 10, "translating...")
+        # 等价于旧 _update_progress(3, 10, "translating...")
+        vm._set_state(progress=3 / 10, status_text="translating...")
 
         assert vm.state.progress == pytest.approx(0.3)
         assert vm.state.status_text == "translating..."
-        assert len(received) == 1
+        assert len(received) >= 1
 
 
 # --- cancel_pending_futures ---
@@ -397,19 +406,23 @@ class TestDispose:
 
     @pytest.mark.asyncio
     async def test_dispose_short_circuits_late_progress_callback(self):
-        """P2-3: dispose 后 _update_progress (跨线程延迟回调) 触发的 _set_state 被短路.
+        """P2-3: dispose 后 late progress callback (via _set_state) 被短路.
 
-        场景: use_effect cleanup 调 dispose() 后, 工作线程的 run_coroutine_threadsafe
-        调度回来的 _update_progress 协程仍可能执行; guard 使 _set_state 短路.
+        场景: use_effect cleanup 调 dispose() 后, 工作线程回调的 late
+        progress 继续尝试更新 state; Mixin._set_state 的 disposed guard
+        使更新短路.
         """
         dp = _make_data_processor()
         vm = HealthScanViewModel(data_processor=dp)
         vm._set_state(scan_state="scanning", progress=0.3)
+        snapshot_before = vm.state
 
         vm.dispose()
-        await vm._update_progress(8, 10, "late update after dispose")
+        # 等价于 late 到达的 progress callback：_set_state(progress=0.8)
+        vm._set_state(progress=8 / 10, status_text="late update after dispose")
 
         # state 不应被 late callback 更新
+        assert vm.state is snapshot_before
         assert vm.state.scan_state == "scanning"
         assert vm.state.progress == 0.3
         assert vm.state.status_text == ""
@@ -489,9 +502,30 @@ class TestHealthScanViewModelContract:
         assert "raise  # R2" in source, "CancelledError 必须 raise (R2)"
 
     def test_uses_run_coroutine_threadsafe(self):
-        """R11: VM 必须用 run_coroutine_threadsafe 调度跨线程回调到主 loop。"""
-        source = _vm_source_without_docstrings()
-        assert "asyncio.run_coroutine_threadsafe" in source, "VM 必须用 run_coroutine_threadsafe"
+        """Phase2 P2-4 更新：VM 不再手动 RCT，改为 Mixin 统一跨线程调度。
+
+        旧实现：VM 源码必须显式使用 ``asyncio.run_coroutine_threadsafe``
+        新实现：VM 继承 ObservableViewModelMixin，由 Mixin 统一执行
+                ``call_soon_threadsafe`` / 同步直调判定 / 节流合并
+
+        因此本契约：检查 Mixin 源码中确实存在跨线程调度机制，
+        且 VM 继承 Mixin（不重复造轮子）。
+        """
+        import inspect
+        from pathlib import Path
+
+        # (1) VM 继承 Mixin
+        assert issubclass(HealthScanViewModel, ObservableViewModelMixin), (
+            "VM 必须继承 ObservableViewModelMixin 以统一跨线程安全"
+        )
+
+        # (2) Mixin 源码包含跨线程调度原语（call_soon_threadsafe 或等价安全路径）
+        mixin_path = Path(inspect.getfile(ObservableViewModelMixin))
+        mixin_source = mixin_path.read_text(encoding="utf-8")
+        has_call_soon = "call_soon_threadsafe" in mixin_source
+        has_sync_fallback = "_do_notify" in mixin_source  # 同步环境直调
+        assert has_call_soon or has_sync_fallback, "Mixin 必须包含跨线程安全调度机制 (call_soon_threadsafe 或等价)"
+        assert has_call_soon, "Mixin 必须用 call_soon_threadsafe 做跨线程调度"
 
     def test_no_i18n_get_in_vm(self):
         """CLAUDE.md §3.2: VM 不调 I18n.get，不感知 locale。

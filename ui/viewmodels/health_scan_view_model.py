@@ -23,8 +23,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any
 
 from data.data_processor import DataProcessor
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -68,61 +68,43 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
         self._data_processor = data_processor
         self._state: HealthScanState = HealthScanState()
         self._subscribers: list[Callable[[HealthScanState], None]] = []
+        # 保留 _futures 集合用于测试契约稳定性（当前 on_progress 已不再写入，
+        # 但测试手动填充调用 cancel_pending_futures 的断言仍需该属性存在）。
         self._futures: set[asyncio.Future] = set()
-        self._main_loop: asyncio.AbstractEventLoop | None = None
-        # P2-3: dispose 后阻止延迟回调 (_update_progress via run_coroutine_threadsafe) 更新 state.
+        # Mixin 字段初始化（跨线程修复）- 不再单独维护 self._main_loop
+        self._init_mixin_fields()
+        # P2-3: dispose 后阻止延迟回调 (_update_progress 跨线程) 更新 state.
         # 对齐 ScreenerViewModel 的 _disposed flag 模式.
         self._disposed: bool = False
-
-    def subscribe(self, callback: Callable[[HealthScanState], None]) -> Callable[[], None]:
-        """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
-        self._subscribers.append(callback)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("[HealthScanVM] subscribed without running loop (test mode)")
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
 
     def _set_state(self, **changes: Any) -> None:
         """Update state fields and notify subscribers (P2-3: 加 _disposed guard).
 
-        dispose 后跨线程回调 (run_coroutine_threadsafe 调度的 _update_progress)
-        可能仍触发 _set_state; guard 使其短路, 避免更新已清理的 state/subscribers
-        (对齐 ScreenerViewModel:190-195 模式).
+        dispose 后跨线程回调仍可能触发 _set_state; guard 使其短路, 避免更新已清理的
+        state/subscribers (对齐 ScreenerViewModel 模式). 与 Mixin._set_state disposed
+        guard 冗余但不冲突，保留作为短路优化。
         """
         if self._disposed:
             return
-        self._state = replace(self._state, **changes)
-        self._notify()
+        super()._set_state(**changes)
 
     async def start_scan(self) -> None:
         """启动扫描任务（业务 command）。
 
         - data_processor 为 None 时设置 error state
-        - 通过 run_coroutine_threadsafe 调度 on_progress 回调到主 loop（R11）
+        - on_progress 来自工作线程，不再手动 run_coroutine_threadsafe 封送；
+          Mixin._set_state -> _notify 自动检测跨线程并封送（统一双轨消除 P1-3）
         - R2: CancelledError 必须 raise
         """
         if self._data_processor is None:
             self._set_state(scan_state="error", error_key="db_err_format")
             return
 
-        loop = asyncio.get_running_loop()
-        self._main_loop = loop
         self._set_state(scan_state="scanning")
 
         def on_progress(current: int, total: int, msg: str) -> None:
-            """工作线程回调：调度 _update_progress 到主 loop（线程安全）。"""
-            fut = asyncio.run_coroutine_threadsafe(
-                self._update_progress(current, total, msg),
-                loop,
-            )
-            self._futures.add(cast("asyncio.Future[Any]", fut))
-            fut.add_done_callback(self._futures.discard)
+            """工作线程回调：直接调 _set_state，由 Mixin 自动封送回主 loop。"""
+            self._set_state(progress=current / total, status_text=msg)
 
         try:
             result = await self._data_processor.run_quality_scan(
@@ -136,16 +118,13 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
             logger.error("[HealthScanVM] Scan failed: %s", ex, exc_info=True)
             self._set_state(scan_state="error", error_key="db_err_format")
 
-    async def _update_progress(self, current: int, total: int, msg: str) -> None:
-        """主 loop 上更新进度 state（跨线程通过 run_coroutine_threadsafe 调度）。"""
-        self._set_state(progress=current / total, status_text=msg)
-
     def cancel_pending_futures(self) -> None:
         """取消 pending futures（R2 兼容不重新抛出）。
 
-        ``future.cancel()`` 在 future 已完成时返回 False，未完成时触发
-        ``CancelledError`` 由 future 内部消化（run_coroutine_threadsafe 的 coroutine
-        收到 CancelledError），不向调用方传播——符合关机清理语义。
+        之前 on_progress 用 run_coroutine_threadsafe 的 Future 跟踪已移除（Mixin 自动封送）。
+        保留该属性与逻辑用于接口稳定性 + 测试契约；若未来需要引入可取消的进度 Future，
+        可在此处扩展。``future.cancel()`` 在 future 已完成时返回 False，未完成时触发
+        ``CancelledError`` 由 future 内部消化，不向调用方传播——符合关机清理语义。
 
         由 View 的 use_effect cleanup 调用（open 变化或卸载时）。
         """
@@ -156,8 +135,8 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
 
     def dispose(self) -> None:
         """清理资源：先标记 disposed 短路延迟回调，再取消 pending futures + 清空订阅者。"""
-        # P2-3: 先置 _disposed=True, 使后续延迟回调 (_update_progress via run_coroutine_threadsafe)
-        # 触发的 _set_state 短路, 避免更新已清理的 state/subscribers.
+        # P2-3: 先置 _disposed=True, 使后续延迟回调触发的 _set_state 短路
         self._disposed = True
         self.cancel_pending_futures()
-        self._subscribers.clear()
+        # Mixin 统一清理 subscribers / loop / pending handle / deque
+        super().dispose()

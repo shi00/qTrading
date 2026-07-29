@@ -2,12 +2,13 @@
 
 覆盖:
 - 初始 state 默认值 + 从 TaskManager 同步初始化
-- subscribe/dispose 契约 (注册订阅者 + 捕获 main loop + 退订 TaskManager)
-- _on_tasks_updated 线程模型 (主循环运行走 call_soon_threadsafe, 否则同步)
+- subscribe/dispose 契约 (注册订阅者 + 退订 TaskManager)
+- _on_tasks_updated 通过 Mixin 统一跨线程调度 (call_soon_threadsafe 下沉 Mixin)
 - _refresh_from_tasks 仅在 running_count 变化时更新 state + 通知
 - 多状态混合任务的 running_count 计算
 
 对齐 ``test_task_center_view_model.py`` 的测试范式 (mock TaskManager + contextlib patch)。
+跨线程封送契约见 ``test_observable_mixin.py``。
 """
 
 # pyright: reportArgumentType=false
@@ -155,25 +156,25 @@ class TestNavBadgeViewModel:
         notified_state = callback.call_args.args[0]
         assert notified_state.running_count == 1
 
-    def test_on_tasks_updated_schedules_on_running_main_loop(self):
-        """_on_tasks_updated 当 _main_loop 运行中时走 call_soon_threadsafe 分支。"""
-        vm = self._make_vm()
-        mock_loop = MagicMock()
-        mock_loop.is_running.return_value = True
-        vm._main_loop = mock_loop
+    def test_on_tasks_updated_updates_state_via_mixin(self):
+        """_on_tasks_updated 通过 _refresh_from_tasks 更新 state（Mixin 统一跨线程调度）。
 
+        新架构：_on_tasks_updated 直接调 _refresh_from_tasks，末尾 _notify 由 Mixin
+        自动判定同/跨线程并封送（call_soon_threadsafe）。跨线程场景见
+        test_observable_mixin.py；此处验证同线程（单测无 subscribe）下 state 同步更新。
+        """
+        vm = self._make_vm()
         tasks = [_make_task(status=TaskStatus.RUNNING)]
         vm._on_tasks_updated(tasks)
+        # 同线程：_refresh_from_tasks 同步更新 state
+        assert vm.state.running_count == 1
 
-        mock_loop.call_soon_threadsafe.assert_called_once()  # noqa: weak-assertion 参数在后续 call_args.args 断言验证
-        scheduled_fn, scheduled_arg = mock_loop.call_soon_threadsafe.call_args.args
-        assert scheduled_fn == vm._refresh_from_tasks
-        assert scheduled_arg is tasks
-        # call_soon_threadsafe 仅调度未执行，state 尚未刷新
-        assert vm.state.running_count == 0
+    def test_on_tasks_updated_sync_when_loop_not_running(self):
+        """_on_tasks_updated 当 _main_loop 未运行时同线程同步更新 state。
 
-    def test_on_tasks_updated_skips_call_soon_when_loop_not_running(self):
-        """_on_tasks_updated 当 _main_loop 存在但未运行时退化为同步执行。"""
+        Mixin._dispatch_notification_impl 判定 cross_thread=False（loop 未运行），
+        走 _do_notify 同步路径；state 在 _refresh_from_tasks 中已更新。
+        """
         vm = self._make_vm()
         mock_loop = MagicMock()
         mock_loop.is_running.return_value = False

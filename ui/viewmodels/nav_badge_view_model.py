@@ -5,11 +5,12 @@
 - ``subscribe``/``_notify`` 通知机制 (hook 通过 ``use_viewmodel`` 订阅)
 - ``TaskManager.subscribe`` 驱动 state 更新
 
-线程模型 (对齐 ``TaskCenterViewModel``):
+线程模型 (对齐 ``TaskCenterViewModel``，P2 Segment 2 统一 Mixin):
 - TaskManager 回调可能来自后台线程
-- ``subscribe()`` 捕获 main loop, ``_on_tasks_updated`` 通过 ``call_soon_threadsafe``
-  将 state 更新调度到主循环
-- 无运行循环时 (单测) 退化为同步执行
+- subscribe/dispose/_notify 为 Mixin 终态骨架方法，子类不再 override subscribe
+- ``_on_tasks_updated`` 直接调 ``_refresh_from_tasks``，末尾 ``_notify`` 由
+  Mixin 自动判定同/跨线程并封送（call_soon_threadsafe）
+- 无运行循环时（单测）退化为同步执行
 
 设计权衡 (YAGNI):
 - 不合并到 ``TaskCenterViewModel``: ``TaskCenterView`` 仅在 tasks tab 激活时挂载,
@@ -18,7 +19,6 @@
   独立 VM 封装订阅 + state 更新, 避免在 AppLayout 写命令式订阅代码
 """
 
-import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -48,40 +48,30 @@ class NavBadgeViewModel(ObservableViewModelMixin[NavBadgeState]):
         self._task_manager = TaskManager()
         self._state = NavBadgeState()
         self._subscribers: list[Callable[[NavBadgeState], None]] = []
-        self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Mixin 字段初始化（跨线程修复）- 不再单独维护 self._main_loop
+        self._init_mixin_fields()
         # 初次同步获取当前状态
         self._refresh_from_tasks(self._task_manager.get_all_tasks())
         # 订阅未来更新
         self._task_manager.subscribe(self._on_tasks_updated)
 
-    def subscribe(self, callback: Callable[[NavBadgeState], None]) -> Callable[[], None]:
-        """订阅 state 变化, 返回退订函数。同时捕获 main loop。"""
-        self._subscribers.append(callback)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("[NavBadgeVM] subscribed without running loop (test mode)")
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
+    # --- subscribe / _notify / dispose 终态方法从 Mixin 继承 ---
+    # （Mixin.subscribe 每次 subscribe 都刷新 _owner_tid + 尝试捕获 loop，更健壮）
 
     def dispose(self) -> None:
-        """清理资源: 退订 TaskManager + 清空订阅者。"""
+        """清理资源: 退订 TaskManager + Mixin 统一清理 subscribers/loop/pending。"""
         self._task_manager.unsubscribe(self._on_tasks_updated)
-        self._subscribers.clear()
+        # Mixin 统一清理 subscribers / loop / pending handle / deque
+        super().dispose()
 
     def _on_tasks_updated(self, tasks: list[AppTask]) -> None:
         """TaskManager subscriber (called from TM thread).
 
-        Schedule state update on main loop if available; else synchronous (test mode).
+        不再手动 call_soon_threadsafe，直接调 _refresh_from_tasks；
+        _refresh_from_tasks 末尾调用 Mixin._notify()，
+        Mixin 会自动判定跨线程并封送（架构统一双轨消除 P1-3）。
         """
-        if self._main_loop and self._main_loop.is_running():
-            self._main_loop.call_soon_threadsafe(self._refresh_from_tasks, tasks)
-        else:
-            self._refresh_from_tasks(tasks)
+        self._refresh_from_tasks(tasks)
 
     def _refresh_from_tasks(self, tasks: list[AppTask]) -> None:
         """从 task list 计算 running_count, 仅在变化时更新 state + 通知。"""
