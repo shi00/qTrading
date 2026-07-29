@@ -337,8 +337,9 @@ class DataExplorerQueryClient:
         # P0-2: Use regex word-boundary matching instead of trailing-space strings.
         # Trailing-space matching ("DROP ") can be bypassed with tabs, newlines,
         # or comments: DROP\ttable, DROP\n table, DROP(--comment)table.
+        # P1-2: Added INTO (SELECT...INTO creates tables) and COPY (filesystem access).
         _DANGEROUS_KEYWORD_PATTERN = re.compile(
-            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE)\b",
+            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
             re.IGNORECASE,
         )
         match = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)

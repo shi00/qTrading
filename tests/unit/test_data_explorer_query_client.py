@@ -551,7 +551,12 @@ class TestExecuteSql:
         first_sql = str(execute_calls[0][0][0])
         assert "READ ONLY" in first_sql.upper()
 
-    def test_read_only_transaction_rejects_write(self):
+    def test_read_only_transaction_rejects_db_side_write(self):
+        """P1-2: READ ONLY 事务作为第二道防线，拦截绕过关键字检查的写入。
+
+        使用不含任何危险关键字的 SELECT 查询模拟 DB 端拒绝写入
+        （如触发器导致的隐式写入被 READ ONLY 拦截）。
+        """
         dm = _make_dm()
         mock_conn = MagicMock()
         mock_conn.execution_options.return_value = mock_conn
@@ -559,9 +564,31 @@ class TestExecuteSql:
         dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        result = dm.execute_sql("SELECT INTO temp_table FROM stock_basic")
+        result = dm.execute_sql("SELECT * FROM stock_basic WHERE ts_code = '000001.SZ'")
         assert result["success"] is False
         assert "read-only" in result["error"].lower()
+
+    def test_select_into_blocked_by_keyword(self):
+        """P1-2: SELECT...INTO 被关键字检查拦截（第一道防线）。
+
+        SELECT INTO 在 PostgreSQL 中创建新表，属于 DDL 操作。
+        sqlparse 将其分类为 SELECT，因此关键字检查是唯一的第一道防线。
+        """
+        dm = _make_dm()
+        result = dm.execute_sql("SELECT * INTO temp_table FROM stock_basic")
+        assert result["success"] is False
+        assert "INTO" in result["error"]
+
+    def test_copy_blocked(self):
+        """P1-2: COPY 被安全检查拦截（sqlparse 或关键字检查）。
+
+        COPY TO/FROM 可访问文件系统，是 PostgreSQL 特有的高危操作。
+        sqlparse 将 COPY 分类为 UNKNOWN（非 SELECT），在第一步即被拦截；
+        关键字检查作为 defense-in-depth，防止 sqlparse 误分类。
+        """
+        dm = _make_dm()
+        result = dm.execute_sql("COPY stock_basic TO '/tmp/data.csv'")
+        assert result["success"] is False
 
     def test_dangerous_keyword_tab_bypass_blocked(self):
         dm = _make_dm()
