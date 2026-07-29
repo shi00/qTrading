@@ -711,6 +711,11 @@ jobs:
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+          # 与 e2e-tests job (Windows) 对齐：CI 高负载 + 多 sidecar 并发启动时
+          # CanvasKit 首帧渲染可能超过默认 8000ms (TIMEOUTS.INTERACTION)，
+          # 倍率 2.0 → 16000ms，避免 wizard_welcome_guide 等 expect_text 误超时
+          # (PR #357 CI run 30426103862 复现根因)。
+          E2E_TIMEOUT_MULTIPLIER: "2.0"
         shell: bash
         run: |
           python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
