@@ -11,8 +11,9 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 
 线程模型：
 - verify_token/update_tier 是 async，在 Flet 事件循环中执行
-- ts.set_token/ts.pro_api/trade_cal/ConfigHandler.save_token 等同步 IO
+- ts.pro_api/trade_cal/ConfigHandler.save_token 等同步 IO
   通过 ThreadPoolManager.run_async(TaskType.IO, ...) offload（R16 合规）
+- token 不经 tushare SDK 全局状态（~/tk.csv）传递，全程显式传参 ts.pro_api(token=...)
 """
 
 import logging
@@ -176,10 +177,12 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def verify_token(self) -> bool:
-        """验证 Tushare Token：set_token + pro_api 探活 + save_token + probe capabilities。
+        """验证 Tushare Token：pro_api 探活 + save_token + probe capabilities。
 
-        R16：ts.set_token/ts.pro_api/trade_cal/ConfigHandler.save_token/
+        R16：ts.pro_api/trade_cal/ConfigHandler.save_token/
         TushareClient 构造等同步 IO 必须通过 ThreadPoolManager offload。
+
+        token 全程显式传参（ts.pro_api(token=...)），不写 tushare SDK 全局 ~/tk.csv。
         """
         token = self._state.token.strip()
 
@@ -197,8 +200,6 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         try:
             import tushare as ts
 
-            # ts.set_token 写入 ~/tk.csv 文件 (同步文件 IO)，必须 offload
-            await ThreadPoolManager().run_async(TaskType.IO, ts.set_token, token)
             # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
             timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
             temp_pro = ts.pro_api(token=token, timeout=timeout_val)
@@ -215,7 +216,7 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
 
-            # TushareClient.__init__ 和 set_token 内部调用 ts.set_token (文件 IO)，必须 offload
+            # TushareClient.set_token 内部仅重建 pro_api 引用与限流器（不写 ~/tk.csv），仍需 offload
             def _init_client_sync() -> tuple[TushareClient, bool]:
                 client = TushareClient()
                 return client, client.set_token(token)
