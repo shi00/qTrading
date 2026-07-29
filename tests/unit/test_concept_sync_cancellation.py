@@ -42,6 +42,8 @@ def _make_ctx(**overrides):
     ctx.cancel_event = None
     ctx.processor = None
     ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
+    # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
+    ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
     for key, value in overrides.items():
         setattr(ctx, key, value)
     return ctx
@@ -235,15 +237,13 @@ class TestLimitListLoopCancellation:
     async def test_loop_cancel_at_200(self):
         """201 条 limit_list，第 2 次 _check_cancelled（循环内 i=200）返回 True。
 
-        验证：返回 CANCELLED，clear_today_limit_concepts 与 upsert_limit_concepts 均未被调用。
+        验证：返回 CANCELLED，overwrite_limit_concepts 未被调用。
         """
         ctx = _make_ctx()
         strategy = LimitListSyncStrategy(ctx)
         limit_df = _make_limit_list_df(201)
 
-        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
         ctx.api.get_limit_list = AsyncMock(return_value=limit_df)
-        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
 
         call_count = 0
 
@@ -260,8 +260,7 @@ class TestLimitListLoopCancellation:
 
             assert result.status == "cancelled"
             assert call_count == 2
-            ctx.cache.stock_dao.clear_today_limit_concepts.assert_not_called()
-            ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
+            ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_loop_no_cancel_under_200(self):
@@ -274,9 +273,8 @@ class TestLimitListLoopCancellation:
         strategy = LimitListSyncStrategy(ctx)
         limit_df = _make_limit_list_df(2)
 
-        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=2)
         ctx.api.get_limit_list = AsyncMock(return_value=limit_df)
-        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=2)
 
         with patch.object(strategy, "_check_cancelled", return_value=False) as mock_check:
             result = await strategy.run()
