@@ -19,12 +19,15 @@ def reset_i18n():
     core 层已无 _state (方案 A 下沉到 ui 层).
     Regression fix: 保存/恢复 _listeners 快照, 清理测试中 subscribe 的泄漏回调,
     同时保留 _sync_i18n_state 全局订阅.
+    core-006: 同步保存/恢复 _locales_dir, 防止 monkeypatch 污染后续测试.
     """
     saved_listeners = list(I18n._listeners) if I18n._listeners else None
+    saved_locales_dir = I18n._locales_dir
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
     I18n._missing_keys = set()
+    I18n._locales_dir = None
     ui_i18n._i18n_state = None
     yield
     I18n._listeners = saved_listeners
@@ -32,6 +35,7 @@ def reset_i18n():
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
     I18n._missing_keys = set()
+    I18n._locales_dir = saved_locales_dir
     ui_i18n._i18n_state = None
 
 
@@ -675,3 +679,187 @@ class TestI18nDebugModeStrictInit:
         result = I18n.get("app_title")
 
         assert result == "A股智能选股助手"
+
+
+class TestReloadLocaleNotifiesListeners:
+    """core-001: reload_locale 必须通知订阅方, 与 set_locale 行为对齐."""
+
+    def test_reload_locale_triggers_listener(self):
+        I18n.initialize()
+        calls = []
+
+        def cb():
+            calls.append(I18n.current_locale())
+
+        I18n.subscribe(cb, sync_immediately=False)
+        I18n.get("app_title")  # 触发缓存加载
+
+        I18n.reload_locale()
+
+        assert len(calls) == 1, "reload_locale 应通知 listener"
+
+    def test_reload_locale_triggers_all_listeners(self):
+        I18n.initialize()
+        calls_a, calls_b = [], []
+
+        I18n.subscribe(lambda: calls_a.append(1), sync_immediately=False)
+        I18n.subscribe(lambda: calls_b.append(1), sync_immediately=False)
+        I18n.get("app_title")
+
+        I18n.reload_locale()
+
+        assert len(calls_a) == 1
+        assert len(calls_b) == 1
+
+    def test_reload_locale_listener_exception_isolation(self):
+        """reload_locale 期间 listener 抛异常不应阻断其他 listener."""
+        I18n.initialize()
+        good_calls = []
+
+        def bad():
+            raise RuntimeError("reload-boom")
+
+        def good():
+            good_calls.append(1)
+
+        I18n.subscribe(bad, sync_immediately=False)
+        I18n.subscribe(good, sync_immediately=False)
+        I18n.get("app_title")
+
+        I18n.reload_locale()
+
+        assert len(good_calls) == 1, "异常 listener 不应阻断后续 listener"
+
+
+class TestListenerIterationDefense:
+    """core-003: listener 迭代期间 subscribe/unsubscribe 不应引发 RuntimeError."""
+
+    def test_set_locale_listener_unsubscribe_during_iteration(self):
+        """set_locale 期间 listener 调用 unsubscribe 自身不应抛 RuntimeError."""
+        I18n.initialize()
+
+        calls = []
+
+        def self_removing():
+            calls.append(1)
+            I18n.unsubscribe(self_removing)
+
+        I18n.subscribe(self_removing, sync_immediately=False)
+
+        # 不应抛 RuntimeError: list changed size during iteration
+        I18n.set_locale("en_US")
+
+        assert len(calls) == 1
+        # 第二次 set_locale 时, self_removing 已被移除, 不应被再次调用
+        I18n.set_locale("zh_CN")
+        assert len(calls) == 1
+
+    def test_set_locale_listener_subscribe_during_iteration(self):
+        """set_locale 期间 listener 调用 subscribe 新回调不应引发 RuntimeError,
+        且新回调在当前迭代中不被调用 (基于副本快照)."""
+        I18n.initialize()
+        first_calls = []
+        second_calls = []
+
+        def first():
+            first_calls.append(1)
+            # 在迭代期间订阅新 listener
+            I18n.subscribe(second, sync_immediately=False)
+
+        def second():
+            second_calls.append(1)
+
+        I18n.subscribe(first, sync_immediately=False)
+
+        I18n.set_locale("en_US")
+
+        assert len(first_calls) == 1
+        # second 在 first 触发期间被订阅, 但基于副本快照不应在本次迭代中调用
+        assert len(second_calls) == 0
+
+        # 下一次 set_locale, second 应被调用
+        I18n.set_locale("zh_CN")
+        assert len(second_calls) == 1
+
+    def test_initialize_listener_subscribe_during_iteration(self):
+        """initialize 期间 listener 调用 subscribe 不应引发 RuntimeError."""
+        # 重置 _initialized 以触发 initialize 路径
+        I18n._initialized = False
+        first_calls = []
+        second_calls = []
+
+        def first():
+            first_calls.append(1)
+            I18n.subscribe(second, sync_immediately=False)
+
+        def second():
+            second_calls.append(1)
+
+        I18n.subscribe(first, sync_immediately=False)
+
+        I18n.initialize()
+
+        assert len(first_calls) == 1
+        assert len(second_calls) == 0
+
+    def test_reload_locale_listener_unsubscribe_during_iteration(self):
+        """reload_locale 期间 listener 调用 unsubscribe 自身不应抛 RuntimeError."""
+        I18n.initialize()
+        calls = []
+
+        def self_removing():
+            calls.append(1)
+            I18n.unsubscribe(self_removing)
+
+        I18n.subscribe(self_removing, sync_immediately=False)
+        I18n.get("app_title")
+
+        I18n.reload_locale()
+
+        assert len(calls) == 1
+        I18n.reload_locale()
+        assert len(calls) == 1
+
+
+class TestFormatExceptionContract:
+    """core-004: 明确 I18n.get 的 format 异常处理契约.
+
+    设计决策:
+    - KeyError (模板含 {name} 但 kwargs 未提供 name): 已吞没, 返回原模板
+    - 其他 format 异常 (IndexError/ValueError): 不吞没, 向调用方传播
+
+    理由: i18n 模板来自开发者控制的 JSON 文件, 非 KeyError 异常通常是
+    模板配置错误 (如 {{{} 损坏语法), 应在开发阶段暴露而非静默吞没.
+    若未来需要更宽松的处理, 应作为独立变更评审.
+    """
+
+    def test_key_error_swallowed_returns_template(self):
+        I18n.initialize()
+        # screener_done 模板: "筛选完成，共 {count} 只股票"
+        # 故意不传 count, 触发 KeyError
+        result = I18n.get("screener_done")
+        assert "{count}" in result, "KeyError 应被吞没, 返回原模板"
+
+    def test_index_error_not_swallowed(self):
+        """模板含位置参数 {0} 但 kwargs 未提供时, IndexError 应传播."""
+        I18n.initialize()
+        # 构造一个含位置参数的缓存模板
+        I18n._strings_cache["zh_CN"] = {"test_pos": "Hello {0}"}
+        # 直接调用会触发 IndexError (str.format 不接受 **kwargs 中的 0)
+        with pytest.raises(IndexError, match="Replacement index 0 out of range"):
+            I18n.get("test_pos", name="Alice")
+
+    def test_value_error_not_swallowed(self):
+        """模板语法错误 (如未闭合的 {) 应传播 ValueError."""
+        I18n.initialize()
+        # 构造一个格式错误的模板: 未闭合的 {
+        I18n._strings_cache["zh_CN"] = {"test_bad": "Hello {"}
+        with pytest.raises(ValueError, match=r"Single '\{' encountered"):
+            I18n.get("test_bad", name="Alice")
+
+    def test_valid_format_with_kwargs_returns_formatted(self):
+        """正常 format 应返回格式化后的字符串."""
+        I18n.initialize()
+        result = I18n.get("screener_done", count=42)
+        assert "42" in result
+        assert "{count}" not in result
