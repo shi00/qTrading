@@ -646,6 +646,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     self._full_results = result_df
                     self._update_pagination(page_no=1)
 
+                    # Task 3.3: save_results 失败不再落入 screener_exec_error.
+                    # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
+                    # trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
+                    save_failed_reason: str | None = None
                     if save_results:
                         analysis_trade_date = context.get("trade_date")
                         if not analysis_trade_date:
@@ -655,24 +659,49 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                         import uuid as _uuid
 
                         run_id = _uuid.uuid4().hex[:16]
-                        await self.review_mgr.save_results(
-                            strategy.name_key,
-                            result_df,
-                            trade_date=analysis_trade_date,
-                            run_id=run_id,
-                            params_snapshot=params or {},
-                        )
+                        try:
+                            await self.review_mgr.save_results(
+                                strategy.name_key,
+                                result_df,
+                                trade_date=analysis_trade_date,
+                                run_id=run_id,
+                                params_snapshot=params or {},
+                            )
+                        except Exception as save_err:
+                            # 必须捕获 Exception 而非 BaseException, 保留 CancelledError
+                            # 传播 (R2 红线).
+                            logger.error(
+                                "[ScreenerVM] save_results failed (results retained in memory): %s",
+                                save_err,
+                                exc_info=True,
+                            )
+                            save_failed_reason = str(save_err) or save_err.__class__.__name__
 
-                    self._set_state(
-                        page_no=1,
-                        loading=False,
-                        status_message=Message(
-                            "screener_done_saved",
-                            {"count": len(result_df)},
-                        ),
-                        status_color="success",
-                        data_version=self._state.data_version + 1,
-                    )
+                    if save_failed_reason is not None:
+                        self._set_state(
+                            page_no=1,
+                            loading=False,
+                            status_message=Message(
+                                "screener_done_unsaved",
+                                {
+                                    "count": len(result_df),
+                                    "reason": save_failed_reason,
+                                },
+                            ),
+                            status_color="warning",
+                            data_version=self._state.data_version + 1,
+                        )
+                    else:
+                        self._set_state(
+                            page_no=1,
+                            loading=False,
+                            status_message=Message(
+                                "screener_done_saved",
+                                {"count": len(result_df)},
+                            ),
+                            status_color="success",
+                            data_version=self._state.data_version + 1,
+                        )
                     return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()

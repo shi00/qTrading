@@ -138,6 +138,7 @@
     "screener_no_data_context": "没有可用的选股数据 (请先同步)",
     "screener_running_strategy": "正在运行 {name}...",
     "screener_done_saved": "筛选完成，共 {count} 只股票 (已保存)",
+    "screener_done_unsaved": "筛选完成，共 {count} 只股票 (结果未保存：{reason})",
     "screener_done": "筛选完成，共 {count} 只股票",
     "screener_saved": "(已保存)",
     "screener_exec_error": "执行中出错",
