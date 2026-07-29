@@ -366,7 +366,9 @@ class TestVerifyToken:
         assert result is True
         mock_tushare.set_token.assert_not_called()
         # 验证仍走显式 token 传参
-        mock_tushare.pro_api.assert_called_once_with(token="valid_token", timeout=mock_client.timeout)
+        # timeout_val 来自 ConfigHandler.get_tushare_timeout（fixture return_value=30），
+        # 不是 mock_client.timeout（MagicMock 对象）
+        mock_tushare.pro_api.assert_called_once_with(token="valid_token", timeout=30)
 
     @pytest.mark.asyncio
     async def test_verify_token_success_with_on_verify_success(self, mock_config_handler, mock_thread_pool):
