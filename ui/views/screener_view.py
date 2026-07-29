@@ -1272,14 +1272,14 @@ def ScreenerView(
     )
 
     # P1-3 批次 2 #70/#71: 表格空态分支 (formatted_rows 为空且非 loading 时显示 EmptyState)
+    # Task 3.5: 移除误导性 CTA (clear_filters 不清结果集也不触发重运行),
+    # 用户可通过工具栏的运行按钮重新执行策略
     table_content: ft.Control
     if not formatted_rows and not state.loading:
         table_content = EmptyState(
             icon=ft.Icons.INBOX,
             title=I18n.get("screener_no_results"),
             message=I18n.get("screener_no_data_context"),
-            on_cta=vm.clear_filters,
-            cta_text=I18n.get("screener_clear_filters"),
         )
     else:
         table_content = ft.Column(

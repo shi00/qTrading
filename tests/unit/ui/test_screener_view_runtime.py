@@ -2253,6 +2253,20 @@ class TestTableDataRendering:
         assert "on_row_click" not in env["captured_callbacks"]
         assert env["captured_callbacks"] == {}
 
+    def test_empty_state_no_cta_button(self, screener_view_env) -> None:
+        """Task 3.5: EmptyState 不渲染误导性 CTA 按钮 (clear_filters 不清结果集).
+
+        验证 EmptyState 调用不含 on_cta/cta_text 参数, 移除误导性「清除筛选条件」CTA。
+        用户可通过工具栏的运行按钮重新执行策略。
+        """
+        source = _read_source()
+        # 定位 EmptyState 调用块
+        empty_state_block = source.split("EmptyState(")[1].split(")")[0]
+        assert "on_cta" not in empty_state_block, (
+            "EmptyState should not wire on_cta (Task 3.5: clear_filters is misleading)"
+        )
+        assert "cta_text" not in empty_state_block, "EmptyState should not have cta_text parameter (Task 3.5)"
+
     def test_with_data_renders_table(self, screener_view_env) -> None:
         """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""
         env = screener_view_env
