@@ -1798,6 +1798,46 @@ class TestTaskManagerScheduleCoroErrorPaths:
         assert result is False
         assert coro.cr_frame is None  # type: ignore[union-attr]
 
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    async def test_schedule_coro_with_closed_coroutine(self, mock_tp):
+        """loop.create_task 对已 close 的 coroutine 抛 TypeError 时应安全降级。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        # 已 close 的 coroutine 传给 create_task 会抛 TypeError
+        mock_loop.create_task.side_effect = TypeError("coroutine is being awaited already")
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        coro.close()  # 预先 close
+        result = mgr._schedule_coro(coro)
+        assert result is True  # call_soon_threadsafe 成功了
+        # coro 已 close，cr_frame 为 None
+        assert coro.cr_frame is None  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    async def test_schedule_coro_with_non_awaitable(self, mock_tp):
+        """loop.create_task 对非 awaitable 抛 TypeError 时应安全降级，不传播异常。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.create_task.side_effect = TypeError("an asyncio.Future, a coroutine or an awaitable is required")
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+
+        # 模拟有 close 方法的非 awaitable 对象（实际场景：已 close 的 coroutine 残留）
+        mock_coro = MagicMock()
+        mock_coro.close = MagicMock()
+        result = mgr._schedule_coro(mock_coro)
+        assert result is True  # call_soon_threadsafe 成功了
+        mock_coro.close.assert_called_once_with()  # noqa: weak-assertion close() 无参数，仅需验证被调用一次
+
 
 class TestTaskManagerPersistSnapshotException:
     """覆盖 _persist_snapshot 异常分支。"""
