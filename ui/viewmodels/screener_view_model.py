@@ -928,6 +928,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         thinking = str(row_data.get("thinking", ""))
         entry = LogEntry(name=name, score=score, thinking=thinking)
         self._state = replace(self._state, logs=self._state.logs + (entry,))
+
+        # Task 3.1: 终结并发模式占位卡 (concurrency>1, is_analyzing=True).
+        # _on_card_start_adapter 在并发模式创建 is_analyzing=True 占位卡; 结果到达时
+        # 写入最终 reasoning/content 并 is_analyzing=False, 避免占位卡假死.
+        # 流式卡 (is_analyzing=False, concurrency=1) 不受影响: 其内容由 chunk 流式写入.
+        content = str(row_data.get("ai_reason", ""))
+        new_cards = tuple(
+            replace(c, reasoning=thinking, content=content, is_analyzing=False)
+            if c.name == name and c.is_analyzing
+            else c
+            for c in self._state.stream_cards
+        )
+        if new_cards != self._state.stream_cards:
+            self._state = replace(self._state, stream_cards=new_cards)
         self._notify()
 
         # 2. Buffer for Table Update
