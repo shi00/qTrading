@@ -469,13 +469,19 @@ class BaseDao:
         except Exception as e:
             logger.debug("[BaseDao] Engine sync_engine check skipped: %s", e)
 
+        # P1-3: 共享事务连接（conn is not None）时，suppress_errors 必须忽略。
+        # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
+        # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+        # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
+        # 注意：else 分支使用 tx_conn 变量名，避免重新绑定 conn 导致异常分支误判。
+        is_shared_conn = conn is not None
         start_time = time.perf_counter()
         try:
-            if conn is not None:
+            if is_shared_conn:
                 await conn.exec_driver_sql(sql, params)
             else:
-                async with self.engine.begin() as conn:
-                    await conn.exec_driver_sql(sql, params)
+                async with self.engine.begin() as tx_conn:
+                    await tx_conn.exec_driver_sql(sql, params)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_WRITE_THRESHOLD_MS:
@@ -511,6 +517,23 @@ class BaseDao:
                 )
                 raise EngineDisposedError(
                     f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {e}"
+                ) from e
+
+            # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
+            # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
+            # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+            # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
+            if is_shared_conn:
+                logger.error(
+                    "[%s] Write Error on shared conn (%.1fms, suppress_errors ignored): %s\nSQL: %s...",
+                    self.__class__.__name__,
+                    elapsed,
+                    e,
+                    sql[:200],
+                    exc_info=True,
+                )
+                raise DatabaseQueryError(
+                    f"[{self.__class__.__name__}] Database write failed on shared conn: {e}"
                 ) from e
 
             if suppress_errors:
@@ -674,20 +697,26 @@ class BaseDao:
                 set_=update_dict,
             )
 
+        # P1-3: 共享事务连接（conn is not None）时，suppress_errors 必须忽略。
+        # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
+        # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+        # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
+        # 注意：else 分支使用 tx_conn 变量名，避免重新绑定 conn 导致异常分支误判。
+        is_shared_conn = conn is not None
         start_time = time.perf_counter()
         try:
             total_written = 0
 
-            if conn is not None:
+            if is_shared_conn:
                 for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
                     chunk = records[i : i + _UPSERT_CHUNK_SIZE]
                     await conn.execute(stmt, chunk)
                     total_written += len(chunk)
             else:
-                async with self.engine.begin() as conn:
+                async with self.engine.begin() as tx_conn:
                     for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
                         chunk = records[i : i + _UPSERT_CHUNK_SIZE]
-                        await conn.execute(stmt, chunk)
+                        await tx_conn.execute(stmt, chunk)
                         total_written += len(chunk)
 
             elapsed = (time.perf_counter() - start_time) * 1000
@@ -729,6 +758,21 @@ class BaseDao:
                 raise EngineDisposedError(
                     f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {e}"
                 ) from e
+
+            # P1-3: 共享事务连接（is_shared_conn=True）时，suppress_errors 必须忽略。
+            # PostgreSQL 事务中发生错误后进入 "aborted" 状态，后续语句全部失败；
+            # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+            # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
+            if is_shared_conn:
+                logger.error(
+                    "[%s] UPSERT Error on shared conn (%.1fms, suppress_errors ignored) on %s: %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    table_name,
+                    e,
+                    exc_info=True,
+                )
+                raise
 
             if suppress_errors:
                 logger.warning(
