@@ -1088,21 +1088,26 @@ class TestScreenerViewModelOnAiProgress:
 
 class TestScreenerViewModelOnAiResultStreamFlush:
     def test_flush_via_main_loop_fallback(self, screener_vm):
-        """无 running loop 时，通过 main_loop fallback 调度 flush。"""
+        """无 running loop 时，通过 _main_loop fallback 调度 flush（loop.create_task）。
+
+        新 Mixin._get_loop_or_none 有 isinstance(loop, AbstractEventLoop) 守卫，
+        需用 spec=AbstractEventLoop 的 mock 通过；调度机制从 run_coroutine_threadsafe
+        改为 loop.create_task（Mixin 统一 lazy getter，架构 P1-2）。
+        """
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = False
-        screener_vm._main_loop = MagicMock()
+        # spec=AbstractEventLoop 使 isinstance 守卫通过（Mixin._get_loop_or_none 防御）
+        screener_vm._main_loop = MagicMock(spec=asyncio.AbstractEventLoop)
         screener_vm._main_loop.is_running.return_value = True
         screener_vm._flush_ai_buffer = MagicMock()
 
-        with (
-            patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")),
-            patch.object(asyncio, "run_coroutine_threadsafe") as mock_rcts,
-        ):
+        with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError("no loop")):
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
 
-        mock_rcts.assert_called_once()
+        # 新机制：通过 loop.create_task(_flush_ai_buffer()) 调度（不再用 run_coroutine_threadsafe）
+        # 强断言：验证传入的是 _flush_ai_buffer() 返回的 coroutine（mock 替身即 return_value）
+        screener_vm._main_loop.create_task.assert_called_once_with(screener_vm._flush_ai_buffer.return_value)
         assert len(screener_vm._ai_buffer) == 1
         # Log still appended to state
         assert len(screener_vm.state.logs) == 1

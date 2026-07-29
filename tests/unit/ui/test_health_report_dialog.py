@@ -1097,34 +1097,32 @@ class TestHealthScanDialogComponent:
         with pytest.raises(asyncio.CancelledError):
             health_scan_dialog_factory(data_processor=data_processor, open_state=True)
 
-    def test_on_progress_uses_run_coroutine_threadsafe(self, health_scan_dialog_factory):
-        """R11: on_progress 跨线程回调用 run_coroutine_threadsafe 调度回主 loop。"""
-        captured_cb: list[Any] = []
+    def test_on_progress_updates_state_via_mixin(self, health_scan_dialog_factory):
+        """on_progress 通过 _set_state 更新 VM state（Mixin 统一跨线程调度）。
+
+        新架构：on_progress 直接调 _set_state，由 Mixin._dispatch_notification_impl
+        自动判定同/跨线程并封送（call_soon_threadsafe）。R11 loop-local 守卫由 Mixin
+        保证，跨线程场景见 test_observable_mixin.py T1~T12。
+        """
 
         async def fake_scan(*args: Any, **kwargs: Any) -> dict:
             cb = kwargs.get("progress_callback")
             if cb:
-                captured_cb.append(cb)
                 cb(5, 10, "scanning...")
             return {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95}
 
         data_processor = MagicMock()
         data_processor.run_quality_scan = fake_scan
 
-        with patch("asyncio.run_coroutine_threadsafe") as mock_rct:
-            mock_rct.return_value = MagicMock()
-            component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
-            if mock_rct.called:
-                coro = mock_rct.call_args.args[0]
-                if hasattr(coro, "close"):
-                    coro.close()
-
-        # R11 守卫：验证 run_coroutine_threadsafe 被调用
-        assert mock_rct.called, "on_progress 必须通过 run_coroutine_threadsafe 调度回主 loop"
-        # 验证传入的 loop 是当前事件循环（loop-local 守卫，不跨循环复用同步原语）
-        call_args = mock_rct.call_args
-        loop_arg = call_args.args[1]
-        assert isinstance(loop_arg, asyncio.AbstractEventLoop), "loop 参数必须是 AbstractEventLoop 实例"
+        component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
+        # HealthScanDialog hooks: [i18n_state, open_state, vm_ref, ...]
+        # vm_ref 是 hook[2]（use_viewmodel 首个内部 use_ref）
+        vm = component._state.hooks[2].ref.current
+        # on_progress(5, 10, "scanning...") → _set_state(progress=0.5, status_text="scanning...")
+        # scan 完成后 _set_state(scan_state="done") 不覆盖 status_text/progress
+        assert vm.state.progress == 0.5
+        assert vm.state.status_text == "scanning..."
+        assert vm.state.scan_state == "done"
 
     def test_close_handler_invokes_on_close(self, health_scan_dialog_factory):
         """_close handler 调用 on_close 回调。"""
@@ -1142,7 +1140,11 @@ class TestHealthScanDialogComponent:
         on_close.assert_called_once()
 
     def test_cleanup_cancels_pending_futures(self, health_scan_dialog_factory):
-        """_cleanup_scan: 卸载时取消 pending futures（R2 兼容不重新抛出）。"""
+        """_cleanup_scan: 卸载时取消 pending futures（R2 兼容不重新抛出）。
+
+        新架构 on_progress 不再通过 run_coroutine_threadsafe 创建 Future（Mixin 自动封送），
+        _futures 仅保留接口稳定性；手动注入 pending future 验证 cancel_pending_futures 契约。
+        """
         mock_future = MagicMock()
         mock_future.done.return_value = False
         mock_future.cancel = MagicMock()
@@ -1156,17 +1158,14 @@ class TestHealthScanDialogComponent:
         data_processor = MagicMock()
         data_processor.run_quality_scan = fake_scan
 
-        with patch("asyncio.run_coroutine_threadsafe", return_value=mock_future) as mock_rct:
-            component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
-            # future 已通过 on_progress 添加到 futures_ref
-            # 卸载触发 _cleanup_scan
-            run_unmount_effects(component)
-            # R2 兼容：cancel 被调用，但不重新抛出 CancelledError
-            mock_future.cancel.assert_called_once()
-            if mock_rct.called:
-                coro = mock_rct.call_args.args[0]
-                if hasattr(coro, "close"):
-                    coro.close()
+        component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
+        # 手动注入 pending future（on_progress 不再自动填充 _futures）
+        vm = component._state.hooks[2].ref.current
+        vm._futures.add(mock_future)
+        # 卸载触发 _cleanup_scan → cancel_pending_futures
+        run_unmount_effects(component)
+        # R2 兼容：cancel 被调用，但不重新抛出 CancelledError
+        mock_future.cancel.assert_called_once()
 
     def test_cleanup_with_no_futures_no_error(self, health_scan_dialog_factory):
         """_cleanup_scan: 无 pending futures 时不抛异常。"""
