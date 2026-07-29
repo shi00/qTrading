@@ -101,15 +101,18 @@ class TestAISelectionStrategy:
     """Tests for AISelectionStrategy"""
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
-    async def test_filter_returns_empty_when_no_api_key(
+    @patch("strategies.ai_mixin.AIService")
+    async def test_filter_returns_quantitative_results_when_no_api_key(
         self,
         mock_ai_service_cls,
         sample_screening_df,
         mock_data_processor,
         test_engine,
     ):
-        """Test: Strategy raises error when API key is missing"""
+        """Task 3.4: AI 不可用时 filter 不再 raise, 返回量化初筛结果 + on_progress 提示 ai_not_configured.
+
+        与 ai_mixin 静默降级路径行为统一 (PR 356).
+        """
         mock_ai_service = MagicMock()
         mock_ai_service.is_cloud_available.return_value = False
         mock_ai_service_cls.return_value = mock_ai_service
@@ -117,19 +120,27 @@ class TestAISelectionStrategy:
         strategy = AISelectionStrategy()
 
         fundamental_df = pd.DataFrame([{"ts_code": "000001.SZ", "pe_ttm": 6.5}])
+        on_progress = MagicMock()
         context = {
             "screening_data": sample_screening_df,
             "fundamental_screening_data": fundamental_df,
             "data_processor": mock_data_processor,
+            "on_progress": on_progress,
         }
 
-        with pytest.raises(ValueError) as excinfo:
-            await strategy.filter(context)
+        result = await strategy.filter(context)
 
-        assert "API Key" in str(excinfo.value)
+        # AI 不可用 → 返回量化初筛结果 (非空), 不 raise
+        assert not result.empty
+        # on_progress 提示 ai_not_configured (出现在任意一次调用中)
+        from ui.i18n import I18n
+
+        expected_msg = I18n.get("ai_not_configured")
+        messages = [c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "") for c in on_progress.call_args_list]
+        assert expected_msg in messages, f"ai_not_configured not in on_progress calls: {messages}"
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     async def test_filter_returns_empty_when_no_data(
         self,
         mock_ai_service_cls,
@@ -152,7 +163,7 @@ class TestAISelectionStrategy:
 
     @pytest.mark.asyncio
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     async def test_filter_returns_empty_when_no_dp(
         self,
         mock_ai_service_cls,
@@ -177,7 +188,7 @@ class TestAISelectionStrategy:
         assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     async def test_pre_filter_removes_negative_pe(
         self,
         mock_ai_service_cls,

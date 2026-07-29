@@ -3,7 +3,6 @@ import logging
 import pandas as pd
 
 from data.persistence.quality_gate import QualityTier, _check_tier
-from services.ai_service import AIService
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
@@ -53,11 +52,9 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         if df is None:
             df = context.get("data")
 
-        # Fail fast if API not configured (test_ai_core compliance)
-        ai_client = AIService()
-        if not ai_client.is_cloud_available():
-            raise ValueError("API Key missing or client not initialized")
-
+        # Task 3.4: AI 不可用行为统一 — 不再 raise ValueError.
+        # 改由 run_ai_analysis (ai_mixin) 统一处理 is_cloud_available() 检查,
+        # 返回量化初筛结果 + on_progress 提示 "ai_not_configured".
         if df is None or df.empty:
             logger.warning("[AIStrategy] No data provided in context")
             return pd.DataFrame()
