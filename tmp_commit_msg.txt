@@ -1,0 +1,11 @@
+feat(onboarding): 云端 AI 步骤可选化，移除 onboarding 硬门槛 (FR-UX-001, P0)
+
+- bootstrap.check_onboarding_needed 移除 llm_api_key 硬门槛：
+  无云端 key 用户可完成 onboarding 进入主界面
+- onboarding_view_model cloud_ai StepConfig 改为可选：
+  show_skip=True + required=False + block_on_missing_validator=False
+  （与 local_model 跳过模式一致）
+- 跳过后主界面 AI 入口走 ai_not_configured 降级路径（已有 guard）
+- 测试同步更新：API key 缺失不再阻断、skip 可越过、契约断言对齐
+
+Plans.md Task 1.2 [lane:gate] [tdd:required]

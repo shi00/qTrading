@@ -391,7 +391,10 @@ def _validate_strategy_tier_coverage() -> None:
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
-    return not db_url or not token or not llm_api_key or not onboarding_complete
+    # FR-UX-001: 云端 AI 可选化，llm_api_key 不再是 onboarding 硬门槛
+    # （参数保留以兼容 startup_controller.start 调用签名；未配置云端 AI 时
+    # 主界面 AI 入口走 ai_not_configured 降级路径）
+    return not db_url or not token or not onboarding_complete
 
 
 def mask_sensitive(value):
