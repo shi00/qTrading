@@ -142,6 +142,130 @@ class TestCheckTier:
         processor._quality_tier = QualityTier.SILVER
         _check_tier(processor, QualityTier.SILVER, "test_func")
 
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_attribution_appended_to_msg(self, mock_i18n):
+        """L82-L89: health_cache 含 market.lag_days > 0 时附归因信息到错误消息。"""
+
+        def _get(key, **kwargs):
+            if key == "quality_err_too_low":
+                return "quality_err_too_low"
+            if key == "quality_err_attribution":
+                return f"落后 {kwargs.get('lag_days')} 天"
+            return key
+
+        mock_i18n.get.side_effect = _get
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {"market": {"lag_days": 5}}}
+        with pytest.raises(QualityGateError, match="落后 5 天"):
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_attribution_skipped_when_lag_zero(self, mock_i18n):
+        """L86: lag_days == 0 时不附归因 (跳过 attribution 拼接)。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {"market": {"lag_days": 0}}}
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        # msg 不含 attribution 拼接 (lag_days=0 跳过 L87-89)
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_attribution_skipped_when_i18n_misses(self, mock_i18n):
+        """L88-L89: I18n.get 返回 key 本身（未命中）时不附归因（attribution == key）。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {"market": {"lag_days": 7}}}
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        # attribution == "quality_err_attribution" 时未拼接
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_missing_market_key_treated_as_zero_lag(self, mock_i18n):
+        """L84-L85: health_cache.data 无 market 键时 lag_days 默认 0，不附归因。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {}}
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_market_not_dict_uses_zero_lag(self, mock_i18n):
+        """L85: market_info 非 dict 时 lag_days=0，不附归因。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {"market": "not_a_dict"}}
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_data_not_dict_skips_attribution(self, mock_i18n):
+        """L83: health_cache.data 非 dict 时跳过归因。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": "not_a_dict"}
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_not_dict_skips_attribution(self, mock_i18n):
+        """L81-L82: _health_cache 非 dict 时跳过归因。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = "not_a_dict"
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_none_skips_attribution(self, mock_i18n):
+        """L81: _health_cache 为 None 时跳过归因。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = None
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        assert "quality_err_attribution" not in str(exc_info.value)
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_health_cache_lag_days_float_appends_attribution(self, mock_i18n):
+        """L86: lag_days 为 float 类型且 > 0 时也附归因。"""
+
+        def _get(key, **kwargs):
+            if key == "quality_err_too_low":
+                return "quality_err_too_low"
+            if key == "quality_err_attribution":
+                return f"落后 {int(kwargs.get('lag_days'))} 天"
+            return key
+
+        mock_i18n.get.side_effect = _get
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._health_cache = {"data": {"market": {"lag_days": 3.5}}}
+        with pytest.raises(QualityGateError, match="落后 3 天"):
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+
 
 class TestRequireQualityDecorator:
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)

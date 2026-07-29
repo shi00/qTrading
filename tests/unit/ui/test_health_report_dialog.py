@@ -798,6 +798,37 @@ class TestBuildScanResultExtended:
         icon = score_row.controls[0]
         assert icon.color == self.mock_ac.ERROR
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    def test_on_init_data_renders_init_button(self):
+        """L744-745: on_init_data 非空时在结果区末尾渲染 Divider + "初始化数据"按钮。"""
+        from ui.components.health_report_dialog import _build_scan_result
+
+        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95, "avg_fundamental": 0.8}
+        on_init_data = MagicMock()
+        column = _build_scan_result(result, on_init_data=on_init_data)
+        # 默认 6 个 controls + 2 个追加 (Divider + Row)
+        # 默认 controls: Container(height=20), score_row, Divider, metrics_row, Divider, fundamentals_row
+        # 追加: Divider + Row(ElevatedButton)
+        assert len(column.controls) == 8
+        # 最后一个是 Row 含 ElevatedButton
+        button_row = column.controls[-1]
+        assert isinstance(button_row, ft.Row)
+        button = button_row.controls[0]
+        assert isinstance(button, ft.ElevatedButton)
+        # on_click 触发 on_init_data 回调
+        assert button.on_click is not None
+        button.on_click(None)  # type: ignore[reportCallIssue]  # [reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        on_init_data.assert_called_once()  # noqa: weak-assertion 回调无参数, 触发即验证
+
+    def test_on_init_data_none_skips_init_button(self):
+        """L743: on_init_data=None 时不追加 Divider + 按钮（仅默认 controls）。"""
+        from ui.components.health_report_dialog import _build_scan_result
+
+        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95, "avg_fundamental": 0.8}
+        column = _build_scan_result(result, on_init_data=None)
+        # 默认 6 个 controls，无追加
+        assert len(column.controls) == 6
+
 
 # ---------------------------------------------------------------------------
 # 组件运行时测试：HealthReportDialog（声明式 V1）
@@ -905,6 +936,70 @@ class TestHealthReportDialogComponent:
         """卸载组件不抛异常（log effect 无 cleanup，仅验证不崩溃）。"""
         component = health_report_dialog_env["component"]
         run_unmount_effects(component)  # 不抛异常即可
+
+    def test_sync_now_handler_invokes_on_sync_now(self, mock_i18n_state, monkeypatch):
+        """L551-555/L570: _sync_now handler 调用 on_close + on_sync_now；on_sync_now 非空时 actions.insert sync_now 按钮。"""
+        from ui.components import health_report_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: f"i18n[{key}]"
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        on_close = MagicMock()
+        on_sync_now = MagicMock()
+        report = _make_report_dict()
+        component = make_component(
+            mod.HealthReportDialog,
+            report=report,
+            page=None,
+            open_state=True,
+            on_close=on_close,
+            on_deep_scan=MagicMock(),
+            on_sync_now=on_sync_now,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        # on_sync_now 非空时 actions.insert(0, sync_now_btn) → sync_now 是第一个按钮
+        sync_now_btn = dialog.actions[0]
+        # 触发 _sync_now handler
+        sync_now_btn.on_click(None)
+        on_close.assert_called_once()
+        on_sync_now.assert_called_once()  # noqa: weak-assertion 回调无参数, 触发即验证
+
+    def test_sync_now_button_absent_when_callback_none(self, mock_i18n_state, monkeypatch):
+        """L570: on_sync_now=None 时 actions 不含 sync_now 按钮（仅 deep_scan + close）。"""
+        from ui.components import health_report_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: f"i18n[{key}]"
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        on_close = MagicMock()
+        on_deep_scan = MagicMock()
+        component = make_component(
+            mod.HealthReportDialog,
+            report=_make_report_dict(),
+            page=None,
+            open_state=True,
+            on_close=on_close,
+            on_deep_scan=on_deep_scan,
+            on_sync_now=None,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        # on_sync_now=None → 仅 2 个按钮 (deep_scan + close)
+        assert len(dialog.actions) == 2
+        # 验证第一个按钮是 deep_scan (通过 on_click 触发 on_close + on_deep_scan)
+        first_btn = dialog.actions[0]
+        first_btn.on_click(None)
+        on_close.assert_called_once()
+        on_deep_scan.assert_called_once()  # noqa: weak-assertion 回调无参数, 触发即验证
 
 
 # ---------------------------------------------------------------------------
@@ -1090,3 +1185,53 @@ class TestHealthScanDialogComponent:
         component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=False)
         # open_=False 时 effect 早返回，run_quality_scan 未被调用
         data_processor.run_quality_scan.assert_not_called()
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    def test_init_data_handler_invokes_on_init_data(self, mock_i18n_state, monkeypatch):
+        """L873-877: HealthScanDialog _init_data handler 调用 on_close + on_init_data。
+
+        扫描成功后 _build_scan_result 渲染"初始化数据"按钮，点击触发 _init_data 闭包。
+        本测试通过 fake_scan 返回 done 状态，渲染按钮后点击触发回调。
+        """
+        from ui.components import health_report_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: f"i18n[{key}]"
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        on_close = MagicMock()
+        on_init_data = MagicMock()
+        data_processor = MagicMock()
+        data_processor.run_quality_scan = AsyncMock(
+            return_value={
+                "score": 90,
+                "tier": 3,
+                "avg_lag": 1,
+                "avg_continuity": 0.95,
+                "avg_fundamental": 0.8,
+                "fin_recency_ok": True,
+                "sample_size": 50,
+            }
+        )
+        component = make_component(
+            mod.HealthScanDialog,
+            data_processor=data_processor,
+            page=None,
+            open_state=True,
+            on_close=on_close,
+            on_init_data=on_init_data,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        # done 状态下 content 是 _build_scan_result 返回的 Column
+        # 末尾的 Row 含 ElevatedButton (scan_btn_init_data)
+        result_column = dialog.content.content
+        button_row = result_column.controls[-1]
+        button = button_row.controls[0]
+        # 触发 _init_data handler
+        button.on_click(None)
+        on_close.assert_called_once()
+        on_init_data.assert_called_once()  # noqa: weak-assertion 回调无参数, 触发即验证
