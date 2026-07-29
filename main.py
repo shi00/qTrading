@@ -83,6 +83,36 @@ async def _wait_for_user_action(retry_event: threading.Event, exit_event: thread
     return result
 
 
+async def _wait_for_event_or_timeout(event: threading.Event, timeout: float) -> str:
+    """等待 event 被 set 或超时，返回 ``"event"`` 或 ``"timeout"``（P2-4）。
+
+    用 threading.Event + asyncio.to_thread + asyncio.sleep 实现可中断的退避等待：
+    - event 被 set → 立即返回 ``"event"``（用户点 Exit 中断退避）
+    - sleep 完成 → 返回 ``"timeout"``（退避结束，继续重试）
+
+    finally 中 set event 唤醒可能仍在阻塞的 ``event.wait()`` 线程，避免线程泄漏
+    （与 ``_wait_for_user_action`` 同样的线程安全策略）。
+
+    CancelledError 正确传播（R2 红线），finally 仍会 set event 避免线程泄漏。
+    """
+    event_task = asyncio.create_task(asyncio.to_thread(event.wait))
+    sleep_task = asyncio.create_task(asyncio.sleep(timeout))
+    result = "timeout"
+    try:
+        await asyncio.wait(
+            [event_task, sleep_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        result = "event" if event.is_set() else "timeout"
+    finally:
+        # 先 set event 唤醒可能仍在阻塞的 event.wait() 线程，再 cancel task
+        event.set()
+        for t in (event_task, sleep_task):
+            if not t.done():
+                t.cancel()
+    return result
+
+
 async def _prepare_db_with_retry(
     page: ft.Page,
     scenario: EmbeddedPgStartupScenario | None,
@@ -164,14 +194,33 @@ async def _prepare_db_with_retry(
             # 再进入退避等待（避免退避期间仍显示错误页让用户误以为卡死）
             from ui.startup_views import LoadingView
 
-            page.render(LoadingView, scenario=scenario)
-            await asyncio.sleep(0.05)  # 让 Flet 刷新一帧
-
             # P2-1: 指数退避（2^(n-1)，上限 30s），给瞬时故障恢复时间
-            # CancelledError 在 sleep 中正确传播（R2 红线）
+            # P2-4: 退避期间显示倒计时 + Exit 按钮，用户可中断等待
             backoff = min(2 ** (failure_count - 1), 30)
             logger.info("[Main] Retrying prepare_database_runtime after %ss backoff", backoff)
-            await asyncio.sleep(backoff)
+
+            backoff_exit_event = threading.Event()
+
+            def on_backoff_exit(_e: ft.ControlEvent, _ev: threading.Event = backoff_exit_event) -> None:
+                _ev.set()
+
+            page.render(
+                LoadingView,
+                scenario=scenario,
+                retry_backoff_seconds=backoff,
+                failure_count=failure_count,
+                on_exit=on_backoff_exit,
+            )
+            await asyncio.sleep(0.05)  # 让 Flet 刷新一帧
+
+            # P2-4: 可中断的退避等待
+            # - exit_event 被 set → 用户点 Exit → sys.exit(0)
+            # - 超时 → 继续重试
+            # - CancelledError → 正确传播（R2 红线）
+            action = await _wait_for_event_or_timeout(backoff_exit_event, backoff)
+            if action == "event":
+                logger.info("[Main] User chose to exit during backoff wait")
+                sys.exit(0)
 
 
 def _resolve_embedded_pg_log_dir_hint() -> str | None:

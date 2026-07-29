@@ -477,6 +477,255 @@ def test_build_pre_init_error_view_persistent_failure_no_log_dir(mock_i18n):
     assert "startup_embedded_pg_persistent_failure_hint" in source
 
 
+# --- P2-4: Retry Backoff Feedback（退避倒计时 + 失败次数 + Exit 按钮）---
+
+
+def test_build_loading_view_retry_backoff_shows_countdown(mock_i18n):
+    """P2-4: retry_backoff_seconds=10 → 显示退避标题 + 倒计时 "剩余 10 秒"."""
+    from ui.startup_views import _build_loading_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(
+            scenario=EmbeddedPgStartupScenario.NORMAL,
+            retry_backoff_seconds=10,
+        )
+    source = repr(view)
+    # 含退避标题、hint、剩余秒数 i18n key
+    assert "startup_retry_backoff_title" in source
+    assert "startup_retry_backoff_remaining" in source
+
+
+def test_build_loading_view_retry_backoff_zero_shows_retrying(mock_i18n):
+    """P2-4: retry_backoff_seconds=0 → 显示 "正在重试..."（倒计时归零）."""
+    from ui.startup_views import _build_loading_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(
+            scenario=EmbeddedPgStartupScenario.NORMAL,
+            retry_backoff_seconds=0,
+        )
+    source = repr(view)
+    # 倒计时归零，显示 "正在重试..." 而非 "剩余 0 秒"
+    assert "startup_retry_backoff_retrying" in source
+    assert "startup_retry_backoff_remaining" not in source
+
+
+def test_build_loading_view_retry_backoff_shows_failure_count(mock_i18n):
+    """P2-4: retry_backoff_seconds + failure_count=3 → 显示失败次数 hint."""
+    from ui.startup_views import _build_loading_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(
+            scenario=EmbeddedPgStartupScenario.NORMAL,
+            retry_backoff_seconds=5,
+            failure_count=3,
+        )
+    source = repr(view)
+    # 含 "已连续失败 N 次" hint i18n key
+    assert "startup_retry_backoff_hint" in source
+
+
+def test_build_loading_view_retry_backoff_shows_exit_button(mock_i18n):
+    """P2-4: retry_backoff_seconds + on_exit → 显示 Exit 按钮可中断退避."""
+    from ui.startup_views import _build_loading_view
+
+    on_exit = MagicMock()
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(
+            scenario=EmbeddedPgStartupScenario.NORMAL,
+            retry_backoff_seconds=5,
+            on_exit=on_exit,
+        )
+    # 含 Exit 按钮（mock_i18n.get("exit_program") 返回 "exit_program"）
+    exit_button = _find_button_by_text(view, "exit_program")
+    assert exit_button is not None  # noqa: weak-assertion <验证 Exit 按钮存在是显示 Exit 按钮测试目标本身, 后续 on_exit.assert_called_once 验证回调触发>
+    # 点击 Exit 触发回调
+    _trigger_click(exit_button)
+    on_exit.assert_called_once()
+
+
+def test_build_loading_view_retry_backoff_without_on_exit_no_button(mock_i18n):
+    """P2-4: retry_backoff_seconds + on_exit=None → 不显示 Exit 按钮（不可中断）."""
+    from ui.startup_views import _build_loading_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(
+            scenario=EmbeddedPgStartupScenario.NORMAL,
+            retry_backoff_seconds=5,
+            on_exit=None,
+        )
+    # 不含 Exit 按钮
+    exit_button = _find_button_by_text(view, "exit_program")
+    assert exit_button is None
+
+
+def test_build_loading_view_no_backoff_no_exit_button(mock_i18n):
+    """P2-4: retry_backoff_seconds=None → 不显示退避相关 UI 和 Exit 按钮."""
+    from ui.startup_views import _build_loading_view
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.NORMAL)
+    source = repr(view)
+    # 不含退避相关 i18n key
+    assert "startup_retry_backoff_title" not in source
+    assert "startup_retry_backoff_remaining" not in source
+    # 不含 Exit 按钮
+    assert _find_button_by_text(view, "exit_program") is None
+
+
+def test_loading_view_component_starts_timer_for_backoff(mock_i18n_state, mock_app_colors_state):
+    """P2-4: LoadingView + retry_backoff_seconds → 启动倒计时定时器（page.run_task 被调用）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(
+        LoadingView,
+        scenario=EmbeddedPgStartupScenario.NORMAL,
+        retry_backoff_seconds=5,
+        failure_count=2,
+        on_exit=MagicMock(),
+    )
+    run_mount_effects(component, page=page)
+
+    assert page.run_task.called  # noqa: weak-assertion <验证 page.run_task 被调用是定时器启动测试目标本身>
+
+
+def test_loading_view_component_no_elapsed_timer_when_backoff(mock_i18n_state, mock_app_colors_state):
+    """P2-4: LoadingView + retry_backoff_seconds + FIRST_RUN → 不启动 elapsed 定时器（互斥）.
+
+    退避倒计时与已等待时间互斥：backoff 期间显示倒计时（让用户知道还要等多久），
+    不显示 elapsed（已等待时间在 backoff 期间无意义）。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    captured_tick_fn: list = []
+    mock_task = MagicMock()
+
+    def fake_run_task(tick_fn):
+        captured_tick_fn.append(tick_fn)
+        return mock_task
+
+    page.run_task = fake_run_task  # type: ignore[method-assign]
+
+    # FIRST_RUN + backoff → 应启动 backoff 定时器（而非 elapsed 定时器）
+    component = make_component(
+        LoadingView,
+        scenario=EmbeddedPgStartupScenario.FIRST_RUN,
+        retry_backoff_seconds=5,
+        failure_count=1,
+        on_exit=MagicMock(),
+    )
+    run_mount_effects(component, page=page)
+
+    assert captured_tick_fn, "backoff 场景应启动定时器"  # noqa: weak-assertion <验证定时器启动是后续执行前提>
+
+    # 在事件循环中执行 _tick 协程，验证是 backoff countdown 而非 elapsed
+    async def run_test():
+        task = asyncio.ensure_future(captured_tick_fn[0]())
+        await asyncio.sleep(0.1)  # 让第一次 tick 执行
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 传播
+            await task
+
+    asyncio.run(run_test())
+
+
+def test_loading_view_component_backoff_exit_button_triggers_callback(
+    mock_i18n, mock_i18n_state, mock_app_colors_state
+):
+    """P2-4: LoadingView + on_exit → Exit 按钮点击触发回调（声明式组件渲染）.
+
+    同时使用 ``mock_i18n`` (patch I18n 类，让 ``I18n.get`` 返回 key 本身) 和
+    ``mock_i18n_state`` (注入 observable state)，以便 ``_find_button_by_text``
+    能通过 key 本身定位按钮。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        attach_fake_page,
+        make_component,
+        render_once,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    on_exit = MagicMock()
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(
+        LoadingView,
+        scenario=EmbeddedPgStartupScenario.NORMAL,
+        retry_backoff_seconds=5,
+        failure_count=2,
+        on_exit=on_exit,
+    )
+    attach_fake_page(component)
+    run_mount_effects(component, page=page)
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = render_once(component)
+
+    # Exit 按钮存在且点击触发回调
+    exit_button = _find_button_by_text(view, "exit_program")
+    assert exit_button is not None  # noqa: weak-assertion <验证 Exit 按钮存在是声明式组件渲染 Exit 按钮测试目标本身, 后续 on_exit.assert_called_once 验证回调触发>
+    _trigger_click(exit_button)
+    on_exit.assert_called_once()
+
+
+def test_loading_view_component_backoff_countdown_tick_decrements_remaining(mock_i18n_state, mock_app_colors_state):
+    """P2-4: LoadingView backoff 定时器每秒递减 remaining，取消时传播 CancelledError（R2 红线）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    captured_tick_fn: list = []
+    mock_task = MagicMock()
+
+    def fake_run_task(tick_fn):
+        captured_tick_fn.append(tick_fn)
+        return mock_task
+
+    page.run_task = fake_run_task  # type: ignore[method-assign]
+
+    component = make_component(
+        LoadingView,
+        scenario=EmbeddedPgStartupScenario.NORMAL,
+        retry_backoff_seconds=2,
+        failure_count=1,
+        on_exit=MagicMock(),
+    )
+    run_mount_effects(component, page=page)
+
+    assert captured_tick_fn  # noqa: weak-assertion <验证 tick_fn 被捕获是后续执行前提>
+
+    # 在事件循环中执行 _tick 协程，验证倒计时递减 + CancelledError 传播（R2）
+    async def run_test():
+        task = asyncio.ensure_future(captured_tick_fn[0]())
+        # 等待 1.5 秒让第一次 tick 完成（remaining=2 → 1），第二次 sleep 进行中取消
+        await asyncio.sleep(1.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线
+            await task
+
+    asyncio.run(run_test())
+    # 验证至少触发过组件更新（remaining 递减）
+    assert page.session.scheduled_updates, "倒计时递减应触发组件更新"  # noqa: weak-assertion <验证 scheduled_updates 非空是递减触发更新的测试目标>
+
+
 def test_build_upgrade_dialog(mock_i18n):
     on_upgrade = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):
