@@ -81,7 +81,10 @@ python -m pytest tests/unit/ -v -m "not slow"
 
 # 6. 推送并创建 PR
 git push -u origin feature/strategy-macd
-gh pr create --title "feat(strategy): add MACD crossover" --body "..."
+# AI 助手创建 PR 时必须使用 --template 加载模板，禁止手写简化 PR body
+gh pr create --title "feat(strategy): add MACD crossover" \
+  --template .github/PULL_REQUEST_TEMPLATE.md \
+  --base main
 
 # 7. PR 通过 Merge Queue 合并后，清理 worktree（回主工作区执行）
 cd ../..  # 回主仓库根
@@ -90,7 +93,68 @@ git worktree prune
 git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
 ```
 
+### AI 助手创建 PR 标准流程（强制）
+
+**背景**：`gh pr create --body "..."` 不会自动加载 `.github/PULL_REQUEST_TEMPLATE.md`（GitHub Web UI 才会自动加载）。AI 助手使用 `gh pr create` 时必须显式加载模板，否则会生成不合规的简化 PR 描述。
+
+**强制要求**（AI 助手创建 PR 时必须遵守）：
+
+1. **必须使用 `--template` 参数加载 PR 模板**：
+
+   ```bash
+   gh pr create --title "<conventional commit title>" \
+     --template .github/PULL_REQUEST_TEMPLATE.md \
+     --base main
+   ```
+
+   此命令会打开编辑器加载模板内容，AI 助手应在模板基础上填写各章节，保留模板结构（标题、勾选项、注释提示）。
+
+2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。CONTRIBUTING.md「PR 描述模板」中"无需手动复制该模板"的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
+
+3. **必须如实勾选模板自检清单**：
+   - 「修改类型」勾选对应项，删除无关项
+   - 「测试覆盖」按实际验证结果勾选，未运行的验证项不得勾选
+   - 「提交前自检清单」逐条核对，未通过项须补齐后再创建 PR
+   - 「文档同步校验」按本次变更范围勾选
+
+4. **PR 标题必须遵循 Conventional Commits**：`<type>(<scope>): <description>`，与提交信息规范一致。
+
+5. **关联工单**：如有关联 Issue，在「关联工单/Issue」章节填写 `Closes #XXX` 或 `Relates to #XXX`。
+
+**验证**：PR 创建后，AI 助手应通过 `gh pr view --json body` 确认 PR body 包含模板全部章节。
+
 > 完成开发后，按 PR 反馈决策：merge（合并入 main）/ keep（保留分支继续迭代）/ discard（丢弃分支并清理 worktree）。决策依据为 PR review 结果与剩余迭代计划。
+
+### AI 助手创建 Issue 标准流程（强制）
+
+**背景**：与 PR 模板类似，`gh issue create` 不会自动加载 `.github/ISSUE_TEMPLATE/` 下的模板。项目使用 Issue Forms（.yml）格式（`bug_report.yml` / `feature_request.yml`），`config.yml` 中 `blank_issues_enabled: false` 禁止空白 issue。AI 助手必须显式指定模板，否则会生成不合规的简化 issue。
+
+**强制要求**（AI 助手创建 Issue 时必须遵守）：
+
+1. **必须使用 `--template` 参数加载 Issue 模板**（模板名称对应 `.github/ISSUE_TEMPLATE/*.yml` 的 `name` 字段）：
+
+   ```bash
+   # Bug 报告
+   gh issue create --title "<简明标题>" --template "🐛 Bug 报告"
+   # 功能请求
+   gh issue create --title "<简明标题>" --template "✨ 功能请求"
+   ```
+
+   此命令会打开编辑器加载模板表单内容，AI 助手应在模板基础上填写各章节，保留模板结构。
+
+2. **禁止手写简化 issue body**：不得用 `--body "简短描述"` 跳过模板，也不得创建空白 issue（`blank_issues_enabled: false`）。
+
+3. **必须如实填写模板表单各字段**：
+   - Bug 报告：需包含 Bug 描述、复现步骤、期望行为、实际行为、环境信息
+   - 功能请求：需包含动机、提案方案、替代方案
+
+4. **Issue 标题应简明扼要**，描述问题或需求的核心。
+
+5. **关联工单**：如有关联 PR 或其他 issue，在 body 中填写 `Relates to #XXX`。
+
+**验证**：Issue 创建后，AI 助手应通过 `gh issue view <number> --json body` 确认 body 包含模板全部字段。
+
+> 安全漏洞报告请走私密渠道（SECURITY.md / GitHub Security Advisories），不要用公开 issue 报告安全漏洞。
 
 ### 原子提交
 

@@ -76,7 +76,7 @@
 ### 提交代码
 
 1. Fork 本仓库
-2. 使用 worktree 隔离开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](#git-工作流与分支策略) 中的「Worktree 强制使用」与「标准工作流」）。**禁止在主工作区直接 `git checkout -b` 开发新特性或跨文件修改**
+2. 使用 worktree 隔离开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md) 中的「Worktree 强制使用」与「标准工作流」）。**禁止在主工作区直接 `git checkout -b` 开发新特性或跨文件修改**
 3. 提交更改 (`git commit -m 'feat: add amazing feature'`)
 4. 推送到分支 (`git push origin feature/amazing-feature`)
 5. 创建 Pull Request
@@ -95,7 +95,11 @@
 提交 PR 时，GitHub 会自动加载项目预设的模板内容。
 为了避免文档与实际模板内容的漂移不一致，请直接查阅实际文件：[`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)。
 
-> **注意**：提交 PR 时无需手动复制该模板，只需在 GitHub 自动生成的草稿基础上如实勾选与填写。请务必确认满足“提交前自检清单（强制全部核对）”项。
+> **注意**：
+> - **GitHub Web UI 创建 PR**：自动加载模板，无需手动复制，在草稿基础上如实勾选与填写。
+> - **`gh pr create` 创建 PR**：**不会自动加载模板**，必须使用 `--template .github/PULL_REQUEST_TEMPLATE.md` 参数显式加载（详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」）。
+>
+> 无论哪种方式，都必须确认满足“提交前自检清单（强制全部核对）”项。
 
 ## 代码审查与合并
 
@@ -155,7 +159,7 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 
 > 项目使用 pre-commit hooks（Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、pyright 增量类型检查（staged `.py`）、弱断言增量扫描（staged `test_*.py`，与 CI baseline 一致）、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护、WCAG 主题对比度检查（ui/theme.py 变更时触发）），hook 数量见 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)，亦见 [Pre-commit Hooks](./docs/guides/ci-cd.md#pre-commit-hooks)。
 >
-> **新特性开发请使用 worktree 隔离**，避免在主工作区直接开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](#git-工作流与分支策略) 中的「Worktree 强制使用」）。
+> **新特性开发请使用 worktree 隔离**，避免在主工作区直接开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md) 中的「Worktree 强制使用」）。
 
 ## 数据库设置
 
