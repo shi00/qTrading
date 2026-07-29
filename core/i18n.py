@@ -97,8 +97,10 @@ class I18n:
         # 触发 _listeners (ui/i18n.py _sync_i18n_state 同步 Observable state).
         # initialize 与 set_locale 行为对齐: 首次初始化也需通知订阅方,
         # 否则 ui 层 I18nState.locale 会 stale (仍为 DEFAULT_LOCALE).
+        # core-003: 使用 list 副本迭代, 防止 listener 回调中 subscribe/unsubscribe
+        # 导致 _listeners 列表变异引发 RuntimeError 或跳过/重复调用.
         if cls._listeners:
-            for listener in cls._listeners:
+            for listener in list(cls._listeners):
                 try:
                     listener()
                 except Exception as e:
@@ -180,8 +182,10 @@ class I18n:
             logger.info("[I18n] Locale changed to: %s", cls._locale)
 
             # 通知订阅方 (ui/i18n.py _sync_i18n_state 同步 Observable state)
+            # core-003: 使用 list 副本迭代, 防止 listener 回调中 subscribe/unsubscribe
+            # 导致 _listeners 列表变异引发 RuntimeError 或跳过/重复调用.
             if cls._listeners:
-                for listener in cls._listeners:
+                for listener in list(cls._listeners):
                     try:
                         listener()
                     except Exception as e:
@@ -266,11 +270,24 @@ class I18n:
 
     @classmethod
     def reload_locale(cls):
-        """Force reload current locale from file (useful for development)."""
+        """Force reload current locale from file (useful for development).
+
+        core-001: 重载后需通知订阅方, 与 set_locale 行为对齐.
+        开发场景下调用 reload_locale() 后 UI 应自动刷新, 否则 stale 状态
+        仍显示旧翻译.
+        """
         if cls._locale in cls._strings_cache:
             del cls._strings_cache[cls._locale]
         cls._get_strings(cls._locale)
         logger.info("[I18n] Reloaded locale: %s", cls._locale)
+        # core-003: 使用 list 副本迭代, 防止 listener 回调中 subscribe/unsubscribe
+        # 导致 _listeners 列表变异引发 RuntimeError 或跳过/重复调用.
+        if cls._listeners:
+            for listener in list(cls._listeners):
+                try:
+                    listener()
+                except Exception as e:
+                    logger.error("[I18n] Listener error during reload: %s", e)
 
 
 @dataclass(frozen=True)
