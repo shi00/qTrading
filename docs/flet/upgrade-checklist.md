@@ -72,7 +72,7 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.4 CanvasKit 版本验证
 
-> 背景：Flet web app 启动时从 `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/` 加载 `canvaskit.js` 与 `canvaskit.wasm`。E2E 测试通过 [tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 拦截该请求并从 `tests/e2e/mock_assets/canvaskit/` 提供本地文件。canvaskit 版本由 Flutter `engineRevision` 决定（见 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig`），与 Flet Python 层版本无直接关系——同 minor 版本的不同 patch 可能共用相同 engineRevision（如 0.86.0 与 0.86.1），跨 minor 版本通常不同（如 0.85.3 → 0.86.0）。
+> 背景：Flet web app 启动时从 `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/` 加载 `canvaskit.js` 与 `canvaskit.wasm`。E2E 测试通过 [tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 拦截该请求并从 `tests/e2e/mock_assets/canvaskit/` 提供本地文件。canvaskit 版本由 Flutter `engineRevision` 决定（见 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig`），与 Flet Python 层版本无直接关系——同 minor 版本的不同 patch 可能共用相同 engineRevision，跨 minor 版本通常不同。
 
 - [ ] **比较 engineRevision**：对比升级前后的 `flutter_bootstrap.js` 中 `_flutter.buildConfig.engineRevision` 字段
   - 升级前：从当前 `pyproject.toml` 锁定版本的 `flet_web` wheel 中读取

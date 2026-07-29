@@ -94,7 +94,9 @@
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
-| Git 操作 / 分支 / worktree | §3 R18、CONTRIBUTING.md「Git 工作流与分支策略」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
+| Git 操作 / 分支 / worktree | §3 R18、[docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「Worktree 强制使用」「标准工作流」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
+| 创建 PR / 提交代码 | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」、`.github/PULL_REQUEST_TEMPLATE.md`；禁止手写简化 PR body，必须用 `gh pr create --template` 加载模板 |
+| 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「AI 助手创建 Issue 标准流程（强制）」、`.github/ISSUE_TEMPLATE/`；禁止手写简化 issue body 或创建空白 issue，必须用 `gh issue create --template "模板名称"` 加载对应表单 |
 | 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（sidecar CLI 诊断/备份/恢复，涉及数据目录与 PGDATA 锁）；操作前确认应用已完全退出 |
 
 ### 1.9 关键验证命令
@@ -213,7 +215,7 @@ app → 编排所有层，仅被 main.py 调用
 | 策略模式 / Polars 向量化基类 / AI 策略混入 / DAO 模式 / 数据同步 / TaskManager | 对应小节 |
 | MVVM 表现层 (View / ViewModel / Component) / 配置管理 / 质量门控 / 性能监控 / 单例模式实现模板 | 对应小节 |
 | 测试规范 / CI/CD 流水线与门禁 | 对应小节 |
-| Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
+| Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |

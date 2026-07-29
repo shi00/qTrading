@@ -143,7 +143,7 @@ flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建�
 
 本节记录 flet-mcp 工具签名与文档描述一致性的 smoke test 证据，作为 §3.2 工具清单与 §3.3 场景示例的可信度依据。
 
-**最近一次验证**：2026-07-24（flet 0.86.2 / flet-mcp 0.86.2 / fastmcp 3.4.4）
+**最近一次验证**：2026-07-24（flet / flet-mcp / fastmcp 版本见 `pyproject.toml`）
 
 **验证命令与结果**：
 
