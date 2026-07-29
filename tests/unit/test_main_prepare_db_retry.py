@@ -302,3 +302,123 @@ def test_pre_init_error_view_component_renders() -> None:
         view = render_once(component)
 
     assert isinstance(view, ft.Container)
+
+
+# ---------- P2-1: 重试退避 + 持续失败诊断引导 ----------
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_retry_backoff_sleeps_between_attempts() -> None:
+    """P2-1: Retry 路径在重试前有指数退避 sleep（1s, 2s, 4s...）。
+
+    验证：第一次失败后 sleep(1s)，第二次失败后 sleep(2s)。
+    """
+    from main import _prepare_db_with_retry
+
+    expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        # 三次失败后第四次成功
+        mock_prepare.side_effect = [
+            RuntimeError("fail1"),
+            RuntimeError("fail2"),
+            RuntimeError("fail3"),
+            expected_url,
+        ]
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            result = await _prepare_db_with_retry(page, scenario=None)
+
+    assert result == expected_url
+    assert mock_prepare.call_count == 4
+    # Retry 路径 sleep 调用：第 1 次失败后 sleep(1)、第 2 次 sleep(2)、第 3 次 sleep(4)
+    # (第四次成功，不再 sleep)
+    sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+    # 过滤掉 LoadingView 刷新帧的 sleep(0.05)
+    backoff_sleeps = [s for s in sleep_calls if s >= 1]
+    assert backoff_sleeps == [1, 2, 4]  # noqa: weak-assertion <验证指数退避序列是测试目标本身>
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_backoff_capped_at_30_seconds() -> None:
+    """P2-1: 退避间隔上限 30s（避免长时间卡顿）。"""
+    from main import _prepare_db_with_retry
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        # 6 次失败后第 7 次成功，验证第 6 次退避 = 30（上限）
+        mock_prepare.side_effect = [RuntimeError(f"fail{i}") for i in range(6)] + [None]
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            await _prepare_db_with_retry(page, scenario=None)
+
+    sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+    backoff_sleeps = [s for s in sleep_calls if s >= 1]
+    # 1, 2, 4, 8, 16, 30 (第 6 次失败后的退避被 cap 到 30)
+    assert backoff_sleeps == [1, 2, 4, 8, 16, 30]  # noqa: weak-assertion <验证退避上限是测试目标本身>
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_persistent_failure_passes_failure_count_to_error_view() -> None:
+    """P2-1: 连续失败 ≥3 次时，PreInitErrorView 收到 failure_count=3。
+
+    验证：第三次失败渲染 PreInitErrorView 时 failure_count=3。
+    """
+    from main import _prepare_db_with_retry
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="exit"),
+        patch("main.sys.exit", side_effect=SystemExit(0)),
+        patch("main.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        # 三次连续失败，第四次用户选 exit
+        mock_prepare.side_effect = RuntimeError("persistent fail")
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            with pytest.raises(SystemExit):  # noqa: weak-assertion SystemExit 触发即测试目标, failure_count 传递在 with 块后断言
+                await _prepare_db_with_retry(page, scenario=None)
+
+    # 验证 PreInitErrorView 渲染时传入了 failure_count
+    pre_init_renders = [c for c in page.render.call_args_list if "PreInitErrorView" in str(c)]
+    assert len(pre_init_renders) >= 1
+    # 第一次失败 failure_count=1
+    first_render_kwargs = pre_init_renders[0].kwargs
+    assert first_render_kwargs.get("failure_count") == 1  # noqa: weak-assertion <验证 failure_count 传递是测试目标本身>
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_backoff_sleep_cancelled_propagates() -> None:
+    """P2-1: 退避 sleep 被取消时 CancelledError 正确传播（R2 红线）。
+
+    用户在退避等待期间关窗口 → main(page) 协程被取消 → asyncio.sleep 抛 CancelledError。
+    """
+    from main import _prepare_db_with_retry
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+    ):
+        mock_prepare.side_effect = RuntimeError("fail")
+        # 模拟 sleep 被取消
+        mock_sleep.side_effect = asyncio.CancelledError()
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播即 R2 红线测试目标
+                await _prepare_db_with_retry(page, scenario=None)
