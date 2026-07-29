@@ -456,14 +456,15 @@ async def prepare_database_runtime() -> str | None:
     # R-Arch-2/Ske-1：embedded 模式下若 DATABASE_URL 环境变量被外部误设，
     # ConfigHandler.get_db_url() Priority 1 会返回该值覆盖 embedded URL，
     # 导致 CacheManager 连错 DB 而 embedded sidecar 空转。emit WARNING 让用户感知。
-    # 不强制 unset 以避免影响子进程（spec.md §1.7 不变量：embedded URL 永不写入 DATABASE_URL）。
+    # P3 根因修复后：main.py 启动时会自动 pop 此 env var，但建议用户清理 shell profile
+    # 从源头消除冲突（spec.md §1.7 不变量：embedded URL 永不写入 DATABASE_URL）。
     external_db_url = os.environ.get("DATABASE_URL")
     if external_db_url:
         logger.warning(
-            "[Bootstrap] QTRADING_DATABASE_MODE=embedded but DATABASE_URL env var is set; "
-            "this env var will take precedence over embedded URL in ConfigHandler.get_db_url() "
-            "(Priority 1 > Priority 3), causing CacheManager to connect to the wrong DB. "
-            "Please unset DATABASE_URL to use embedded PostgreSQL."
+            "[Bootstrap] QTRADING_DATABASE_MODE=embedded but DATABASE_URL env var is set. "
+            "main.py 启动时会自动 pop 此 env var 以避免 ContextVar 在调度边界外失效，"
+            "但建议清理 shell profile（如 .bashrc/.zshrc/系统环境变量）中的残留 DATABASE_URL，"
+            "从源头消除冲突。"
         )
 
     service = EmbeddedPostgresService.from_config(config)
