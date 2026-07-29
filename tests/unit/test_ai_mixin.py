@@ -649,7 +649,12 @@ class TestRunAiAnalysis:
     @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self):
         """Task 2.2: 未确认 AI 外发政策时，run_ai_analysis 应通过 on_progress
-        显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。"""
+        显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。
+
+        NOTE: ack guard 不阻断 cache 预取 (commit ab16b588), on_progress 会被多次调用
+        (ack prompt → init → progress done). 此处断言 ack prompt 出现在任意一次调用中,
+        而非仅检查最后一次调用 (call_args).
+        """
         s = ConcreteStrategy()
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
         on_progress = MagicMock()
@@ -668,17 +673,17 @@ class TestRunAiAnalysis:
 
             result = await s.run_ai_analysis(candidates, context)
 
-            # 返回原始 candidates（不进行 AI 分析）
+            # 返回原始 candidates（不进行 AI 分析, fallback 到 math-only results）
             assert len(result) == 1
             assert result.iloc[0]["ts_code"] == "000001.SZ"
-            # on_progress 被调用且 message 为确认引导
-            call_args = on_progress.call_args
-            assert call_args is not None
-            # 签名: (completed, total, message)；message 为 ai_external_acknowledgment_prompt i18n 文案
-            message = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("message", "")
+            # on_progress 被调用, 确认引导出现在任意一次调用中 (不阻断 cache 预取, 会被后续 init/done 覆盖)
             from ui.i18n import I18n
 
-            assert message == I18n.get("ai_external_acknowledgment_prompt")
+            expected_prompt = I18n.get("ai_external_acknowledgment_prompt")
+            messages = [
+                (c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "")) for c in on_progress.call_args_list
+            ]
+            assert expected_prompt in messages, f"ack prompt not found in on_progress calls; messages={messages}"
             # AIService.analyze_stock 未被调用
             mock_ai_instance.analyze_stock.assert_not_called()
 
