@@ -95,6 +95,7 @@
     "status_error": "Error",
     "select_strategy": "Select Strategy",
     "run_screening": "Run Screening",
+    "stop_screening": "Stop Screening",
     "screener_select_strategy": "Select Strategy",
     "screener_reload_data": "Reload Data",
     "screener_auto_save": "Auto Save History",

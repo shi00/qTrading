@@ -218,3 +218,37 @@ class TestClearFilters:
         vm.clear_filters()
         assert vm._full_results is not None
         assert len(vm._full_results) == 1
+
+
+# --- cancel_strategy (Task 3.2: 本页取消) ---
+
+
+class TestCancelStrategy:
+    """Task 3.2: cancel_strategy 命令 + _active_task_id 生命周期."""
+
+    def test_active_task_id_initial_none(self, vm):
+        """VM 初始化时 _active_task_id 为 None (无可取消任务)."""
+        assert vm._active_task_id is None
+
+    def test_cancel_strategy_noop_when_no_active_task(self, vm):
+        """_active_task_id 为 None 时 cancel_strategy 不调用 TaskManager.cancel_task."""
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm_cls:
+            vm.cancel_strategy()
+            mock_tm_cls.assert_not_called()
+
+    def test_cancel_strategy_calls_cancel_task_with_correct_id(self, vm):
+        """_active_task_id 不为 None 时 cancel_strategy 调用 TaskManager.cancel_task(id)."""
+        vm._active_task_id = "task-abc-123"
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm_cls:
+            vm.cancel_strategy()
+            mock_tm_cls.assert_called_once_with()
+            mock_tm_cls.return_value.cancel_task.assert_called_once_with("task-abc-123")
+
+    def test_cancel_strategy_idempotent_after_clear(self, vm):
+        """cancel_strategy 后 _active_task_id 仍保留 (避免重复 cancel 已结束任务需手动清空)."""
+        vm._active_task_id = "task-xyz"
+        with patch("ui.viewmodels.screener_view_model.TaskManager"):
+            vm.cancel_strategy()
+        # _active_task_id 不在 cancel_strategy 中清空 (由 _execute_screening finally 清空)
+        # 防止 cancel_strategy 假设取消成功后清空, 实际取消异步完成
+        assert vm._active_task_id == "task-xyz"
