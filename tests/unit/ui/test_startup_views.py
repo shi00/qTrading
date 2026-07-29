@@ -13,6 +13,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -207,11 +208,180 @@ def test_build_loading_view_scenario_unknown_uses_normal_text(mock_i18n):
     assert texts[1].value == "startup_embedded_pg_normal_hint"
 
 
+# --- P1-2: LoadingView 已等待时间反馈 ---
+
+
+def test_build_loading_view_first_run_with_elapsed_shows_elapsed(mock_i18n):
+    """P1-2: FIRST_RUN + elapsed_seconds=5 → 显示 \"已等待 5s\" 文本."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.FIRST_RUN, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    # 标题 + 提示 + 已等待时间 = 3 个 Text
+    assert len(texts) == 3
+    # 第三个 Text 是已等待时间（i18n key 格式化后返回 key 本身，mock_i18n.get 返回 key）
+    assert "startup_embedded_pg_elapsed_seconds" in texts[2].value
+
+
+def test_build_loading_view_first_run_zero_elapsed_no_show(mock_i18n):
+    """P1-2: FIRST_RUN + elapsed_seconds=0 → 不显示已等待时间（避免初始闪烁）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.FIRST_RUN, elapsed_seconds=0)
+    texts = _find_controls(view, ft.Text)
+    # 仅标题 + 提示 = 2 个 Text，无已等待时间
+    assert len(texts) == 2
+
+
+def test_build_loading_view_normal_no_elapsed(mock_i18n):
+    """P1-2: NORMAL + elapsed_seconds=5 → 不显示已等待时间（2-5s 等待不需要反馈）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.NORMAL, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+
+
+def test_build_loading_view_unknown_no_elapsed(mock_i18n):
+    """P1-2: UNKNOWN + elapsed_seconds=5 → 不显示已等待时间（保守文案）."""
+    from app.bootstrap import EmbeddedPgStartupScenario
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        view = _build_loading_view(scenario=EmbeddedPgStartupScenario.UNKNOWN, elapsed_seconds=5)
+    texts = _find_controls(view, ft.Text)
+    assert len(texts) == 2
+
+
 def test_loading_view_is_ft_component():
     """LoadingView 必须用 @ft.component 装饰（声明式契约守护）."""
     from ui.startup_views import LoadingView
 
     assert hasattr(LoadingView, "__wrapped__"), "LoadingView 必须用 @ft.component 装饰"
+
+
+def test_loading_view_component_starts_timer_on_mount(mock_i18n_state, mock_app_colors_state):
+    """P1-2: LoadingView 挂载时启动定时器（page.run_task 被调用）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    assert page.session.scheduled_effects, "use_effect setup 应被调度"
+    # page.run_task 被调用启动定时器
+    assert page.run_task.called  # noqa: weak-assertion <验证 page.run_task 被调用是测试目标本身，mock 无返回值可进一步断言>
+
+
+def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_app_colors_state):
+    """P1-2: LoadingView 卸载时取消定时器（task.cancel 被调用，R2 红线）."""
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+        run_unmount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    mock_task = MagicMock()
+    page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    # 卸载组件，触发 cleanup
+    run_unmount_effects(component)
+
+    # cleanup 应取消 task
+    mock_task.cancel.assert_called_once()  # noqa: weak-assertion <验证 task.cancel 被调用是 R2 红线测试目标本身>
+
+
+def test_get_page_returns_none_outside_render_context():
+    """L41-42: 非渲染上下文调用 _get_page() 返回 None (不抛 RuntimeError).
+
+    conftest.py ``_reset_context_page`` autouse fixture 已清理 ``_context_page``，
+    此处直接调用 ``_get_page()`` 应进入 except 分支返回 None。
+    覆盖 ``_get_page`` 的 RuntimeError except 分支（diff-coverage 补齐）。
+    """
+    from ui.startup_views import _get_page
+
+    assert _get_page() is None
+
+
+def test_loading_view_setup_timer_early_return_when_no_page(mock_i18n_state, mock_app_colors_state):
+    """L170: LoadingView mount 时若 _get_page() 返回 None, 早退不启动定时器.
+
+    覆盖 ``_setup_timer`` 中 ``if page is None: return`` 的早退分支
+    （diff-coverage 补齐）。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=None)
+
+    # mock _get_page 返回 None, 模拟非渲染上下文 (如 page 尚未挂载)
+    with patch("ui.startup_views._get_page", return_value=None):
+        run_mount_effects(component, page=page)
+
+    # page.run_task 不应被调用 (page 为 None 时早退)
+    assert not page.run_task.called  # noqa: weak-assertion <验证 page.run_task 未被调用是早退分支测试目标本身>
+
+
+def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state, mock_app_colors_state):
+    """L173-179: _tick 协程每秒更新计数器, CancelledError 被传播 (R2 红线).
+
+    覆盖 ``_tick`` 协程体 (try/while/await/set/except/raise)。
+    通过捕获 ``page.run_task`` 接收的 coro, 在事件循环中执行验证 R2 红线。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    captured_tick_fn: list = []
+    mock_task = MagicMock()
+
+    def fake_run_task(tick_fn):
+        captured_tick_fn.append(tick_fn)
+        return mock_task
+
+    page.run_task = fake_run_task  # type: ignore[method-assign]
+
+    component = make_component(LoadingView, scenario=None)
+    run_mount_effects(component, page=page)
+
+    assert captured_tick_fn, "_tick 函数应被传给 page.run_task"  # noqa: weak-assertion <验证 tick_fn 被捕获是后续执行的前提>
+
+    # 在事件循环中执行 _tick 协程, 验证第一次 tick 完成状态递增, 且取消时 CancelledError 被传播 (R2 红线)
+    async def run_test():
+        task = asyncio.ensure_future(captured_tick_fn[0]())
+        # 等待第一次 tick 完成 (sleep(1) + L176-177 递增与 set_state)，再于第二次 sleep 中取消
+        await asyncio.sleep(1.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可, raises 即充分
+            await task
+
+    asyncio.run(run_test())
+
+    # 第一次 tick 后 set_state 触发 _schedule_update → session.schedule_update 被调用
+    assert page.session.scheduled_updates, "第一次 tick 后应调度组件更新 (elapsed_seconds 状态变更)"
 
 
 def test_build_upgrade_dialog(mock_i18n):
