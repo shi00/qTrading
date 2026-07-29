@@ -566,3 +566,125 @@ async def test_prepare_db_with_retry_backoff_timeout_continues_retry() -> None:
 
     assert result == expected_url
     assert mock_prepare.call_count == 2
+
+
+# ---------- P2-5: embedded URL ContextVar override 测试 ----------
+
+
+def test_get_db_url_prefers_contextvar_override_over_env_var() -> None:
+    """P2-5: ContextVar override(Priority 0) > DATABASE_URL env var(Priority 1)。
+
+    当 embedded 模式成功后，用 ContextVar 写入 embedded URL，即使 DATABASE_URL
+    环境变量存在，get_db_url() 也应返回 embedded URL（避免连错库）。
+    """
+    from utils.config_handler import ConfigHandler
+
+    env_url = "postgresql+asyncpg://env_user:env_pass@external-host:5432/external_db"
+    embedded_url = "postgresql+asyncpg://postgres:pass@127.0.0.1:15432/astock"
+
+    with patch.dict("os.environ", {"DATABASE_URL": env_url}):
+        # 未设 override：Priority 1 (env) 生效
+        assert ConfigHandler.get_db_url() == env_url
+
+        # P2-5: 设 ContextVar override（模拟 embedded 成功）
+        token = ConfigHandler._db_url_override.set(embedded_url)
+        try:
+            # override 生效：Priority 0 覆盖 Priority 1
+            assert ConfigHandler.get_db_url() == embedded_url
+        finally:
+            ConfigHandler._db_url_override.reset(token)
+
+        # reset 后：回到 Priority 1 (env)
+        assert ConfigHandler.get_db_url() == env_url
+
+
+def test_get_db_url_contextvar_override_overrides_db_host_components() -> None:
+    """P2-5: ContextVar override 同时覆盖 Priority 2（db_host 组件）。
+
+    优先级验证：ContextVar(0) > env(1) > db_host 组件(2) > config.DB_URL(3)。
+    """
+    from utils.config_handler import ConfigHandler
+
+    embedded_url = "postgresql+asyncpg://postgres:pass@127.0.0.1:15432/astock"
+    components_url = "postgresql+asyncpg://persisted_user:persisted_pass@onboarding-host:5432/astock"
+
+    # 模拟 onboard 后：db_host 已写入配置，Priority 2 会重建 components_url
+    def _mock_get_typed(key: str, typ, default):
+        return {
+            "db_host": "onboarding-host",
+            "db_port": 5432,
+            "db_user": "persisted_user",
+            "db_name": "astock",
+        }.get(key, default)
+
+    with (
+        patch.dict("os.environ", {"DATABASE_URL": ""}),
+        patch.object(ConfigHandler, "get_typed", side_effect=_mock_get_typed),
+        patch.object(ConfigHandler, "get_db_password", return_value="persisted_pass"),
+        patch(
+            "data.persistence.db_config_service.DatabaseConfigService.build_url",
+            return_value=components_url,
+        ),
+    ):
+        # 未设 override：Priority 2 (db_host 组件) 生效
+        assert ConfigHandler.get_db_url() == components_url
+
+        # P2-5: 设 ContextVar override → Priority 0 赢
+        token = ConfigHandler._db_url_override.set(embedded_url)
+        try:
+            assert ConfigHandler.get_db_url() == embedded_url
+        finally:
+            ConfigHandler._db_url_override.reset(token)
+
+        # reset 后：回到 Priority 2
+        assert ConfigHandler.get_db_url() == components_url
+
+
+def test_embedded_db_url_lost_to_env_var_is_the_bug_we_fix() -> None:
+    """P2-5 (Red phase): 当前 bug 复现——DATABASE_URL env var(Priority 1) 覆盖 config.DB_URL(Priority 3)。
+
+    此测试复现 bug：embedded 成功后 config.DB_URL = embedded_url，但用户 shell
+    残留 DATABASE_URL，get_db_url() 返回值是 env_url 而非 embedded_url。
+
+    修复策略（P2-5）：embedded 成功后用 ContextVar(Priority 0) 显式 override，
+    override 期间 get_db_url() 正确返回 embedded_url。
+    """
+    import config as app_config
+
+    from utils.config_handler import ConfigHandler
+
+    env_url = "postgresql+asyncpg://env_user:env_pass@bad-host:5432/wrong_db"
+    embedded_url = "postgresql+asyncpg://postgres:pass@127.0.0.1:15432/astock"
+
+    # 模拟：embedded 成功后写 config.DB_URL = embedded_url（main.py D15 行为）
+    original_db_url = app_config.DB_URL
+    try:
+        app_config.DB_URL = embedded_url
+
+        with patch.dict("os.environ", {"DATABASE_URL": env_url}):
+            # Bug 复现：env(Priority 1) 胜过 config.DB_URL(Priority 3)
+            # 此为当前未修复代码的真实行为（即 P2-5 bug 本身）
+            before_override = ConfigHandler.get_db_url()
+            assert before_override == env_url, (
+                "Red phase: expected env_url to win (this is the bug we fix), "
+                f"but got {before_override!r}. If this assert fails it means "
+                "the precedence has changed and this test needs updating."
+            )
+
+            # 修复后：设 ContextVar override → embedded_url 赢
+            token = ConfigHandler._db_url_override.set(embedded_url)
+            try:
+                after_override = ConfigHandler.get_db_url()
+                assert after_override == embedded_url, (
+                    f"After override expected embedded_url but got {after_override!r}"
+                )
+            finally:
+                ConfigHandler._db_url_override.reset(token)
+
+            # reset 后 bug 复现（回到 env_url）——证明 override 是必要的
+            after_reset = ConfigHandler.get_db_url()
+            assert after_reset == env_url, (
+                f"After reset expected env_url again (proving override is required), but got {after_reset!r}"
+            )
+    finally:
+        app_config.DB_URL = original_db_url
