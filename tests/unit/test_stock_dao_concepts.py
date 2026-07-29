@@ -587,3 +587,123 @@ class TestDeleteExpiredFailures:
         dao._write_db = AsyncMock(side_effect=RuntimeError("connect fail"))
         with pytest.raises(RuntimeError):
             await dao.delete_expired_failures()
+
+
+class TestOverwriteLimitConcepts:
+    """P0-2: overwrite_limit_concepts 事务原子性测试。
+
+    验证 clear_today_limit_concepts + upsert_limit_concepts 在同一事务（同一 conn）内执行，
+    避免 clear 成功 upsert 失败导致当日数据丢失。
+    """
+
+    @pytest.mark.asyncio
+    async def test_records_passed_clear_and_upsert_share_same_conn(self):
+        """有记录时 clear 与 upsert 必须在同一 conn 上执行（事务原子性）"""
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        # 真实调用 clear_today_limit_concepts / upsert_limit_concepts，验证 conn 透传
+        dao._write_db = AsyncMock(return_value=3)
+        dao._save_upsert = AsyncMock(return_value=5)
+
+        records = [
+            {"ts_code": "000001.SZ", "concept_id": "LIMIT_000001.SZ", "concept_name": "涨停原因1"},
+        ]
+        result = await dao.overwrite_limit_concepts(records)
+
+        assert result == 5
+        # clear_today_limit_concepts 传入 conn=mock_conn
+        dao._write_db.assert_called_once()
+        assert dao._write_db.call_args.kwargs.get("conn") is mock_conn
+        # upsert_limit_concepts 传入 conn=mock_conn
+        dao._save_upsert.assert_called_once()
+        assert dao._save_upsert.call_args.kwargs.get("conn") is mock_conn
+
+    @pytest.mark.asyncio
+    async def test_empty_records_only_clears_no_upsert(self):
+        """空记录时只 clear 不 upsert，返回 0（保留 clear 以重置当日 LIMIT_ 数据）"""
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        dao._write_db = AsyncMock(return_value=2)
+        dao._save_upsert = AsyncMock(return_value=99)
+
+        result = await dao.overwrite_limit_concepts([])
+
+        assert result == 0
+        dao._write_db.assert_called_once()
+        assert dao._write_db.call_args.kwargs.get("conn") is mock_conn
+        dao._save_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self):
+        """CancelledError 必须传播（R2），不得被外层 except Exception 吞"""
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
+            side_effect=asyncio.CancelledError(),
+        )
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(asyncio.CancelledError):
+            await dao.overwrite_limit_concepts([{"ts_code": "000001.SZ"}])
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed(self):
+        """EngineDisposedError 必须传播（R5）"""
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
+            side_effect=EngineDisposedError(),
+        )
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(EngineDisposedError):
+            await dao.overwrite_limit_concepts([{"ts_code": "000001.SZ"}])
+
+    @pytest.mark.asyncio
+    async def test_propagates_upsert_failure(self):
+        """upsert 失败时异常必须传播，由 _guarded_begin 触发事务回滚（clear 不应提交）"""
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        dao._write_db = AsyncMock(return_value=3)
+        # upsert 抛通用异常 → 必须传播，事务回滚
+        dao._save_upsert = AsyncMock(side_effect=RuntimeError("upsert boom"))
+
+        with pytest.raises(RuntimeError, match="upsert boom"):
+            await dao.overwrite_limit_concepts([{"ts_code": "000001.SZ"}])
+
+        # clear 已调用，但事务因 upsert 失败回滚
+        dao._write_db.assert_called_once()
+        dao._save_upsert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_propagates_clear_failure(self):
+        """clear 失败时异常必须传播，由 _guarded_begin 触发事务回滚（不调用 upsert）"""
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        dao._write_db = AsyncMock(side_effect=RuntimeError("clear boom"))
+        dao._save_upsert = AsyncMock(return_value=99)
+
+        with pytest.raises(RuntimeError, match="clear boom"):
+            await dao.overwrite_limit_concepts([{"ts_code": "000001.SZ"}])
+
+        dao._write_db.assert_called_once()
+        # clear 失败 → upsert 不应被调用
+        dao._save_upsert.assert_not_called()
