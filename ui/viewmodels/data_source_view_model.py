@@ -550,6 +550,13 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         """
         return ConfigHandler.get_init_history_years()
 
+    def is_ai_external_acknowledged(self) -> bool:
+        """Task 2.2: 读取 AI 外发知情确认状态（供 View 决定 dialog 文案）.
+
+        View 不直接 import ConfigHandler（MVVM 契约），由 VM 透传.
+        """
+        return ConfigHandler.is_ai_external_acknowledged()
+
     async def save_tushare_token(self, token: str) -> None:
         """异步保存 Tushare token 到配置并更新客户端 (R16: IO offload via ThreadPoolManager).
 

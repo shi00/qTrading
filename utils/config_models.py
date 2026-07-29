@@ -186,6 +186,8 @@ class AppConfig(BaseModel):
     onboarding_complete: bool = False
     enable_news_alerts: bool = True
     ai_prompt_dump_enabled: bool = False
+    # Task 2.2: AI 外发知情一次性确认（用户首次使用云端 AI 时确认数据外发政策）
+    ai_external_acknowledged: bool = False
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)

@@ -279,6 +279,7 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
         ) as mock_global_context,
         patch("data.persistence.review_manager.ReviewManager") as mock_review_manager,
         patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=5),
+        patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
         patch.object(
             strategy,
             "_build_multi_period_financials",

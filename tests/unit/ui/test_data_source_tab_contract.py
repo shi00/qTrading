@@ -526,6 +526,10 @@ class _FakeDataSourceViewModel:
     def execute_ai_concept_rebuild(self) -> None:
         self.method_calls.append(("execute_ai_concept_rebuild", {}))
 
+    def is_ai_external_acknowledged(self) -> bool:
+        """Task 2.2: View 调用此方法判断用户是否已确认 AI 外发数据政策."""
+        return True
+
     def execute_clear_cache(self) -> None:
         self.method_calls.append(("execute_clear_cache", {}))
 

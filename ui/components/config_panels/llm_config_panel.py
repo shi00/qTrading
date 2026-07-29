@@ -20,6 +20,7 @@ import flet as ft
 
 from ui.components.flet_type_helpers import (
     get_control_value,
+    safe_on_change,
     safe_on_click,
     safe_on_select,
 )
@@ -258,6 +259,24 @@ def _on_provider_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.Con
     return _on_provider_change
 
 
+def _on_acknowledgment_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Task 2.2: Create on_change handler for AI external acknowledgment checkbox.
+
+    Submits vm.update_ai_external_acknowledged via page.run_task (R16: persists via ThreadPoolManager).
+    """
+
+    def _on_acknowledgment_change(e: ft.ControlEvent) -> None:
+        checked = bool(e.control.value) if e.control else False
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.update_ai_external_acknowledged, checked)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for update_ai_external_acknowledged")
+
+    return _on_acknowledgment_change
+
+
 @ft.component
 def LLMConfigPanel(
     vm: LLMConfigPanelViewModel,
@@ -437,6 +456,18 @@ def LLMConfigPanel(
     section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
     section_header.visible = not compact
 
+    # Task 2.2: AI 外发知情说明 + 确认 checkbox
+    ai_disclosure_text = ft.Text(
+        I18n.get("ai_external_disclosure"),
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.WARNING,
+    )
+    ai_acknowledgment_checkbox = ft.Checkbox(
+        label=I18n.get("ai_external_acknowledgment_checkbox"),
+        value=state.ai_external_acknowledged,
+        on_change=safe_on_change(_on_acknowledgment_change_factory(vm)),
+    )
+
     form_content = ft.Column(
         controls=[
             section_header,
@@ -448,6 +479,8 @@ def LLMConfigPanel(
             base_url_input,
             api_key_input,
             azure_row,
+            ai_disclosure_text,
+            ai_acknowledgment_checkbox,
             action_buttons,
             ft.Row(
                 [status_icon, status_text_ctrl],
