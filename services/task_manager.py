@@ -846,9 +846,13 @@ class TaskManager:
             def _launch():
                 try:
                     task = loop.create_task(coro)
-                except RuntimeError:
+                except (RuntimeError, TypeError, ValueError):
+                    # RuntimeError: loop closed between is_running() check and create_task
+                    # TypeError: coro is not a coroutine/awaitable (defensive against
+                    #            closed-coroutine or non-awaitable edge cases)
+                    # ValueError: coro has already been awaited
                     coro.close()
-                    logger.debug("[TaskManager] Loop closed before _launch, coroutine dropped.")
+                    logger.debug("[TaskManager] Loop closed or invalid coro in _launch, dropped.")
                     return
                 # Keep a strong reference to the task to prevent garbage collection
                 self._background_tasks.add(task)

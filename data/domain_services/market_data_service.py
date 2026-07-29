@@ -7,6 +7,7 @@ UI 只从内存缓存读取，类似 NewsSubscriptionService 架构。
 
 import asyncio
 import datetime
+import functools
 import inspect
 import logging
 import math
@@ -337,11 +338,37 @@ class MarketDataService:
             "stale": data_stale,
         }
 
+        await self._notify_listeners()
+
+    async def _notify_listeners(self):
+        """通知所有注册的 listener 数据已更新。
+
+        async listener 在事件循环线程执行（Flet set_state 必须在主线程），
+        sync listener 提交到 IO 线程池。async listener 加 10s 超时防卡死。
+        """
         listener_count = len(self._listeners)
         if listener_count > 0:
             for listener in list(self._listeners):
                 try:
-                    await ThreadPoolManager().run_async(TaskType.IO, listener)
+                    # 识别 partial 包装的 async function（修复 inspect.iscoroutinefunction 误判）
+                    unwrapped = listener
+                    while isinstance(unwrapped, functools.partial):
+                        unwrapped = unwrapped.func
+
+                    if asyncio.iscoroutinefunction(unwrapped):
+                        # async listener: 在事件循环线程执行（Flet set_state 必须在主线程）
+                        # 加超时防止单个 listener 卡死阻塞整个 fetch 周期
+                        await asyncio.wait_for(listener(), timeout=10.0)
+                    else:
+                        # sync listener: 提交到 IO 线程池（避免阻塞事件循环）
+                        await ThreadPoolManager().run_async(TaskType.IO, listener)
+                except TimeoutError:
+                    logger.warning(
+                        "[MarketDataService] Listener timeout (10s), skipped: %s",
+                        getattr(listener, "__name__", listener),
+                    )
+                except asyncio.CancelledError:
+                    raise  # R2: 传播取消
                 except Exception as e:
                     error_info = classify_error(e, context="general")
                     severity = classify_severity(e)

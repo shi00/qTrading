@@ -103,3 +103,25 @@ def test_main_persists_embedded_db_url_in_config() -> None:
         f"main() 源码不应含 'with override_db_url('（D15：已改为永久设置 config.DB_URL），"
         f"实际源码片段：\n{source[:2000]}"
     )
+
+
+def test_main_pops_database_url_env_in_embedded_mode() -> None:
+    """P3 根因修复：embedded 模式启动成功后应 pop 残留的 DATABASE_URL env var。
+
+    根因：ContextVar per-asyncio-task，DataExplorer 同步调用链外（非 page.run_task）
+    ContextVar 已丢失，get_db_url() 返回 env var 残留旧 URL（Priority 1 > Priority 3）。
+    pop env var 后，Priority 1 失效，统一走 ContextVar 或 config.DB_URL。
+
+    源码静态分析断言：
+    - main() 源码含 'os.environ.pop("DATABASE_URL", None)'
+    - 该调用在 'ConfigHandler._db_url_override.set' 之后
+    """
+    source = inspect.getsource(main)
+    assert 'os.environ.pop("DATABASE_URL", None)' in source, (
+        f"main() 源码应含 'os.environ.pop(\"DATABASE_URL\", None)'（P3：根因修复），实际源码片段：\n{source[:2500]}"
+    )
+    pop_pos = source.find('os.environ.pop("DATABASE_URL"')
+    override_pos = source.find("ConfigHandler._db_url_override.set(")
+    assert pop_pos != -1 and override_pos != -1 and override_pos < pop_pos, (
+        "os.environ.pop 必须在 ConfigHandler._db_url_override.set 之后（P3：先设置 override 再 pop env var）"
+    )

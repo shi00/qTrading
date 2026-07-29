@@ -12,6 +12,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from data.cache.cache_manager import CacheManager
 from data.domain_services.market_data_service import MarketDataService
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -987,3 +988,96 @@ class TestMarketDataServicePollLoopTokenBreaker:
 
         # 配置 600s > 300s，应取 600s
         assert sleep_calls == [600], f"预期 sleep 600s（取最大值），实际 {sleep_calls}"
+
+
+class TestMarketDataServiceListenerDispatch:
+    """P2: listener async/sync 分流与超时保护验证。"""
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_partial_async_listener_dispatched_to_event_loop(self, mock_tc, mock_cache, mock_api):
+        """functools.partial 包装的 async function 应在事件循环线程执行（不抛 ValueError）。"""
+        svc = MarketDataService()
+        svc._cached_data = {"date": "20260101", "indices": [], "hsgt": {}, "hot_concepts": [], "stale": False}
+
+        called = False
+
+        async def async_listener():
+            nonlocal called
+            called = True
+
+        # 用 functools.partial 包装，模拟 ViewModel 的 partial 绑定场景
+        import functools
+
+        partial_listener = functools.partial(async_listener)
+        svc._listeners.add(partial_listener)
+
+        # 直接调用 listener 通知逻辑（绕过 _fetch_market_data 的复杂数据获取）
+        await svc._notify_listeners()
+
+        # 验证 listener 被调用（不抛 ValueError 即成功）
+        assert called is True
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_sync_listener_dispatched_to_thread_pool(self, mock_tc, mock_cache, mock_api):
+        """sync listener 应提交到 IO 线程池执行。"""
+        svc = MarketDataService()
+        svc._cached_data = {"date": "20260101", "indices": [], "hsgt": {}, "hot_concepts": [], "stale": False}
+
+        def sync_listener():
+            pass
+
+        svc._listeners.add(sync_listener)
+
+        with patch("data.domain_services.market_data_service.ThreadPoolManager") as mock_tp:
+            mock_tp.return_value.run_async = AsyncMock(return_value=None)
+            await svc._notify_listeners()
+            # 验证 run_async 被调用且传入 sync_listener
+            mock_tp.return_value.run_async.assert_called_once_with(TaskType.IO, sync_listener)
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_async_listener_timeout_logs_warning(self, mock_tc, mock_cache, mock_api):
+        """卡死的 async listener 应在 10s 超时后 warning 并继续（不阻塞整个 fetch）。"""
+        svc = MarketDataService()
+        svc._cached_data = {"date": "20260101", "indices": [], "hsgt": {}, "hot_concepts": [], "stale": False}
+
+        async def stuck_listener():
+            await asyncio.sleep(100)  # 模拟卡死
+
+        svc._listeners.add(stuck_listener)
+
+        # 用 patch 加速超时（避免测试等待 10s）
+        with (
+            patch("data.domain_services.market_data_service.asyncio.wait_for", side_effect=TimeoutError()),
+            patch("data.domain_services.market_data_service.logger") as mock_logger,
+        ):
+            await svc._notify_listeners()
+            # 验证 warning 被调用且消息含 "Listener timeout" 关键词
+            call_args = mock_logger.warning.call_args
+            assert call_args is not None
+            assert "Listener timeout" in str(call_args.args) or "Listener timeout" in str(call_args)
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_cancelled_error_propagates_from_listener(self, mock_tc, mock_cache, mock_api):
+        """R2: listener 执行期间收到 CancelledError 必须传播。"""
+        svc = MarketDataService()
+        svc._cached_data = {"date": "20260101", "indices": [], "hsgt": {}, "hot_concepts": [], "stale": False}
+
+        async def cancelling_listener():
+            raise asyncio.CancelledError()
+
+        svc._listeners.add(cancelling_listener)
+
+        with pytest.raises(asyncio.CancelledError):
+            await svc._notify_listeners()

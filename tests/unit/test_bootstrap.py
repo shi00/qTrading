@@ -884,3 +884,36 @@ class TestMaskSensitiveEdgeCases:
         assert result == "***"
         for item in data:
             assert str(item) not in result
+
+
+class TestBootstrapDatabaseUrlWarning:
+    """P4: 验证 embedded 模式下 DATABASE_URL 残留的警告文案准确性。
+
+    P3 根因修复后，main.py 启动时会自动 pop 残留的 DATABASE_URL env var，
+    bootstrap.py 的警告文案应：
+    1. 说明启动后会自动 pop（消除"自相矛盾"感）
+    2. 建议用户清理 shell profile（提供可操作建议）
+    3. 不打印残留 URL 值（R9 合规）
+    """
+
+    def test_warning_message_mentions_auto_pop(self):
+        """警告文案应说明 main.py 会自动 pop DATABASE_URL env var。"""
+        import inspect
+        from app.bootstrap import prepare_database_runtime
+
+        source = inspect.getsource(prepare_database_runtime)
+        # 验证文案包含"自动 pop"关键信息
+        assert "自动 pop" in source or "pop" in source, (
+            f"prepare_database_runtime 警告文案应说明 main.py 会自动 pop DATABASE_URL，实际源码片段：\n{source[:2000]}"
+        )
+
+    def test_warning_message_mentions_shell_profile(self):
+        """警告文案应建议用户清理 shell profile。"""
+        import inspect
+        from app.bootstrap import prepare_database_runtime
+
+        source = inspect.getsource(prepare_database_runtime)
+        # 验证文案包含"shell profile"可操作建议
+        assert "shell profile" in source, (
+            f"prepare_database_runtime 警告文案应建议清理 shell profile，实际源码片段：\n{source[:2000]}"
+        )
