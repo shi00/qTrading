@@ -170,6 +170,65 @@ class TestAsyncioExceptionHandler:
         finally:
             loop.close()
 
+    def test_connection_reset_error_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """ConnectionResetError (WinError 10054) 应记 WARNING 而非 CRITICAL"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
+        loop = asyncio.new_event_loop()
+        context = {
+            "exception": ConnectionResetError("[WinError 10054] test"),
+            "message": "connection reset",
+        }
+        try:
+            with caplog.at_level(logging.DEBUG):
+                _asyncio_exception_handler(loop, context)
+
+            assert any(
+                "Network connection reset/aborted" in r.message and "ConnectionResetError" in r.message
+                for r in caplog.records
+            )
+            assert all(r.levelno != logging.CRITICAL for r in caplog.records)
+        finally:
+            loop.close()
+
+    def test_connection_aborted_error_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """ConnectionAbortedError 应记 WARNING 而非 CRITICAL"""
+        loop = asyncio.new_event_loop()
+        context = {
+            "exception": ConnectionAbortedError("[WinError 1236] test"),
+            "message": "connection aborted",
+        }
+        try:
+            with caplog.at_level(logging.DEBUG):
+                _asyncio_exception_handler(loop, context)
+
+            assert any(
+                "Network connection reset/aborted" in r.message and "ConnectionAbortedError" in r.message
+                for r in caplog.records
+            )
+            assert all(r.levelno != logging.CRITICAL for r in caplog.records)
+        finally:
+            loop.close()
+
+    def test_broken_pipe_error_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """BrokenPipeError 应记 WARNING 而非 CRITICAL"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
+        loop = asyncio.new_event_loop()
+        context = {
+            "exception": BrokenPipeError("test"),
+            "message": "broken pipe",
+        }
+        try:
+            with caplog.at_level(logging.DEBUG):
+                _asyncio_exception_handler(loop, context)
+
+            assert any(
+                "Network connection reset/aborted" in r.message and "BrokenPipeError" in r.message
+                for r in caplog.records
+            )
+            assert all(r.levelno != logging.CRITICAL for r in caplog.records)
+        finally:
+            loop.close()
+
 
 class TestSanitization:
     """测试脱敏功能"""

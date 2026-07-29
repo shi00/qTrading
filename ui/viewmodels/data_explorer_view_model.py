@@ -4,7 +4,7 @@ import logging
 import re
 import typing
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pandas as pd
@@ -109,8 +109,22 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
         self._disposed = False
 
+    def _set_state(self, **changes: Any) -> None:
+        """Update state fields and notify subscribers.
+
+        disposed guard: dispose 后阻止延迟完成的异步任务更新 state/subscriber
+        (对齐 ScreenerViewModel, 见 screener_view_model.py).
+        """
+        if self._disposed:
+            return
+        self._state = replace(self._state, **changes)
+        self._notify()
+
     def _notify(self) -> None:
-        for cb in self._subscribers:
+        if self._disposed:
+            return
+        # 快照 subscribers 避免迭代中订阅者修改列表 (对齐 ObservableViewModelMixin 默认实现).
+        for cb in list(self._subscribers):
             try:
                 cb(self._state)
             except Exception as e:
@@ -121,7 +135,9 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         if self._disposed:
             return
         self._disposed = True
-        self._set_state(
+        # 直接赋值, 不通过 _set_state (避免触发 _notify 且避开 disposed guard).
+        self._state = replace(
+            self._state,
             tables_list=(),
             table_columns=(),
             numeric_cols=frozenset(),

@@ -108,10 +108,14 @@ class BacktestDAO(BaseDao):
             ]
         )
 
+        # 排除 id (由 DB autoincrement 生成) 和 executed_at (由 DB server_default 生成),
+        # 避免 _save_upsert 显式传 None 覆盖 DB 默认值。对齐 screener_dao.py 的范式。
+        # 注意: get_model_columns 的 exclude 是替换默认值而非合并, 故须显式包含 updated_at/created_at
+        # (BacktestResultModel 当前无这两列, 但为防御未来模型扩展导致误传 None).
         return await self._save_upsert(
             df,
             "backtest_results",
-            get_model_columns(BacktestResultModel),
+            get_model_columns(BacktestResultModel, exclude={"id", "executed_at", "updated_at", "created_at"}),
             pk_columns=["run_id"],
         )
 
