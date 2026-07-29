@@ -229,6 +229,18 @@ class TestDataSourceTabContract:
         assert "page_ref" not in params, "DataSourceTab 不应接收 page_ref 参数"
         assert "show_snack_callback" in params, "DataSourceTab 必须接收 show_snack_callback"
 
+    def test_no_hardcoded_1530_time_placeholder(self):
+        """DoD: 源码禁止出现硬编码 "15:30" 时间占位 (Task 1.3 伪造占位修复)。"""
+        source = _raw_source()
+        assert "15:30" not in source, "data_source_tab.py 不应硬编码 15:30 时间占位"
+
+    def test_no_metric_storage_placeholder_card(self):
+        """DoD: 源码禁止出现 metric_storage 伪造占位卡片 (Task 1.3: 移除未真实统计的存储占用卡片)。"""
+        source = _code_source()
+        assert "metric_storage" not in source, (
+            "data_source_tab.py 不应保留 metric_storage 卡片 (未真实统计 PG data 目录大小)"
+        )
+
 
 # ============================================================================
 # 模块级纯函数测试
@@ -1103,19 +1115,21 @@ class TestDataSourceTabStateBranches:
         rings = _find_by_type(result, ft.ProgressRing)
         assert len(rings) == 0, "idle state 不应有 ProgressRing"
 
-    def test_metric_sync_placeholder_when_no_health_result(
+    def test_metric_sync_not_checked_when_no_health_result(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """state.health_result=None → metric_sync_value="time_today 15:30" (placeholder)。"""
+        """state.health_result=None → metric_sync_value="ds_not_checked" (未检查文案, 非硬编码时间)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         texts = _find_by_type(result, ft.Text)
-        # metric_sync_value = f"{I18n.get('time_today')} 15:30"
-        # I18n.get mock 返回 key, 所以值 = "time_today 15:30"
-        assert any("time_today" in (t.value or "") and "15:30" in (t.value or "") for t in texts)
+        # metric_sync_value = I18n.get("ds_not_checked")
+        # I18n.get mock 返回 key, 所以值 = "ds_not_checked"
+        assert any(t.value == "ds_not_checked" for t in texts)
+        # 反向守护: 不应出现硬编码 "15:30" 占位
+        assert not any("15:30" in (t.value or "") for t in texts)
 
     # --- P1-5: Secondary progress 区域 (daily_sync/ai_concept_sync/cache_clear) ---
 
