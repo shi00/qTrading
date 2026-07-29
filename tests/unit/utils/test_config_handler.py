@@ -2718,3 +2718,38 @@ class TestConfigHandlerStrategyPresets:
         # 删除 (load_config 仍返回含 "my" 的 mock 配置)
         result = ConfigHandler.delete_strategy_preset("value_strategy", "my")
         assert result is True
+
+
+class TestConfigHandlerAIExternalAcknowledged:
+    """Task 2.2: ai_external_acknowledged 知情确认状态持久化"""
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_default_false_when_missing(self, mock_load):
+        mock_load.return_value = {}
+        assert ConfigHandler.is_ai_external_acknowledged() is False
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_returns_true_when_set(self, mock_load):
+        mock_load.return_value = {"ai_external_acknowledged": True}
+        assert ConfigHandler.is_ai_external_acknowledged() is True
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_true_persists(self, mock_set):
+        result = ConfigHandler.set_ai_external_acknowledged(True)
+        assert result is True
+        mock_set.assert_called_once_with("ai_external_acknowledged", True)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_false_persists(self, mock_set):
+        result = ConfigHandler.set_ai_external_acknowledged(False)
+        assert result is True
+        mock_set.assert_called_once_with("ai_external_acknowledged", False)
+
+    def test_field_in_default_config(self):
+        """AppConfig 默认 dump 应包含 ai_external_acknowledged=False"""
+        from utils.config_models import AppConfig
+
+        cfg = AppConfig()
+        assert cfg.ai_external_acknowledged is False
+        dumped = cfg.model_dump()
+        assert dumped["ai_external_acknowledged"] is False

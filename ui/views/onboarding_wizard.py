@@ -773,6 +773,13 @@ def OnboardingWizard(
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("ai_external_disclosure"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.WARNING,
+                    text_align=ft.TextAlign.CENTER,
+                ),
                 ft.Container(height=20),
                 ft.Container(
                     content=LLMConfigPanel(

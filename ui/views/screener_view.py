@@ -425,6 +425,10 @@ def ScreenerView(
         if page is not None:
             page.run_task(_on_run_click, e)
 
+    def _on_cancel_click_sync(e: ft.ControlEvent) -> None:
+        # Task 3.2: cancel_strategy 是线程安全的 (call_soon_threadsafe), 可直接在 UI 线程调用
+        vm.cancel_strategy()
+
     async def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
             await vm.sort_data(col_id, new_asc)
@@ -1190,15 +1194,27 @@ def ScreenerView(
         spacing=10,
     )
 
-    run_btn = ft.Button(
-        content=I18n.get("run_screening"),
-        icon=ft.Icons.PLAY_ARROW,
-        on_click=safe_on_click(_on_run_click_sync),
-        disabled=run_disabled,
-        style=AppStyles.primary_button(),
-        height=45,
-        visible=is_realtime,
-    )
+    # Task 3.2: loading 时切换为停止按钮 (STOP icon + cancel handler, 可点击)
+    if state.loading:
+        run_btn = ft.Button(
+            content=I18n.get("stop_screening"),
+            icon=ft.Icons.STOP,
+            on_click=safe_on_click(_on_cancel_click_sync),
+            disabled=False,
+            style=AppStyles.primary_button(),
+            height=45,
+            visible=is_realtime,
+        )
+    else:
+        run_btn = ft.Button(
+            content=I18n.get("run_screening"),
+            icon=ft.Icons.PLAY_ARROW,
+            on_click=safe_on_click(_on_run_click_sync),
+            disabled=run_disabled,
+            style=AppStyles.primary_button(),
+            height=45,
+            visible=is_realtime,
+        )
     export_btn = ft.Button(
         content=I18n.get("screener_export"),
         icon=ft.Icons.DOWNLOAD,
@@ -1272,14 +1288,14 @@ def ScreenerView(
     )
 
     # P1-3 批次 2 #70/#71: 表格空态分支 (formatted_rows 为空且非 loading 时显示 EmptyState)
+    # Task 3.5: 移除误导性 CTA (clear_filters 不清结果集也不触发重运行),
+    # 用户可通过工具栏的运行按钮重新执行策略
     table_content: ft.Control
     if not formatted_rows and not state.loading:
         table_content = EmptyState(
             icon=ft.Icons.INBOX,
             title=I18n.get("screener_no_results"),
             message=I18n.get("screener_no_data_context"),
-            on_cta=vm.clear_filters,
-            cta_text=I18n.get("screener_clear_filters"),
         )
     else:
         table_content = ft.Column(

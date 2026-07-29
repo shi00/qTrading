@@ -37,6 +37,7 @@ from ui.components.config_panels.llm_config_panel import (
     _build_model_options,
     _build_provider_options,
     _get_provider_name,
+    _on_acknowledgment_change_factory,
     _on_provider_change_factory,
     _on_refresh_click_factory,
     _on_save_click_factory,
@@ -623,6 +624,20 @@ class TestFactoryFunctionsPageAvailable:
             _invoke(handler, _make_event("qwen"))
         mock_page.run_task.assert_called_once_with(vm.update_provider, "qwen")
 
+    def test_on_acknowledgment_change_factory_calls_run_task_with_checked_value(self) -> None:
+        """_on_acknowledgment_change_factory: page 可用 → page.run_task(vm.update_ai_external_acknowledged, checked)。
+
+        Task 2.2 覆盖 L269-273: checked = bool(e.control.value) if e.control else False;
+        page 可用时调 page.run_task(vm.update_ai_external_acknowledged, checked)。
+        """
+        vm = MagicMock(spec=LLMConfigPanelViewModel)
+        handler = _on_acknowledgment_change_factory(vm)
+        mock_page = MagicMock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _invoke(handler, _make_event(True))
+        mock_page.run_task.assert_called_once_with(vm.update_ai_external_acknowledged, True)
+
 
 class TestFactoryFunctionsPageNone:
     """4 个 factory 函数: page=None 时早返回 (不调 run_task, 不抛异常)。"""
@@ -667,6 +682,16 @@ class TestFactoryFunctionsPageNone:
             _invoke(handler, _make_event("qwen"))
         mock_page.run_task.assert_not_called()
 
+    def test_on_acknowledgment_change_factory_page_none_skips_run_task(self) -> None:
+        """_on_acknowledgment_change_factory: page=None → 不调 run_task (覆盖 L269-272)。"""
+        vm = MagicMock(spec=LLMConfigPanelViewModel)
+        handler = _on_acknowledgment_change_factory(vm)
+        mock_page = MagicMock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: None)
+            _invoke(handler, _make_event(True))
+        mock_page.run_task.assert_not_called()
+
 
 class TestFactoryFunctionsRuntimeError:
     """4 个 factory 函数: ft.context.page 抛 RuntimeError 时静默处理 (不抛异常)。
@@ -706,6 +731,15 @@ class TestFactoryFunctionsRuntimeError:
         with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
             type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
             _invoke(handler, _make_event("qwen"))
+
+    def test_on_acknowledgment_change_factory_runtime_error_swallowed(self) -> None:
+        """_on_acknowledgment_change_factory: RuntimeError 静默处理 (覆盖 L274-275)。"""
+        vm = MagicMock(spec=LLMConfigPanelViewModel)
+        handler = _on_acknowledgment_change_factory(vm)
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            # 不应抛异常 (RuntimeError 被 except 捕获并 logger.debug)
+            _invoke(handler, _make_event(True))
 
 
 class TestOnProviderChangeFactoryEdgeCases:

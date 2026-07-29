@@ -79,6 +79,8 @@ class LLMConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
     # Custom model history (来自 ConfigHandler，非 locale 相关)
     custom_model_options: tuple[str, ...] = ()
+    # Task 2.2: AI 外发知情确认状态
+    ai_external_acknowledged: bool = False
 
 
 class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[LLMConfigState]):
@@ -179,6 +181,7 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
             show_refresh_button=show_refresh,
             api_key_modified=False,
             custom_model_options=custom_model_options,
+            ai_external_acknowledged=ConfigHandler.is_ai_external_acknowledged(),
         )
 
     def reload_config(self) -> None:
@@ -214,6 +217,18 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
 
     def update_azure_version(self, value: str) -> None:
         self._set_state(azure_api_version=value)
+
+    async def update_ai_external_acknowledged(self, acknowledged: bool) -> None:
+        """Task 2.2: 持久化 AI 外发知情确认状态。
+
+        R16：ConfigHandler 同步 IO 通过 ThreadPoolManager offload。
+        """
+        await ThreadPoolManager().run_async(
+            TaskType.IO,
+            ConfigHandler.set_ai_external_acknowledged,
+            acknowledged,
+        )
+        self._set_state(ai_external_acknowledged=acknowledged)
 
     @log_async_operation(
         operation_name="llm_panel_update_provider",

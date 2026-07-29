@@ -369,10 +369,16 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
+        # Task 2.2: 未确认 AI 外发政策时，dialog 增加外发说明
+        content_key = (
+            "dialog_ai_concept_rebuild_content_with_external"
+            if not vm.is_ai_external_acknowledged()
+            else "dialog_ai_concept_rebuild_content"
+        )
         set_confirm_dialog_config(
             {
                 "title_key": "dialog_ai_concept_rebuild_title",
-                "content_key": "dialog_ai_concept_rebuild_content",
+                "content_key": content_key,
                 "confirm_btn_key": "btn_confirm_rebuild",
                 "callback": _do_ai_concept_rebuild,
                 "is_destructive": True,

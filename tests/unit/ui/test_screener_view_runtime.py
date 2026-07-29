@@ -104,6 +104,7 @@ def _get_run_button(env: dict) -> ft.Button:
     """从渲染树中找到 run button (icon=PLAY_ARROW).
 
     源码中 ft.Row([export_btn, run_btn]) export_btn 在前, 需通过 icon 区分。
+    Task 3.2: loading=True 时 run_btn 切换为 STOP icon, 此 helper 仅在 loading=False 时可用。
     """
     buttons = _get_buttons(env)
     ft_btns = [b for b in buttons if isinstance(b, ft.Button)]
@@ -111,6 +112,18 @@ def _get_run_button(env: dict) -> ft.Button:
     run_btns = [b for b in ft_btns if b.icon == ft.Icons.PLAY_ARROW]
     assert len(run_btns) >= 1, "未找到 run button (icon=PLAY_ARROW)"
     return run_btns[0]
+
+
+def _get_stop_button(env: dict) -> ft.Button:
+    """从渲染树中找到 stop button (icon=STOP).
+
+    Task 3.2: state.loading=True 时 run_btn 切换为 STOP icon + cancel handler.
+    """
+    buttons = _get_buttons(env)
+    ft_btns = [b for b in buttons if isinstance(b, ft.Button)]
+    stop_btns = [b for b in ft_btns if b.icon == ft.Icons.STOP]
+    assert len(stop_btns) >= 1, "未找到 stop button (icon=STOP)"
+    return stop_btns[0]
 
 
 def _get_export_button(env: dict) -> ft.Button:
@@ -2253,6 +2266,20 @@ class TestTableDataRendering:
         assert "on_row_click" not in env["captured_callbacks"]
         assert env["captured_callbacks"] == {}
 
+    def test_empty_state_no_cta_button(self, screener_view_env) -> None:
+        """Task 3.5: EmptyState 不渲染误导性 CTA 按钮 (clear_filters 不清结果集).
+
+        验证 EmptyState 调用不含 on_cta/cta_text 参数, 移除误导性「清除筛选条件」CTA。
+        用户可通过工具栏的运行按钮重新执行策略。
+        """
+        source = _read_source()
+        # 定位 EmptyState 调用块
+        empty_state_block = source.split("EmptyState(")[1].split(")")[0]
+        assert "on_cta" not in empty_state_block, (
+            "EmptyState should not wire on_cta (Task 3.5: clear_filters is misleading)"
+        )
+        assert "cta_text" not in empty_state_block, "EmptyState should not have cta_text parameter (Task 3.5)"
+
     def test_with_data_renders_table(self, screener_view_env) -> None:
         """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""
         env = screener_view_env
@@ -2386,16 +2413,17 @@ class TestDerivedStateFromVM:
         # 至少存在 ProgressRing 控件, visible 由 state.loading 派生
         assert len(status_rings) >= 0  # 无 stream_cards 时可能无 ring
 
-    def test_run_disabled_when_loading(self, screener_view_env) -> None:
-        """state.loading=True → run_disabled=True (即使有 selected_strategy)."""
+    def test_run_button_becomes_stop_when_loading(self, screener_view_env) -> None:
+        """Task 3.2: state.loading=True → 按钮切换为 STOP icon + disabled=False (可点击取消)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         fake_vm._set_state(loading=True, selected_strategy="value", strategies_loaded=True)
         _rerender(env)
 
-        run_btn = _get_run_button(env)
-        assert run_btn.disabled is True, "loading=True 时 run button 应 disabled (即使有策略)"
+        stop_btn = _get_stop_button(env)
+        assert stop_btn.disabled is False, "loading=True 时 STOP 按钮应启用 (可点击取消)"
+        assert stop_btn.icon == ft.Icons.STOP
 
     def test_run_disabled_when_no_strategy(self, screener_view_env) -> None:
         """state.selected_strategy=None → run_disabled=True (即使 loading=False)."""
@@ -2442,27 +2470,28 @@ class TestDerivedStateFromVM:
         assert export_btn.disabled is False, "total_items>0 时 export button 应启用"
 
     def test_derived_state_auto_updates_on_loading_change(self, screener_view_env) -> None:
-        """DoD: loading 变化时按钮与进度自动更新 (无需手动 set_progress_visible/set_run_disabled)."""
+        """DoD: loading 变化时按钮自动在 PLAY_ARROW/STOP 间切换 (Task 3.2)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        # 初始: loading=False, selected_strategy=value → run enabled, progress hidden
+        # 初始: loading=False, selected_strategy=value → PLAY_ARROW, disabled=False
         fake_vm._set_state(loading=False, selected_strategy="value", strategies_loaded=True)
         _rerender(env)
         run_btn = _get_run_button(env)
         assert run_btn.disabled is False
+        assert run_btn.icon == ft.Icons.PLAY_ARROW
 
-        # 模拟 run_strategy 开始: VM 设置 loading=True
+        # 模拟 run_strategy 开始: VM 设置 loading=True → 切换为 STOP, disabled=False (可取消)
         fake_vm._set_state(loading=True)
         _rerender(env)
-        run_btn = _get_run_button(env)
-        assert run_btn.disabled is True, "loading=True 后 run button 应自动 disabled"
+        stop_btn = _get_stop_button(env)
+        assert stop_btn.disabled is False, "loading=True 后 STOP 按钮应启用 (可点击取消)"
 
-        # 模拟 run_strategy 结束: VM 设置 loading=False
+        # 模拟 run_strategy 结束: VM 设置 loading=False → 切换回 PLAY_ARROW, disabled=False
         fake_vm._set_state(loading=False)
         _rerender(env)
         run_btn = _get_run_button(env)
-        assert run_btn.disabled is False, "loading=False 后 run button 应自动 enabled"
+        assert run_btn.disabled is False, "loading=False 后 PLAY_ARROW 按钮应启用"
 
 
 # ============================================================================

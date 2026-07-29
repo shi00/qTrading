@@ -534,6 +534,15 @@ class ConfigHandler:
     def set_onboarding_complete(complete=True):
         return ConfigHandler.save_config({"onboarding_complete": complete})
 
+    @staticmethod
+    def is_ai_external_acknowledged() -> bool:
+        """Task 2.2: 用户是否已确认 AI 外发数据知情政策。"""
+        return ConfigHandler.get_typed("ai_external_acknowledged", bool, False)
+
+    @staticmethod
+    def set_ai_external_acknowledged(acknowledged: bool) -> bool:
+        return ConfigHandler.set_typed("ai_external_acknowledged", bool(acknowledged))
+
     @classmethod
     def is_embedded_mode(cls) -> bool:
         """判断是否为 embedded PostgreSQL 模式（R-B1 单一入口点）。
