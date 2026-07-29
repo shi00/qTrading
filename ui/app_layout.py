@@ -29,9 +29,11 @@ from ui.components.flet_type_helpers import (
     safe_on_change,
     safe_on_click,
 )
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
@@ -150,8 +152,13 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
     return ft.Stack(safe_controls(pages), expand=True)
 
 
-def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
-    """构造导航栏目的地列表 (i18n 变化时由组件重渲染自动刷新)。"""
+def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDestination]:
+    """构造导航栏目的地列表 (i18n 变化时由组件重渲染自动刷新)。
+
+    Args:
+        running_count: TaskManager 中 RUNNING 状态任务数 (Phase 6.1, FR-UX-006)。
+            ``nav_tasks`` 项 icon 上叠加数字角标, >0 时显示。
+    """
     nav_items = [
         (ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD, "nav_market"),
         (ft.Icons.FILTER_ALT_OUTLINED, ft.Icons.FILTER_ALT, "nav_screener"),
@@ -160,18 +167,64 @@ def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
         (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, ft.Icons.FORMAT_LIST_BULLETED, "nav_tasks"),
         (ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, "nav_settings"),
     ]
-    return [
-        ft.NavigationRailDestination(
-            icon=icon,
-            selected_icon=selected_icon,
-            label=ft.Text(
-                I18n.get(label_key),
-                size=AppStyles.FONT_SIZE_BODY_SM,
-                weight=ft.FontWeight.BOLD,
-            ),
+    destinations: list[ft.NavigationRailDestination] = []
+    for icon, selected_icon, label_key in nav_items:
+        # Phase 6.1 FR-UX-006: nav_tasks icon 上叠加 running_count 角标
+        icon_content: ft.IconData | ft.Stack = icon
+        if label_key == "nav_tasks" and running_count > 0:
+            icon_content = _build_nav_badge_icon(icon, running_count)
+        destinations.append(
+            ft.NavigationRailDestination(
+                icon=icon_content,
+                selected_icon=selected_icon,
+                label=ft.Text(
+                    I18n.get(label_key),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.BOLD,
+                ),
+            )
         )
-        for icon, selected_icon, label_key in nav_items
-    ]
+    return destinations
+
+
+def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
+    """构造带运行中任务数角标的 nav_tasks icon (Phase 6.1, FR-UX-006).
+
+    ``ft.Badge`` 在 NavigationRailDestination 上无 ``badge`` 属性可挂载,
+    故用 ``ft.Stack`` 在 icon 右上角叠加数字小圆点。``running_count`` 上限
+    99, 超过显示 "99+"。
+
+    Args:
+        icon: 基础 icon 名称 (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED 等)。
+        running_count: RUNNING 状态任务数 (>0 由调用方保证)。
+    """
+    badge_text = str(running_count) if running_count <= 99 else "99+"
+    # 数字宽度自适应: 1 位数 16px, 2 位数/99+ 用 22px
+    badge_w = 16 if len(badge_text) == 1 else 22
+    return ft.Stack(
+        [
+            ft.Icon(icon, size=AppStyles.FONT_SIZE_LG),
+            ft.Container(
+                content=ft.Text(
+                    badge_text,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=ft.Colors.WHITE,
+                    text_align=ft.TextAlign.CENTER,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                width=badge_w,
+                height=16,
+                border_radius=8,
+                bgcolor=AppColors.ERROR,
+                alignment=ft.Alignment.CENTER,
+                left=12,
+                top=-2,
+                padding=ft.Padding.symmetric(horizontal=2, vertical=0),
+            ),
+        ],
+        width=24,
+        height=24,
+    )
 
 
 @ft.component
@@ -189,6 +242,9 @@ def AppLayout() -> ft.Container:
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
+
+    # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
+    nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)
 
     # --- Pure UI state ---
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
@@ -336,7 +392,7 @@ def AppLayout() -> ft.Container:
         indicator_color=ft.Colors.PRIMARY,
         indicator_shape=ft.RoundedRectangleBorder(radius=4),
         leading=brand_header,
-        destinations=_build_nav_destinations(),
+        destinations=_build_nav_destinations(running_count=nav_badge_state.running_count),
         on_change=safe_on_change(_on_nav_change),
     )
 

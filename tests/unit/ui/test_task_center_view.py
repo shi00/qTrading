@@ -582,6 +582,61 @@ class TestBuildTaskCard:
         _trigger_callback(btn.on_click, MagicMock())
         on_cancel.assert_called_once_with("task-xyz")
 
+    # --- Phase 6.2 (FR-UX-006): FAILED task retry + details buttons ---
+
+    def test_build_task_card_failed_has_retry_button(self):
+        """FAILED task card should show Retry button when on_retry is provided."""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full")
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock())
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        # FAILED card should have at least 1 TextButton (retry)
+        assert len(buttons) >= 1
+
+    def test_build_task_card_failed_has_details_button(self):
+        """FAILED task card should show View Details button when on_view_details is provided."""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full")
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock(), on_view_details=MagicMock())
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        # FAILED card should have 2 TextButtons (retry + details)
+        assert len(buttons) >= 2
+
+    def test_build_task_card_failed_no_retry_button_when_callback_none(self):
+        """FAILED task card should not show Retry button when on_retry is None."""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full")
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=None, on_view_details=MagicMock())
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        # Only details button, no retry
+        assert len(buttons) == 1
+
+    def test_build_task_card_failed_retry_triggers_callback(self):
+        """Clicking Retry button should call on_retry with task_id."""
+        row = self._make_row(id="failed-task-1", status=TaskStatus.FAILED, error="timeout")
+        on_retry = MagicMock()
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=on_retry)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) >= 1
+        # First button is retry (appended before details)
+        _trigger_callback(buttons[0].on_click, MagicMock())
+        on_retry.assert_called_once_with("failed-task-1")
+
+    def test_build_task_card_failed_details_triggers_callback(self):
+        """Clicking View Details button should call on_view_details with task_id."""
+        row = self._make_row(id="failed-task-2", status=TaskStatus.FAILED, error="timeout")
+        on_view_details = MagicMock()
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock(), on_view_details=on_view_details)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) >= 2
+        # Second button is details (appended after retry)
+        _trigger_callback(buttons[1].on_click, MagicMock())
+        on_view_details.assert_called_once_with("failed-task-2")
+
+    def test_build_task_card_failed_no_buttons_when_callbacks_none(self):
+        """FAILED task card should have no action buttons when callbacks are None."""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full")
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=None, on_view_details=None)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) == 0
+
 
 # ---------------------------------------------------------------------------
 # TaskCenterView 组件体测试 (覆盖 263-408 行 @ft.component 函数体)
@@ -960,3 +1015,22 @@ def _find_control_by_type(root: ft.Control, control_type: type) -> ft.Control | 
             if found is not None:
                 return found
     return None
+
+
+def _find_all_controls_by_type(root: ft.Control, control_type: type) -> list[ft.Control]:
+    """Recursively find ALL controls of given type in the control tree (Phase 6.2)."""
+    results: list[ft.Control] = []
+    if not isinstance(root, ft.Control):
+        return results
+    if isinstance(root, control_type):
+        results.append(root)
+    content = getattr(root, "content", None)
+    if isinstance(content, ft.Control):
+        results.extend(_find_all_controls_by_type(content, control_type))
+    controls = getattr(root, "controls", None)
+    if isinstance(controls, list):
+        for ctrl in controls:
+            if not isinstance(ctrl, ft.Control):
+                continue
+            results.extend(_find_all_controls_by_type(ctrl, control_type))
+    return results

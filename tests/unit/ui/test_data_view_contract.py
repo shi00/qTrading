@@ -389,6 +389,9 @@ class _FakeDataExplorerState:
     sql_result_columns: tuple[str, ...] = ()
     sql_result_rows: tuple[SqlResultRow, ...] = ()
     sql_error: str | None = None
+    # Phase 6.4 (FR-UX-006): 数据新鲜度字段 (对齐 DataExplorerState)
+    data_latest_date: str = ""
+    data_lag_days: int = 0
 
 
 class _FakeDataExplorerViewModel:
@@ -435,6 +438,10 @@ class _FakeDataExplorerViewModel:
         self.method_calls.append(("init_tables", {}))
         self._set_state(tables_loaded=True, tables_list=("stock_basic", "daily_quotes"))
         return ["stock_basic", "daily_quotes"]
+
+    async def load_data_freshness(self) -> None:
+        """Phase 6.4 (FR-UX-006): 数据新鲜度加载桩 (fake state 已有默认值)."""
+        self.method_calls.append(("load_data_freshness", {}))
 
     async def load_table_schema(self, table_name: str) -> list:
         self.method_calls.append(("load_table_schema", {"table_name": table_name}))

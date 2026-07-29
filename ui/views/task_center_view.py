@@ -96,10 +96,18 @@ def _render_task_field(val: Message | str) -> str:
     return I18n.get(val.key, **params)
 
 
-def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Container:
+def _build_task_card(
+    row: TaskRow,
+    on_cancel: Callable[[str], None],
+    on_retry: Callable[[str], None] | None = None,
+    on_view_details: Callable[[str], None] | None = None,
+) -> ft.Container:
     """Build a single task card with status badge, progress, and actions.
 
-    Pure function — no self/state dependency. Receives immutable TaskRow + on_cancel callback.
+    Pure function — no self/state dependency. Receives immutable TaskRow + callbacks.
+
+    Phase 6.2 (FR-UX-006): FAILED tasks show "Retry" + "View Details" buttons
+    when ``on_retry``/``on_view_details`` callbacks are provided.
     """
     status_color = _get_status_color(row.status)
     status_label = _get_status_label(row.status)
@@ -225,26 +233,59 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
         italic=True,
     )
 
-    action_btn: ft.Control = ft.Container()
+    # Phase 6.2 (FR-UX-006): Build action buttons based on task status
+    action_buttons: list[ft.Control] = []
     if row.status in (TaskStatus.RUNNING, TaskStatus.QUEUED) and row.cancellable:
-        action_btn = ft.TextButton(
-            I18n.get("task_cancel_tooltip"),
-            icon=ft.Icons.STOP_CIRCLE_OUTLINED,
-            icon_color=AppColors.ERROR,
-            style=ft.ButtonStyle(
-                color=AppColors.ERROR,
-                padding=ft.Padding.symmetric(horizontal=12, vertical=4),
-                shape=ft.RoundedRectangleBorder(radius=6),
-            ),
-            on_click=lambda e, tid=row.id: on_cancel(tid),
+        action_buttons.append(
+            ft.TextButton(
+                I18n.get("task_cancel_tooltip"),
+                icon=ft.Icons.STOP_CIRCLE_OUTLINED,
+                icon_color=AppColors.ERROR,
+                style=ft.ButtonStyle(
+                    color=AppColors.ERROR,
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+                    shape=ft.RoundedRectangleBorder(radius=6),
+                ),
+                on_click=lambda e, tid=row.id: on_cancel(tid),
+            )
         )
+    elif row.status == TaskStatus.FAILED:
+        # Phase 6.2 (FR-UX-006): Retry + View Details buttons for failed tasks
+        if on_retry is not None:
+            action_buttons.append(
+                ft.TextButton(
+                    I18n.get("task_retry"),
+                    icon=ft.Icons.REFRESH,
+                    icon_color=AppColors.PRIMARY,
+                    style=ft.ButtonStyle(
+                        color=AppColors.PRIMARY,
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+                        shape=ft.RoundedRectangleBorder(radius=6),
+                    ),
+                    on_click=lambda e, tid=row.id: on_retry(tid),
+                )
+            )
+        if on_view_details is not None:
+            action_buttons.append(
+                ft.TextButton(
+                    I18n.get("task_view_details"),
+                    icon=ft.Icons.INFO_OUTLINE,
+                    icon_color=AppColors.TEXT_SECONDARY,
+                    style=ft.ButtonStyle(
+                        color=AppColors.TEXT_SECONDARY,
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+                        shape=ft.RoundedRectangleBorder(radius=6),
+                    ),
+                    on_click=lambda e, tid=row.id: on_view_details(tid),
+                )
+            )
 
     bottom_row = ft.Row(
         [
             ft.Icon(ft.Icons.ACCESS_TIME, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_HINT),
             time_text,
             ft.Container(expand=True),
-            action_btn,
+            *action_buttons,
         ],
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
         spacing=6,
@@ -297,10 +338,24 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
+    # Phase 6.2 (FR-UX-006): Details dialog state (task_id being viewed, None = closed)
+    details_task_id, set_details_task_id = ft.use_state(None)
+
     # --- Handlers ---
     def _on_cancel(task_id: str) -> None:
         UILogger.log_action("TaskCenterView", "Click", f"btn_cancel | task_id={task_id}")
         vm.cancel_task(task_id)
+
+    def _on_retry(task_id: str) -> None:
+        UILogger.log_action("TaskCenterView", "Click", f"btn_retry | task_id={task_id}")
+        vm.retry_task(task_id)
+
+    def _on_view_details(task_id: str) -> None:
+        UILogger.log_action("TaskCenterView", "Click", f"btn_details | task_id={task_id}")
+        set_details_task_id(task_id)
+
+    def _on_close_details(e: ft.ControlEvent) -> None:  # noqa: ARG001
+        set_details_task_id(None)
 
     def _on_clear(e: ft.ControlEvent) -> None:  # noqa: ARG001
         UILogger.log_action("TaskCenterView", "Click", "btn_clear_finished")
@@ -388,7 +443,15 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
     if not state.tasks:
         scroll_controls = [empty_view]
     else:
-        scroll_controls = [_build_task_card(row, on_cancel=_on_cancel) for row in page_rows]
+        scroll_controls = [
+            _build_task_card(
+                row,
+                on_cancel=_on_cancel,
+                on_retry=_on_retry,
+                on_view_details=_on_view_details,
+            )
+            for row in page_rows
+        ]
 
     scroll_area = ft.ListView(
         controls=scroll_controls,
@@ -424,6 +487,63 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
         spacing=4,
         visible=state.total_pages > 1,
     )
+
+    # --- Phase 6.2 (FR-UX-006): Task details dialog ---
+    details_row: TaskRow | None = None
+    if details_task_id is not None:
+        for r in state.tasks:
+            if r.id == details_task_id:
+                details_row = r
+                break
+
+    if details_row is not None:
+        details_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("task_details_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        f"{I18n.get('task_col_name')}: {_render_task_field(details_row.name)}",
+                        size=AppStyles.FONT_SIZE_BODY,
+                    ),
+                    ft.Text(
+                        f"{I18n.get('task_col_type')}: {_render_task_field(details_row.task_type)}",
+                        size=AppStyles.FONT_SIZE_BODY,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        f"{I18n.get('task_col_status')}: {_get_status_label(details_row.status)}",
+                        size=AppStyles.FONT_SIZE_BODY,
+                        color=_get_status_color(details_row.status),
+                    ),
+                    ft.Container(height=4),
+                    ft.Text(
+                        f"{I18n.get('task_details_error')}:",
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        details_row.error or I18n.get("task_details_no_error"),
+                        size=AppStyles.FONT_SIZE_BODY,
+                        color=AppColors.ERROR if details_row.error else AppColors.TEXT_HINT,
+                        selectable=True,
+                    ),
+                ],
+                tight=True,
+                spacing=6,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            actions=[
+                ft.TextButton(
+                    I18n.get("common_close"),
+                    on_click=safe_on_click(_on_close_details),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+    else:
+        details_dialog = None
+    ft.use_dialog(details_dialog)
 
     # --- Assembly ---
     return ft.Container(

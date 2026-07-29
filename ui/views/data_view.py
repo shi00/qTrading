@@ -41,7 +41,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, SqlResultRow, TableRow
+from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, MAX_EXPORT_ROWS, SqlResultRow, TableRow
 from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
@@ -270,6 +270,8 @@ def TableViewerTab(
             tables = await vm.init_tables()
             if tables:
                 await _load_schema_and_data()
+            # Phase 6.4 (FR-UX-006): 加载数据新鲜度 (非关键, 失败不阻塞)
+            await vm.load_data_freshness()
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -382,6 +384,9 @@ def TableViewerTab(
                             action_text=I18n.get("data_export_open_folder"),
                             on_action=lambda: page.run_task(open_export_folder, filepath),
                         )
+                        # Phase 6.3 (FR-UX-006): 截断警告 toast (导出全部且达到上限)
+                        if not current_page and len(df) >= MAX_EXPORT_ROWS:
+                            _safe_show_toast(page, I18n.get("data_export_truncated_warning"), "warning")
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
                     page = _get_page()
@@ -608,6 +613,22 @@ def TableViewerTab(
     else:
         grid_content = loading_widget
 
+    # Phase 6.4 (FR-UX-006): 数据新鲜度标签 (滞后 >3 日显示警告色)
+    if state.data_latest_date:
+        freshness_color = AppColors.ERROR if state.data_lag_days > 3 else AppColors.TEXT_SECONDARY
+        freshness_label = ft.Text(
+            I18n.get("data_freshness_label", date=state.data_latest_date, days=state.data_lag_days),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=freshness_color,
+            weight=ft.FontWeight.W_500 if state.data_lag_days > 3 else ft.FontWeight.NORMAL,
+        )
+    else:
+        freshness_label = ft.Text(
+            I18n.get("data_freshness_no_data"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_HINT,
+        )
+
     # 工具栏
     toolbar_content = ft.Row(
         [
@@ -624,6 +645,8 @@ def TableViewerTab(
                 bgcolor=AppColors.SURFACE,
             ),
             ft.Container(expand=True),
+            freshness_label,
+            ft.Container(width=8),
             ft.PopupMenuButton(
                 icon=ft.Icons.MORE_VERT,
                 tooltip=I18n.get("common_more_actions"),
