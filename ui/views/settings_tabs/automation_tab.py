@@ -59,6 +59,7 @@ def _build_time_options() -> list[ft.dropdown.Option]:
         ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
         ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
         ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
+        ft.dropdown.Option("20:30", I18n.get("settings_opt_2030")),
     ]
 
 
@@ -211,6 +212,23 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
+    async def _do_nightly_prediction_time_change(new_time: str) -> None:
+        """Task 7.3: 保存夜间 AI 预测时辰。"""
+        try:
+            success = await settings_vm.save_nightly_prediction_time(new_time)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
+            if show_snack_callback:
+                show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:
+            logger.error("[AutomationTab] nightly prediction time save failed: %s", ex, exc_info=True)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_schedule_toggle(e: ft.ControlEvent) -> None:
         new_enabled = get_control_value(e.control, ft.Switch)
@@ -246,6 +264,14 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_engine_change, new_engine)
+
+    def _on_nightly_prediction_time_change(e: ft.ControlEvent) -> None:
+        """Task 7.3: 夜间预测时辰 event handler。"""
+        new_time = get_control_value(e.control, ft.Dropdown)
+        settings_vm.set_nightly_prediction_time(new_time)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_nightly_prediction_time_change, new_time)
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     schedule_status_color = AppColors.SUCCESS if settings_state.auto_enabled else AppColors.TEXT_HINT
@@ -301,6 +327,17 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         options=_build_search_engine_options(),
         on_select=safe_on_select(_on_ai_concept_engine_change),
         disabled=not settings_state.ai_enabled,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+    # Task 7.3: 夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30, 提升为可配项)
+    nightly_prediction_time_dropdown = ft.Dropdown(
+        label=I18n.get("settings_nightly_prediction_time"),
+        width=_DROPDOWN_WIDTH,
+        value=settings_state.nightly_prediction_time,
+        options=_build_time_options(),
+        on_select=safe_on_select(_on_nightly_prediction_time_change),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -396,6 +433,24 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
+    # Task 7.3: 夜间 AI 预测时辰卡片 (独立 card, 无开关 — scheduler 始终调度)
+    row_nightly_time = SettingRow(
+        icon=safe_icon_str(ft.Icons.NIGHTLIGHT),
+        title=I18n.get("settings_nightly_prediction_time"),
+        subtitle=I18n.get("settings_nightly_prediction_desc"),
+        control=nightly_prediction_time_dropdown,
+        icon_color=AppColors.ACCENT,
+        title_key="settings_nightly_prediction_time",
+        subtitle_key="settings_nightly_prediction_desc",
+    )
+    card_nightly = DashboardCard(
+        content=ft.Column(
+            [
+                row_nightly_time,
+            ],
+        ),
+    )
+
     txt_title = ft.Text(
         I18n.get("settings_auto_update"),
         size=AppStyles.FONT_SIZE_TITLE,
@@ -422,6 +477,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Container(height=_SPACING_SMALL),
                 card_main,
                 card_ai,
+                card_nightly,
                 txt_hint,
             ],
             spacing=_SPACING_DEFAULT,

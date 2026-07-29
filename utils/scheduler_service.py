@@ -392,15 +392,21 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Daily Update at %02d:%02d", hour, minute)
 
-        # 2. Nightly AI Prediction Job (Default 20:30)
-        # In the future, this could be configurable
+        # 2. Nightly AI Prediction Job
+        # Task 7.3: 时辰从 ConfigHandler.get_nightly_prediction_time() 读取 (原硬编码 20:30)
+        nightly_time = ConfigHandler.get_nightly_prediction_time() or "20:30"
+        try:
+            n_hour, n_minute = map(int, nightly_time.split(":"))
+        except (ValueError, TypeError, AttributeError):
+            n_hour, n_minute = 20, 30
+
         self.scheduler.add_job(
             self._run_nightly_prediction,
-            CronTrigger(hour=20, minute=30),
+            CronTrigger(hour=n_hour, minute=n_minute),
             id="nightly_prediction",
             replace_existing=True,
         )
-        logger.info("[Scheduler] Scheduled Nightly Prediction at 20:30")
+        logger.info("[Scheduler] Scheduled Nightly Prediction at %02d:%02d", n_hour, n_minute)
 
         # 3. AI Concept Tagging Job (Daily)
         ai_concept_time = ConfigHandler.get_ai_concept_schedule_time() or "18:00"

@@ -9,11 +9,13 @@ VM 内部不持有 dict/DataFrame 作为业务状态 (移除 dual-track).
 VM 不感知 locale: i18n 消息用 Message (key + params) 透传.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
@@ -21,10 +23,12 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
-from services.ai_service import AIService
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+
+if TYPE_CHECKING:
+    from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +124,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         # T6 fix: 与 _processor / _cache 一致，AIService 也通过构造注入。
         # AIService 已是 @register_singleton，AIService() 默认返回同一实例，
         # 显式注入仅为统一风格、便于测试替换。
+        # Task 7.2: AIService 改为惰性构造 (避免 DataSourceTab 打开即触发 litellm import
+        # 阻塞主线程); 仅在 execute_ai_concept_rebuild 实际用到时才构造。
         self._processor = processor or DataProcessor()
         self._cache = cache or CacheManager()
-        self._ai_service = ai_service or AIService()
+        self._ai_service = ai_service
         self._tm = TaskManager()
 
         # Business state (internal mutable tracking, not for View)
@@ -150,6 +156,18 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             return
         self._tm_callback = self.handle_task_update
         self._tm.subscribe(self._tm_callback)
+
+    def _get_ai_service(self) -> AIService:
+        """Task 7.2: 惰性构造 AIService (仅在 execute_ai_concept_rebuild 用到时才 import + 构造).
+
+        避免 DataSourceTab 打开即触发 ``services.ai_service`` → litellm 同步 import
+        阻塞主线程; 同时保持显式注入可测试性。
+        """
+        if self._ai_service is None:
+            from services.ai_service import AIService
+
+            self._ai_service = AIService()
+        return self._ai_service
 
     def _unsubscribe_from_task_manager(self) -> None:
         """取消 TaskManager 订阅 (dispose 时调用)."""
@@ -368,11 +386,12 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 self._set_state(progress=0.05, progress_message=Message("ds_ai_concept_rebuild_start"))
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
+                # Task 7.2: _get_ai_service() 惰性构造, 避免 __init__ 触发 litellm import
                 await self._processor.run_ai_concept_tagging(
                     task_id=task_id,
                     cancel_event=cancel_event,
                     manual_trigger=True,
-                    ai_service=self._ai_service,
+                    ai_service=self._get_ai_service(),
                 )
                 # P1-5: 完成进度 100% (任务结束 finally 重置为 0, 此处先让用户看到完成态)
                 self._set_state(progress=1.0, progress_message=Message("ds_ai_concept_rebuild_done"))

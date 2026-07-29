@@ -201,18 +201,19 @@ class TestR2CancelledErrorPropagation:
 class TestBuildTimeOptions:
     """_build_time_options 模块级纯函数测试。"""
 
-    def test_returns_six_options(self):
+    def test_returns_seven_options(self):
+        """Task 7.3: 新增 20:30 选项, 共 7 个。"""
         from ui.views.settings_tabs.automation_tab import _build_time_options
 
         options = _build_time_options()
-        assert len(options) == 6
+        assert len(options) == 7
 
     def test_option_keys_correct(self):
         from ui.views.settings_tabs.automation_tab import _build_time_options
 
         options = _build_time_options()
         keys = [opt.key for opt in options]
-        assert keys == ["15:30", "16:00", "16:30", "17:00", "18:00", "20:00"]
+        assert keys == ["15:30", "16:00", "16:30", "17:00", "18:00", "20:00", "20:30"]
 
     def test_options_are_dropdown_option_instances(self):
         from ui.views.settings_tabs.automation_tab import _build_time_options
