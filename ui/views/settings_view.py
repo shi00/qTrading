@@ -103,6 +103,8 @@ def _show_snack_impl(
         page: 渲染时捕获的 ft.Page 引用 (None 时静默返回).
         message: toast 文本.
         color: AppColors token 或 "error"/"success"/"warning" 字符串, 决定 msg_type.
+        action_text: Task 5.1 snack action 按钮文本 (None 无按钮).
+        on_action: Task 5.1 snack action 回调 (action_text 非空时必填).
 
     Note:
         page 在 SettingsView 渲染时捕获, 供 run_task 回调中使用
@@ -118,7 +120,13 @@ def _show_snack_impl(
         msg_type = "success"
     elif color == AppColors.WARNING or color == "warning":
         msg_type = "warning"
-    page.show_toast(message, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+    # Task 5.1: action_text/on_action 仅在非 None 时透传 (保持无 action 场景调用签名不变)
+    toast_kwargs: dict[str, object] = {"type": msg_type}
+    if kwargs.get("action_text") is not None:
+        toast_kwargs["action_text"] = kwargs["action_text"]
+    if kwargs.get("on_action") is not None:
+        toast_kwargs["on_action"] = kwargs["on_action"]
+    page.show_toast(message, **toast_kwargs)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
 
 
 @ft.component

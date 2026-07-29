@@ -159,6 +159,20 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
                 alignment=ft.MainAxisAlignment.START,
             ),
             ft.Row(integrity_items, spacing=5, alignment=ft.MainAxisAlignment.START, wrap=True),
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.VERIFIED, size=AppStyles.FONT_SIZE_LG, color=AppColors.PRIMARY),
+                    ft.Text(
+                        f"{I18n.get('ds_data_quality_tier')}: {I18n.get(f'quality_tier_{result.quality_tier}')}"
+                        if result.quality_tier is not None
+                        else f"{I18n.get('ds_data_quality_tier')}: {I18n.get('ds_not_checked')}",
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_PRIMARY,
+                    ),
+                ],
+                spacing=5,
+                alignment=ft.MainAxisAlignment.START,
+            ),
         ],
         spacing=6,
     )
@@ -284,6 +298,16 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[DataSourceTab] Health check failed: %s", DataSanitizer.sanitize_error(ex))
+
+    async def _do_probe_credits() -> None:
+        """Task 5.1: snack action '重新探测积分' → tushare_vm.verify_token()."""
+        ensure_correlation_id()
+        try:
+            await tushare_vm.verify_token()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:
+            logger.error("[DataSourceTab] Probe credits failed: %s", DataSanitizer.sanitize_error(ex))
 
     async def _do_full_sync() -> None:
         ensure_correlation_id()
@@ -449,6 +473,18 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     def _on_scan_close() -> None:
         set_scan_dialog_open(False)
 
+    def _on_sync_now_from_health_report() -> None:
+        """Task 5.3: 健康报告弹窗"立即同步" → 触发完整日更新 (修复深链)."""
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_full_sync)
+
+    def _on_init_data_from_scan() -> None:
+        """Task 5.3: 深度扫描结果"初始化数据" → 触发初始化历史数据 (修复深链)."""
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_init_historical)
+
     def _on_confirm_dialog_close() -> None:
         set_confirm_dialog_config({})
 
@@ -477,13 +513,39 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     # --- Snack effect: state.snack → show_snack (瞬态通知, 监听 seq 变化触发回调) ---
     # L771 合规: 直接从 state.snack 读取 (frozen SnackRow), 无 vm.last_snack property 拉取.
     # seq 字段确保连续相同内容也触发 use_state setter 更新.
+    # Task 5.1: snack.action_key 非空时附 action 按钮 (检查健康/重新探测积分).
     def _on_snack_change() -> None:
         snack = state.snack
         if snack is None:
             return
         text = I18n.get(snack.message.key, **snack.message.params)
+        action_text: str | None = None
+        on_action: Callable[[], None] | None = None
+        if snack.action_key is not None:
+            action_text = I18n.get(snack.action_key)
+            if snack.action_key == "snack_action_check_health":
+
+                def _go_check_health() -> None:
+                    page = _get_page()
+                    if page is not None:
+                        page.run_task(_do_check_health)
+
+                on_action = _go_check_health
+            elif snack.action_key == "snack_action_probe_credits":
+
+                def _go_probe_credits() -> None:
+                    page = _get_page()
+                    if page is not None:
+                        page.run_task(_do_probe_credits)
+
+                on_action = _go_probe_credits
         if show_snack_callback:
-            show_snack_callback(text, color=_resolve_snack_color(snack.color_name))
+            show_snack_callback(
+                text,
+                color=_resolve_snack_color(snack.color_name),
+                action_text=action_text,
+                on_action=on_action,
+            )
 
     ft.use_effect(_on_snack_change, dependencies=[state.snack.seq if state.snack else 0])
 
@@ -943,6 +1005,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             open_state=True,
             on_close=_on_health_report_close,
             on_deep_scan=_on_deep_scan,
+            on_sync_now=_on_sync_now_from_health_report,
         )
         ft.use_dialog(typing.cast("ft.DialogControl | None", health_report_dialog_ctrl))
 
@@ -954,6 +1017,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             page=page,
             open_state=True,
             on_close=_on_scan_close,
+            on_init_data=_on_init_data_from_scan,
         )
         ft.use_dialog(typing.cast("ft.DialogControl | None", scan_dialog_ctrl))
 

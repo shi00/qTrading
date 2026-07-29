@@ -76,6 +76,17 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
         )
         if msg == "quality_err_too_low":  # Fallback if I18n not initialized
             msg = f"Data Quality too low for {func_name}. Required: {min_tier.name}, Current: {QualityTier(current_tier).name}"
+        # Task 5.2: 附归因信息 (落后表名 + lag_days) 从 health_cache 读取
+        health_cache = getattr(processor, "_health_cache", None)
+        if health_cache and isinstance(health_cache, dict):
+            health_data = health_cache.get("data")
+            if health_data and isinstance(health_data, dict):
+                market_info = health_data.get("market") or {}
+                lag_days = market_info.get("lag_days", 0) if isinstance(market_info, dict) else 0
+                if isinstance(lag_days, (int, float)) and lag_days > 0:
+                    attribution = I18n.get("quality_err_attribution", lag_days=int(lag_days))
+                    if attribution != "quality_err_attribution":
+                        msg = f"{msg} {attribution}"
         logger.warning("[QualityGate] %s", msg)
         raise QualityGateError(msg)
 
