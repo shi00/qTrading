@@ -432,3 +432,107 @@ class TestSaveResultsFailState:
         assert state.status_message is not None
         assert state.status_message.key == "screener_done_saved"
         assert state.status_color == "success"
+
+
+# --- Task 4.1: 筛选方案保存/载入/删除 (FR-UX-003) ---
+
+
+class TestPresetManagement:
+    """Task 4.1: 策略筛选方案预设管理 (FR-UX-003).
+
+    覆盖 VM 的 4 个 preset 命令方法:
+    - get_preset_names: 同步读预设名称列表
+    - save_preset: 通过 ThreadPoolManager 提交 IO 写盘
+    - load_preset: 同步读预设参数 (未命中返回空 dict)
+    - delete_preset: 通过 ThreadPoolManager 提交 IO 删除 (返回 bool)
+    """
+
+    def test_get_preset_names_returns_names_list(self, vm):
+        """get_preset_names 返回已保存预设名称列表."""
+        from utils.config_handler import ConfigHandler
+
+        with patch.object(
+            ConfigHandler,
+            "get_strategy_presets",
+            return_value={"保守型": {"pe": 15}, "激进型": {"pe": 5}},
+        ):
+            names = vm.get_preset_names("value_strategy")
+        assert names == ["保守型", "激进型"]
+
+    def test_get_preset_names_returns_empty_list_when_no_presets(self, vm):
+        """无预设时返回空列表."""
+        from utils.config_handler import ConfigHandler
+
+        with patch.object(ConfigHandler, "get_strategy_presets", return_value={}):
+            names = vm.get_preset_names("value_strategy")
+        assert names == []
+
+    @pytest.mark.asyncio
+    async def test_save_preset_calls_save_strategy_preset_via_thread_pool(self, vm):
+        """save_preset 通过 ThreadPoolManager 提交 IO 写盘并透传参数."""
+        from unittest.mock import AsyncMock
+
+        from utils.config_handler import ConfigHandler
+        from utils.thread_pool import TaskType
+
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value=True)
+
+            await vm.save_preset("保守型", "value_strategy", {"pe": 15})
+
+        mock_tpm.run_async.assert_awaited_once_with(
+            TaskType.IO,
+            ConfigHandler.save_strategy_preset,
+            "value_strategy",
+            "保守型",
+            {"pe": 15},
+        )
+
+    def test_load_preset_returns_params_when_exists(self, vm):
+        """load_preset 命中预设时返回参数 dict."""
+        from utils.config_handler import ConfigHandler
+
+        with patch.object(
+            ConfigHandler,
+            "get_strategy_presets",
+            return_value={"保守型": {"pe": 15, "roe": 10}},
+        ):
+            params = vm.load_preset("保守型", "value_strategy")
+        assert params == {"pe": 15, "roe": 10}
+
+    def test_load_preset_returns_empty_dict_when_not_exists(self, vm):
+        """load_preset 未命中预设时返回空 dict (不抛异常)."""
+        from utils.config_handler import ConfigHandler
+
+        with patch.object(
+            ConfigHandler,
+            "get_strategy_presets",
+            return_value={"保守型": {"pe": 15}},
+        ):
+            params = vm.load_preset("不存在", "value_strategy")
+        assert params == {}
+
+    @pytest.mark.asyncio
+    async def test_delete_preset_returns_true_when_existed(self, vm):
+        """delete_preset 命中时返回 True (ConfigHandler.delete_strategy_preset 返回 True)."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value=True)
+
+            result = await vm.delete_preset("保守型", "value_strategy")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_delete_preset_returns_false_when_not_existed(self, vm):
+        """delete_preset 未命中时返回 False (ConfigHandler.delete_strategy_preset 返回 False)."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value=False)
+
+            result = await vm.delete_preset("不存在", "value_strategy")
+        assert result is False
