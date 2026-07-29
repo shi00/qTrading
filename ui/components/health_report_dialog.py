@@ -504,6 +504,7 @@ def HealthReportDialog(
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
     on_deep_scan: Callable[[], None] | None = None,
+    on_sync_now: Callable[[], None] | None = None,
 ) -> ft.Container:
     """健康报告弹窗（声明式 V1）。
 
@@ -511,6 +512,7 @@ def HealthReportDialog(
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 深度扫描通过 ``on_deep_scan`` 回调通知消费方（HealthScanDialog 声明式，Task E.3 重写）
+    - Task 5.3: ``on_sync_now`` 回调关闭弹窗并触发同步命令（修复深链）
     - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
 
     Args:
@@ -519,6 +521,7 @@ def HealthReportDialog(
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）
         on_deep_scan: 深度扫描回调（消费方打开 HealthScanDialog）
+        on_sync_now: 立即同步回调（Task 5.3: 关闭弹窗并触发同步）
     """
     ft.use_state(get_observable_state)
     open_, set_open = ft.use_state(open_state)
@@ -544,6 +547,35 @@ def HealthReportDialog(
         if on_deep_scan is not None:
             on_deep_scan()
 
+    def _sync_now(_e=None) -> None:
+        set_open(False)
+        if on_close is not None:
+            on_close()
+        if on_sync_now is not None:
+            on_sync_now()
+
+    actions = [
+        ft.TextButton(
+            I18n.get("health_btn_deep_scan"),
+            on_click=_deep_scan,
+            style=ft.ButtonStyle(color=AppColors.ACCENT),
+        ),
+        ft.TextButton(
+            I18n.get("common_close"),
+            on_click=_close,
+            style=ft.ButtonStyle(color=AppColors.PRIMARY),
+        ),
+    ]
+    if on_sync_now is not None:
+        actions.insert(
+            0,
+            ft.TextButton(
+                I18n.get("health_btn_sync_now"),
+                on_click=_sync_now,
+                style=ft.ButtonStyle(color=AppColors.SUCCESS),
+            ),
+        )
+
     dialog = (
         ft.AlertDialog(
             content_padding=0,
@@ -551,18 +583,7 @@ def HealthReportDialog(
             title=ft.Text(I18n.get("health_report_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
             title_padding=0,
             content=_build_health_content(report, width, height),
-            actions=[
-                ft.TextButton(
-                    I18n.get("health_btn_deep_scan"),
-                    on_click=_deep_scan,
-                    style=ft.ButtonStyle(color=AppColors.ACCENT),
-                ),
-                ft.TextButton(
-                    I18n.get("common_close"),
-                    on_click=_close,
-                    style=ft.ButtonStyle(color=AppColors.PRIMARY),
-                ),
-            ],
+            actions=actions,
             actions_padding=10,
             shape=ft.RoundedRectangleBorder(radius=8),
         )
@@ -590,8 +611,11 @@ def _scan_dialog_size(page: ft.Page | None) -> tuple[int, int]:
     return w, h
 
 
-def _build_scan_result(result: dict) -> ft.Column:
-    """构建扫描结果内容（纯函数，由旧 ``HealthScanDialog.show_results`` 转换）。"""
+def _build_scan_result(result: dict, on_init_data: Callable[[], None] | None = None) -> ft.Column:
+    """构建扫描结果内容（纯函数，由旧 ``HealthScanDialog.show_results`` 转换）。
+
+    Task 5.3: ``on_init_data`` 非空时在结果区底部添加"初始化数据"按钮（修复深链）。
+    """
     score = result.get("score", 0)
     tier = result.get("tier", 1)
     avg_lag = result.get("avg_lag", 99)
@@ -606,116 +630,133 @@ def _build_scan_result(result: dict) -> ft.Column:
     )
     fin_recency_ok = result.get("fin_recency_ok", False)
 
-    return ft.Column(
-        [
-            ft.Container(height=20),
+    result_controls: list[ft.Control] = [
+        ft.Container(height=20),
+        ft.Row(
+            [
+                ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=AppStyles.ICON_SIZE_XL),
+                ft.Column(
+                    [
+                        ft.Text(
+                            f"{I18n.get('health_score_title')}: {score}",
+                            size=AppStyles.FONT_SIZE_HEADLINE,
+                            weight=ft.FontWeight.BOLD,
+                            color=color,
+                        ),
+                        ft.Text(
+                            f"{I18n.get('quality_tier_' + str(tier))}",
+                            size=AppStyles.FONT_SIZE_LG,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                    ],
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+        ft.Divider(height=20),
+        ft.Row(
+            [
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("health_continuity"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            f"{avg_cont * 100:.1f}%",
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                    ],
+                ),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("health_avg_recency"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            f"{avg_lag:.1f} {I18n.get('health_days')}",
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                    ],
+                ),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("health_sample_size"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            f"{result.get('sample_size', 0)}",
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                    ],
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_AROUND,
+        ),
+        ft.Divider(height=10),
+        ft.Row(
+            [
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("health_fundamental_completeness"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            f"{avg_fundamental * 100:.1f}%",
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            weight=ft.FontWeight.BOLD,
+                            color=fundamental_color,
+                        ),
+                    ],
+                ),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("health_fin_recency"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
+                        ft.Icon(
+                            ft.Icons.CHECK if fin_recency_ok else ft.Icons.CLOSE,
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            color=AppColors.SUCCESS if fin_recency_ok else AppColors.ERROR,
+                        ),
+                    ],
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_AROUND,
+        ),
+    ]
+
+    # Task 5.3: 扫描结果区添加"初始化数据"修复深链按钮
+    if on_init_data is not None:
+        result_controls.append(ft.Divider(height=20))
+        result_controls.append(
             ft.Row(
                 [
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=AppStyles.ICON_SIZE_XL),
-                    ft.Column(
-                        [
-                            ft.Text(
-                                f"{I18n.get('health_score_title')}: {score}",
-                                size=AppStyles.FONT_SIZE_HEADLINE,
-                                weight=ft.FontWeight.BOLD,
-                                color=color,
-                            ),
-                            ft.Text(
-                                f"{I18n.get('quality_tier_' + str(tier))}",
-                                size=AppStyles.FONT_SIZE_LG,
-                                color=AppColors.TEXT_PRIMARY,
-                            ),
-                        ],
-                    ),
+                    ft.ElevatedButton(
+                        I18n.get("scan_btn_init_data"),
+                        icon=ft.Icons.CLOUD_DOWNLOAD,
+                        on_click=lambda _e: on_init_data(),
+                        style=ft.ButtonStyle(color=AppColors.SUCCESS),
+                    )
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
-            ),
-            ft.Divider(height=20),
-            ft.Row(
-                [
-                    ft.Column(
-                        [
-                            ft.Text(
-                                I18n.get("health_continuity"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            ft.Text(
-                                f"{avg_cont * 100:.1f}%",
-                                size=AppStyles.FONT_SIZE_TITLE,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                        ],
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(
-                                I18n.get("health_avg_recency"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            ft.Text(
-                                f"{avg_lag:.1f} {I18n.get('health_days')}",
-                                size=AppStyles.FONT_SIZE_TITLE,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                        ],
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(
-                                I18n.get("health_sample_size"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            ft.Text(
-                                f"{result.get('sample_size', 0)}",
-                                size=AppStyles.FONT_SIZE_TITLE,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                        ],
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_AROUND,
-            ),
-            ft.Divider(height=10),
-            ft.Row(
-                [
-                    ft.Column(
-                        [
-                            ft.Text(
-                                I18n.get("health_fundamental_completeness"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            ft.Text(
-                                f"{avg_fundamental * 100:.1f}%",
-                                size=AppStyles.FONT_SIZE_TITLE,
-                                weight=ft.FontWeight.BOLD,
-                                color=fundamental_color,
-                            ),
-                        ],
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(
-                                I18n.get("health_fin_recency"),
-                                size=AppStyles.FONT_SIZE_BODY_SM,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
-                            ft.Icon(
-                                ft.Icons.CHECK if fin_recency_ok else ft.Icons.CLOSE,
-                                size=AppStyles.FONT_SIZE_TITLE,
-                                color=AppColors.SUCCESS if fin_recency_ok else AppColors.ERROR,
-                            ),
-                        ],
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_AROUND,
-            ),
-        ],
-    )
+            )
+        )
+
+    return ft.Column(result_controls)
 
 
 def _build_scan_content(
@@ -726,6 +767,7 @@ def _build_scan_content(
     width: int,
     height: int,
     error_key: str | None = None,
+    on_init_data: Callable[[], None] | None = None,
 ) -> ft.Container:
     """构建扫描弹窗内容（纯函数，状态驱动渲染）。
 
@@ -737,12 +779,13 @@ def _build_scan_content(
         width: 对话框宽度
         height: 对话框高度
         error_key: 错误状态 i18n key（scan_state="error" 时使用，默认 "db_err_format"）
+        on_init_data: Task 5.3 初始化数据回调（仅 scan_state="done" 时渲染按钮）
     """
     if scan_state == "done" and result is not None:
         return ft.Container(
             width=width,
             height=height,
-            content=_build_scan_result(result),
+            content=_build_scan_result(result, on_init_data=on_init_data),
         )
 
     # 进度阶段：idle / scanning / error
@@ -773,6 +816,7 @@ def HealthScanDialog(
     page: ft.Page | None = None,
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
+    on_init_data: Callable[[], None] | None = None,
 ) -> ft.Container:
     """深度健康扫描弹窗（声明式 V1）。
 
@@ -786,6 +830,7 @@ def HealthScanDialog(
       取消 pending futures（R2 兼容：CancelledError 在 future.cancel() 内部消化）
     - 跨线程 ``on_progress`` 回调在 VM 内通过 ``asyncio.run_coroutine_threadsafe``
       调度回主 loop 更新 state（R11 loop-local 守卫）
+    - Task 5.3: ``on_init_data`` 回调在扫描结果区渲染"初始化数据"按钮（修复深链）
     - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
 
     Args:
@@ -793,6 +838,7 @@ def HealthScanDialog(
         page: ft.Page 引用（用于计算对话框尺寸）
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）
+        on_init_data: Task 5.3 初始化数据回调（扫描结果区按钮点击时触发）
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -822,6 +868,14 @@ def HealthScanDialog(
         if on_close is not None:
             on_close()
 
+    def _init_data() -> None:
+        """Task 5.3: 关闭弹窗并触发初始化数据命令（修复深链）。"""
+        set_open(False)
+        if on_close is not None:
+            on_close()
+        if on_init_data is not None:
+            on_init_data()
+
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     content = _build_scan_content(
         scan_state=state.scan_state,
@@ -831,6 +885,7 @@ def HealthScanDialog(
         width=width,
         height=height,
         error_key=state.error_key,
+        on_init_data=_init_data if on_init_data is not None else None,
     )
 
     dialog = (

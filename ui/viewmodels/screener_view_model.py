@@ -104,6 +104,8 @@ class ScreenerState:
     loading: bool = False
     status_message: Message | None = None
     status_color: str = ""
+    # Task 5.2: 质量门阻断时的跳转 action key (如 screener_action_go_sync), None 无 action
+    status_action_key: str | None = None
     # AI streaming logs (append-only tuple)
     logs: tuple[LogEntry, ...] = ()
     # AI streaming/placeholder cards (state-driven, §3.2 MVVM)
@@ -473,6 +475,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             self._set_state(
                 status_message=Message("screener_load_failed", {}),
                 status_color="error",
+                status_action_key=None,
             )
 
     def update_strategy_desc(self, selected_strategy: str | None, params: dict | None = None) -> None:
@@ -553,6 +556,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._set_state(
             status_message=Message("screener_history_viewing", params),
             status_color="info",
+            status_action_key=None,
         )
 
     @staticmethod
@@ -596,6 +600,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             self._set_state(
                 status_message=Message("screener_strategy_not_found"),
                 status_color="error",
+                status_action_key=None,
             )
             return
 
@@ -636,11 +641,13 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                                 {"tables": ", ".join(not_ready)},
                             ),
                             status_color="warning",
+                            status_action_key=None,
                         )
                     else:
                         self._set_state(
                             status_message=Message("strategy_dep_degraded"),
                             status_color="warning",
+                            status_action_key=None,
                         )
 
                 context["data_processor"] = self.data_processor
@@ -736,6 +743,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                                 },
                             ),
                             status_color="warning",
+                            status_action_key=None,
                             data_version=self._state.data_version + 1,
                         )
                     else:
@@ -747,6 +755,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                                 {"count": len(result_df)},
                             ),
                             status_color="success",
+                            status_action_key=None,
                             data_version=self._state.data_version + 1,
                         )
                     return Message("task_screening_success", {"count": len(result_df)})
@@ -758,6 +767,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     loading=False,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
+                    status_action_key=None,
                     data_version=self._state.data_version + 1,
                 )
                 return Message("screener_no_results")
@@ -767,6 +777,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     loading=False,
                     status_message=Message("screener_cancelled"),
                     status_color="warning",
+                    status_action_key=None,
                 )
                 raise
             except QualityGateError as e:
@@ -779,6 +790,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     loading=False,
                     status_message=Message("screener_blocked", {"reason": str(e)}),
                     status_color="warning",
+                    # Task 5.2: 附 "前往同步" 跳转 action 供 View 渲染按钮
+                    status_action_key="screener_action_go_sync",
                 )
                 return Message("screener_blocked", {"reason": str(e)})
             except Exception as e:
@@ -792,6 +805,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     loading=False,
                     status_message=Message("screener_exec_error"),
                     status_color="error",
+                    status_action_key=None,
                 )
                 raise RuntimeError(f"Strategy execution crashed: {e}") from e
             finally:
@@ -810,6 +824,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 {"name_key": strategy.name_key},
             ),
             status_color="info",
+            # Task 5.2: 重置上一次 QualityGateError 残留的 action key
+            status_action_key=None,
         )
 
         # Dispatch to TaskManager!
@@ -828,6 +844,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 loading=False,
                 status_message=Message("screener_task_rejected"),
                 status_color="warning",
+                status_action_key=None,
             )
         else:
             self._strategy_submitted = True
@@ -1003,6 +1020,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 {"done": current, "total": total, "msg": msg},
             ),
             status_color="info",
+            status_action_key=None,
         )
 
     def _on_ai_result_stream(self, row_data):

@@ -44,11 +44,14 @@ class SnackRow:
     替代 dual-track 的 (Message, str) tuple + version 持有模式, 直接放入 state.
     seq 字段确保连续相同内容也触发 use_state setter 更新 (非 dual-track:
     无 property 包装, 直接放 state 字段).
+    action_key: Task 5.1 错误分类透传, snack action 按钮的 i18n key
+        (如 snack_action_check_health), None 表示无 action 按钮.
     """
 
     message: Message
     color_name: str
     seq: int = 0
+    action_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,8 @@ class HealthResultRow:
     """健康检查结果行数据 frozen dataclass (L771 合规).
 
     替代 dual-track 的 dict 持有模式, 扁平化 dict 结构直接放入 state.
+    quality_tier: Task 5.2 当前质量等级 (0=CRITICAL, 1=BRONZE, 2=SILVER, 3=GOLD),
+        None 表示未检测 (health check 未运行或 tier 未设置).
     """
 
     status: str = "green"
@@ -65,6 +70,7 @@ class HealthResultRow:
     details_missing_critical: int = 0
     details_missing_depth: int = 0
     details_missing_breadth: int = 0
+    quality_tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -202,13 +208,21 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     # --- Emitters (直接 _set_state, 无 dual-track) ---
 
-    def _emit_snack(self, message: Message, color_name: str) -> None:
+    def _emit_snack(self, message: Message, color_name: str, action_key: str | None = None) -> None:
         """Store snack directly into state (L771 合规, 无 dual-track).
 
         seq 字段确保连续相同内容也触发 use_state setter 更新.
+        action_key: Task 5.1 错误分类透传的 snack action 按钮 i18n key, None 表示无 action.
         """
         self._snack_seq += 1
-        self._set_state(snack=SnackRow(message=message, color_name=color_name, seq=self._snack_seq))
+        self._set_state(
+            snack=SnackRow(
+                message=message,
+                color_name=color_name,
+                seq=self._snack_seq,
+                action_key=action_key,
+            )
+        )
 
     def _emit_health_result(self, result: HealthResultRow) -> None:
         """Store health result directly into state and clear health_error.
@@ -227,6 +241,45 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     def _emit_cache_cleared(self) -> None:
         """Notify cache cleared via cache_cleared_version (无数据瞬态信号, 非 dual-track)."""
         self._set_state(cache_cleared_version=self._state.cache_cleared_version + 1)
+
+    # --- Error classification (Task 5.1) ---
+
+    def _classify_sync_error(self, ex: Exception) -> tuple[Message, str | None]:
+        """Map sync exception to (snack message, action_key) via classify_error.
+
+        消费 classify_error 结果, 按 4 类错误 (网络/Token/积分/DB) 映射到
+        具体 i18n message key + action key (检查健康/重新探测积分).
+        未知错误降级为 common_op_fail + 无 action.
+
+        Returns:
+            (message, action_key) — action_key 为 snack action 按钮的 i18n key,
+            None 表示无 action 按钮.
+        """
+        error_str = str(ex).lower()
+
+        # Token 鉴权错误 → 重新探测积分
+        if any(kw in error_str for kw in ("token", "403", "401", "unauthorized", "forbidden")):
+            info = classify_error(ex, context="token")
+            return Message(info["message_key"]), "snack_action_probe_credits"
+
+        # 积分/配额错误 → 重新探测积分
+        if any(kw in error_str for kw in ("quota", "402", "积分不足")):
+            info = classify_error(ex, context="llm")
+            return Message(info["message_key"]), "snack_action_probe_credits"
+
+        # DB 错误 → 检查健康
+        if any(kw in error_str for kw in ("asyncpg", "postgres", "数据库", "database")):
+            info = classify_error(ex, context="db")
+            return Message(info["message_key"]), "snack_action_check_health"
+
+        # 网络/通用错误 → 检查健康 (网络类) 或无 action (未知)
+        info = classify_error(ex, context="general")
+        code = info.get("code", "unknown")
+        if code in ("network", "timeout", "server", "dns", "ssl", "connection"):
+            return Message(info["message_key"]), "snack_action_check_health"
+
+        # 未知错误 → 无 action
+        return Message("common_op_fail"), None
 
     # --- Internal helpers ---
 
@@ -347,11 +400,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 )
                 raise
             except Exception as ex:
-                classify_error(ex, context="general")
-                self._emit_snack(
-                    Message("common_op_fail"),
-                    "error",
-                )
+                # Task 5.1: 消费 classify_error 结果, 按 4 类错误透传具体 snack + action
+                snack_msg, action_key = self._classify_sync_error(ex)
+                self._emit_snack(snack_msg, "error", action_key=action_key)
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -518,12 +569,13 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 self._emit_snack(Message("ds_init_fail_generic"), "error")
                 raise RuntimeError(e.args[0]) from e
             except Exception as e:
-                # Task 3.1: msg 改为 Message (替代 I18n.get 翻译字符串), 透传给 RuntimeError.
-                msg = Message("ds_init_fail_fmt")
+                # Task 5.1: snack 消费 classify_error 结果 (具体错误原因 + action),
+                # RuntimeError 仍透传 ds_init_fail_fmt (TaskManager 不使用 task.result).
+                snack_msg, action_key = self._classify_sync_error(e)
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
-                self._emit_snack(Message("ds_init_fail_fmt"), "error")
-                raise RuntimeError(msg) from e
+                self._emit_snack(snack_msg, "error", action_key=action_key)
+                raise RuntimeError(Message("ds_init_fail_fmt")) from e
 
         task_id = self._tm.submit_task(
             name=Message("task_name_init_sync"),
@@ -684,6 +736,7 @@ def _health_dict_to_row(result: dict) -> HealthResultRow:
         details_missing_critical=_to_int(details.get("missing_critical", 0)),
         details_missing_depth=_to_int(details.get("missing_depth", 0)),
         details_missing_breadth=_to_int(details.get("missing_breadth", 0)),
+        quality_tier=_to_int(result.get("tier")) if result.get("tier") is not None else None,
     )
 
 

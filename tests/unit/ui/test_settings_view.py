@@ -240,6 +240,64 @@ class TestShowSnack:
         _show_snack_impl(mock_page, "saved", color="success")
         mock_page.show_toast.assert_called_once_with("saved", type="success")
 
+    def test_show_snack_passes_action_text_when_not_none(self):
+        """L126: action_text 非 None 时透传到 show_toast kwargs。
+
+        Task 5.1 snack action 按钮: action_text 提供按钮文案,
+        仅在非 None 时透传 (保持无 action 场景调用签名不变)。
+        """
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        _show_snack_impl(mock_page, "err", color="error", action_text="重试")
+        mock_page.show_toast.assert_called_once_with("err", type="error", action_text="重试")
+
+    def test_show_snack_passes_on_action_when_not_none(self):
+        """L128: on_action 非 None 时透传到 show_toast kwargs。
+
+        Task 5.1 snack action 按钮: on_action 提供按钮回调,
+        仅在非 None 时透传。
+        """
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        on_action = MagicMock()
+        _show_snack_impl(mock_page, "err", color="error", on_action=on_action)
+        mock_page.show_toast.assert_called_once_with("err", type="error", on_action=on_action)
+
+    def test_show_snack_passes_both_action_text_and_on_action(self):
+        """L126+L128: action_text + on_action 同时非 None 时全部透传。"""
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        on_action = MagicMock()
+        _show_snack_impl(
+            mock_page,
+            "err",
+            color="error",
+            action_text="检查健康",
+            on_action=on_action,
+        )
+        mock_page.show_toast.assert_called_once_with(
+            "err",
+            type="error",
+            action_text="检查健康",
+            on_action=on_action,
+        )
+
+    def test_show_snack_skips_action_text_when_none(self):
+        """L125: action_text=None 时 toast_kwargs 不含 action_text (保持调用签名不变)。"""
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        _show_snack_impl(mock_page, "msg", action_text=None, on_action=None)
+        # 仅 type=info, 不含 action_text/on_action
+        mock_page.show_toast.assert_called_once_with("msg", type="info")
+
     def test_show_snack_no_show_toast_logs_warning(self):
         """page 无 show_toast 方法时，降级为 logger.warning，不调 show_dialog。"""
         from ui.views.settings_view import _show_snack_impl
