@@ -758,6 +758,22 @@ class TestDataSourceViewModelSetHistoryYears:
             mock_ch.set_init_history_years.assert_called_with(3)
 
 
+class TestDataSourceViewModelIsAIExternalAcknowledged:
+    """Task 2.2: is_ai_external_acknowledged 透传 ConfigHandler (覆盖 L558)。"""
+
+    def test_returns_true_when_config_handler_returns_true(self, bound_vm):
+        with patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch:
+            mock_ch.is_ai_external_acknowledged.return_value = True
+            assert bound_vm.is_ai_external_acknowledged() is True
+            mock_ch.is_ai_external_acknowledged.assert_called_once_with()
+
+    def test_returns_false_when_config_handler_returns_false(self, bound_vm):
+        with patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch:
+            mock_ch.is_ai_external_acknowledged.return_value = False
+            assert bound_vm.is_ai_external_acknowledged() is False
+            mock_ch.is_ai_external_acknowledged.assert_called_once_with()
+
+
 class TestDataSourceViewModelGetHealthReport:
     async def test_returns_report(self, bound_vm, mock_processor):
         result = await bound_vm.get_health_report()
