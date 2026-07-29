@@ -53,8 +53,9 @@ class TestCheckOnboardingNeeded:
     def test_missing_token_needed(self):
         assert check_onboarding_needed("db_url", "", "api_key", True) is True
 
-    def test_missing_api_key_needed(self):
-        assert check_onboarding_needed("db_url", "token", "", True) is True
+    def test_missing_api_key_not_needed(self):
+        """FR-UX-001: 云端 AI 可选化，llm_api_key 不再是 onboarding 硬门槛。"""
+        assert check_onboarding_needed("db_url", "token", "", True) is False
 
     def test_not_onboarding_complete_needed(self):
         assert check_onboarding_needed("db_url", "token", "api_key", False) is True
@@ -65,8 +66,13 @@ class TestCheckOnboardingNeeded:
     def test_none_token_needed(self):
         assert check_onboarding_needed("db_url", None, "api_key", True) is True
 
-    def test_none_api_key_needed(self):
-        assert check_onboarding_needed("db_url", "token", None, True) is True
+    def test_none_api_key_not_needed(self):
+        """FR-UX-001: llm_api_key=None 且 onboarding 已完成、db_url/token 齐全 → 无需 onboarding。"""
+        assert check_onboarding_needed("db_url", "token", None, True) is False
+
+    def test_none_api_key_incomplete_onboarding_needed(self):
+        """FR-UX-001: llm_api_key=None 但 onboarding 未完成 → 仍需 onboarding。"""
+        assert check_onboarding_needed("db_url", "token", None, False) is True
 
     def test_all_missing_needed(self):
         assert check_onboarding_needed(None, None, None, False) is True

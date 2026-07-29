@@ -36,6 +36,7 @@ env/
 *.spec
 !AStockScreener.spec
 flet-app.tar.gz
+/VERSION
 
 # Installer logs & pip
 pip-log.txt
@@ -93,6 +94,19 @@ logs/
 *.bak
 *.html
 mylog*.txt
+
+# 2.1 AI assistant & CI diagnostic artifacts (commit/PR/调查临时文件)
+tmp_*.txt
+tmp_*.md
+tmp_*.json
+tmp_*.py
+tmp_*.zip
+tmp_*/
+/tmp/
+ci_log_*.txt
+codeql_logs.txt
+e2e_reports.zip
+temp_pr*.txt
 
 # 3. Environment Variables & Secrets
 .env
