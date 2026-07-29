@@ -17,6 +17,20 @@ from strategies.utils import safe_float
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _mock_ai_external_acknowledged_default_true():
+    """Task 2.2: 默认所有 ai_mixin 测试视为已确认 AI 外发政策。
+
+    现有测试不关心确认状态，默认 True 保持原行为。
+    专门测试未确认行为的用例在测试内显式 patch False 覆盖。
+    """
+    with patch(
+        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+        return_value=True,
+    ):
+        yield
+
+
 class ConcreteStrategy(AIStrategyMixin):
     key = "test_strategy"
 
@@ -631,6 +645,42 @@ class TestRunAiAnalysis:
             import datetime
 
             mock_get_news.assert_called_with("000001.SZ", limit=5, as_of=datetime.date(2024, 1, 18))
+
+    @pytest.mark.asyncio
+    async def test_skips_and_prompts_when_not_acknowledged(self):
+        """Task 2.2: 未确认 AI 外发政策时，run_ai_analysis 应通过 on_progress
+        显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。"""
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        on_progress = MagicMock()
+        dp = MagicMock()
+        context = {"data_processor": dp, "on_progress": on_progress}
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+                return_value=False,
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+            # 返回原始 candidates（不进行 AI 分析）
+            assert len(result) == 1
+            assert result.iloc[0]["ts_code"] == "000001.SZ"
+            # on_progress 被调用且 message 为确认引导
+            call_args = on_progress.call_args
+            assert call_args is not None
+            # 签名: (completed, total, message)；message 为 ai_external_acknowledgment_prompt i18n 文案
+            message = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("message", "")
+            from ui.i18n import I18n
+
+            assert message == I18n.get("ai_external_acknowledgment_prompt")
+            # AIService.analyze_stock 未被调用
+            mock_ai_instance.analyze_stock.assert_not_called()
 
 
 class TestCancelOrphanNewsTasks:

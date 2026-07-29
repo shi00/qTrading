@@ -342,6 +342,19 @@ class AIStrategyMixin:
                 )
             return candidates_df
 
+        # --- Guard: AI External Data Acknowledged? (Task 2.2) ---
+        if not ConfigHandler.is_ai_external_acknowledged():
+            logger.info(
+                "[AIStrategyMixin] AI external data policy not acknowledged — returning math-only results",
+            )
+            if on_progress:
+                on_progress(
+                    0,
+                    0,
+                    I18n.get("ai_external_acknowledgment_prompt"),
+                )
+            return candidates_df
+
         # --- Guard: DataProcessor Available? ---
         if dp is None:
             logger.warning(
