@@ -446,7 +446,10 @@ async def test_phase2_triggered_when_ai_available():
             mock_rm_instance = MagicMock()
             mock_rm_instance.get_learning_context = AsyncMock(return_value="")
             mock_rm.return_value = mock_rm_instance
-        with patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30):
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+        ):
             with patch.object(s, "_mixin_analyze_single", new_callable=AsyncMock) as mock_analyze:
                 mock_analyze.return_value = {
                     "score": 75,

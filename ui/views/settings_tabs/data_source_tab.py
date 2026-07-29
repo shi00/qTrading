@@ -51,7 +51,6 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -373,7 +372,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         # Task 2.2: 未确认 AI 外发政策时，dialog 增加外发说明
         content_key = (
             "dialog_ai_concept_rebuild_content_with_external"
-            if not ConfigHandler.is_ai_external_acknowledged()
+            if not vm.is_ai_external_acknowledged()
             else "dialog_ai_concept_rebuild_content"
         )
         set_confirm_dialog_config(
