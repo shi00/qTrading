@@ -49,6 +49,7 @@ class FakeScreenerState:
     status_color: str = ""
     logs: tuple = ()
     stream_cards: tuple = ()
+    stream_cards_truncated: bool = False
     selected_strategy: str | None = None
     tier_hint: str | None = None
     mode: str = "REALTIME"

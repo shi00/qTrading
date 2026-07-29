@@ -28,6 +28,7 @@ class NewsRow:
     tags: str = ""
     source: str = ""
     publish_time: str = ""
+    is_ai_tagged: bool = False
 
 
 @dataclass(frozen=True)
@@ -361,6 +362,19 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 # ============================================================
 
 
+def _detect_ai_tagged(tags: str, source: str) -> bool:
+    """检测新闻是否被 AI 打标 (tags 含 AI_ 前缀或 source 标识 AI 来源).
+
+    AI 概念打标写入 stock_concepts 时 concept_id 以 'AI_LLM_' 前缀标识,
+    对应 news tags 中可能出现 'AI_' 前缀标签; source 为 'AI' 时亦视为 AI 生成.
+    """
+    if not tags and not source:
+        return False
+    if any(t.strip().upper().startswith("AI") for t in (tags or "").split(",") if t.strip()):
+        return True
+    return (source or "").upper() == "AI"
+
+
 def _news_item_to_row(item: Any) -> NewsRow:
     """单个 news item (dict) → NewsRow.
 
@@ -369,11 +383,14 @@ def _news_item_to_row(item: Any) -> NewsRow:
     from data.cache.cache_manager import CacheManager
 
     normalized = CacheManager.normalize_news_item(item, default_source="CLS")
+    tags = str(normalized.get("tags", "") or "")
+    source = str(normalized.get("source", "") or "")
     return NewsRow(
         content=str(normalized.get("content", "") or ""),
-        tags=str(normalized.get("tags", "") or ""),
-        source=str(normalized.get("source", "") or ""),
+        tags=tags,
+        source=source,
         publish_time=str(normalized.get("publish_time", "") or ""),
+        is_ai_tagged=_detect_ai_tagged(tags, source),
     )
 
 
@@ -387,6 +404,7 @@ def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
             tags=str(row.get("tags", "") or ""),
             source=str(row.get("source", "") or ""),
             publish_time=str(row.get("publish_time", "") or ""),
+            is_ai_tagged=_detect_ai_tagged(str(row.get("tags", "") or ""), str(row.get("source", "") or "")),
         )
         for row in df.to_dict("records")
     )

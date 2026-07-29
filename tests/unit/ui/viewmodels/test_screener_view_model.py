@@ -162,6 +162,40 @@ class TestClearStreamCards:
         vm.clear_stream_cards()
         assert vm.state.stream_cards == ()
 
+    def test_clear_resets_truncated_flag(self, vm):
+        """Task 8.4: clear_stream_cards 重置 stream_cards_truncated."""
+        # 先触发截断
+        for i in range(_MAX_LOG_CARDS + 1):
+            vm.start_stream_card(f"stock_{i}")
+        assert vm.state.stream_cards_truncated is True
+        vm.clear_stream_cards()
+        assert vm.state.stream_cards_truncated is False
+
+
+# --- Task 8.4: stream_cards_truncated flag ---
+
+
+class TestStreamCardsTruncated:
+    """Task 8.4: 截断提示 flag 在超出 _MAX_LOG_CARDS 时置 True."""
+
+    def test_truncated_false_when_below_max(self, vm):
+        """未超出 _MAX_LOG_CARDS 时 truncated=False."""
+        for i in range(_MAX_LOG_CARDS):
+            vm.start_stream_card(f"stock_{i}")
+        assert vm.state.stream_cards_truncated is False
+
+    def test_truncated_true_when_exceeds_max(self, vm):
+        """超出 _MAX_LOG_CARDS 时 truncated=True."""
+        for i in range(_MAX_LOG_CARDS + 1):
+            vm.start_stream_card(f"stock_{i}")
+        assert vm.state.stream_cards_truncated is True
+
+    def test_truncated_stays_true_after_more_cards(self, vm):
+        """一旦截断, 继续添加卡片 truncated 保持 True."""
+        for i in range(_MAX_LOG_CARDS + 5):
+            vm.start_stream_card(f"stock_{i}")
+        assert vm.state.stream_cards_truncated is True
+
 
 # --- Adapter methods ---
 

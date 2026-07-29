@@ -10,10 +10,12 @@ H2-2 改造: 移除 dual-track, state 字段全部用 frozen dataclass / Message
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
+from data.sync.base import SyncResult
 from services.ai_service import AIService
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
@@ -345,6 +347,8 @@ class TestDataSourceViewModelFullDailySync:
         assert bound_vm.state.active_key == "daily_sync"
 
     async def test_daily_sync_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        # Task 8.2: _daily_logic 消费 SyncResult.skipped, 需返回真实 SyncResult (非 AsyncMock)
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
@@ -407,6 +411,55 @@ class TestDataSourceViewModelFullDailySync:
         _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
         # finally 应重置 sync busy 状态
         assert bound_vm.state.is_syncing is False
+
+    async def test_daily_sync_skipped_emits_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """Task 8.2: SyncResult.skipped > 0 时发射 snack_sync_skipped_fmt."""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10, skipped=5))
+        mock_cache.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        # 应发射 skipped snack (info) + 成功 snack
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(s.message == Message("snack_sync_skipped_fmt", {"skipped": 5}) for s in snack_msgs)
+        assert any(s.message == Message("snack_full_sync_done_simple") for s in snack_msgs)
+
+    async def test_daily_sync_permission_skipped_emits_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """Task 8.2: skipped_permission 表存在时发射 snack_sync_permission_skipped_fmt."""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
+        mock_cache.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {"table_name": ["a", "b", "c"], "status": ["success", "skipped_permission", "skipped_permission"]}
+            )
+        )
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(s.message == Message("snack_sync_permission_skipped_fmt", {"count": 2}) for s in snack_msgs)
+
+    async def test_daily_sync_no_skipped_no_extra_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """Task 8.2: skipped=0 且无 skipped_permission 时不发射额外 snack."""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
+        mock_cache.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        # 仅成功 snack, 无 skipped/permission snack
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert all(s.message != Message("snack_sync_skipped_fmt", {"skipped": 0}) for s in snack_msgs)
 
 
 class TestDataSourceViewModelAiConceptRebuild:

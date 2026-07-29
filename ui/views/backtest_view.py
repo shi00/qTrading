@@ -25,7 +25,7 @@ from ui.components.resizable_splitter import ResizableSplitter
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.backtest_view_model import BacktestViewModel
+from ui.viewmodels.backtest_view_model import BacktestViewModel, consume_pending_prefill
 from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 
@@ -68,6 +68,21 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
     selected_strategy, set_selected_strategy = ft.use_state(lambda: next(iter(strategies), None))
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
 
+    # Task 8.3: 选股→回测参数透传 — mount 时消费 pending prefill (strategy_key + params)
+    # params 经 ref 透传到 run_backtest, 避免不必要的重渲染 (params 仅在 run 时读取)
+    _prefilled_params = ft.use_ref(lambda: None)
+
+    def _consume_prefill() -> None:
+        prefill = consume_pending_prefill()
+        if prefill is None:
+            return
+        strategy_key = prefill.get("strategy_key")
+        if strategy_key and strategy_key in strategies:
+            set_selected_strategy(strategy_key)
+        _prefilled_params.current = prefill.get("params")
+
+    ft.use_effect(_consume_prefill, dependencies=[strategies])
+
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
@@ -92,7 +107,8 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(vm.run_backtest, selected_strategy, backtest_config)
+                # Task 8.3: 透传选股页 params (若有), 否则 None 用策略默认参数
+                page.run_task(vm.run_backtest, selected_strategy, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
 

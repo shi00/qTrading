@@ -1108,8 +1108,9 @@ class TestTableViewerTabEventHandlers:
         """_on_sort → vm.set_sort + vm.clear_error + vm.query_data。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
@@ -1148,8 +1149,9 @@ class TestTableViewerTabEventHandlers:
         """_on_sort: 无效 col_id 直接 return (不调 vm.set_sort)。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
@@ -1873,8 +1875,9 @@ class TestTableViewerTabAsyncErrorPaths:
         """_do_sort_query: vm.query_data 抛 Exception → 兜底捕获。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
 
         async def _raising_query(**kwargs: Any) -> pd.DataFrame:

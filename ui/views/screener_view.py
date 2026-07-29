@@ -42,9 +42,11 @@ from ui.components.toast_manager import open_export_folder
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, translate_strategy_name, get_observable_state
+from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
+from ui.viewmodels.backtest_view_model import set_pending_prefill
 from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -444,6 +446,16 @@ def ScreenerView(
     def _on_cancel_click_sync(e: ft.ControlEvent) -> None:
         # Task 3.2: cancel_strategy 是线程安全的 (call_soon_threadsafe), 可直接在 UI 线程调用
         vm.cancel_strategy()
+
+    def _on_backtest_click_sync(e: ft.ControlEvent) -> None:
+        """Task 8.3: 选股→回测参数透传 — 暂存 strategy_key + params 并跳转回测页."""
+        UILogger.log_action("ScreenerView", "Click", "btn_jump_backtest")
+        if not state.selected_strategy:
+            return
+        set_pending_prefill(state.selected_strategy, params=dict(params_ref.current or {}))
+        page = _get_page()
+        if page is not None:
+            page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
 
     async def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
@@ -1247,11 +1259,23 @@ def ScreenerView(
         style=AppStyles.outline_button(),
         height=45,
     )
+    # Task 8.3: 选股→回测跳转按钮 (仅 realtime 模式 + 选中策略时可用)
+    backtest_btn = ft.Button(
+        content=I18n.get("screener_run_backtest"),
+        icon=ft.Icons.SCIENCE,
+        on_click=safe_on_click(_on_backtest_click_sync),
+        disabled=run_disabled or not is_realtime,
+        style=AppStyles.outline_button(),
+        height=45,
+        visible=is_realtime,
+    )
 
     right_controls = ft.Column(
         [
             status_row,
-            ft.Row([export_btn, export_excel_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
+            ft.Row(
+                [export_btn, export_excel_btn, backtest_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END
+            ),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -1338,28 +1362,39 @@ def ScreenerView(
     )
 
     # 3. AI 分析报告区 (仅 REALTIME 模式)
+    log_column_controls: list[ft.Control] = [
+        ft.Text(
+            I18n.get("ai_analysis_report"),
+            font_family="Roboto",
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        ),
+        ft.Container(
+            content=ft.Column(
+                [_build_log_card(c) for c in state.stream_cards],
+                expand=True,
+                spacing=4,
+                scroll=ft.ScrollMode.ALWAYS,
+                auto_scroll=True,
+            ),
+            border_radius=8,
+            padding=5,
+            expand=True,
+        ),
+    ]
+    # Task 8.4: 卡片截断提示 — 超过 _MAX_LOG_CARDS 时显示折叠提示
+    if state.stream_cards_truncated:
+        log_column_controls.append(
+            ft.Text(
+                I18n.get("ai_cards_truncated_hint").format(max=10),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+        )
     log_card = ft.Container(
         content=ft.Column(
-            [
-                ft.Text(
-                    I18n.get("ai_analysis_report"),
-                    font_family="Roboto",
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(
-                    content=ft.Column(
-                        [_build_log_card(c) for c in state.stream_cards],
-                        expand=True,
-                        spacing=4,
-                        scroll=ft.ScrollMode.ALWAYS,
-                        auto_scroll=True,
-                    ),
-                    border_radius=8,
-                    padding=5,
-                    expand=True,
-                ),
-            ],
+            log_column_controls,
             spacing=5,
         ),
         expand=True,

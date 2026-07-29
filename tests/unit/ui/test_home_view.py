@@ -526,10 +526,10 @@ class TestHomeViewRuntime:
         # 找到 date Text (header 倒数第二个控件, 最后是 IconButton)
         date_text = header.controls[-2]
         assert isinstance(date_text, ft.Text)
-        # stale=True 时 value 应含 updating 后缀 (mock_i18n_state 用真实 I18nState 翻译)
+        # Task 8.1: stale=True 时显示「数据缓存于」明确告知用户当前为缓存快照
         from ui.i18n import I18n
 
-        assert I18n.get("home_data_updating") in date_text.value
+        assert I18n.get("market_data_cached_at").split("{")[0] in date_text.value
 
     def test_refresh_clicked_invokes_run_task(
         self,

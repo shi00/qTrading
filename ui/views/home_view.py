@@ -115,6 +115,19 @@ def HomeView(
         except RuntimeError:
             logger.debug("[HomeView] page not available for navigation")
 
+    def _on_view_stock(stock_code: str) -> None:
+        """新闻「查看个股」跳转 (Task 8.1): PubSub 广播导航到选股页.
+
+        最小实现: 跳转到选股 tab 供用户进一步研究该股票代码。
+        """
+        _ = stock_code  # 预留: 后续可扩展为跨视图股票代码预填
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")
+        except RuntimeError:
+            logger.debug("[HomeView] page not available for view_stock navigation")
+
     async def _on_load_more_click(e: ft.ControlEvent) -> None:
         try:
             await vm.load_next_page()  # state 自动更新, 无需 View 持有快照
@@ -192,8 +205,11 @@ def HomeView(
 
     # --- 渲染 (直接从 state 读取, 无 dual-track) ---
 
-    suffix = f" ({I18n.get('home_data_updating')})" if state.market_stale else ""
-    date_text_value = I18n.get("home_data_date").format(date=state.market_date) + suffix
+    # Task 8.1: 数据缓存透明化 — stale 时显示「数据缓存于」明确告知用户当前为缓存快照
+    if state.market_stale:
+        date_text_value = I18n.get("market_data_cached_at").format(date=state.market_date)
+    else:
+        date_text_value = I18n.get("home_data_date").format(date=state.market_date)
 
     header = ft.Row(
         safe_controls(
@@ -248,6 +264,7 @@ def HomeView(
                     news_rows=state.news_rows,
                     has_more=state.has_more_news,
                     on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
+                    on_view_stock=_on_view_stock,
                 ),
             ]
         )

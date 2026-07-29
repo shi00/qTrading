@@ -312,7 +312,27 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
             try:
-                await self._processor.run_daily_update(progress_callback=_progress)
+                result = await self._processor.run_daily_update(progress_callback=_progress)
+                # Task 8.2: 同步结果可见化 — 消费 SyncResult.skipped 与 skipped_permission 汇总
+                if result is not None and getattr(result, "skipped", 0) > 0:
+                    self._emit_snack(
+                        Message("snack_sync_skipped_fmt", {"skipped": result.skipped}),
+                        "info",
+                    )
+                # 查询 sync_status 表汇总 skipped_permission 表数 (降级提示, 非 fatal)
+                try:
+                    sync_df = await self._cache.get_sync_status()
+                    if sync_df is not None and hasattr(sync_df, "shape") and sync_df.shape[0] > 0:
+                        perm_skipped = int((sync_df["status"] == "skipped_permission").sum())
+                        if perm_skipped > 0:
+                            self._emit_snack(
+                                Message("snack_sync_permission_skipped_fmt", {"count": perm_skipped}),
+                                "warning",
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as perm_err:
+                    logger.debug("[DataSourceVM] skipped_permission summary failed: %s", perm_err)
                 self._emit_snack(
                     Message("snack_full_sync_done_simple"),
                     "success",

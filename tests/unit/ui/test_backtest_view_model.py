@@ -14,9 +14,52 @@ import pytest
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
 from ui.viewmodels import Message
-from ui.viewmodels.backtest_view_model import BacktestState, BacktestViewModel
+from ui.viewmodels.backtest_view_model import (
+    BacktestState,
+    BacktestViewModel,
+    consume_pending_prefill,
+    set_pending_prefill,
+)
 
 pytestmark = pytest.mark.unit
+
+
+class TestPendingPrefill:
+    """Task 8.3: 选股→回测参数透传 stash 函数测试."""
+
+    def test_set_and_consume_prefill(self):
+        """set → consume 单次消费语义."""
+        set_pending_prefill("value_oversold", {"rsi_threshold": 25})
+        data = consume_pending_prefill()
+        assert data is not None
+        assert data["strategy_key"] == "value_oversold"
+        assert data["params"] == {"rsi_threshold": 25}
+
+    def test_consume_clears_stash(self):
+        """consume 后再次 consume 返回 None (单次消费)."""
+        set_pending_prefill("test_strategy")
+        consume_pending_prefill()
+        assert consume_pending_prefill() is None
+
+    def test_consume_empty_returns_none(self):
+        """无 pending 时 consume 返回 None."""
+        # 确保 stash 为空 (前序测试可能残留)
+        consume_pending_prefill()
+        assert consume_pending_prefill() is None
+
+    def test_set_overwrites_previous(self):
+        """多次 set 覆盖, 只保留最后一次."""
+        set_pending_prefill("strategy_a", {"a": 1})
+        set_pending_prefill("strategy_b", {"b": 2})
+        data = consume_pending_prefill()
+        assert data["strategy_key"] == "strategy_b"
+        assert data["params"] == {"b": 2}
+
+    def test_set_with_none_params(self):
+        """params=None 时存为空 dict."""
+        set_pending_prefill("test_strategy", None)
+        data = consume_pending_prefill()
+        assert data["params"] == {}
 
 
 class TestBacktestViewModel:
