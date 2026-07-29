@@ -422,3 +422,147 @@ async def test_backoff_sleep_cancelled_propagates() -> None:
         with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
             with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播即 R2 红线测试目标
                 await _prepare_db_with_retry(page, scenario=None)
+
+
+# ---------- P2-4: 可中断退避等待 + LoadingView 倒计时反馈 ----------
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_wait_for_event_or_timeout_returns_event_when_set() -> None:
+    """P2-4: _wait_for_event_or_timeout: event 已 set → 立即返回 "event"."""
+    import threading
+
+    from main import _wait_for_event_or_timeout
+
+    event = threading.Event()
+    event.set()
+
+    result = await _wait_for_event_or_timeout(event, 10)
+
+    assert result == "event"
+    assert event.is_set()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_wait_for_event_or_timeout_returns_timeout_when_sleep_completes() -> None:
+    """P2-4: _wait_for_event_or_timeout: event 未 set 且 sleep 完成 → 返回 "timeout"."""
+    import threading
+
+    from main import _wait_for_event_or_timeout
+
+    event = threading.Event()
+
+    with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await _wait_for_event_or_timeout(event, 5)
+
+    assert result == "timeout"
+    mock_sleep.assert_called_once_with(5)
+    # finally 应 set event 避免线程泄漏
+    assert event.is_set()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_wait_for_event_or_timeout_cancelled_sets_event() -> None:
+    """P2-4: _wait_for_event_or_timeout: 外部取消时 finally set event 避免线程泄漏."""
+    import threading
+
+    from main import _wait_for_event_or_timeout
+
+    event = threading.Event()
+
+    # 模拟用户关窗口：main(page) 协程被取消
+    task = asyncio.create_task(_wait_for_event_or_timeout(event, 10))
+    await asyncio.sleep(0.01)  # 让 task 开始执行
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播即测试目标, event set 副作用在 with 块后断言
+        await task
+
+    # finally 应 set event，唤醒阻塞的 event.wait() 线程
+    assert event.is_set(), "finally 应 set event 避免线程泄漏"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_db_with_retry_backoff_exit_triggers_sys_exit() -> None:
+    """P2-4: 退避等待期间用户点 Exit → sys.exit(0)。
+
+    验证：第一次失败 → 用户 Retry → 渲染 LoadingView（带 Exit 按钮） →
+    用户点 Exit → _wait_for_event_or_timeout 返回 "event" → sys.exit(0)。
+    """
+    from main import _prepare_db_with_retry
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="event"),
+        patch("main.sys.exit", side_effect=SystemExit(0)) as mock_exit,
+    ):
+        mock_prepare.side_effect = RuntimeError("sidecar failed")
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            with pytest.raises(SystemExit) as exc_info:  # noqa: weak-assertion SystemExit 触发即测试目标, sys.exit 参数在 with 块后断言
+                await _prepare_db_with_retry(page, scenario=None)
+
+    assert exc_info.value.code == 0
+    mock_exit.assert_called_once_with(0)
+    assert mock_prepare.call_count == 1
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_db_with_retry_backoff_renders_loading_view_with_countdown() -> None:
+    """P2-4: 退避等待前渲染 LoadingView 并传入 retry_backoff_seconds + failure_count + on_exit。
+
+    验证：第一次失败 → Retry → 渲染 LoadingView 时传入 backoff=1、failure_count=1、on_exit 回调。
+    """
+    from main import _prepare_db_with_retry
+
+    expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
+    ):
+        mock_prepare.side_effect = [RuntimeError("fail"), expected_url]
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            result = await _prepare_db_with_retry(page, scenario=None)
+
+    assert result == expected_url
+    # 验证 LoadingView 渲染时传入了 backoff 参数
+    loading_renders = [c for c in page.render.call_args_list if "LoadingView" in str(c)]
+    assert len(loading_renders) >= 1
+    backoff_kwargs = loading_renders[0].kwargs
+    assert backoff_kwargs.get("retry_backoff_seconds") == 1  # 第一次失败 backoff=2^0=1
+    assert backoff_kwargs.get("failure_count") == 1
+    assert "on_exit" in backoff_kwargs
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_db_with_retry_backoff_timeout_continues_retry() -> None:
+    """P2-4: 退避超时后继续重试 prepare_database_runtime。
+
+    验证：第一次失败 → Retry → 渲染 LoadingView → 退避超时 → 第二次成功。
+    """
+    from main import _prepare_db_with_retry
+
+    expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
+
+    with (
+        patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
+        patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
+        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
+    ):
+        mock_prepare.side_effect = [RuntimeError("fail"), expected_url]
+        page = MagicMock()
+
+        with patch.dict("os.environ", {"E2E_TESTING": "", "FLET_FORCE_WEB_SERVER": ""}):
+            result = await _prepare_db_with_retry(page, scenario=None)
+
+    assert result == expected_url
+    assert mock_prepare.call_count == 2

@@ -86,6 +86,9 @@ class _StartupBridge:
 def _build_loading_view(
     scenario: EmbeddedPgStartupScenario | None = None,
     elapsed_seconds: int = 0,
+    retry_backoff_seconds: int | None = None,
+    failure_count: int = 0,
+    on_exit: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.Container:
     """构造 loading 启动视图.
 
@@ -94,8 +97,63 @@ def _build_loading_view(
     - ``FIRST_RUN``：标题 ``startup_embedded_pg_first_run_title`` + 提示 ``startup_embedded_pg_first_run_hint``
       + （当 ``elapsed_seconds > 0``）追加 ``startup_embedded_pg_elapsed_seconds`` 已等待时间反馈
     - ``NORMAL`` / ``UNKNOWN``：标题 ``startup_embedded_pg_normal_title`` + 提示 ``startup_embedded_pg_normal_hint``
+
+    P2-4: 当 ``retry_backoff_seconds is not None`` 时，覆盖 scenario 文案，显示退避倒计时：
+    - 标题 ``startup_retry_backoff_title``
+    - 提示 ``startup_retry_backoff_hint``（含 failure_count）
+    - 倒计时 ``startup_retry_backoff_remaining``（remaining > 0）或 ``startup_retry_backoff_retrying``（remaining == 0）
+    - Exit 按钮（``on_exit`` 不为 None 时显示，允许用户中断退避等待）
     """
     children: list[ft.Control] = [ft.ProgressRing(width=40, height=40, stroke_width=3)]
+
+    # P2-4: 退避倒计时反馈（覆盖 scenario 文案）
+    if retry_backoff_seconds is not None:
+        children.append(
+            ft.Text(
+                I18n.get("startup_retry_backoff_title"),
+                size=AppStyles.FONT_SIZE_HEADLINE,
+                weight=ft.FontWeight.BOLD,
+            )
+        )
+        if failure_count > 0:
+            children.append(
+                ft.Text(
+                    I18n.get("startup_retry_backoff_hint").format(count=failure_count),
+                    size=AppStyles.FONT_SIZE_BODY,
+                    color=AppColors.TEXT_SECONDARY,
+                )
+            )
+        # 倒计时：remaining > 0 显示 "剩余 N 秒"，== 0 显示 "正在重试..."
+        if retry_backoff_seconds > 0:
+            countdown_text = I18n.get("startup_retry_backoff_remaining").format(seconds=retry_backoff_seconds)
+        else:
+            countdown_text = I18n.get("startup_retry_backoff_retrying")
+        children.append(
+            ft.Text(
+                countdown_text,
+                size=AppStyles.FONT_SIZE_BODY,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        )
+        # Exit 按钮（on_exit 不为 None 时显示，允许用户中断退避等待）
+        if on_exit is not None:
+            children.append(
+                ft.TextButton(
+                    I18n.get("exit_program"),
+                    on_click=safe_on_click(on_exit),
+                )
+            )
+        return ft.Container(
+            content=ft.Column(
+                safe_controls(children),
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=20,
+            ),
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+        )
+
     if scenario is None:
         # external 模式：原有 "Initializing..." 单行
         children.append(ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=AppStyles.FONT_SIZE_TITLE))
@@ -141,7 +199,12 @@ def _build_loading_view(
 
 
 @ft.component
-def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Container:
+def LoadingView(
+    scenario: EmbeddedPgStartupScenario | None = None,
+    retry_backoff_seconds: int | None = None,
+    failure_count: int = 0,
+    on_exit: Callable[[ft.ControlEvent], None] | None = None,
+) -> ft.Container:
     """启动期 LoadingView 独立组件（prepare_database_runtime 期间临时显示）。
 
     与 StartupView 的 LOADING 状态共用 ``_build_loading_view``，但独立挂载，
@@ -152,25 +215,48 @@ def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Contain
     ``prepare_database_runtime`` 完成后再 ``page.render(RootView, ...)`` 替换。
 
     P1-2: FIRST_RUN 场景下每秒更新已等待时间，缓解首次启动的等待焦虑。
+    P2-4: ``retry_backoff_seconds`` 不为 None 时显示退避倒计时，每秒递减 remaining；
+    ``on_exit`` 不为 None 时显示 Exit 按钮允许用户中断退避等待。
+    退避倒计时与已等待时间互斥（backoff 期间显示倒计时更让用户知道还要等多久）。
     定时器在 mount 时启动、unmount 时取消（R2: CancelledError 必须 raise）。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - 不持有业务状态；scenario 作为 prop 推送
+    - 不持有业务状态；scenario/retry_backoff_seconds 作为 prop 推送
     """
     ft.use_state(get_observable_state)
 
     elapsed_seconds, set_elapsed_seconds = ft.use_state(0)
+    backoff_remaining, set_backoff_remaining = ft.use_state(retry_backoff_seconds)
     counter_ref = ft.use_ref(0)
     timer_task_ref = ft.use_ref(None)
 
     def _setup_timer() -> None:
-        # P2-3: 仅 FIRST_RUN 场景启动定时器（非 FIRST_RUN 场景不显示已等待时间，
-        # 启动定时器只会触发每秒无效重渲染，重试 backoff 期间最长 30s 开销不必要）
-        if scenario != EmbeddedPgStartupScenario.FIRST_RUN:
-            return
         page = _get_page()
         if page is None:
+            return
+
+        # P2-4: backoff 倒计时定时器（与 elapsed 定时器互斥）
+        if retry_backoff_seconds is not None:
+            # 局部变量捕获非 None 值，帮助 pyright 推断类型（闭包 narrowing 限制）
+            backoff_seconds: int = retry_backoff_seconds
+
+            async def _tick_backoff() -> None:
+                try:
+                    remaining = backoff_seconds
+                    while remaining > 0:
+                        await asyncio.sleep(1)
+                        remaining -= 1
+                        set_backoff_remaining(remaining)
+                except asyncio.CancelledError:
+                    raise  # R2: 必须传播，配合优雅停机
+
+            timer_task_ref.current = page.run_task(_tick_backoff)
+            return
+
+        # P2-3: 仅 FIRST_RUN 场景启动 elapsed 定时器（非 FIRST_RUN 场景不显示已等待时间，
+        # 启动定时器只会触发每秒无效重渲染，重试 backoff 期间最长 30s 开销不必要）
+        if scenario != EmbeddedPgStartupScenario.FIRST_RUN:
             return
 
         async def _tick() -> None:
@@ -191,7 +277,13 @@ def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Contain
 
     ft.use_effect(_setup_timer, dependencies=[], cleanup=_cleanup_timer)
 
-    return _build_loading_view(scenario, elapsed_seconds=elapsed_seconds)
+    return _build_loading_view(
+        scenario,
+        elapsed_seconds=elapsed_seconds,
+        retry_backoff_seconds=backoff_remaining,
+        failure_count=failure_count,
+        on_exit=on_exit,
+    )
 
 
 def _build_pre_init_error_view(
