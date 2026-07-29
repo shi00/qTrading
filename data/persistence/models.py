@@ -858,6 +858,21 @@ class AIConceptFailure(Base):
     )
 
 
+class Watchlist(Base):
+    """关注列表（FR-UX-004, Task 4.2）。
+
+    用户从选股结果/详情对话框加入关注的股票，按 ts_code 唯一去重（upsert）。
+    note 字段存用户备注（R17: note 非 SQL 保留字，安全）。
+    """
+
+    __tablename__ = "watchlist"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    ts_code = Column(String, nullable=False, unique=True, index=True)
+    stock_name = Column(String)
+    added_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    note = Column(String)
+
+
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
     return [

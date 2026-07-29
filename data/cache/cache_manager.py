@@ -33,8 +33,9 @@ from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.stk_limit_dao import StkLimitDao
 from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
-from data.persistence.daos.sync_dao import SyncDao
 from data.persistence.daos.top_inst_dao import TopInstDao
+from data.persistence.daos.watchlist_dao import WatchlistDao
+from data.persistence.daos.sync_dao import SyncDao
 from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
@@ -76,6 +77,7 @@ class CacheManager:
         ("sw_industry_classify_dao", SwIndustryClassifyDao),
         ("sw_industry_member_dao", SwIndustryMemberDao),
         ("express_dao", ExpressDao),
+        ("watchlist_dao", WatchlistDao),
     )
 
     def __new__(cls):
@@ -149,6 +151,8 @@ class CacheManager:
             self.sw_industry_member_dao = SwIndustryMemberDao(self.engine)
             # Phase 3G §4.3.4：业绩快报 DAO
             self.express_dao = ExpressDao(self.engine)
+            # FR-UX-004, Task 4.2：关注列表 DAO
+            self.watchlist_dao = WatchlistDao(self.engine)
 
             self._schema_initialized = False
 
@@ -1396,3 +1400,21 @@ class CacheManager:
                 safe_error(e),
             )
             return False
+
+    # --- Watchlist (FR-UX-004, Task 4.2) ---
+
+    async def add_to_watchlist(self, ts_code: str, stock_name: str, note: str | None = None) -> int:
+        """加入关注列表（upsert by ts_code，保留首次加入日期）。"""
+        return await self.watchlist_dao.add_to_watchlist(ts_code, stock_name, note)
+
+    async def remove_from_watchlist(self, ts_code: str) -> int:
+        """移除关注。"""
+        return await self.watchlist_dao.remove_from_watchlist(ts_code)
+
+    async def get_watchlist(self) -> pd.DataFrame:
+        """查询全部关注列表（按 added_at desc）。"""
+        return await self.watchlist_dao.get_watchlist()
+
+    async def is_in_watchlist(self, ts_code: str) -> bool:
+        """检查是否已关注。"""
+        return await self.watchlist_dao.is_in_watchlist(ts_code)

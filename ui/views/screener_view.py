@@ -45,6 +45,7 @@ from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
+from ui.viewmodels.watchlist_view_model import WatchlistViewModel
 from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -295,6 +296,8 @@ def ScreenerView(
     _ = viewport
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
+    # FR-UX-004, Task 4.2: 关注列表 VM (详情对话框「加入关注」按钮消费)
+    _wl_state, wl_vm = use_viewmodel(factory=lambda: WatchlistViewModel())
 
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
@@ -611,6 +614,26 @@ def ScreenerView(
 
     def _on_detail_close() -> None:
         set_detail_dialog_data(None)
+
+    # FR-UX-004, Task 4.2: 加入关注 (详情对话框按钮 → WatchlistViewModel)
+    async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
+        try:
+            await wl_vm.add_to_watchlist(ts_code, stock_name)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("watchlist_added"), "success")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Add to watchlist failed: %s", ex, exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
+
+    def _on_add_to_watchlist(ts_code: str, stock_name: str) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_add_to_watchlist, ts_code, stock_name)
 
     # --- 参数面板 helper ---
 
@@ -1385,6 +1408,7 @@ def ScreenerView(
             page=page,
             open_state=True,
             on_close=_on_detail_close,
+            on_add_to_watchlist=_on_add_to_watchlist,
         )
 
     content_controls = [control_card, main_body]
