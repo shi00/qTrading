@@ -36,7 +36,7 @@ class TestAISelectionStrategyInit:
 
 class TestAISelectionStrategyFilter:
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_none_context(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
@@ -45,7 +45,7 @@ class TestAISelectionStrategyFilter:
         assert result.empty
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_dependencies_unready(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
@@ -56,9 +56,14 @@ class TestAISelectionStrategyFilter:
         assert result.empty
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_api_not_configured(self, mock_ch, mock_ai_cls):
+        """Task 3.4: AI 不可用时不再 raise ValueError, 统一返回量化初筛结果.
+
+        ai_mixin.run_ai_analysis 检查 is_cloud_available() 后返回原始 candidates,
+        on_progress 提示 "ai_not_configured" (与 ai_mixin 路径统一).
+        """
         mock_ch.get_ai_max_candidates.return_value = 10
         mock_ch.get_strategy_min_turnover.return_value = 1.0
         mock_ai_instance = MagicMock()
@@ -73,16 +78,28 @@ class TestAISelectionStrategyFilter:
                 "list_status": ["L"],
             }
         )
+        on_progress = MagicMock()
         context = {
             "screening_data": df,
             "fundamental_screening_data": df,
             "data_processor": _make_dp(),
+            "on_progress": on_progress,
         }
-        with pytest.raises(ValueError, match="API Key"):
-            await s.filter(context)
+        result = await s.filter(context)
+        # Task 3.4: 返回量化初筛结果 (不 raise), 与 ai_mixin 路径统一
+        assert len(result) == 1
+        assert result.iloc[0]["ts_code"] == "000001.SZ"
+        # on_progress 提示 "ai_not_configured" (出现在任意一次调用中)
+        from ui.i18n import I18n
+
+        expected_msg = I18n.get("ai_not_configured")
+        messages = [
+            (c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "")) for c in on_progress.call_args_list
+        ]
+        assert expected_msg in messages, f"ai_not_configured not in on_progress calls: {messages}"
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_empty_data(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
@@ -100,7 +117,7 @@ class TestAISelectionStrategyFilter:
         assert result.empty
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_no_candidates_after_filter(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
@@ -127,14 +144,10 @@ class TestAISelectionStrategyFilter:
 
     @pytest.mark.asyncio
     @patch("strategies.ai_mixin.AIService")
-    @patch("strategies.ai_strategy.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
-    async def test_with_candidates(self, mock_ch, mock_ai_cls, mock_mixin_ai):
+    async def test_with_candidates(self, mock_ch, mock_mixin_ai):
         mock_ch.get_ai_max_candidates.return_value = 10
         mock_ch.get_strategy_min_turnover.return_value = 1.0
-        mock_ai_instance = MagicMock()
-        mock_ai_instance.is_cloud_available.return_value = True
-        mock_ai_cls.return_value = mock_ai_instance
         mock_mixin_ai.return_value.is_cloud_available.return_value = False
         s = AISelectionStrategy()
         df = pd.DataFrame(
@@ -156,7 +169,7 @@ class TestAISelectionStrategyFilter:
         assert len(result) == 1
 
     @pytest.mark.asyncio
-    @patch("strategies.ai_strategy.AIService")
+    @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_legacy_data_key(self, mock_ch, mock_ai_cls):
         mock_ch.get_ai_max_candidates.return_value = 10
