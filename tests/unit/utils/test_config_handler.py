@@ -2518,6 +2518,208 @@ class TestConfigHandlerIsEmbeddedMode:
             assert ConfigHandler.is_embedded_mode() is True
 
 
+class TestConfigHandlerStrategyPresets:
+    """Task 4.1: 策略参数预设保存/载入/删除 (FR-UX-003)
+
+    覆盖 Plans.md 要求:
+    ① 保存→切策略→载入→参数还原单测 (跨策略隔离)
+    ② 重名覆盖与删除单测
+    """
+
+    # --- get_strategy_presets ---
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"保守型": {"pe": 15}}},
+    )
+    def test_get_presets_returns_dict(self, mock_load):
+        """获取预设 → 返回 {name: params} dict"""
+        presets = ConfigHandler.get_strategy_presets("value_strategy")
+        assert presets == {"保守型": {"pe": 15}}
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_get_presets_empty_config_returns_empty_dict(self, mock_load):
+        """无预设时 → 返回空 dict"""
+        presets = ConfigHandler.get_strategy_presets("value_strategy")
+        assert presets == {}
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": "not_a_dict"},
+    )
+    def test_get_presets_invalid_type_returns_empty_dict(self, mock_load):
+        """预设字段类型非法 (非 dict) → 返回空 dict (防御性)"""
+        presets = ConfigHandler.get_strategy_presets("value_strategy")
+        assert presets == {}
+
+    # --- save_strategy_preset ---
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_save_preset_to_empty_config(self, mock_load, mock_save):
+        """保存预设到无预设的配置 → 调用 save_config 写入新预设"""
+        result = ConfigHandler.save_strategy_preset("value_strategy", "保守型", {"pe": 15})
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        assert saved["strategy_presets_value_strategy"] == {"保守型": {"pe": 15}}
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"existing": {"pe": 10}}},
+    )
+    def test_save_preset_appends_to_existing(self, mock_load, mock_save):
+        """已有预设时保存新预设 → 追加到现有 dict, 保留旧预设"""
+        result = ConfigHandler.save_strategy_preset("value_strategy", "激进型", {"pe": 5})
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        presets = saved["strategy_presets_value_strategy"]
+        assert presets["existing"] == {"pe": 10}  # 保留旧值
+        assert presets["激进型"] == {"pe": 5}  # 新增
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": "not_a_dict"},
+    )
+    def test_save_preset_resets_invalid_type(self, mock_load, mock_save):
+        """预设字段类型非法时保存 → 重置为空 dict 再写入新预设"""
+        result = ConfigHandler.save_strategy_preset("value_strategy", "new", {"pe": 10})
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        assert saved["strategy_presets_value_strategy"] == {"new": {"pe": 10}}
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_save_preset_propagates_save_config_failure(self, mock_load, mock_save):
+        """save_config 失败 → 返回 False"""
+        result = ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1})
+        assert result is False
+
+    # --- delete_strategy_preset ---
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"保守型": {"pe": 15}}},
+    )
+    def test_delete_preset_exists_returns_true(self, mock_load, mock_save):
+        """删除存在的预设 → 返回 True, 预设从 dict 移除"""
+        result = ConfigHandler.delete_strategy_preset("value_strategy", "保守型")
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        assert "保守型" not in saved["strategy_presets_value_strategy"]
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"保守型": {"pe": 15}}},
+    )
+    def test_delete_preset_not_exists_returns_false(self, mock_load):
+        """删除不存在的预设 → 返回 False, 不调用 save_config"""
+        with patch.object(cfg_mod.ConfigHandler, "save_config") as mock_save:
+            result = ConfigHandler.delete_strategy_preset("value_strategy", "不存在")
+            assert result is False
+            mock_save.assert_not_called()
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    def test_delete_preset_empty_config_returns_false(self, mock_load):
+        """配置无预设时删除 → 返回 False"""
+        result = ConfigHandler.delete_strategy_preset("value_strategy", "任何")
+        assert result is False
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": "not_a_dict"},
+    )
+    def test_delete_preset_invalid_type_returns_false(self, mock_load):
+        """预设字段类型非法时删除 → 返回 False (防御性)"""
+        result = ConfigHandler.delete_strategy_preset("value_strategy", "任何")
+        assert result is False
+
+    # --- ① 保存→切策略→载入→参数还原 (跨策略隔离) ---
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={
+            "strategy_presets_value_strategy": {"保守型": {"pe": 15, "roe": 10}},
+            "strategy_presets_growth_strategy": {"激进型": {"pe": 30, "rev_growth": 0.5}},
+        },
+    )
+    def test_cross_strategy_isolation(self, mock_load, mock_save):
+        """① 跨策略隔离: 策略 A 的预设不影响策略 B
+
+        保存 value 策略预设 → 切到 growth 策略 → 载入 growth 预设 → 参数还原
+        验证两策略预设独立存储 (key 隔离: strategy_presets_{strategy_key})。
+        """
+        # 载入 value 策略预设
+        value_presets = ConfigHandler.get_strategy_presets("value_strategy")
+        assert value_presets == {"保守型": {"pe": 15, "roe": 10}}
+
+        # 切到 growth 策略, 载入其预设
+        growth_presets = ConfigHandler.get_strategy_presets("growth_strategy")
+        assert growth_presets == {"激进型": {"pe": 30, "rev_growth": 0.5}}
+
+        # 参数还原: 各策略预设互不污染
+        assert value_presets != growth_presets
+        assert "保守型" not in growth_presets
+        assert "激进型" not in value_presets
+
+        # 保存 value 策略新预设不影响 growth 策略预设
+        ConfigHandler.save_strategy_preset("value_strategy", "新方案", {"pe": 12})
+        saved = mock_save.call_args[0][0]
+        # 仅 value 策略的 presets 被更新
+        assert "新方案" in saved["strategy_presets_value_strategy"]
+        # growth 策略的 presets key 未被触及 (save_config 只收到 value 策略的更新)
+        assert "strategy_presets_growth_strategy" not in saved
+
+    # --- ② 重名覆盖与删除 ---
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"my": {"pe": 15, "roe": 10}}},
+    )
+    def test_overwrite_same_name_replaces_params(self, mock_load, mock_save):
+        """② 重名覆盖: 保存同名预设 → 整体替换参数 dict (旧字段不残留)"""
+        result = ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20})
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        preset = saved["strategy_presets_value_strategy"]["my"]
+        assert preset == {"pe": 20}  # 新值
+        assert "roe" not in preset  # 旧字段被覆盖, 不残留
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"strategy_presets_value_strategy": {"my": {"pe": 15}}},
+    )
+    def test_overwrite_then_delete_flow(self, mock_load, mock_save):
+        """② 重名覆盖 → 删除流程
+
+        保存 "my" 预设 (pe=15) → 重名覆盖 (pe=20) → 删除 → 返回 True
+        """
+        # 重名覆盖
+        result = ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20})
+        assert result is True
+        saved = mock_save.call_args[0][0]
+        assert saved["strategy_presets_value_strategy"]["my"] == {"pe": 20}
+
+        # 删除 (load_config 仍返回含 "my" 的 mock 配置)
+        result = ConfigHandler.delete_strategy_preset("value_strategy", "my")
+        assert result is True
+
+
 class TestConfigHandlerAIExternalAcknowledged:
     """Task 2.2: ai_external_acknowledged 知情确认状态持久化"""
 
