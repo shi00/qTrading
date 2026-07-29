@@ -253,6 +253,14 @@ class TestOnboardingVMNavigation:
         assert bound_vm.state.current_step == 5
         assert any(s.current_step == 5 for s in snapshots)
 
+    async def test_skip_step_from_cloud_ai_advances(self, bound_vm, snapshots):
+        """FR-UX-001: 在 cloud_ai 步骤执行 skip 命令可推进到 local_model 步骤。"""
+        bound_vm.current_step = 3  # cloud_ai step
+        await bound_vm.skip_step()
+        assert bound_vm.current_step == 4
+        assert bound_vm.state.current_step == 4
+        assert any(s.current_step == 4 for s in snapshots)
+
     async def test_skip_step_does_not_exceed_max(self, bound_vm):
         bound_vm.current_step = 7
         await bound_vm.skip_step()
@@ -627,10 +635,11 @@ class TestOnboardingVMUnboundValidator:
         result = await vm.validate_and_persist_current_step()
         assert result is False
 
-    async def test_unbound_cloud_ai_validator_blocks(self, vm):
+    async def test_unbound_cloud_ai_validator_passes(self, vm):
+        """FR-UX-001: cloud_ai is optional (block_on_missing_validator=False); unbound validator allows pass."""
         vm.current_step = 3  # cloud_ai
         result = await vm.validate_and_persist_current_step()
-        assert result is False
+        assert result is True
 
     async def test_unbound_local_model_validator_passes(self, vm):
         """local_model is optional (block_on_missing_validator=False); unbound validator allows pass."""
@@ -708,8 +717,9 @@ class TestStepConfigContract:
         assert actual_ids == expected_ids
 
     def test_required_steps(self):
+        # FR-UX-001: cloud_ai 可选化（required=False），必填步骤仅剩 database/token
         required_steps = [config.id for config in STEP_CONFIGS if config.required]
-        assert required_steps == ["database", "token", "cloud_ai"]
+        assert required_steps == ["database", "token"]
 
     def test_validate_before_next_steps(self):
         validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
@@ -737,6 +747,15 @@ class TestStepConfigContract:
 
     def test_local_model_step_has_skip(self):
         assert STEP_CONFIGS[4].show_skip is True
+
+    def test_cloud_ai_step_has_skip(self):
+        """FR-UX-001: cloud_ai 步骤显示跳过按钮，且非必填，未绑定 validator 时不阻断。"""
+        config = STEP_CONFIGS[3]
+        assert config.id == "cloud_ai"
+        assert config.show_skip is True
+        assert config.skip_text_key == "wizard_btn_skip"
+        assert config.required is False
+        assert config.block_on_missing_validator is False
 
 
 # =====================================================================

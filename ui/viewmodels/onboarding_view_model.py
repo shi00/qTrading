@@ -86,8 +86,14 @@ STEP_CONFIGS = [
         show_next=True,
         next_text_key="wizard_btn_verify_next",
         next_icon="ARROW_FORWARD",
-        required=True,
+        # FR-UX-001: 云端 AI 可选化，允许无 API Key 用户跳过（skip_step 不触发校验，
+        # validate_before_next=True 保留：用户点「下一步」仍走连接验证；
+        # block_on_missing_validator=False：未绑定 validator 时不阻断，与 local_model 一致）
+        show_skip=True,
+        skip_text_key="wizard_btn_skip",
+        required=False,
         validate_before_next=True,
+        block_on_missing_validator=False,
     ),
     StepConfig(
         id="local_model",
