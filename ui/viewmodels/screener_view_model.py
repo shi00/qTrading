@@ -172,6 +172,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         # TaskManager subscription state
         self._strategy_submitted = False
+        self._active_task_id: str | None = None  # Task 3.2: 保存运行中 task_id 供 cancel_strategy
 
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
 
@@ -747,6 +748,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     status_color="error",
                 )
                 raise RuntimeError(f"Strategy execution crashed: {e}") from e
+            finally:
+                self._active_task_id = None  # Task 3.2: 所有退出路径清空, 防止误取消已结束的 task
 
         # Reset Local UI State
         self._full_results = None
@@ -782,6 +785,16 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
         else:
             self._strategy_submitted = True
+            self._active_task_id = task_id  # Task 3.2: 保存供 cancel_strategy
+
+    def cancel_strategy(self) -> None:
+        """Task 3.2: 取消正在运行的选股策略任务 (本页取消).
+
+        线程安全: TaskManager.cancel_task 通过 call_soon_threadsafe 调度到事件循环,
+        可在 Flet 同步 handler 中直接调用 (R16 不适用: 无 IO/CPU 阻塞).
+        """
+        if self._active_task_id is not None:
+            TaskManager().cancel_task(self._active_task_id)
 
     # --- Sorting & Pagination ---
 

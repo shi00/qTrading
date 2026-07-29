@@ -99,6 +99,7 @@
     "status_error": "错误",
     "select_strategy": "选择策略",
     "run_screening": "执行选股",
+    "stop_screening": "停止选股",
     "screener_select_strategy": "选择策略",
     "screener_reload_data": "重载数据",
     "screener_auto_save": "自动保存复盘记录",
