@@ -220,6 +220,88 @@ class TestClearFilters:
         assert len(vm._full_results) == 1
 
 
+# --- Non-streaming concurrency placeholder (Task 3.1: AI 并发占位卡假死修复) ---
+
+
+class TestNonStreamingConcurrencyPlaceholder:
+    """Task 3.1: 非流式并发模式 (concurrency>1) 下占位卡状态闭环.
+
+    复现路径: ai_mixin 在 concurrency>1 时调 ``on_card_start`` (VM:_on_card_start_adapter)
+    创建 ``is_analyzing=True`` 占位卡; 单股分析完成后调 ``on_result`` (VM:_on_ai_result_stream)
+    传入最终结果。修复前 _on_ai_result_stream 仅更新 logs/_ai_buffer, 占位卡永远停留在
+    ``is_analyzing=True`` (假死)。修复后应命中占位卡并写入最终 reasoning/content.
+    """
+
+    def test_placeholder_card_finalized_on_result_stream(self, vm):
+        """concurrency>1 路径: 结果到达后占位卡 is_analyzing=False 且含最终内容."""
+        # 1. 模拟 ai_mixin 在 concurrency>1 时调 on_card_start 创建占位卡
+        vm._on_card_start_adapter("贵州茅台")
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is True
+        assert card.reasoning == ""
+        assert card.content == ""
+
+        # 2. 模拟 ai_mixin 调 on_result 传入最终结果 (row_data 字段对齐 _build_result_row)
+        vm._on_ai_result_stream(
+            {
+                "name": "贵州茅台",
+                "ai_score": 75.0,
+                "thinking": "技术面多头排列，量能放大",
+                "ai_reason": "最终分析：建议关注",
+            }
+        )
+
+        # 3. 断言占位卡已终结 (is_analyzing=False) 且写入最终 reasoning/content
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is False, "占位卡未终结 (假死)"
+        assert card.reasoning == "技术面多头排列，量能放大"
+        assert card.content == "最终分析：建议关注"
+
+    def test_placeholder_card_unknown_name_does_not_crash(self, vm):
+        """结果 name 不匹配任何占位卡时不应崩溃 (边界)."""
+        vm._on_card_start_adapter("贵州茅台")
+        vm._on_ai_result_stream(
+            {
+                "name": "其他股票",
+                "ai_score": 60.0,
+                "thinking": "思考",
+                "ai_reason": "分析",
+            }
+        )
+        # 不匹配的占位卡不应被误更新
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is True
+        assert card.reasoning == ""
+
+    def test_streaming_card_not_overwritten_by_result_stream(self, vm):
+        """流式卡 (concurrency=1, is_analyzing=False) 不应被 _on_ai_result_stream 覆盖.
+
+        流式卡的内容由 chunk 流式写入 + finalize_stream_card 终结; _on_ai_result_stream
+        仅用于并发模式的占位卡终结, 不应破坏流式路径行为 (任务要求: 不破坏流式路径).
+        """
+        # 1. 模拟 concurrency=1 流式路径: on_stream_start 创建流式卡 (is_analyzing=False)
+        on_chunk = vm._on_stream_start_adapter("贵州茅台")
+        on_chunk("流式内容已写入", is_reasoning=False)
+        on_chunk.final_flush()
+        original_content = vm.state.stream_cards[0].content
+        assert original_content == "流式内容已写入"
+
+        # 2. 调 _on_ai_result_stream (流式路径也会被调用, 但不应覆盖流式卡内容)
+        vm._on_ai_result_stream(
+            {
+                "name": "贵州茅台",
+                "ai_score": 75.0,
+                "thinking": "思考",
+                "ai_reason": "最终分析",
+            }
+        )
+
+        # 3. 流式卡内容不被覆盖 (流式路径行为不变)
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is False
+        assert card.content == original_content
+
+
 # --- Task 3.3: save_results 失败分态 ---
 
 
