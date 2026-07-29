@@ -1445,6 +1445,55 @@ class ConfigHandler:
         key = f"ai_strategy_prompt_{strategy_key}"
         return ConfigHandler.save_config({key: prompt})
 
+    # --- Task 4.1: 筛选方案保存/复用 (FR-UX-003) ---
+
+    @staticmethod
+    def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
+        """获取策略的已保存参数预设 (Task 4.1).
+
+        Returns:
+            dict: {preset_name: params_dict}, 无预设时返回空 dict.
+        """
+        config = ConfigHandler.load_config()
+        key = f"strategy_presets_{strategy_key}"
+        presets = config.get(key, {})
+        return presets if isinstance(presets, dict) else {}
+
+    @staticmethod
+    def save_strategy_preset(strategy_key: str, name: str, params: dict) -> bool:
+        """保存命名参数预设 (Task 4.1). 重名覆盖.
+
+        Args:
+            strategy_key: 策略 key
+            name: 预设名称
+            params: 参数 dict
+
+        Returns:
+            bool: 保存成功返回 True.
+        """
+        config = ConfigHandler.load_config()
+        key = f"strategy_presets_{strategy_key}"
+        presets = config.get(key, {})
+        if not isinstance(presets, dict):
+            presets = {}
+        presets[name] = params
+        return ConfigHandler.save_config({key: presets})
+
+    @staticmethod
+    def delete_strategy_preset(strategy_key: str, name: str) -> bool:
+        """删除命名参数预设 (Task 4.1).
+
+        Returns:
+            bool: 删除成功 (预设存在) 返回 True, 不存在返回 False.
+        """
+        config = ConfigHandler.load_config()
+        key = f"strategy_presets_{strategy_key}"
+        presets = config.get(key, {})
+        if not isinstance(presets, dict) or name not in presets:
+            return False
+        del presets[name]
+        return ConfigHandler.save_config({key: presets})
+
     @staticmethod
     def get_ai_news_prompt():
         """Get News Classification Prompt (returns Default if not set)"""

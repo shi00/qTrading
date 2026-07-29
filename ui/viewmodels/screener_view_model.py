@@ -387,6 +387,52 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, prompt)
         return True, None
 
+    # --- Task 4.1: 筛选方案保存/复用 (FR-UX-003) ---
+
+    def get_preset_names(self, strategy_key: str) -> list[str]:
+        """获取策略已保存的预设名称列表 (Task 4.1).
+
+        ConfigHandler._config_cache 命中时为纯内存读 (非 IO); 首次未命中
+        触发小 JSON 文件读 (< 5ms), 在 use_effect 上下文中可接受。
+        """
+        from utils.config_handler import ConfigHandler
+
+        presets = ConfigHandler.get_strategy_presets(strategy_key)
+        return list(presets.keys())
+
+    async def save_preset(self, name: str, strategy_key: str, params: dict) -> None:
+        """保存命名参数预设 (Task 4.1). 重名覆盖.
+
+        Raises:
+            Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
+        """
+        from utils.config_handler import ConfigHandler
+
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_strategy_preset, strategy_key, name, params)
+
+    def load_preset(self, name: str, strategy_key: str) -> dict:
+        """载入命名参数预设 (Task 4.1).
+
+        Returns:
+            参数 dict; 预设不存在时返回空 dict.
+        """
+        from utils.config_handler import ConfigHandler
+
+        presets = ConfigHandler.get_strategy_presets(strategy_key)
+        return presets.get(name, {})
+
+    async def delete_preset(self, name: str, strategy_key: str) -> bool:
+        """删除命名参数预设 (Task 4.1).
+
+        Returns:
+            bool: True 表示已删除, False 表示预设不存在.
+        """
+        from utils.config_handler import ConfigHandler
+
+        return bool(
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name)
+        )
+
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
 
