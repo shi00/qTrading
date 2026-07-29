@@ -164,6 +164,28 @@ class TestBacktestDAO:
         dao._save_upsert.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_save_result_excludes_id_and_executed_at(
+        self,
+        dao: BacktestDAO,
+        backtest_result: BacktestResult,
+    ) -> None:
+        """save_result 传给 _save_upsert 的 columns 不含 id (autoincrement) 和 executed_at (server_default).
+
+        否则 _save_upsert 会显式传 None 覆盖 DB 默认值,导致 NotNullViolation.
+        对齐 screener_dao.py 的范式: exclude={"id", "executed_at", "updated_at", "created_at"}.
+        BacktestResultModel 当前无 updated_at/created_at 列, 但显式排除防御未来模型扩展.
+        """
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        await dao.save_result(_result_to_dict(backtest_result))
+
+        call_args = dao._save_upsert.call_args
+        # 位置参数: (df, table_name, columns, pk_columns)
+        columns = call_args[0][2]
+        assert "id" not in columns, "id 列应由 DB autoincrement 生成, 不应出现在 INSERT 列表"
+        assert "executed_at" not in columns, "executed_at 应由 DB server_default 生成, 不应被 None 覆盖"
+
+    @pytest.mark.asyncio
     async def test_get_result_found(self, dao: BacktestDAO) -> None:
         mock_df = pd.DataFrame(
             {

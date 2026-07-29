@@ -104,6 +104,8 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
 
     捕获事件循环中未处理异常，脱敏后记录 CRITICAL 日志。
     特殊处理 CancelledError（正常关闭行为，降级为 WARNING）。
+    网络瞬时错误（ConnectionResetError 等）按 recoverable 降级为 WARNING，
+    与 ai_service.py 处理同类异常的级别一致 (ai_service.py:922-933)。
     """
     try:
         exception = context.get("exception")
@@ -118,6 +120,18 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
 
         if isinstance(exception, KeyboardInterrupt):
             logger.info("[AsyncioHandler] KeyboardInterrupt in event loop, exiting gracefully.")
+            return
+
+        # 网络瞬时错误 (WinError 10054/1236 等) 按 recoverable 降级;
+        # 不 raise: exception_handler 不参与传播, 异常已终止对应 transport.
+        # 与 ai_service.py / db_config_service.py 处理同类异常的级别一致.
+        if isinstance(exception, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            sanitized_msg = DataSanitizer.sanitize_error(exception)  # type: ignore[arg-type]
+            logger.warning(
+                "[AsyncioHandler] Network connection reset/aborted in event loop: %s: %s",
+                type(exception).__name__,
+                sanitized_msg,
+            )
             return
 
         if exception is not None:

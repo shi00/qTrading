@@ -660,6 +660,41 @@ class TestDisposeEdgeCase:
         assert vm._disposed is True
 
 
+class TestDisposedGuard:
+    """disposed guard: _set_state/_notify 在 dispose 后不应修改 state 或调用 subscribers."""
+
+    def test_set_state_after_dispose_is_noop(self, vm):
+        """disposed 后 _set_state 不应修改 state."""
+        vm.dispose()
+        original_state = vm.state
+        vm._set_state(tables_list=("should_not_appear",), current_page=99)
+        assert vm.state == original_state
+
+    def test_notify_after_dispose_is_noop(self, vm):
+        """disposed 后 _notify 不应调用 subscribers."""
+        received: list[DataExplorerState] = []
+        vm.subscribe(lambda s: received.append(s))
+        vm.dispose()
+        vm._notify()
+        assert received == []
+
+    def test_dispose_does_not_notify_subscribers(self, vm):
+        """dispose 中重置 state 不应触发 subscriber 回调 (不应通过 _set_state 触发 _notify)."""
+        received: list[DataExplorerState] = []
+        vm.subscribe(lambda s: received.append(s))
+        vm.dispose()
+        assert received == []
+
+    def test_set_state_before_dispose_works_normally(self, vm):
+        """disposed guard 不应影响 dispose 前的正常调用."""
+        received: list[DataExplorerState] = []
+        vm.subscribe(lambda s: received.append(s))
+        vm._set_state(current_page=5)
+        assert vm.state.current_page == 5
+        assert len(received) == 1
+        assert received[0].current_page == 5
+
+
 class TestInitTablesSeverity:
     async def test_operational_error_sets_error_message(self, vm, mock_db):
         """operational 严重度异常(未知错误)设置 error_message,返回空列表。"""
