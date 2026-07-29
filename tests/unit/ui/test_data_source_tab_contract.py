@@ -789,10 +789,14 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         assert isinstance(result, ft.Container)
 
-    def test_listview_contains_four_cards(
+    def test_listview_contains_five_cards(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """Container.content 是 ListView, 含 4 个 DashboardCard (mock 后为 Container)。"""
+        """Container.content 是 ListView, 含 5 个 DashboardCard (mock 后为 Container)。
+
+        5 个 card: health_dashboard / action_console / connection_card / historical_card /
+        data_flow_card (Task 2.3 数据存储与流向说明区)。
+        """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(monkeypatch)
@@ -800,7 +804,7 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         listview = result.content
         assert isinstance(listview, ft.ListView)
-        assert len(listview.controls) == 4
+        assert len(listview.controls) == 5
 
     def test_mount_triggers_main_vm_subscribe(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -949,6 +953,103 @@ class TestDataSourceTabComponentBody:
         clickables = _find_clickable_containers(result)
         # 3 个 ActionChip (full_sync / ai_concept_rebuild / clear_cache)
         assert len(clickables) >= 3
+
+
+# ============================================================================
+# 组件体测试: Task 2.3 数据存储与流向说明区
+# ============================================================================
+
+
+class TestDataSourceTabDataFlowSection:
+    """Task 2.3: 数据存储与流向说明区渲染测试。
+
+    说明区为纯静态展示 (无 VM 交互), i18n key 由 View 直接解析,
+    locale 变化通过组件顶部 ``ft.use_state(get_observable_state)`` 自动重渲染。
+    """
+
+    def test_data_flow_section_renders_title(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区渲染标题 ds_data_flow_title。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        # SectionHeader mock 后为 ft.Text(title), I18n.get mock 返回 key
+        assert any((t.value or "") == "ds_data_flow_title" for t in texts)
+
+    def test_data_flow_section_renders_storage_path(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区渲染本地 PG 存储路径文案 (ds_data_flow_storage_title + desc)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        values = [(t.value or "") for t in texts]
+        assert "ds_data_flow_storage_title" in values
+        assert "ds_data_flow_storage_desc" in values
+
+    def test_data_flow_section_renders_outbound_channels(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区渲染外发渠道清单 (Tushare/AkShare 查询 + 云端 LLM 分析)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        values = [(t.value or "") for t in texts]
+        assert "ds_data_flow_outbound_title" in values
+        # Tushare/AkShare 渠道文案 (可能带 "• " 前缀)
+        assert any("ds_data_flow_outbound_tushare" in v for v in values)
+        # 云端 LLM 渠道文案
+        assert any("ds_data_flow_outbound_llm" in v for v in values)
+
+    def test_data_flow_section_renders_storage_icon(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区包含 STORAGE 图标 (本地存储标识)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        icons = _find_by_type(result, ft.Icon)
+        assert any(getattr(i, "icon", None) == ft.Icons.STORAGE for i in icons)
+
+    def test_data_flow_section_renders_outbound_icon(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区包含 CLOUD_SYNC 图标 (外发渠道标识)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        icons = _find_by_type(result, ft.Icon)
+        assert any(getattr(i, "icon", None) == ft.Icons.CLOUD_SYNC for i in icons)
+
+    def test_data_flow_section_is_last_card_in_listview(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """说明区是 ListView 的最后一个 card (historical_card 之后)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        listview = result.content
+        assert isinstance(listview, ft.ListView)
+        # 最后一个 card 应包含 ds_data_flow_title 文本 (通过递归遍历断言)
+        last_card = listview.controls[-1]
+        last_card_texts = _find_by_type(last_card, ft.Text)
+        assert any((t.value or "") == "ds_data_flow_title" for t in last_card_texts)
 
 
 # ============================================================================

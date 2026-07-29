@@ -839,6 +839,72 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
+    # --- Task 2.3: 数据存储与流向说明区 (静态展示, 无 VM 交互) ---
+    # 本地 PG 存储路径 + 外发渠道清单 (Tushare/AkShare 查询、云端 LLM 分析)
+    # i18n key 由 View 直接解析, locale 变化经组件顶部 ft.use_state(get_observable_state) 自动重渲染
+    data_flow_card = DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("ds_data_flow_title"), title_key="ds_data_flow_title"),
+                ft.Container(height=10),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.STORAGE, size=AppStyles.FONT_SIZE_LG, color=AppColors.INFO),
+                        ft.Column(
+                            [
+                                ft.Text(
+                                    I18n.get("ds_data_flow_storage_title"),
+                                    size=AppStyles.FONT_SIZE_BODY,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                                ft.Text(
+                                    I18n.get("ds_data_flow_storage_desc"),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.CLOUD_SYNC, size=AppStyles.FONT_SIZE_LG, color=AppColors.ACCENT),
+                        ft.Column(
+                            [
+                                ft.Text(
+                                    I18n.get("ds_data_flow_outbound_title"),
+                                    size=AppStyles.FONT_SIZE_BODY,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                                ft.Text(
+                                    f"• {I18n.get('ds_data_flow_outbound_tushare')}",
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                                ft.Text(
+                                    f"• {I18n.get('ds_data_flow_outbound_llm')}",
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+            ],
+        ),
+    )
+
     # --- Confirm dialog (条件渲染 + use_state) ---
     if confirm_dialog_config:
         title_key = confirm_dialog_config.get("title_key", "")
@@ -892,6 +958,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                 action_console,
                 connection_card,
                 historical_card,
+                data_flow_card,
             ],
             spacing=15,
             padding=ft.Padding.only(bottom=50),
