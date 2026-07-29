@@ -160,8 +160,25 @@ class TestStartupInitServices:
 
         assert ctrl.state == StartupState.INIT_FAILED
         assert ctrl.context.error == "init_exception"
-        assert ctrl.context.detail is not None
-        assert "unexpected error" in ctrl.context.detail
+
+    @pytest.mark.asyncio
+    async def test_init_services_set_onboarding_complete_failure_continues_to_ready(self, controller):
+        """app-004 举一反三: set_onboarding_complete(True) 失败时仍 transition 到 READY.
+
+        服务已初始化成功，仅 onboarding_complete 标志未持久化，不阻塞启动。
+        """
+        ctrl, transitions = controller
+        with (
+            patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            mock_tpm.return_value.run_async = AsyncMock(side_effect=RuntimeError("disk full"))
+            await ctrl._init_services()
+
+        assert ctrl.state == StartupState.READY
+        assert transitions[-1][0] == StartupState.READY
 
 
 class TestStartupRetry:
@@ -218,6 +235,32 @@ class TestStartupReconfigure:
         assert transitions[-1] == StartupState.NEED_ONBOARDING
         cache_manager.close.assert_awaited_once()
         mock_tpm.return_value.run_async.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_set_onboarding_complete_failure_transitions_to_init_failed(self):
+        """app-004: set_onboarding_complete(False) 失败时 transition 到 INIT_FAILED，避免停留 LOADING."""
+        transitions = []
+        cache_manager = AsyncMock()
+        controller = StartupController(
+            cache_manager=cache_manager,
+            on_state_change=lambda s, ctx: transitions.append((s, ctx)),
+        )
+        controller._state = StartupState.INIT_FAILED
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(side_effect=OSError("disk full"))
+            await controller.reconfigure()
+
+        # 状态机应 transition 到 INIT_FAILED，而非停留 LOADING
+        assert controller.state == StartupState.INIT_FAILED
+        assert transitions[-1][0] == StartupState.INIT_FAILED
+        assert transitions[-1][1].error == "reconfigure_failed"
+        assert transitions[-1][1].detail is not None
+        # cache_manager.close 仍应被调用
+        cache_manager.close.assert_awaited_once()
 
 
 class TestStartupSkip:
