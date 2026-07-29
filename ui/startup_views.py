@@ -165,6 +165,10 @@ def LoadingView(scenario: EmbeddedPgStartupScenario | None = None) -> ft.Contain
     timer_task_ref = ft.use_ref(None)
 
     def _setup_timer() -> None:
+        # P2-3: 仅 FIRST_RUN 场景启动定时器（非 FIRST_RUN 场景不显示已等待时间，
+        # 启动定时器只会触发每秒无效重渲染，重试 backoff 期间最长 30s 开销不必要）
+        if scenario != EmbeddedPgStartupScenario.FIRST_RUN:
+            return
         page = _get_page()
         if page is None:
             return

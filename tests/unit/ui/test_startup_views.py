@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
+from app.bootstrap import EmbeddedPgStartupScenario
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.startup_views import (
     StartupView,
@@ -263,7 +264,11 @@ def test_loading_view_is_ft_component():
 
 
 def test_loading_view_component_starts_timer_on_mount(mock_i18n_state, mock_app_colors_state):
-    """P1-2: LoadingView 挂载时启动定时器（page.run_task 被调用）."""
+    """P1-2: LoadingView 挂载时启动定时器（page.run_task 被调用）.
+
+    P2-3: 仅 FIRST_RUN 场景启动定时器（非 FIRST_RUN 场景不显示已等待时间，
+    启动定时器只会触发无效重渲染）。
+    """
     from tests.unit.ui.component_renderer import (
         FakePage,
         make_component,
@@ -273,7 +278,7 @@ def test_loading_view_component_starts_timer_on_mount(mock_i18n_state, mock_app_
 
     page = FakePage()
     page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
-    component = make_component(LoadingView, scenario=None)
+    component = make_component(LoadingView, scenario=EmbeddedPgStartupScenario.FIRST_RUN)
     run_mount_effects(component, page=page)
 
     assert page.session.scheduled_effects, "use_effect setup 应被调度"
@@ -282,7 +287,10 @@ def test_loading_view_component_starts_timer_on_mount(mock_i18n_state, mock_app_
 
 
 def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_app_colors_state):
-    """P1-2: LoadingView 卸载时取消定时器（task.cancel 被调用，R2 红线）."""
+    """P1-2: LoadingView 卸载时取消定时器（task.cancel 被调用，R2 红线）.
+
+    P2-3: 仅 FIRST_RUN 场景启动定时器，所以卸载测试也使用 FIRST_RUN。
+    """
     from tests.unit.ui.component_renderer import (
         FakePage,
         make_component,
@@ -294,7 +302,7 @@ def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_a
     page = FakePage()
     mock_task = MagicMock()
     page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
-    component = make_component(LoadingView, scenario=None)
+    component = make_component(LoadingView, scenario=EmbeddedPgStartupScenario.FIRST_RUN)
     run_mount_effects(component, page=page)
 
     # 卸载组件，触发 cleanup
@@ -302,6 +310,40 @@ def test_loading_view_component_cancels_timer_on_unmount(mock_i18n_state, mock_a
 
     # cleanup 应取消 task
     mock_task.cancel.assert_called_once()  # noqa: weak-assertion <验证 task.cancel 被调用是 R2 红线测试目标本身>
+
+
+# --- P2-3: LoadingView 定时器仅在 FIRST_RUN 场景启动 ---
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        None,
+        EmbeddedPgStartupScenario.NORMAL,
+        EmbeddedPgStartupScenario.UNKNOWN,
+    ],
+)
+def test_loading_view_component_no_timer_for_non_first_run(mock_i18n_state, mock_app_colors_state, scenario):
+    """P2-3: 非 FIRST_RUN 场景不启动定时器（避免无效重渲染）.
+
+    scenario=None (external 模式) / NORMAL / UNKNOWN 场景下，
+    ``_build_loading_view`` 不显示已等待时间，启动定时器只会触发每秒无效重渲染。
+    重试 backoff 期间最长 30s，30 次无效重渲染是不必要的性能开销。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        make_component,
+        run_mount_effects,
+    )
+    from ui.startup_views import LoadingView
+
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    component = make_component(LoadingView, scenario=scenario)
+    run_mount_effects(component, page=page)
+
+    # 非 FIRST_RUN 场景不启动定时器
+    assert not page.run_task.called  # noqa: weak-assertion <验证 page.run_task 未被调用是非 FIRST_RUN 早退测试目标本身>
 
 
 def test_get_page_returns_none_outside_render_context():
@@ -346,6 +388,8 @@ def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state,
 
     覆盖 ``_tick`` 协程体 (try/while/await/set/except/raise)。
     通过捕获 ``page.run_task`` 接收的 coro, 在事件循环中执行验证 R2 红线。
+
+    P2-3: 仅 FIRST_RUN 场景启动定时器，所以 _tick 协程测试也使用 FIRST_RUN。
     """
     from tests.unit.ui.component_renderer import (
         FakePage,
@@ -364,7 +408,7 @@ def test_loading_view_tick_coroutine_runs_and_propagates_cancel(mock_i18n_state,
 
     page.run_task = fake_run_task  # type: ignore[method-assign]
 
-    component = make_component(LoadingView, scenario=None)
+    component = make_component(LoadingView, scenario=EmbeddedPgStartupScenario.FIRST_RUN)
     run_mount_effects(component, page=page)
 
     assert captured_tick_fn, "_tick 函数应被传给 page.run_task"  # noqa: weak-assertion <验证 tick_fn 被捕获是后续执行的前提>
