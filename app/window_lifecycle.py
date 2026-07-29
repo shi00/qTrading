@@ -248,15 +248,25 @@ async def perform_upgrade_exit(
 
     流程：
     1. 执行 cleanup（timeout_s=5.0, step_timeout_s=10.0）
-    2. cleanup 失败仅记录日志
-    3. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
-    4. force_exit(1)
+    2. cleanup 被 cancel：force_exit(1) 并 raise CancelledError（R2 红线，与 perform_window_shutdown 对齐）
+    3. cleanup 失败仅记录日志
+    4. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
+    5. force_exit(1)
     """
     # upgrade exit 路径：timeout_s=5.0 是整个 cleanup 链的硬上限（asyncio.wait_for 总超时）。
     # step_timeout_s=10.0 通过 min(default_timeout, step_timeout_s) 仅对 Step 8 (embedded postgres,
     # default=35.0s) 生效，将其单步预算从默认 5.0s 抬升到 10.0s；Step 0~7 的 default_timeout 均 ≤5.0s
     # 不受影响。但 Step 8 实际能跑的时间仍受 5.0s 总时长钳制（剩余 = 5.0s - 前序步骤累计耗时）。
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=10.0)
+    try:
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=10.0)
+    except asyncio.CancelledError:
+        # R2 红线：CancelledError 必须 raise；但在此之前调用 force_exit 避免进程悬挂
+        # （do_cleanup 透传 CancelledError 时 force_exit 未被调用，进程会卡死）。
+        # 与 perform_window_shutdown 的处理模式对齐。
+        logger.warning("[Main] Upgrade exit cleanup was cancelled, forcing process exit.")
+        await asyncio.sleep(0.2)
+        coordinator.force_exit(1)
+        raise
     if not cleanup_ok:
         logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
     try:
@@ -280,15 +290,25 @@ async def handle_disconnect(
     """处理外部 disconnect 事件.
 
     流程：
-    1. 启动 watchdog（25s）
-    2. 执行 cleanup（timeout=20s）
-    3. 如果 cleanup_done_fn() 返回 True：直接返回（其他路径已处理）
-    4. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
-    5. cleanup_ok=False：log error，sleep 0.2s，force_exit(1)
+    1. 启动 watchdog（70s）
+    2. 执行 cleanup（timeout=60s, step_timeout=35s）
+    3. cleanup 被 cancel：force_exit(1) 并 raise CancelledError（R2 红线，与 perform_window_shutdown 对齐）
+    4. 如果 cleanup_done_fn() 返回 True：直接返回（其他路径已处理）
+    5. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
+    6. cleanup_ok=False：log error，sleep 0.2s，force_exit(1)
     """
     # Phase 2 Step 8 加入后，disconnect 路径同步调整：watchdog 70s + do_cleanup 60s
     coordinator.start_watchdog(70)
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
+    try:
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
+    except asyncio.CancelledError:
+        # R2 红线：CancelledError 必须 raise；但在此之前调用 force_exit 避免进程悬挂
+        # （do_cleanup 透传 CancelledError 时 force_exit 未被调用，进程会卡死）。
+        # 与 perform_window_shutdown 的处理模式对齐。
+        logger.warning("[Main] Disconnect cleanup was cancelled, forcing process exit.")
+        await asyncio.sleep(0.2)
+        coordinator.force_exit(1)
+        raise
     if cleanup_done_fn():
         return
     if cleanup_ok:

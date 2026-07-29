@@ -501,7 +501,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
 
                 try:
-                    await self.sync_daily_market_snapshot(date_obj, force=True, sync_result=result)
+                    # P0-1: 检查返回值，False 表示取消信号触发，部分写入不应计为成功
+                    success = await self.sync_daily_market_snapshot(date_obj, force=True, sync_result=result)
+                    if not success:
+                        async with counter_lock:
+                            consecutive_failures += 1
+                            failed_dates.append(date_obj)
+                        return
                     async with counter_lock:
                         processed_count += 1
                         result.added += 1
@@ -607,7 +613,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with sem:
                         try:
-                            await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
+                            # P0-1: 检查返回值，False 表示取消信号触发，不计为成功
+                            success = await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
+                            if not success:
+                                failed_list.append(date)
+                                return
                             logger.debug("[HistoricalSync] Retry | ✅ Recovered %s", date)
                             result.added += 1
                         except EngineDisposedError:

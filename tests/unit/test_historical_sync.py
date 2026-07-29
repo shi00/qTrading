@@ -1182,6 +1182,48 @@ class TestHistoricalSyncRunEngineDisposedError:
             await strategy._run_impl()
 
 
+class TestHistoricalSyncOneDayReturnValue:
+    """P0-1: sync_one_day 必须检查 sync_daily_market_snapshot 返回值，False 时不计为成功"""
+
+    @pytest.mark.asyncio
+    async def test_false_return_does_not_increment_added(self):
+        """sync_daily_market_snapshot 返回 False 时，result.added 不递增"""
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
+        strategy = HistoricalSyncStrategy(ctx)
+
+        with patch.object(
+            HistoricalSyncStrategy,
+            "sync_daily_market_snapshot",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            # 避免 backoff 等待
+            with patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock):
+                with patch("data.sync.historical.asyncio.wait_for", new_callable=AsyncMock):
+                    result = await strategy.run(days=1)
+
+        assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_true_return_increments_added(self):
+        """sync_daily_market_snapshot 返回 True 时，result.added 正常递增"""
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
+        strategy = HistoricalSyncStrategy(ctx)
+
+        with patch.object(
+            HistoricalSyncStrategy,
+            "sync_daily_market_snapshot",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            with patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock):
+                result = await strategy.run(days=1)
+
+        assert result.added == 1
+
+
 class TestSyncDailyMarketSnapshotCancellation:
     """S2: 验证 sync_daily_market_snapshot 长循环中取消信号响应"""
 

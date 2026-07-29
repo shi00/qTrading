@@ -13,6 +13,7 @@
   声明式重写后改为父组件 state 驱动）
 """
 
+import json
 import logging
 import math
 import typing
@@ -131,6 +132,152 @@ def _info_chip(label, value, color=None) -> ft.Container:
         bgcolor=AppColors.SURFACE_VARIANT,
         border_radius=8,
         width=120,
+    )
+
+
+def _build_prediction_badge(value) -> ft.Container:
+    """Task 4.3 (FR-UX-005): 构建 WIN/LOSS 徽章 (模块级纯函数, 可独立单测)."""
+    val_str = str(value).upper() if value is not None else ""
+    if val_str == "WIN":
+        color = AppColors.SUCCESS
+        text = I18n.get("prediction_win")
+        icon = ft.Icons.CHECK_CIRCLE
+    elif val_str == "LOSS":
+        color = AppColors.ERROR
+        text = I18n.get("prediction_loss")
+        icon = ft.Icons.CANCEL
+    else:
+        color = AppColors.TEXT_HINT
+        text = "-"
+        icon = ft.Icons.REMOVE
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(icon, color=color, size=AppStyles.FONT_SIZE_TITLE),
+                ft.Text(
+                    text,
+                    color=color,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.BOLD,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=4,
+        ),
+        border=ft.Border.all(1, color),
+        border_radius=12,
+        padding=ft.Padding.symmetric(horizontal=10, vertical=3),
+    )
+
+
+def _format_pct_with_sign(val) -> str:
+    """Task 4.3 (FR-UX-005): 带符号格式化百分比数值 (纯函数)."""
+    if not is_valid_number(val):
+        return "-"
+    val_f = float(val)
+    sign = "+" if val_f > 0 else ""
+    return f"{sign}{val_f:.2f}"
+
+
+def _has_review_value(v) -> bool:
+    """Task 4.3: 检查复盘值是否非空 (None/NaN/空字符串 → False)."""
+    if v is None:
+        return False
+    if isinstance(v, float) and v != v:  # NaN (v != v 是 NaN 标准 idiom)
+        return False
+    return not (isinstance(v, str) and not v.strip())
+
+
+def _build_params_snapshot_section(params) -> ft.Control:
+    """Task 4.3 (FR-UX-005): 结构化展示 params_snapshot (dict/str/None 三态)."""
+    if params is None:
+        return ft.Container()
+    # 如果是 str, 尝试解析为 dict (JSONB 字段读取后可能是 str)
+    if isinstance(params, str):
+        if not params.strip():
+            return ft.Container()
+        try:
+            params = json.loads(params)
+        except (ValueError, TypeError):
+            # 解析失败, 原样展示
+            return ft.Container(
+                content=ft.Text(
+                    params,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    selectable=True,
+                ),
+                padding=10,
+                bgcolor=AppColors.SURFACE_VARIANT,
+                border_radius=8,
+            )
+    if not isinstance(params, dict) or not params:
+        return ft.Container()
+    # key-value 列表
+    rows = [
+        ft.Row(
+            [
+                ft.Text(
+                    str(k),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Text(
+                    str(v),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    selectable=True,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        )
+        for k, v in params.items()
+    ]
+    return ft.Container(
+        content=ft.Column(rows, spacing=4),
+        padding=10,
+        bgcolor=AppColors.SURFACE_VARIANT,
+        border_radius=8,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _build_review_section(stock_data: dict) -> ft.Control:
+    """Task 4.3 (FR-UX-005): 复盘区 (徽章 + t1/t5/alpha + params_snapshot).
+
+    无复盘数据时返回空 Container.
+    """
+    prediction_result = stock_data.get("prediction_result")
+    t1_pct = stock_data.get("t1_pct")
+    t5_pct = stock_data.get("t5_pct")
+    alpha = stock_data.get("alpha")
+    params_snapshot = stock_data.get("params_snapshot")
+
+    if not any(_has_review_value(v) for v in [prediction_result, t1_pct, t5_pct, alpha, params_snapshot]):
+        return ft.Container()
+
+    return ft.Column(
+        [
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("review_section_title"),
+                size=AppStyles.FONT_SIZE_LG,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.PRIMARY,
+            ),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
+            ft.Row(
+                [
+                    _build_prediction_badge(prediction_result),
+                    _info_chip(I18n.get("col_t1_pct"), _format_pct_with_sign(t1_pct)),
+                    _info_chip(I18n.get("col_t5_pct"), _format_pct_with_sign(t5_pct)),
+                    _info_chip(I18n.get("col_alpha"), _format_pct_with_sign(alpha)),
+                ],
+            ),
+            _build_params_snapshot_section(params_snapshot),
+        ],
     )
 
 
@@ -448,6 +595,7 @@ def _build_content(
                 valuation_section,
                 financial_section,
                 basic_section,
+                _build_review_section(stock_data),  # Task 4.3 (FR-UX-005)
             ],
             scroll=ft.ScrollMode.AUTO,
         ),
