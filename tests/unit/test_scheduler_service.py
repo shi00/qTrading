@@ -151,6 +151,7 @@ class TestSchedulerServiceScheduleJobs:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
@@ -161,16 +162,34 @@ class TestSchedulerServiceScheduleJobs:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("nightly_prediction")
         assert job.id == "nightly_prediction"
 
     @patch("utils.scheduler_service.ConfigHandler")
+    def test_schedule_jobs_nightly_prediction_uses_configured_time(self, mock_ch):
+        """Task 7.3: nightly_prediction 时辰从 ConfigHandler 读取 (原硬编码 20:30)。"""
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "16:30"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "21:45"
+        svc = SchedulerService()
+        svc._schedule_jobs()
+        job = svc.scheduler.get_job("nightly_prediction")
+        assert job is not None
+        hour_field = next(f for f in job.trigger.fields if f.name == "hour")
+        minute_field = next(f for f in job.trigger.fields if f.name == "minute")
+        assert "21" in str(hour_field)
+        assert "45" in str(minute_field)
+
+    @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_adds_ai_concept_daily(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("ai_concept_daily_refresh")
@@ -187,6 +206,7 @@ class TestSchedulerServiceScheduleJobs:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = None
         mock_ch.get_ai_concept_schedule_time.return_value = "invalid"
+        mock_ch.get_nightly_prediction_time.return_value = None
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
@@ -197,6 +217,7 @@ class TestSchedulerServiceScheduleJobs:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         svc._schedule_jobs()
@@ -569,6 +590,7 @@ class TestScheduleJobsInvalidTime:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "invalid"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("daily_update") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
@@ -578,6 +600,7 @@ class TestScheduleJobsInvalidTime:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = None
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("ai_concept_daily_refresh") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖

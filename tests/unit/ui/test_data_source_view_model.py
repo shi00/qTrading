@@ -80,8 +80,8 @@ def mock_cache():
 
 @pytest.fixture
 def mock_ai_service():
-    # T6 fix: AIService 通过构造注入到 ViewModel，需 mock 避免真实单例初始化
-    with patch("ui.viewmodels.data_source_view_model.AIService") as cls:
+    # Task 7.2: AIService 改为惰性构造, patch 源模块 (而非 VM 模块, 因 VM 已无运行时 import)
+    with patch("services.ai_service.AIService") as cls:
         instance = MagicMock(spec=AIService)
         instance.is_cloud_available = MagicMock(return_value=True)
         cls.return_value = instance
@@ -144,7 +144,17 @@ class TestDataSourceViewModelInit:
         assert isinstance(vm._processor, DataProcessor)
         assert isinstance(vm._cache, CacheManager)
         assert isinstance(vm._tm, TaskManager)
-        assert isinstance(vm._ai_service, AIService)  # T6 fix: 验证 AIService 注入
+        # Task 7.2: AIService 惰性构造, 默认 None (仅 _get_ai_service() 调用时才构造)
+        assert vm._ai_service is None
+
+    def test_get_ai_service_lazy_constructs_on_first_call(self, mock_ai_service):
+        """Task 7.2: _get_ai_service() 首次调用惰性构造 AIService, 再次调用复用同一实例."""
+        vm = DataSourceViewModel()
+        assert vm._ai_service is None
+        svc1 = vm._get_ai_service()
+        assert svc1 is mock_ai_service
+        svc2 = vm._get_ai_service()
+        assert svc2 is svc1  # 复用, 不重复构造
 
     def test_constructor_injection(self, mock_processor, mock_cache, mock_ai_service):
         # T6 fix: ai_service 也支持构造注入，与 _processor / _cache 一致

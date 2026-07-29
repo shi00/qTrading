@@ -182,6 +182,8 @@ class AppConfig(BaseModel):
     ai_concept_schedule_enabled: bool = False
     ai_concept_schedule_time: str = Field(default="18:00", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
     ai_concept_search_engine: str = Field(default="search_std", pattern="^(search_std|search_pro)$")
+    # Task 7.3: 夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30, 提升为可配置项)
+    nightly_prediction_time: str = Field(default="20:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
 
     onboarding_complete: bool = False
     enable_news_alerts: bool = True
