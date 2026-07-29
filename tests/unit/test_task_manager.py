@@ -10,6 +10,7 @@ import pandas as pd
 
 from core.i18n import Message
 from services.task_manager import TaskManager, AppTask, TaskStatus, TERMINAL_STATUSES
+from tests.conftest import singleton_state
 from utils.time_utils import get_now
 
 # P2-5: 仅含真实 asyncio.sleep 的测试类标注 slow；其余测试可在 "not slow" 下运行
@@ -1918,3 +1919,61 @@ class TestTaskManagerUpdateProgressThrottle:
         with patch.object(mgr, "_notify_subscribers") as mock_notify:
             mgr.update_progress(t.id, 1.0)
         mock_notify.assert_called_once()
+
+
+class TestRetryTask:
+    """覆盖 retry_task 的 4 个分支：task 不存在 / 非 FAILED / 无 factory / 重试成功。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_task_not_found_returns_none(self, mock_tp):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            result = mgr.retry_task("nonexistent_tid")
+            assert result is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_task_not_failed_returns_none(self, mock_tp):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            mgr._tasks["tid1"] = AppTask(status=TaskStatus.QUEUED)
+            result = mgr.retry_task("tid1")
+            assert result is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_task_no_factory_returns_none(self, mock_tp):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            task = AppTask(status=TaskStatus.FAILED)
+            task._coroutine_factory = None
+            mgr._tasks["tid2"] = task
+            result = mgr.retry_task("tid2")
+            assert result is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    def test_retry_success_calls_submit_task(self, mock_tp):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            factory = MagicMock()
+            task = AppTask(
+                name="Retried",
+                task_type="Data",
+                status=TaskStatus.FAILED,
+                cancellable=True,
+            )
+            task._coroutine_factory = factory
+            task._coroutine_kwargs = {"a": 1}
+            mgr._tasks["tid3"] = task
+
+            with patch.object(mgr, "submit_task", return_value="new_tid_123") as mock_submit:
+                result = mgr.retry_task("tid3")
+
+        assert result == "new_tid_123"
+        mock_submit.assert_called_once_with(
+            name="Retried",
+            task_type="Data",
+            coroutine_factory=factory,
+            cancellable=True,
+            a=1,
+        )
+        # 显式确认 unique_key 未被传入（retry 不使用唯一键去重）
+        assert "unique_key" not in mock_submit.call_args.kwargs

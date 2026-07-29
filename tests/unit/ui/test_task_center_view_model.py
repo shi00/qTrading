@@ -104,3 +104,21 @@ class TestTaskCenterViewModelMissingBranches:
         # 同步执行了 _refresh_from_tasks，state 已刷新
         assert vm.state.total_count == 1
         assert vm.state.running_count == 1
+
+
+class TestRetryTask:
+    """Phase 6.2 FR-UX-006: retry_task 委托给 TaskManager。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_tm = _build_mock_task_manager()
+        self.mock_tm.retry_task = MagicMock(return_value="new_tid_abc")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.viewmodels.task_center_view_model.TaskManager", return_value=self.mock_tm))
+            yield
+
+    def test_retry_task_delegates_to_manager(self):
+        """retry_task(tid) 调用一次 TaskManager.retry_task(tid)。"""
+        vm = TaskCenterViewModel()
+        vm.retry_task("tid_123")
+        self.mock_tm.retry_task.assert_called_once_with("tid_123")

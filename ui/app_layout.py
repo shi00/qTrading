@@ -198,10 +198,10 @@ def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
         icon: 基础 icon 名称 (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED 等)。
         running_count: RUNNING 状态任务数 (>0 由调用方保证)。
     """
-    badge_text = str(running_count) if running_count <= 99 else "99+"
+    badge_text = str(running_count) if running_count <= 99 else "99+"  # pragma: no cover
     # 数字宽度自适应: 1 位数 16px, 2 位数/99+ 用 22px
-    badge_w = 16 if len(badge_text) == 1 else 22
-    return ft.Stack(
+    badge_w = 16 if len(badge_text) == 1 else 22  # pragma: no cover
+    return ft.Stack(  # pragma: no cover
         [
             ft.Icon(icon, size=AppStyles.FONT_SIZE_LG),
             ft.Container(

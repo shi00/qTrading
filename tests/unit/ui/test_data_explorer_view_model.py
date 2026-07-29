@@ -837,3 +837,65 @@ class TestWriteExcel:
         df = MagicMock()
         result = await vm.write_excel(df, "/tmp/test.xlsx")
         assert result is None
+
+
+class TestLoadDataFreshness:
+    """Phase 6.4 FR-UX-006: load_data_freshness 分支覆盖。"""
+
+    async def test_disposed_returns_none(self, vm):
+        """dispose 后调用直接 return, state 不变(data_latest_date 仍 "")。"""
+        vm.dispose()
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == ""
+        assert vm.state.data_lag_days == 0
+
+    async def test_raw_empty_sets_empty_state(self, vm, mock_db):
+        """raw 为 None/空字符串: 设置 data_latest_date="" 且 data_lag_days=0。"""
+        mock_db.get_latest_trade_date.return_value = None
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == ""
+        assert vm.state.data_lag_days == 0
+
+    async def test_raw_yyyymmdd_8digits(self, vm, mock_db):
+        """raw="20250728"(8位数字): 格式化 2025-07-28 + 计算 lag。"""
+        import datetime as _dt
+
+        latest_fixed = _dt.date(2025, 7, 28)
+        expected_lag = max(0, (_dt.date.today() - latest_fixed).days)
+
+        mock_db.get_latest_trade_date.return_value = "20250728"
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == "2025-07-28"
+        assert vm.state.data_lag_days == expected_lag
+
+    async def test_raw_already_yyyy_mm_dd(self, vm, mock_db):
+        """raw="2025-07-28"(已格式化): 走 else 分支 + 计算 lag。"""
+        import datetime as _dt
+
+        latest_fixed = _dt.date(2025, 7, 28)
+        expected_lag = max(0, (_dt.date.today() - latest_fixed).days)
+
+        mock_db.get_latest_trade_date.return_value = "2025-07-28"
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == "2025-07-28"
+        assert vm.state.data_lag_days == expected_lag
+
+    async def test_raw_invalid_format_catches_valueerror(self, vm, mock_db):
+        """raw 非日期格式: strptime ValueError -> state 保留原始字符串, lag=0。"""
+        mock_db.get_latest_trade_date.return_value = "not_a_date_2025"
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == "not_a_date_2025"
+        assert vm.state.data_lag_days == 0
+
+    async def test_cancelled_error_propagates(self, vm, mock_db):
+        """R2: CancelledError 必须重新 raise, 不可吞没。"""
+        mock_db.get_latest_trade_date.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):
+            await vm.load_data_freshness()
+
+    async def test_exception_just_logs_no_raise(self, vm, mock_db):
+        """非致命异常: 仅记录日志, 不抛异常, state 保持默认。"""
+        mock_db.get_latest_trade_date.side_effect = RuntimeError("boom")
+        await vm.load_data_freshness()
+        assert vm.state.data_latest_date == ""
+        assert vm.state.data_lag_days == 0

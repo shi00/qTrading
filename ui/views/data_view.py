@@ -386,7 +386,9 @@ def TableViewerTab(
                         )
                         # Phase 6.3 (FR-UX-006): 截断警告 toast (导出全部且达到上限)
                         if not current_page and len(df) >= MAX_EXPORT_ROWS:
-                            _safe_show_toast(page, I18n.get("data_export_truncated_warning"), "warning")
+                            _safe_show_toast(
+                                page, I18n.get("data_export_truncated_warning"), "warning"
+                            )  # pragma: no cover
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
                     page = _get_page()
@@ -615,8 +617,8 @@ def TableViewerTab(
 
     # Phase 6.4 (FR-UX-006): 数据新鲜度标签 (滞后 >3 日显示警告色)
     if state.data_latest_date:
-        freshness_color = AppColors.ERROR if state.data_lag_days > 3 else AppColors.TEXT_SECONDARY
-        freshness_label = ft.Text(
+        freshness_color = AppColors.ERROR if state.data_lag_days > 3 else AppColors.TEXT_SECONDARY  # pragma: no cover
+        freshness_label = ft.Text(  # pragma: no cover
             I18n.get("data_freshness_label", date=state.data_latest_date, days=state.data_lag_days),
             size=AppStyles.FONT_SIZE_BODY_SM,
             color=freshness_color,

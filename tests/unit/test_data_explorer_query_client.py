@@ -678,3 +678,56 @@ class TestDatabaseConfigServiceSQLInjection:
             mock_connect.return_value = mock_conn
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "my_database_v2")
             assert ok is True
+
+
+class TestGetLatestTradeDate:
+    def test_table_not_exists_returns_none(self):
+        dm = _make_dm()
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic"]):
+            result = dm.get_latest_trade_date()
+            assert result is None
+
+    def test_empty_result_returns_none(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = None
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic", "daily_quotes"]):
+            result = dm.get_latest_trade_date()
+            assert result is None
+
+    def test_valid_yyyymmdd_string(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = "20250728"
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic", "daily_quotes"]):
+            result = dm.get_latest_trade_date()
+            assert result == "20250728"
+
+    def test_valid_integer_date(self):
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 20250728
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dm, "get_all_tables", return_value=["stock_basic", "daily_quotes"]):
+            result = dm.get_latest_trade_date()
+            assert result == "20250728"
+
+    def test_exception_returns_none(self):
+        dm = _make_dm()
+        with patch(
+            "data.persistence.data_explorer_query_client.sa.inspect",
+            side_effect=Exception("boom"),
+        ):
+            result = dm.get_latest_trade_date()
+            assert result is None
