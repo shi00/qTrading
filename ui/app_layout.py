@@ -41,6 +41,7 @@ from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
 from ui.views.task_center_view import TaskCenterView
 from ui.views.viewport_state import ViewportState
+from ui.views.watchlist_view import WatchlistView
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class NavTabs(IntEnum):
     DATA = 3
     TASKS = 4
     SETTINGS = 5
+    WATCHLIST = 6
 
 
 def _get_page() -> ft.Page | None:
@@ -148,6 +150,14 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
             expand=True,
             visible=current_tab == NavTabs.SETTINGS,
         ),
+        ft.Container(
+            content=_make_content(
+                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST, viewport=viewport),
+                current_tab == NavTabs.WATCHLIST,
+            ),
+            expand=True,
+            visible=current_tab == NavTabs.WATCHLIST,
+        ),
     ]
     return ft.Stack(safe_controls(pages), expand=True)
 
@@ -166,6 +176,7 @@ def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDes
         (ft.Icons.STORAGE_OUTLINED, ft.Icons.STORAGE_ROUNDED, "nav_data"),
         (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, ft.Icons.FORMAT_LIST_BULLETED, "nav_tasks"),
         (ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, "nav_settings"),
+        (ft.Icons.STAR_OUTLINE, ft.Icons.STAR, "nav_watchlist"),
     ]
     destinations: list[ft.NavigationRailDestination] = []
     for icon, selected_icon, label_key in nav_items:
