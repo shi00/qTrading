@@ -494,19 +494,12 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         metric_health_value = I18n.get("ds_status_checking")
         metric_health_icon = ft.Icons.HOURGLASS_TOP
         metric_health_color = AppColors.INFO
-        metric_storage_value = I18n.get("ds_status_calc")
-        metric_storage_icon = ft.Icons.HOURGLASS_TOP
-        metric_storage_color = AppColors.TEXT_HINT
     elif state.health_error is not None:
         # 健康检查出错 (common_check_fail)
         health_key = "common_check_fail"
         metric_health_value = I18n.get(health_key)
-        metric_storage_value = I18n.get(health_key)
         metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
             health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-        )
-        metric_storage_icon, metric_storage_color = _HEALTH_STATUS_VISUALS.get(
-            health_key, (ft.Icons.STORAGE, AppColors.TEXT_HINT)
         )
     elif state.health_result is not None:
         # 有健康检查结果, 从 status 派生 health_key
@@ -518,29 +511,23 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         else:
             health_key = "ds_health_ok"
         metric_health_value = I18n.get(health_key)
-        metric_storage_value = I18n.get("common_normal")
         metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
             health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
         )
-        metric_storage_icon = ft.Icons.STORAGE
-        metric_storage_color = AppColors.SUCCESS
     else:
         # 未检查过 (初始状态)
         metric_health_value = I18n.get("ds_status_checking")
         metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
         metric_health_color = AppColors.WARNING
-        metric_storage_value = I18n.get("ds_status_calc")
-        metric_storage_icon = ft.Icons.STORAGE
-        metric_storage_color = AppColors.TEXT_HINT
 
-    # metric_sync / metric_coverage: 从 state.health_result 派生 (有结果时) 或占位值
+    # metric_sync / metric_coverage: 从 state.health_result 派生 (有结果时) 或未检查文案
     if state.health_result is not None:
         latest = state.health_result.market_latest_local
         metric_sync_value = I18n.get("ds_never_sync") if not latest or str(latest) == "None" else str(latest)
         cov_val = state.health_result.details_financial_coverage
         metric_coverage_value = f"{cov_val:.1f}%"
     else:
-        metric_sync_value = f"{I18n.get('time_today')} 15:30"
+        metric_sync_value = I18n.get("ds_not_checked")
         metric_coverage_value = I18n.get("ds_val_placeholder_count")
 
     metric_sync_icon = ft.Icons.ACCESS_TIME
@@ -637,12 +624,6 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         icon=safe_icon_str(metric_health_icon),
         status_color=metric_health_color,
     )
-    metric_storage = MetricCard(
-        label=I18n.get("ds_storage_usage"),
-        value=metric_storage_value,
-        icon=safe_icon_str(metric_storage_icon),
-        status_color=metric_storage_color,
-    )
 
     health_dashboard = DashboardCard(
         content=ft.Column(
@@ -657,10 +638,9 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
-                        ft.Column([metric_sync], col={"sm": 6, "md": 3}),
-                        ft.Column([metric_coverage], col={"sm": 6, "md": 3}),
-                        ft.Column([metric_health], col={"sm": 6, "md": 3}),
-                        ft.Column([metric_storage], col={"sm": 6, "md": 3}),
+                        ft.Column([metric_sync], col={"sm": 6, "md": 4}),
+                        ft.Column([metric_coverage], col={"sm": 6, "md": 4}),
+                        ft.Column([metric_health], col={"sm": 6, "md": 4}),
                     ],
                 ),
                 ft.Container(height=10),
