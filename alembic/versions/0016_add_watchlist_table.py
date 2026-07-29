@@ -49,12 +49,14 @@ def upgrade() -> None:
         ),
         sa.Column("note", sa.String(), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_watchlist")),
-        sa.UniqueConstraint("ts_code", name=op.f("uq_watchlist_ts_code")),
     )
+    # ORM 模型 ts_code 用 unique=True, index=True → 期望 unique index (ix_watchlist_ts_code)。
+    # 用 unique index 替代 UniqueConstraint + 普通 index，与 ORM 对齐避免 alembic check 漂移。
     op.create_index(
         "ix_watchlist_ts_code",
         "watchlist",
         ["ts_code"],
+        unique=True,
         if_not_exists=True,
     )
 
