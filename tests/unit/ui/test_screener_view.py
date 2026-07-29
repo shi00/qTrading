@@ -18,6 +18,7 @@ import pytest
 
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
+    _HIDDEN_COLS,
     _build_page_size_options,
     _build_strategy_options,
     _build_table_data,
@@ -87,6 +88,70 @@ class TestFormatCellValue:
         # int 值且非 volume 列时跳过 float 格式化，走 str(val)
         result = _format_cell_value("ai_score", 85)
         assert result == "85"
+
+    # --- Task 4.3 (FR-UX-005): 复盘列格式化 ---
+
+    def test_prediction_result_win(self):
+        with patch("ui.views.screener_view.I18n.get", return_value="胜") as mock_get:
+            result = _format_cell_value("prediction_result", "WIN")
+            assert result == "胜"
+            mock_get.assert_called_with("prediction_win")
+
+    def test_prediction_result_loss(self):
+        with patch("ui.views.screener_view.I18n.get", return_value="负") as mock_get:
+            result = _format_cell_value("prediction_result", "LOSS")
+            assert result == "负"
+            mock_get.assert_called_with("prediction_loss")
+
+    def test_prediction_result_none(self):
+        result = _format_cell_value("prediction_result", None)
+        assert result == "-"
+
+    def test_prediction_result_unknown(self):
+        result = _format_cell_value("prediction_result", "UNKNOWN")
+        assert result == "-"
+
+    def test_t1_pct_positive(self):
+        result = _format_cell_value("t1_pct", 1.23)
+        assert result == "+1.23"
+
+    def test_t1_pct_negative(self):
+        result = _format_cell_value("t1_pct", -1.23)
+        assert result == "-1.23"
+
+    def test_t5_pct_zero(self):
+        result = _format_cell_value("t5_pct", 0.0)
+        assert result == "0.00"
+
+    def test_alpha_positive(self):
+        result = _format_cell_value("alpha", 5.67)
+        assert result == "+5.67"
+
+    def test_alpha_negative(self):
+        result = _format_cell_value("alpha", -5.67)
+        assert result == "-5.67"
+
+
+class TestHiddenColsContract:
+    """Task 4.3 (FR-UX-005): _HIDDEN_COLS 契约守护 - 复盘列可见, params_snapshot 隐藏."""
+
+    def test_prediction_result_visible(self):
+        assert "prediction_result" not in _HIDDEN_COLS
+
+    def test_t1_pct_visible(self):
+        assert "t1_pct" not in _HIDDEN_COLS
+
+    def test_t5_pct_visible(self):
+        assert "t5_pct" not in _HIDDEN_COLS
+
+    def test_params_snapshot_hidden(self):
+        assert "params_snapshot" in _HIDDEN_COLS
+
+    def test_t1_price_still_hidden(self):
+        assert "t1_price" in _HIDDEN_COLS
+
+    def test_t5_price_still_hidden(self):
+        assert "t5_price" in _HIDDEN_COLS
 
 
 class TestBuildTableData:
