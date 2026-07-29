@@ -153,7 +153,7 @@ def _build_prediction_badge(value) -> ft.Container:
     return ft.Container(
         content=ft.Row(
             [
-                ft.Icon(icon, color=color, size=16),
+                ft.Icon(icon, color=color, size=AppStyles.FONT_SIZE_TITLE),
                 ft.Text(
                     text,
                     color=color,
