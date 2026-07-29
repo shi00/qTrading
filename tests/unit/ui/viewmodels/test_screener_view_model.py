@@ -334,3 +334,135 @@ class TestCancelStrategy:
         # _active_task_id 不在 cancel_strategy 中清空 (由 _execute_screening finally 清空)
         # 防止 cancel_strategy 假设取消成功后清空, 实际取消异步完成
         assert vm._active_task_id == "task-xyz"
+
+
+# --- Task 3.3: save_results 失败分态 ---
+
+
+class TestSaveResultsFailState:
+    """Task 3.3: save_results 失败不再落入 screener_exec_error.
+
+    失败时:
+    - 结果集 (_full_results) 保留照常上屏
+    - 状态栏提示 screener_done_unsaved (含 reason)
+    - status_color 为 warning (非 error)
+    """
+
+    @pytest.fixture
+    def vm_with_strategy(self, vm):
+        """配置 vm + mock 策略 + 测试 context + save_results 抛异常."""
+        import datetime as dt
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        # Mock 策略对象
+        strategy = type("MockStrategy", (), {})()
+        strategy.name_key = "strategy_test"
+        strategy.filter = lambda ctx: pd.DataFrame(
+            {"ts_code": ["000001.SZ", "000002.SZ"], "name": ["平安银行", "万科A"]},
+        )
+        vm.strategy_mgr.get_strategy.return_value = strategy
+
+        # Mock data_processor.get_strategy_data 为 AsyncMock (await 返回 dict)
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+
+        # Mock save_results 抛 RuntimeError
+        vm.review_mgr.save_results = AsyncMock(side_effect=RuntimeError("DB connection lost"))
+        return vm
+
+    @staticmethod
+    def _build_sync_submit_task_holder():
+        """submit_task 同步调度 coro_factory 并通过 holder 暴露 task 供后续 await."""
+        import asyncio
+
+        holder = type("Holder", (), {"task": None})()
+
+        def _sync_submit_task(*args, **kwargs):
+            coro_factory = kwargs["coroutine_factory"]
+            coro = coro_factory(task_id="test-task-id")
+            holder.task = asyncio.ensure_future(coro)
+            return "test-task-id"
+
+        return holder, _sync_submit_task
+
+    @pytest.mark.asyncio
+    async def test_save_results_fail_shows_unsaved_status(self, vm_with_strategy):
+        """save_results raise 时状态为 screener_done_unsaved."""
+        from services.task_manager import TaskManager
+
+        holder, _sync_submit = self._build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm_with_strategy.run_strategy("test_strategy")
+            # 显式 await _execute_screening 完成
+            assert holder.task is not None
+            await holder.task
+
+        state = vm_with_strategy.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_unsaved"
+        assert state.status_color == "warning"
+        # reason 透传到 i18n params
+        assert "DB connection lost" in state.status_message.params.get("reason", "")
+
+    @pytest.mark.asyncio
+    async def test_save_results_fail_retains_full_results(self, vm_with_strategy):
+        """save_results 失败后 _full_results 保留 (照常上屏)."""
+        from services.task_manager import TaskManager
+
+        holder, _sync_submit = self._build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm_with_strategy.run_strategy("test_strategy")
+            assert holder.task is not None
+            await holder.task
+
+        # 结果集保留, 含 2 行测试数据
+        assert vm_with_strategy._full_results is not None
+        assert len(vm_with_strategy._full_results) == 2
+        assert "ts_code" in vm_with_strategy._full_results.columns
+
+    @pytest.mark.asyncio
+    async def test_save_results_success_shows_saved_status(self, vm):
+        """正常路径: save_results 成功时状态仍为 screener_done_saved (回归测试)."""
+        import datetime as dt
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        from services.task_manager import TaskManager
+
+        strategy = type("MockStrategy", (), {})()
+        strategy.name_key = "strategy_test"
+        strategy.filter = lambda ctx: pd.DataFrame({"ts_code": ["000001.SZ"]})
+        vm.strategy_mgr.get_strategy.return_value = strategy
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+        # save_results 成功
+        vm.review_mgr.save_results = AsyncMock(return_value=None)
+
+        holder, _sync_submit = self._build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("test_strategy")
+            assert holder.task is not None
+            await holder.task
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_saved"
+        assert state.status_color == "success"

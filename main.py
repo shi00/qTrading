@@ -367,10 +367,24 @@ async def main(page: ft.Page):
     # D15（pg-plan §22）：embedded 模式下永久设置 config.DB_URL（运行时变量，不持久化到
     # config 文件，不设 DATABASE_URL 环境变量避免污染子进程）。
     # ConfigHandler.get_db_url() Priority 3 兜底返回 embedded URL。
+    #
+    # P2-5: embedded 成功时通过 ContextVar(Priority 0) 强制 URL，覆盖
+    # DATABASE_URL env var(Priority 1) 与 onboard 后 db_host(Priority 2)。
+    # 典型 bug 场景：用户 shell profile 残留旧 DATABASE_URL 指向废弃主机，
+    # 导致 CacheManager 连错库、初始化 DB 报错。用 ContextVar(Priority 0)
+    # 保证即使 env var 存在，embedded URL 也胜出。不做 try/finally reset：
+    # ContextVar 是 per-asyncio-task 的，main(page) task 销毁时上下文即 GC；
+    # Flet Web 多 session 间各有独立 task context，不会互相污染。
     if embedded_db_url:
         import config
 
         config.DB_URL = embedded_db_url
+
+        ConfigHandler._db_url_override.set(embedded_db_url)
+        logger.info(
+            "[Main] Embedded DB URL ContextVar override active; "
+            "DATABASE_URL env var and persisted db_host will be ignored"
+        )
     cache_manager = CacheManager()
 
     from utils.shutdown import ShutdownCoordinator

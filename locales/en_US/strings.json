@@ -247,6 +247,7 @@
     "task_screening_success": "Successfully screened {count} stocks",
     "task_type_ai_screening": "AI Stock Screening",
     "screener_done_saved": "Filtering complete, found {count} stocks. Saved.",
+    "screener_done_unsaved": "Filtering complete, found {count} stocks. Results not saved: {reason}.",
     "screener_done": "Filtering complete, found {count} stocks",
     "screener_saved": "(Saved)",
     "screener_exec_error": "Execution Error",
