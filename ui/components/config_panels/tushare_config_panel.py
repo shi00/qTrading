@@ -153,6 +153,13 @@ def TushareConfigPanel(
         token_input.width = AppStyles.CONTROL_WIDTH_LG
         token_input.hint_text = I18n.get("tushare_token_hint")
 
+    # Task 2.1: token 存储透明说明（静态文案，不依赖 state，i18n 驱动 locale 切换）
+    storage_hint_text = ft.Text(
+        I18n.get("tushare_token_storage_hint"),
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.TEXT_SECONDARY,
+    )
+
     tier_dropdown = ft.Dropdown(
         label=I18n.get("sys_tier_label_in_token_panel"),
         value=state.tier,
@@ -216,6 +223,7 @@ def TushareConfigPanel(
     if compact:
         controls: list[ft.Control] = [
             token_input,
+            storage_hint_text,
             ft.Container(height=10),
             tier_dropdown,
             ft.Container(height=10),
@@ -266,6 +274,7 @@ def TushareConfigPanel(
                         spacing=10,
                         wrap=True,
                     ),
+                    storage_hint_text,
                     tier_dropdown,
                     ft.Row(
                         [status_icon, status_text_ctrl],

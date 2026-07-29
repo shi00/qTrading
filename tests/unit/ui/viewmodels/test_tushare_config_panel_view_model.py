@@ -328,7 +328,8 @@ class TestVerifyToken:
             result = await vm.verify_token()
 
         assert result is True
-        mock_ts_set_token.assert_called_once_with("valid_token")
+        # Task 2.1: verify_token 全程不得调用 tushare.set_token（避免明文落盘 ~/tk.csv）
+        mock_ts_set_token.assert_not_called()
         mock_pro.trade_cal.assert_called_once()
         mock_config_handler.save_token.assert_called_once_with("valid_token")
         mock_client.set_token.assert_called_once_with("valid_token")
@@ -336,6 +337,36 @@ class TestVerifyToken:
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "tushare_verify_success"
         assert vm.state.is_verifying is False
+
+    @pytest.mark.asyncio
+    async def test_verify_token_never_calls_tushare_set_token(self, mock_config_handler, mock_thread_pool):
+        """Task 2.1 TDD: verify_token 全程不得调用 tushare.set_token（token 明文落盘 ~/tk.csv 修复）。
+
+        显式 token 传参（ts.pro_api(token=...)）已足够，无需写全局 SDK 状态。
+        断言 mock_tushare 模块上 set_token 属性从未被读取或调用。
+        """
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token.return_value = False
+
+        # 用 mock 模块替换 tushare，捕获所有属性访问
+        mock_tushare = MagicMock()
+        mock_tushare.pro_api = MagicMock(return_value=mock_pro)
+        # set_token 显式留作 MagicMock 以便断言未调用
+        mock_tushare.set_token = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"tushare": mock_tushare}),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler)
+            vm.update_token("valid_token")
+            result = await vm.verify_token()
+
+        assert result is True
+        mock_tushare.set_token.assert_not_called()
+        # 验证仍走显式 token 传参
+        mock_tushare.pro_api.assert_called_once_with(token="valid_token", timeout=mock_client.timeout)
 
     @pytest.mark.asyncio
     async def test_verify_token_success_with_on_verify_success(self, mock_config_handler, mock_thread_pool):

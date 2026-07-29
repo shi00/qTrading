@@ -1366,6 +1366,7 @@
     "sys_sync_heavy_hint": "Concurrency for history/financial data (3-5)",
     "tushare_token_label": "Tushare Token",
     "tushare_token_hint": "Enter Tushare Token",
+    "tushare_token_storage_hint": "Token is stored in the system keyring, not in the database",
     "tushare_verify": "Verify Token",
     "tushare_save": "Save",
     "tushare_verifying": "Verifying...",

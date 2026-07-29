@@ -1,0 +1,8 @@
+fix(tushare): token 不再明文落盘 ~/tk.csv，显式传参 ts.pro_api(token=...) (Task 2.1)
+
+- verify_token 全程不调用 ts.set_token（mock 断言未调用）
+- TushareClient._set_token_core 已改为 ts.pro_api(token=...) 显式传参
+- 配置面板已有「存储于系统密钥环」说明文案（tushare_token_storage_hint）
+- 测试更新：test_set_token 断言 ts.set_token 未调用、ts.pro_api(token=...) 被调用
+
+Plans.md Task 2.1 [lane:gate] [tdd:required]

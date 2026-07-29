@@ -114,10 +114,17 @@ class TestTushareClientInit:
 class TestTushareClientSetToken:
     @pytest.mark.asyncio
     async def test_set_token(self, tushare_client_mocks):
+        """Task 2.1: set_token_async 不得调用 ts.set_token（避免明文落盘 ~/tk.csv）。
+
+        显式 token 传参（ts.pro_api(token=...)）已足够，无需写全局 SDK 状态。
+        """
         client, mock_ts, mock_ch = tushare_client_mocks
         await client.set_token_async("new_token")
         assert client.token == "new_token"
-        mock_ts.set_token.assert_called_with("new_token")
+        # Task 2.1: 禁止调用 ts.set_token（明文落盘修复）
+        mock_ts.set_token.assert_not_called()
+        # 验证走显式 token 传参路径（_set_token_core 调用 ts.pro_api(token=...)）
+        mock_ts.pro_api.assert_called_with(token="new_token", timeout=client.timeout)
 
     @pytest.mark.asyncio
     async def test_set_token_clears_capability_cache(self, tushare_client_mocks):

@@ -1366,6 +1366,7 @@
     "col_duration_ms": "耗时(ms)",
     "tushare_token_label": "Tushare Token",
     "tushare_token_hint": "请输入 Tushare Token",
+    "tushare_token_storage_hint": "Token 存储于系统密钥环，不写入数据库",
     "tushare_verify": "验证 Token",
     "tushare_save": "保存",
     "tushare_verifying": "正在验证...",

@@ -494,8 +494,6 @@ class TushareClient:
             self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
             if self.token:
-                ts.set_token(self.token)
-                # Pass timeout to requests via tushare SDK
                 # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
                 # tushare SDK has no type stubs; cast to Protocol for typed access
                 self.pro = typing.cast(TushareProApi, ts.pro_api(token=self.token, timeout=self.timeout))
@@ -594,7 +592,7 @@ class TushareClient:
 
         职责：
         - 设置 self.token；
-        - 同步 tushare SDK 全局 token + 重建 pro_api 引用；
+        - 重建 pro_api 引用（显式传 token，不写 tushare SDK 全局 ~/tk.csv）；
         - 重建 _rate_limiter / _api_limiters / _probe_rate_limiter；
         - 清空 _capability_cache。
 
@@ -603,7 +601,6 @@ class TushareClient:
         """
         old_token = self.token
         self.token = token
-        ts.set_token(token)
         # 显式传 token，避免依赖 tushare SDK 全局状态
         self.pro = typing.cast(TushareProApi, ts.pro_api(token=token, timeout=self.timeout) if token else None)
 
