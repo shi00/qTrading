@@ -144,7 +144,18 @@ class StartupController:
             from utils.thread_pool import TaskType, ThreadPoolManager
             from utils.config_handler import ConfigHandler
 
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, True)
+            # app-004 举一反三：set_onboarding_complete(True) 失败不阻塞启动
+            # （服务已初始化成功，仅 onboarding_complete 标志未持久化），
+            # 记录 warning 后仍 transition 到 READY，用户可正常使用。
+            # 下次启动时可能重新走 onboarding 流程，但不影响当前会话。
+            try:
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, True)
+            except Exception as e:
+                logger.warning(
+                    "[Startup] set_onboarding_complete(True) failed after successful init, continuing to READY: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
             self._transition(StartupState.READY)
             return
 
@@ -182,7 +193,31 @@ class StartupController:
         from utils.thread_pool import TaskType, ThreadPoolManager
         from utils.config_handler import ConfigHandler
 
-        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
+        # app-004: set_onboarding_complete(False) 失败时 transition 到 INIT_FAILED，
+        # 避免 state machine 停留 LOADING 导致用户看到无限 loading。
+        try:
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Startup] set_onboarding_complete(False) failed during reconfigure (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
+            self._transition(
+                StartupState.INIT_FAILED,
+                error="reconfigure_failed",
+                detail=DataSanitizer.sanitize_error(e),
+            )
+            return
         self._transition(StartupState.NEED_ONBOARDING)
 
     def skip(self):

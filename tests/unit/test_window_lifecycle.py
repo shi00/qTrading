@@ -618,6 +618,26 @@ class TestPerformUpgradeExit:
             )
         assert coordinator.force_exit_codes == [1]
 
+    @pytest.mark.asyncio
+    async def test_cleanup_cancelled_force_exits_and_reraises(self) -> None:
+        """do_cleanup 抛 CancelledError：force_exit(1) + re-raise（R2 合规，app-002 修复）.
+
+        与 perform_window_shutdown.test_cleanup_cancelled_force_exits_and_reraises 对齐：
+        未处理 CancelledError 会导致 force_exit 被跳过，进程悬挂。
+        """
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_exc=asyncio.CancelledError())
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；块外 force_exit_codes 已强断言
+                await perform_upgrade_exit(
+                    coordinator,
+                    page,
+                    is_web_mode_fn=lambda: False,
+                )
+        assert coordinator.force_exit_codes == [1]
+        # window destroy 不应被调用（CancelledError 在 do_cleanup 后立即 raise）
+        assert page.window.destroy_calls == 0
+
 
 # ============================================================================
 # handle_disconnect
@@ -675,3 +695,21 @@ class TestHandleDisconnect:
         )
         # Phase 2 Step 8 调整：watchdog 70s
         assert coordinator.start_watchdog_args == [70]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancelled_force_exits_and_reraises(self) -> None:
+        """do_cleanup 抛 CancelledError：force_exit(1) + re-raise（R2 合规，app-003 修复）.
+
+        与 perform_window_shutdown.test_cleanup_cancelled_force_exits_and_reraises 对齐：
+        未处理 CancelledError 会导致 force_exit 被跳过，进程悬挂。
+        """
+        coordinator = _FakeCoordinator(cleanup_exc=asyncio.CancelledError())
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；块外 force_exit_codes 已强断言
+                await handle_disconnect(
+                    coordinator,
+                    cleanup_done_fn=lambda: False,
+                )
+        assert coordinator.force_exit_codes == [1]
+        # cancel_watchdog 不应被调用（CancelledError 在 do_cleanup 后立即 raise）
+        assert coordinator.cancel_watchdog_calls == 0

@@ -1113,3 +1113,240 @@ class TestStockDetailDialogComponent:
         assert callable(dialog.on_dismiss)
         dialog.on_dismiss(None)
         on_close.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3 (FR-UX-005): 复盘区纯函数
+# ---------------------------------------------------------------------------
+class TestBuildPredictionBadge:
+    """_build_prediction_badge 模块级纯函数测试 (WIN/LOSS/None 三态)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac))
+            yield
+
+    def test_win_returns_success_badge(self):
+        from ui.components.stock_detail_dialog import _build_prediction_badge
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: {"prediction_win": "胜"}.get(key, key)
+        container = _build_prediction_badge("WIN")
+        assert isinstance(container, ft.Container)
+        text = container.content.controls[1]
+        assert text.value == "胜"
+
+    def test_loss_returns_error_badge(self):
+        from ui.components.stock_detail_dialog import _build_prediction_badge
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: {"prediction_loss": "负"}.get(key, key)
+        container = _build_prediction_badge("LOSS")
+        text = container.content.controls[1]
+        assert text.value == "负"
+
+    def test_none_returns_dash_badge(self):
+        from ui.components.stock_detail_dialog import _build_prediction_badge
+
+        container = _build_prediction_badge(None)
+        text = container.content.controls[1]
+        assert text.value == "-"
+
+    def test_unknown_returns_dash_badge(self):
+        from ui.components.stock_detail_dialog import _build_prediction_badge
+
+        container = _build_prediction_badge("UNKNOWN")
+        text = container.content.controls[1]
+        assert text.value == "-"
+
+
+class TestFormatPctWithSign:
+    """_format_pct_with_sign 模块级纯函数测试."""
+
+    def test_positive_value(self):
+        from ui.components.stock_detail_dialog import _format_pct_with_sign
+
+        assert _format_pct_with_sign(1.23) == "+1.23"
+
+    def test_negative_value(self):
+        from ui.components.stock_detail_dialog import _format_pct_with_sign
+
+        assert _format_pct_with_sign(-1.23) == "-1.23"
+
+    def test_zero_value(self):
+        from ui.components.stock_detail_dialog import _format_pct_with_sign
+
+        assert _format_pct_with_sign(0.0) == "0.00"
+
+    def test_none_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_pct_with_sign
+
+        assert _format_pct_with_sign(None) == "-"
+
+    def test_nan_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_pct_with_sign
+
+        assert _format_pct_with_sign(float("nan")) == "-"
+
+
+class TestHasReviewValue:
+    """_has_review_value 模块级纯函数测试."""
+
+    def test_none_returns_false(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value(None) is False
+
+    def test_nan_returns_false(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value(float("nan")) is False
+
+    def test_empty_string_returns_false(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value("") is False
+        assert _has_review_value("   ") is False
+
+    def test_non_empty_string_returns_true(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value("WIN") is True
+
+    def test_float_returns_true(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value(1.23) is True
+        assert _has_review_value(0.0) is True
+
+    def test_int_returns_true(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value(0) is True
+
+    def test_dict_returns_true(self):
+        from ui.components.stock_detail_dialog import _has_review_value
+
+        assert _has_review_value({"key": "val"}) is True
+
+
+class TestBuildParamsSnapshotSection:
+    """_build_params_snapshot_section 模块级纯函数测试 (dict/str/None 三态)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac))
+            yield
+
+    def test_none_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section(None)
+        assert isinstance(result, ft.Container)
+
+    def test_empty_string_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section("")
+        assert isinstance(result, ft.Container)
+
+    def test_invalid_json_string_shows_raw(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section("not a json")
+        assert isinstance(result, ft.Container)
+        assert isinstance(result.content, ft.Text)
+        assert result.content.value == "not a json"
+
+    def test_valid_json_string_parses_to_dict(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section('{"strategy": "value_strategy", "n": 10}')
+        assert isinstance(result, ft.Container)
+        assert isinstance(result.content, ft.Column)
+        assert len(result.content.controls) == 2
+
+    def test_dict_renders_key_value_rows(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section({"strategy": "value_strategy", "n": 10})
+        assert isinstance(result, ft.Container)
+        assert isinstance(result.content, ft.Column)
+        assert len(result.content.controls) == 2
+
+    def test_empty_dict_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        result = _build_params_snapshot_section({})
+        assert isinstance(result, ft.Container)
+
+
+class TestBuildReviewSection:
+    """_build_review_section 模块级纯函数测试 (有/无复盘数据分支)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac))
+            yield
+
+    def test_no_review_data_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        result = _build_review_section({})
+        assert isinstance(result, ft.Container)
+
+    def test_all_none_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        result = _build_review_section(
+            {
+                "prediction_result": None,
+                "t1_pct": None,
+                "t5_pct": None,
+                "alpha": None,
+                "params_snapshot": None,
+            }
+        )
+        assert isinstance(result, ft.Container)
+
+    def test_all_nan_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        result = _build_review_section(
+            {
+                "prediction_result": float("nan"),
+                "t1_pct": float("nan"),
+                "t5_pct": float("nan"),
+                "alpha": float("nan"),
+            }
+        )
+        assert isinstance(result, ft.Container)
+
+    def test_with_prediction_result_returns_column(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        result = _build_review_section({"prediction_result": "WIN"})
+        assert isinstance(result, ft.Column)
+
+    def test_with_t1_pct_returns_column(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        result = _build_review_section({"t1_pct": 1.23})
+        assert isinstance(result, ft.Column)
+
+    def test_with_params_snapshot_returns_column(self):
+        from ui.components.stock_detail_dialog import _build_review_section
+
+        result = _build_review_section({"params_snapshot": {"key": "val"}})
+        assert isinstance(result, ft.Column)

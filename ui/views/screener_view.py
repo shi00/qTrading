@@ -88,13 +88,11 @@ _HIDDEN_COLS = frozenset(
         "area",
         "market",
         "thinking",
-        "prediction_result",
         "review_status",
         "created_at",
         "t1_price",
-        "t1_pct",
         "t5_price",
-        "t5_pct",
+        "params_snapshot",
     }
 )
 
@@ -106,11 +104,18 @@ _COLUMN_WIDTHS = {
     "confidence": 70,
     "industry": 120,
     "strategy_name": 120,
+    "prediction_result": 80,
+    "t1_pct": 80,
+    "t5_pct": 80,
+    "alpha": 80,
 }
 
 _VOLUME_COLS = frozenset({"vol", "volume", "amount"})
 
 _DATE_COLS = frozenset({"list_date", "trade_date"})
+
+# Task 4.3 (FR-UX-005): 复盘涨幅/超额收益列, 带符号格式化 (+1.23 / -1.23)
+_PCT_COLS = frozenset({"t1_pct", "t5_pct", "alpha"})
 
 
 def _render_status_message(msg: Message | None) -> str:
@@ -135,6 +140,13 @@ def _format_cell_value(col: str, val) -> str:
         return "-"
     if col == "strategy_name":
         return translate_strategy_name(str(val)) or str(val)
+    if col == "prediction_result":  # Task 4.3 (FR-UX-005): WIN/LOSS 文本映射
+        val_str = str(val).upper()
+        if val_str == "WIN":
+            return I18n.get("prediction_win")
+        if val_str == "LOSS":
+            return I18n.get("prediction_loss")
+        return "-"
     if col in _DATE_COLS:
         if isinstance(val, (datetime.date, datetime.datetime)):
             return val.strftime("%Y-%m-%d")
@@ -149,6 +161,10 @@ def _format_cell_value(col: str, val) -> str:
             if val > 10_000:
                 return f"{val / 10_000:.2f}{I18n.get('unit_wan')}"
             return f"{val:,.0f}"
+        if col in _PCT_COLS:  # Task 4.3 (FR-UX-005): 带符号格式化
+            val_f = float(val)
+            sign = "+" if val_f > 0 else ""
+            return f"{sign}{val_f:.2f}"
         if isinstance(val, (float, Decimal)):
             return f"{val:.2f}"
     return str(val)
