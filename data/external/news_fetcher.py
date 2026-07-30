@@ -253,6 +253,15 @@ class NewsFetcher:
             return await asyncio.wait_for(future, timeout=15.0)
         except TimeoutError as e:
             _log_with_severity(e, "[News] Timeout fetching news for %s", ts_code)
+            # 监控告警：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，
+            # 底层 ThreadPoolManager IO 线程中的 _fetch（含 akshare/requests.get）
+            # 无法被强制取消，会持续占用 IO 池槽位直至 _fetch 自然返回。
+            # 多次超时累积可能耗尽 IO 线程池 max_workers，需关注线程池占用。
+            logger.warning(
+                "[News] Background IO task for %s may still be running after "
+                "15s timeout (uncancelable in Python thread pool).",
+                ts_code,
+            )
             return []
         except Exception as e:
             _log_with_severity(
@@ -632,6 +641,15 @@ class NewsFetcher:
                     _HOT_CONCEPTS_TIMEOUT_SECONDS,
                     count,
                 )
+            # 监控告警：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，
+            # 底层 ThreadPoolManager IO 线程中的 _fetch（含 akshare 调用）无法
+            # 被强制取消，会持续占用 IO 池槽位直至 _fetch 自然返回。多次超时
+            # 累积可能耗尽 IO 线程池 max_workers，需关注线程池占用。
+            logger.warning(
+                "[News] Hot concepts background IO task may still be running "
+                "after %.0fs timeout (uncancelable in Python thread pool).",
+                _HOT_CONCEPTS_TIMEOUT_SECONDS,
+            )
             return []
         except Exception as e:
             _SINA_CONSECUTIVE_FAILURES["concept"] += 1
