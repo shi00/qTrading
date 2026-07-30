@@ -283,6 +283,43 @@ class TestFinancialSyncFetchComprehensive:
             warning_calls = [c for c in mock_logger.warning.call_args_list if "Core table" in str(c)]
             assert len(warning_calls) >= 2
 
+    @pytest.mark.asyncio
+    async def test_aux_counts_preserved_on_core_merge_failure(self):
+        """data-P1-6: core 表合并失败时，aux_counts 必须返回已保存的 aux 行数，
+        不得硬编码为 0。
+
+        场景：fetch_aux 成功保存 mainbz=3/audit=2 行，但 core 表合并非 system 级
+        异常（pd.merge KeyError），except 块必须返回 aux_counts={"mainbz":3,"audit":2}，
+        确保 sync_status 正确更新，避免下次同步重复拉取。
+        """
+        ctx = make_ctx()
+        # aux 表返回非空 DataFrame，save_func 返回行数
+        ctx.api.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 3, "end_date": ["20240331"] * 3})
+        )
+        ctx.api.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 2, "end_date": ["20240331"] * 2})
+        )
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=3)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=2)
+        # core 表：income 正常，balance 缺 end_date 列导致 pd.merge 抛 KeyError
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
+        )
+        ctx.api.get_balancesheet = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "total_assets": [1000.0]})
+        )
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        # 核心断言：aux_counts 保留已保存的行数，不被硬编码为 0
+        assert df is None
+        assert aux["mainbz"] == 3
+        assert aux["audit"] == 2
+
 
 class TestFinancialSyncRepair:
     @pytest.mark.asyncio
