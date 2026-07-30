@@ -13,6 +13,7 @@ from data.external.news_fetcher import NewsFetcher
 from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import SyncContext, safe_error
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
@@ -672,6 +673,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     return 0
 
                 for r in results:
+                    # R5: EngineDisposedError 必须优先传播，不作为普通 subtask 失败被静默吞没
+                    if isinstance(r, EngineDisposedError):
+                        raise r
                     if isinstance(r, pd.DataFrame) and not r.empty:
                         all_dfs.append(r)
                     elif isinstance(r, Exception):
