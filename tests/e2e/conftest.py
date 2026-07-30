@@ -525,9 +525,13 @@ async def _setup_canvaskit_intercept(page) -> None:
                     )
                     return
                 # 未缓存字体（如 notosanshk/notosanskr/notocoloremoji 等回退字体族）：
-                # abort 让 CanvasKit 收到加载失败信号，回退到下一个字体族（notosanssc）。
-                # 实测：返回 200 + 无效空字体会让 CanvasKit 误认字体已加载但无字形，
-                # 破坏回退链 → 中文字符无法渲染 → E2E 找不到"平安银行"文本。
+                # CanvasKit 对 abort 的字体会无限重试（每帧重新请求），导致 CPU 耗尽
+                # 和语义节点不生成 → E2E 卡死。返回 200 + 不匹配的有效字体（如 roboto）
+                # 也会破坏回退链（CanvasKit 认为字体已加载，不再回退到 notosanssc）。
+                # 解决方案：在 mock_assets/fonts/ 缓存所有被实际请求的回退字体分片。
+                # flet 升级后若 CI 出现 "font not cached, abort" 警告并卡死，需从日志
+                # 提取被 abort 的字体 URL，下载到 mock_assets/fonts/ 后提交。
+                # 参考 PR 373 修复的字体列表（notocoloremoji/notosanshk/notosanskr/notosanssymbols）。
                 logger.warning("[E2E Intercept] font not cached, abort: %s", url)
                 await route.abort()
                 return
