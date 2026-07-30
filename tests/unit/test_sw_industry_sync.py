@@ -553,3 +553,114 @@ class TestRecordSkippedPermission:
 
         debug_logs = [r for r in caplog.records if "Failed to record skipped_permission" in r.message]
         assert len(debug_logs) == 1
+
+
+class TestSyncMembersCheckpoint:
+    """data-P1-5a: _sync_members checkpoint 持久化测试。
+
+    验证：达到 _CHECKPOINT_INTERVAL 阈值时触发 _save_members_checkpoint；
+    checkpoint 成功后清空 all_dfs；未达阈值不触发；checkpoint 失败不清空 all_dfs；
+    循环结束后剩余批次走正常 save 路径。
+    """
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_triggered_when_threshold_reached(self):
+        """累积行数达到 _CHECKPOINT_INTERVAL 时触发 checkpoint 保存。"""
+        from data.sync.sw_industry import _CHECKPOINT_INTERVAL
+
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=0)
+        # 构造单个 index_code 返回超过阈值的行数
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
+                "index_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(return_value=big_df)
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        # checkpoint 应被调用一次（累积行数 > 阈值）
+        assert strategy.member_dao.save_sw_industry_member.await_count >= 1
+        # 循环结束后 all_dfs 为空（已 checkpoint），走 total_rows > 0 分支
+        ctx.cache.update_sync_status.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_not_triggered_below_threshold(self):
+        """累积行数未达 _CHECKPOINT_INTERVAL 时不触发 checkpoint，走循环后一次性 save。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=1)
+        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        # 只走循环后一次性 save，不触发 checkpoint
+        strategy.member_dao.save_sw_industry_member.assert_awaited_once()
+        assert result.added == 1
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_failure_does_not_clear_all_dfs(self):
+        """checkpoint 保存失败时不清空 all_dfs，循环后仍会尝试 save。"""
+        from data.sync.sw_industry import _CHECKPOINT_INTERVAL
+
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=0)
+        # 第一次调用（checkpoint）失败，第二次调用（循环后 save）成功
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=[RuntimeError("checkpoint db error"), 1])
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
+                "index_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+            }
+        )
+        ctx.api.get_index_member_all = AsyncMock(return_value=big_df)
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        # checkpoint 失败后 all_dfs 未清空，循环后再次 save（共 2 次调用）
+        assert strategy.member_dao.save_sw_industry_member.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_save_members_checkpoint_success_returns_true(self):
+        """_save_members_checkpoint 成功保存返回 True。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=5)
+        dfs = [_make_member_df("801010.SI"), _make_member_df("801020.SI")]
+
+        result = await strategy._save_members_checkpoint(dfs)
+
+        assert result is True
+        strategy.member_dao.save_sw_industry_member.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_save_members_checkpoint_failure_returns_false(self):
+        """_save_members_checkpoint 失败返回 False（不 raise）。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=0)
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=RuntimeError("db down"))
+        dfs = [_make_member_df("801010.SI")]
+
+        result = await strategy._save_members_checkpoint(dfs)
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_save_members_checkpoint_engine_disposed_propagates(self):
+        """R5: _save_members_checkpoint 遇 EngineDisposedError 必须 raise 传播。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=0)
+        strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=EngineDisposedError("engine closed"))
+        dfs = [_make_member_df("801010.SI")]
+
+        with pytest.raises(EngineDisposedError):
+            await strategy._save_members_checkpoint(dfs)
