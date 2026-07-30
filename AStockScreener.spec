@@ -111,7 +111,7 @@ for root, dirs, files in os.walk(str(project_root)):
                 _binaries_key_excludes.append(rel)
                 break
 
-icon_path = project_root / "assets" / "icon.ico"
+icon_path = project_root / "assets" / "windows.ico"
 if not icon_path.exists():
     icon_path = project_root / "assets" / "icon.png"
 
