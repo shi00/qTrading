@@ -472,6 +472,48 @@ class TestDataSourceViewModelFullDailySync:
         snack_msgs = [s.snack for s in snapshots if s.snack is not None]
         assert all(s.message != Message("snack_sync_skipped_fmt", {"skipped": 0}) for s in snack_msgs)
 
+    async def test_daily_sync_permission_summary_cancelled_propagates(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """L403-404: get_sync_status 抛 CancelledError 时 inner except 应 re-raise (不被 perm_err 捕获).
+
+        覆盖红线 R2: asyncio.CancelledError 必须传播, 不能被 except Exception 吞没。
+        验证路径: inner try → get_sync_status raises CancelledError → inner except re-raise →
+        outer except asyncio.CancelledError 发射 settings_msg_sync_cancelled snack → finally 重置 sync busy.
+        """
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
+        mock_cache.get_sync_status = AsyncMock(side_effect=asyncio.CancelledError())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 后续 L494-500 有 snack/state 强断言
+            await factory(task_id="task_123")
+
+        # 外层 except asyncio.CancelledError 应发射取消 snack (而非 perm_err 的 debug 日志)
+        _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
+        # 成功 snack 不应被发射 (CancelledError 在发射成功 snack 前传播)
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
+        # finally 应重置 sync busy 状态
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm.state.active_key is None
+
+    async def test_daily_sync_permission_summary_exception_logged_as_debug(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """L405-406: get_sync_status 抛普通 Exception 时降级为 debug 日志, 不影响主流程."""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
+        mock_cache.get_sync_status = AsyncMock(side_effect=RuntimeError("sync_status query failed"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        # 主流程不应被中断, 仍发射成功 snack
+        _assert_snack(bound_vm, snapshots, "snack_full_sync_done_simple", "success")
+        assert bound_vm.state.is_syncing is False
+
 
 class TestDataSourceViewModelAiConceptRebuild:
     def test_execute_sets_sync_busy(self, bound_vm):
