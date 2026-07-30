@@ -368,10 +368,10 @@ jobs:
       # 与生产代码默认值一致。构建真实 sidecar binary，让 Flet 子进程启动 sidecar +
       # 真实 PG 16，替代原有的外置 PostgreSQL service。
       # 参考 embedded-tests job 的 sidecar 构建步骤（行 675-705）。
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
@@ -640,10 +640,10 @@ jobs:
           # Same fix as the e2e-tests job (see line 322-326).
           uv pip install --system flet-web==0.86.3
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
@@ -841,11 +841,11 @@ jobs:
         if: steps.cache-playwright-skip-revalidation.outputs.cache-hit != 'true'
         run: playwright install chromium
 
-      - name: Install Rust toolchain (1.97.0, real-sidecar group only)
+      - name: Install Rust toolchain (1.97.1, real-sidecar group only)
         if: matrix.needs_rust == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target (real-sidecar group only)
         if: matrix.needs_rust == 'true'
@@ -1066,10 +1066,10 @@ jobs:
         if: steps.cache-playwright-smoke.outputs.cache-hit != 'true'
         run: playwright install chromium
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1

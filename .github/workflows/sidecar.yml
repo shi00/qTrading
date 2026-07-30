@@ -69,10 +69,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           components: clippy, rustfmt
           targets: ${{ matrix.target }}
 
@@ -163,10 +163,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
@@ -215,10 +215,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
@@ -272,10 +272,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
