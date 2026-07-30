@@ -240,7 +240,6 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             return {
                 "code": "embedded_start_failed",
                 "message_key": "db_err_embedded_start_failed",
-                "format_args": {"error": str(e)},
             }
         if error_type == "ValueError":
             return {

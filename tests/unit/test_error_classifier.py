@@ -244,6 +244,16 @@ class TestClassifyErrorDBContext:
             classify_error(EmbeddedPostgresStartError("sidecar crashed (exit=60)"), context="db")["code"] == "crashed"
         )
 
+    def test_embedded_postgres_fallback_no_format_args(self):
+        """fallback 分支（无已知关键词）不应传 format_args，防止原始异常泄露（R9）。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        exc = EmbeddedPostgresStartError("some unknown sidecar failure mode")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "embedded_start_failed"
+        assert result["message_key"] == "db_err_embedded_start_failed"
+        assert "format_args" not in result, "fallback 分支不应传 format_args，模板无 {error} 占位符"
+
 
 class TestClassifyErrorChartContext:
     def test_timeout(self):
