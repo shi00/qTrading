@@ -162,9 +162,12 @@ async def _prepare_db_with_retry(
                 sys.exit(1)
 
             from ui.startup_views import PreInitErrorView
+            from utils.error_classifier import classify_error, get_error_message
             from utils.sanitizers import DataSanitizer
 
-            error_message = DataSanitizer.sanitize_error(e)
+            error_info = classify_error(e, context="db")
+            localized_error = get_error_message(error_info)
+            error_message = DataSanitizer.sanitize_error(localized_error)
             log_dir_hint = _resolve_embedded_pg_log_dir_hint()
             retry_event = threading.Event()
             exit_event = threading.Event()
