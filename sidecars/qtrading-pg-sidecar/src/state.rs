@@ -1,4 +1,4 @@
-//! runtime state 持久化（pg_plan §11 `postgres/17/runtime/state.json`）。
+//! runtime state 持久化（pg_plan §11 `postgres/16/runtime/state.json`）。
 //! 原子写入（tmp + rename），损坏时容错为 None（doctor 负责报告）。
 
 use serde::{Deserialize, Serialize};

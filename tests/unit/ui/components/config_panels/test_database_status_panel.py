@@ -88,7 +88,7 @@ def _render_panel(
 
     mock_doctor = MagicMock()
     mock_doctor.data_dir = "/fake/data"
-    mock_doctor.pg_version = 17
+    mock_doctor.pg_version = 16
     mock_doctor.postgres_alive = True
 
     mock_svc = MagicMock()
@@ -368,7 +368,7 @@ class TestDatabaseStatusPanelStateRendering:
 
     def test_renders_version_when_pg_version_set(self, mock_i18n_state, mock_app_colors_state) -> None:
         """pg_version 非 None 时渲染 db_status_version."""
-        state = DatabaseStatusState(pg_version="17")
+        state = DatabaseStatusState(pg_version="16")
         _, _, result, _ = _render_panel_with_state(state)
         ctrls = _walk_controls(result)
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]

@@ -1138,7 +1138,7 @@
     "ds_init_fail_generic": "Initialization failed (Check logs for details)",
     "ds_data_flow_title": "Data Storage & Flow",
     "ds_data_flow_storage_title": "Local PostgreSQL Storage",
-    "ds_data_flow_storage_desc": "Default path: <app data>/postgres/17 (embedded mode, localhost only)",
+    "ds_data_flow_storage_desc": "Default path: <app data>/postgres/16 (embedded mode, localhost only)",
     "ds_data_flow_outbound_title": "Outbound Channels",
     "ds_data_flow_outbound_tushare": "Tushare / AkShare market & financial queries (read-only, on-demand)",
     "ds_data_flow_outbound_llm": "Cloud LLM concept analysis (sends concept names and minimal context only, no holdings)",

@@ -114,7 +114,7 @@ try {
         Write-Host "  Skipping P1-11 sidecar rejection scenario (dev build without sidecar)" -ForegroundColor Yellow
     } else {
         # sidecar run 会驻留（等 stdin EOF 退出），用 Start-Process 启动后不等待
-        $sidecarProc = Start-Process -FilePath $sidecarExe -ArgumentList "run", "--data-dir", "$env:LOCALAPPDATA\qTrading\postgres\17\data", "--password-file", "$env:TEMP\fake_sidecar_pwd" -PassThru
+        $sidecarProc = Start-Process -FilePath $sidecarExe -ArgumentList "run", "--data-dir", "$env:LOCALAPPDATA\qTrading\postgres\16\data", "--password-file", "$env:TEMP\fake_sidecar_pwd" -PassThru
         Start-Sleep -Seconds 3
         Assert-True (-not $sidecarProc.HasExited) "sidecar running (PID: $($sidecarProc.Id))"
 

@@ -1,4 +1,4 @@
-﻿# installer_smoke_uninstall.ps1
+# installer_smoke_uninstall.ps1
 # Phase 5 DoD §17.5 卸载验证（保留数据）smoke test 脚本
 # 用法: powershell -File scripts/installer_smoke_uninstall.ps1 -InstallerPath <path>
 # 验证: 卸载后 PGDATA 目录保留（不删除用户数据）
@@ -16,7 +16,7 @@ Set-StrictMode -Version Latest
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 $UninstallerPath = Join-Path $AppInstallDir "unins000.exe"
-$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\17\data"
+$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\16\data"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }

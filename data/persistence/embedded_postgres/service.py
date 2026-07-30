@@ -109,7 +109,7 @@ class EmbeddedPostgresService:
             self._sidecar_binary = Path(sidecar_binary)
             self._data_dir = Path(data_dir)
             self._install_dir = Path(install_dir)
-            # log_dir 默认从 data_dir 推导：data_dir = <root>/postgres/17/data
+            # log_dir 默认从 data_dir 推导：data_dir = <root>/postgres/16/data
             # root = data_dir.parent.parent.parent（对应 paths.rs Layout::from_data_dir）
             if log_dir is None:
                 root = self._data_dir.parent.parent.parent
@@ -138,7 +138,7 @@ class EmbeddedPostgresService:
           - PyInstaller frozen 模式（``sys.frozen``）：``sys._MEIPASS / sidecars / qtrading-pg-sidecar[.exe]``
             （pg_plan §16.2，installer embedded variant 安装到 ``<app>/_internal/sidecars/``）
           - 开发模式：``Path("sidecars") / qtrading-pg-sidecar[.exe]``（cwd-relative）
-        - data_dir：embedded_pg_data_root 为空时用 platformdirs 默认 <app data>/postgres/17/data
+        - data_dir：embedded_pg_data_root 为空时用 platformdirs 默认 <app data>/postgres/16/data
         - install_dir：默认 <data_root>/install
         - log_dir：默认 <app data>/postgres-logs
         """

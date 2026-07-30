@@ -51,7 +51,7 @@ const BLOCK_BEGIN: &str =
     "# >>> qtrading-pg-sidecar managed block (do not edit between markers) >>>";
 const BLOCK_END: &str = "# <<< qtrading-pg-sidecar managed block <<<";
 
-/// bundled PostgreSQL 主版本（build.rs 注入，如 "17.2.0" → 17）。
+/// bundled PostgreSQL 主版本（build.rs 注入，如 "16.14.0" → 16）。
 pub fn bundled_pg_major() -> Option<u32> {
     env!("SIDECAR_POSTGRES_VERSION")
         .split('.')
@@ -64,7 +64,7 @@ pub fn bundled_pg_version() -> &'static str {
     env!("SIDECAR_POSTGRES_VERSION")
 }
 
-/// PG_VERSION 文件内容（"17\n"）→ 主版本号。
+/// PG_VERSION 文件内容（"16\n"）→ 主版本号。
 pub fn read_pg_major(data_dir: &Path) -> Option<u32> {
     std::fs::read_to_string(data_dir.join("PG_VERSION"))
         .ok()?
@@ -433,7 +433,7 @@ mod tests {
     fn make_existing_cluster(dir: &Path) {
         std::fs::create_dir_all(dir.join("global")).unwrap();
         std::fs::create_dir_all(dir.join("base")).unwrap();
-        std::fs::write(dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
     }
@@ -468,7 +468,7 @@ mod tests {
     fn guard_rejects_missing_critical_files() {
         let dir = unique_tmp("missing-critical");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
         // 无 global/pg_control
         assert_eq!(guard_data_dir(&dir), Err(exit_codes::DATA_DIR_ABNORMAL));
         let _ = std::fs::remove_dir_all(&dir);
@@ -538,9 +538,9 @@ mod tests {
 
     #[test]
     fn bundled_major_parses() {
-        // build.rs 注入 "17.2.0"（.cargo/config.toml POSTGRESQL_VERSION="=17.2.0"）
-        assert_eq!(bundled_pg_major(), Some(17));
-        assert_eq!(bundled_pg_version(), "17.2.0");
+        // build.rs 注入 "16.14.0"（.cargo/config.toml POSTGRESQL_VERSION="=16.14.0"）
+        assert_eq!(bundled_pg_major(), Some(16));
+        assert_eq!(bundled_pg_version(), "16.14.0");
     }
 
     #[test]

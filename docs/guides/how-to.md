@@ -112,7 +112,7 @@
 
 - 应用必须完全退出（sidecar 会获取 PGDATA 锁，运行中无法维护）
 - sidecar binary 位于 `sidecars/qtrading-pg-sidecar[.exe]`
-- 数据目录默认在 `<app data>/postgres/17/data`（可通过 `AppConfig.embedded_pg_data_root` 自定义）
+- 数据目录默认在 `<app data>/postgres/16/data`（可通过 `AppConfig.embedded_pg_data_root` 自定义）
 
 #### 9.2 诊断（doctor）
 
@@ -170,7 +170,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 
 ### 10. 运行 embedded 模式真实 sidecar 测试
 
-> 适用场景：验证内置 PostgreSQL（子进程启动）真实场景的端到端覆盖，包含真实 Rust sidecar binary + 真实 PostgreSQL 17。
+> 适用场景：验证内置 PostgreSQL（子进程启动）真实场景的端到端覆盖，包含真实 Rust sidecar binary + 真实 PostgreSQL 16。
 
 #### 10.1 测试范围
 

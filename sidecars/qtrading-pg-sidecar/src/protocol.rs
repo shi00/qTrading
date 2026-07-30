@@ -113,18 +113,18 @@ mod tests {
     #[test]
     fn ready_json_matches_plan_schema() {
         let ready = ReadyJson::new(
-            "17.2.0".into(),
+            "16.14.0".into(),
             "127.0.0.1".into(),
             54832,
             "qtrading".into(),
             "postgres".into(),
-            "C:/Users/u/AppData/Local/qTrading/postgres/17/data".into(),
+            "C:/Users/u/AppData/Local/qTrading/postgres/16/data".into(),
             Some(12345),
         );
         let v = serde_json::to_value(&ready).unwrap();
         assert_eq!(v["schema"], "qtrading.embedded_postgres.run.ready.v1");
         assert_eq!(v["status"], "running");
-        assert_eq!(v["postgres_version"], "17.2.0");
+        assert_eq!(v["postgres_version"], "16.14.0");
         assert_eq!(v["host"], "127.0.0.1");
         assert_eq!(v["port"], 54832);
         assert_eq!(v["database"], "qtrading");
@@ -135,7 +135,7 @@ mod tests {
             v["url"],
             "postgresql://postgres:***@127.0.0.1:54832/qtrading"
         );
-        assert!(!v["url"].as_str().unwrap().contains(":17."));
+        assert!(!v["url"].as_str().unwrap().contains(":16."));
         assert_eq!(v["pid"], 12345);
         assert!(v["sidecar_pid"].as_u64().unwrap() > 0);
     }
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn ready_json_pid_optional() {
         let ready = ReadyJson::new(
-            "17.2.0".into(),
+            "16.14.0".into(),
             "127.0.0.1".into(),
             5432,
             "qtrading".into(),

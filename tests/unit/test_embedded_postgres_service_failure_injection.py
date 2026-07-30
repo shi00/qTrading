@@ -44,14 +44,14 @@ if TYPE_CHECKING:
 FAKE_READY = {
     "schema": "qtrading.embedded_postgres.run.ready.v1",
     "status": "running",
-    "postgres_version": "17.2.0",
+    "postgres_version": "16.14.0",
     "host": "127.0.0.1",
     "port": 55432,
     "database": "qtrading",
     "username": "postgres",
     "password_source": "password_file",
     "url": "postgresql://postgres:***@127.0.0.1:55432/qtrading",
-    "data_dir": "C:/fake/postgres/17/data",
+    "data_dir": "C:/fake/postgres/16/data",
     "sidecar_pid": 12340,
     "pid": 12345,
 }

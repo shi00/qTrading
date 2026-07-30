@@ -1,4 +1,4 @@
-//! 维护锁（pg_plan §13.3）：`postgres/17/runtime/lock`。
+//! 维护锁（pg_plan §13.3）：`postgres/16/runtime/lock`。
 //!
 //! fs2 OS 级文件锁：进程死亡自动释放，无 stale lock（stale 检测由 doctor 负责报告）。
 //! PGDATA 级操作（restore/maintenance-shell/离线 dump/run）必须持锁；冲突返回 exit 50。

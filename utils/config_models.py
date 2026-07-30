@@ -219,7 +219,7 @@ class AppConfig(BaseModel):
         default="", description="sidecar binary 绝对路径；空则按平台默认搜索（sidecars/qtrading-pg-sidecar[.exe]）"
     )
     embedded_pg_data_root: str = Field(
-        default="", description="PGDATA 根目录；空则用 platformdirs 默认 <app data>/postgres/17"
+        default="", description="PGDATA 根目录；空则用 platformdirs 默认 <app data>/postgres/16"
     )
     embedded_pg_install_root: str = Field(
         default="", description="PostgreSQL binaries 安装根目录；空则 <embedded_pg_data_root>/../install"

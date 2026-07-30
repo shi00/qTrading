@@ -17,18 +17,18 @@ if [ ! -x "$SIDECAR_BIN" ]; then
     exit 1
 fi
 
-# 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/17/data
-# Linux: ~/.local/share/qTrading/postgres/17/data
-# macOS: ~/Library/Application Support/qTrading/postgres/17/data
+# 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
+# Linux: ~/.local/share/qTrading/postgres/16/data
+# macOS: ~/Library/Application Support/qTrading/postgres/16/data
 case "$(uname -s)" in
     Darwin*)
-        DEFAULT_DATA_DIR="$HOME/Library/Application Support/qTrading/postgres/17/data"
+        DEFAULT_DATA_DIR="$HOME/Library/Application Support/qTrading/postgres/16/data"
         ;;
     Linux*)
-        DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/qTrading/postgres/17/data"
+        DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/qTrading/postgres/16/data"
         ;;
     *)
-        DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/qTrading/postgres/17/data"
+        DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/qTrading/postgres/16/data"
         ;;
 esac
 
