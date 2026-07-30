@@ -510,11 +510,16 @@ async def _setup_canvaskit_intercept(page) -> None:
             # 字体（CodeQL 修复：用 is_font_cdn_url 精确匹配 host 而非子串）
             if is_font_cdn_url(url):
                 filename = extract_font_filename(path)
+                # 未缓存字体：返回 200 + 空 woff2，让 CanvasKit 认为字体加载成功。
+                # CanvasKit 对 404/abort 不缓存"不可用"状态，每次 UI 重渲染都重新尝试，
+                # 阻塞渲染线程。返回 200 + 空 woff2 让引擎认为字体已加载（无字形），
+                # 不再重试，回退到下一个字体族。
+                empty_font_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / "empty.woff2"
                 if filename is None:
-                    # fulfill 404 而非 abort：让 CanvasKit 缓存"字体不可用"状态，
-                    # 避免无限重试（abort 被视为临时故障，会触发循环重载）。
-                    logger.warning("[E2E Intercept] font filename None, fulfill 404: %s", url)
-                    await route.fulfill(status=404, headers=_CORS_CORP_HEADERS)
+                    logger.warning("[E2E Intercept] font filename None, fulfill 200 empty: %s", url)
+                    await route.fulfill(
+                        status=200, content_type="font/woff2", path=str(empty_font_path), headers=_CORS_CORP_HEADERS
+                    )
                     return
                 local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
                 if local_path.exists():
@@ -526,11 +531,10 @@ async def _setup_canvaskit_intercept(page) -> None:
                         headers=_CORS_CORP_HEADERS,
                     )
                     return
-                # fulfill 404 而非 abort：CanvasKit 硬编码的字体回退链（notosanshk/
-                # notocoloremoji 等）对应用 locale=zh 非必需，404 让引擎缓存"不可用"
-                # 状态后停止重试；abort 会被视为临时故障导致无限循环（PR #373 hang 根因）。
-                logger.warning("[E2E Intercept] font not cached, fulfill 404: %s", url)
-                await route.fulfill(status=404, headers=_CORS_CORP_HEADERS)
+                logger.warning("[E2E Intercept] font not cached, fulfill 200 empty: %s", url)
+                await route.fulfill(
+                    status=200, content_type="font/woff2", path=str(empty_font_path), headers=_CORS_CORP_HEADERS
+                )
                 return
             # 其他外部请求：强制离线
             logger.info("[E2E Intercept] abort external: %s", url)
