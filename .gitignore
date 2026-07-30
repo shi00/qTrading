@@ -107,6 +107,10 @@ ci_log_*.txt
 codeql_logs.txt
 e2e_reports.zip
 temp_pr*.txt
+.COMMIT_MSG*
+*.COMMIT_MSG*
+.pr-body*
+*.pr-body*
 
 # 3. Environment Variables & Secrets
 .env
