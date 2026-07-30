@@ -1649,7 +1649,7 @@ jobs:
           } else {
             Write-Error "ISCC smoke test failed: installer not found at $installerPath"
             exit 1
-          fi
+          }
 
   flaky-detection:
     name: Flaky Test Detection (advisory)
