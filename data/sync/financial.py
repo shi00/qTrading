@@ -1014,6 +1014,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
                 return 0
 
+        # data-P1-6: 预初始化 aux_counts，确保 except 块能返回已保存的 aux 行数
+        # 而非硬编码 0。aux 表通过 fetch_aux 内部 save_func 已写入 DB，
+        # 即使 core 表合并失败也不应丢弃已保存的行数。
+        aux_counts = {"mainbz": 0, "audit": 0}
+
         try:
             aux_tasks = [
                 fetch_aux(
@@ -1135,7 +1140,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            return None, {"mainbz": 0, "audit": 0}
+            return None, aux_counts
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
