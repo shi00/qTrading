@@ -57,7 +57,11 @@ class FletPage:
         tappable_btn = self.page.locator(f'flt-semantics[role="{role}"][flt-tappable]:not([aria-current])').filter(
             has_text=name
         )
-        btn = self.page.get_by_role(role, name=name)
+        # btn fallback 也排除 aria-current，与 tappable_btn 对齐：
+        # 防止 tappable_btn.first.click 偶发失败时 fallback 到 btn.first 选中
+        # SegmentedButton 当前激活 segment（aria-current="true"），触发 _on_mode_change
+        # 但 new_mode==state.mode 直接 return，目标 Button 回调永不执行。
+        btn = self.page.locator(f'[role="{role}"]:not([aria-current])').filter(has_text=name)
         by_label = self.page.locator(
             f'[aria-label="{name}"], [aria-label*="{name}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
         )

@@ -1273,8 +1273,11 @@ def ScreenerView(
     right_controls = ft.Column(
         [
             status_row,
+            # backtest_btn 放在 run_btn 之后：避免 V1 M3 语义合并时 hit-testing
+            # 优先命中 backtest_btn 触发非预期跳转（保险措施，配合 flet_page.py
+            # btn fallback 排除 aria-current 的修复）
             ft.Row(
-                [export_btn, export_excel_btn, backtest_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END
+                [export_btn, export_excel_btn, run_btn, backtest_btn], spacing=15, alignment=ft.MainAxisAlignment.END
             ),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
