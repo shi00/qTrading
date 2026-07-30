@@ -873,6 +873,13 @@ class CacheManager:
             except Exception as e:
                 # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
                 classified = classify_error(e, "db")
+                # P1-4: 引擎被释放（竞态：close() 在 check_comprehensive_health 期间执行）
+                # 抛出 EngineDisposedError 以触发上层调用方异常处理，
+                # 避免静默降级为"表不健康"误导健康报告。
+                if classified["code"] == "interrupted":
+                    raise EngineDisposedError(
+                        f"[CacheManager] Health | Engine disposed during check for table {table}: {e}"
+                    ) from e
                 if classified["code"] == "not_found":
                     logger.warning(
                         "[CacheManager] Health | ⚠️ Table %s missing/not created yet.",
@@ -898,6 +905,9 @@ class CacheManager:
         check_coros = [_check_single_table(t, m) for t, m in monitored_tables.items()]
         gather_results = await gather_return_exceptions_propagating_cancel(*check_coros)
         for item in gather_results:
+            # P1-4: 引擎释放异常优先传播，避免静默降级误导健康报告
+            if isinstance(item, EngineDisposedError):
+                raise item
             if isinstance(item, BaseException):
                 logger.warning("[CacheManager] Health | Table check failed: %s", safe_error(item))
                 continue

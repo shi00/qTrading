@@ -1145,18 +1145,18 @@ class TestR5EngineDisposedReraises:
         未 reraise。对比 _sync_share_float/_sync_stk_holdertrade 的
         `except EngineDisposedError: raise` 位于 outer try 层级，正确 reraise。
 
-        Task 5.4 仅新增测试，不重构源码；此处匹配源码现状断言 count == -1。
-        修复时应将 inner `except EngineDisposedError: raise` 提升到 outer try 层级，
-        与 _sync_share_float 一致。
+        R5 根因修复（PR #377）：classify_severity 现将 EngineDisposedError 归为 "system"，
+        outer handler 的 `if severity == "system": raise` 触发，EngineDisposedError 正确传播。
+        此测试验证根因修复后的 R5 合规行为。
         """
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        count, date = await strategy._sync_pledge_stat()
-        assert count == -1  # 源码现状：outer except 吞没 EngineDisposedError（R5 违规）
-        assert date is None
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await strategy._sync_pledge_stat()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_share_float_reraises(self):
@@ -1221,10 +1221,13 @@ class TestR5EngineDisposedReraises:
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_recording_engine_disposed(self):
-        """_sync_pledge_stat 在 TushareAPIPermissionError 后记录状态时 EngineDisposedError 被吞没返回 -1。
+        """_sync_pledge_stat 在 TushareAPIPermissionError 后返回 -1。
 
-        注：源码 inner except 将 EngineDisposedError 归为 operational severity（非 system），
-        仅记 error 日志不 raise。此为现状测试，不重构源码（Task 5.4 仅新增测试）。
+        注：TushareAPIPermissionError 被 inner except 捕获（classify_severity 归为
+        "recoverable"），走 continue 路径，4 次 retry 失败后 all_api_failed=True
+        返回 (-1, None)。outer `except TushareAPIPermissionError` 块不会触发，
+        update_sync_status 从未被调用，EngineDisposedError 无传播机会。
+        此测试验证现状行为（非 R5 传播路径）。
         """
         ctx = MagicMock()
         ctx.api = MagicMock()
@@ -1234,7 +1237,8 @@ class TestR5EngineDisposedReraises:
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
-        assert count == -1  # EngineDisposedError 被吞没，返回 -1
+        assert count == -1  # TushareAPIPermissionError 被 inner except 捕获后 continue，4 次 retry 失败后返回 -1
+        assert date is None
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_recording_engine_disposed(self):
