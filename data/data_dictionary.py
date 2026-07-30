@@ -825,6 +825,16 @@ TABLE_DEFINITIONS = {
             "duration_ms": "col_duration_ms",
         },
     },
+    "watchlist": {
+        "alias": "tab_watchlist",
+        "desc": "用户关注列表（FR-UX-004, Task 4.2）",
+        "columns": {
+            "ts_code": "col_ts_code",
+            "stock_name": "col_stock_name",
+            "added_at": "col_added_at",
+            "note": "col_note",
+        },
+    },
 }
 
 

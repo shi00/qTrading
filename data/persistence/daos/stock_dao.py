@@ -370,7 +370,7 @@ class StockDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def upsert_limit_concepts(self, records: list[dict]) -> int:
+    async def upsert_limit_concepts(self, records: list[dict], conn: typing.Any = None) -> int:
         """
         涨停原因概念入库接口。
         records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "LIMIT_C1", "concept_name": "涨停原因1"}]
@@ -387,14 +387,47 @@ class StockDao(BaseDao):
             "stock_concepts",
             cols,
             pk_columns=pk_columns,
+            conn=conn,
         )
 
-    async def clear_today_limit_concepts(self) -> int:
+    async def clear_today_limit_concepts(self, conn: typing.Any = None) -> int:
         """清空当日 LIMIT_ 前缀概念（涨停原因概念每日重建）。"""
         return await self._write_db(
             "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
             [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+            conn=conn,
         )
+
+    @log_async_operation(
+        operation_name="StockDao.overwrite_limit_concepts",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
+    async def overwrite_limit_concepts(self, records: list[dict]) -> int:
+        """
+        P0-2: 事务性覆盖当日 LIMIT_ 前缀概念。
+        clear + upsert 在同一事务内完成，避免 clear 成功 upsert 失败导致当日数据丢失。
+        """
+        try:
+            async with self._guarded_begin() as conn:
+                cleared = await self.clear_today_limit_concepts(conn=conn)
+                if records:
+                    upserted = await self.upsert_limit_concepts(records, conn=conn)
+                else:
+                    upserted = 0
+            logger.info(
+                "[StockDao] overwrite_limit_concepts: cleared=%s, upserted=%s",
+                cleared,
+                upserted,
+            )
+            return upserted
+        except asyncio.CancelledError:
+            logger.warning("[StockDao] Cancelled during overwrite_limit_concepts.")
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error("[StockDao] overwrite_limit_concepts failed: %s", safe_error(e))
+            raise
 
     async def get_concepts_by_prefix(
         self,

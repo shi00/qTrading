@@ -82,8 +82,8 @@ def mock_cache():
 
 @pytest.fixture
 def mock_ai_service():
-    # T6 fix: AIService 通过构造注入到 ViewModel，需 mock 避免真实单例初始化
-    with patch("ui.viewmodels.data_source_view_model.AIService") as cls:
+    # Task 7.2: AIService 改为惰性构造, patch 源模块 (而非 VM 模块, 因 VM 已无运行时 import)
+    with patch("services.ai_service.AIService") as cls:
         instance = MagicMock(spec=AIService)
         instance.is_cloud_available = MagicMock(return_value=True)
         cls.return_value = instance
@@ -146,7 +146,17 @@ class TestDataSourceViewModelInit:
         assert isinstance(vm._processor, DataProcessor)
         assert isinstance(vm._cache, CacheManager)
         assert isinstance(vm._tm, TaskManager)
-        assert isinstance(vm._ai_service, AIService)  # T6 fix: 验证 AIService 注入
+        # Task 7.2: AIService 惰性构造, 默认 None (仅 _get_ai_service() 调用时才构造)
+        assert vm._ai_service is None
+
+    def test_get_ai_service_lazy_constructs_on_first_call(self, mock_ai_service):
+        """Task 7.2: _get_ai_service() 首次调用惰性构造 AIService, 再次调用复用同一实例."""
+        vm = DataSourceViewModel()
+        assert vm._ai_service is None
+        svc1 = vm._get_ai_service()
+        assert svc1 is mock_ai_service
+        svc2 = vm._get_ai_service()
+        assert svc2 is svc1  # 复用, 不重复构造
 
     def test_constructor_injection(self, mock_processor, mock_cache, mock_ai_service):
         # T6 fix: ai_service 也支持构造注入，与 _processor / _cache 一致
@@ -379,7 +389,8 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(RuntimeError, match="Network error"):
             await factory(task_id="task_123")
 
-        _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
+        # Task 5.1: "Network error" 经 _classify_sync_error 分类为 common_err_network
+        _assert_snack(bound_vm, snapshots, "common_err_network", "error")
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None
 
@@ -616,7 +627,8 @@ class TestDataSourceViewModelInitHistorical:
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
-        _assert_snack(bound_vm, snapshots, "ds_init_fail_fmt", "error")
+        # Task 5.1: "Sync failed" 经 _classify_sync_error 分类为 unknown → common_op_fail
+        _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
 
     async def test_init_none_report_raises(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         mock_processor.initialize_system = AsyncMock(return_value=None)
@@ -1060,4 +1072,103 @@ class TestDataSourceViewModelSyncBusyProgressReset:
         bound_vm._set_sync_busy(True)
         assert bound_vm.state.is_syncing is True
         assert bound_vm.state.active_key is None
+
+
+class TestDataSourceViewModelSyncErrorClassification:
+    """Task 5.1: 同步失败错误分类透传 — 4 类错误各验证 snack 消息 key 与 action_key.
+
+    _daily_logic / _run_initial_sync 的 Exception 分支应消费 classify_error 返回结果,
+    snack 显示具体原因 (网络/Token/积分/DB 四类), 并附 action_key (检查健康/重新探测积分).
+    """
+
+    async def test_daily_sync_network_error_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """网络错误 → snack key=common_err_network, action=snack_action_check_health。"""
+        mock_processor.run_daily_update = AsyncMock(side_effect=ConnectionError("network unreachable"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(ConnectionError) as exc_info:
+            await factory(task_id="task_123")
+        assert "network unreachable" in str(exc_info.value)
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "common_err_network"
+        assert bound_vm.state.snack.action_key == "snack_action_check_health"
+
+    async def test_daily_sync_token_error_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """Token 错误 → snack key=wizard_err_token_invalid, action=snack_action_probe_credits。"""
+        mock_processor.run_daily_update = AsyncMock(side_effect=RuntimeError("Tushare token invalid: 403"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory(task_id="task_123")
+        assert "token invalid" in str(exc_info.value).lower()
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "wizard_err_token_invalid"
+        assert bound_vm.state.snack.action_key == "snack_action_probe_credits"
+
+    async def test_daily_sync_quota_error_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """积分错误 → snack key=llm_err_insufficient_quota, action=snack_action_probe_credits。"""
+        mock_processor.run_daily_update = AsyncMock(side_effect=RuntimeError("insufficient_quota: 402"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory(task_id="task_123")
+        assert "insufficient_quota" in str(exc_info.value)
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "llm_err_insufficient_quota"
+        assert bound_vm.state.snack.action_key == "snack_action_probe_credits"
+
+    async def test_daily_sync_db_error_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """DB 错误 → snack key=db_err_refused, action=snack_action_check_health。"""
+        mock_processor.run_daily_update = AsyncMock(side_effect=RuntimeError("asyncpg connection refused to postgres"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory(task_id="task_123")
+        assert "connection refused" in str(exc_info.value)
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "db_err_refused"
+        assert bound_vm.state.snack.action_key == "snack_action_check_health"
+
+    async def test_init_sync_network_error_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """init sync 网络错误 → snack key=common_err_network, action=snack_action_check_health。"""
+        mock_processor.initialize_system = AsyncMock(side_effect=ConnectionError("connection reset"))
+
+        bound_vm.execute_init_historical_data()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await factory(task_id="task_123")
+        # _run_initial_sync 把 ConnectionError 包装成 RuntimeError(Message(key='ds_init_fail_fmt'))
+        assert "ds_init_fail_fmt" in str(exc_info.value)
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "common_err_network"
+        assert bound_vm.state.snack.action_key == "snack_action_check_health"
+
+    async def test_daily_sync_generic_error_no_action(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """非分类错误 → snack key=common_op_fail, action_key=None (无 action)。"""
+        mock_processor.run_daily_update = AsyncMock(side_effect=ValueError("unexpected bug"))
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(ValueError) as exc_info:
+            await factory(task_id="task_123")
+        assert "unexpected bug" in str(exc_info.value)
+
+        assert bound_vm.state.snack is not None
+        assert bound_vm.state.snack.message.key == "common_op_fail"
+        assert bound_vm.state.snack.action_key is None
         assert bound_vm.state.progress == 0.0

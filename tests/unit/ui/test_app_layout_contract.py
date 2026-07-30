@@ -192,7 +192,7 @@ class TestAppLayoutContract:
         assert "page.on_resize" in _code_source(), "必须设置 page.on_resize"
 
     def test_consumes_subviews_via_function_call(self):
-        """DoD: 6 个子视图必须用函数调用消费 (HomeView(active=...)/ScreenerView(active=...)/...)。"""
+        """DoD: 7 个子视图必须用函数调用消费 (HomeView(active=...)/ScreenerView(active=...)/...)。"""
         source = _code_source()
         for view_name in [
             "HomeView(active=",
@@ -201,6 +201,7 @@ class TestAppLayoutContract:
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(active=",
+            "WatchlistView(active=",
         ]:
             assert view_name in source, f"必须函数调用消费 {view_name}"
 
@@ -273,8 +274,8 @@ class TestBuildPagesStack:
         source = _code_source()
         assert "def _build_view(" not in source, "不应再有 _build_view 条件渲染函数"
 
-    def test_consumes_all_six_subviews_in_stack(self):
-        """DoD: ``_build_pages_stack`` 必须预先创建所有 6 个子视图放入 Stack。"""
+    def test_consumes_all_seven_subviews_in_stack(self):
+        """DoD: ``_build_pages_stack`` 必须预先创建所有 7 个子视图放入 Stack。"""
         source = _code_source()
         for view_name in [
             "HomeView(active=",
@@ -283,6 +284,7 @@ class TestBuildPagesStack:
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(active=",
+            "WatchlistView(active=",
         ]:
             assert view_name in source, f"_build_pages_stack 必须预创建 {view_name}"
 
@@ -304,12 +306,12 @@ class TestBuildNavDestinations:
                 stack.enter_context(p)
             yield
 
-    def test_returns_six_destinations(self):
-        """返回 6 个 NavigationRailDestination (market/screener/backtest/data/tasks/settings)。"""
+    def test_returns_seven_destinations(self):
+        """返回 7 个 NavigationRailDestination (market/screener/backtest/data/tasks/settings/watchlist)。"""
         from ui.app_layout import _build_nav_destinations
 
         destinations = _build_nav_destinations()
-        assert len(destinations) == 6
+        assert len(destinations) == 7
 
     def test_destinations_are_correct_type(self):
         """返回值必须是 ft.NavigationRailDestination 实例。"""
@@ -331,6 +333,7 @@ class TestBuildNavDestinations:
             "nav_data",
             "nav_tasks",
             "nav_settings",
+            "nav_watchlist",
         ]
         for dest, key in zip(destinations, expected_keys, strict=True):
             # label 是 ft.Text 控件, 文本通过 .value 访问
@@ -361,18 +364,18 @@ class TestGetPage:
 class TestNavTabs:
     """NavTabs IntEnum 契约测试。"""
 
-    def test_nav_tabs_has_six_members(self):
-        """NavTabs 必须有 6 个成员 (MARKET/SCREENER/BACKTEST/DATA/TASKS/SETTINGS)。"""
+    def test_nav_tabs_has_seven_members(self):
+        """NavTabs 必须有 7 个成员 (MARKET/SCREENER/BACKTEST/DATA/TASKS/SETTINGS/WATCHLIST)。"""
         from ui.app_layout import NavTabs
 
-        assert len(NavTabs) == 6
+        assert len(NavTabs) == 7
 
     def test_nav_tabs_values_are_sequential(self):
         """NavTabs 值必须从 0 开始连续 (NavigationRail selected_index 依赖)。"""
         from ui.app_layout import NavTabs
 
         values = [int(tab) for tab in NavTabs]
-        assert values == [0, 1, 2, 3, 4, 5]
+        assert values == [0, 1, 2, 3, 4, 5, 6]
 
 
 # ============================================================================
@@ -412,8 +415,8 @@ class TestViewportState:
         with pytest.raises(dataclasses.FrozenInstanceError):
             vp.width = 1000.0  # type: ignore[misc]
 
-    def test_app_layout_passes_viewport_to_six_subviews(self):
-        """DoD: AppLayout 必须下发 viewport 给 6 个子视图 (源码契约: "XxxView(active=" + "viewport=")。"""
+    def test_app_layout_passes_viewport_to_seven_subviews(self):
+        """DoD: AppLayout 必须下发 viewport 给 7 个子视图 (源码契约: "XxxView(active=" + "viewport=")。"""
         source = _code_source()
         for view_name in [
             "HomeView(active=",
@@ -422,11 +425,12 @@ class TestViewportState:
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(active=",
+            "WatchlistView(active=",
         ]:
             assert view_name in source, f"必须函数调用消费 {view_name}"
-        # 6 个子视图都必须接收 viewport 参数 (源码 grep 式契约)
+        # 7 个子视图都必须接收 viewport 参数 (源码 grep 式契约)
         viewport_count = source.count("viewport=viewport")
-        assert viewport_count >= 6, f"必须给 6 个子视图下发 viewport=viewport, 实际出现 {viewport_count} 次"
+        assert viewport_count >= 7, f"必须给 7 个子视图下发 viewport=viewport, 实际出现 {viewport_count} 次"
 
     def test_build_pages_stack_accepts_viewport_param(self):
         """DoD: _build_pages_stack 必须接收 viewport 参数。"""

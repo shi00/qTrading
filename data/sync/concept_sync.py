@@ -293,11 +293,10 @@ class LimitListSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return result
 
+            # P0-2: 用 overwrite_limit_concepts 替代 clear+upsert，确保事务原子性
             # S11 fix: fetch 成功后再 clear+upsert，避免 clear 后 fetch 失败导致旧数据丢失
-            await stock_dao.clear_today_limit_concepts()
-            if records:
-                saved = await stock_dao.upsert_limit_concepts(records)
-                result.added = saved or 0
+            saved = await stock_dao.overwrite_limit_concepts(records)
+            result.added = saved or 0
 
             logger.info(
                 "[LimitListSync] Done | trade_date=%s, added=%d",

@@ -38,6 +38,8 @@ class AutomationSettingsState:
     ai_enabled: bool = False
     ai_time: str = "20:00"
     ai_engine: str = "search_std"
+    # Task 7.3: 夜间 AI 预测时辰 (与 scheduler_service 硬编码 20:30 对齐, 提升为可配项)
+    nightly_prediction_time: str = "20:30"
     # 新闻提醒
     news_enabled: bool = True
     news_interval: str = "60"
@@ -75,6 +77,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             ai_enabled=ConfigHandler.is_ai_concept_schedule_enabled(),
             ai_time=ConfigHandler.get_ai_concept_schedule_time(),
             ai_engine=ConfigHandler.get_ai_concept_search_engine(),
+            nightly_prediction_time=ConfigHandler.get_nightly_prediction_time(),
             news_enabled=bool(enable_news),
             news_interval=str(news_interval),
             is_saving=False,
@@ -96,6 +99,10 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
 
     def set_ai_engine(self, value: str) -> None:
         self._set_state(ai_engine=value)
+
+    def set_nightly_prediction_time(self, value: str) -> None:
+        """Task 7.3: 更新本地 state 的夜间预测时辰 (View 乐观更新)."""
+        self._set_state(nightly_prediction_time=value)
 
     def set_news_enabled(self, value: bool) -> None:
         self._set_state(news_enabled=value)
@@ -222,6 +229,30 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] ai concept search engine save failed: %s",
+                ex,
+                exc_info=True,
+            )
+            return False
+        finally:
+            self._set_state(is_saving=False)
+
+    async def save_nightly_prediction_time(self, new_time: str) -> bool:
+        """Task 7.3: 保存夜间 AI 预测时辰。"""
+        if self._state.is_saving:
+            return False
+        self._set_state(is_saving=True)
+        try:
+            result = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.set_nightly_prediction_time,
+                new_time,
+            )
+            return bool(result)
+        except asyncio.CancelledError:
+            raise  # R2
+        except Exception as ex:
+            logger.error(
+                "[AutomationSettingsVM] nightly prediction time save failed: %s",
                 ex,
                 exc_info=True,
             )

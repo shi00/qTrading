@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import functools
 import logging
 import re
@@ -26,6 +27,9 @@ _NUMERIC_TYPE_PATTERN = re.compile(
 )
 
 _DATE_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Phase 6.3 (FR-UX-006): Export row limit — exporting all data caps at this count
+MAX_EXPORT_ROWS = 50000
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,9 @@ class DataExplorerState:
     sql_result_rows: tuple[SqlResultRow, ...] = ()
     # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
     sql_error: str | None = None
+    # Phase 6.4 (FR-UX-006): 数据新鲜度 (daily_quotes 最新 trade_date + 滞后天数)
+    data_latest_date: str = ""  # YYYY-MM-DD formatted, empty = not loaded
+    data_lag_days: int = 0  # today - latest_date in days
 
 
 class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
@@ -109,26 +116,29 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
         self._disposed = False
 
+        # Mixin 字段初始化（跨线程修复）
+        self._init_mixin_fields()
+
     def _set_state(self, **changes: Any) -> None:
         """Update state fields and notify subscribers.
 
         disposed guard: dispose 后阻止延迟完成的异步任务更新 state/subscriber
-        (对齐 ScreenerViewModel, 见 screener_view_model.py).
+        (对齐 ScreenerViewModel, 见 screener_view_model.py). 与 Mixin._set_state
+        disposed guard 冗余但不冲突，保留作为短路优化。
         """
         if self._disposed:
             return
-        self._state = replace(self._state, **changes)
-        self._notify()
+        super()._set_state(**changes)
 
-    def _notify(self) -> None:
-        if self._disposed:
-            return
-        # 快照 subscribers 避免迭代中订阅者修改列表 (对齐 ObservableViewModelMixin 默认实现).
-        for cb in list(self._subscribers):
-            try:
-                cb(self._state)
-            except Exception as e:
-                logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
+    def _invoke_single_subscriber(self, cb: Callable[[DataExplorerState], None], snap: DataExplorerState) -> None:
+        """覆盖 per-cb 调用策略：DEVM-specific try/except + warning logging。
+
+        不再 override 终态骨架 _notify()（避免跨线程修复被绕过，架构 P0-1 修复）。
+        """
+        try:
+            cb(snap)
+        except Exception as e:
+            logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
 
     def dispose(self):
         """Release resources held by this ViewModel."""
@@ -152,7 +162,8 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         if self._db is not None:
             self._db.close()
             self._db = typing.cast(DataExplorerQueryClient, None)
-        self._subscribers.clear()
+        # Mixin 统一清理：subscribers / loop / pending handle / deque
+        super().dispose()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def init_tables(self):
@@ -197,6 +208,44 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
             )
             return []
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def load_data_freshness(self) -> None:
+        """Load data freshness info from daily_quotes (Phase 6.4, FR-UX-006).
+
+        Queries ``MAX(trade_date)`` from ``daily_quotes``, formats as YYYY-MM-DD,
+        and computes lag days vs today. Updates ``state.data_latest_date`` and
+        ``state.data_lag_days``. Non-fatal: failures log + leave state unchanged.
+        """
+        ensure_correlation_id()
+        if self._disposed:
+            return
+        try:
+            raw = await self._tp.run_async(TaskType.CPU, self._db.get_latest_trade_date)
+            if not raw:
+                self._set_state(data_latest_date="", data_lag_days=0)
+                return
+            # trade_date stored as YYYYMMDD string (8 digits) or int
+            date_str = str(raw)
+            if len(date_str) == 8 and date_str.isdigit():
+                latest = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                formatted = latest.strftime("%Y-%m-%d")
+            else:
+                # Already YYYY-MM-DD or other format — use as-is
+                formatted = date_str
+                try:
+                    latest = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    self._set_state(data_latest_date=date_str, data_lag_days=0)
+                    return
+            today = datetime.date.today()
+            lag = max(0, (today - latest).days)
+            self._set_state(data_latest_date=formatted, data_lag_days=lag)
+        except asyncio.CancelledError:
+            logger.warning("[DataExplorerVM] Cancelled during load_data_freshness.")
+            raise
+        except Exception as e:
+            logger.warning("[DataExplorerVM] load_data_freshness failed (non-fatal): %s", e, exc_info=True)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_table_schema(self, table_name: str):
@@ -376,7 +425,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
             if not current_page_only:
                 pg = 1
-                ps = 50000
+                ps = MAX_EXPORT_ROWS
 
             df = await self._tp.run_async(
                 TaskType.CPU,

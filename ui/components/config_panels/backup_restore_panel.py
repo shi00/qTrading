@@ -2,7 +2,8 @@
 
 显示备份/恢复操作 UI:
 - "手动备份" 按钮 → vm.start_backup(output_path)
-- "恢复向导" 按钮 → vm.start_restore_wizard(input_path) → confirm_restore / dismiss_offline_guidance
+- "恢复向导" 按钮 → FilePicker 选择备份文件 → vm.start_restore_wizard(input_path)
+  → confirm_restore / dismiss_offline_guidance
 - 备份进度状态显示 (progress_message / error_message / success_message)
 - 恢复前二次确认 (tri-state confirmation: pending → offline_guidance/cancelled)
 - 离线恢复指引 (D36: 不直接调 sidecar restore, 引导用户用离线维护脚本)
@@ -12,10 +13,13 @@ CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 - View 通过 use_viewmodel(factory=...) 订阅 vm.state 变化触发重渲染
 - i18n 通过 ft.use_state(get_observable_state) 自动重渲染
 - View 不持有业务状态 (state 全部从 VM 读取)
+
+Task 7.1: 恢复入口改为 FilePicker 选文件; 未选文件时显示「查看离线恢复指引」提示
+(不再用 _generate_default_backup_path 生成必不存在的时间戳路径触发 start_restore_wizard)。
 """
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import flet as ft
@@ -73,20 +77,49 @@ def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandl
     return safe_on_click(_on_backup_click)
 
 
-def _on_restore_wizard_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
-    """Create on_click handler for restore wizard button — submits vm.start_restore_wizard.
+def _on_restore_wizard_click_factory(
+    vm: BackupRestoreViewModel,
+    file_picker: ft.FilePicker | None,
+) -> ft.ControlEventHandler | None:
+    """Create on_click handler for restore wizard button — opens FilePicker to select backup file.
 
-    Restore input path: 优先使用 state.backup_path (最近一次备份), 否则用默认值.
+    Task 7.1: 恢复入口改为 FilePicker 选文件 (不再用默认时间戳路径).
+    - 选到文件: vm.start_restore_wizard(Path(file.path))
+    - 未选文件: 显示 ``backup_view_offline_guide`` 提示 (不调用 start_restore_wizard,
+      避免用必不存在的路径触发 error_message).
     """
 
-    def _on_restore_wizard_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    async def _pick_and_restore() -> None:
+        if file_picker is None:
+            logger.debug("[BackupRestorePanel] FilePicker unavailable for restore pick")
+            return
+        try:
+            result = await file_picker.pick_files(
+                allowed_extensions=["dump"],
+                dialog_title=I18n.get("backup_select_file"),
+            )
+        except Exception as exc:
+            logger.error("[BackupRestorePanel] File pick failed: %s", exc, exc_info=True)
+            return
+        if not result:
+            # 未选文件: 显示「查看离线恢复指引」提示, 不调用 start_restore_wizard
+            try:
+                page = ft.context.page
+            except RuntimeError:
+                page = None
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("backup_view_offline_guide"), type="info")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+            return
+        picked_path = result[0].path
+        if not picked_path:
+            return
+        await vm.start_restore_wizard(Path(picked_path))
+
+    def _on_restore_wizard_click(e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
-                input_path = (
-                    Path(vm.state.backup_path) if vm.state.backup_path is not None else _generate_default_backup_path()
-                )
-                page.run_task(vm.start_restore_wizard, input_path)
+                page.run_task(_pick_and_restore)
         except RuntimeError:
             logger.debug("[BackupRestorePanel] page not available for start_restore_wizard")
 
@@ -144,6 +177,29 @@ def BackupRestorePanel() -> ft.Container:
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
 
+    # --- FilePicker lifecycle (Task 7.1: 恢复入口选文件) ---
+    # use_ref 持有 FilePicker 实例; use_effect 注册到 page.services + cleanup 时移除
+    # (与 local_model_config_panel.py 的 FilePicker 生命周期模式一致, R4 服务化挂载)
+    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+
+    def _setup_file_picker() -> None:
+        try:
+            page = ft.context.page
+            if page is not None and file_picker is not None and file_picker not in page.services:
+                page.services.append(file_picker)
+        except RuntimeError:
+            logger.debug("[BackupRestorePanel] page not available for FilePicker setup")
+
+    def _cleanup_file_picker() -> None:
+        try:
+            page = ft.context.page
+            if page is not None and file_picker in page.services:
+                page.services.remove(file_picker)
+        except RuntimeError:
+            pass
+
+    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+
     # --- Title ---
     title_ctrl = ft.Text(
         I18n.get("backup_restore_title"),
@@ -194,7 +250,7 @@ def BackupRestorePanel() -> ft.Container:
     restore_button = ft.Button(
         content=I18n.get("restore_button"),
         icon=ft.Icons.RESTORE,
-        on_click=_on_restore_wizard_click_factory(vm),
+        on_click=_on_restore_wizard_click_factory(vm, file_picker),
         style=AppStyles.secondary_button(),
         visible=state.confirm_state in ("idle", "cancelled"),
     )

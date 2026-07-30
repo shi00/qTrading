@@ -240,6 +240,64 @@ class TestShowSnack:
         _show_snack_impl(mock_page, "saved", color="success")
         mock_page.show_toast.assert_called_once_with("saved", type="success")
 
+    def test_show_snack_passes_action_text_when_not_none(self):
+        """L126: action_text 非 None 时透传到 show_toast kwargs。
+
+        Task 5.1 snack action 按钮: action_text 提供按钮文案,
+        仅在非 None 时透传 (保持无 action 场景调用签名不变)。
+        """
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        _show_snack_impl(mock_page, "err", color="error", action_text="重试")
+        mock_page.show_toast.assert_called_once_with("err", type="error", action_text="重试")
+
+    def test_show_snack_passes_on_action_when_not_none(self):
+        """L128: on_action 非 None 时透传到 show_toast kwargs。
+
+        Task 5.1 snack action 按钮: on_action 提供按钮回调,
+        仅在非 None 时透传。
+        """
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        on_action = MagicMock()
+        _show_snack_impl(mock_page, "err", color="error", on_action=on_action)
+        mock_page.show_toast.assert_called_once_with("err", type="error", on_action=on_action)
+
+    def test_show_snack_passes_both_action_text_and_on_action(self):
+        """L126+L128: action_text + on_action 同时非 None 时全部透传。"""
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        on_action = MagicMock()
+        _show_snack_impl(
+            mock_page,
+            "err",
+            color="error",
+            action_text="检查健康",
+            on_action=on_action,
+        )
+        mock_page.show_toast.assert_called_once_with(
+            "err",
+            type="error",
+            action_text="检查健康",
+            on_action=on_action,
+        )
+
+    def test_show_snack_skips_action_text_when_none(self):
+        """L125: action_text=None 时 toast_kwargs 不含 action_text (保持调用签名不变)。"""
+        from ui.views.settings_view import _show_snack_impl
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        _show_snack_impl(mock_page, "msg", action_text=None, on_action=None)
+        # 仅 type=info, 不含 action_text/on_action
+        mock_page.show_toast.assert_called_once_with("msg", type="info")
+
     def test_show_snack_no_show_toast_logs_warning(self):
         """page 无 show_toast 方法时，降级为 logger.warning，不调 show_dialog。"""
         from ui.views.settings_view import _show_snack_impl
@@ -294,41 +352,44 @@ class TestBuildTabs:
         assert len(tabs) == 6
 
     def test_build_tabs_calls_each_tab_constructor(self):
+        """Task 7.2: 惰性构造 — 只构造 current_tab 对应的 tab, 其他为空 Container。"""
         from ui.views.settings_view import _build_tabs
 
         show_snack = MagicMock()
-        _build_tabs(show_snack)
+        _build_tabs(show_snack, current_tab=0)
 
         self.mock_data.assert_called_once_with(show_snack)
-        self.mock_db.assert_called_once_with(show_snack)
-        self.mock_ai.assert_called_once_with(show_snack)
-        self.mock_auto.assert_called_once_with(show_snack)
-        # NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)
-        self.mock_notify.assert_called_once_with(show_snack)
-        self.mock_system.assert_called_once_with(show_snack)
+        # 其他 tab 工厂不应被调用 (惰性构造)
+        self.mock_db.assert_not_called()
+        self.mock_ai.assert_not_called()
+        self.mock_auto.assert_not_called()
+        self.mock_notify.assert_not_called()
+        self.mock_system.assert_not_called()
 
     def test_build_tabs_notifications_tab_receives_only_show_snack(self):
-        """NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)。"""
+        """NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)。
+
+        Task 7.2: current_tab=4 (NotificationsTab) 时才构造。
+        """
         from ui.views.settings_view import _build_tabs
 
-        _build_tabs(MagicMock())
+        _build_tabs(MagicMock(), current_tab=4)
 
         self.mock_notify.assert_called_once()
         args = self.mock_notify.call_args[0]
         assert len(args) == 1, "NotificationsTab 声明式重写后不应接收 page_ref"
 
-    def test_build_tabs_e2e_mode_only_constructs_active_tab(self):
-        """e2e_mode=True 时只构造 current_tab 对应的 tab, 其他 tab 工厂不被调用。
+    def test_build_tabs_lazy_only_constructs_active_tab(self):
+        """Task 7.2: 惰性构造 — current_tab=2 时只构造 AIBrainTab, 其他为空 Container。
 
-        覆盖 E2E 模式惰性工厂分支 (settings_view.py L70-82)。
         根因: 先构造所有 tab 再过滤会导致 DataSourceTab → DataSourceViewModel →
         AIService → litellm import 18s+ 阻塞 MainThread。
         """
         from ui.views.settings_view import _build_tabs
 
         show_snack = MagicMock()
-        # current_tab=2 (AIBrainTab), e2e_mode=True
-        tabs = _build_tabs(show_snack, current_tab=2, e2e_mode=True)
+        # current_tab=2 (AIBrainTab)
+        tabs = _build_tabs(show_snack, current_tab=2)
 
         assert len(tabs) == 6
         # 只有 AIBrainTab 被构造
@@ -344,12 +405,12 @@ class TestBuildTabs:
         assert isinstance(tabs[0], ft.Container)
         assert tabs[0].content is None  # 空 Container
 
-    def test_build_tabs_e2e_mode_current_tab_0_constructs_only_data_source(self):
-        """e2e_mode=True, current_tab=0 时只构造 DataSourceTab。"""
+    def test_build_tabs_current_tab_0_constructs_only_data_source(self):
+        """Task 7.2: current_tab=0 时只构造 DataSourceTab。"""
         from ui.views.settings_view import _build_tabs
 
         show_snack = MagicMock()
-        _build_tabs(show_snack, current_tab=0, e2e_mode=True)
+        _build_tabs(show_snack, current_tab=0)
 
         self.mock_data.assert_called_once_with(show_snack)
         self.mock_db.assert_not_called()

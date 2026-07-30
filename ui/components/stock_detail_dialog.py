@@ -741,6 +741,7 @@ def StockDetailDialog(
     page: ft.Page | None = None,
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
+    on_add_to_watchlist: Callable[[str, str], None] | None = None,
 ) -> ft.Container:
     """股票详情弹窗（声明式 V1）。
 
@@ -756,6 +757,7 @@ def StockDetailDialog(
         page: ft.Page 引用（用于计算对话框尺寸）
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）
+        on_add_to_watchlist: 加入关注回调 (ts_code, stock_name); 为 None 时不显示按钮
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -793,16 +795,22 @@ def StockDetailDialog(
         if on_close is not None:
             on_close()
 
+    # --- 加入关注处理（FR-UX-004, Task 4.2）---
+    def _add_to_watchlist(_e) -> None:
+        if on_add_to_watchlist is not None:
+            on_add_to_watchlist(data.get("ts_code", ""), data.get("name", ""))
+
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
+    actions = [ft.TextButton(I18n.get("common_close"), on_click=_close)]
+    if on_add_to_watchlist is not None:
+        actions.insert(0, ft.TextButton(I18n.get("watchlist_add"), on_click=_add_to_watchlist))
     dialog = (
         ft.AlertDialog(
             modal=False,
             on_dismiss=_close,
             title=_build_title(data),
             content=_build_content(data, chart_content, width, height),
-            actions=[
-                ft.TextButton(I18n.get("common_close"), on_click=_close),
-            ],
+            actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )
         if open_

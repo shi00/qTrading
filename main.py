@@ -381,10 +381,18 @@ async def main(page: ft.Page):
         config.DB_URL = embedded_db_url
 
         ConfigHandler._db_url_override.set(embedded_db_url)
-        logger.info(
-            "[Main] Embedded DB URL ContextVar override active; "
-            "DATABASE_URL env var and persisted db_host will be ignored"
-        )
+
+        # P3 根因修复：embedded 模式下 pop 掉残留的 DATABASE_URL env var，
+        # 消除 ContextVar(Priority 0) 在 Flet 调度边界外失效时 env var(Priority 1)
+        # 兜底返回错误 URL 的隐患。子进程（如 DataExplorer 同步调用链）不再读到错误 URL。
+        removed = os.environ.pop("DATABASE_URL", None)
+        if removed:
+            logger.info(
+                "[Main] Embedded DB URL ContextVar override active; "
+                "removed stale DATABASE_URL env var to prevent cross-boundary leakage"
+            )
+        else:
+            logger.info("[Main] Embedded DB URL ContextVar override active; no DATABASE_URL env var present")
     cache_manager = CacheManager()
 
     from utils.shutdown import ShutdownCoordinator

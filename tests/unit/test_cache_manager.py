@@ -23,6 +23,7 @@ from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 from data.persistence.daos.express_dao import ExpressDao
+from data.persistence.daos.watchlist_dao import WatchlistDao
 
 pytestmark = pytest.mark.unit
 
@@ -66,6 +67,8 @@ def _make_mgr():
     # Phase 3G §4.3.4：express DAO（prefetch_auxiliary_data 引用 get_express_batch）
     mgr.express_dao = MagicMock(spec=ExpressDao)
     mgr.express_dao.get_express_batch = AsyncMock(return_value=pd.DataFrame())
+    # FR-UX-004, Task 4.2：watchlist DAO（_create_engine 通过 _DAO_REGISTRY 同步 engine 引用）
+    mgr.watchlist_dao = MagicMock(spec=WatchlistDao)
     return mgr
 
 

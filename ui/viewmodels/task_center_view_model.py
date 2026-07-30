@@ -12,7 +12,6 @@
 - 无运行循环时（单测）退化为同步执行
 """
 
-import asyncio
 import datetime
 import logging
 from collections.abc import Callable
@@ -72,44 +71,33 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
         self._task_manager = TaskManager()
         self._state = TaskCenterState()
         self._subscribers: list[Callable[[TaskCenterState], None]] = []
-        self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Mixin 字段初始化（跨线程修复）- 不再单独维护 self._main_loop
+        self._init_mixin_fields()
         # Populate initial state synchronously from TaskManager
         self._refresh_from_tasks(self._task_manager.get_all_tasks())
         # Subscribe for future updates
         self._task_manager.subscribe(self._on_tasks_updated)
 
     # --- State snapshot + subscribe/_notify ---
-
-    def subscribe(self, callback: Callable[[TaskCenterState], None]) -> Callable[[], None]:
-        """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
-        self._subscribers.append(callback)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("[TaskCenterVM] subscribed without running loop (test mode)")
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
+    # subscribe / dispose 终态方法从 Mixin 继承，不再自定义捕获 loop
+    # （Mixin.subscribe 每次 subscribe 都刷新 _owner_tid + 尝试捕获 loop，更健壮）
 
     def dispose(self) -> None:
         """Cleanup resources."""
         self._task_manager.unsubscribe(self._on_tasks_updated)
-        self._subscribers.clear()
+        # Mixin 统一清理 subscribers / loop / pending handle / deque
+        super().dispose()
 
     # --- TaskManager callback ---
 
     def _on_tasks_updated(self, tasks: list[AppTask]) -> None:
         """TaskManager subscriber (called from TM thread).
 
-        Schedule state update on main loop if available; else synchronous (test mode).
+        不再手动 call_soon_threadsafe，直接调 _refresh_from_tasks；
+        _refresh_from_tasks 末尾调用 Mixin._notify() / _set_state，
+        Mixin 会自动判定跨线程并封送（架构统一双轨消除 P1-3）。
         """
-        if self._main_loop and self._main_loop.is_running():
-            self._main_loop.call_soon_threadsafe(self._refresh_from_tasks, tasks)
-        else:
-            self._refresh_from_tasks(tasks)
+        self._refresh_from_tasks(tasks)
 
     def _refresh_from_tasks(self, tasks: list[AppTask]) -> None:
         """Convert AppTask list to TaskRow tuple, recompute pagination, update state."""
@@ -163,3 +151,11 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
         """Clear finished tasks and reset to first page."""
         self._set_state(current_page=1)
         self._task_manager.clear_finished()
+
+    def retry_task(self, task_id: str) -> None:
+        """Retry a failed task via TaskManager (Phase 6.2, FR-UX-006).
+
+        Re-submits the failed task with stored factory + kwargs. TaskManager
+        handles validation (task must be FAILED + have stored factory).
+        """
+        self._task_manager.retry_task(task_id)

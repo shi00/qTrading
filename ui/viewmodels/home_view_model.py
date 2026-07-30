@@ -116,13 +116,18 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # Concurrency Control
         self._load_generation = 0  # Prevent race conditions
 
-    def _notify(self) -> None:
-        """覆盖 _notify: 用 try/except 包裹 subscriber 调用, 不让单个异常中断通知。"""
-        for cb in list(self._subscribers):
-            try:
-                cb(self._state)
-            except Exception as e:
-                logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
+        # Mixin 字段初始化（跨线程修复）
+        self._init_mixin_fields()
+
+    def _invoke_single_subscriber(self, cb: Callable[[HomeState], None], snap: HomeState) -> None:
+        """覆盖 per-cb 调用策略：HomeVM-specific try/except + warning logging。
+
+        不再 override 终态骨架 _notify()（避免跨线程修复被绕过，架构 P0-1 修复）。
+        """
+        try:
+            cb(snap)
+        except Exception as e:
+            logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
 
     def init(self) -> None:
         """Initialize subscriptions (无回调参数,View 通过 subscribe 订阅 state)。"""

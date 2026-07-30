@@ -584,14 +584,34 @@ class TestBaseDaoWriteDbExtended:
 
     @pytest.mark.asyncio
     async def test_write_error_suppressed(self):
+        """P1-3: suppress_errors=True 仅在无共享事务连接（conn=None）时生效。
+
+        共享事务连接（conn is not None）时，suppress_errors 被忽略以保护事务完整性。
+        """
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = Exception("Write failed")
+        mock_engine = _setup_mock_engine_begin(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = None
+            result = await dao._write_db("INSERT INTO t VALUES ($1)", suppress_errors=True)
+            assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_write_error_with_conn_ignores_suppress_errors(self):
+        """P1-3: 共享事务连接（conn is not None）时，suppress_errors=True 被忽略，异常必须传播。
+
+        PostgreSQL 事务中发生错误后进入 aborted 状态，后续语句全部失败；
+        若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+        """
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql.side_effect = Exception("Write failed")
         dao = BaseDao(mock_engine)
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            result = await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn, suppress_errors=True)
-            assert result == -1
+            with pytest.raises(DatabaseQueryError, match="shared conn"):
+                await dao._write_db("INSERT INTO t VALUES ($1)", conn=mock_conn, suppress_errors=True)
 
     @pytest.mark.asyncio
     async def test_write_error_not_suppressed(self):
@@ -1232,9 +1252,13 @@ class TestBaseDaoSaveUpsertExtended:
 
     @pytest.mark.asyncio
     async def test_upsert_error_suppressed(self):
-        mock_engine = MagicMock()
+        """P1-3: suppress_errors=True 仅在无共享事务连接（conn=None）时生效。
+
+        共享事务连接（conn is not None）时，suppress_errors 被忽略以保护事务完整性。
+        """
         mock_conn = AsyncMock()
         mock_conn.execute.side_effect = Exception("Upsert failed")
+        mock_engine = _setup_mock_engine_begin(mock_conn)
         mock_table = MagicMock()
         mock_table.columns = {}
         mock_col_a = MagicMock()
@@ -1262,9 +1286,49 @@ class TestBaseDaoSaveUpsertExtended:
                 ["a"],
                 ["a"],
                 suppress_errors=True,
-                conn=mock_conn,
             )
             assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_upsert_error_with_conn_ignores_suppress_errors(self):
+        """P1-3: 共享事务连接（conn is not None）时，suppress_errors=True 被忽略，异常必须传播。
+
+        PostgreSQL 事务中发生错误后进入 aborted 状态，后续语句全部失败；
+        若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
+        """
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("Upsert failed")
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            with pytest.raises(Exception, match="Upsert failed"):
+                await dao._save_upsert(
+                    pd.DataFrame({"a": [1]}),
+                    "test_table",
+                    ["a"],
+                    ["a"],
+                    suppress_errors=True,
+                    conn=mock_conn,
+                )
 
     @pytest.mark.asyncio
     async def test_upsert_cancelled_propagates(self):

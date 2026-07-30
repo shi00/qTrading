@@ -368,44 +368,62 @@ class TestClickHandlers:
             _set_context_page(None)
         vm.start_backup.assert_not_called()
 
-    def test_on_restore_wizard_click_uses_default_path_when_backup_path_none(self) -> None:
-        """state.backup_path 为 None 时用默认路径调 vm.start_restore_wizard."""
+    def test_on_restore_wizard_click_picks_file_and_restores(self) -> None:
+        """Task 7.1: FilePicker 选到文件 → vm.start_restore_wizard(Path(picked))."""
+        import asyncio
+
         vm = MagicMock()
-        vm.state.backup_path = None
+        vm.start_restore_wizard = AsyncMock()
+        mock_file_picker = MagicMock()
+        picked_file = MagicMock()
+        picked_file.path = "/tmp/selected-backup.dump"
+        mock_file_picker.pick_files = AsyncMock(return_value=[picked_file])
         mock_page = MagicMock()
         _set_context_page(mock_page)
         try:
-            handler = panel_module._on_restore_wizard_click_factory(vm)
+            handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
             _invoke_click(handler)
+            # run_task 传入的是协程函数, 需调用获取协程对象
+            coro_func = mock_page.run_task.call_args[0][0]
+            asyncio.run(coro_func())
         finally:
             _set_context_page(None)
 
-        args = mock_page.run_task.call_args[0]
-        assert args[0] == vm.start_restore_wizard
-        assert isinstance(args[1], Path)
-        assert args[1].name.startswith("qtrading-backup-")
+        vm.start_restore_wizard.assert_awaited_once_with(Path("/tmp/selected-backup.dump"))
 
-    def test_on_restore_wizard_click_uses_state_backup_path_when_set(self) -> None:
-        """state.backup_path 非 None 时用该路径调 vm.start_restore_wizard."""
+    def test_on_restore_wizard_click_no_file_shows_guide(self) -> None:
+        """Task 7.1: FilePicker 未选文件 → 显示 backup_view_offline_guide 提示, 不调 start_restore_wizard."""
+        import asyncio
+
         vm = MagicMock()
-        vm.state.backup_path = "/existing/backup.dump"
+        vm.start_restore_wizard = AsyncMock()
+        mock_file_picker = MagicMock()
+        mock_file_picker.pick_files = AsyncMock(return_value=None)  # 未选文件
         mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
         _set_context_page(mock_page)
         try:
-            handler = panel_module._on_restore_wizard_click_factory(vm)
+            handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
             _invoke_click(handler)
+            coro_func = mock_page.run_task.call_args[0][0]
+            asyncio.run(coro_func())
         finally:
             _set_context_page(None)
 
-        args = mock_page.run_task.call_args[0]
-        assert args[1] == Path("/existing/backup.dump")
+        vm.start_restore_wizard.assert_not_called()
+        # 强断言: 验证 show_toast 参数 (type=info + 非空 message)
+        toast_args = mock_page.show_toast.call_args
+        assert toast_args is not None, "show_toast should be called when no file selected"
+        assert toast_args.kwargs.get("type") == "info"
+        assert isinstance(toast_args.args[0], str) and len(toast_args.args[0]) > 0
 
     def test_on_restore_wizard_click_silent_on_runtime_error(self) -> None:
         """page 不可用时静默处理 (ft.context.page 抛 RuntimeError)."""
         vm = MagicMock()
+        mock_file_picker = MagicMock()
         _set_context_page(None)
         try:
-            handler = panel_module._on_restore_wizard_click_factory(vm)
+            handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
             _invoke_click(handler)  # 不应抛异常
         finally:
             _set_context_page(None)

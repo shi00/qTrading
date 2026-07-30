@@ -358,7 +358,7 @@ graph TB
     subgraph INFRA["<b>基础设施层 Infrastructure</b>"]
         direction LR
         CACHE["🗄️ CacheManager<br/>单例缓存 | DAO 统一入口"]
-        DAOS["📝 DAOs (16 个业务 DAO + Base)<br/>Stock | Quote | Financial | Holder<br/>Macro | Market | Screener | Sync<br/>Backtest | Express | PledgeDetail<br/>ShareFloat | StkHoldertrade | StkLimit<br/>SwIndustry | TopInst | Base"]
+        DAOS["📝 DAOs (17 个业务 DAO + Base)<br/>Stock | Quote | Financial | Holder<br/>Macro | Market | Screener | Sync<br/>Backtest | Express | PledgeDetail<br/>ShareFloat | StkHoldertrade | StkLimit<br/>SwIndustry | TopInst | Watchlist | Base"]
         SYNC["🔄 Sync Strategies<br/>历史行情 | 财务 | 股东 | 宏观<br/>断点续传 | 质量评分"]
         QUALITY["🛡️ Quality Gate<br/>Bronze → Silver → Gold<br/>三级数据质量校验"]
         REVIEW["🔁 ReviewManager<br/>AI 回顾闭环<br/>Alpha 收益 | 经验注入"]

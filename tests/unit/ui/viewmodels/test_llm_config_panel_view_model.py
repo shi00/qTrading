@@ -1051,11 +1051,15 @@ class TestLLMConfigPanelViewModelDispose:
         vm.dispose()
         vm.dispose()  # 不应抛异常
 
-    def test_dispose_then_subscribe_works(self, mock_test_connection, mock_config_handler):
-        """dispose 后仍可重新订阅（清理的是旧订阅者列表）。"""
+    def test_dispose_then_subscribe_no_notification(self, mock_test_connection, mock_config_handler):
+        """dispose 后 _disposed 永久置位，重新订阅后 state 变化不再通知（Mixin 终态语义）。
+
+        新 Mixin.dispose 翻转 _disposed=True 且不可逆（与 test_set_state_after_dispose_noop
+        一致）；subscribe 仍可追加回调，但 _set_state/_notify 因 _disposed guard 早返。
+        """
         vm = _make_vm(mock_test_connection)
         vm.dispose()
         received: list[LLMConfigState] = []
         vm.subscribe(lambda s: received.append(s))
         vm.update_model("new")
-        assert len(received) == 1
+        assert len(received) == 0

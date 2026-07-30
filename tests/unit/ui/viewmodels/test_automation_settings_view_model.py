@@ -39,6 +39,8 @@ def mock_config_handler():
         m.is_ai_concept_schedule_enabled.return_value = False
         m.get_ai_concept_schedule_time.return_value = "20:00"
         m.get_ai_concept_search_engine.return_value = "search_std"
+        m.get_nightly_prediction_time.return_value = "20:30"
+        m.set_nightly_prediction_time.return_value = True
         m.get_config.side_effect = lambda key, default=None: {
             "enable_news_alerts": True,
             "news_poll_interval": 60,
@@ -86,6 +88,7 @@ class TestStateImmutability:
         assert vm.state.ai_enabled is False
         assert vm.state.ai_time == "20:00"
         assert vm.state.ai_engine == "search_std"
+        assert vm.state.nightly_prediction_time == "20:30"
         assert vm.state.news_enabled is True
         assert vm.state.news_interval == "60"
         assert vm.state.is_saving is False
@@ -198,6 +201,32 @@ class TestSaveAiConceptEngine:
         result = await vm.save_ai_concept_engine("search_pro")
         assert result is True
         mock_config_handler.set_ai_concept_search_engine.assert_called_once_with("search_pro")
+
+
+# --- save_nightly_prediction_time (Task 7.3) ---
+
+
+class TestSaveNightlyPredictionTime:
+    @pytest.mark.asyncio
+    async def test_save_success(self, mock_config_handler, mock_thread_pool):
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_nightly_prediction_time("21:00")
+        assert result is True
+        mock_config_handler.set_nightly_prediction_time.assert_called_once_with("21:00")
+
+    @pytest.mark.asyncio
+    async def test_save_failure_returns_false(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.set_nightly_prediction_time.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_nightly_prediction_time("21:00")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_save_cancelled_error_propagates(self, mock_config_handler, mock_thread_pool):
+        mock_thread_pool.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+        vm = _make_vm(mock_config_handler)
+        with pytest.raises(asyncio.CancelledError):
+            await vm.save_nightly_prediction_time("21:00")
 
 
 # --- save_news_enabled ---

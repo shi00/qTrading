@@ -623,6 +623,16 @@ class ConfigHandler:
     def set_ai_concept_search_engine(cls, engine: str):
         return ConfigHandler.set_typed("ai_concept_search_engine", str(engine))
 
+    @classmethod
+    def get_nightly_prediction_time(cls) -> str:
+        """Task 7.3: 获取夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30)."""
+        return ConfigHandler.get_typed("nightly_prediction_time", str, "20:30")
+
+    @classmethod
+    def set_nightly_prediction_time(cls, time_str: str) -> bool:
+        """Task 7.3: 设置夜间 AI 预测时辰 (HH:MM)."""
+        return ConfigHandler.set_typed("nightly_prediction_time", str(time_str))
+
     @staticmethod
     def get_log_max_mb():
         return ConfigHandler.get_typed("log_max_mb", int, 5)

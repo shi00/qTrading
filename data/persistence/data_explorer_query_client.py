@@ -175,6 +175,31 @@ class DataExplorerQueryClient:
             logger.error("Error counting rows for %s: %s", table_name, e)
             return 0
 
+    def get_latest_trade_date(self) -> str | None:
+        """Get the latest trade_date from daily_quotes (Phase 6.4, FR-UX-006).
+
+        Uses SQLAlchemy Core with hardcoded table/column names (no user input,
+        R4 compliant). Returns trade_date as string (YYYYMMDD format) or None
+        if table is empty / doesn't exist / query fails.
+        """
+        self._ensure_engine()
+        try:
+            # Hardcoded constants — no injection vector (R4 safe)
+            allowed_tables = self.get_all_tables()
+            if "daily_quotes" not in allowed_tables:
+                return None
+            tbl = sa.table("daily_quotes")
+            stmt = sa.select(sa.func.max(sa.column("trade_date"))).select_from(tbl)
+            with self._engine.connect() as conn:  # type: ignore[union-attr]
+                result = conn.execute(stmt)
+                val = result.scalar()
+                if val is None:
+                    return None
+                return str(val)
+        except Exception as e:
+            logger.error("Error fetching latest trade_date: %s", e)
+            return None
+
     def _validate_table_name(self, table_name: str):
         """Ensure table name is valid and exists to prevent injection."""
         allowed_tables = self.get_all_tables()
@@ -312,8 +337,9 @@ class DataExplorerQueryClient:
         # P0-2: Use regex word-boundary matching instead of trailing-space strings.
         # Trailing-space matching ("DROP ") can be bypassed with tabs, newlines,
         # or comments: DROP\ttable, DROP\n table, DROP(--comment)table.
+        # P1-2: Added INTO (SELECT...INTO creates tables) and COPY (filesystem access).
         _DANGEROUS_KEYWORD_PATTERN = re.compile(
-            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE)\b",
+            r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|TRUNCATE|EXECUTE|GRANT|REVOKE|INTO|COPY)\b",
             re.IGNORECASE,
         )
         match = _DANGEROUS_KEYWORD_PATTERN.search(sql_query)

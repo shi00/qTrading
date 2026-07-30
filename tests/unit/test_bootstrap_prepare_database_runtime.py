@@ -198,7 +198,7 @@ async def test_prepare_database_runtime_warns_when_database_url_env_set(monkeypa
     """R-Arch-2/Ske-1: embedded 模式 + DATABASE_URL env var 误设 → emit WARNING，仍启动 embedded PG。
 
     场景：QTRADING_DATABASE_MODE=embedded + DATABASE_URL env var 被外部误设。
-    验证：记 WARNING 提示用户该 env var 会覆盖 embedded URL，但仍继续启动 embedded PG。
+    验证：记 WARNING 提示用户 main.py 会自动 pop 此 env var 并建议清理 shell profile，但仍继续启动 embedded PG。
     """
     import logging
 
@@ -229,11 +229,10 @@ async def test_prepare_database_runtime_warns_when_database_url_env_set(monkeypa
     with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
         result = await prepare_database_runtime()
 
-    # 验证 WARNING 日志含关键提示
-    assert any(
-        "DATABASE_URL env var is set" in r.message and "will take precedence over embedded URL" in r.message
-        for r in caplog.records
-    ), f"期望 WARNING 日志含 DATABASE_URL 误设提示，实际：{[r.message for r in caplog.records]}"
+    # 验证 WARNING 日志含关键提示（P4：文案已更新为说明自动 pop + 建议清理 shell profile）
+    assert any("DATABASE_URL env var is set" in r.message and "shell profile" in r.message for r in caplog.records), (
+        f"期望 WARNING 日志含 DATABASE_URL 误设提示及 shell profile 建议，实际：{[r.message for r in caplog.records]}"
+    )
     # 验证仍启动 embedded PG（不阻断启动）
     assert result == fake_info.url
 

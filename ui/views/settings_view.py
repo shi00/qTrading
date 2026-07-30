@@ -5,16 +5,17 @@
 
 变更要点:
 - 旧命令式 class 子类 → ``@ft.component def SettingsView()``
-- Tab 切换由 ``use_state(current_tab)`` 驱动，条件渲染当前激活 tab
+- Tab 切换由 ``use_state(current_tabs)`` 驱动，条件渲染当前激活 tab
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除所有命令式生命周期回调与手动刷新方法
 - 3 个命令式 tabs (DataSourceTab/AIBrainTab/SystemTab) 仍命令式实例化（Phase E 待重写）
 - DatabaseTab/AutomationTab/NotificationsTab 已声明式 (Phase A.2/D.4)，直接函数调用
 - ``show_snack`` 用 ``ft.context.page`` 访问 page（try/except 守卫 RuntimeError）
+- Task 7.2: 6 个 tab 全部惰性构造 (仅 current_tab 实例化, 其他用空 Container 占位),
+  消除打开设置页即触发 AIService → litellm import 主线程阻塞
 """
 
 import logging
-import os
 from collections.abc import Callable
 
 import flet as ft
@@ -55,40 +56,27 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     )
 
 
-def _build_tabs(show_snack: Callable, current_tab: int = 0, e2e_mode: bool = False) -> list[ft.Control]:
-    """Instantiate 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab).
+def _build_tabs(show_snack: Callable, current_tab: int = 0) -> list[ft.Control]:
+    """Instantiate 6 tabs lazily — only construct ``current_tab``, others are empty Containers.
 
-    E2E 模式优化: ``e2e_mode=True`` 时只构造 ``current_tab`` 对应的 tab, 其他用空
-    ``ft.Container`` 占位。根因: DataSourceTab 的 DataSourceViewModel.__init__ →
-    AIService() → litellm import (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM;
-    SystemTab 的 TierApiPanel 调用 TushareClient()。这些阻塞 Flet patch 下发导致
-    E2E 浏览器超时 (与 app_layout.py _build_pages_stack E2E 优化一致)。
+    Task 7.2: 正常模式与 E2E 模式统一为惰性构造 (原 e2e_mode 分支合并).
+    根因: DataSourceTab 的 DataSourceViewModel.__init__ → AIService() → litellm import
+    (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM; SystemTab 的 TierApiPanel
+    调用 TushareClient()。惰性构造使打开设置页只构造当前 tab, 避免全量构造阻塞
+    Flet patch 下发 (与 app_layout.py _build_pages_stack E2E 优化一致).
 
-    注意: 必须使用惰性构造 (lambda + 条件调用), 不能先构造所有 tab 再过滤,
+    注意: 必须使用惰性工厂 (lambda + 条件调用), 不能先构造所有 tab 再过滤,
     否则 VM 构造链仍会执行 (DataSourceTab(...) 会立即触发 DataSourceViewModel.__init__).
     """
-    if e2e_mode:
-        # 惰性工厂: 只对 current_tab 调用工厂, 其他返回空 Container
-        tab_factories: list[Callable[[], ft.Control]] = [
-            lambda: DataSourceTab(show_snack),
-            lambda: DatabaseTab(show_snack),
-            lambda: AIBrainTab(show_snack),
-            lambda: AutomationTab(show_snack),
-            lambda: NotificationsTab(show_snack),
-            lambda: SystemTab(show_snack),
-        ]
-        return [
-            tab_factories[i]() if i == current_tab else ft.Container(expand=True) for i in range(len(tab_factories))
-        ]
-    # 正常模式: 构造所有 tab
-    return [
-        DataSourceTab(show_snack),
-        DatabaseTab(show_snack),
-        AIBrainTab(show_snack),
-        AutomationTab(show_snack),
-        NotificationsTab(show_snack),
-        SystemTab(show_snack),
+    tab_factories: list[Callable[[], ft.Control]] = [
+        lambda: DataSourceTab(show_snack),
+        lambda: DatabaseTab(show_snack),
+        lambda: AIBrainTab(show_snack),
+        lambda: AutomationTab(show_snack),
+        lambda: NotificationsTab(show_snack),
+        lambda: SystemTab(show_snack),
     ]
+    return [tab_factories[i]() if i == current_tab else ft.Container(expand=True) for i in range(len(tab_factories))]
 
 
 def _show_snack_impl(
@@ -103,6 +91,8 @@ def _show_snack_impl(
         page: 渲染时捕获的 ft.Page 引用 (None 时静默返回).
         message: toast 文本.
         color: AppColors token 或 "error"/"success"/"warning" 字符串, 决定 msg_type.
+        action_text: Task 5.1 snack action 按钮文本 (None 无按钮).
+        on_action: Task 5.1 snack action 回调 (action_text 非空时必填).
 
     Note:
         page 在 SettingsView 渲染时捕获, 供 run_task 回调中使用
@@ -118,7 +108,13 @@ def _show_snack_impl(
         msg_type = "success"
     elif color == AppColors.WARNING or color == "warning":
         msg_type = "warning"
-    page.show_toast(message, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+    # Task 5.1: action_text/on_action 仅在非 None 时透传 (保持无 action 场景调用签名不变)
+    toast_kwargs: dict[str, object] = {"type": msg_type}
+    if kwargs.get("action_text") is not None:
+        toast_kwargs["action_text"] = kwargs["action_text"]
+    if kwargs.get("on_action") is not None:
+        toast_kwargs["on_action"] = kwargs["on_action"]
+    page.show_toast(message, **toast_kwargs)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
 
 
 @ft.component
@@ -153,8 +149,8 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
         _show_snack_impl(_page, message, color, **kwargs)
 
     # --- Build tabs ---
-    is_e2e = os.environ.get("E2E_TESTING") == "true"
-    tabs = _build_tabs(_show_snack, current_tab=current_tab, e2e_mode=is_e2e)
+    # Task 7.2: 惰性构造 (仅 current_tab 实例化), 消除打开设置页即触发 AIService 构造链
+    tabs = _build_tabs(_show_snack, current_tab=current_tab)
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
     # --- Tab click handler ---

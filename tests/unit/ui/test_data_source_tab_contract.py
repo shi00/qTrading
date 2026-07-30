@@ -536,6 +536,10 @@ class _FakeDataSourceViewModel:
     def execute_init_historical_data(self) -> None:
         self.method_calls.append(("execute_init_historical_data", {}))
 
+    def get_data_processor(self) -> Any:
+        """Return a mock data processor for HealthScanDialog construction."""
+        return MagicMock()
+
     async def save_tushare_token(self, token: str) -> None:
         self.method_calls.append(("save_tushare_token", {"token": token}))
 
@@ -585,6 +589,11 @@ class _FakeTushareConfigPanelViewModel:
 
     def reload_config(self) -> None:
         self.method_calls.append(("reload_config", {}))
+
+    async def verify_token(self) -> bool:
+        """Task 5.1: 模拟 tushare_vm.verify_token() 命令。"""
+        self.method_calls.append(("verify_token", {}))
+        return True
 
 
 def _run_async_coro(coro: Any) -> None:
@@ -1595,6 +1604,88 @@ class TestDataSourceTabStateEffects:
         args = snack_cb.call_args
         assert "common_saved" in args[0][0]
 
+    def test_snack_action_check_health_triggers_run_task(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L525-531: snack.action_key='snack_action_check_health' → show_snack 带 on_action → 点击触发 _do_check_health。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        # 设置含 action_key 的 snack
+        fake_vm._set_state(
+            snack=SnackRow(
+                message=Message("common_err_unknown"),
+                color_name="error",
+                seq=2,
+                action_key="snack_action_check_health",
+            )
+        )
+        run_render_effects(component)
+        # show_snack_callback 应被调用且 action_text + on_action 非 None
+        snack_cb.assert_called_once()
+        kwargs = snack_cb.call_args.kwargs
+        assert kwargs.get("action_text") is not None
+        on_action = kwargs.get("on_action")
+        assert on_action is not None
+        # 触发 on_action → page.run_task(_do_check_health) → vm.check_health
+        on_action()
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "check_health" in calls
+
+    def test_snack_action_probe_credits_triggers_verify_token(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L533-540: snack.action_key='snack_action_probe_credits' → on_action → _do_probe_credits → tushare_vm.verify_token。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        # 设置含 action_key='snack_action_probe_credits' 的 snack
+        fake_vm._set_state(
+            snack=SnackRow(
+                message=Message("tushare_token_invalid"),
+                color_name="error",
+                seq=3,
+                action_key="snack_action_probe_credits",
+            )
+        )
+        run_render_effects(component)
+        snack_cb.assert_called_once()
+        kwargs = snack_cb.call_args.kwargs
+        on_action = kwargs.get("on_action")
+        assert on_action is not None
+        # 触发 on_action → page.run_task(_do_probe_credits) → tushare_vm.verify_token
+        on_action()
+        calls = [c[0] for c in fake_tushare_vm.method_calls]
+        assert "verify_token" in calls
+
+    def test_snack_action_none_skips_action_button(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L523: snack.action_key=None → action_text=None, on_action=None。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        fake_vm._set_state(
+            snack=SnackRow(message=Message("common_saved"), color_name="success", seq=4, action_key=None)
+        )
+        run_render_effects(component)
+        snack_cb.assert_called_once()
+        kwargs = snack_cb.call_args.kwargs
+        assert kwargs.get("action_text") is None
+        assert kwargs.get("on_action") is None
+
     def test_health_result_state_renders_ok_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
@@ -1789,6 +1880,71 @@ class TestDataSourceTabAsyncErrorPaths:
         last_call = snack_cb.call_args
         assert "common_err_unknown" in last_call[0][0]
 
+    def test_do_probe_credits_propagates_cancelled_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L307-308: _do_probe_credits raises CancelledError → 传播 (R2: 不被 except Exception 捕获)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_cancelled() -> bool:
+            raise asyncio.CancelledError()
+
+        fake_tushare_vm.verify_token = _raise_cancelled
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        fake_vm._set_state(
+            snack=SnackRow(
+                message=Message("tushare_token_invalid"),
+                color_name="error",
+                seq=10,
+                action_key="snack_action_probe_credits",
+            )
+        )
+        run_render_effects(component)
+        kwargs = snack_cb.call_args.kwargs
+        on_action = kwargs.get("on_action")
+        assert on_action is not None  # noqa: weak-assertion 链式非终态, 后续 pytest.raises 验证行为
+        # 触发 on_action → page.run_task(_do_probe_credits) → CancelledError 传播
+        with pytest.raises(asyncio.CancelledError):
+            on_action()
+
+    def test_do_probe_credits_handles_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L309-310: _do_probe_credits raises Exception → 捕获 + logger.error (不传播)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_exception() -> bool:
+            raise RuntimeError("probe failed")
+
+        fake_tushare_vm.verify_token = _raise_exception
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        fake_vm._set_state(
+            snack=SnackRow(
+                message=Message("tushare_token_invalid"),
+                color_name="error",
+                seq=11,
+                action_key="snack_action_probe_credits",
+            )
+        )
+        run_render_effects(component)
+        kwargs = snack_cb.call_args.kwargs
+        on_action = kwargs.get("on_action")
+        assert on_action is not None  # noqa: weak-assertion 链式非终态, 后续 mock_logger.error 验证行为
+        # 触发 on_action → page.run_task(_do_probe_credits) → Exception 被捕获 (不传播)
+        with patch("ui.views.settings_tabs.data_source_tab.logger") as mock_logger:
+            on_action()
+            mock_logger.error.assert_called_once()  # noqa: weak-assertion 验证 error 日志触发, 参数为动态错误消息
+
 
 # ============================================================================
 # 组件体测试: Dialog 渲染分支
@@ -1875,6 +2031,80 @@ class TestDataSourceTabDialogs:
         btn.on_click(_make_event())
         render_once(component)
         assert page._dialogs.controls is not None  # noqa: weak-assertion smoke test 验证 scan_dialog 路径不抛异常,HealthScanDialog 已被 mock 为空 Column
+
+    def test_sync_now_callback_triggers_full_sync(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L478-480: HealthReportDialog on_sync_now 回调 → _do_full_sync → vm.execute_full_daily_sync。"""
+        import ui.views.settings_tabs.data_source_tab as _mod
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        # 用 MagicMock 覆盖 HealthReportDialog, 以便捕获 on_sync_now 回调
+        mock_dialog = MagicMock(return_value=ft.Column([]))
+        monkeypatch.setattr(_mod, "HealthReportDialog", mock_dialog)
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 触发 _do_show_health_report → set_health_report_open(True) + set_health_report_data(report)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        render_once(component)
+
+        # HealthReportDialog 被调用, 从 kwargs 获取 on_sync_now 回调
+        mock_dialog.assert_called()  # noqa: weak-assertion 链式非终态, 后续 call_args.kwargs 验证回调参数
+        on_sync_now = mock_dialog.call_args.kwargs.get("on_sync_now")
+        assert on_sync_now is not None, "on_sync_now 回调应被传入 HealthReportDialog"
+        # 触发 on_sync_now → _on_sync_now_from_health_report → page.run_task(_do_full_sync)
+        on_sync_now()
+        # _do_full_sync → vm.execute_full_daily_sync (is_syncing=False 时)
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_full_daily_sync" in calls
+
+    def test_init_data_callback_triggers_init_historical(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """L483-486: HealthScanDialog on_init_data 回调 → _do_init_historical → vm.execute_init_historical_data。"""
+        import ui.views.settings_tabs.data_source_tab as _mod
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        # 用 MagicMock 覆盖 HealthScanDialog, 以便捕获 on_init_data 回调
+        mock_dialog = MagicMock(return_value=ft.Column([]))
+        monkeypatch.setattr(_mod, "HealthScanDialog", mock_dialog)
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component, page=page)
+        # 直接设置 scan_dialog_open=True 触发 HealthScanDialog 渲染
+        # 由于 set_scan_dialog_open 是闭包, 需通过 _on_deep_scan 触发
+        # 但 _on_deep_scan 也是闭包, 只能通过 HealthReportDialog 的 on_deep_scan 触发
+        # 改用直接渲染: 先 mock HealthReportDialog 捕获 on_deep_scan, 触发后 set_scan_dialog_open(True)
+        mock_health_dialog = MagicMock(return_value=ft.Column([]))
+        monkeypatch.setattr(_mod, "HealthReportDialog", mock_health_dialog)
+        # 重新挂载 (mock 已更新)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 触发 health_report 打开
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        render_once(component)
+        # 获取 on_deep_scan 回调并触发 → set_scan_dialog_open(True)
+        on_deep_scan = mock_health_dialog.call_args.kwargs.get("on_deep_scan")
+        assert on_deep_scan is not None
+        on_deep_scan()
+        render_once(component)
+
+        # HealthScanDialog 被调用, 从 kwargs 获取 on_init_data 回调
+        mock_dialog.assert_called()  # noqa: weak-assertion 链式非终态, 后续 call_args.kwargs 验证回调参数
+        on_init_data = mock_dialog.call_args.kwargs.get("on_init_data")
+        assert on_init_data is not None, "on_init_data 回调应被传入 HealthScanDialog"
+        # 触发 on_init_data → _on_init_data_from_scan → page.run_task(_do_init_historical)
+        on_init_data()
+        # _do_init_historical → vm.execute_init_historical_data (is_syncing=False 时)
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_init_historical_data" in calls
 
 
 # ============================================================================

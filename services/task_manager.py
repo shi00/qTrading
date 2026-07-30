@@ -122,6 +122,9 @@ class AppTask:
     _cancel_event: threading.Event | None = None
     unique_key: str | None = None  # For deduplication
     correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
+    # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
+    _coroutine_factory: Callable = None  # type: ignore[assignment]
+    _coroutine_kwargs: dict = field(default_factory=dict)
 
 
 @register_singleton
@@ -344,6 +347,9 @@ class TaskManager:
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
         task.unique_key = unique_key
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
+        # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
+        task._coroutine_factory = coroutine_factory
+        task._coroutine_kwargs = dict(kwargs)
 
         from utils.correlation import get_correlation_id as _get_cid
 
@@ -483,6 +489,34 @@ class TaskManager:
         """Remove completed, failed, or cancelled tasks from the queue and DB.  Thread-safe."""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._clear_finished_impl)
+
+    def retry_task(self, task_id: str) -> str | None:
+        """Retry a failed task by re-submitting with stored factory + kwargs (Phase 6.2, FR-UX-006).
+
+        Only FAILED tasks can be retried. The new task gets a fresh task_id and
+        does NOT inherit the original ``unique_key`` (avoids dedup conflicts
+        with the failed task's still-held key during the brief overlap window).
+
+        Returns:
+            New task_id if retry was submitted, None if task not found, not FAILED,
+            or missing stored factory.
+        """
+        task = self._tasks.get(task_id)
+        if not task or task.status != TaskStatus.FAILED:
+            logger.warning("[TaskManager] Retry skipped: task %s not found or not FAILED", task_id)
+            return None
+        if task._coroutine_factory is None:
+            logger.warning("[TaskManager] Retry skipped: task %s has no stored factory", task_id)
+            return None
+        # unique_key omitted: default None avoids dedup conflicts with the
+        # failed task's still-held key during the brief overlap window.
+        return self.submit_task(
+            name=task.name,
+            task_type=task.task_type,
+            coroutine_factory=task._coroutine_factory,
+            cancellable=task.cancellable,
+            **task._coroutine_kwargs,
+        )
 
     def _clear_finished_impl(self):
         """Actual clearing logic. Runs on event loop thread."""
@@ -846,9 +880,13 @@ class TaskManager:
             def _launch():
                 try:
                     task = loop.create_task(coro)
-                except RuntimeError:
+                except (RuntimeError, TypeError, ValueError):
+                    # RuntimeError: loop closed between is_running() check and create_task
+                    # TypeError: coro is not a coroutine/awaitable (defensive against
+                    #            closed-coroutine or non-awaitable edge cases)
+                    # ValueError: coro has already been awaited
                     coro.close()
-                    logger.debug("[TaskManager] Loop closed before _launch, coroutine dropped.")
+                    logger.debug("[TaskManager] Loop closed or invalid coro in _launch, dropped.")
                     return
                 # Keep a strong reference to the task to prevent garbage collection
                 self._background_tasks.add(task)
