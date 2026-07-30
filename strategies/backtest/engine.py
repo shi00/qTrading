@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import date
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -25,6 +25,7 @@ from strategies.backtest.portfolio import PortfolioSimulator
 
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
+    from data.data_processor import DataProcessor
     from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class VectorBacktestEngine:
         self,
         cache: CacheManager,
         config: BacktestConfig,
-        data_processor: Any = None,
+        data_processor: DataProcessor | None = None,
     ):
         self.cache = cache
         self.config = config

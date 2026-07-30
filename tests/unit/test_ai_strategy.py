@@ -7,7 +7,7 @@ import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock
 
-from data.persistence.quality_gate import QualityTier
+from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_strategy import AISelectionStrategy
 
 pytestmark = pytest.mark.unit
@@ -17,6 +17,30 @@ def _make_dp(tier=QualityTier.GOLD):
     dp = MagicMock()
     dp._quality_tier = tier
     return dp
+
+
+class TestAISelectionStrategyQualityGate:
+    """P1-001: 验证 @require_quality 装饰器替代手动 _check_tier 调用。"""
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_quality_gate_raises_when_tier_below_silver(self, mock_ch):
+        """tier=BRONZE 低于 SILVER 要求时，@require_quality 抛 QualityGateError。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        s = AISelectionStrategy()
+        context = {"data_processor": _make_dp(tier=QualityTier.BRONZE)}
+        with pytest.raises(QualityGateError, match="SILVER|too low"):
+            await s.filter(context)
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_quality_gate_passes_when_tier_meets_silver(self, mock_ch):
+        """tier=SILVER 满足要求时，@require_quality 放行（后续空 context 返回空 df）。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        s = AISelectionStrategy()
+        context = {"data_processor": _make_dp(tier=QualityTier.SILVER)}
+        result = await s.filter(context)
+        assert result.empty
 
 
 class TestAISelectionStrategyInit:
