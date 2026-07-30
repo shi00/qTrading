@@ -510,16 +510,9 @@ async def _setup_canvaskit_intercept(page) -> None:
             # 字体（CodeQL 修复：用 is_font_cdn_url 精确匹配 host 而非子串）
             if is_font_cdn_url(url):
                 filename = extract_font_filename(path)
-                # 未缓存字体：返回 200 + 空 woff2，让 CanvasKit 认为字体加载成功。
-                # CanvasKit 对 404/abort 不缓存"不可用"状态，每次 UI 重渲染都重新尝试，
-                # 阻塞渲染线程。返回 200 + 空 woff2 让引擎认为字体已加载（无字形），
-                # 不再重试，回退到下一个字体族。
-                empty_font_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / "empty.woff2"
                 if filename is None:
-                    logger.warning("[E2E Intercept] font filename None, fulfill 200 empty: %s", url)
-                    await route.fulfill(
-                        status=200, content_type="font/woff2", path=str(empty_font_path), headers=_CORS_CORP_HEADERS
-                    )
+                    logger.warning("[E2E Intercept] font filename None, abort: %s", url)
+                    await route.abort()
                     return
                 local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
                 if local_path.exists():
@@ -531,10 +524,12 @@ async def _setup_canvaskit_intercept(page) -> None:
                         headers=_CORS_CORP_HEADERS,
                     )
                     return
-                logger.warning("[E2E Intercept] font not cached, fulfill 200 empty: %s", url)
-                await route.fulfill(
-                    status=200, content_type="font/woff2", path=str(empty_font_path), headers=_CORS_CORP_HEADERS
-                )
+                # 未缓存字体（如 notosanshk/notosanskr/notocoloremoji 等回退字体族）：
+                # abort 让 CanvasKit 收到加载失败信号，回退到下一个字体族（notosanssc）。
+                # 实测：返回 200 + 无效空字体会让 CanvasKit 误认字体已加载但无字形，
+                # 破坏回退链 → 中文字符无法渲染 → E2E 找不到"平安银行"文本。
+                logger.warning("[E2E Intercept] font not cached, abort: %s", url)
+                await route.abort()
                 return
             # 其他外部请求：强制离线
             logger.info("[E2E Intercept] abort external: %s", url)
