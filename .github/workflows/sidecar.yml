@@ -77,7 +77,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -170,7 +170,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: cargo build --release
         run: cargo build --target ${{ matrix.target }} --release
@@ -279,7 +279,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Setup Python (for generate_sidecar_manifest.py)
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

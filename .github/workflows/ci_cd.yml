@@ -377,7 +377,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: e2e-tests-windows
+          key: e2e-tests-windows-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -649,7 +649,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: embedded-tests-${{ matrix.os }}
+          key: embedded-tests-${{ matrix.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -852,7 +852,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: windows-skip-revalidation-real-sidecar
+          key: windows-skip-revalidation-real-sidecar-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary (real-sidecar group only)
         if: matrix.needs_rust == 'true'
@@ -1075,7 +1075,7 @@ jobs:
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: e2e-sidecar-real-smoke
+          key: e2e-sidecar-real-smoke-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary
         shell: bash
