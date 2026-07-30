@@ -245,6 +245,39 @@ class TestGetStockNews:
             assert result == []
 
 
+class TestGetStockNewsThreadLeakMonitor:
+    """data-P1-1a: 验证 get_stock_news timeout 时记录线程泄漏监控告警。
+
+    根因：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，底层
+    ThreadPoolManager IO 线程中的 _fetch 无法被强制取消，会持续占用
+    IO 池槽位直至自然返回。多次超时累积可能耗尽 IO 线程池 max_workers。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_timeout_logs_thread_leak_warning(self, mock_tpm, caplog):
+        """timeout 触发时必须记录 'uncancelable' 关键字的警告日志。"""
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
+
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError()),
+            ][1],
+        ):
+            with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_stock_news("000001.SZ")
+
+        assert result == []
+        thread_leak_logs = [
+            r for r in caplog.records if "uncancelable" in r.getMessage() and r.levelno == logging.WARNING
+        ]
+        assert len(thread_leak_logs) == 1, f"应记录 1 条线程泄漏警告，实际: {len(thread_leak_logs)}"
+
+
 class TestGetLatestGlobalNews:
     """测试 get_latest_global_news —— 直连 CLS API + 熔断器。"""
 
@@ -1078,6 +1111,29 @@ class TestGetHotConceptsTimeout:
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher._run_with_python_string_storage")
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_timeout_logs_thread_leak_warning(self, mock_tpm, mock_run, caplog):
+        """data-P1-1a: timeout 触发时必须记录 'uncancelable' 关键字的警告日志。
+
+        根因：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，底层
+        ThreadPoolManager IO 线程中的 _fetch 无法被强制取消，会持续占用
+        IO 池槽位直至自然返回。
+        """
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
+
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts(limit=3)
+
+        assert result == []
+        thread_leak_logs = [
+            r for r in caplog.records if "uncancelable" in r.getMessage() and r.levelno == logging.WARNING
+        ]
+        assert len(thread_leak_logs) == 1, f"应记录 1 条线程泄漏警告，实际: {len(thread_leak_logs)}"
 
 
 class TestSinaConsecutiveEmptyAlert:
