@@ -42,7 +42,7 @@ pub enum Command {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct DataDirArgs {
-    /// PGDATA 目录（<app data>/postgres/17/data）
+    /// PGDATA 目录（<app data>/postgres/16/data）
     #[arg(long)]
     pub data_dir: PathBuf,
 }

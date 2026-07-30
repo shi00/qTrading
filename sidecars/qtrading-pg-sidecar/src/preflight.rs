@@ -17,7 +17,7 @@ pub enum PreflightFailure {
     #[error("disk full (磁盘空间不足)：{path} 剩余 {free_mb}MB < 500MB，请清理后重试")]
     DiskSpace { path: PathBuf, free_mb: u64 },
     #[error(
-        "目录不可写：{path}（已重试 3 次；若被杀软/索引服务锁定，请将 postgres/17/ 加入排除列表）"
+        "目录不可写：{path}（已重试 3 次；若被杀软/索引服务锁定，请将 postgres/16/ 加入排除列表）"
     )]
     NotWritable { path: PathBuf },
     #[error("数据库目录必须位于本地日志式文件系统（Windows NTFS/ReFS、macOS APFS/HFS+、Linux ext4/xfs/btrfs），当前：{kind}")]
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn cloud_sync_detection_windows_paths() {
         assert!(
-            detect_cloud_sync(Path::new(r"C:\Users\u\OneDrive\qTrading\postgres\17\data"))
+            detect_cloud_sync(Path::new(r"C:\Users\u\OneDrive\qTrading\postgres\16\data"))
                 .is_some()
         );
         assert!(detect_cloud_sync(Path::new(r"C:\Users\u\Dropbox\data")).is_some());
@@ -442,10 +442,10 @@ mod tests {
         assert!(detect_cloud_sync(Path::new("/home/u/Google Drive/pg/data")).is_some());
         assert!(detect_cloud_sync(Path::new("/home/u/坚果云/pg/data")).is_some());
         assert!(
-            detect_cloud_sync(Path::new("/home/u/.local/share/qTrading/postgres/17/data"))
+            detect_cloud_sync(Path::new("/home/u/.local/share/qTrading/postgres/16/data"))
                 .is_none()
         );
-        assert!(detect_cloud_sync(Path::new("/mnt/data/postgres/17/data")).is_none());
+        assert!(detect_cloud_sync(Path::new("/mnt/data/postgres/16/data")).is_none());
     }
 
     #[test]

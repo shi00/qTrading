@@ -1380,7 +1380,7 @@ def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
     3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
 
     embedded 模式（spec.md §3 不变量 1）：与生产代码默认值一致，启动真实 sidecar +
-    真实 PG 17。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
+    真实 PG 16。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
     供 ``seed_e2e_data`` fixture 读取后连接 sidecar DB 播种数据。
     """
     print("[E2E DIAG] flet_app fixture: start", flush=True)
@@ -1559,12 +1559,12 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
     """真实 sidecar 版本的 embedded wizard app fixture。
 
     与 ``embedded_wizard_app`` 区别：用真实 sidecar binary 替代 fake_sidecar，
-    使 app 内部 EmbeddedPostgresService 启动真实 Rust sidecar + 真实 PG 17。
+    使 app 内部 EmbeddedPostgresService 启动真实 Rust sidecar + 真实 PG 16。
 
     启动超时放宽到 300s（首次 initdb + PG binaries 下载可能较慢）。
 
     独立 data_root：pytest-xdist 多 worker 各自启动 Flet 子进程，若共用默认
-    ``embedded_pg_data_root``（platformdirs ``~/.local/share/qTrading/postgres/17``），
+    ``embedded_pg_data_root``（platformdirs ``~/.local/share/qTrading/postgres/16``），
     多个 sidecar 并发启动会因 PGDATA 锁冲突 exit=50。为每个 worker session 分配
     独立临时 data_root，避免跨 worker 冲突。
     """

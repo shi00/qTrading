@@ -93,7 +93,7 @@ class TestQuerySidecarVersion:
             "schema": "qtrading.embedded_postgres.version.v1",
             "sidecar_version": "0.1.0",
             "protocol_version": "v1",
-            "postgres_version": "17.2.0",
+            "postgres_version": "16.14.0",
         }
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(expected), stderr="")
@@ -114,7 +114,7 @@ class TestBuildManifest:
             "schema": "qtrading.embedded_postgres.version.v1",
             "sidecar_version": "0.1.0",
             "protocol_version": "v1",
-            "postgres_version": "17.2.0",
+            "postgres_version": "16.14.0",
             "postgres_binary_source": "theseus-bundled",
             "postgresql_embedded_version": "0.21.0",
             "rustc_version": "rustc 1.97.0",
@@ -137,7 +137,7 @@ class TestBuildManifest:
         assert manifest["sha256"] == "abc123"
         assert manifest["sidecar_version"] == "0.1.0"
         assert manifest["protocol_version"] == "v1"
-        assert manifest["postgres_version"] == "17.2.0"
+        assert manifest["postgres_version"] == "16.14.0"
         assert manifest["postgres_binary_source"] == "theseus-bundled"
         assert manifest["postgresql_embedded_version"] == "0.21.0"
         assert manifest["rustc_version"] == "rustc 1.97.0"
@@ -217,7 +217,7 @@ class TestMainArgparse:
         version_json = {
             "sidecar_version": "0.1.0",
             "protocol_version": "v1",
-            "postgres_version": "17.2.0",
+            "postgres_version": "16.14.0",
             "postgres_binary_source": "theseus-bundled",
             "postgresql_embedded_version": "0.21.0",
             "rustc_version": "rustc 1.97.0",

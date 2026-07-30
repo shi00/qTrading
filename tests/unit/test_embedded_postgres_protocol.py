@@ -15,7 +15,7 @@ class TestConnectionInfo:
             url="postgresql+asyncpg://qtrading:secret@127.0.0.1:55432/qtrading",
             port=55432,
             pid=12345,
-            data_dir="C:/fake/postgres/17/data",
+            data_dir="C:/fake/postgres/16/data",
         )
         assert info.url.startswith("postgresql+asyncpg://")
         assert info.port == 55432

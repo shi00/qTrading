@@ -234,7 +234,7 @@ class EmbeddedPgMaintenanceService:
 
         与 ``EmbeddedPostgresService.from_config`` 一致的默认搜索逻辑：
         - sidecar_path 为空时按平台默认搜索 ``sidecars/qtrading-pg-sidecar[.exe]``
-        - data_root 为空时用 platformdirs 默认 ``<app data>/postgres/17``
+        - data_root 为空时用 platformdirs 默认 ``<app data>/postgres/16``
         """
         config = AppConfig.model_validate(ConfigHandler.load_config())
         sidecar_path = config.embedded_pg_sidecar_path

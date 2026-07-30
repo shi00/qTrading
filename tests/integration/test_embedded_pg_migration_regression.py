@@ -2,7 +2,7 @@
 
 覆盖 spec §3.3：embedded 模式迁移回归（upgrade head / downgrade base / upgrade head / check）。
 
-验证 sidecar bundled PG 17 与 alembic 迁移脚本完全兼容。
+验证 sidecar bundled PG 16 与 alembic 迁移脚本完全兼容。
 
 依赖：
 - ``real_embedded_pg`` fixture（session-scoped 真实 PG 实例）

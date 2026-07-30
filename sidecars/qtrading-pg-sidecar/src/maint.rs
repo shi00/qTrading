@@ -1056,7 +1056,7 @@ mod tests {
     fn make_fake_cluster(dir: &Path) {
         std::fs::create_dir_all(dir.join("global")).unwrap();
         std::fs::create_dir_all(dir.join("base")).unwrap();
-        std::fs::write(dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
     }
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn doctor_on_fresh_dir_reports_not_initialized() {
         let dir = unique_tmp("doctor-fresh");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         assert!(doctor(&data_dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn doctor_on_fake_cluster_ok() {
         let dir = unique_tmp("doctor-cluster");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         assert!(doctor(&data_dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1082,7 +1082,7 @@ mod tests {
     fn doctor_on_nonempty_without_pg_version_ok_but_issues() {
         // doctor 自身永不失败（exit 0），问题经 issues 数组上报
         let dir = unique_tmp("doctor-abnormal");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::write(data_dir.join("random.txt"), "x").unwrap();
         assert!(doctor(&data_dir).is_ok());
@@ -1092,7 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn dump_rejects_uninitialized_dir() {
         let dir = unique_tmp("dump-fresh");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let args = cli::DumpArgs {
             data_dir,
             output: dir.join("out.dump"),
@@ -1106,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn dump_rejects_missing_password() {
         let dir = unique_tmp("dump-nopw");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         let args = cli::DumpArgs {
             data_dir,
@@ -1120,7 +1120,7 @@ mod tests {
     async fn restore_rejects_missing_input() {
         let dir = unique_tmp("restore-noinput");
         let args = cli::RestoreArgs {
-            data_dir: dir.join("postgres/17/data"),
+            data_dir: dir.join("postgres/16/data"),
             input: dir.join("nope.dump"),
             target_data_dir: None,
         };
@@ -1138,7 +1138,7 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("x"), "y").unwrap();
         // 密码文件需存在以越过 load_password
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
         let args = cli::RestoreArgs {
@@ -1156,7 +1156,7 @@ mod tests {
         let input = dir.join("in.dump");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&input, b"dump").unwrap();
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::RestoreArgs {
@@ -1171,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn reset_password_rejects_uninitialized_dir() {
         let dir = unique_tmp("resetpw-fresh");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let args = cli::DataDirArgs { data_dir };
         assert_eq!(
             reset_password(args).await,
@@ -1183,9 +1183,9 @@ mod tests {
     #[tokio::test]
     async fn reset_password_lock_conflict() {
         let dir = unique_tmp("resetpw-lock");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::DataDirArgs { data_dir };
@@ -1212,7 +1212,7 @@ mod tests {
         std::fs::create_dir_all(&residual1).unwrap();
         std::fs::create_dir_all(&residual2).unwrap();
         // 写入部分文件模拟半截状态
-        std::fs::write(residual1.join("PG_VERSION"), b"17\n").unwrap();
+        std::fs::write(residual1.join("PG_VERSION"), b"16\n").unwrap();
 
         let (restore_residuals, dump_partials) = scan_residuals(&data_dir);
         assert_eq!(restore_residuals.len(), 2, "should detect 2 residual dirs");
@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn load_password_returns_password_when_file_exists() {
         let dir = unique_tmp("loadpw-ok");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
         let pwd = load_password(&layout).expect("password should load");
@@ -1303,7 +1303,7 @@ mod tests {
     #[test]
     fn load_password_fails_when_file_missing() {
         let dir = unique_tmp("loadpw-miss");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         assert_eq!(load_password(&layout), Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1313,7 +1313,7 @@ mod tests {
     #[test]
     fn load_password_fails_when_file_empty() {
         let dir = unique_tmp("loadpw-empty");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         std::fs::create_dir_all(layout.password_file.parent().unwrap()).unwrap();
         std::fs::write(&layout.password_file, "  \n").unwrap();
@@ -1386,10 +1386,10 @@ mod tests {
     #[test]
     fn doctor_on_init_dir_with_missing_critical_files_ok() {
         let dir = unique_tmp("doctor-missing-critical");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         // PG_VERSION 存在但 global/pg_control 缺失
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 global/pg_control
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn doctor_detects_stale_postmaster_pid() {
         let dir = unique_tmp("doctor-stale-pid");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         // 写入一个几乎不可能存活的 PID（与 pgbin.rs 测试同款）
         std::fs::write(
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn doctor_detects_corrupted_state_file() {
         let dir = unique_tmp("doctor-corrupt-state");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         // 写入损坏的 state.json（位于 runtime/state.json）
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
@@ -1432,7 +1432,7 @@ mod tests {
     #[test]
     fn doctor_reports_kill_fallback_history() {
         let dir = unique_tmp("doctor-kill-fallback");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let st = state::RuntimeState {
@@ -1449,7 +1449,7 @@ mod tests {
     #[test]
     fn doctor_detects_pg_version_mismatch() {
         let dir = unique_tmp("doctor-version-mismatch");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(data_dir.join("global")).unwrap();
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
         // 写入一个与 bundled (17) 不匹配的主版本（16）
@@ -1464,7 +1464,7 @@ mod tests {
     #[test]
     fn doctor_with_password_file_present() {
         let dir = unique_tmp("doctor-with-pw");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
@@ -1507,7 +1507,7 @@ mod tests {
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, b"i am a file").unwrap();
         // lock_file 路径为 blocker/lock → 父目录 blocker 是文件，create_dir_all 失败
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let mut layout = Layout::from_data_dir(&data_dir, None, None, None);
         layout.lock_file = blocker.join("lock");
         match acquire_lock(&layout) {
@@ -1521,7 +1521,7 @@ mod tests {
     #[tokio::test]
     async fn dump_fails_when_output_parent_uncreateable() {
         let dir = unique_tmp("dump-output-fail");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
         let input = dir.join("in.dump");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&input, b"dump").unwrap();
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         // 故意不写 password file
         let args = cli::RestoreArgs {
             data_dir,
@@ -1559,7 +1559,7 @@ mod tests {
     #[tokio::test]
     async fn reset_password_rejects_alive_postgres() {
         let dir = unique_tmp("resetpw-alive");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         // 必须先建立完整 cluster（含 global/pg_control / base / postgresql.conf），
         // 否则 guard_data_dir 会先返回 DATA_DIR_ABNORMAL(40) 而非 LOCK_CONFLICT(50)
         make_fake_cluster(&data_dir);
@@ -1579,7 +1579,7 @@ mod tests {
     #[tokio::test]
     async fn maintenance_shell_rejects_uninitialized_dir() {
         let dir = unique_tmp("shell-fresh");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let args = cli::DataDirArgs { data_dir };
         assert_eq!(
             maintenance_shell(args).await,
@@ -1592,9 +1592,9 @@ mod tests {
     #[tokio::test]
     async fn maintenance_shell_lock_conflict() {
         let dir = unique_tmp("shell-lock");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::DataDirArgs { data_dir };
@@ -1612,11 +1612,11 @@ mod tests {
     #[test]
     fn doctor_reports_residuals_and_partials() {
         let dir = unique_tmp("doctor-residuals");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
-        // scan_residuals 扫描 data_dir.parent()（即 dir/postgres/17/），
+        // scan_residuals 扫描 data_dir.parent()（即 dir/postgres/16/），
         // data_dir 的 file_name = "data"，残留目录需命名为 "data.restore-*"
-        let parent = data_dir.parent().unwrap(); // dir/postgres/17/
+        let parent = data_dir.parent().unwrap(); // dir/postgres/16/
         let restore_residual = parent.join("data.restore-20260728T120000Z");
         std::fs::create_dir_all(&restore_residual).unwrap();
         let partial_file = parent.join("backup.dump.partial");
@@ -1633,7 +1633,7 @@ mod tests {
     fn doctor_reports_password_file_perms_on_unix() {
         use std::os::unix::fs::PermissionsExt;
         let dir = unique_tmp("doctor-pw-perms");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
@@ -1680,9 +1680,9 @@ mod tests {
     #[test]
     fn doctor_missing_pg_control_with_version() {
         let dir = unique_tmp("doctor-no-control");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 global/pg_control
@@ -1695,9 +1695,9 @@ mod tests {
     #[test]
     fn doctor_missing_base_dir_with_version() {
         let dir = unique_tmp("doctor-no-base");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(data_dir.join("global")).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 base 目录
@@ -1710,10 +1710,10 @@ mod tests {
     #[test]
     fn doctor_missing_postgresql_conf_with_version() {
         let dir = unique_tmp("doctor-no-conf");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(data_dir.join("global")).unwrap();
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
-        std::fs::write(data_dir.join("PG_VERSION"), "17\n").unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
         // 故意不创建 postgresql.conf
         assert!(doctor(&data_dir).is_ok());
@@ -1729,7 +1729,7 @@ mod tests {
     fn doctor_with_fs_unsupported_env_override() {
         std::env::set_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND", "fat32");
         let dir = unique_tmp("doctor-fat32");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
         assert!(doctor(&data_dir).is_ok());
         std::env::remove_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND");
@@ -1741,7 +1741,7 @@ mod tests {
     fn doctor_with_cloud_sync_path() {
         let dir = unique_tmp("doctor-onedrive");
         // 路径含 "onedrive" 触发 detect_cloud_sync
-        let data_dir = dir.join("onedrive/postgres/17/data");
+        let data_dir = dir.join("onedrive/postgres/16/data");
         make_fake_cluster(&data_dir);
         assert!(doctor(&data_dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1757,7 +1757,7 @@ mod tests {
     /// 返回 (layout, password, dir) — dir 用于测试后清理。
     async fn setup_pg_layout(test_name: &str) -> (Layout, String, PathBuf) {
         let dir = unique_tmp(test_name);
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let password = "TestPwd-1_2.3~xxxx".to_string();
 

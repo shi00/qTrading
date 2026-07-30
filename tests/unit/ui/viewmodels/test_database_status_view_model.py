@@ -33,7 +33,7 @@ def mock_doctor_result():
     """构造一个 running 状态的 DoctorResult mock。"""
     result = MagicMock()
     result.data_dir = "/fake/data"
-    result.pg_version = 17
+    result.pg_version = 16
     result.postgres_alive = True
     result.state_file = "running"
     return result
@@ -110,7 +110,7 @@ class TestRefreshStatus:
     async def test_refresh_status_updates_running_state(self, vm):
         await vm.refresh_status()
         assert vm.state.is_running is True
-        assert vm.state.pg_version == "17"
+        assert vm.state.pg_version == "16"
         assert vm.state.data_dir == "/fake/data"
         assert vm.state.port == 5432
         assert vm.state.log_dir == "/fake/log_dir"

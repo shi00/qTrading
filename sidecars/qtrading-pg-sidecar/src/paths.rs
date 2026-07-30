@@ -1,7 +1,7 @@
 //! 用户数据目录布局解析（pg_plan §11）。
 //!
 //! ```text
-//! <app data>/postgres/17/{data,install,runtime}
+//! <app data>/postgres/16/{data,install,runtime}
 //! <app data>/postgres-logs/sidecar.log
 //! <app data>/backups/
 //! ```
@@ -61,26 +61,26 @@ mod tests {
     #[test]
     fn derives_plan_layout_from_data_dir() {
         let layout = Layout::from_data_dir(
-            Path::new("/home/u/.local/share/qTrading/postgres/17/data"),
+            Path::new("/home/u/.local/share/qTrading/postgres/16/data"),
             None,
             None,
             None,
         );
         assert_eq!(
             layout.install_dir,
-            PathBuf::from("/home/u/.local/share/qTrading/postgres/17/install")
+            PathBuf::from("/home/u/.local/share/qTrading/postgres/16/install")
         );
         assert_eq!(
             layout.state_file,
-            PathBuf::from("/home/u/.local/share/qTrading/postgres/17/runtime/state.json")
+            PathBuf::from("/home/u/.local/share/qTrading/postgres/16/runtime/state.json")
         );
         assert_eq!(
             layout.password_file,
-            PathBuf::from("/home/u/.local/share/qTrading/postgres/17/runtime/password")
+            PathBuf::from("/home/u/.local/share/qTrading/postgres/16/runtime/password")
         );
         assert_eq!(
             layout.lock_file,
-            PathBuf::from("/home/u/.local/share/qTrading/postgres/17/runtime/lock")
+            PathBuf::from("/home/u/.local/share/qTrading/postgres/16/runtime/lock")
         );
         assert_eq!(
             layout.sidecar_log,
@@ -92,14 +92,14 @@ mod tests {
     #[cfg(windows)]
     fn derives_windows_layout() {
         let layout = Layout::from_data_dir(
-            Path::new(r"C:\Users\u\AppData\Local\qTrading\postgres\17\data"),
+            Path::new(r"C:\Users\u\AppData\Local\qTrading\postgres\16\data"),
             None,
             None,
             None,
         );
         assert_eq!(
             layout.install_dir,
-            PathBuf::from(r"C:\Users\u\AppData\Local\qTrading\postgres\17\install")
+            PathBuf::from(r"C:\Users\u\AppData\Local\qTrading\postgres\16\install")
         );
         assert_eq!(
             layout.sidecar_log,
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn explicit_overrides_win() {
         let layout = Layout::from_data_dir(
-            Path::new("/x/postgres/17/data"),
+            Path::new("/x/postgres/16/data"),
             Some(Path::new("/opt/pg")),
             Some(Path::new("/secret/pw")),
             Some(Path::new("/var/log/s.log")),

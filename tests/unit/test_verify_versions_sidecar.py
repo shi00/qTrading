@@ -68,7 +68,7 @@ def _write_sidecar_stubs(
     cargo_version: str = "0.1.0",
     pyproject_version: str = "0.1.0",
     protocol_version: str = "v1",
-    pg_version: str = "17.2.0",
+    pg_version: str = "16.14.0",
     crate_version: str = "0.21.0",
     write_cargo: bool = True,
     write_protocol: bool = True,
@@ -127,7 +127,7 @@ class TestGetPyprojectSidecarConfig:
         cfg = get_pyproject_sidecar_config()
         assert cfg["version"] == "0.1.0"
         assert cfg["protocol_version"] == "v1"
-        assert cfg["postgresql_version"] == "17.2.0"
+        assert cfg["postgresql_version"] == "16.14.0"
         assert cfg["crate_version"] == "0.21.0"
 
     def test_missing_section_raises_keyerror(self, tmp_path: Path, monkeypatch) -> None:
@@ -239,7 +239,7 @@ class TestCheckSidecarVersionConsistency:
             _PYPROJECT_SIDECAR_TEMPLATE.format(
                 pyproject_version="0.1.0",
                 protocol_version="v2",
-                pg_version="17.2.0",
+                pg_version="16.14.0",
                 crate_version="0.21.0",
             ),
             encoding="utf-8",
@@ -255,8 +255,8 @@ class TestCheckSidecarVersionConsistency:
         errors = check_sidecar_version_consistency()
         assert any("protocol.rs PROTOCOL_VERSION 'v1'" in e and "pyproject" in e for e in errors)
 
-    def test_postgresql_version_not_17_series(self, tmp_path: Path, monkeypatch) -> None:
-        _write_sidecar_stubs(tmp_path, pg_version="16.2.0")
+    def test_postgresql_version_not_supported_series(self, tmp_path: Path, monkeypatch) -> None:
+        _write_sidecar_stubs(tmp_path, pg_version="15.2.0")
         monkeypatch.setattr(
             "verify_versions.SIDECAR_CARGO_PATH", tmp_path / "sidecars" / "qtrading-pg-sidecar" / "Cargo.toml"
         )
@@ -266,7 +266,7 @@ class TestCheckSidecarVersionConsistency:
         )
         monkeypatch.setattr("verify_versions.PYPROJECT_PATH", tmp_path / "pyproject.toml")
         errors = check_sidecar_version_consistency()
-        assert any("not in 17.x series" in e for e in errors)
+        assert any("not in 16-19.x series" in e for e in errors)
 
     def test_crate_version_mismatch(self, tmp_path: Path, monkeypatch) -> None:
         # Cargo.toml crate_version=0.21.0, pyproject crate_version=0.22.0
@@ -275,7 +275,7 @@ class TestCheckSidecarVersionConsistency:
             _PYPROJECT_SIDECAR_TEMPLATE.format(
                 pyproject_version="0.1.0",
                 protocol_version="v1",
-                pg_version="17.2.0",
+                pg_version="16.14.0",
                 crate_version="0.22.0",
             ),
             encoding="utf-8",
@@ -336,7 +336,7 @@ class TestCheckSidecarVersionConsistency4Way:
         version_json = {
             "sidecar_version": "0.1.0",
             "protocol_version": "v1",
-            "postgres_version": "17.2.0",
+            "postgres_version": "16.14.0",
             "postgresql_embedded_version": "0.21.0",
         }
         with patch("verify_versions.query_sidecar_version_json", return_value=version_json):
@@ -358,7 +358,7 @@ class TestCheckSidecarVersionConsistency4Way:
         version_json = {
             "sidecar_version": "0.2.0",  # 与 Cargo.toml 0.1.0 不一致
             "protocol_version": "v1",
-            "postgres_version": "17.2.0",
+            "postgres_version": "16.14.0",
             "postgresql_embedded_version": "0.21.0",
         }
         with patch("verify_versions.query_sidecar_version_json", return_value=version_json):
