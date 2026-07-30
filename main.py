@@ -333,7 +333,7 @@ async def main(page: ft.Page):
     I18n.initialize(ConfigHandler.get_locale())
     page.locale_configuration = build_locale_configuration(I18n.current_locale())
     page.title = I18n.get("app_title")
-    icon_ico_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "windows.ico"))
+    icon_ico_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "hope.ico"))
     icon_png_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "icon.png"))
     page.window.icon = icon_ico_path if os.path.exists(icon_ico_path) else icon_png_path
 
