@@ -36,6 +36,12 @@ _SW_LEVELS: tuple[str, ...] = ("L1", "L2", "L3")
 # 取消信号，违反 2s 红线。改用 time.monotonic() 时间维度测量。
 _CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
+# data-P1-5a: checkpoint 保存间隔（行数维度）。
+# 与 holder.py _CHECKPOINT_INTERVAL 保持一致（5000 行）。当 all_dfs 累积行数
+# 达到阈值时调用 _save_members_checkpoint 持久化，避免循环中断导致全量数据丢失。
+# member_dao.save_sw_industry_member 是 upsert 语义，多次调用安全。
+_CHECKPOINT_INTERVAL = 5000
+
 
 class SwIndustrySyncStrategy(ISyncStrategy):
     """申万行业分类同步策略（全局快照，月度更新）。
@@ -191,6 +197,8 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             all_dfs: list[pd.DataFrame] = []
             total_rows = 0
             errors = 0
+            # data-P1-5a: checkpoint 跟踪，避免循环中断导致全量数据丢失
+            checkpoint_rows = 0
 
             # A1: 循环体按时间维度（每 2 秒）检查 _check_cancelled。旧实现每 200 条
             # 检查一次，每个迭代含网络 IO（约 1-2 秒），最坏需 200-400 秒才响应取消
@@ -258,11 +266,32 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     result.status = SyncStatus.PARTIAL.value
                     result.errors.append(f"member index_code={index_code}: {safe_error(e)}")
 
+                # data-P1-5a: 达到 checkpoint 阈值时持久化已累积的数据，
+                # 避免循环中断导致全量数据丢失。仅在保存成功后清空 all_dfs。
+                if total_rows - checkpoint_rows >= _CHECKPOINT_INTERVAL and all_dfs:
+                    if await self._save_members_checkpoint(all_dfs):
+                        checkpoint_rows = total_rows
+                        all_dfs = []
+
             if not all_dfs:
-                logger.warning(
-                    "[SwIndustrySync] Members | No data fetched (errors=%s/%s)",
+                if total_rows == 0:
+                    logger.warning(
+                        "[SwIndustrySync] Members | No data fetched (errors=%s/%s)",
+                        errors,
+                        total,
+                    )
+                    return
+                # data-P1-5a: 所有批次已通过 checkpoint 持久化，无需再保存
+                logger.info(
+                    "[SwIndustrySync] Members | All batches checkpointed (%s rows, errors=%s/%s)",
+                    total_rows,
                     errors,
                     total,
+                )
+                await self.context.cache.update_sync_status(
+                    "sw_industry_member",
+                    get_now().date(),
+                    total_rows,
                 )
                 return
 
@@ -347,3 +376,53 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def _save_members_checkpoint(self, all_dfs: list[pd.DataFrame]) -> bool:
+        """data-P1-5a: 保存累积的成分股数据作为 checkpoint。
+
+        若同步在循环中途中断，已 fetch 的数据会被持久化，下次无需重新获取。
+        member_dao.save_sw_industry_member 是 upsert 语义，多次调用安全。
+
+        Returns:
+            True 如果 checkpoint 保存成功，False 否则。
+            调用方 MUST NOT 在返回 False 时清空 all_dfs，否则数据会丢失。
+        """
+        try:
+            combined = pd.concat(all_dfs, ignore_index=True)
+            # 去重：同一 ts_code+index_code 可能被多个级别重复返回
+            if {"ts_code", "index_code"}.issubset(combined.columns):
+                combined = combined.drop_duplicates(subset=["ts_code", "index_code"])
+            await self.member_dao.save_sw_industry_member(combined)
+            logger.info(
+                "[SwIndustrySync] Members | Checkpoint saved: %s records",
+                len(combined),
+            )
+            return True
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[SwIndustrySync] Members | SYSTEM-LEVEL failure during checkpoint save: %s",
+                    safe_error(e),
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[SwIndustrySync] Members | Checkpoint save failed (%s): %s",
+                    error_info["code"],
+                    safe_error(e),
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[SwIndustrySync] Members | Checkpoint save failed (%s): %s",
+                    error_info["code"],
+                    safe_error(e),
+                    exc_info=True,
+                )
+            return False
