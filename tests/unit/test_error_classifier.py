@@ -634,3 +634,25 @@ class TestClassifySeverityTusharePermission:
     def test_builtin_permission_error_still_system(self):
         # 内置 PermissionError（文件系统权限）仍归为 system，不受影响
         assert classify_severity(PermissionError("access denied")) == "system"
+
+
+class TestClassifySeverityEngineDisposed:
+    """R5: EngineDisposedError 应归为 system，确保 except Exception 块中
+    `if severity == "system": raise` 能正确传播，避免僵尸引擎操作被静默吞没。
+    用动态创建同名异常类测试，避免 utils 测试反向依赖 data 层（R1 架构边界）。"""
+
+    def test_engine_disposed_error_is_system(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        e = EngineDisposedError("Engine disposed during check")
+        assert classify_severity(e) == "system"
+
+    def test_engine_disposed_error_is_system_in_db_context(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        e = EngineDisposedError("Engine disposed")
+        assert classify_severity(e, context="db") == "system"
+
+    def test_engine_disposed_error_is_system_in_all_contexts(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        for ctx in ("general", "token", "llm", "db", "chart"):
+            e = EngineDisposedError("test")
+            assert classify_severity(e, context=ctx) == "system", f"context={ctx} 应识别为 system"

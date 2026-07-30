@@ -28,6 +28,9 @@ SYSTEM_LEVEL_ERROR_TYPES = {
     "SystemExit",
     "KeyboardInterrupt",
     "RecursionError",
+    # R5: EngineDisposedError 表示引擎已释放，继续操作属于僵尸引擎操作。
+    # 用类名字符串匹配避免 utils 反向依赖 data 层（与 TushareAPIPermissionError 模式一致）。
+    "EngineDisposedError",
 }
 
 RECOVERABLE_CODES = {
