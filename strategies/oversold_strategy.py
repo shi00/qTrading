@@ -1,6 +1,5 @@
 import datetime
 import logging
-import typing
 
 import pandas as pd
 import polars as pl
@@ -292,10 +291,10 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
     async def _math_filter(
         self,
-        context: typing.Any,
-        rsi_period: typing.Any,
-        rsi_threshold: typing.Any,
-        vol_ratio_threshold: typing.Any,
+        context: StrategyContext,
+        rsi_period: int,
+        rsi_threshold: float,
+        vol_ratio_threshold: float,
     ):
         """
         Phase 1: Pure mathematical RSI filtering using Polars.
