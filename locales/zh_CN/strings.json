@@ -83,7 +83,7 @@
     "screener_run": "执行选股",
     "screener_results": "选股结果",
     "screener_export": "导出 CSV",
-    "screener_mode_run": "执行选股",
+    "screener_mode_run": "实时选股",
     "screener_mode_history": "历史档案",
     "screener_all_strategies": "全部策略",
     "ai_save_prompt": "保存修改",

@@ -52,8 +52,8 @@ class FletPage:
         # V1 M3 优先：flt-tappable 标记真正可点击的叶子按钮，:not([aria-current]) 排除
         # SegmentedButton 选中 segment 和 nav 当前激活项（两者都有 aria-current 属性）。
         # 文本合并特性导致 get_by_role("button", name=...) 会匹配到容器/nav 节点；
-        # 当 i18n 文案冲突时（如 screener_mode_run 与 run_screening 都是"执行选股"），
-        # .first 会命中最先出现的 SegmentedButton segment 而非目标 Button。
+        # 同文案冲突曾导致 .first 命中 SegmentedButton segment 而非目标 Button
+        # （已修复：screener_mode_run 与 run_screening 文案区分），保留过滤作通用防御。
         tappable_btn = self.page.locator(f'flt-semantics[role="{role}"][flt-tappable]:not([aria-current])').filter(
             has_text=name
         )

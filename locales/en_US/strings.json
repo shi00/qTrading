@@ -79,7 +79,7 @@
     "screener_run": "Run Strategy",
     "screener_results": "Results",
     "screener_export": "Export CSV",
-    "screener_mode_run": "Run Screener",
+    "screener_mode_run": "Realtime",
     "screener_mode_history": "History Archive",
     "screener_all_strategies": "All Strategies",
     "ai_save_prompt": "Save Modifications",
