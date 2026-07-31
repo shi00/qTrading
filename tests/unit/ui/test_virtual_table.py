@@ -1,13 +1,17 @@
-"""virtual_table 契约守护测试 — Phase B.3 声明式重写。
+"""virtual_table 契约守护测试 — Phase B.3 声明式重写 (方案 D: ListView 原生虚拟化)。
 
 覆盖:
-- 纯函数: next_sort_state / window_capacity / compute_window / _total_width / _ScrollCache
+- 纯函数: next_sort_state / _total_width
 - 组件契约: @ft.component 装饰标记、参数签名、返回类型注解、禁止命令式 API (源码检查)
-- 虚拟化逻辑: viewport 窗口计算 (窗口大小、缓冲、末尾 clamp、空表)
+- ListView 原生虚拟化配置契约 (build_controls_on_demand / item_extent / cache_extent / key)
 
-声明式组件组合 (@ft.component + use_state/use_effect/use_ref) 是有状态的, 在无 renderer
+声明式组件组合 (@ft.component + use_state) 是有状态的, 在无 renderer
 环境下会抛 RuntimeError, 由集成测试 (flet_test_page fixture) 覆盖, 不在本单元测试范围
 (对齐 test_resizable_splitter.py / test_task_center_view.py 模式)。
+
+变更要点 (方案 D):
+- 删除自实现虚拟化 (compute_window / window_capacity / _ScrollCache / DEFAULT_VIEWPORT_ROWS / RERENDER_THRESHOLD)
+- 改用 ListView 原生 build_controls_on_demand + item_extent + cache_extent + key
 """
 
 import inspect
@@ -17,16 +21,10 @@ import flet as ft
 import pytest
 
 from ui.components.virtual_table import (
-    BUFFER_ROWS,
-    DEFAULT_VIEWPORT_ROWS,
     MIN_TABLE_WIDTH,
-    ROW_HEIGHT,
     PaginatedTable,
-    _ScrollCache,
     _total_width,
-    compute_window,
     next_sort_state,
-    window_capacity,
 )
 
 pytestmark = pytest.mark.unit
@@ -100,83 +98,7 @@ class TestNextSortState:
         assert new_asc is True
 
 
-# --- 2. window_capacity (视口容量纯函数) ---
-
-
-class TestWindowCapacity:
-    def test_zero_viewport_uses_default(self):
-        """viewport_h=0 时用 DEFAULT_VIEWPORT_ROWS + 2*BUFFER_ROWS。"""
-        assert window_capacity(0.0) == DEFAULT_VIEWPORT_ROWS + 2 * BUFFER_ROWS
-
-    def test_negative_viewport_uses_default(self):
-        assert window_capacity(-1.0) == DEFAULT_VIEWPORT_ROWS + 2 * BUFFER_ROWS
-
-    def test_explicit_viewport_height(self):
-        """viewport_h=20*ROW_HEIGHT → 20 + 2*BUFFER_ROWS。"""
-        assert window_capacity(20 * ROW_HEIGHT) == 20 + 2 * BUFFER_ROWS
-
-    def test_taller_viewport_larger_capacity(self):
-        assert window_capacity(60 * ROW_HEIGHT) == 60 + 2 * BUFFER_ROWS
-
-    def test_smaller_viewport_smaller_capacity(self):
-        assert window_capacity(10 * ROW_HEIGHT) == 10 + 2 * BUFFER_ROWS
-
-    def test_non_exact_multiple_ceils_up(self):
-        """非整数倍向上取整。"""
-        # 20.5 行 → ceil(20.5)=21
-        assert window_capacity(20.5 * ROW_HEIGHT) == 21 + 2 * BUFFER_ROWS
-
-    def test_minimum_one_row(self):
-        """极小 viewport (小于一行) 至少返回 1 + 2*BUFFER_ROWS。"""
-        assert window_capacity(1.0) == 1 + 2 * BUFFER_ROWS
-
-
-# --- 3. compute_window (虚拟化窗口纯函数) ---
-
-
-class TestComputeWindow:
-    def test_empty_rows_returns_zero_window(self):
-        assert compute_window(0, 0, 0.0) == (0, 0)
-
-    def test_default_window_bounded_by_capacity(self):
-        """500 行, 默认视口 → 窗口大小 = 30 + 2*8 = 46。"""
-        start, end = compute_window(0, 500, 0.0)
-        assert (start, end) == (0, 46)
-        assert end - start == 46
-
-    def test_initial_window_starts_at_zero(self):
-        start, _ = compute_window(0, 500, 0.0)
-        assert start == 0
-
-    def test_scroll_shifts_window_start(self):
-        """滚动到 200 行后, 窗口 start > 0 (留 BUFFER_ROWS 缓冲)。"""
-        start, end = compute_window(200, 500, 20 * ROW_HEIGHT)
-        assert start == 200 - BUFFER_ROWS
-        assert start > 0
-        # 窗口大小不变 (受视口容量约束)
-        assert end - start == 20 + 2 * BUFFER_ROWS
-
-    def test_window_never_exceeds_row_count(self):
-        """末尾 clamp: 窗口 end 不超过 row_count。"""
-        start, end = compute_window(490, 500, 0.0)
-        assert end == 500
-        assert end - start <= 46
-        assert start == 500 - 46  # clamp 到末尾
-
-    def test_small_row_count_renders_all(self):
-        """行数 < 容量时全部渲染。"""
-        start, end = compute_window(0, 5, 0.0)
-        assert (start, end) == (0, 5)
-
-    def test_viewport_height_changes_capacity(self):
-        """taller 视口 → 更大窗口 (虚拟化适配视口尺寸)。"""
-        _, end_default = compute_window(0, 500, 0.0)
-        _, end_tall = compute_window(0, 500, 60 * ROW_HEIGHT)
-        assert end_tall > end_default
-        assert end_tall == 60 + 2 * BUFFER_ROWS
-
-
-# --- 4. _total_width ---
+# --- 2. _total_width ---
 
 
 class TestTotalWidth:
@@ -198,32 +120,7 @@ class TestTotalWidth:
         assert _total_width([]) == MIN_TABLE_WIDTH
 
 
-# --- 5. _ScrollCache (use_ref 缓存即时数值) ---
-
-
-class TestScrollCache:
-    def test_initial_state(self):
-        cache = _ScrollCache()
-        assert cache.last_first == -1
-        assert cache.last_viewport_h == 0.0
-
-    def test_last_first_assignable_to_int(self):
-        cache = _ScrollCache()
-        cache.last_first = 42
-        assert cache.last_first == 42
-
-    def test_last_viewport_h_assignable_to_float(self):
-        cache = _ScrollCache()
-        cache.last_viewport_h = 600.0
-        assert cache.last_viewport_h == 600.0
-
-    def test_has_slots_no_dict(self):
-        """_ScrollCache 用 __slots__ (轻量缓存, 无 __dict__ 开销)。"""
-        cache = _ScrollCache()
-        assert not hasattr(cache, "__dict__")
-
-
-# --- 6. 组件契约 (声明式标记 + 签名 + 禁止命令式 API) ---
+# --- 3. 组件契约 (声明式标记 + 签名 + 禁止命令式 API) ---
 
 
 class TestComponentContract:
@@ -290,10 +187,30 @@ class TestComponentContract:
         """DoD: 必须用 @ft.component 装饰。"""
         assert "@ft.component" in _raw_source()
 
-    def test_virtualization_pure_functions_present(self):
-        """DoD: 虚拟化逻辑以纯函数形式保留 (compute_window / window_capacity)。"""
-        assert "def compute_window" in _raw_source()
-        assert "def window_capacity" in _raw_source()
+    def test_no_self_implemented_virtualization(self):
+        """DoD (方案 D): 自实现虚拟化已删除 (compute_window / window_capacity / _ScrollCache)。"""
+        assert "def compute_window" not in _raw_source()
+        assert "def window_capacity" not in _raw_source()
+        assert "class _ScrollCache" not in _raw_source()
+        assert "_ScrollCache" not in _code_source()
+
+    def test_no_scroll_state_or_ref(self):
+        """DoD (方案 D): 不再使用 scroll_first/viewport_h state 与 scroll_ref。"""
+        src = _code_source()
+        assert "scroll_first" not in src
+        assert "viewport_h" not in src
+        assert "scroll_ref" not in src
+        assert "set_scroll_first" not in src
+        assert "set_viewport_h" not in src
+
+    def test_no_rerender_threshold_constant(self):
+        """DoD (方案 D): RERENDER_THRESHOLD / DEFAULT_VIEWPORT_ROWS 常量已删除。
+
+        用 _code_source() (去除 docstring) 检查, 因模块 docstring 会提及已删除的符号名作为变更说明。
+        """
+        src = _code_source()
+        assert "RERENDER_THRESHOLD" not in src
+        assert "DEFAULT_VIEWPORT_ROWS" not in src
 
     def test_no_pagerefmixin_import(self):
         """模块不得依赖 PageRefMixin (CLAUDE.md §3.3 技术债消除)。"""
@@ -303,7 +220,50 @@ class TestComponentContract:
         assert "PageRefMixin" not in dir(mod)
 
 
-# --- 7. 无 renderer 环境下组件实例化抛 RuntimeError (契约验证) ---
+# --- 4. Column(scroll=ALWAYS) 配置契约 (方案 D-v2, E2E 修复) ---
+
+
+class TestRowsColumnConfig:
+    """验证 PaginatedTable 使用 ft.Column(scroll=ALWAYS) 承载行 (方案 D-v2, E2E 修复)。
+
+    方案 D-v2 变更背景:
+    - 原方案 D 使用 ListView + build_controls_on_demand=False, 但 ListView 视口高度为 0
+      (E2E 父容器布局未稳定) 时, Flutter 仍可能跳过子控件语义节点生成, 导致
+      Playwright 无法定位行文本或点击行 (PR 373 & PR 392 均复现).
+    - 改为 ft.Column(scroll=ALWAYS): Column 不做窗口化, 所有行立即布局并生成
+      flt-semantics 语义节点; scroll=ALWAYS 保留纵向滚动能力.
+    - 单页 ≤100 行规模下, Column 全量布局性能与 ListView(非虚拟化模式) 无显著差异.
+
+    这些属性是方案 D-v2 的核心契约: 删除 ListView 视口虚拟化后, 由 Column 直接
+    承载全部行, 确保语义节点稳定生成.
+    """
+
+    def test_no_listview_used(self):
+        """DoD: 不再使用 ft.ListView (避免 ListView 视口高度为 0 时的语义节点丢失)。"""
+        assert "ft.ListView" not in _code_source()
+        assert "ListView(" not in _code_source()
+
+    def test_column_scroll_always_declared(self):
+        """DoD: 行容器 Column 显式声明 scroll=ft.ScrollMode.ALWAYS (保留纵向滚动)。"""
+        assert "scroll=ft.ScrollMode.ALWAYS" in _code_source()
+
+    def test_column_key_declared(self):
+        """DoD: Column.key 显式设置 (rows 变化时重建以重置滚动位置)。"""
+        assert "key=" in _code_source()
+
+    def test_no_stack_canvas_layer(self):
+        """DoD (方案 D-v2): 不再使用 ft.Stack 作为虚拟化画布层。"""
+        assert "ft.Stack" not in _code_source()
+        assert "Stack(" not in _code_source()
+
+    def test_no_on_scroll_handler(self):
+        """DoD (方案 D-v2): 不再挂 _on_scroll handler (无自实现虚拟化滚动节流)。"""
+        src = _code_source()
+        assert "on_scroll=" not in src
+        assert "def _on_scroll" not in src
+
+
+# --- 5. 无 renderer 环境下组件实例化抛 RuntimeError (契约验证) ---
 
 
 class TestRendererRequirement:
