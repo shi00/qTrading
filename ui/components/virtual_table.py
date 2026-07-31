@@ -224,7 +224,7 @@ def _build_row(
         不会递归合并 Row 内多层嵌套的 Text label, 导致 button 节点 text='' (E2E 修复: PR #373).
 
         对比: 表头 _build_header 的 on_click 设置在内层 Container(直接包含 Text) 上,
-        InkWell 的 MergeSemantics 合并直接子节点 Text 的 label → button 节点 text='name (名称)' ✓.
+        InkWell 的 MergeSemantics 合并直接子节点 Text 的 label -> button 节点 text='name (名称)' 成功.
 
         修复: ft.Semantics(content=inner, label=row_label, button=True, exclude_semantics=True)
         Semantics 的 label 成为 flt-semantic-node 的 text, Playwright get_by_text 可匹配 "平安银行".
