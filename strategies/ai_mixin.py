@@ -479,12 +479,19 @@ class AIStrategyMixin:
                 async with news_sem:
                     try:
                         return await NewsFetcher.get_stock_news(code, limit=5, as_of=news_as_of)
+                    except asyncio.CancelledError:
+                        # R2: 传播取消信号，配合优雅停机
+                        raise
                     except (ValueError, RuntimeError, OSError, ConnectionError):
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
+            # 异常路径：取消已创建的 news_tasks 避免孤儿任务泄漏资源
+            for _task in news_tasks.values():
+                if not _task.done():
+                    _task.cancel()
             logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", DataSanitizer.sanitize_error(e))
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
@@ -636,7 +643,7 @@ class AIStrategyMixin:
 
         for res in results:
             if isinstance(res, asyncio.CancelledError):
-                self._cancel_orphan_news_tasks(prefetched)
+                await self._cancel_orphan_news_tasks(prefetched)
                 raise res
             completed += 1
             if isinstance(res, Exception):
@@ -662,7 +669,7 @@ class AIStrategyMixin:
             len(final_rows),
         )
 
-        self._cancel_orphan_news_tasks(prefetched)
+        await self._cancel_orphan_news_tasks(prefetched)
 
         if not final_rows:
             return candidates_df  # Fallback: return math-only results
@@ -682,11 +689,19 @@ class AIStrategyMixin:
         return result_df.sort_values("ai_score", ascending=False)
 
     @staticmethod
-    def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:
-        """Cancel any orphan news fetch tasks that were never awaited."""
-        for _code, task in prefetched.news_tasks.items():
-            if not task.done():
-                task.cancel()
+    async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:
+        """Cancel any orphan news fetch tasks that were never awaited.
+
+        R2 合规：调用 ``task.cancel()`` 后必须 ``await`` 被取消的 task 实际终止，
+        避免 HTTP 连接/文件句柄等资源泄漏（被取消的 task 仍可能持有资源直到调度器回收）。
+        """
+        pending = [task for task in prefetched.news_tasks.values() if not task.done()]
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        # 等待被取消的 task 完成；CancelledError 和其他异常都被吞没（已记录日志或预期）
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def _build_result_row(self, row_data: dict, res: object) -> dict | None:
         """把单股 AI 结果组装为结果行；无效（None/异常/score==0）返回 None。"""
