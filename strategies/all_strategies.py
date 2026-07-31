@@ -62,10 +62,21 @@ class StrategyManager:
 
     @classmethod
     def _reset_singleton(cls):
-        """Reset singleton for testing only. NEVER call in production."""
+        """Reset singleton for testing only. NEVER call in production.
+
+        R7 合规：除重置 _instance/_initialized 外，同时重置模块级 _strategies_imported
+        标志，确保下次实例化时重新触发 _import_all_strategies()。
+
+        注意：_STRATEGY_REGISTRY 不在此重置。Python import 是幂等的，清空 registry 后
+        重新执行 _import_all_strategies() 不会重新触发 @register_strategy 装饰器，
+        会导致真实策略丢失。测试中如需隔离策略注册，应使用 patch("...get_strategy_registry")
+        或使用独特 key 的 mock 策略（不与真实策略 key 冲突）。
+        """
+        global _strategies_imported
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+            _strategies_imported = False
 
     @classmethod
     def _atexit_cleanup(cls):
