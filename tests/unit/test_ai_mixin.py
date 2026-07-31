@@ -647,6 +647,67 @@ class TestRunAiAnalysis:
             mock_get_news.assert_called_with("000001.SZ", limit=5, as_of=datetime.date(2024, 1, 18))
 
     @pytest.mark.asyncio
+    async def test_prefetch_failure_does_not_leak_news_tasks(self):
+        """M10-PR3: 预取阶段 get_daily_quotes 抛异常时，应正常降级不抛异常。
+
+        异常在 news_tasks 创建前抛出（dict comprehension 是原子的），
+        因此 news_tasks 保持空 dict，不会有孤儿 task 泄漏。
+        本测试验证 run_ai_analysis 能正常降级到 math-only 结果。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        # get_daily_quotes 抛异常，触发 except 块
+        dp.cache.get_daily_quotes = AsyncMock(side_effect=RuntimeError("DB connection lost"))
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            # 应正常降级，不抛异常
+            result = await s.run_ai_analysis(candidates, context)
+            # 验证返回 candidates_df（降级到 math-only）
+            assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_bg_fetch_news_propagates_cancelled_error(self):
+        """R2 合规：bg_fetch_news 应传播 CancelledError 而非吞没。
+
+        通过 mock NewsFetcher.get_stock_news 抛 CancelledError 验证：
+        bg_fetch_news 的 except asyncio.CancelledError 分支应 re-raise，
+        最终 run_ai_analysis 应传播 CancelledError。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # bg_fetch_news 传播 CancelledError → news_task cancelled →
+            # analyze_one await news_task 抛 CancelledError →
+            # gather_return_exceptions_propagating_cancel raise →
+            # run_ai_analysis 传播 CancelledError
+            with pytest.raises(asyncio.CancelledError):
+                await s.run_ai_analysis(candidates, context)
+
+    @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self):
         """Task 2.2: 未确认 AI 外发政策时，run_ai_analysis 应通过 on_progress
         显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。
@@ -689,23 +750,85 @@ class TestRunAiAnalysis:
 
 
 class TestCancelOrphanNewsTasks:
-    def test_cancels_undone_tasks(self):
-        """_cancel_orphan_news_tasks should cancel tasks that are not done"""
-        task1 = MagicMock()
-        task1.done.return_value = False
-        task2 = MagicMock()
-        task2.done.return_value = True
+    @pytest.mark.asyncio
+    async def test_cancels_undone_tasks_and_awaits_them(self):
+        """_cancel_orphan_news_tasks should cancel pending tasks and await their termination.
+
+        M10-PR3 修复点：原实现仅 ``task.cancel()`` 不 await，导致被取消的 task 仍持有
+        HTTP 连接/文件句柄等资源。本测试用真实 asyncio.Task 验证 await 行为。
+        """
+
+        # 创建真实的长时间运行 task
+        async def slow_task():
+            await asyncio.sleep(100)
+
+        task1 = asyncio.create_task(slow_task())
+        task2 = asyncio.create_task(slow_task())
+        # 让 task 调度执行，进入 sleep
+        await asyncio.sleep(0)
+        assert not task1.done()
+        assert not task2.done()
+
         prefetched = PreFetchedContext(news_tasks={"A": task1, "B": task2})
 
-        AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
 
-        task1.cancel.assert_called_once()
-        task2.cancel.assert_not_called()
+        # 验证 task 已被取消并实际终止（await 完成）
+        assert task1.done()
+        assert task1.cancelled()
+        assert task2.done()
+        assert task2.cancelled()
 
-    def test_empty_news_tasks(self):
+    @pytest.mark.asyncio
+    async def test_empty_news_tasks(self):
         """_cancel_orphan_news_tasks should handle empty news_tasks"""
         prefetched = PreFetchedContext(news_tasks={})
-        AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+        # 不应抛异常
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+
+    @pytest.mark.asyncio
+    async def test_skips_done_tasks(self):
+        """_cancel_orphan_news_tasks should not cancel done tasks, only pending ones."""
+
+        # 已完成的 task
+        async def quick_task():
+            return "done"
+
+        done_task = asyncio.create_task(quick_task())
+        await done_task  # 确保完成
+        assert done_task.done()
+        assert not done_task.cancelled()
+
+        # 待运行的 task
+        pending_task = asyncio.create_task(asyncio.sleep(100))
+        await asyncio.sleep(0)
+
+        prefetched = PreFetchedContext(news_tasks={"done": done_task, "pending": pending_task})
+
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+
+        # done_task 保持已完成状态，未被取消
+        assert done_task.done()
+        assert not done_task.cancelled()
+        # pending_task 被取消并终止
+        assert pending_task.done()
+        assert pending_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_all_tasks_done_skips_gather(self):
+        """所有 task 已完成时，不应调用 gather（快速返回路径）."""
+        # 使用 spy 验证 gather 不被调用
+        with patch("strategies.ai_mixin.asyncio.gather", new=AsyncMock()) as mock_gather:
+
+            async def quick_task():
+                return "done"
+
+            done_task = asyncio.create_task(quick_task())
+            await done_task
+
+            prefetched = PreFetchedContext(news_tasks={"A": done_task})
+            await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+            mock_gather.assert_not_called()
 
 
 class TestAIStrategyMixinAnalyzeSingle:
