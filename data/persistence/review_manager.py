@@ -10,6 +10,7 @@ import pandas as pd
 from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.sync.base import safe_error
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
@@ -102,14 +103,14 @@ class ReviewManager:
                 logger.critical(
                     "[Review] SYSTEM-LEVEL failure in index bulk pre-fetch (%s): %s",
                     error_info["code"],
-                    exc,
+                    safe_error(exc),
                     exc_info=True,
                 )
                 raise
             logger.warning(
                 "[Review] Failed to bulk pre-fetch index quotes (%s): %s",
                 error_info["code"],
-                exc,
+                safe_error(exc),
             )
 
         for _, row in pending_df.iterrows():
@@ -188,7 +189,7 @@ class ReviewManager:
                                     index_code,
                                     trade_date_str,
                                     error_info["code"],
-                                    exc,
+                                    safe_error(exc),
                                     exc_info=True,
                                 )
                                 raise
@@ -197,7 +198,7 @@ class ReviewManager:
                                 index_code,
                                 trade_date_str,
                                 error_info["code"],
-                                exc,
+                                safe_error(exc),
                             )
                             index_cache[trade_date_str] = None
 
@@ -242,7 +243,7 @@ class ReviewManager:
                     )
 
             except Exception as e:
-                logger.error("[Review] Error reviewing %s: %s", ts_code, e)
+                logger.error("[Review] Error reviewing %s: %s", ts_code, safe_error(e))
 
         if updates:
             await self._batch_update_results(updates)
@@ -288,14 +289,14 @@ class ReviewManager:
                 logger.critical(
                     "[Review] SYSTEM-LEVEL error fetching pending predictions (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
             logger.error(
                 "[Review] Error fetching pending predictions (%s): %s",
                 error_info["code"],
-                e,
+                safe_error(e),
             )
             return pd.DataFrame()
 
@@ -375,14 +376,14 @@ class ReviewManager:
                 logger.critical(
                     "[Review] SYSTEM-LEVEL error fetching learning context (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
             logger.warning(
                 "[Review] Error fetching learning context (%s): %s",
                 error_info["code"],
-                e,
+                safe_error(e),
             )
             # Non-blocking: return empty context on error
 
@@ -438,7 +439,7 @@ class ReviewManager:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
             raise
         except Exception as e:
-            logger.error("[Review] Batch update failed, falling back to individual updates: %s", e)
+            logger.error("[Review] Batch update failed, falling back to individual updates: %s", safe_error(e))
             for u in updates:
                 try:
                     await self._update_result(
@@ -455,7 +456,9 @@ class ReviewManager:
                     # R5 一致性： disposed 引擎不可恢复，fallback 路径同样必须上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
-                    logger.error("[Review] Individual update also failed for record %s: %s", u["record_id"], inner_e)
+                    logger.error(
+                        "[Review] Individual update also failed for record %s: %s", u["record_id"], safe_error(inner_e)
+                    )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _update_result(
