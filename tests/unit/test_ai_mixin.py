@@ -648,11 +648,11 @@ class TestRunAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_prefetch_failure_does_not_leak_news_tasks(self):
-        """M10-PR3: 预取阶段 get_daily_quotes 抛异常时，不应泄漏已创建的 news_tasks。
+        """M10-PR3: 预取阶段 get_daily_quotes 抛异常时，应正常降级不抛异常。
 
-        验证异常路径的取消逻辑：try 块内创建 news_tasks 后若抛异常，except 块应取消
-        已创建的 task。本测试通过 mock get_daily_quotes 在创建 news_tasks 前抛异常，
-        验证 run_ai_analysis 能正常降级且不泄漏资源。
+        异常在 news_tasks 创建前抛出（dict comprehension 是原子的），
+        因此 news_tasks 保持空 dict，不会有孤儿 task 泄漏。
+        本测试验证 run_ai_analysis 能正常降级到 math-only 结果。
         """
         s = ConcreteStrategy()
         dp = _make_mock_dp()
@@ -672,6 +672,40 @@ class TestRunAiAnalysis:
             result = await s.run_ai_analysis(candidates, context)
             # 验证返回 candidates_df（降级到 math-only）
             assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_bg_fetch_news_propagates_cancelled_error(self):
+        """R2 合规：bg_fetch_news 应传播 CancelledError 而非吞没。
+
+        通过 mock NewsFetcher.get_stock_news 抛 CancelledError 验证：
+        bg_fetch_news 的 except asyncio.CancelledError 分支应 re-raise，
+        最终 run_ai_analysis 应传播 CancelledError。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # bg_fetch_news 传播 CancelledError → news_task cancelled →
+            # analyze_one await news_task 抛 CancelledError →
+            # gather_return_exceptions_propagating_cancel raise →
+            # run_ai_analysis 传播 CancelledError
+            with pytest.raises(asyncio.CancelledError):
+                await s.run_ai_analysis(candidates, context)
 
     @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self):

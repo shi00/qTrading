@@ -488,10 +488,6 @@ class AIStrategyMixin:
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            # 异常路径：取消已创建的 news_tasks 避免孤儿任务泄漏资源
-            for _task in news_tasks.values():
-                if not _task.done():
-                    _task.cancel()
             logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", DataSanitizer.sanitize_error(e))
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
