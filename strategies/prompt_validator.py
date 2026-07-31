@@ -44,6 +44,9 @@ async def validate_prompt_declarations(
             has_data = await decl.injector()
             results[decl.name] = has_data
             decl.status = "available" if has_data else "missing"
+        # NOTE(lazy): 数据声明校验容错（单声明失败不阻塞其他声明校验）.
+        #   ceiling: 单声明 injector 抛异常，标记为 error 状态继续校验其他声明.
+        #   upgrade: ≥3 个声明连续失败时，升级为 fail-fast 提前终止校验并告警.
         except Exception as e:
             results[decl.name] = False
             decl.status = f"error: {DataSanitizer.sanitize_error(e)}"
