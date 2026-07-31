@@ -287,7 +287,7 @@ def PaginatedTable(
             is_hovered=(abs_idx == hovered_idx),
             on_hover=_make_row_hover(abs_idx),
         )
-        # NOTE(lazy): Python 端构建全量行控件 (非窗口化), 由 ListView build_controls_on_demand 按需渲染. ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 改回自实现窗口化或分页加载.
+        # NOTE(lazy): Python 端构建全量行控件, ListView build_controls_on_demand=False 强制全量渲染 (非按需). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 改回 build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)
     ]
 
@@ -295,8 +295,13 @@ def PaginatedTable(
         controls=safe_controls(all_rows),
         expand=True,
         spacing=0,
-        # 方案 D: 原生虚拟化配置 (显式声明用于契约测试)
-        build_controls_on_demand=True,  # 原生按需构建 (默认值, 显式声明便于契约测试)
+        # E2E 修复: build_controls_on_demand=False 强制构建全量行
+        # 原因: build_controls_on_demand=True 时, 若 ListView 视口高度在布局计算时
+        # 为 0 (如 E2E 环境中父容器布局尚未稳定), Flutter 引擎不构建任何子控件,
+        # 导致行 Container 不生成 flt-semantics 节点, Playwright get_by_text 找不到
+        # 行内文本 ("平安银行" E2E 失败, PR 373 & PR 392 均复现).
+        # 强制 False 后所有行立即构建, 单页 ≤100 行 (ceiling 见 NOTE(lazy)) 性能可忽略.
+        build_controls_on_demand=False,
         item_extent=ROW_HEIGHT,  # 固定行高, Flutter 跳过测量
         cache_extent=BUFFER_ROWS * ROW_HEIGHT,  # 上下各 BUFFER_ROWS 行缓冲
         key=list_view_key,  # rows 变化时重建以重置滚动位置

@@ -444,7 +444,7 @@ class TestPaginatedTableRenderStructure:
     def test_list_view_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
         """方案 D: ListView.controls 直接是行 Container 列表 (无 Stack 中间层)。
 
-        100 行规模下 Python 端构建全量行控件, Flutter 端由 build_controls_on_demand 按需渲染。
+        100 行规模下 Python 端构建全量行控件, build_controls_on_demand=False 强制全量渲染。
         """
         rows = [_make_row_data() for _ in range(5)]
         _, result = _render(_make_component(rows=rows))
@@ -476,11 +476,16 @@ class TestPaginatedTableRenderStructure:
 class TestPaginatedTableListViewConfig:
     """验证 ListView 原生虚拟化配置 (方案 D 核心契约)。"""
 
-    def test_list_view_build_controls_on_demand_true(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.build_controls_on_demand=True (原生按需构建)。"""
+    def test_list_view_build_controls_on_demand_false(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.build_controls_on_demand=False (E2E 修复: 强制全量构建行控件)。
+
+        build_controls_on_demand=True 时, 若 ListView 视口高度在布局计算时为 0,
+        Flutter 引擎不构建任何子控件, 导致行 Container 不生成 flt-semantics 节点,
+        Playwright get_by_text 找不到行内文本。
+        """
         _, result = _render(_make_component())
         list_view = result.controls[0].controls[0].controls[1]
-        assert list_view.build_controls_on_demand is True
+        assert list_view.build_controls_on_demand is False
 
     def test_list_view_item_extent_is_row_height(self, mock_i18n_state, mock_app_colors_state):
         """ListView.item_extent=ROW_HEIGHT (固定行高, Flutter 跳过测量)。"""

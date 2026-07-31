@@ -228,11 +228,15 @@ class TestListViewNativeVirtualization:
 
     这些属性是方案 D 的核心契约: 删除自实现虚拟化后, 由 Flet 引擎层按需构建行控件。
     显式声明 (而非依赖默认值) 以便契约测试可断言源码标记。
+
+    注意: build_controls_on_demand=False (E2E 修复), 强制全量构建行控件以确保
+    Playwright 能检测到行内文本 (build_controls_on_demand=True 时视口高度为 0
+    会导致行不构建, 不生成语义节点)。
     """
 
     def test_list_view_build_controls_on_demand_declared(self):
-        """DoD: ListView 显式声明 build_controls_on_demand=True (原生按需构建)。"""
-        assert "build_controls_on_demand=True" in _code_source()
+        """DoD: ListView 显式声明 build_controls_on_demand=False (E2E 修复: 强制全量构建)。"""
+        assert "build_controls_on_demand=False" in _code_source()
 
     def test_list_view_item_extent_is_row_height(self):
         """DoD: ListView.item_extent=ROW_HEIGHT (固定行高, Flutter 跳过测量)。"""
