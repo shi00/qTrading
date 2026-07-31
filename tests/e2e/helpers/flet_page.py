@@ -568,6 +568,9 @@ class FletPage:
 
         if logger.isEnabledFor(logging.DEBUG):
             self._dump_dom_debug(text)
+        else:
+            # 非 DEBUG 模式也保存截图（诊断必需）
+            self._save_screenshot_only(f"expect_text_fail_{text}")
 
         # [PITFALL_WARNING] expect_text 报错 "Timeout 1ms exceeded" 的幻觉
         # 坑点：当这个函数因为超时找不到元素而报错时，Playwright 抛出的异常会显示 "Timeout 1ms exceeded"。
@@ -628,12 +631,45 @@ class FletPage:
         except RuntimeError:
             pass
 
-    def _dump_dom_debug(self, text: str) -> None:
-        """在 DEBUG 级别输出 DOM 状态（仅 logger.isEnabledFor(DEBUG) 时调用）。"""
+    def _save_screenshot_only(self, tag: str) -> None:
+        """无条件保存截图（不依赖日志级别），用于失败诊断。"""
         import asyncio
+        from pathlib import Path
+        import time
+
+        async def _shoot():
+            try:
+                shots_dir = Path(__file__).resolve().parents[3] / "logs" / "e2e_screenshots"
+                shots_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                safe_tag = "".join(c if c.isalnum() or c in "-_" else "_" for c in tag)[:40]
+                shot_path = shots_dir / f"fail_{ts}_{safe_tag}.png"
+                await self.page.screenshot(path=str(shot_path), full_page=True)
+                logger.error("[E2E SCREENSHOT] saved to %s", shot_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[E2E SCREENSHOT] failed to save screenshot: %s", exc)
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_shoot())
+        else:
+            loop.run_until_complete(_shoot())
+
+    def _dump_dom_debug(self, text: str) -> None:
+        """在 DEBUG 级别输出当前 DOM 快照，并保存截图（仅 logger.isEnabledFor(DEBUG) 时调用）。"""
+        import asyncio
+        from pathlib import Path
+        import time
 
         async def _dump():
             try:
+                # 保存截图用于可视化诊断
+                shots_dir = Path(__file__).resolve().parents[3] / "logs" / "e2e_screenshots"
+                shots_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                shot_path = shots_dir / f"fail_{ts}_{text[:20].replace('/', '_').replace('\\\\', '_')}.png"
+                await self.page.screenshot(path=str(shot_path), full_page=True)
+                logger.error("[E2E SCREENSHOT] saved to %s", shot_path)
                 inputs = await self.page.eval_on_selector_all(
                     "input",
                     """els => els.map(e => ({

@@ -354,59 +354,69 @@ class TestBuildCells:
 
 
 class TestBuildRow:
-    """_build_row 纯函数测试：单行构建 + on_row_click 绑定。"""
+    """_build_row 纯函数测试：单行构建 + on_row_click 绑定 (方案 D: GestureDetector 包裹)."""
 
-    def test_returns_container_with_correct_geometry(self):
-        """方案 D: 行不再绝对定位 (无 left/top), 由 ListView 线性布局。"""
+    def test_returns_gesture_detector_with_inner_container(self):
+        """方案 D: 行返回 GestureDetector, 内部包裹 Container (生成 flt-tappable 语义属性)."""
         row = _build_row(5, _make_row_data(), _make_columns(), 800, None)
-        assert isinstance(row, ft.Container)
-        # 方案 D: 不再设置 left/top (由 ListView 线性布局)
-        assert row.height == ROW_HEIGHT
-        assert row.width == 800
-        assert row.ink is True
+        assert isinstance(row, ft.GestureDetector)
+        inner = row.content
+        assert isinstance(inner, ft.Container)
+        # 方案 D: 不再设置 left/top (由 Column 线性布局)
+        assert inner.height == ROW_HEIGHT
+        assert inner.width == 800
+        assert inner.ink is True
 
     def test_bgcolor_from_app_styles(self):
         row = _build_row(3, _make_row_data(), _make_columns(), 800, None)
-        assert row.bgcolor == AppStyles.data_table_row(3)
+        inner = row.content
+        assert inner.bgcolor == AppStyles.data_table_row(3)
 
     def test_content_is_row_of_cells(self):
         row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
-        assert isinstance(row.content, ft.Row)
-        assert len(row.content.controls) == 4
+        inner = row.content
+        assert isinstance(inner.content, ft.Row)
+        assert len(inner.content.controls) == 4
 
-    def test_no_on_row_click_no_click_handler(self):
+    def test_no_on_row_click_no_tap_handler(self):
+        """方案 D: on_row_click=None 时 GestureDetector.on_tap=None."""
         row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
-        assert row.on_click is None
+        assert row.on_tap is None
 
-    def test_with_on_row_click_attaches_handler(self):
+    def test_with_on_row_click_attaches_tap_handler(self):
+        """方案 D: on_row_click 非空时 GestureDetector.on_tap 为 callable."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert callable(row.on_click)
+        assert callable(row.on_tap)
 
     def test_on_row_click_handler_invokes_callback_with_row_data(self):
+        """方案 D: GestureDetector.on_tap 触发时调用 on_row_click(row_data)."""
         on_row_click = MagicMock()
         data = _make_row_data()
         row = _build_row(0, data, _make_columns(), 800, on_row_click)
-        assert callable(row.on_click)
-        row.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        assert callable(row.on_tap)
+        row.on_tap(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_tap as 0-arg, but runtime passes event]
         on_row_click.assert_called_once_with(data)
 
     def test_is_hovered_false_uses_odd_even_color(self):
         """P2-8 MAJ-2: is_hovered=False (默认) → bgcolor 为 ODD/EVEN 色 (非 TABLE_ROW_HOVER)."""
         row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
-        assert row.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
-        assert row.bgcolor != AppColors.TABLE_ROW_HOVER
+        inner = row.content
+        assert inner.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
+        assert inner.bgcolor != AppColors.TABLE_ROW_HOVER
 
     def test_is_hovered_true_uses_hover_color(self):
         """P2-8 MAJ-2: is_hovered=True → bgcolor 为 TABLE_ROW_HOVER."""
         row = _build_row(0, _make_row_data(), _make_columns(), 800, None, is_hovered=True)
-        assert row.bgcolor == AppColors.TABLE_ROW_HOVER
+        inner = row.content
+        assert inner.bgcolor == AppColors.TABLE_ROW_HOVER
 
-    def test_on_hover_attached_when_provided(self):
-        """P2-8 MAJ-2: 传入 on_hover 回调时, Container.on_hover 非空."""
+    def test_on_hover_attached_to_inner_container_when_provided(self):
+        """P2-8 MAJ-2: 传入 on_hover 回调时, 内部 Container.on_hover 非空 (GestureDetector 无 on_hover 用于 bgcolor 切换)."""
         on_hover = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, None, on_hover=on_hover)
-        assert callable(row.on_hover)
+        inner = row.content
+        assert callable(inner.on_hover)
 
 
 # ---------------------------------------------------------------------------
@@ -415,23 +425,18 @@ class TestBuildRow:
 
 
 class TestPaginatedTableRenderStructure:
-    """验证 PaginatedTable 渲染后的控件树结构 (方案 D-v2: Column 直接含行, 无 ListView 中间层)。"""
+    """验证 PaginatedTable 渲染后的控件树结构 (方案 D-v3: Column 直接含 header + rows, 无 Row 中间层)。"""
 
-    def test_renders_column_with_row(self, mock_i18n_state, mock_app_colors_state):
+    def test_renders_column_directly(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
         assert isinstance(result, ft.Column)
-        assert len(result.controls) == 1
-        outer_row = result.controls[0]
-        assert isinstance(outer_row, ft.Row)
-        assert outer_row.scroll == ft.ScrollMode.ALWAYS
-        assert outer_row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
+        assert result.expand is True
+        # 直接含 header_container + rows_clip_container, 无外层 Row 嵌套
+        assert len(result.controls) == 2
 
-    def test_inner_column_contains_header_and_rows_column(self, mock_i18n_state, mock_app_colors_state):
+    def test_column_contains_header_and_rows_clip_container(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
-        inner_column = result.controls[0].controls[0]
-        assert isinstance(inner_column, ft.Column)
-        assert len(inner_column.controls) == 2
-        header_container, rows_clip_container = inner_column.controls
+        header_container, rows_clip_container = result.controls
         assert isinstance(header_container, ft.Container)
         # 方案 D-v2: 用 ft.Container(clip_behavior=HARD_EDGE) 包裹 ft.Column(scroll=ALWAYS)
         assert isinstance(rows_clip_container, ft.Container)
@@ -441,29 +446,29 @@ class TestPaginatedTableRenderStructure:
 
     def test_header_container_has_correct_height_and_bgcolor(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
-        header = result.controls[0].controls[0].controls[0]
+        header = result.controls[0]
         assert header.height == HEADER_HEIGHT
         assert header.bgcolor == AppColors.TABLE_HEADER_BG
 
     def test_rows_column_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
-        """方案 D-v2: Column.controls 直接是行 Container 列表 (无 ListView/Stack 中间层)。
+        """方案 D-v2: Column.controls 直接是行 GestureDetector 列表 (无 ListView/Stack 中间层)。
 
         100 行规模下 Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行.
         """
         rows = [_make_row_data() for _ in range(5)]
         _, result = _render(_make_component(rows=rows))
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         assert isinstance(rows_clip_container, ft.Container)
         rows_column = rows_clip_container.content
         assert isinstance(rows_column, ft.Column)
-        # 直接是行 Container, 不经过 ListView/Stack
+        # 直接是行 GestureDetector, 不经过 ListView/Stack
         assert len(rows_column.controls) == 5
         for row in rows_column.controls:
-            assert isinstance(row, ft.Container)
+            assert isinstance(row, ft.GestureDetector)
 
     def test_empty_rows_renders_empty_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         assert isinstance(rows_clip_container, ft.Container)
         rows_column = rows_clip_container.content
         assert isinstance(rows_column, ft.Column)
@@ -471,7 +476,7 @@ class TestPaginatedTableRenderStructure:
 
     def test_header_row_contains_one_container_per_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
-        header = result.controls[0].controls[0].controls[0]
+        header = result.controls[0]
         header_row = header.content
         assert isinstance(header_row, ft.Row)
         assert len(header_row.controls) == 4
@@ -487,7 +492,7 @@ class TestPaginatedTableRowsColumnConfig:
     def test_rows_column_scroll_always(self, mock_i18n_state, mock_app_colors_state):
         """rows_column.scroll=ALWAYS (保留纵向滚动能力, 与原 ListView 行为一致)。"""
         _, result = _render(_make_component())
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         rows_column = rows_clip_container.content
         assert rows_column.scroll == ft.ScrollMode.ALWAYS
 
@@ -497,8 +502,8 @@ class TestPaginatedTableRowsColumnConfig:
         rows2 = [_make_row_data()]
         _, result1 = _render(_make_component(rows=rows1))
         _, result2 = _render(_make_component(rows=rows2))
-        rows_col1 = result1.controls[0].controls[0].controls[1].content
-        rows_col2 = result2.controls[0].controls[0].controls[1].content
+        rows_col1 = result1.controls[1].content
+        rows_col2 = result2.controls[1].content
         # key 非空且随 rows 引用变化
         assert rows_col1.key is not None
         assert rows_col2.key is not None
@@ -507,27 +512,27 @@ class TestPaginatedTableRowsColumnConfig:
     def test_rows_clip_container_clip_behavior_hard_edge(self, mock_i18n_state, mock_app_colors_state):
         """rows_clip_container.clip_behavior=HARD_EDGE (裁剪溢出行内容, 对应原 ListView clip_behavior)。"""
         _, result = _render(_make_component())
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         assert rows_clip_container.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
     def test_rows_column_expand_true(self, mock_i18n_state, mock_app_colors_state):
         """rows_column.expand=True (占满剩余可用高度, 与原 ListView 行为一致)。"""
         _, result = _render(_make_component())
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         rows_column = rows_clip_container.content
         assert rows_column.expand is True
 
     def test_rows_column_spacing_zero(self, mock_i18n_state, mock_app_colors_state):
         """rows_column.spacing=0 (行间无空隙, 与原 ListView spacing=0 一致)。"""
         _, result = _render(_make_component())
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         rows_column = rows_clip_container.content
         assert rows_column.spacing == 0
 
     def test_rows_column_no_on_scroll_handler(self, mock_i18n_state, mock_app_colors_state):
         """方案 D-v2: Column 不挂 on_scroll handler (无自实现虚拟化滚动节流)。"""
         _, result = _render(_make_component())
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         rows_column = rows_clip_container.content
         assert rows_column.on_scroll is None
 
@@ -540,7 +545,7 @@ class TestPaginatedTableRowsChangeEffect:
         component = _make_component()
         run_mount_effects(component)
         result = render_once(component)
-        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_clip_container = result.controls[1]
         rows_column = rows_clip_container.content
         assert isinstance(rows_column, ft.Column)
         assert rows_column.key is not None

@@ -208,15 +208,15 @@ def _build_row(
     on_row_click: Callable[[dict[str, Any]], None] | None,
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
-) -> ft.Container:
-    """构建单个行 Container (方案 D: 不再绝对定位, 由 ListView 线性布局)。
+) -> ft.GestureDetector:
+    """构建单个行 (方案 D: GestureDetector 包裹, 生成 flt-tappable 语义属性)。
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
         is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
     """
-    row = ft.Container(
+    inner = ft.Container(
         height=ROW_HEIGHT,
         width=total_w,
         ink=True,
@@ -224,9 +224,10 @@ def _build_row(
         content=ft.Row(safe_controls(_build_cells(row_data, columns)), spacing=0),
         on_hover=on_hover,
     )
-    if on_row_click is not None:
-        row.on_click = _make_row_click_handler(on_row_click, row_data)
-    return row
+    return ft.GestureDetector(
+        content=inner,
+        on_tap=_make_row_click_handler(on_row_click, row_data) if on_row_click is not None else None,
+    )
 
 
 @ft.component
@@ -322,20 +323,15 @@ def PaginatedTable(
         width=total_w,
         border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.TABLE_BORDER)),
     )
-    inner_column = ft.Column(
-        controls=[header_container, rows_clip_container],
-        spacing=0,
-        width=total_w,
-    )
+    # 布局修复: 移除外层 Column > Row(STRETCH, scroll=ALWAYS) > inner_column 嵌套
+    # 原因: inner_column 无 expand=True, rows_clip_container 的 expand=True 无效 (父级无固定高度),
+    # 行区域按内容高度撑开 (100*30=3000px), 超出视口被裁剪, 只有表头可见.
+    # 修复: 直接用 Column 承载 header + rows_clip_container, expand=True 让 rows_clip_container 垂直填充.
+    # 水平滚动由 rows_clip_container 内的 rows_column(scroll=ALWAYS) 不需要, 表格列宽固定.
+    # NOTE(lazy): 移除水平滚动能力. ceiling: total_w > 视口宽度时表格列会被压缩. upgrade: 单页列总宽度 > 1200px 时, 评估改用 Row(scroll=ALWAYS) 包裹并修复 inner_column expand=True.
     return ft.Column(
-        controls=[
-            ft.Row(
-                controls=[inner_column],
-                expand=True,
-                scroll=ft.ScrollMode.ALWAYS,
-                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-            )
-        ],
+        controls=[header_container, rows_clip_container],
         expand=True,
         spacing=0,
+        width=total_w,
     )
