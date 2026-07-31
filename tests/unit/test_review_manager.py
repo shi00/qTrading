@@ -1482,3 +1482,129 @@ class TestReviewManagerSystemLevelError:
         with pytest.raises(PermissionError, match="permission denied") as exc_info:
             await rm.get_learning_context()
         assert str(exc_info.value) == "permission denied"
+
+
+class TestReviewManagerR9Sanitization:
+    """R9 一致性：data/persistence/review_manager.py 的 logger 调用必须经 safe_error 脱敏。
+
+    代表性 caplog 测试：触发 run_review 内异常路径，断言日志记录不含明文敏感字段。
+    覆盖 P3-Data-R9-SafeError-Consistency-Gap 修复（11 处 logger 替换为 safe_error）。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_warning_log_sanitized(self, mock_cm, mock_tc, caplog):
+        """触发 run_review 内 warning 路径（L195-202），断言日志不含明文 token。
+
+        路径：mock_cache.get_index_daily_range 返回空 DataFrame（确定性走到 row 循环）→
+        mock_cache.get_index_daily 抛 RuntimeError 含 api_key=sk-... →
+        L196 warning logger 调用 → safe_error 脱敏。
+        """
+        import logging
+
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        # 显式 mock get_index_daily_range 返回空 DataFrame，避免 MagicMock await 抛 TypeError 副作用
+        mock_cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
+        # 异常消息含 api_key=sk-... 敏感字段，验证 safe_error 将其替换为 api_key=***
+        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("DB error: api_key=sk-test-secret-123"))
+        rm._update_result = AsyncMock()
+
+        with caplog.at_level(logging.WARNING, logger="data.persistence.review_manager"):
+            await rm.run_review()
+
+        # 必须至少有一条含 api_key 的日志（证明 safe_error 被实际调用，避免空跑）
+        assert any("api_key=***" in r.getMessage() for r in caplog.records), (
+            "safe_error 未被实际执行：未找到含 api_key=*** 的日志记录"
+        )
+        # 断言所有日志记录不含明文敏感字段
+        for record in caplog.records:
+            formatted = record.getMessage()
+            assert "sk-test-secret-123" not in formatted, f"R9 违规：日志含明文敏感字段: {formatted}"
+            if "api_key" in formatted:
+                # api_key 必须已被脱敏为 api_key=***
+                assert "api_key=***" in formatted, f"R9 违规：api_key 未脱敏: {formatted}"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_critical_log_sanitized(self, mock_cm, mock_tc, caplog):
+        """触发 run_review 内 critical 路径（L102-109），断言日志不含明文 token。
+
+        路径：mock_cache.get_index_daily_range 抛 PermissionError 含 api_key=sk-... →
+        classify_severity 返回 "system" → L103 critical logger 调用 → safe_error 脱敏 →
+        L109 raise 传播 PermissionError。
+        """
+        import logging
+
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        # PermissionError 触发 classify_severity 返回 "system" → critical 路径
+        mock_cache.get_index_daily_range = AsyncMock(
+            side_effect=PermissionError("DB permission denied: api_key=sk-test-secret-123")
+        )
+        rm._update_result = AsyncMock()
+
+        with caplog.at_level(logging.WARNING, logger="data.persistence.review_manager"):
+            with pytest.raises(PermissionError, match="permission denied"):
+                await rm.run_review()
+
+        # 必须至少有一条 critical 级别且含 api_key 的日志（证明 critical 路径 safe_error 被实际调用）
+        critical_records = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+        assert critical_records, "未触发 critical 路径：未找到 CRITICAL 级别日志记录"
+        assert any("api_key=***" in r.getMessage() for r in critical_records), (
+            "safe_error 未在 critical 路径被实际执行：未找到含 api_key=*** 的 CRITICAL 日志"
+        )
+        # 断言所有日志记录不含明文敏感字段
+        for record in caplog.records:
+            formatted = record.getMessage()
+            assert "sk-test-secret-123" not in formatted, f"R9 违规：日志含明文敏感字段: {formatted}"
+            if "api_key" in formatted:
+                assert "api_key=***" in formatted, f"R9 违规：api_key 未脱敏: {formatted}"

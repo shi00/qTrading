@@ -1617,7 +1617,7 @@ class AIService:
             return validate_ai_analysis_response(res)
 
         except AIServiceUnavailableError as ae:
-            logger.error("[AIService] Analyze | ❌ All providers failed: %s", ae)
+            logger.error("[AIService] Analyze | ❌ All providers failed: %s", DataSanitizer.sanitize_error(ae))
             logger.debug("[AIService] Analyze | All providers failed traceback:", exc_info=True)
             return {"error": "All LLM providers unavailable", "score": 0}
         except (TimeoutError, httpx.TimeoutException) as te:
@@ -1627,7 +1627,7 @@ class AIService:
         except LocalInferenceTimeoutError as lite:
             logger.error(
                 "[AIService] Analyze | ❌ Local model inference timeout: %s",
-                lite,
+                DataSanitizer.sanitize_error(lite),
                 exc_info=True,
             )
             return {"error": "Local model timeout", "score": 0}

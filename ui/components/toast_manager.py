@@ -499,7 +499,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
         ),
         padding=12,
         bgcolor=ft.Colors.SURFACE,
-        border=ft.Border.only(left=ft.BorderSide(4, data.color)),  # type: ignore[untyped]
+        border=ft.Border.only(left=ft.BorderSide(4, data.color)),  # type: ignore[untyped]  # [reason: ft.Border.only/ft.BorderSide 类型存根缺失, 返回 Any, flet 类型标注滞后]
         border_radius=8,
         shadow=ft.BoxShadow(
             spread_radius=1,
