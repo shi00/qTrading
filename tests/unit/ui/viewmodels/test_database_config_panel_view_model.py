@@ -17,6 +17,7 @@ from ui.viewmodels.database_config_panel_view_model import (
     DatabaseConfigPanelViewModel,
     DatabaseConfigState,
 )
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -839,6 +840,44 @@ class TestSaveConfigEdgeCases:
         assert result is False
         assert vm.state.status_type == "error"
         assert vm.state.is_saving is False
+
+
+# --- save_show_advanced (async, R16 IO offload) ---
+
+
+class TestSaveShowAdvanced:
+    """save_show_advanced: R16 ConfigHandler.save_config 通过 ThreadPoolManager offload."""
+
+    @pytest.mark.asyncio
+    async def test_save_show_advanced_offloads_to_thread_pool(self, mock_config_handler, mock_thread_pool):
+        """DoD: 调 ThreadPoolManager.run_async(TaskType.IO, ConfigHandler.save_config, {...})."""
+        vm = _make_vm(mock_config_handler)
+        await vm.save_show_advanced(True)
+
+        mock_thread_pool.run_async.assert_awaited_once()
+        call_args = mock_thread_pool.run_async.call_args
+        assert call_args.args[0] == TaskType.IO
+        assert call_args.args[1] is mock_config_handler.save_config
+        assert call_args.args[2] == {"db_show_advanced": True}
+        mock_config_handler.save_config.assert_called_once_with({"db_show_advanced": True})
+
+    @pytest.mark.asyncio
+    async def test_save_show_advanced_false_value(self, mock_config_handler, mock_thread_pool):
+        """DoD: value=False 时传 {"db_show_advanced": False}."""
+        vm = _make_vm(mock_config_handler)
+        await vm.save_show_advanced(False)
+
+        call_args = mock_thread_pool.run_async.call_args
+        assert call_args.args[2] == {"db_show_advanced": False}
+
+    @pytest.mark.asyncio
+    async def test_save_show_advanced_propagates_cancelled_error(self, mock_config_handler, mock_thread_pool):
+        """R2: ThreadPoolManager 抛 CancelledError 时必须传播."""
+        vm = _make_vm(mock_config_handler)
+        mock_thread_pool.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await vm.save_show_advanced(True)
 
 
 # --- R9: 异常日志脱敏 + R2: CancelledError 传播 ---

@@ -17,7 +17,6 @@
 
 import asyncio
 import datetime
-import io
 import logging
 import os
 import typing
@@ -484,12 +483,12 @@ def ScreenerView(
         is_web = page is not None and page.web
         if is_web:
             try:
-                if format_ == "csv":
-                    src_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-                else:
-                    buf = io.BytesIO()
-                    df.to_excel(buf, index=False, engine="openpyxl")
-                    src_bytes = buf.getvalue()
+                # R16: df.to_csv/to_excel 是 CPU 密集操作, 通过 VM 方法 offload 到 CPU 线程池
+                src_bytes, error = await vm.export_results_bytes(format_)
+                if src_bytes is None:
+                    if page is not None:
+                        _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                    return
                 if file_picker is None:
                     return
                 await file_picker.save_file(

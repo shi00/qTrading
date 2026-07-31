@@ -13,7 +13,6 @@
 """
 
 import logging
-import webbrowser
 from collections.abc import Callable
 
 import flet as ft
@@ -30,8 +29,6 @@ from ui.viewmodels import Message
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 
 logger = logging.getLogger(__name__)
-
-_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"
 
 # --- Status display config ---
 
@@ -105,9 +102,22 @@ def _on_tier_change_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.Con
     return _on_tier_change
 
 
-def _on_register_click(e: ft.ControlEvent) -> None:
-    """Open Tushare register page in browser."""
-    webbrowser.open_new_tab(_TUSHARE_REGISTER_URL)
+def _on_register_click_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for register link — submits vm.open_registration_url via page.run_task.
+
+    R16: ``webbrowser.open_new_tab`` 同步 IO 由 VM 通过 ThreadPoolManager offload,
+    View 仅做事件分发 (与 _on_verify_click_factory 一致模式).
+    """
+
+    def _on_register_click(e: ft.ControlEvent) -> None:
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.open_registration_url)
+        except RuntimeError:
+            logger.debug("[TushareConfigPanel] page not available for open_registration_url")
+
+    return _on_register_click
 
 
 @ft.component
@@ -207,7 +217,7 @@ def TushareConfigPanel(
     register_link = ft.TextButton(
         content=I18n.get("tushare_register"),
         icon=ft.Icons.OPEN_IN_NEW,
-        on_click=safe_on_click(_on_register_click),
+        on_click=safe_on_click(_on_register_click_factory(vm)),
         style=ft.ButtonStyle(
             color=AppColors.PRIMARY,
         ),

@@ -6,19 +6,19 @@ from typing import Any
 
 import flet as ft
 
-from data.constants import (
+from ui.components.flet_type_helpers import safe_controls
+from ui.hooks import use_viewmodel
+from ui.i18n import I18n, get_observable_state
+from ui.theme import AppColors, AppStyles
+from ui.viewmodels.health_scan_view_model import (
     HEALTH_CHECK_TABLES,
     HEALTH_DEPTH_WARNING_RATIO,
     HEALTH_REPORT_ORDER,
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
+    HealthScanViewModel,
 )
-from ui.components.flet_type_helpers import safe_controls
-from ui.hooks import use_viewmodel
-from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors, AppStyles
-from ui.viewmodels.health_scan_view_model import HealthScanViewModel
 
 logger = logging.getLogger(__name__)
 

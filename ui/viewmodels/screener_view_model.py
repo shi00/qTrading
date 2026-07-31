@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import inspect
+import io
 import logging
 import time
 import typing
@@ -780,12 +781,12 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 )
                 self._set_state(
                     loading=False,
-                    status_message=Message("screener_blocked", {"reason": str(e)}),
+                    status_message=Message("screener_blocked", {"reason": DataSanitizer.sanitize_error(e)}),
                     status_color="warning",
                     # Task 5.2: 附 "前往同步" 跳转 action 供 View 渲染按钮
                     status_action_key="screener_action_go_sync",
                 )
-                return Message("screener_blocked", {"reason": str(e)})
+                return Message("screener_blocked", {"reason": DataSanitizer.sanitize_error(e)})
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
@@ -1350,7 +1351,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except Exception as e:
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)
-            return None, str(e)
+            return None, DataSanitizer.sanitize_error(e)
 
     async def export_results_excel(self, filepath: str) -> tuple[str | None, str | None]:
         """Export current results to Excel (.xlsx) at the specified path.
@@ -1374,7 +1375,48 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except Exception as e:
             logger.error("Export Excel failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export Excel failed traceback", exc_info=True)
-            return None, str(e)
+            return None, DataSanitizer.sanitize_error(e)
+
+    async def export_results_bytes(self, format_: str) -> tuple[bytes | None, str | None]:
+        """Export current results to bytes (Web mode: browser download via ``src_bytes``).
+
+        与 ``export_results``/``export_results_excel`` 结构对齐: 通过
+        ``ThreadPoolManager.run_async(TaskType.CPU, ...)`` offload CPU 密集的序列化 (R16).
+        View (Web 模式) 调用此方法获取 bytes, 传给 ``file_picker.save_file(src_bytes=...)``.
+
+        Args:
+            format_: "csv" 或 "xlsx"
+
+        Returns:
+            (bytes, None) 成功; (None, error_msg) 失败.
+        """
+        if self._full_results is None or self._full_results.empty:
+            return None, "No data to export"
+
+        try:
+            if format_ == "csv":
+                csv_str = await ThreadPoolManager().run_async(
+                    TaskType.CPU,
+                    self._full_results.to_csv,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+                assert csv_str is not None
+                return csv_str.encode("utf-8-sig"), None
+            else:
+                buf = io.BytesIO()
+                await ThreadPoolManager().run_async(
+                    TaskType.CPU,
+                    self._full_results.to_excel,
+                    buf,
+                    index=False,
+                    engine="openpyxl",
+                )
+                return buf.getvalue(), None
+        except Exception as e:
+            logger.error("Export bytes failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export bytes failed traceback", exc_info=True)
+            return None, DataSanitizer.sanitize_error(e)
 
     # --- TaskManager Subscription ---
 

@@ -432,6 +432,107 @@ class TestScreenerViewModelExport:
                 assert call_args.args[2] == filepath
                 assert call_args.kwargs == {"index": False, "engine": "openpyxl"}
 
+    @pytest.mark.asyncio
+    async def test_export_results_excel_exception_returns_sanitized_error(self, vm):
+        """R9: to_excel 抛异常时返回 (None, sanitized_error)，不泄露 str(e).
+
+        DataSanitizer.sanitize_error 对普通 RuntimeError 字符串不替换 (只清除路径/凭证),
+        所以这里 patch sanitize_error 返回固定字符串, 验证 error 来自 sanitize_error 而非 str(e).
+        """
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_export.xlsx")
+            with (
+                patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm,
+                patch(
+                    "ui.viewmodels.screener_view_model.DataSanitizer.sanitize_error",
+                    return_value="<sanitized>",
+                ) as mock_sanitize,
+            ):
+                mock_tm.return_value.run_async = AsyncMock(side_effect=RuntimeError("boom boom"))
+                path, error = await vm.export_results_excel(filepath)
+                assert path is None
+                assert error == "<sanitized>"  # R9: 来自 sanitize_error 而非 str(e)
+                # logger.error + return 各调一次, 共 2 次
+                assert mock_sanitize.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_export_results_bytes_no_data(self, vm):
+        """DoD: _full_results 为 None 时返回 (None, 'No data to export')."""
+        vm._full_results = None
+        result, error = await vm.export_results_bytes("csv")
+        assert result is None
+        assert error == "No data to export"
+
+    @pytest.mark.asyncio
+    async def test_export_results_bytes_empty_df(self, vm):
+        """DoD: _full_results 为空 DataFrame 时返回 (None, 'No data to export')."""
+        vm._full_results = pd.DataFrame()
+        result, error = await vm.export_results_bytes("csv")
+        assert result is None
+        assert error == "No data to export"
+
+    @pytest.mark.asyncio
+    async def test_export_results_bytes_csv_success(self, vm):
+        """DoD: format_='csv' 时通过 ThreadPoolManager offload to_csv, 返回 utf-8-sig bytes."""
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+            mock_tm.return_value.run_async = AsyncMock(
+                side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
+            )
+            result, error = await vm.export_results_bytes("csv")
+            assert error is None
+            assert result is not None
+            # 解码后应包含 utf-8-sig BOM + "A"
+            decoded = result.decode("utf-8-sig")
+            assert "A" in decoded
+            # 验证 ThreadPoolManager 调用参数
+            call_args = mock_tm.return_value.run_async.call_args
+            assert call_args.args[0] == TaskType.CPU
+            assert call_args.args[1] == vm._full_results.to_csv
+            assert call_args.kwargs == {"index": False, "encoding": "utf-8-sig"}
+
+    @pytest.mark.asyncio
+    async def test_export_results_bytes_xlsx_success(self, vm):
+        """DoD: format_='xlsx' 时通过 ThreadPoolManager offload to_excel, 返回 xlsx bytes."""
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+            mock_tm.return_value.run_async = AsyncMock(
+                side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
+            )
+            result, error = await vm.export_results_bytes("xlsx")
+            assert error is None
+            assert result is not None
+            # xlsx 文件以 PK\x03\x04 开头 (ZIP magic)
+            assert result[:2] == b"PK"
+            # 验证 ThreadPoolManager 调用参数
+            call_args = mock_tm.return_value.run_async.call_args
+            assert call_args.args[0] == TaskType.CPU
+            assert call_args.args[1] == vm._full_results.to_excel
+            assert call_args.kwargs == {"index": False, "engine": "openpyxl"}
+
+    @pytest.mark.asyncio
+    async def test_export_results_bytes_exception_returns_sanitized_error(self, vm):
+        """R9: to_csv/to_excel 抛异常时返回 (None, sanitized_error)，不泄露 str(e).
+
+        DataSanitizer.sanitize_error 对普通 RuntimeError 字符串不替换 (只清除路径/凭证),
+        所以这里 patch sanitize_error 返回固定字符串, 验证 error 来自 sanitize_error 而非 str(e).
+        """
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        with (
+            patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm,
+            patch(
+                "ui.viewmodels.screener_view_model.DataSanitizer.sanitize_error",
+                return_value="<sanitized>",
+            ) as mock_sanitize,
+        ):
+            mock_tm.return_value.run_async = AsyncMock(side_effect=RuntimeError("secret boom"))
+            result, error = await vm.export_results_bytes("csv")
+            assert result is None
+            assert error == "<sanitized>"  # R9: 来自 sanitize_error 而非 str(e)
+            # logger.error + return 各调一次, 共 2 次
+            assert mock_sanitize.call_count == 2
+
 
 class TestScreenerViewModelRunStrategy:
     @pytest.mark.asyncio
