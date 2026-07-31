@@ -396,7 +396,7 @@ class TestRiskParitySizer:
     """测试风险平价分配器（简化版）"""
 
     def test_risk_parity_distribution(self):
-        """测试风险平价分配：权重与信号排名倒数成正比"""
+        """测试风险平价分配：权重与 signal_rank 成正比（rank 大=信号强=权重大）"""
         from strategies.backtest.position_sizer import RiskParitySizer
 
         signals = pl.DataFrame(
@@ -418,16 +418,16 @@ class TestRiskParitySizer:
         sizer = RiskParitySizer()
         result = sizer.compute_weights(signals, quotes, config)
 
-        inv_sum = 1 / 3 + 1 / 2 + 1 / 1
+        rank_sum = 3 + 2 + 1
         w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
         w2 = float(result.filter(pl.col("ts_code") == "000002.SZ").select("weight").item())
         w3 = float(result.filter(pl.col("ts_code") == "000003.SZ").select("weight").item())
-        assert abs(w1 - (1 / 3) / inv_sum) < 1e-6
-        assert abs(w2 - (1 / 2) / inv_sum) < 1e-6
-        assert abs(w3 - 1 / inv_sum) < 1e-6
+        assert abs(w1 - 3 / rank_sum) < 1e-6
+        assert abs(w2 - 2 / rank_sum) < 1e-6
+        assert abs(w3 - 1 / rank_sum) < 1e-6
 
-    def test_risk_parity_higher_rank_lower_weight(self):
-        """测试信号排名数值越大，权重越低（inv_rank 越小）"""
+    def test_risk_parity_higher_rank_higher_weight(self):
+        """M10-001 修复：signal_rank 数值越大（信号越强），权重越高"""
         from strategies.backtest.position_sizer import RiskParitySizer
 
         signals = pl.DataFrame(
@@ -450,9 +450,9 @@ class TestRiskParitySizer:
         result = sizer.compute_weights(signals, quotes, config)
 
         weights = result["weight"].to_list()
-        # signal_rank: [5, 3, 1] -> inv_rank: [0.2, 0.33, 1.0] -> weights: [0.13, 0.22, 0.65]
-        # 数值越大，inv_rank 越小，权重越低
-        assert weights[0] < weights[1] < weights[2]
+        # signal_rank: [5, 3, 1] -> weights: [5/9, 3/9, 1/9]
+        # M10-001 统一语义：rank 大=信号强=权重大
+        assert weights[0] > weights[1] > weights[2]
 
     def test_risk_parity_missing_signal_rank_fallback(self):
         """测试缺失 signal_rank 列时回退到等权重"""
