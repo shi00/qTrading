@@ -649,11 +649,11 @@ class FletPage:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[E2E SCREENSHOT] failed to save screenshot: %s", exc)
 
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        try:
+            loop = asyncio.get_running_loop()
             loop.create_task(_shoot())
-        else:
-            loop.run_until_complete(_shoot())
+        except RuntimeError:
+            pass  # 无运行中的 loop（理论上不可达，expect_text 调用时 loop 一定在运行）
 
     def _dump_dom_debug(self, text: str) -> None:
         """在 DEBUG 级别输出当前 DOM 快照，并保存截图（仅 logger.isEnabledFor(DEBUG) 时调用）。"""

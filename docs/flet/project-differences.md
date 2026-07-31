@@ -141,6 +141,117 @@ ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 
 见 §2.1。`factory=` 与 `vm=` 互斥。
 
+### 4.5 ListView 视口高度为 0 时不生成子控件语义节点（E2E 杀手）
+
+**背景**：PR #392 修复 `PaginatedTable` E2E 测试失败时定位的根因。
+
+**现象**：`ft.ListView(build_controls_on_demand=False)` 在视口高度为 0（E2E 环境中父容器布局尚未稳定）时，Flutter 引擎仍可能跳过子控件语义节点生成，导致 Playwright `get_by_text` 找不到行内文本、`click_row_by_text` 全策略失败。`build_controls_on_demand=True` 时更严重（视口为 0 时 Flutter 不构建任何子控件）。
+
+**根因**：Flutter ListView 的虚拟化机制依赖视口高度计算可见区域，视口高度为 0 时 `build_sliver_list` 不构建任何 child，语义节点（`flt-semantics`）也不生成。
+
+**解决方案**：单页 ≤100 行规模下，改用 `ft.Column(scroll=ft.ScrollMode.ALWAYS)` 替代 `ListView`。Column 不做窗口化，所有行立即参与布局并生成 `flt-semantics` 节点。
+
+**适用场景**：单页行数有明确上限（如 `page_size=100`、`MAX_ROWS_UI=100`）的表格。无上限场景仍需用 `ListView` 虚拟化，但必须确保父容器有稳定非零高度。
+
+**升级触发条件**：单页行数 ≥500 或构建耗时 > 50ms 时，评估切换回 `ListView(build_controls_on_demand=True)` 并解决 E2E 视口高度为 0 时的子控件不构建问题（可能需要 `page.on_resize` 等待布局稳定）。
+
+### 4.6 CanvasKit 不响应合成 DOM 事件，需用真实鼠标事件
+
+**背景**：PR #392 修复行点击未触发 `on_click` 回调时定位的根因。
+
+**现象**：Playwright `click(force=True)`（合成 DOM `el.click()` 事件）对 Flet CanvasKit 渲染的控件不可靠 — `force=True` 报告 SUCCESS 但 `on_click`/`on_tap` 回调未触发。
+
+**根因**：Flutter CanvasKit 在 canvas 层面处理 hit-testing，不响应浏览器合成的 DOM 事件；只响应真实鼠标事件（`mousedown` + `mouseup`）。
+
+**解决方案**：E2E 测试中优先使用 `page.mouse.click(cx, cy)`（真实鼠标事件）而非 `locator.click(force=True)`（合成 DOM 事件）。`cx, cy` 通过 `locator.bounding_box()` 中心坐标计算。
+
+```python
+# 推荐：真实鼠标事件触发 Flutter hit-testing
+box = await locator.bounding_box()
+cx = box["x"] + box["width"] / 2
+cy = box["y"] + box["height"] / 2
+await page.mouse.click(cx, cy)
+
+# 降级：合成 DOM 事件（对 CanvasKit 不可靠）
+await locator.click(force=True)
+```
+
+**降级策略**：真实鼠标事件失败时，再降级到 `force=True` 合成事件（对部分 Flet 控件如导航按钮仍有效）。
+
+### 4.7 Container.on_click 不生成 flt-tappable，GestureDetector.on_tap 才生成
+
+**背景**：PR #392 修复行点击语义属性缺失时定位的根因。
+
+**现象**：`ft.Container(on_click=handler, ink=True)` 生成 `flt-semantics[role="button"]` 但不生成 `flt-tappable` 语义属性，导致 Playwright 无法通过 `flt-tappable` 选择器定位可点击元素。
+
+**根因**：Flet 的 `flt-tappable` 语义属性由 `GestureDetector` 生成，`Container.on_click` 内部虽用 `InkWell` 但不暴露 `flt-tappable`。
+
+**解决方案**：需要 E2E 点击的行容器用 `ft.GestureDetector(content=Container, on_tap=handler)` 包裹，而非直接用 `Container(on_click=handler)`。
+
+```python
+# 推荐：GestureDetector 生成 flt-tappable
+inner = ft.Container(
+    height=ROW_HEIGHT,
+    ink=True,
+    bgcolor=...,
+    content=ft.Row(cells, spacing=0),
+    on_hover=on_hover,  # hover 仍挂 Container
+)
+return ft.GestureDetector(
+    content=inner,
+    on_tap=on_row_click_handler if on_row_click is not None else None,
+)
+
+# 不推荐：Container.on_click 不生成 flt-tappable
+return ft.Container(
+    on_click=on_row_click_handler,
+    ink=True,
+    ...
+)
+```
+
+**E2E 点击策略优先级**（见 `tests/e2e/pages.py:click_row_by_text`）：
+1. `flt-semantics[flt-tappable]` bounding_box 中心 → `page.mouse.click`（真实鼠标事件）
+2. `flt-semantics[role="button"]` bounding_box 中心 → `page.mouse.click`
+3. 文本 bounding_box 中心 → `page.mouse.click`
+4. `flt-semantics[flt-tappable]` → `click(force=True)`（合成事件降级）
+5. `flt-semantics[role="button"]` → `click(force=True)`
+6. 文本 → `click(force=True)`
+
+### 4.8 Flet 布局嵌套中 expand=True 的传递性陷阱
+
+**背景**：PR #392 修复表格区域被压扁、只有表头可见时定位的根因。
+
+**现象**：`Column > Row(STRETCH) > inner_column(无 expand=True) > rows_clip_container(expand=True)` 嵌套中，`rows_clip_container.expand=True` 无效（父级 `inner_column` 无固定高度），行区域按内容高度撑开（100*30=3000px），超出视口被裁剪，只有表头可见。
+
+**根因**：Flet 的 `expand=True` 只在直接父级有约束高度时生效。若父级是 `Column`/`Row` 但无 `expand=True`，父级本身按内容高度撑开，子级的 `expand=True` 无意义。
+
+**解决方案**：扁平化布局，减少嵌套层级。直接用 `Column(controls=[header, rows_clip_container], expand=True)`，让 `rows_clip_container.expand=True` 在有 `expand=True` 的父级 `Column` 中生效。
+
+```python
+# 推荐：扁平化布局，expand 链路清晰
+return ft.Column(
+    controls=[header_container, rows_clip_container],
+    expand=True,  # 父级 expand=True 占满可用高度
+    spacing=0,
+    width=total_w,
+)
+
+# 不推荐：嵌套过深，expand 传递断裂
+return ft.Column(
+    controls=[
+        ft.Row(
+            controls=[inner_column],  # inner_column 无 expand=True
+            expand=True,
+            scroll=ft.ScrollMode.ALWAYS,
+        )
+    ],
+    expand=True,
+)
+```
+
+**调试技巧**：E2E 失败时截图若显示表格只有表头无数据行，优先检查 `expand=True` 链路是否断裂。
+
 ---
 
 ## 5. R16 UI 阻塞红线

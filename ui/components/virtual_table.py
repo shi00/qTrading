@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 ROW_HEIGHT = 30
 HEADER_HEIGHT = 35
-BUFFER_ROWS = 8
 MIN_TABLE_WIDTH = 800
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
@@ -266,8 +265,8 @@ def PaginatedTable(
     # P2-8 MAJ-2 (review fix): hover 触发链路落地 — hovered_idx=-1 表示无 hover
     hovered_idx, set_hovered_idx = ft.use_state(-1)
 
-    # rows 变化时通过 key 重建 ListView 重置滚动位置 (对齐原命令式数据推送行为)
-    # scroll_to 对 ListView "ineffective" (flet-mcp 验证), 故用 key 重建
+    # rows 变化时通过 key 重建 Column 重置滚动位置 (对齐原命令式数据推送行为)
+    # scroll_to 对 Column "ineffective" (flet-mcp 验证), 故用 key 重建
     rows_token = id(rows) if rows is not None else 0
     list_view_key = f"vt_{rows_token}"
 
