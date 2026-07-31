@@ -398,7 +398,7 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: Message | str | None = None) -> bool:  # type: ignore[assignment]
+    def update_progress(self, task_id: str, progress: float, description: Message | str | None = None) -> bool:
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
         Throttled to avoid flooding subscribers with high-frequency updates.
 
