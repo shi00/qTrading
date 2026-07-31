@@ -330,6 +330,67 @@ class TestMarketCapWeightSizer:
         assert "signal_rank" in result.columns
         assert "total_mv" not in result.columns
 
+    def test_market_cap_negative_mv_filtered(self):
+        """测试负市值记录被过滤，不参与权重计算"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [3, 2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "total_mv": [100, -50, 300],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # 负市值被过滤，只剩 2 条记录
+        assert len(result) == 2
+        assert "000002.SZ" not in result["ts_code"].to_list()
+        # 权重应基于正市值总和 100+300=400
+        w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
+        w3 = float(result.filter(pl.col("ts_code") == "000003.SZ").select("weight").item())
+        assert abs(w1 - 100 / 400) < 1e-6
+        assert abs(w3 - 300 / 400) < 1e-6
+
+    def test_market_cap_all_negative_mv_fallback(self):
+        """测试全部市值为负时回退到等权重"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "total_mv": [-100, -200],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # 全部过滤后为空，fallback 到等权重
+        weights = result["weight"].to_list()
+        assert all(abs(w - 0.5) < 1e-6 for w in weights)
+
 
 class TestRiskParitySizer:
     """测试风险平价分配器（简化版）"""
@@ -418,8 +479,8 @@ class TestRiskParitySizer:
         weights = result["weight"].to_list()
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
 
-    def test_risk_parity_zero_signal_rank_fallback(self):
-        """测试 signal_rank 包含 0 时 inv_rank_sum 为 inf 的回退"""
+    def test_risk_parity_zero_signal_rank_filtered(self):
+        """测试 signal_rank=0 的记录被过滤，只使用有效记录计算权重"""
         from strategies.backtest.position_sizer import RiskParitySizer
 
         signals = pl.DataFrame(
@@ -441,8 +502,64 @@ class TestRiskParitySizer:
         sizer = RiskParitySizer()
         result = sizer.compute_weights(signals, quotes, config)
 
+        # signal_rank=0 被过滤，只剩 1 条记录，权重为 1.0
+        assert len(result) == 1
+        assert result["ts_code"][0] == "000002.SZ"
+        assert abs(float(result["weight"][0]) - 1.0) < 1e-6
+
+    def test_risk_parity_all_invalid_ranks_fallback(self):
+        """测试全部 signal_rank <= 0 时回退到等权重"""
+        from strategies.backtest.position_sizer import RiskParitySizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [0, -1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = RiskParitySizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # 全部过滤后为空，fallback 到等权重
+        weights = result["weight"].to_list()
+        assert all(abs(w - 0.5) < 1e-6 for w in weights)
+
+    def test_risk_parity_null_signal_rank_filtered(self):
+        """测试 signal_rank=null 的记录被过滤"""
+        from strategies.backtest.position_sizer import RiskParitySizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [None, 2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = RiskParitySizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # null 被过滤，只剩 2 条记录
         assert len(result) == 2
-        assert "weight" in result.columns
+        assert "000001.SZ" not in result["ts_code"].to_list()
 
 
 class TestMaxSingleWeightConstraint:
@@ -561,6 +678,58 @@ class TestSlippageWithAvgDailyVolume:
         # 关键断言：每个非 null 行的 avg_daily_volume 不等于当前 bar 的 vol（无前视偏差）
         for i in range(5, 10):
             assert avg[i] != vol[i]
+
+    def test_avg_daily_volume_null_vol_filled(self):
+        """测试 vol 列 null 值被填 0 后计算，不污染窗口均值"""
+        from strategies.backtest.engine import VectorBacktestEngine
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 10,
+                "trade_date": [date(2024, 1, i) for i in range(1, 11)],
+                "open": [10.0] * 10,
+                "high": [10.5] * 10,
+                "low": [9.5] * 10,
+                "close": [10.2] * 10,
+                "vol": [100.0, None, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0],
+                "adj_factor": [1.0] * 10,
+            }
+        )
+
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        result = engine._compute_avg_daily_volume(quotes_df)
+
+        avg = result["avg_daily_volume"].to_list()
+        # 前 5 行为 null（min_samples=5 不足）
+        assert avg[:5] == [None] * 5
+        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0
+        assert avg[5] == 200.0
+
+    def test_avg_daily_volume_nan_vol_filled(self):
+        """测试 vol 列 NaN 值被填 0 后计算，不污染窗口均值"""
+        from strategies.backtest.engine import VectorBacktestEngine
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 10,
+                "trade_date": [date(2024, 1, i) for i in range(1, 11)],
+                "open": [10.0] * 10,
+                "high": [10.5] * 10,
+                "low": [9.5] * 10,
+                "close": [10.2] * 10,
+                "vol": [100.0, float("nan"), 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0],
+                "adj_factor": [1.0] * 10,
+            }
+        )
+
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        result = engine._compute_avg_daily_volume(quotes_df)
+
+        avg = result["avg_daily_volume"].to_list()
+        # 前 5 行为 null（min_samples=5 不足）
+        assert avg[:5] == [None] * 5
+        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0（NaN 被填 0）
+        assert avg[5] == 200.0
 
     def test_slippage_uses_avg_daily_volume(self):
         """测试滑点计算使用平均成交量"""

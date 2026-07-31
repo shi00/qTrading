@@ -406,12 +406,20 @@ class VectorBacktestEngine:
         - slippage_bps * (1 + participation * factor)
 
         使用 rolling_mean 窗口计算，min_samples=5 允许部分窗口。
+        vol 列的 null/NaN（数据缺失）填 0 后再计算，避免污染窗口均值。
         """
         if "vol" not in quotes_df.columns:
             return quotes_df
 
         avg_vol_expr = (
-            pl.col("vol").shift(1).rolling_mean(window_size=20, min_samples=5).over("ts_code").alias("avg_daily_volume")
+            pl.col("vol")
+            .cast(pl.Float64)
+            .fill_null(0.0)
+            .fill_nan(0.0)
+            .shift(1)
+            .rolling_mean(window_size=20, min_samples=5)
+            .over("ts_code")
+            .alias("avg_daily_volume")
         )
 
         return quotes_df.with_columns(avg_vol_expr)
