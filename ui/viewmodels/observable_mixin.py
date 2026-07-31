@@ -89,7 +89,7 @@ class ObservableViewModelMixin[T]:
         return self._state
 
     # ==================================================================
-    # 🔒 终态骨架方法：子类禁止 override（跨线程修复不可被绕过）
+    # 终态骨架方法：子类禁止 override（跨线程修复不可被绕过）
     # ==================================================================
 
     def subscribe(self, callback: Callable[[T], None]) -> Callable[[], None]:
@@ -233,7 +233,7 @@ class ObservableViewModelMixin[T]:
         self._on_after_dispose(subs_snapshot, pending_snapshot, captured_loop)
 
     # ==================================================================
-    # 🧩 扩展点：子类按需 override
+    # 扩展点：子类按需 override
     # ==================================================================
 
     def _invoke_single_subscriber(self, cb: Callable[[T], None], snap: T) -> None:

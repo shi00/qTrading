@@ -26,6 +26,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from data.constants import (
+    HEALTH_CHECK_TABLES as HEALTH_CHECK_TABLES,  # re-export for HealthReportDialog (过渡期, 完全 MVVM 改造见技术债)
+    HEALTH_DEPTH_WARNING_RATIO as HEALTH_DEPTH_WARNING_RATIO,
+    HEALTH_REPORT_ORDER as HEALTH_REPORT_ORDER,
+    HEALTH_THRESHOLD_BREADTH as HEALTH_THRESHOLD_BREADTH,
+    HEALTH_THRESHOLD_FINANCIAL_COVERAGE as HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
+    HEALTH_THRESHOLD_FINANCIAL_EXCELLENT as HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
+)
 from data.data_processor import DataProcessor
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 

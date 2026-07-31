@@ -17,6 +17,7 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 """
 
 import logging
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -31,6 +32,8 @@ from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
+
+_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,14 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         """触发 on_save 回调（同步，由消费方处理实际异步保存）。"""
         if self._on_save:
             self._on_save(self.get_current_config())
+
+    async def open_registration_url(self) -> None:
+        """在系统默认浏览器打开 Tushare 注册页（R16: webbrowser 同步 IO offload）。
+
+        Raises:
+            asyncio.CancelledError: 取消时显式传播 (R2).
+        """
+        await ThreadPoolManager().run_async(TaskType.IO, webbrowser.open_new_tab, _TUSHARE_REGISTER_URL)
 
     # --- Status helpers ---
 

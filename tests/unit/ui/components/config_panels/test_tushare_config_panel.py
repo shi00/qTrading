@@ -2,8 +2,8 @@
 
 覆盖:
 1. 模块级纯函数: _build_tier_options / TUSHARE_POINT_TIERS 常量 / _render_message
-2. 工厂函数: _on_verify_click_factory / _on_save_click_factory / _on_tier_change_factory
-3. _on_register_click: webbrowser.open_new_tab mock
+2. 工厂函数: _on_verify_click_factory / _on_save_click_factory / _on_tier_change_factory / _on_register_click_factory
+3. _on_register_click_factory: page.run_task(vm.open_registration_url) 调度
 4. 组件运行时: compact 布局 / show_save_button / show_register_link / is_verifying /
    status_icon 隐藏 / token_input password
 5. R9 守卫: token 不打印
@@ -34,7 +34,7 @@ from ui.components.config_panels import tushare_config_panel as panel_module
 from ui.components.config_panels.tushare_config_panel import (
     TushareConfigPanel,
     _build_tier_options,
-    _on_register_click,
+    _on_register_click_factory,
     _on_save_click_factory,
     _on_tier_change_factory,
     _on_verify_click_factory,
@@ -142,11 +142,12 @@ class TestTushareConfigPanelContractExtension:
         assert "RuntimeError" in source
 
     def test_factory_functions_defined(self) -> None:
-        """DoD: 3 个 factory 函数必须存在。"""
+        """DoD: 4 个 factory 函数必须存在。"""
         source = _read_source()
         assert "def _on_verify_click_factory(" in source
         assert "def _on_save_click_factory(" in source
         assert "def _on_tier_change_factory(" in source
+        assert "def _on_register_click_factory(" in source
 
     def test_panel_signature_accepts_vm_and_flags(self) -> None:
         """DoD: TushareConfigPanel 签名应接收 vm + show_save_button + compact + show_register_link。"""
@@ -408,22 +409,40 @@ class TestOnTierChangeFactory:
 
 
 # ============================================================================
-# _on_register_click: webbrowser.open_new_tab mock
+# 工厂函数: _on_register_click_factory (R16: webbrowser.open_new_tab 由 VM 通过 ThreadPoolManager offload)
 # ============================================================================
 
 
-class TestOnRegisterClick:
-    """_on_register_click: 打开 Tushare 注册页面。"""
+class TestOnRegisterClickFactory:
+    """_on_register_click_factory: page 可用/None/RuntimeError 守卫 + 调度 vm.open_registration_url。"""
 
-    def test_opens_browser_with_register_url(self) -> None:
-        """DoD: 调 webbrowser.open_new_tab(_TUSHARE_REGISTER_URL)。"""
-        with patch.object(panel_module, "webbrowser") as mock_webbrowser:
-            _invoke(_on_register_click, _make_event())
-        mock_webbrowser.open_new_tab.assert_called_once_with(panel_module._TUSHARE_REGISTER_URL)
+    def test_page_available_calls_run_task(self) -> None:
+        """page 可用 → page.run_task(vm.open_registration_url)。"""
+        vm = MagicMock(spec=TushareConfigPanelViewModel)
+        handler = _on_register_click_factory(vm)
+        mock_page = MagicMock()
+        with patch("ui.components.config_panels.tushare_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _invoke(handler, _make_event())
+        mock_page.run_task.assert_called_once_with(vm.open_registration_url)
 
-    def test_register_url_is_tushare_pro(self) -> None:
-        """DoD: _TUSHARE_REGISTER_URL 是 tushare.pro 注册页。"""
-        assert "tushare.pro/register" in panel_module._TUSHARE_REGISTER_URL
+    def test_page_none_skips_run_task(self) -> None:
+        """page=None → 不调 run_task, 不抛异常。"""
+        vm = MagicMock(spec=TushareConfigPanelViewModel)
+        handler = _on_register_click_factory(vm)
+        mock_page = MagicMock()
+        with patch("ui.components.config_panels.tushare_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: None)
+            _invoke(handler, _make_event())
+        mock_page.run_task.assert_not_called()
+
+    def test_runtime_error_swallowed(self) -> None:
+        """ft.context.page 抛 RuntimeError → 静默处理, 不抛异常。"""
+        vm = MagicMock(spec=TushareConfigPanelViewModel)
+        handler = _on_register_click_factory(vm)
+        with patch("ui.components.config_panels.tushare_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            _invoke(handler, _make_event())  # 不应抛异常
 
 
 # ============================================================================
@@ -445,6 +464,7 @@ class _FakeTushareConfigPanelVM:
         self.update_tier = MagicMock()
         self.save = MagicMock()
         self.update_token = MagicMock()
+        self.open_registration_url = MagicMock()
 
     @property
     def state(self) -> TushareConfigState:
@@ -808,18 +828,22 @@ class TestTushareConfigPanelEventHandlers:
         _invoke(token_input.on_change, _make_event("new-token-xxx"))
         vm.update_token.assert_called_once_with("new-token-xxx")
 
-    def test_register_click_calls_webbrowser_open_new_tab(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """register link on_click → webbrowser.open_new_tab(url)。"""
-        _, _, result, _ = _render_panel(compact=True, show_register_link=True)
+    def test_register_click_calls_run_task_with_open_registration_url(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """register link on_click → page.run_task(vm.open_registration_url) (R16: webbrowser offload)."""
+        vm, _, result, _ = _render_panel(compact=True, show_register_link=True)
         ctrls = _walk_controls(result)
         register_links = [
             c for c in ctrls if isinstance(c, ft.TextButton) and getattr(c, "icon", None) == ft.Icons.OPEN_IN_NEW
         ]
         assert len(register_links) == 1
 
-        with patch.object(panel_module, "webbrowser") as mock_webbrowser:
+        mock_page = MagicMock()
+        with patch("ui.components.config_panels.tushare_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
             _invoke(register_links[0].on_click, _make_event())
-        mock_webbrowser.open_new_tab.assert_called_once_with(panel_module._TUSHARE_REGISTER_URL)
+        mock_page.run_task.assert_called_once_with(vm.open_registration_url)
 
 
 # ============================================================================

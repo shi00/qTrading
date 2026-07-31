@@ -12,14 +12,21 @@
 通过 mock 调用次数验证渲染分支。
 """
 
+import asyncio
+import inspect
 from collections.abc import Callable
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 
-from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -33,7 +40,7 @@ class _FakeDatabaseVM:
         self.reload_config = MagicMock()
         self.dispose_called = False
         self.load_show_advanced = MagicMock(return_value=False)
-        self.save_show_advanced = MagicMock()
+        self.save_show_advanced = AsyncMock()
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -147,10 +154,8 @@ class TestDatabaseTab3Panel:
         assert call_kwargs.get("show_save_button") is True
 
     def test_toggle_persists_to_appconfig(self, mock_i18n_state: Any, mock_app_colors_state: Any) -> None:
-        """DoD 4: 切换开关调用 vm.save_show_advanced 持久化 db_show_advanced。"""
+        """DoD 4: 切换开关通过 page.run_task 调度 async handler 持久化 db_show_advanced (R16)."""
         from ui.views.settings_tabs import database_tab as mod
-
-        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 
         fake_vm = _FakeDatabaseVM()
         fake_vm.load_show_advanced.return_value = False
@@ -163,7 +168,10 @@ class TestDatabaseTab3Panel:
             patch.object(mod, "DatabaseConfigPanelViewModel", return_value=fake_vm),
         ):
             component = make_component(mod.DatabaseTab, show_snack_callback=MagicMock())
-            run_mount_effects(component)
+            # 创建带 run_task 的 fake page (R16: sync wrapper + page.run_task 模式)
+            page = FakePage()
+            page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+            run_mount_effects(component, page=page)
             result = render_once(component)
 
             # 在 mock 上下文内查找 advanced_switch 并触发 on_change
@@ -172,12 +180,21 @@ class TestDatabaseTab3Panel:
             advanced_switch = switches[0]
             assert advanced_switch.on_change is not None, "Switch 必须有 on_change 处理器"
 
-            # 构造 ControlEvent mock
+            # 构造 ControlEvent mock 并触发 sync wrapper
             e = MagicMock()
             e.control.value = True
-            # on_change 类型为 ControlEventHandler[Switch] | None，
-            # 实际是 _on_advanced_toggle(e: ControlEvent) -> None，接受 1 个参数
+            page.run_task.reset_mock()
             cast(Callable[[Any], Any], advanced_switch.on_change)(e)
+
+            # 验证 page.run_task 被调用, handler 为 async 函数, 参数为 (True,)
+            assert page.run_task.call_args is not None, "page.run_task 应被调用 (R16)"
+            handler = page.run_task.call_args.args[0]
+            assert inspect.iscoroutinefunction(handler), "handler 应为 async 函数"
+            handler_args = page.run_task.call_args.args[1:]
+            assert handler_args == (True,), f"run_task 参数应为 (True,), 实际 {handler_args}"
+
+            # 驱动 async handler 执行, 验证 vm.save_show_advanced 被调用
+            asyncio.run(handler(*handler_args))
 
         # 验证 save_show_advanced 被调用, 参数为 True
         fake_vm.save_show_advanced.assert_called_once_with(True)

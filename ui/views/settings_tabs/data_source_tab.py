@@ -28,7 +28,6 @@ from collections.abc import Callable
 
 import flet as ft
 
-from services.task_manager import TaskStatus
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.flet_type_helpers import (
     get_control_value,
@@ -49,7 +48,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
+from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow, TaskStatus
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger

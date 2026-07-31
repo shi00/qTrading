@@ -20,6 +20,7 @@ from typing import Any
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
                         "type": "set_tier_failed",
                         "reason": "io",
                         "tier": old_tier,
-                        "error": str(exc),
+                        "error": DataSanitizer.sanitize_error(exc),
                     }
                 )
 

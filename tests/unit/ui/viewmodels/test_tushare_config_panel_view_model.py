@@ -222,6 +222,27 @@ class TestSubscribeNotify:
 # --- update_tier (async) ---
 
 
+class TestOpenRegistrationUrl:
+    """open_registration_url: R16 webbrowser.open_new_tab 通过 ThreadPoolManager offload."""
+
+    @pytest.mark.asyncio
+    async def test_open_registration_url_offloads_to_thread_pool(self, mock_config_handler, mock_thread_pool):
+        """DoD: 调 ThreadPoolManager.run_async(TaskType.IO, webbrowser.open_new_tab, url)."""
+        with patch("ui.viewmodels.tushare_config_panel_view_model.webbrowser") as mock_webbrowser:
+            vm = _make_vm(mock_config_handler)
+            await vm.open_registration_url()
+
+        mock_thread_pool.run_async.assert_awaited_once()
+        call_args = mock_thread_pool.run_async.call_args
+        assert call_args.args[0].name == "IO"  # TaskType.IO
+        assert call_args.args[1] is mock_webbrowser.open_new_tab
+        assert call_args.args[2] == "https://tushare.pro/register?reg=728426"
+        mock_webbrowser.open_new_tab.assert_called_once_with("https://tushare.pro/register?reg=728426")
+
+
+# --- update_tier (async) ---
+
+
 class TestUpdateTier:
     @pytest.mark.asyncio
     async def test_update_tier_success(self, mock_config_handler, mock_thread_pool):
