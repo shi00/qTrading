@@ -1034,6 +1034,10 @@ class AIStrategyMixin:
             else:
                 result["price_trend_5d"] = I18n.get("ai_data_insufficient")
 
+        # NOTE(lazy): 技术结构计算容错（单股票单次计算失败不影响整体 AI 分析）.
+        #   ceiling: 单股票单次计算失败，result 字段降级为 i18n 错误占位.
+        #   upgrade: 该方法被 ≥3 处调用方依赖，或单日失败影响 ≥10 只股票时，
+        #           升级为按异常类型分类的 fail-fast 或重试机制.
         except Exception as e:
             severity = classify_severity(e)
             if severity == "system":
