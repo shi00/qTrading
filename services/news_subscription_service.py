@@ -58,7 +58,8 @@ class NewsSubscriptionService:
         if inst is not None:
             inst._listeners.clear()
             inst._alert_listeners.clear()
-            inst._listener_errors.clear()
+            # M9-001: 用 setattr 替代 .clear()，兼容测试用 __new__ 绕过 __init__ 时属性未初始化场景
+            inst._listener_errors = {}
 
     @classmethod
     def _atexit_cleanup(cls):
