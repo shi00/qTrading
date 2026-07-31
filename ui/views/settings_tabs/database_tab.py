@@ -15,6 +15,7 @@ CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 - 高级模式状态通过 ft.use_state + use_effect 持久化到 AppConfig
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 
@@ -31,6 +32,14 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 
 logger = logging.getLogger(__name__)
+
+
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
 
 
 def _on_test_success(config: dict) -> None:
@@ -89,14 +98,22 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(_load_advanced_state, dependencies=[])
 
-    def _on_advanced_toggle(e: ft.ControlEvent) -> None:
-        """高级模式开关切换: 更新 state + 持久化到 AppConfig。"""
-        value = bool(get_control_value(e.control, ft.Switch))
-        set_show_advanced(value)
+    async def _do_save_show_advanced(value: bool) -> None:
+        """异步持久化 db_show_advanced 到 AppConfig (R16: IO offload via VM)."""
         try:
-            database_config_vm.save_show_advanced(value)
+            await database_config_vm.save_show_advanced(value)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception:  # noqa: BLE001  # NOTE(lazy): 配置写入失败降级为内存态. ceiling: 配置文件不可写. upgrade: 引入配置可写性预检或重试.
             logger.debug("[DatabaseTab] Failed to persist db_show_advanced=%s", value)
+
+    def _on_advanced_toggle(e: ft.ControlEvent) -> None:
+        """高级模式开关切换: 更新 state + 调度异步持久化 (R16: sync wrapper + page.run_task)."""
+        value = bool(get_control_value(e.control, ft.Switch))
+        set_show_advanced(value)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_show_advanced, value)
 
     # --- Build UI ---
     title_text = ft.Text(

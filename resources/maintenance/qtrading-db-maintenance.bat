@@ -17,9 +17,9 @@ if not exist "%SIDECAR_EXE%" (
     exit /b 1
 )
 
-REM 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/17/data
-REM Windows: %LOCALAPPDATA%\qTrading\postgres\17\data
-set "DEFAULT_DATA_DIR=%LOCALAPPDATA%\qTrading\postgres\17\data"
+REM 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
+REM Windows: %LOCALAPPDATA%\qTrading\postgres\16\data
+set "DEFAULT_DATA_DIR=%LOCALAPPDATA%\qTrading\postgres\16\data"
 
 if "%~1"=="" goto :help
 

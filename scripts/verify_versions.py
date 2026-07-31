@@ -268,7 +268,7 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
     默认三方校验（不调用 binary）：
     - Cargo.toml [package].version == pyproject.toml [tool.qtrading.sidecar] version
     - protocol.rs PROTOCOL_VERSION == pyproject.toml [tool.qtrading.sidecar] protocol_version
-    - pyproject.toml [tool.qtrading.sidecar] postgresql_version == "17.2.0"（固定 17 系列）
+    - pyproject.toml [tool.qtrading.sidecar] postgresql_version == "16.14.0"（固定 16 系列）
     - pyproject.toml [tool.qtrading.sidecar] crate_version == Cargo.toml [dependencies] postgresql_embedded version
 
     当 ``sidecar_binary`` 非空时启用四方校验，额外检查：
@@ -323,9 +323,9 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
             f"pyproject.toml [tool.qtrading.sidecar] protocol_version '{pyproject_protocol}'"
         )
 
-    # 9c: postgresql_version 固定 17 系列（pg_plan §15.2）
-    if pyproject_pg_ver and not pyproject_pg_ver.startswith("17."):
-        errors.append(f"sidecar postgresql_version '{pyproject_pg_ver}' not in 17.x series (pg_plan §15.2)")
+    # 9c: postgresql_version 固定 16 系列（pg_plan §15.2，支持 16-19 系列）
+    if pyproject_pg_ver and not re.match(r"1[6-9]\.", pyproject_pg_ver):
+        errors.append(f"sidecar postgresql_version '{pyproject_pg_ver}' not in 16-19.x series (pg_plan §15.2)")
 
     # 9d: crate_version 与 Cargo.toml [dependencies] postgresql_embedded 版本对齐
     cargo_crate_ver = _get_cargo_postgresql_embedded_version()

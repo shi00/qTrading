@@ -1,4 +1,4 @@
-﻿# installer_smoke_upgrade.ps1
+# installer_smoke_upgrade.ps1
 # Phase 5 DoD §17.5 升级验证（保留数据）smoke test 脚本
 # 用法: powershell -File scripts/installer_smoke_upgrade.ps1 -InstallerPath <path> [-OldVersion 0.9.0]
 # 前置: 已发布 OldVersion 的 embedded variant GitHub Release，且本机已登录 gh CLI
@@ -19,7 +19,7 @@ Set-StrictMode -Version Latest
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 # PGDATA 路径以 resources/maintenance/README-maintenance.md 为准（platformdirs 默认）
-$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\17\data"
+$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\16\data"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }

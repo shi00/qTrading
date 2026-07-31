@@ -136,6 +136,9 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("ratio", descending=True)
             )
+        # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
+        #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.
+        #   upgrade: 同一策略在 ≥5 个交易日连续触发该兜底时，升级为重试机制或告警.
         except Exception as e:
             severity = classify_severity(e)
             log_level = logger.error if severity == "system" else logger.warning
@@ -279,6 +282,9 @@ class InstitutionalStrategy(PolarsBaseStrategy):
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("net_amount", descending=True)
             )
+        # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
+        #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.
+        #   upgrade: 同一策略在 ≥3 个交易日连续触发该兜底时，升级为重试机制或告警.
         except Exception as e:
             severity = classify_severity(e)
             log_level = logger.error if severity == "system" else logger.warning
@@ -344,6 +350,9 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("amount", descending=True)
             )
+        # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
+        #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.
+        #   upgrade: 同一策略在 ≥3 个交易日连续触发该兜底时，升级为重试机制或告警.
         except Exception as e:
             severity = classify_severity(e)
             log_level = logger.error if severity == "system" else logger.warning

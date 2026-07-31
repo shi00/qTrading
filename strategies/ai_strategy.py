@@ -2,7 +2,7 @@ import logging
 
 import pandas as pd
 
-from data.persistence.quality_gate import QualityTier, _check_tier
+from data.persistence.quality_gate import QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("ai_active")
 class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
-    required_quality_tier = QualityTier.SILVER
     required_context_keys: tuple[str, ...] = ("screening_data",)
     required_tables: tuple[str, ...] = ("daily_quotes", "daily_indicators")
 
@@ -27,13 +26,8 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         self.limit = ConfigHandler.get_ai_max_candidates()
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
+    @require_quality(QualityTier.SILVER)
     async def filter(self, context: StrategyContext):
-        _check_tier(
-            context.get("data_processor"),
-            self.required_quality_tier,
-            f"{self.__class__.__name__}.filter",
-        )
-
         if context is None:
             return pd.DataFrame()
 

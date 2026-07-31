@@ -23,7 +23,7 @@ def setup_test_files(
 ):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n\n[tool.qtrading.sidecar]\nversion = "0.1.0"\nprotocol_version = "v1"\npostgresql_version = "17.2.0"\ncrate_version = "0.21.0"\n',
+        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n\n[tool.qtrading.sidecar]\nversion = "0.1.0"\nprotocol_version = "v1"\npostgresql_version = "16.14.0"\ncrate_version = "0.21.0"\n',
         encoding="utf-8",
     )
 

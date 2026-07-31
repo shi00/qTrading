@@ -162,9 +162,12 @@ async def _prepare_db_with_retry(
                 sys.exit(1)
 
             from ui.startup_views import PreInitErrorView
+            from utils.error_classifier import classify_error, get_error_message
             from utils.sanitizers import DataSanitizer
 
-            error_message = DataSanitizer.sanitize_error(e)
+            error_info = classify_error(e, context="db")
+            localized_error = get_error_message(error_info)
+            error_message = DataSanitizer.sanitize_error(localized_error)
             log_dir_hint = _resolve_embedded_pg_log_dir_hint()
             retry_event = threading.Event()
             exit_event = threading.Event()
@@ -330,7 +333,9 @@ async def main(page: ft.Page):
     I18n.initialize(ConfigHandler.get_locale())
     page.locale_configuration = build_locale_configuration(I18n.current_locale())
     page.title = I18n.get("app_title")
-    page.window.icon = "icon.png"
+    icon_ico_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "hope.ico"))
+    icon_png_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "assets", "icon.png"))
+    page.window.icon = icon_ico_path if os.path.exists(icon_ico_path) else icon_png_path
 
     is_web_mode = os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
     await setup_window_geometry(page, is_web_mode=is_web_mode)

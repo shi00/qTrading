@@ -300,7 +300,7 @@ fn test_inject_28_restore_interruption_residual() {
         .join("data.restore-20260723T120000Z");
     std::fs::create_dir_all(&residual_dir).unwrap();
     // 写入半截状态文件模拟中断
-    std::fs::write(residual_dir.join("PG_VERSION"), b"17\n").unwrap();
+    std::fs::write(residual_dir.join("PG_VERSION"), b"16\n").unwrap();
     // RAII guard: panic 安全清理残留目录（P1-1）
     let _guard = RemovePathOnDrop(residual_dir.clone());
 

@@ -56,7 +56,10 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos
-            runner: macos-14
+            # bundled PG 16.14.0 归档（theseus）构建于 macOS 26.0 SDK，引用 _strchrnul，
+            # 仅 macOS 26+ 可运行；macos-14(Sonoma) 缺该符号导致 initdb dyld 加载失败
+            # （dump/restore/reset_password 三个 maint 测试）。
+            runner: macos-26
             target: aarch64-apple-darwin
     defaults:
       run:
@@ -66,10 +69,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           components: clippy, rustfmt
           targets: ${{ matrix.target }}
 
@@ -77,7 +80,7 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -96,7 +99,7 @@ jobs:
 
       - name: Install cargo-llvm-cov (Linux only)
         if: matrix.os == 'linux'
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
         with:
           tool: cargo-llvm-cov
 
@@ -148,7 +151,7 @@ jobs:
             artifact_name: qtrading-pg-sidecar-linux-aarch64
             binary_path: target/aarch64-unknown-linux-gnu/release/qtrading-pg-sidecar
           - os: macos
-            runner: macos-14
+            runner: macos-26
             target: aarch64-apple-darwin
             artifact_name: qtrading-pg-sidecar-macos-aarch64
             binary_path: target/aarch64-apple-darwin/release/qtrading-pg-sidecar
@@ -160,17 +163,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: cargo build --release
         run: cargo build --target ${{ matrix.target }} --release
@@ -212,13 +215,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7  # v2.85.0
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
         with:
           tool: cargo-audit
 
@@ -257,7 +260,7 @@ jobs:
             binary_path: target/aarch64-unknown-linux-gnu/release/qtrading-pg-sidecar
             artifact_name: qtrading-pg-sidecar-linux-aarch64
           - os: macos
-            runner: macos-14
+            runner: macos-26
             target: aarch64-apple-darwin
             binary_path: target/aarch64-apple-darwin/release/qtrading-pg-sidecar
             artifact_name: qtrading-pg-sidecar-macos-aarch64
@@ -269,17 +272,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Setup Python (for generate_sidecar_manifest.py)
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

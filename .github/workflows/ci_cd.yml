@@ -93,7 +93,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16.14
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ${{ env.CI_PG_PASSWORD }}
@@ -282,7 +282,7 @@ jobs:
     needs: lint-fast
     runs-on: windows-latest
     # E2E Tests embedded 模式实际运行时间：PR #291 改用 embedded 模式后，
-    # sidecar 构建 + PG 17 initdb + 44 个 E2E 测试总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消）。
+    # sidecar 构建 + PG 16 initdb + 44 个 E2E 测试总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消）。
     # 外置 PostgreSQL 模式（main 分支）总时长 31 分钟（run 30151665758），embedded 模式更慢。
     # 提升至 60 分钟留余量，长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
     timeout-minutes: 60
@@ -366,18 +366,18 @@ jobs:
 
       # Phase 2 方案 B（spec.md §3 不变量 1）：E2E Tests (Windows) 改用 embedded 模式，
       # 与生产代码默认值一致。构建真实 sidecar binary，让 Flet 子进程启动 sidecar +
-      # 真实 PG 17，替代原有的外置 PostgreSQL service。
+      # 真实 PG 16，替代原有的外置 PostgreSQL service。
       # 参考 embedded-tests job 的 sidecar 构建步骤（行 675-705）。
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: e2e-tests-windows
+          key: e2e-tests-windows-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -403,7 +403,7 @@ jobs:
       - name: Run E2E Tests
         env:
           # spec.md §3 不变量 1：embedded 模式为默认，与生产代码默认值一致。
-          # Flet 子进程启动 sidecar + 真实 PG 17，E2E 主进程通过 QTRADING_EMBEDDED_PG_URL_FILE
+          # Flet 子进程启动 sidecar + 真实 PG 16，E2E 主进程通过 QTRADING_EMBEDDED_PG_URL_FILE
           # 获取 sidecar URL 播种数据（conftest.py 的 flet_app/seed_e2e_data fixture 协同）。
           QTRADING_DATABASE_MODE: embedded
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
@@ -640,16 +640,16 @@ jobs:
           # Same fix as the e2e-tests job (see line 322-326).
           uv pip install --system flet-web==0.86.3
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: embedded-tests-${{ matrix.os }}
+          key: embedded-tests-${{ matrix.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -841,18 +841,18 @@ jobs:
         if: steps.cache-playwright-skip-revalidation.outputs.cache-hit != 'true'
         run: playwright install chromium
 
-      - name: Install Rust toolchain (1.97.0, real-sidecar group only)
+      - name: Install Rust toolchain (1.97.1, real-sidecar group only)
         if: matrix.needs_rust == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target (real-sidecar group only)
         if: matrix.needs_rust == 'true'
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: windows-skip-revalidation-real-sidecar
+          key: windows-skip-revalidation-real-sidecar-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary (real-sidecar group only)
         if: matrix.needs_rust == 'true'
@@ -1066,16 +1066,16 @@ jobs:
         if: steps.cache-playwright-smoke.outputs.cache-hit != 'true'
         run: playwright install chromium
 
-      - name: Install Rust toolchain (1.97.0)
+      - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.0
+          toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
-          key: e2e-sidecar-real-smoke
+          key: e2e-sidecar-real-smoke-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
 
       - name: Build sidecar binary
         shell: bash
@@ -1649,7 +1649,7 @@ jobs:
           } else {
             Write-Error "ISCC smoke test failed: installer not found at $installerPath"
             exit 1
-          fi
+          }
 
   flaky-detection:
     name: Flaky Test Detection (advisory)

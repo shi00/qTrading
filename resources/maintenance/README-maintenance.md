@@ -47,9 +47,9 @@ cd "<安装目录>/resources/maintenance"
 
 脚本自动使用 platformdirs 默认路径作为 `--data-dir`：
 
-- **Windows**: `%LOCALAPPDATA%\qTrading\postgres\17\data`
-- **Linux**: `~/.local/share/qTrading/postgres/17/data`（或 `$XDG_DATA_HOME/qTrading/postgres/17/data`）
-- **macOS**: `~/Library/Application Support/qTrading/postgres/17/data`
+- **Windows**: `%LOCALAPPDATA%\qTrading\postgres\16\data`
+- **Linux**: `~/.local/share/qTrading/postgres/16/data`（或 `$XDG_DATA_HOME/qTrading/postgres/16/data`）
+- **macOS**: `~/Library/Application Support/qTrading/postgres/16/data`
 
 如需操作其他数据目录，直接调用 sidecar binary 并显式传 `--data-dir`：
 

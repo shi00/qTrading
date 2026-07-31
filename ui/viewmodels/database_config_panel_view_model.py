@@ -117,9 +117,13 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
         """读取 db_show_advanced 配置 (P3-13: View 通过 VM 访问)."""
         return bool(ConfigHandler.load_config().get("db_show_advanced", False))
 
-    def save_show_advanced(self, value: bool) -> None:
-        """持久化 db_show_advanced 配置 (P3-13: View 通过 VM 访问)."""
-        ConfigHandler.save_config({"db_show_advanced": value})
+    async def save_show_advanced(self, value: bool) -> None:
+        """持久化 db_show_advanced 配置 (P3-13: View 通过 VM 访问; R16: IO offload).
+
+        Raises:
+            asyncio.CancelledError: 取消时显式传播 (R2).
+        """
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"db_show_advanced": value})
 
     # --- Update commands ---
 

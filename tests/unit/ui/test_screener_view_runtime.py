@@ -282,6 +282,7 @@ class _FakeScreenerViewModel:
         self._current_page_data: pd.DataFrame | None = None
         self._export_result: tuple = ("/path/to/file.csv", None)
         self._export_excel_result: tuple = ("/path/to/file.xlsx", None)
+        self._export_bytes_result: tuple = (b"data", None)
         self.run_strategy_mock = MagicMock()
         self.sort_data_mock = MagicMock()
         self.strategy_mgr = MagicMock()
@@ -470,6 +471,11 @@ class _FakeScreenerViewModel:
     async def export_results_excel(self, filepath: str) -> tuple:
         self.method_calls.append(f"export_results_excel:{filepath}")
         return self._export_excel_result
+
+    async def export_results_bytes(self, format_: str) -> tuple[bytes | None, str | None]:
+        """Web 模式导出 bytes (M12-002 R16: 通过 VM offload)."""
+        self.method_calls.append(f"export_results_bytes:{format_}")
+        return self._export_bytes_result
 
 
 # ============================================================================
@@ -1390,6 +1396,109 @@ class TestOnExportExcelClick:
         assert save_file_kwargs["allowed_extensions"] == ["xlsx"]
         # 默认文件名应为 .xlsx 后缀
         assert save_file_kwargs["file_name"].endswith(".xlsx")
+
+
+# ============================================================================
+# Handler 测试: _on_export_click (Web 模式, M12-002 R16: export_results_bytes)
+# ============================================================================
+
+
+class TestOnExportClickWebMode:
+    """_on_export_click Web 模式: page.web=True 走 vm.export_results_bytes (M12-002 diff-coverage)."""
+
+    def test_web_mode_export_csv_success(self, screener_view_env) -> None:
+        """DoD: page.web=True + CSV 导出成功 → 调 vm.export_results_bytes('csv') + save_file(src_bytes=...)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        page.web = True  # 启用 Web 模式
+
+        fake_vm._export_data = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        fake_vm._export_bytes_result = (b"csv_data_bytes", None)
+        _rerender(env)
+
+        file_picker = next(s for s in page.services if isinstance(s, ft.FilePicker))
+        file_picker.save_file = AsyncMock(return_value="dummy")
+
+        page.run_task.reset_mock()
+        page.show_toast.reset_mock()
+        buttons = _get_buttons(env)
+        export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
+        _invoke(export_btn.on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 验证 vm.export_results_bytes 被调用 (而非 export_results)
+        assert "export_results_bytes:csv" in fake_vm.method_calls
+        assert not any(c.startswith("export_results:") for c in fake_vm.method_calls)
+        # 验证 save_file 收到 src_bytes
+        save_file_kwargs = file_picker.save_file.call_args.kwargs
+        assert save_file_kwargs["src_bytes"] == b"csv_data_bytes"
+        # 成功 toast
+        page.show_toast.assert_called_once_with(
+            "i18n[data_export_success]", "success", action_text=None, on_action=None
+        )
+
+    def test_web_mode_export_xlsx_success(self, screener_view_env) -> None:
+        """DoD: page.web=True + Excel 导出 → 调 vm.export_results_bytes('excel') + save_file(src_bytes=...).
+
+        注: _on_export_excel_click 传给 _do_export 的 format_='excel' (非 'xlsx'),
+        _do_export 内部 ext='xlsx' 用于文件名/allowed_extensions, 但 vm.export_results_bytes
+        收到的是 'excel'.
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        page.web = True
+
+        fake_vm._export_data = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        fake_vm._export_bytes_result = (b"xlsx_data_bytes", None)
+        _rerender(env)
+
+        file_picker = next(s for s in page.services if isinstance(s, ft.FilePicker))
+        file_picker.save_file = AsyncMock(return_value="dummy")
+
+        page.run_task.reset_mock()
+        page.show_toast.reset_mock()
+        buttons = _get_buttons(env)
+        excel_btn = next(b for b in buttons if isinstance(b, ft.Button) and "data_export_excel" in str(b.content))
+        _invoke(excel_btn.on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 验证 vm.export_results_bytes 被调用 (而非 export_results_excel)
+        # _on_export_excel_click 传 format_='excel', _do_export 内部 ext='xlsx'
+        assert "export_results_bytes:excel" in fake_vm.method_calls
+        assert not any(c.startswith("export_results_excel:") for c in fake_vm.method_calls)
+        save_file_kwargs = file_picker.save_file.call_args.kwargs
+        assert save_file_kwargs["src_bytes"] == b"xlsx_data_bytes"
+        # allowed_extensions 用 ext='xlsx' (非 'excel')
+        assert save_file_kwargs["allowed_extensions"] == ["xlsx"]
+
+    def test_web_mode_export_bytes_failure_shows_error_toast(self, screener_view_env) -> None:
+        """DoD: vm.export_results_bytes 返回 (None, error) → show_toast('data_export_fail', 'error')."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        page.web = True
+
+        fake_vm._export_data = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        fake_vm._export_bytes_result = (None, "export error")
+        _rerender(env)
+
+        page.run_task.reset_mock()
+        page.show_toast.reset_mock()
+        buttons = _get_buttons(env)
+        export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
+        _invoke(export_btn.on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 错误 toast
+        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
 
 # ============================================================================

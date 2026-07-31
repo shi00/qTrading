@@ -578,6 +578,52 @@ class TestLocalModelManagerLoadModelWithLlama:
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is False
 
+    @pytest.mark.asyncio
+    async def test_load_model_persist_sha256_failure_logs_sanitized_error(self, caplog):
+        """R9: save_config 抛含 secret 的异常时，日志不得出现明文 secret（覆盖 L655-660）。"""
+        import logging
+
+        from utils.sanitizers import DataSanitizer
+
+        leaked_secret = "sk-test-secret-do-not-leak-9f8e7d6c"
+        DataSanitizer.register_secret(leaked_secret)
+        try:
+            with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+                mgr = LocalModelManager()
+                with (
+                    patch("os.path.exists", return_value=True),
+                    # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                    patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                    patch.object(LocalModelManager, "_get_load_lock"),
+                    patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                    patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                    patch.object(mgr, "_ensure_worker", return_value=True),
+                    patch.object(mgr, "_await_worker_ready", return_value=True),
+                ):
+                    mock_ch.get_typed.return_value = ""
+                    mock_ch.save_config.side_effect = ValueError(f"persist failed: {leaked_secret}")
+                    mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                    with caplog.at_level(logging.WARNING):
+                        result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+
+                    # 持久化失败不阻塞加载流程
+                    assert result is True
+                    assert mgr._model_path == "/path/to/model.gguf"
+                    assert mgr._model_sha256 == "abc123"
+                    # R9：%s 格式化部分必须经 sanitize_error 脱敏（exc_info traceback
+                    # 由解释器控制，是项目接受的折衷，见 M9 检视报告 §3.1 反证 5）
+                    warning_records = [
+                        rec
+                        for rec in caplog.records
+                        if rec.levelno == logging.WARNING and "Failed to persist model SHA-256" in rec.getMessage()
+                    ]
+                    assert len(warning_records) == 1, "expected exactly one warning log"
+                    assert leaked_secret not in warning_records[0].getMessage()
+                    assert "***" in warning_records[0].getMessage()
+        finally:
+            # 清理注册的 secret，避免污染其他测试
+            DataSanitizer._reset_known_secrets()
+
 
 class TestLocalModelManagerRunInferenceWithModel:
     @pytest.mark.asyncio

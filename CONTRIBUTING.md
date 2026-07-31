@@ -129,7 +129,7 @@
 ## 前置要求
 
 - Python 3.13+
-- PostgreSQL 17.2.0+（外置模式需要；内置模式自带 17.2.0 无需安装）
+- PostgreSQL 16.14.0+（外置模式需要；内置模式自带 16.14.0 无需安装）
 - Git
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (依赖管理工具)
 
@@ -364,7 +364,7 @@ CLAUDE.md §1.5 保留「非平凡逻辑必须验证」与「交付收尾原则�
 |------|---------|
 | **UI 框架** | Flet V1（版本见 [`pyproject.toml`](./pyproject.toml)，含 `flet` / `flet-desktop` / `flet-charts` 三包；Flet 1.0 alpha/beta 阶段，Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型） |
 | **计算引擎** | Polars (策略层向量化) + Pandas (DAO 层 / 数据同步层) |
-| **数据库** | PostgreSQL 17.2.0 + SQLAlchemy 2.0 (asyncpg) |
+| **数据库** | PostgreSQL 16.14.0 + SQLAlchemy 2.0 (asyncpg) |
 | **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |
 | **AI 推理** | LiteLLM (多家云端供应商统一网关) / llama-cpp-python (本地 GGUF) |
 | **数据源** | Tushare Pro (核心) + Akshare (补充) |

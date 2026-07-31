@@ -486,7 +486,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                 self._active_tasks.update(tasks)
 
             try:
-                await gather_return_exceptions_propagating_cancel(*tasks)
+                stock_results = await gather_return_exceptions_propagating_cancel(*tasks)
+                # R5: 显式传播 EngineDisposedError，避免被静默吞没
+                for sr in stock_results:
+                    if isinstance(sr, EngineDisposedError):
+                        raise sr
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
@@ -710,6 +714,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                 batch = [sync_one_target(item) for item in batch_targets]
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch)
                 for r in batch_results:
+                    # R5: EngineDisposedError 必须优先传播，不作为普通 batch 失败
+                    if isinstance(r, EngineDisposedError):
+                        raise r
                     if isinstance(r, Exception):
                         logger.warning("[FinancialSync] Batch task failed: %s", r)
                         day_has_error = True
@@ -891,6 +898,9 @@ class FinancialSyncStrategy(ISyncStrategy):
             coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
             gather_results = await gather_return_exceptions_propagating_cancel(*coros)
             for gr in gather_results:
+                # R5: EngineDisposedError 必须优先传播，不作为普通 batch table 失败
+                if isinstance(gr, EngineDisposedError):
+                    raise gr
                 if isinstance(gr, Exception):
                     logger.warning("[FinancialSync] Batch table sync failed for date %s: %s", d, gr, exc_info=True)
 
@@ -1004,6 +1014,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
                 return 0
 
+        # data-P1-6: 预初始化 aux_counts，确保 except 块能返回已保存的 aux 行数
+        # 而非硬编码 0。aux 表通过 fetch_aux 内部 save_func 已写入 DB，
+        # 即使 core 表合并失败也不应丢弃已保存的行数。
+        aux_counts = {"mainbz": 0, "audit": 0}
+
         try:
             aux_tasks = [
                 fetch_aux(
@@ -1031,6 +1046,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                 fetch_cashflow(),
                 *aux_tasks,
             )
+
+            # R5: gather_return_exceptions_propagating_cancel 仅传播 CancelledError，
+            # EngineDisposedError 作为普通异常保留在 results 中。若不显式 re-raise，
+            # 后续 isinstance(r, int) 检查会静默吞没为 aux_counts=0 / core 降级跳过，
+            # 违反 R5 僵尸引擎操作红线。
+            for r in results:
+                if isinstance(r, EngineDisposedError):
+                    raise r
 
             # Unpack Core Results
             # results[0-3] are core, results[4-5] are aux (row_counts)
@@ -1117,7 +1140,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     safe_error(e),
                     exc_info=True,
                 )
-            return None, {"mainbz": 0, "audit": 0}
+            return None, aux_counts
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:

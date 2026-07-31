@@ -283,6 +283,43 @@ class TestFinancialSyncFetchComprehensive:
             warning_calls = [c for c in mock_logger.warning.call_args_list if "Core table" in str(c)]
             assert len(warning_calls) >= 2
 
+    @pytest.mark.asyncio
+    async def test_aux_counts_preserved_on_core_merge_failure(self):
+        """data-P1-6: core 表合并失败时，aux_counts 必须返回已保存的 aux 行数，
+        不得硬编码为 0。
+
+        场景：fetch_aux 成功保存 mainbz=3/audit=2 行，但 core 表合并非 system 级
+        异常（pd.merge KeyError），except 块必须返回 aux_counts={"mainbz":3,"audit":2}，
+        确保 sync_status 正确更新，避免下次同步重复拉取。
+        """
+        ctx = make_ctx()
+        # aux 表返回非空 DataFrame，save_func 返回行数
+        ctx.api.get_fina_mainbz = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 3, "end_date": ["20240331"] * 3})
+        )
+        ctx.api.get_fina_audit = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 2, "end_date": ["20240331"] * 2})
+        )
+        ctx.cache.save_fina_mainbz = AsyncMock(return_value=3)
+        ctx.cache.save_fina_audit = AsyncMock(return_value=2)
+        # core 表：income 正常，balance 缺 end_date 列导致 pd.merge 抛 KeyError
+        ctx.api.get_income = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
+        )
+        ctx.api.get_balancesheet = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "total_assets": [1000.0]})
+        )
+        ctx.api.get_fina_indicator = AsyncMock(return_value=None)
+        ctx.api.get_cashflow = AsyncMock(return_value=None)
+
+        strategy = FinancialSyncStrategy(ctx)
+        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+
+        # 核心断言：aux_counts 保留已保存的行数，不被硬编码为 0
+        assert df is None
+        assert aux["mainbz"] == 3
+        assert aux["audit"] == 2
+
 
 class TestFinancialSyncRepair:
     @pytest.mark.asyncio
@@ -1099,14 +1136,17 @@ class TestFinancialSyncEngineDisposed:
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_fetch_comprehensive(self):
+        """R5: _fetch_comprehensive_financial_data 中任一 API 抛 EngineDisposedError 时必须传播。
+
+        修复前：gather_return_exceptions_propagating_cancel 将 EngineDisposedError 作为普通异常
+        保留在 results 中，被后续 isinstance(r, int) 静默吞没。
+        修复后：显式检查 results 中的 EngineDisposedError 并 re-raise。
+        """
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = FinancialSyncStrategy(ctx)
-        # EngineDisposedError is caught by gather_return_exceptions_propagating_cancel
-        # and returned as an exception result; other API calls may still succeed
-        df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
-        # The income table failed but other tables may still produce data
-        assert isinstance(df, (type(None), pd.DataFrame))
+        with pytest.raises(EngineDisposedError):
+            await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
 
 
 class TestFinancialSyncClassifyError:
@@ -1740,20 +1780,21 @@ class TestFinancialSyncEngineDisposedExtended:
                 await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
 
     @pytest.mark.asyncio
-    async def test_engine_disposed_in_corporate_actions_caught_by_gather(self):
-        """R5: _sync_corporate_actions_by_date 中 API 抛 EngineDisposedError 时，
-        内部 except EngineDisposedError: raise 生效，被 gather 捕获为返回值。"""
+    async def test_engine_disposed_in_corporate_actions_propagates(self):
+        """R5: _sync_corporate_actions_by_date 中 API 抛 EngineDisposedError 时必须传播。
+
+        修复前：gather_return_exceptions_propagating_cancel 将 EngineDisposedError 作为普通异常
+        保留在 results 中，被 isinstance(gr, Exception) 分支静默吞没。
+        修复后：gather_results 循环优先检查 EngineDisposedError 并 re-raise。
+        """
         ctx = make_ctx()
         from data.constants import FINANCIAL_BATCH_TABLES
 
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
             setattr(ctx.api, cfg["api"], AsyncMock(side_effect=EngineDisposedError("disposed")))
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.logger") as mock_logger:
-            # 不应抛异常（被 gather 捕获为返回值后记 warning）
+        with pytest.raises(EngineDisposedError):
             await strategy._sync_corporate_actions_by_date(["20240614"])
-            warning_calls = [c for c in mock_logger.warning.call_args_list if "Batch table sync failed" in str(c)]
-            assert len(warning_calls) >= 1
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_incremental_date_parse(self):
@@ -1777,15 +1818,19 @@ class TestFinancialSyncEngineDisposedExtended:
             await strategy.run()
 
     @pytest.mark.asyncio
-    async def test_engine_disposed_in_full_sync_save_caught_by_gather(self):
+    async def test_engine_disposed_in_full_sync_save_propagates(self):
         """R5: _run_full_sync process_one_stock 中 save_financial_reports 抛 EngineDisposedError 时,
-        内部 except EngineDisposedError: raise 生效, 但被 gather 捕获为返回值(不传播到外层)。"""
+        必须从 gather 结果中显式 re-raise 传播到外层（修复后行为）。
+
+        修复前：gather_return_exceptions_propagating_cancel 将 EngineDisposedError 作为普通异常
+        保留在 results 中，被 batch_results 循环的 isinstance(r, Exception) 分支静默吞没。
+        修复后：batch_results 循环优先检查 EngineDisposedError 并 re-raise。
+        """
         ctx = make_ctx()
         ctx.cache.save_financial_reports = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = FinancialSyncStrategy(ctx)
-        # gather(return_exceptions=True) 捕获 EngineDisposedError, 不传播
-        result = await strategy.run(force=True)
-        assert result is not None
+        with pytest.raises(EngineDisposedError):
+            await strategy.run(force=True)
 
 
 class TestFinancialSyncIncrementalErrorPaths:
@@ -2150,7 +2195,13 @@ class TestIncrementalBatchStatus:
 
     @pytest.mark.asyncio
     async def test_batch_all_failed_status_failed(self):
-        """全部 batch 任务失败（day_saved=0）时 status="failed"。"""
+        """全部 batch 任务失败（day_saved=0）时 status="failed"。
+
+        注：使用 PermissionError 模拟 system 级别失败以逃出 sync_one_target 内部
+        except Exception 块（severity=="system" 时 re-raise）。
+        R5 修复后 EngineDisposedError 在 batch_results 循环中被优先传播，
+        不再进入 status 标记路径，故改用 PermissionError。
+        """
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
@@ -2163,7 +2214,7 @@ class TestIncrementalBatchStatus:
                 }
             )
         )
-        ctx.cache.save_financial_reports = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.save_financial_reports = AsyncMock(side_effect=PermissionError("permission denied"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
@@ -2201,10 +2252,13 @@ class TestIncrementalBatchStatus:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
 
         # 000001.SZ 抛异常，000002.SZ 正常返回
+        # 注：使用 PermissionError（system 级别）以逃出 sync_one_target 内部 except Exception 块。
+        # R5 修复后 EngineDisposedError 在 batch_results 循环中被优先传播，
+        # 不再进入 status 标记路径，故改用 PermissionError。
         def selective_save(df, *args, **kwargs):
             ts_code = df["ts_code"].iloc[0] if "ts_code" in df.columns else None
             if ts_code == "000001.SZ":
-                raise EngineDisposedError("disposed")
+                raise PermissionError("permission denied for 000001.SZ")
             return 1
 
         ctx.cache.save_financial_reports = AsyncMock(side_effect=selective_save)

@@ -21,7 +21,7 @@ OutputDir=Output
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=lowest
-SetupIconFile=assets\icon.ico
+SetupIconFile=assets\hope.ico
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -57,7 +57,7 @@ Filename: "{app}\AStockScreener.exe"; Description: "启动 AStockScreener"; Flag
 [UninstallRun]
 ; Phase 5 失败注入 #32 配套：卸载前先 stop sidecar（防止文件占用）；Check 确保开发环境无 sidecar binary 时不报错
 ; --data-dir 路径与 resources/maintenance/README-maintenance.md 一致（platformdirs 默认）
-Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop --data-dir ""{localappdata}\qTrading\postgres\17\data"""; Flags: runhidden; RunOnceId: "StopSidecar"; Check: SidecarExists
+Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop --data-dir ""{localappdata}\qTrading\postgres\16\data"""; Flags: runhidden; RunOnceId: "StopSidecar"; Check: SidecarExists
 #endif
 
 #if TargetVariant == "embedded"

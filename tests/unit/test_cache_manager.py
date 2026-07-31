@@ -834,6 +834,101 @@ class TestCacheManagerCheckComprehensiveHealth:
             assert "daily_quotes" in result["tables"]
             assert result["tables"]["daily_quotes"]["ratio"] == 0
 
+    @pytest.mark.asyncio
+    async def test_health_check_table_query_interrupted_raises_engine_disposed(self):
+        """P1-4: 表查询抛 'connection was closed' (interrupted) 时必须抛 EngineDisposedError。
+
+        竞态场景：close() 在 check_comprehensive_health 期间执行，引擎被释放。
+        原行为：异常被吞没，返回 ratio=0 误导健康报告为"表不健康"。
+        修复后：抛出 EngineDisposedError 触发上层调用方异常处理，避免静默降级。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        # classify_error 对 "connection was closed" 识别为 interrupted
+        mock_conn.execute = AsyncMock(side_effect=Exception("connection was closed in the middle of operation"))
+
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"]},
+                    },
+                },
+            ),
+        ):
+            with pytest.raises(EngineDisposedError, match="Engine disposed during check"):
+                await mgr.check_comprehensive_health()
+
+    @pytest.mark.asyncio
+    async def test_health_check_engine_disposed_propagates_through_gather(self):
+        """P1-4: 多表并发检查中某表抛 EngineDisposedError 时必须优先传播。
+
+        场景：两个 monitored 表，表A 的 conn 正常，表B 的 conn 在 count 查询时抛 interrupted。
+        修复前：gather 收集异常后当作普通失败 continue，返回部分健康报告。
+        修复后：检测到 EngineDisposedError 优先 raise，避免误导性健康报告。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        # 表A 正常 conn
+        mock_conn_ok = MagicMock()
+        mock_conn_ok.execution_options = AsyncMock(return_value=mock_conn_ok)
+        mock_result_ok = MagicMock()
+        mock_result_ok.scalar = MagicMock(return_value=10)
+        mock_conn_ok.execute = AsyncMock(return_value=mock_result_ok)
+
+        # 表B 异常 conn：count 查询抛 interrupted
+        mock_conn_bad = MagicMock()
+        mock_conn_bad.execution_options = AsyncMock(return_value=mock_conn_bad)
+        mock_conn_bad.execute = AsyncMock(side_effect=Exception("connection was closed in the middle of operation"))
+
+        # engine.connect() 每次返回独立 ctx：第 1 次表A，第 2 次表B
+        mock_engine_ctx_ok, _ = _make_async_engine_ctx(mock_conn_ok)
+        mock_engine_ctx_bad, _ = _make_async_engine_ctx(mock_conn_bad)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(side_effect=[mock_engine_ctx_ok, mock_engine_ctx_bad])
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
+                    },
+                    "stock_basic": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"]},
+                    },
+                },
+            ),
+        ):
+            with pytest.raises(EngineDisposedError, match="Engine disposed during check"):
+                await mgr.check_comprehensive_health()
+
 
 class TestCacheManagerCheckTableHasData:
     @pytest.mark.asyncio

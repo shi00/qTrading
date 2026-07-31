@@ -31,14 +31,14 @@ from utils.sanitizers import DataSanitizer
 FAKE_READY = {
     "schema": "qtrading.embedded_postgres.run.ready.v1",
     "status": "running",
-    "postgres_version": "17.2.0",
+    "postgres_version": "16.14.0",
     "host": "127.0.0.1",
     "port": 55432,
     "database": "qtrading",
     "username": "postgres",
     "password_source": "password_file",
     "url": "postgresql://postgres:***@127.0.0.1:55432/qtrading",
-    "data_dir": "C:/fake/postgres/17/data",
+    "data_dir": "C:/fake/postgres/16/data",
     "sidecar_pid": 12340,
     "pid": 12345,
 }
@@ -72,7 +72,7 @@ def main():
     ready = {
         "schema": "qtrading.embedded_postgres.run.ready.v1",
         "status": "running",
-        "postgres_version": "17.2.0-mock",
+        "postgres_version": "16.14.0-mock",
         "host": args.listen,
         "port": 55432,
         "database": args.database,
@@ -975,7 +975,7 @@ class TestEmbeddedPostgresServiceFromConfig:
 
         验证：
         1. embedded_pg_sidecar_path 为空 → 默认 sidecars/qtrading-pg-sidecar[.exe]
-        2. embedded_pg_data_root 为空 → 默认 <app_data>/postgres/17/data
+        2. embedded_pg_data_root 为空 → 默认 <app_data>/postgres/16/data
         3. embedded_pg_install_root 为空 → 默认 <data_root>/install
         4. embedded_pg_log_dir 为空 → 默认从 data_dir 推导（<root>/postgres-logs）
         """
@@ -1000,7 +1000,7 @@ class TestEmbeddedPostgresServiceFromConfig:
         assert service._sidecar_binary == Path("sidecars") / f"qtrading-pg-sidecar{expected_suffix}", (
             f"sidecar_binary 默认值错误，实际：{service._sidecar_binary}"
         )
-        # 断言 2: data_dir 默认 <app_data>/postgres/17/data
+        # 断言 2: data_dir 默认 <app_data>/postgres/16/data
         expected_data_dir = tmp_path / "app_data" / "postgres" / "17" / "data"
         assert service._data_dir == expected_data_dir, (
             f"data_dir 默认值错误，实际：{service._data_dir}，期望：{expected_data_dir}"
@@ -1011,7 +1011,7 @@ class TestEmbeddedPostgresServiceFromConfig:
             f"install_dir 默认值错误，实际：{service._install_dir}，期望：{expected_install_dir}"
         )
         # 断言 4: log_dir 从 data_dir 推导 → <root>/postgres-logs
-        # data_dir = <app_data>/postgres/17/data → root = data_dir.parent.parent.parent = <app_data>
+        # data_dir = <app_data>/postgres/16/data → root = data_dir.parent.parent.parent = <app_data>
         expected_log_dir = tmp_path / "app_data" / "postgres-logs"
         assert service._log_dir == expected_log_dir, (
             f"log_dir 默认值错误，实际：{service._log_dir}，期望：{expected_log_dir}"

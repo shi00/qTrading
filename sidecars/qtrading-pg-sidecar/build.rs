@@ -3,7 +3,7 @@
 //! 通过 `cargo:rustc-env` 注入，代码侧用 `env!`/`option_env!` 消费：
 //! - SIDECAR_TARGET / SIDECAR_PROFILE / SIDECAR_BUILD_TIME_UNIX / SIDECAR_BUILD_TIME_UTC
 //! - SIDECAR_GIT_SHA（CI 经 SIDECAR_GIT_SHA 注入；本地回退 `git rev-parse`，失败为 "unknown"）
-//! - SIDECAR_POSTGRES_VERSION（.cargo/config.toml [env] POSTGRESQL_VERSION，精确 pin `=17.2.0`）
+//! - SIDECAR_POSTGRES_VERSION（.cargo/config.toml [env] POSTGRESQL_VERSION，精确 pin `=16.14.0`）
 //! - SIDECAR_CRATE_VERSION（postgresql_embedded 版本，解析 Cargo.lock）
 //! - SIDECAR_RUSTC_VERSION
 

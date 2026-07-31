@@ -533,6 +533,44 @@ class TestDataProcessorSyncConcepts:
         result = await dp.sync_concepts()
         assert result == 0
 
+    @pytest.mark.asyncio
+    async def test_sync_concepts_engine_disposed_in_gather_results_propagates(self):
+        """R5: gather_return_exceptions_propagating_cancel 返回的 EngineDisposedError
+        必须显式 raise 传播，不得作为普通 subtask 失败被静默吞没。
+
+        场景：fetch_one 内部 API 调用抛 EngineDisposedError，gather 以 return_exceptions
+        模式收集后，sync_concepts 必须优先识别并 raise，由外层 except 捕获后通过
+        classify_severity='system' 路径再次 raise（系统级异常不降级）。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dp = _make_dp()
+        df_c = pd.DataFrame({"code": ["TS1", "TS2"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+        # 模拟其中一个 fetch_one 任务抛出 EngineDisposedError
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS2"],
+                "concept_name": ["Concept2"],
+                "ts_code": ["000002.SZ"],
+                "name": ["Stock2"],
+            }
+        )
+
+        async def _api_with_engine_disposed(c):
+            if c == "TS1":
+                raise EngineDisposedError("engine closed during concept detail fetch")
+            return detail_df
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_api_with_engine_disposed)
+        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.clear_cancel()
+
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 红线契约仅验证 EngineDisposedError 类型传播即可，无有意义 message 可 match；后续 overwrite_concepts.assert_not_called 已强断言
+            await dp.sync_concepts()
+        # 验证：EngineDisposedError 在保存前抛出，未触发 overwrite_concepts
+        dp.cache.overwrite_concepts.assert_not_called()
+
 
 class TestDataProcessorInitData:
     @pytest.mark.asyncio

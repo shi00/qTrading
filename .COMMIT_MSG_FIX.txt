@@ -1,5 +1,0 @@
-fix(ui): _build_prediction_badge icon size 改用 AppStyles token (Task 4.3 PR#362 CI fix)
-
-CI 失败修复:
-- test_no_magic_font_size_in_ui: stock_detail_dialog.py:156
-  size=16 字面值 → size=AppStyles.FONT_SIZE_TITLE (P1-1 规范)

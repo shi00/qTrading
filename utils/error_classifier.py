@@ -28,6 +28,9 @@ SYSTEM_LEVEL_ERROR_TYPES = {
     "SystemExit",
     "KeyboardInterrupt",
     "RecursionError",
+    # R5: EngineDisposedError 表示引擎已释放，继续操作属于僵尸引擎操作。
+    # 用类名字符串匹配避免 utils 反向依赖 data 层（与 TushareAPIPermissionError 模式一致）。
+    "EngineDisposedError",
 }
 
 RECOVERABLE_CODES = {
@@ -188,6 +191,59 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "unknown", "message_key": "llm_err_unknown", "should_retry": False}
 
     if context == "db":
+        if error_type == "EmbeddedPostgresStartError" or "sidecar" in error_str or "embedded_pg" in error_str:
+            import re
+
+            if "not found" in error_str:
+                match = re.search(r"not found:\s*(.+)$", str(e), re.IGNORECASE)
+                path = match.group(1).strip() if match else ""
+                return {
+                    "code": "sidecar_not_found",
+                    "message_key": "db_err_sidecar_not_found",
+                    "format_args": {"path": path or "sidecars/qtrading-pg-sidecar.exe"},
+                }
+            if "not executable" in error_str:
+                match = re.search(r"not executable:\s*(.+)$", str(e), re.IGNORECASE)
+                path = match.group(1).strip() if match else ""
+                return {
+                    "code": "sidecar_not_executable",
+                    "message_key": "db_err_sidecar_not_executable",
+                    "format_args": {"path": path or "sidecars/qtrading-pg-sidecar.exe"},
+                }
+            if "sha256" in error_str:
+                return {
+                    "code": "sha256_mismatch",
+                    "message_key": "db_err_sidecar_sha256_mismatch",
+                }
+            if "initdb failed" in error_str or "exit=11" in error_str:
+                return {
+                    "code": "initdb_failed",
+                    "message_key": "db_err_embedded_initdb_failed",
+                }
+            if "disk full" in error_str or "exit=15" in error_str:
+                return {
+                    "code": "disk_space",
+                    "message_key": "common_err_disk_space",
+                }
+            if "password error" in error_str or "exit=16" in error_str:
+                return {
+                    "code": "password_error",
+                    "message_key": "db_err_embedded_password_error",
+                }
+            if "already running" in error_str or "exit=50" in error_str:
+                return {
+                    "code": "already_running",
+                    "message_key": "db_err_embedded_already_running",
+                }
+            if "crashed" in error_str or "exit=60" in error_str:
+                return {
+                    "code": "crashed",
+                    "message_key": "db_err_embedded_crashed",
+                }
+            return {
+                "code": "embedded_start_failed",
+                "message_key": "db_err_embedded_start_failed",
+            }
         if error_type == "ValueError":
             return {
                 "code": "format",

@@ -929,7 +929,7 @@ class AIService:
                     logger.warning(
                         "[AIService] Stream interrupted after %d chars: %s. Returning partial result.",
                         len(response_content),
-                        stream_err,
+                        DataSanitizer.sanitize_error(stream_err),
                     )
 
                 try:

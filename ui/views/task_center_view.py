@@ -17,7 +17,6 @@ from collections.abc import Callable
 import flet as ft
 
 from core.i18n import Message
-from services.task_manager import TaskStatus
 from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -26,6 +25,7 @@ from ui.viewmodels.task_center_view_model import (
     PAGE_SIZE,
     TaskCenterViewModel,
     TaskRow,
+    TaskStatus,
 )
 from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger

@@ -31,8 +31,8 @@ MOCK_DOCTOR_JSON: dict[str, object] = {
     "schema": "qtrading.embedded_postgres.doctor.v1",
     "data_dir": "/fake/data",
     "initialized": True,
-    "pg_version": 17,
-    "bundled_pg_major": 17,
+    "pg_version": 16,
+    "bundled_pg_major": 16,
     "version_match": True,
     "critical_files_missing": [],
     "install_dir_complete": True,
@@ -123,8 +123,8 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
         assert result.schema == "qtrading.embedded_postgres.doctor.v1"
         assert result.data_dir == "/fake/data"
         assert result.initialized is True
-        assert result.pg_version == 17
-        assert result.bundled_pg_major == 17
+        assert result.pg_version == 16
+        assert result.bundled_pg_major == 16
         assert result.version_match is True
         assert result.install_dir_complete is True
         assert result.postgres_alive is True

@@ -438,7 +438,7 @@ def test_detect_scenario_normal_when_both_exist(monkeypatch, tmp_path: Path) -> 
     install_dir.mkdir()
     data_dir.mkdir()
     (install_dir / ".setup-complete").write_text("sha256:fake\n")
-    (data_dir / "PG_VERSION").write_text("17.0\n")
+    (data_dir / "PG_VERSION").write_text("16.0\n")
 
     config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
     monkeypatch.setattr(
@@ -497,7 +497,7 @@ def test_detect_scenario_unknown_when_only_pg_version_exists(monkeypatch, tmp_pa
     install_dir.mkdir()
     data_dir.mkdir()
     # 不创建 .setup-complete
-    (data_dir / "PG_VERSION").write_text("17.0\n")
+    (data_dir / "PG_VERSION").write_text("16.0\n")
 
     config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True))
     monkeypatch.setattr(

@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn state_file_condition_tri_state() {
         let dir = unique_tmp("tri");
-        let layout = Layout::from_data_dir(&dir.join("postgres/17/data"), None, None, None);
+        let layout = Layout::from_data_dir(&dir.join("postgres/16/data"), None, None, None);
         assert_eq!(state_file_condition(&layout).0, "missing");
         std::fs::create_dir_all(layout.state_file.parent().unwrap()).unwrap();
         std::fs::write(&layout.state_file, "{bad json").unwrap();
@@ -285,7 +285,7 @@ mod tests {
     fn status_json_schema_on_fresh_dir() {
         // fresh 目录：not_initialized，无 state，无锁
         let dir = unique_tmp("status-fresh");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         // status 写 stdout 不便直接断言；改为验证其不报错返回
         assert!(status(&data_dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
@@ -294,7 +294,7 @@ mod tests {
     #[tokio::test]
     async fn stop_on_fresh_dir_is_noop_ok() {
         let dir = unique_tmp("stop-noop");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         assert!(stop(&data_dir).await.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn stop_conflict_when_lock_held() {
         let dir = unique_tmp("stop-conflict");
-        let data_dir = dir.join("postgres/17/data");
+        let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         assert_eq!(stop(&data_dir).await, Err(exit_codes::LOCK_CONFLICT));
@@ -315,7 +315,7 @@ mod tests {
         let json = serde_json::to_value(&v).unwrap();
         assert_eq!(json["schema"], protocol::VERSION_SCHEMA);
         assert_eq!(json["protocol_version"], "v1");
-        assert_eq!(json["postgres_version"], "17.2.0");
+        assert_eq!(json["postgres_version"], "16.14.0");
         assert_eq!(json["license"], "PostgreSQL");
         assert_eq!(json["postgres_binary_source"], "theseus-bundled");
         assert!(json["build_time_unix"].as_u64().unwrap() > 0);

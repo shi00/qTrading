@@ -654,7 +654,11 @@ class LocalModelManager:
                                 }
                             )
                         except (ValueError, OSError, RuntimeError) as e:
-                            logger.warning("[LocalModel] Failed to persist model SHA-256: %s", e, exc_info=True)
+                            logger.warning(
+                                "[LocalModel] Failed to persist model SHA-256: %s",
+                                DataSanitizer.sanitize_error(e),
+                                exc_info=True,
+                            )
 
                     elapsed = asyncio.get_running_loop().time() - start_time
                     logger.info(

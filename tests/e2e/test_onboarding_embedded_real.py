@@ -4,7 +4,7 @@
 
 与 ``test_onboarding_embedded.py`` 的区别：
 - 后者用 ``fake_sidecar``（Python 脚本模拟 sidecar 协议）
-- 本测试用真实 Rust sidecar binary + 真实 PG 17，验证完整应用启动链路
+- 本测试用真实 Rust sidecar binary + 真实 PG 16，验证完整应用启动链路
 
 验证内容：
 1. 真实 sidecar 启动 → app 内部 ``prepare_database_runtime()`` 协调

@@ -198,6 +198,62 @@ class TestClassifyErrorDBContext:
         result = classify_error(Exception("no such table: stock_basic"), context="db")
         assert result["code"] == "not_found"
 
+    def test_embedded_postgres_sidecar_not_found(self):
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        exc = EmbeddedPostgresStartError("sidecar binary not found: sidecars\\qtrading-pg-sidecar.exe")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "sidecar_not_found"
+        assert result["message_key"] == "db_err_sidecar_not_found"
+        assert result["format_args"]["path"] == "sidecars\\qtrading-pg-sidecar.exe"
+
+    def test_embedded_postgres_sidecar_not_executable(self):
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        exc = EmbeddedPostgresStartError("sidecar binary not executable: sidecars\\qtrading-pg-sidecar.exe")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "sidecar_not_executable"
+        assert result["message_key"] == "db_err_sidecar_not_executable"
+        assert result["format_args"]["path"] == "sidecars\\qtrading-pg-sidecar.exe"
+
+    def test_embedded_postgres_sha256_mismatch(self):
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        exc = EmbeddedPostgresStartError("sidecar binary sha256 mismatch")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "sha256_mismatch"
+        assert result["message_key"] == "db_err_sidecar_sha256_mismatch"
+
+    def test_embedded_postgres_exit_codes(self):
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        assert (
+            classify_error(EmbeddedPostgresStartError("initdb failed (exit=11)"), context="db")["code"]
+            == "initdb_failed"
+        )
+        assert classify_error(EmbeddedPostgresStartError("disk full (exit=15)"), context="db")["code"] == "disk_space"
+        assert (
+            classify_error(EmbeddedPostgresStartError("password error (exit=16)"), context="db")["code"]
+            == "password_error"
+        )
+        assert (
+            classify_error(EmbeddedPostgresStartError("qTrading already running (exit=50)"), context="db")["code"]
+            == "already_running"
+        )
+        assert (
+            classify_error(EmbeddedPostgresStartError("sidecar crashed (exit=60)"), context="db")["code"] == "crashed"
+        )
+
+    def test_embedded_postgres_fallback_no_format_args(self):
+        """fallback 分支（无已知关键词）不应传 format_args，防止原始异常泄露（R9）。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        exc = EmbeddedPostgresStartError("some unknown sidecar failure mode")
+        result = classify_error(exc, context="db")
+        assert result["code"] == "embedded_start_failed"
+        assert result["message_key"] == "db_err_embedded_start_failed"
+        assert "format_args" not in result, "fallback 分支不应传 format_args，模板无 {error} 占位符"
+
 
 class TestClassifyErrorChartContext:
     def test_timeout(self):
@@ -634,3 +690,25 @@ class TestClassifySeverityTusharePermission:
     def test_builtin_permission_error_still_system(self):
         # 内置 PermissionError（文件系统权限）仍归为 system，不受影响
         assert classify_severity(PermissionError("access denied")) == "system"
+
+
+class TestClassifySeverityEngineDisposed:
+    """R5: EngineDisposedError 应归为 system，确保 except Exception 块中
+    `if severity == "system": raise` 能正确传播，避免僵尸引擎操作被静默吞没。
+    用动态创建同名异常类测试，避免 utils 测试反向依赖 data 层（R1 架构边界）。"""
+
+    def test_engine_disposed_error_is_system(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        e = EngineDisposedError("Engine disposed during check")
+        assert classify_severity(e) == "system"
+
+    def test_engine_disposed_error_is_system_in_db_context(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        e = EngineDisposedError("Engine disposed")
+        assert classify_severity(e, context="db") == "system"
+
+    def test_engine_disposed_error_is_system_in_all_contexts(self):
+        EngineDisposedError = type("EngineDisposedError", (Exception,), {})
+        for ctx in ("general", "token", "llm", "db", "chart"):
+            e = EngineDisposedError("test")
+            assert classify_severity(e, context=ctx) == "system", f"context={ctx} 应识别为 system"
