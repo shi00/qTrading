@@ -286,6 +286,49 @@ class TestBacktestStrategyAdapter:
         assert scores == [0.8, 0.6]
 
     @pytest.mark.asyncio
+    async def test_adapter_assigns_rank_by_score_desc(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """M10-001/M10-002 契约：score 高的行应获得大 rank（rank 大=信号强）。
+
+        策略返回未按 score 排序的 DataFrame，adapter 应按 score 降序排序后赋 rank，
+        消除"策略返回 DataFrame 已排序"的隐式假设。
+        """
+
+        class UnsortedScoreStrategy(BaseStrategy):
+            required_context_keys = ()
+
+            def __init__(self):
+                super().__init__("unsorted_score_strategy", "Unsorted Score Strategy")
+
+            async def filter(self, context):
+                # 故意打乱顺序：score 0.9 在中间，0.5 在最前，0.7 在最后
+                return pd.DataFrame(
+                    {
+                        "ts_code": ["000003.SZ", "000001.SZ", "000002.SZ"],
+                        "score": [0.5, 0.9, 0.7],
+                    }
+                )
+
+        unsorted_strategy = UnsortedScoreStrategy()
+        context = {"trade_date": date(2024, 1, 1)}
+
+        result = await adapter.generate_signal(
+            strategy=unsorted_strategy,
+            context=context,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert result is not None
+        # 按 score 降序后：000001.SZ(0.9) rank=3, 000002.SZ(0.7) rank=2, 000003.SZ(0.5) rank=1
+        rank_by_code = {row["ts_code"]: row["signal_rank"] for row in result.to_dicts()}
+        assert rank_by_code["000001.SZ"] == 3  # score 0.9 最高 → rank 3 最大
+        assert rank_by_code["000002.SZ"] == 2  # score 0.7 中间 → rank 2
+        assert rank_by_code["000003.SZ"] == 1  # score 0.5 最低 → rank 1 最小
+
+    @pytest.mark.asyncio
     async def test_adapter_with_signal_score_column(
         self,
         adapter: BacktestStrategyAdapter,
