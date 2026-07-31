@@ -579,7 +579,15 @@ class FletPage:
         #      这里故意执行了一个 timeout=1ms 的 wait_for 触发报错。
         # 正确做法：看到 "Timeout 1ms exceeded" 报错时，不要以为是 timeout_ms 参数没传进去，
         #         这实际上意味着它已经实打实地等待了你传入的足额时间（比如 5000ms 或 15000ms）后依然失败。
-        await loc_combined.wait_for(state="attached", timeout=1)
+        # Phase 9.1: 包装为明确 AssertionError，避免 "Timeout 1ms exceeded" 误导调试。
+        try:
+            await loc_combined.wait_for(state="attached", timeout=1)
+        except Exception as exc:
+            raise AssertionError(
+                f"expect_text: 文本 '{text}' 在 {scaled}ms 内未出现"
+                f"（含 {scaled}ms 轮询等待 + 1ms 触发报错）。"
+                f"实际已等待完整 {scaled}ms 后仍失败，非 timeout 参数问题。"
+            ) from exc
 
     async def has_text(self, text: str) -> bool:
         """检查页面上是否存在指定文本。"""
