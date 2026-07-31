@@ -2052,9 +2052,14 @@ class TestPayloadSanitization:
                 mgr._worker_proc.is_alive.return_value = True
 
                 with caplog.at_level("ERROR", logger="services.local_model_manager"):
-                    with pytest.raises(RuntimeError, match="Inference execution failed"):
+                    with pytest.raises(RuntimeError, match="Inference execution failed") as exc_info:
                         await mgr.run_inference("test prompt")
 
                 # 反向断言：原始路径字符串不出现在 caplog 记录中
                 for record in caplog.records:
                     assert sensitive_path not in record.getMessage()
+
+                # R9 守卫：异常消息体同样必须脱敏。
+                # 上游 ai_service.py 在 _log(..., exc_info=True) 时会输出完整 traceback
+                # （含 RuntimeError 消息体），未脱敏 payload 会经此路径泄露。
+                assert sensitive_path not in str(exc_info.value)

@@ -854,9 +854,12 @@ class LocalModelManager:
 
         if status == "error":
             # R9: payload 来自子进程 result_queue，可能含 traceback（模型路径/系统信息），
-            # 经 sanitize_error 脱敏后再记录
-            logger.error("[LocalModel] Inference error: %s", DataSanitizer.sanitize_error(payload))
-            raise RuntimeError(f"Inference execution failed: {payload}")
+            # 经 sanitize_error 脱敏后再记录。
+            # 异常消息同样必须脱敏：上游 ai_service.py 在 _log(..., exc_info=True) 时
+            # 会输出完整 traceback（含 RuntimeError 消息体），未脱敏 payload 会经此路径泄露。
+            sanitized_payload = DataSanitizer.sanitize_error(payload)
+            logger.error("[LocalModel] Inference error: %s", sanitized_payload)
+            raise RuntimeError(f"Inference execution failed: {sanitized_payload}")
 
         if status == "shutdown":
             self._worker_ready = False
