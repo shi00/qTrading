@@ -208,7 +208,7 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Control:
-    """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
+    """构建单个行 (方案 E: Container.on_click 替代 GestureDetector 包裹).
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
@@ -216,17 +216,16 @@ def _build_row(
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
 
     Note:
-        on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
-        "GestureDetector should have at least one event handler defined" 警告覆盖行文本
-        的语义节点 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖导致 E2E 失败)。
+        与表头 _build_header 实现保持一致: 直接给 Container(ink=True) 设置 on_click,
+        Container 的 Material > InkWell 作为 MergeSemantics 将子 Text label 合并到
+        button 节点的 text/aria-label, Playwright 通过 get_by_text / [aria-label*=...]
+        匹配行内文本 (E2E 修复: PR #373 行 button 节点 text 为空导致 "平安银行" 不可见).
 
-        on_row_click 非空时用默认 GestureDetector (exclude_from_semantics=False) 包裹:
-        GestureDetector 默认生成 role=button 语义节点, Container(ink=True) 的 InkWell
-        作为 MergeSemantics 将子 Text label 合并到该 button 节点的 aria-label,
-        Playwright 通过 [aria-label*="平安银行"] 定位 (E2E 验证通过).
-        禁用 exclude_from_semantics=True: 该参数会打破 InkWell 合并语义链路,
-        导致子 Text 在 CanvasKit 下散落不可被 get_by_text / [aria-label*=...] 匹配
-        (PR #373 E2E 回归修复: revert 42c05ad5 误判).
+        禁用 GestureDetector 包裹行: GestureDetector 创建独立 button 语义节点但
+        不会合并子 Text label (与 InkWell MergeSemantics 行为不同), 导致行 button
+        节点 text 为空, Playwright get_by_text 找不到 "平安银行".
+        同时规避 Flutter "GestureDetector should have at least one event handler defined"
+        警告 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖).
     """
     inner = ft.Container(
         height=ROW_HEIGHT,
@@ -238,10 +237,8 @@ def _build_row(
     )
     if on_row_click is None:
         return inner
-    return ft.GestureDetector(
-        content=inner,
-        on_tap=_make_row_click_handler(on_row_click, row_data),
-    )
+    inner.on_click = _make_row_click_handler(on_row_click, row_data)
+    return inner
 
 
 @ft.component

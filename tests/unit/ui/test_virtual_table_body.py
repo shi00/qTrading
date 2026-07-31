@@ -369,68 +369,66 @@ class TestBuildRow:
         assert row.width == 800
         assert row.ink is True
 
-    def test_returns_gesture_detector_with_inner_container(self):
-        """on_row_click 非空时返回 GestureDetector, 内部包裹 Container (生成 flt-tappable 语义属性)."""
+    def test_returns_container_with_on_click_when_click_handler_set(self):
+        """方案 E: on_row_click 非空时返回 Container(ink=True, on_click=...).
+
+        与表头 _build_header 实现一致, Container 的 InkWell 作为 MergeSemantics
+        合并子 Text label 到 button 节点 text/aria-label (E2E 修复: PR #373).
+        """
         on_row_click = MagicMock()
         row = _build_row(5, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.GestureDetector)
-        inner = row.content
-        assert isinstance(inner, ft.Container)
-        # 方案 D: 不再设置 left/top (由 Column 线性布局)
-        assert inner.height == ROW_HEIGHT
-        assert inner.width == 800
-        assert inner.ink is True
+        assert isinstance(row, ft.Container)
+        # 方案 E: 不再设置 left/top (由 Column 线性布局)
+        assert row.height == ROW_HEIGHT
+        assert row.width == 800
+        assert row.ink is True
+        assert callable(row.on_click)
 
     def test_bgcolor_from_app_styles(self):
         on_row_click = MagicMock()
         row = _build_row(3, _make_row_data(), _make_columns(), 800, on_row_click)
-        inner = row.content
-        assert inner.bgcolor == AppStyles.data_table_row(3)
+        assert row.bgcolor == AppStyles.data_table_row(3)
 
     def test_content_is_row_of_cells(self):
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        inner = row.content
-        assert isinstance(inner.content, ft.Row)
-        assert len(inner.content.controls) == 4
+        assert isinstance(row.content, ft.Row)
+        assert len(row.content.controls) == 4
 
-    def test_with_on_row_click_attaches_tap_handler(self):
-        """方案 D: on_row_click 非空时 GestureDetector.on_tap 为 callable."""
+    def test_with_on_row_click_attaches_click_handler(self):
+        """方案 E: on_row_click 非空时 Container.on_click 为 callable."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert callable(row.on_tap)
+        assert callable(row.on_click)
 
     def test_on_row_click_handler_invokes_callback_with_row_data(self):
-        """方案 D: GestureDetector.on_tap 触发时调用 on_row_click(row_data)."""
+        """方案 E: Container.on_click 触发时调用 on_row_click(row_data)."""
         on_row_click = MagicMock()
         data = _make_row_data()
         row = _build_row(0, data, _make_columns(), 800, on_row_click)
-        assert callable(row.on_tap)
-        row.on_tap(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_tap as 0-arg, but runtime passes event]
+        assert callable(row.on_click)
+        row.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
         on_row_click.assert_called_once_with(data)
 
     def test_is_hovered_false_uses_odd_even_color(self):
         """P2-8 MAJ-2: is_hovered=False (默认) → bgcolor 为 ODD/EVEN 色 (非 TABLE_ROW_HOVER)."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        inner = row.content
-        assert inner.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
-        assert inner.bgcolor != AppColors.TABLE_ROW_HOVER
+        assert row.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
+        assert row.bgcolor != AppColors.TABLE_ROW_HOVER
 
     def test_is_hovered_true_uses_hover_color(self):
         """P2-8 MAJ-2: is_hovered=True → bgcolor 为 TABLE_ROW_HOVER."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, is_hovered=True)
-        inner = row.content
-        assert inner.bgcolor == AppColors.TABLE_ROW_HOVER
+        assert row.bgcolor == AppColors.TABLE_ROW_HOVER
 
-    def test_on_hover_attached_to_inner_container_when_provided(self):
-        """P2-8 MAJ-2: 传入 on_hover 回调时, 内部 Container.on_hover 非空 (GestureDetector 无 on_hover 用于 bgcolor 切换)."""
+    def test_on_hover_attached_to_container_when_provided(self):
+        """P2-8 MAJ-2: 传入 on_hover 回调时, Container.on_hover 非空 (用于 bgcolor 切换)."""
         on_hover = MagicMock()
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, on_hover=on_hover)
-        inner = row.content
-        assert callable(inner.on_hover)
+        assert callable(row.on_hover)
 
 
 # ---------------------------------------------------------------------------
@@ -481,10 +479,14 @@ class TestPaginatedTableRenderStructure:
         for row in rows_column.controls:
             assert isinstance(row, ft.Container)
 
-    def test_rows_column_contains_gesture_detectors_when_click_handler_set(
+    def test_rows_column_contains_containers_with_on_click_when_click_handler_set(
         self, mock_i18n_state, mock_app_colors_state
     ):
-        """方案 D: on_row_click 非空时行返回 GestureDetector (生成 flt-tappable 语义属性)."""
+        """方案 E: on_row_click 非空时行返回 Container(ink=True, on_click=...).
+
+        与表头 _build_header 实现一致, Container 的 InkWell 作为 MergeSemantics
+        合并子 Text label 到 button 节点 text/aria-label (E2E 修复: PR #373).
+        """
         rows = [_make_row_data() for _ in range(3)]
         on_row_click = MagicMock()
         _, result = _render(_make_component(rows=rows, on_row_click=on_row_click))
@@ -492,8 +494,8 @@ class TestPaginatedTableRenderStructure:
         rows_column = rows_clip_container.content
         assert len(rows_column.controls) == 3
         for row in rows_column.controls:
-            assert isinstance(row, ft.GestureDetector)
-            assert isinstance(row.content, ft.Container)
+            assert isinstance(row, ft.Container)
+            assert callable(row.on_click)
 
     def test_empty_rows_renders_empty_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
