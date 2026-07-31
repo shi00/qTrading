@@ -489,7 +489,9 @@ class LocalModelManager:
             logger.info("[LocalModel] Persistent worker ready with model: %s", payload)
             return True
 
-        logger.error("[LocalModel] Persistent worker failed: %s", payload)
+        # R9: payload 来自子进程 result_queue，可能含 traceback.format_exc()（模型路径），
+        # 经 sanitize_error 脱敏后再记录（与子进程内 sanitize_error 模式一致）
+        logger.error("[LocalModel] Persistent worker failed: %s", DataSanitizer.sanitize_error(payload))
         self._worker_ready = False
         self._shutdown_worker()
         return False
@@ -851,7 +853,9 @@ class LocalModelManager:
         elapsed = asyncio.get_running_loop().time() - start_time
 
         if status == "error":
-            logger.error("[LocalModel] Inference error: %s", payload)
+            # R9: payload 来自子进程 result_queue，可能含 traceback（模型路径/系统信息），
+            # 经 sanitize_error 脱敏后再记录
+            logger.error("[LocalModel] Inference error: %s", DataSanitizer.sanitize_error(payload))
             raise RuntimeError(f"Inference execution failed: {payload}")
 
         if status == "shutdown":

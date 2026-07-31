@@ -27,6 +27,7 @@ from typing import Any
 from utils.config_handler import ConfigHandler
 from utils.config_models import AppConfig
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -157,7 +158,9 @@ class EmbeddedPgMaintenanceService:
         try:
             data = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError as exc:
-            raise EmbeddedPgMaintenanceError(f"doctor JSON parse failed: {exc}; stdout={stdout!r}") from exc
+            # R9: stdout 可能含 PG 数据目录路径，经 sanitize_error 脱敏后再进入异常消息
+            sanitized_stdout = DataSanitizer.sanitize_error(stdout)
+            raise EmbeddedPgMaintenanceError(f"doctor JSON parse failed: {exc}; stdout={sanitized_stdout!r}") from exc
         return self._validate_doctor_json(data)
 
     @log_async_operation(
@@ -220,7 +223,11 @@ class EmbeddedPgMaintenanceService:
         try:
             data = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError as exc:
-            raise EmbeddedPgMaintenanceError(f"maintenance-shell JSON parse failed: {exc}; stdout={stdout!r}") from exc
+            # R9: stdout 可能含 PG 数据目录路径，经 sanitize_error 脱敏后再进入异常消息
+            sanitized_stdout = DataSanitizer.sanitize_error(stdout)
+            raise EmbeddedPgMaintenanceError(
+                f"maintenance-shell JSON parse failed: {exc}; stdout={sanitized_stdout!r}"
+            ) from exc
         return MaintenanceShellInfo(
             psql_path=str(data.get("psql_path", "")),
             connection_string_redacted=str(data.get("connection_string_redacted", "")),
@@ -310,13 +317,15 @@ class EmbeddedPgMaintenanceService:
             exit_code,
             ("unknown_error", logging.ERROR, f"未知错误（exit={exit_code}）"),
         )
+        # R9: stderr 来自 sidecar CLI 子进程，可能含 PG 数据目录路径、连接信息，
+        # 经 sanitize_error 脱敏后再记录
         logger.log(
             log_level,
             "[embedded_pg_maintenance] %s command failed: exit=%s, type=%s, stderr=%s",
             command,
             exit_code,
             error_type,
-            stderr,
+            DataSanitizer.sanitize_error(stderr),
         )
         raise EmbeddedPgMaintenanceError(f"{command} failed: exit={exit_code}, type={error_type}; {user_hint}")
 

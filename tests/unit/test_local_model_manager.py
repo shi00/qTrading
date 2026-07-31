@@ -1997,3 +1997,64 @@ class TestLocalModelVerificationMode:
         """cancel_verification_if_active() 在 _instance=None 时不报错。"""
         LocalModelManager._instance = None
         LocalModelManager.cancel_verification_if_active()
+
+
+class TestPayloadSanitization:
+    """R9: payload 含 traceback 路径时经 DataSanitizer.sanitize_error 脱敏后才记录。"""
+
+    @pytest.mark.asyncio
+    async def test_persistent_worker_failure_payload_sanitized_in_log(self, caplog):
+        """L492: _await_worker_ready 的 error payload 含路径时，caplog 中原始路径不出现。"""
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        # 含空格的 Windows 路径（项目真实工作目录风格）
+        sensitive_path = r"D:\workspace\Quantitative Trading\models\test.gguf"
+        payload = f'Model load failed: Traceback:\n  File "{sensitive_path}", line 1'
+        mgr._result_queue.get_nowait.return_value = ("error", payload)
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        with patch.object(mgr, "_shutdown_worker"):
+            with caplog.at_level("ERROR", logger="services.local_model_manager"):
+                result = await mgr._await_worker_ready()
+            assert result is False
+
+        # 反向断言：原始路径字符串不出现在 caplog 记录中
+        for record in caplog.records:
+            assert sensitive_path not in record.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_inference_error_payload_sanitized_in_log(self, caplog):
+        """L854: run_inference 的 error payload 含路径时，caplog 中原始路径不出现。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                sensitive_path = r"D:\workspace\Quantitative Trading\models\test.gguf"
+                payload = f'Inference failed: Traceback:\n  File "{sensitive_path}", line 42'
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue.get_nowait.return_value = ("error", payload)
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                with caplog.at_level("ERROR", logger="services.local_model_manager"):
+                    with pytest.raises(RuntimeError, match="Inference execution failed"):
+                        await mgr.run_inference("test prompt")
+
+                # 反向断言：原始路径字符串不出现在 caplog 记录中
+                for record in caplog.records:
+                    assert sensitive_path not in record.getMessage()
