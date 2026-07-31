@@ -133,13 +133,20 @@ class BacktestStrategyAdapter:
             return pl.DataFrame()
 
         num_rows = len(df)
-        ts_codes = df["ts_code"].to_list()
 
-        score_col = None
+        # M10-001/M10-002 修复：统一 signal_rank 语义为 "rank 大 = 信号强"。
+        # 若存在 score 列，按 score 降序排序后赋 rank，消除"策略返回 DataFrame 已排序"的隐式假设。
+        score_col_name = None
         for score_name in ["score", "signal_score", "rank_score", "ai_score"]:
             if score_name in df.columns:
-                score_col = df[score_name].to_list()
+                score_col_name = score_name
                 break
+
+        if score_col_name is not None:
+            df = df.sort(score_col_name, descending=True)
+
+        ts_codes = df["ts_code"].to_list()
+        score_col = df[score_col_name].to_list() if score_col_name else None
 
         reason_col = None
         for reason_name in ["reason", "signal_reason", "note"]:
@@ -147,6 +154,7 @@ class BacktestStrategyAdapter:
                 reason_col = df[reason_name].to_list()
                 break
 
+        # rank 语义：rank 大 = 信号强（第一行 rank=N 最大，按 score 降序后即最强信号）
         ranks = list(range(num_rows, 0, -1))
 
         equal_weight = 1.0 / num_rows if num_rows > 0 else 0.0

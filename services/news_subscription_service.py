@@ -58,6 +58,8 @@ class NewsSubscriptionService:
         if inst is not None:
             inst._listeners.clear()
             inst._alert_listeners.clear()
+            # M9-001: 用 setattr 替代 .clear()，兼容测试用 __new__ 绕过 __init__ 时属性未初始化场景
+            inst._listener_errors = {}
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -93,6 +95,7 @@ class NewsSubscriptionService:
         # Format: set of callables
         self._listeners = set()
         self._alert_listeners = set()  # Special listeners for popups (controlled by config)
+        self._listener_errors: dict = {}  # M9-001: 显式初始化，消除延迟创建异味
 
         self._current_fetch_task = None
         self._processing_task = None
@@ -421,9 +424,6 @@ class NewsSubscriptionService:
         target = listeners if listeners else self._listeners
         if not target:
             return
-
-        if not hasattr(self, "_listener_errors"):
-            self._listener_errors = {}
 
         for listener in list(target):
             try:

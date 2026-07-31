@@ -122,14 +122,13 @@ class MarketCapWeightSizer(PositionSizer):
 class RiskParitySizer(PositionSizer):
     """风险平价分配器（简化版）
 
-    简化实现：使用 signal_rank 的倒数作为风险代理。
-    signal_rank 数值越大，inv_rank 越小，权重越低。
+    M10-001 修复：统一 signal_rank 语义为 "rank 大 = 信号强"。
+    使用 signal_rank 本身作为权重代理：rank 大 = 信号强 = 权重大。
 
-    语义：signal_rank 表示信号强度排名，数值越小信号越强，
-    因此权重与信号强度成正比（rank 1 最强，权重最高）。
+    语义：signal_rank 数值越大信号越强，因此权重与 signal_rank 成正比
+    （rank N 最强，权重最高）。
 
-    计算公式：weight_i = inv_rank_i / sum(inv_rank)
-    其中 inv_rank_i = 1 / signal_rank_i
+    计算公式：weight_i = rank_i / sum(rank)
     """
 
     def compute_weights(
@@ -142,7 +141,7 @@ class RiskParitySizer(PositionSizer):
             logger.warning("[RiskParitySizer] signal_rank column not found, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
-        # 过滤非正 signal_rank（避免 1/0 = inf）和 null 值
+        # 过滤非正 signal_rank（避免除零）和 null 值
         valid_signals = signals.filter((pl.col("signal_rank") > 0) & pl.col("signal_rank").is_not_null())
         if valid_signals.is_empty():
             logger.warning("[RiskParitySizer] No valid signal_rank data, falling back to equal weight")
@@ -150,17 +149,13 @@ class RiskParitySizer(PositionSizer):
 
         signals_sorted = valid_signals.sort("signal_rank", descending=True)
 
-        signals_with_inv_rank = signals_sorted.with_columns((1.0 / pl.col("signal_rank")).alias("inv_rank"))
+        rank_sum = signals_sorted.select(pl.col("signal_rank").sum()).item()
 
-        inv_rank_sum = signals_with_inv_rank.select(pl.col("inv_rank").sum()).item()
-
-        if inv_rank_sum is None or inv_rank_sum <= 0:
-            logger.warning("[RiskParitySizer] Invalid inverse rank sum, falling back to equal weight")
+        if rank_sum is None or rank_sum <= 0:
+            logger.warning("[RiskParitySizer] Invalid rank sum, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
-        result = signals_with_inv_rank.with_columns((pl.col("inv_rank") / inv_rank_sum).alias("weight")).drop(
-            "inv_rank"
-        )
+        result = signals_sorted.with_columns((pl.col("signal_rank") / rank_sum).alias("weight"))
 
         return result
 
