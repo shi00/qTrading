@@ -93,8 +93,11 @@ class MarketCapWeightSizer(PositionSizer):
 
         signals_with_mv = signals.join(unique_quotes, on="ts_code", how="inner")
 
+        # 过滤非正市值（数据异常或退市残留），避免负权重污染
+        signals_with_mv = signals_with_mv.filter(pl.col("total_mv") > 0)
+
         if signals_with_mv.is_empty():
-            logger.warning("[MarketCapWeightSizer] No matching quotes, falling back to equal weight")
+            logger.warning("[MarketCapWeightSizer] No valid market cap data, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
         total_mv_sum = signals_with_mv.select(pl.col("total_mv").sum()).item()
@@ -139,7 +142,13 @@ class RiskParitySizer(PositionSizer):
             logger.warning("[RiskParitySizer] signal_rank column not found, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
-        signals_sorted = signals.sort("signal_rank", descending=True)
+        # 过滤非正 signal_rank（避免 1/0 = inf）和 null 值
+        valid_signals = signals.filter((pl.col("signal_rank") > 0) & pl.col("signal_rank").is_not_null())
+        if valid_signals.is_empty():
+            logger.warning("[RiskParitySizer] No valid signal_rank data, falling back to equal weight")
+            return EqualWeightSizer().compute_weights(signals, quotes, config)
+
+        signals_sorted = valid_signals.sort("signal_rank", descending=True)
 
         signals_with_inv_rank = signals_sorted.with_columns((1.0 / pl.col("signal_rank")).alias("inv_rank"))
 
