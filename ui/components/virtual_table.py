@@ -208,7 +208,7 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Control:
-    """构建单个行。
+    """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
@@ -220,13 +220,13 @@ def _build_row(
         "GestureDetector should have at least one event handler defined" 警告覆盖行文本
         的语义节点 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖导致 E2E 失败)。
 
-        on_row_click 非空时用 GestureDetector(exclude_from_semantics=True) 包裹:
-        GestureDetector 默认 excludeFromSemantics=false 会在 semantics 树注入空 button
-        节点 (aria='', text=''), 不合并子 Text label, 导致 Playwright get_by_text
-        找不到行内文本 (Flutter bug #147050, Flet #5417). exclude_from_semantics=True
-        让 GestureDetector 不注入空 button 节点, 子 Text label 直接暴露;
-        Container(ink=True) 的 InkWell 不创建独立 SemanticsNode (仅给现有节点添加
-        tap action), a11y 不退化 (PR #373 E2E 修复).
+        on_row_click 非空时用默认 GestureDetector (exclude_from_semantics=False) 包裹:
+        GestureDetector 默认生成 role=button 语义节点, Container(ink=True) 的 InkWell
+        作为 MergeSemantics 将子 Text label 合并到该 button 节点的 aria-label,
+        Playwright 通过 [aria-label*="平安银行"] 定位 (E2E 验证通过).
+        禁用 exclude_from_semantics=True: 该参数会打破 InkWell 合并语义链路,
+        导致子 Text 在 CanvasKit 下散落不可被 get_by_text / [aria-label*=...] 匹配
+        (PR #373 E2E 回归修复: revert 42c05ad5 误判).
     """
     inner = ft.Container(
         height=ROW_HEIGHT,
@@ -241,7 +241,6 @@ def _build_row(
     return ft.GestureDetector(
         content=inner,
         on_tap=_make_row_click_handler(on_row_click, row_data),
-        exclude_from_semantics=True,
     )
 
 
