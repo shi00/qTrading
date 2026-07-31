@@ -2,16 +2,16 @@
 
 补充 test_virtual_table.py 仅覆盖纯函数的不足，验证：
 - _build_header / _build_cells / _build_row 单元构建函数的分支逻辑
-- PaginatedTable 组件体 的渲染结构 + ListView 原生虚拟化配置 (方案 D)
+- PaginatedTable 组件体 的渲染结构 + Column(scroll=ALWAYS) 配置 (方案 D-v2, E2E 修复)
 
 配套 conftest.py 的 ``mock_app_colors_state`` 注入 Observable state，
 ``_v1_page_compat`` 让 ``control.page`` 可注入。
 
-变更要点 (方案 D):
+变更要点 (方案 D-v2):
 - 删除 TestPaginatedTableScrollHandler (不再有 _on_scroll handler)
-- 改写 TestPaginatedTableRenderStructure (ListView 直接含行, 无 Stack 中间层)
+- 改写 TestPaginatedTableRenderStructure (Column 直接含行, 无 ListView/Stack 中间层)
 - 改写 TestPaginatedTableRowsChangeEffect (key 重建替代 use_effect 重置)
-- 新增 TestPaginatedTableListViewConfig (验证 ListView 原生虚拟化配置)
+- 新增 TestPaginatedTableRowsColumnConfig (验证 Column 配置, 替代 ListView 虚拟化配置)
 """
 
 # pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
@@ -410,12 +410,12 @@ class TestBuildRow:
 
 
 # ---------------------------------------------------------------------------
-# PaginatedTable 组件体 (方案 D: ListView 原生虚拟化)
+# PaginatedTable 组件体 (方案 D-v2: Column(scroll=ALWAYS) 承载行, E2E 修复)
 # ---------------------------------------------------------------------------
 
 
 class TestPaginatedTableRenderStructure:
-    """验证 PaginatedTable 渲染后的控件树结构 (方案 D: ListView 直接含行, 无 Stack 中间层)。"""
+    """验证 PaginatedTable 渲染后的控件树结构 (方案 D-v2: Column 直接含行, 无 ListView 中间层)。"""
 
     def test_renders_column_with_row(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
@@ -426,14 +426,18 @@ class TestPaginatedTableRenderStructure:
         assert outer_row.scroll == ft.ScrollMode.ALWAYS
         assert outer_row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
 
-    def test_inner_column_contains_header_and_listview(self, mock_i18n_state, mock_app_colors_state):
+    def test_inner_column_contains_header_and_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
         inner_column = result.controls[0].controls[0]
         assert isinstance(inner_column, ft.Column)
         assert len(inner_column.controls) == 2
-        header_container, list_view = inner_column.controls
+        header_container, rows_clip_container = inner_column.controls
         assert isinstance(header_container, ft.Container)
-        assert isinstance(list_view, ft.ListView)
+        # 方案 D-v2: 用 ft.Container(clip_behavior=HARD_EDGE) 包裹 ft.Column(scroll=ALWAYS)
+        assert isinstance(rows_clip_container, ft.Container)
+        assert rows_clip_container.clip_behavior == ft.ClipBehavior.HARD_EDGE
+        rows_column = rows_clip_container.content
+        assert isinstance(rows_column, ft.Column)
 
     def test_header_container_has_correct_height_and_bgcolor(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
@@ -441,25 +445,29 @@ class TestPaginatedTableRenderStructure:
         assert header.height == HEADER_HEIGHT
         assert header.bgcolor == AppColors.TABLE_HEADER_BG
 
-    def test_list_view_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
-        """方案 D: ListView.controls 直接是行 Container 列表 (无 Stack 中间层)。
+    def test_rows_column_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
+        """方案 D-v2: Column.controls 直接是行 Container 列表 (无 ListView/Stack 中间层)。
 
-        100 行规模下 Python 端构建全量行控件, build_controls_on_demand=False 强制全量渲染。
+        100 行规模下 Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行.
         """
         rows = [_make_row_data() for _ in range(5)]
         _, result = _render(_make_component(rows=rows))
-        list_view = result.controls[0].controls[0].controls[1]
-        assert isinstance(list_view, ft.ListView)
-        # 直接是行 Container, 不经过 Stack
-        assert len(list_view.controls) == 5
-        for row in list_view.controls:
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        assert isinstance(rows_clip_container, ft.Container)
+        rows_column = rows_clip_container.content
+        assert isinstance(rows_column, ft.Column)
+        # 直接是行 Container, 不经过 ListView/Stack
+        assert len(rows_column.controls) == 5
+        for row in rows_column.controls:
             assert isinstance(row, ft.Container)
 
-    def test_empty_rows_renders_empty_list_view(self, mock_i18n_state, mock_app_colors_state):
+    def test_empty_rows_renders_empty_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
-        list_view = result.controls[0].controls[0].controls[1]
-        assert isinstance(list_view, ft.ListView)
-        assert list_view.controls == []
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        assert isinstance(rows_clip_container, ft.Container)
+        rows_column = rows_clip_container.content
+        assert isinstance(rows_column, ft.Column)
+        assert rows_column.controls == []
 
     def test_header_row_contains_one_container_per_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
@@ -473,69 +481,66 @@ class TestPaginatedTableRenderStructure:
         assert result.expand is True
 
 
-class TestPaginatedTableListViewConfig:
-    """验证 ListView 原生虚拟化配置 (方案 D 核心契约)。"""
+class TestPaginatedTableRowsColumnConfig:
+    """验证 Column(scroll=ALWAYS) + Container(clip_behavior) 配置 (方案 D-v2 核心契约, E2E 修复)。"""
 
-    def test_list_view_build_controls_on_demand_false(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.build_controls_on_demand=False (E2E 修复: 强制全量构建行控件)。
-
-        build_controls_on_demand=True 时, 若 ListView 视口高度在布局计算时为 0,
-        Flutter 引擎不构建任何子控件, 导致行 Container 不生成 flt-semantics 节点,
-        Playwright get_by_text 找不到行内文本。
-        """
+    def test_rows_column_scroll_always(self, mock_i18n_state, mock_app_colors_state):
+        """rows_column.scroll=ALWAYS (保留纵向滚动能力, 与原 ListView 行为一致)。"""
         _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        assert list_view.build_controls_on_demand is False
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_column = rows_clip_container.content
+        assert rows_column.scroll == ft.ScrollMode.ALWAYS
 
-    def test_list_view_item_extent_is_row_height(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.item_extent=ROW_HEIGHT (固定行高, Flutter 跳过测量)。"""
-        _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        assert list_view.item_extent == ROW_HEIGHT
-
-    def test_list_view_cache_extent_set(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.cache_extent 显式设置 (上下缓冲, 替代自实现 BUFFER_ROWS)。"""
-        from ui.components.virtual_table import BUFFER_ROWS
-
-        _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        # cache_extent = BUFFER_ROWS * ROW_HEIGHT (上下各 BUFFER_ROWS 行缓冲)
-        assert list_view.cache_extent == BUFFER_ROWS * ROW_HEIGHT
-
-    def test_list_view_key_changes_with_rows_token(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.key 随 rows 引用变化 (rows 变化时重建以重置滚动位置)。"""
+    def test_rows_column_key_changes_with_rows_token(self, mock_i18n_state, mock_app_colors_state):
+        """rows_column.key 随 rows 引用变化 (rows 变化时重建以重置滚动位置)。"""
         rows1 = [_make_row_data()]
         rows2 = [_make_row_data()]
         _, result1 = _render(_make_component(rows=rows1))
         _, result2 = _render(_make_component(rows=rows2))
-        list_view1 = result1.controls[0].controls[0].controls[1]
-        list_view2 = result2.controls[0].controls[0].controls[1]
+        rows_col1 = result1.controls[0].controls[0].controls[1].content
+        rows_col2 = result2.controls[0].controls[0].controls[1].content
         # key 非空且随 rows 引用变化
-        assert list_view1.key is not None
-        assert list_view2.key is not None
-        assert list_view1.key != list_view2.key
+        assert rows_col1.key is not None
+        assert rows_col2.key is not None
+        assert rows_col1.key != rows_col2.key
 
-    def test_list_view_clip_behavior_hard_edge(self, mock_i18n_state, mock_app_colors_state):
-        """ListView.clip_behavior=HARD_EDGE (裁剪溢出行内容)。"""
+    def test_rows_clip_container_clip_behavior_hard_edge(self, mock_i18n_state, mock_app_colors_state):
+        """rows_clip_container.clip_behavior=HARD_EDGE (裁剪溢出行内容, 对应原 ListView clip_behavior)。"""
         _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        assert list_view.clip_behavior == ft.ClipBehavior.HARD_EDGE
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        assert rows_clip_container.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
-    def test_list_view_no_on_scroll_handler(self, mock_i18n_state, mock_app_colors_state):
-        """方案 D: ListView 不再挂 on_scroll handler (虚拟化由引擎层接管)。"""
+    def test_rows_column_expand_true(self, mock_i18n_state, mock_app_colors_state):
+        """rows_column.expand=True (占满剩余可用高度, 与原 ListView 行为一致)。"""
         _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        assert list_view.on_scroll is None
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_column = rows_clip_container.content
+        assert rows_column.expand is True
+
+    def test_rows_column_spacing_zero(self, mock_i18n_state, mock_app_colors_state):
+        """rows_column.spacing=0 (行间无空隙, 与原 ListView spacing=0 一致)。"""
+        _, result = _render(_make_component())
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_column = rows_clip_container.content
+        assert rows_column.spacing == 0
+
+    def test_rows_column_no_on_scroll_handler(self, mock_i18n_state, mock_app_colors_state):
+        """方案 D-v2: Column 不挂 on_scroll handler (无自实现虚拟化滚动节流)。"""
+        _, result = _render(_make_component())
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_column = rows_clip_container.content
+        assert rows_column.on_scroll is None
 
 
 class TestPaginatedTableRowsChangeEffect:
-    """验证 rows 变化时 ListView key 重建行为 (方案 D: 替代 use_effect 重置滚动)。"""
+    """验证 rows 变化时 Column key 重建行为 (方案 D-v2: 替代 use_effect 重置滚动)。"""
 
-    def test_initial_mount_renders_list_view(self, mock_i18n_state, mock_app_colors_state):
-        """首次 mount 时 ListView 正常渲染 (key 机制不阻塞初始渲染)。"""
+    def test_initial_mount_renders_rows_column(self, mock_i18n_state, mock_app_colors_state):
+        """首次 mount 时 rows_column(Column) 正常渲染 (key 机制不阻塞初始渲染)。"""
         component = _make_component()
         run_mount_effects(component)
         result = render_once(component)
-        list_view = result.controls[0].controls[0].controls[1]
-        assert isinstance(list_view, ft.ListView)
-        assert list_view.key is not None
+        rows_clip_container = result.controls[0].controls[0].controls[1]
+        rows_column = rows_clip_container.content
+        assert isinstance(rows_column, ft.Column)
+        assert rows_column.key is not None

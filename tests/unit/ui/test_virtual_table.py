@@ -220,43 +220,44 @@ class TestComponentContract:
         assert "PageRefMixin" not in dir(mod)
 
 
-# --- 4. ListView 原生虚拟化配置契约 (方案 D) ---
+# --- 4. Column(scroll=ALWAYS) 配置契约 (方案 D-v2, E2E 修复) ---
 
 
-class TestListViewNativeVirtualization:
-    """验证 PaginatedTable 使用 ListView 原生虚拟化能力 (build_controls_on_demand + item_extent + cache_extent + key)。
+class TestRowsColumnConfig:
+    """验证 PaginatedTable 使用 ft.Column(scroll=ALWAYS) 承载行 (方案 D-v2, E2E 修复)。
 
-    这些属性是方案 D 的核心契约: 删除自实现虚拟化后, 由 Flet 引擎层按需构建行控件。
-    显式声明 (而非依赖默认值) 以便契约测试可断言源码标记。
+    方案 D-v2 变更背景:
+    - 原方案 D 使用 ListView + build_controls_on_demand=False, 但 ListView 视口高度为 0
+      (E2E 父容器布局未稳定) 时, Flutter 仍可能跳过子控件语义节点生成, 导致
+      Playwright 无法定位行文本或点击行 (PR 373 & PR 392 均复现).
+    - 改为 ft.Column(scroll=ALWAYS): Column 不做窗口化, 所有行立即布局并生成
+      flt-semantics 语义节点; scroll=ALWAYS 保留纵向滚动能力.
+    - 单页 ≤100 行规模下, Column 全量布局性能与 ListView(非虚拟化模式) 无显著差异.
 
-    注意: build_controls_on_demand=False (E2E 修复), 强制全量构建行控件以确保
-    Playwright 能检测到行内文本 (build_controls_on_demand=True 时视口高度为 0
-    会导致行不构建, 不生成语义节点)。
+    这些属性是方案 D-v2 的核心契约: 删除 ListView 视口虚拟化后, 由 Column 直接
+    承载全部行, 确保语义节点稳定生成.
     """
 
-    def test_list_view_build_controls_on_demand_declared(self):
-        """DoD: ListView 显式声明 build_controls_on_demand=False (E2E 修复: 强制全量构建)。"""
-        assert "build_controls_on_demand=False" in _code_source()
+    def test_no_listview_used(self):
+        """DoD: 不再使用 ft.ListView (避免 ListView 视口高度为 0 时的语义节点丢失)。"""
+        assert "ft.ListView" not in _code_source()
+        assert "ListView(" not in _code_source()
 
-    def test_list_view_item_extent_is_row_height(self):
-        """DoD: ListView.item_extent=ROW_HEIGHT (固定行高, Flutter 跳过测量)。"""
-        assert "item_extent=ROW_HEIGHT" in _code_source()
+    def test_column_scroll_always_declared(self):
+        """DoD: 行容器 Column 显式声明 scroll=ft.ScrollMode.ALWAYS (保留纵向滚动)。"""
+        assert "scroll=ft.ScrollMode.ALWAYS" in _code_source()
 
-    def test_list_view_cache_extent_declared(self):
-        """DoD: ListView.cache_extent 显式设置 (上下缓冲, 替代自实现 BUFFER_ROWS)。"""
-        assert "cache_extent=" in _code_source()
-        assert "BUFFER_ROWS" in _code_source()
-
-    def test_list_view_key_declared(self):
-        """DoD: ListView.key 显式设置 (rows 变化时重建以重置滚动位置)。"""
+    def test_column_key_declared(self):
+        """DoD: Column.key 显式设置 (rows 变化时重建以重置滚动位置)。"""
         assert "key=" in _code_source()
 
     def test_no_stack_canvas_layer(self):
-        """DoD (方案 D): 不再使用 ft.Stack 作为虚拟化画布层。"""
+        """DoD (方案 D-v2): 不再使用 ft.Stack 作为虚拟化画布层。"""
         assert "ft.Stack" not in _code_source()
+        assert "Stack(" not in _code_source()
 
     def test_no_on_scroll_handler(self):
-        """DoD (方案 D): 不再挂 _on_scroll handler (虚拟化由引擎层接管)。"""
+        """DoD (方案 D-v2): 不再挂 _on_scroll handler (无自实现虚拟化滚动节流)。"""
         src = _code_source()
         assert "on_scroll=" not in src
         assert "def _on_scroll" not in src

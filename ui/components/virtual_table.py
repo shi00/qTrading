@@ -1,13 +1,19 @@
-"""virtual_table — 声明式虚拟化表格 (方案 D: ListView 原生虚拟化).
+"""virtual_table — 声明式分页表格 (方案 D-v2: Column + scroll, 移除 ListView 视口虚拟化).
 
 从命令式容器子类重写为 ``@ft.component def PaginatedTable(...) -> ft.Column``
 (CLAUDE.md §3.2 MVVM, §3.3).
 
-变更要点 (方案 D):
-- 删除自实现虚拟化 (compute_window / window_capacity / _ScrollCache / DEFAULT_VIEWPORT_ROWS / RERENDER_THRESHOLD)
-- 改用 ListView 原生虚拟化: build_controls_on_demand + item_extent + cache_extent + key
-- 虚拟化由 Flet 引擎层接管, Python 端构建全量行控件 (100 行规模下可忽略)
-- rows 变化时通过 key 重建 ListView 重置滚动位置 (scroll_to 对 ListView 无效, 见 flet-mcp 验证)
+变更要点 (方案 D-v2, E2E 修复):
+- 删除 ListView 及其视口虚拟化 (build_controls_on_demand / item_extent / cache_extent)
+- 改用 ft.Column(scroll=ALWAYS) 承载行: Column 不做窗口化, 所有行立即布局并生成语义节点
+- 保留 rows 变化时通过 key 重建以重置滚动位置
+- 保留 ink=True 确保行 Container 生成 flt-tappable 语义属性
+
+背景:
+- ListView + build_controls_on_demand=False 时, 若 ListView 视口高度在布局计算时为 0
+  (E2E 环境中父容器布局尚未稳定), Flutter 引擎仍可能跳过子控件语义节点生成,
+  导致 Playwright get_by_text 找不到行内文本 (PR 373 & PR 392 均复现).
+- 所有调用点单页 ≤100 行, Column 全量布局性能可忽略.
 
 保留:
 - @ft.component 函数组件形态 (MVVM 强制)
@@ -232,22 +238,23 @@ def PaginatedTable(
     on_sort: Callable[[str, bool], None] | None = None,
     on_row_click: Callable[[dict[str, Any]], None] | None = None,
 ) -> ft.Column:
-    """声明式虚拟化表格 (方案 D: ListView 原生虚拟化)。
+    """声明式分页表格 (方案 D-v2: Column + scroll, 移除 ListView 视口虚拟化).
 
     Args:
-        rows: 当页全量行数据 (dict 列表); ListView 按需构建可见行。
+        rows: 当页全量行数据 (dict 列表); Column 直接渲染全部行.
         columns: 列定义 (id/label/width)。
         sort_col: 当前排序列 id; 表头显示方向箭头。
         sort_asc: 当前排序方向 (True=升序)。
         on_sort: 列头点击回调 (col_id, new_asc); 由消费方更新 sort_col/sort_asc props。
         on_row_click: 行点击回调 (row_data)。
 
-    虚拟化 (方案 D): 删除自实现 viewport 窗口计算, 改用 ListView 原生能力:
-    - ``build_controls_on_demand=True``: Flutter 引擎按需构建可见行
-    - ``item_extent=ROW_HEIGHT``: 固定行高, 跳过测量阶段
-    - ``cache_extent=BUFFER_ROWS * ROW_HEIGHT``: 上下各 BUFFER_ROWS 行缓冲
-    - ``key=f"vt_{rows_token}"``: rows 变化时重建 ListView 重置滚动位置
-      (scroll_to 对 ListView "ineffective", 见 flet-mcp 验证, 故用 key 重建)
+    E2E 修复 (方案 D-v2):
+    - 用 ft.Column(scroll=ALWAYS) 替换 ListView: ListView 的视口高度为 0 时, 即使
+      build_controls_on_demand=False, Flutter 也可能跳过子控件语义节点生成, 导致
+      Playwright 无法定位行文本或点击行 (PR 373 & PR 392 均复现).
+    - Column 不做窗口化, 所有行立即参与布局并生成语义节点.
+    - 单页 ≤100 行规模下, Column 全量布局性能与 ListView(非虚拟化模式) 无显著差异.
+    - rows 变化时通过 key 重建 Column 重置滚动位置 (对齐原命令式数据推送行为).
     """
     # theme 订阅 (Layer 2 表格色随主题自动重渲染)
     ft.use_state(AppColors.get_observable_state)
@@ -287,24 +294,25 @@ def PaginatedTable(
             is_hovered=(abs_idx == hovered_idx),
             on_hover=_make_row_hover(abs_idx),
         )
-        # NOTE(lazy): Python 端构建全量行控件, ListView build_controls_on_demand=False 强制全量渲染 (非按需). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 改回 build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
+        # NOTE(lazy): Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)
     ]
 
-    list_view = ft.ListView(
+    rows_column = ft.Column(
         controls=safe_controls(all_rows),
         expand=True,
         spacing=0,
-        # E2E 修复: build_controls_on_demand=False 强制构建全量行
-        # 原因: build_controls_on_demand=True 时, 若 ListView 视口高度在布局计算时
-        # 为 0 (如 E2E 环境中父容器布局尚未稳定), Flutter 引擎不构建任何子控件,
-        # 导致行 Container 不生成 flt-semantics 节点, Playwright get_by_text 找不到
-        # 行内文本 ("平安银行" E2E 失败, PR 373 & PR 392 均复现).
-        # 强制 False 后所有行立即构建, 单页 ≤100 行 (ceiling 见 NOTE(lazy)) 性能可忽略.
-        build_controls_on_demand=False,
-        item_extent=ROW_HEIGHT,  # 固定行高, Flutter 跳过测量
-        cache_extent=BUFFER_ROWS * ROW_HEIGHT,  # 上下各 BUFFER_ROWS 行缓冲
+        # E2E 修复: Column + scroll=ALWAYS 替代 ListView
+        # 原因: ListView 视口高度为 0 (E2E 父容器布局未稳定) 时, 即使 build_controls_on_demand=False,
+        # Flutter 引擎也可能跳过子控件语义节点生成. Column 不做窗口化, 所有行立即布局并生成 flt-semantics.
+        # scroll=ALWAYS 保留纵向滚动能力 (与原 ListView 行为一致).
+        scroll=ft.ScrollMode.ALWAYS,
         key=list_view_key,  # rows 变化时重建以重置滚动位置
+    )
+    # Column 不支持 clip_behavior, 用 Container 包裹以保持原 ListView 的 HARD_EDGE 裁剪行为
+    rows_clip_container = ft.Container(
+        content=rows_column,
+        expand=True,
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
     )
     header_container = ft.Container(
@@ -315,7 +323,7 @@ def PaginatedTable(
         border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.TABLE_BORDER)),
     )
     inner_column = ft.Column(
-        controls=[header_container, list_view],
+        controls=[header_container, rows_clip_container],
         spacing=0,
         width=total_w,
     )

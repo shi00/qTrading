@@ -68,13 +68,15 @@ class ScreenerPage:
         """点击表格中包含指定文本的行（用于触发行 on_click 打开详情对话框）。
 
         策略（按可靠性顺序）：
-        1. ``page.evaluate`` 直接调用 ``el.click()`` 在最内层 ``flt-tappable`` 元素上 —
-           直接触发 Flet semantics 的 tap 事件，绕过 Playwright 的 actionability 检查。
-           选最内层（最小面积）的 ``flt-tappable`` 以避免命中父容器（如表格卡片）。
-        2. ``page.mouse.click()`` 在文本 bounding box 中心 — 通过 Flutter hit-testing
+        1. ``page.mouse.click()`` 在文本 bounding box 中心 — 通过 Flutter hit-testing
            分发到行 Container.on_click（canvas 层面点击）。
-        3. ``flt-tappable`` 祖先元素 click — Playwright 标准点击。
-        4. 文本元素 force click — 兜底。
+           **首选原因**: Flutter CanvasKit 通过 pointerdown/pointerup 手势检测触发 on_click,
+           page.mouse.click 模拟真实鼠标事件能正确触发; 而 DOM el.click() 仅派发合成 click
+           事件, Flutter 引擎不响应 (PR 373/392/PR-当前 均复现此问题).
+        2. ``flt-tappable`` 祖先元素 Playwright click — 使用 Playwright 的指针事件点击.
+        3. ``page.evaluate`` 直接调用 ``el.click()`` 在 ``flt-tappable`` 元素上 —
+           后备: 合成 click 事件, 对部分 Flutter 版本有效.
+        4. 文本元素 force click — 兜底.
         """
         scaled = self.page._tm(timeout_ms)
         page = self.page.page
@@ -85,7 +87,28 @@ class ScreenerPage:
         except Exception:  # noqa: BLE001
             await text_loc.wait_for(state="attached", timeout=scaled)
 
-        # 策略 1: page.evaluate 直接 el.click() 最内层 flt-tappable 元素
+        # 策略 1: mouse.click 在文本中心（通过 Flutter hit-testing 触发行 on_click）
+        try:
+            box = await text_loc.bounding_box()
+            if box and box["width"] > 0 and box["height"] > 0:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await page.mouse.click(cx, cy)
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 策略 2: 找文本的 flt-tappable 祖先（行 Container）并 Playwright click
+        try:
+            # locator().filter(has=...) 匹配包含指定 locator 的元素；取 first 避免匹配多个
+            tappable_ancestor = page.locator("[flt-tappable]").filter(has=text_loc).first
+            if await tappable_ancestor.count() > 0:
+                await tappable_ancestor.click(force=True, timeout=self.page._tm(3000))
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 策略 3: page.evaluate 直接 el.click() flt-tappable 元素（后备, 合成事件）
         try:
             clicked = await page.evaluate(
                 """(searchText) => {
@@ -104,27 +127,6 @@ class ScreenerPage:
                 text,
             )
             if clicked:
-                return
-        except Exception:  # noqa: BLE001
-            pass
-
-        # 策略 2: mouse.click 在文本中心（通过 Flutter hit-testing 触发行 on_click）
-        try:
-            box = await text_loc.bounding_box()
-            if box and box["width"] > 0 and box["height"] > 0:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                await page.mouse.click(cx, cy)
-                return
-        except Exception:  # noqa: BLE001
-            pass
-
-        # 策略 3: 找文本的 flt-tappable 祖先（行 Container）并点击
-        try:
-            # locator().filter(has=...) 匹配包含指定 locator 的元素；取 first 避免匹配多个
-            tappable_ancestor = page.locator("[flt-tappable]").filter(has=text_loc).first
-            if await tappable_ancestor.count() > 0:
-                await tappable_ancestor.click(force=True, timeout=self.page._tm(3000))
                 return
         except Exception:  # noqa: BLE001
             pass
