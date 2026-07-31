@@ -4,10 +4,14 @@
 内部使用 FletPage helper 与 labels.py 提供的本地化文案。
 """
 
+import logging
+
 from core.i18n import I18n
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
+
+logger = logging.getLogger(__name__)
 
 
 class App:
@@ -68,13 +72,16 @@ class ScreenerPage:
         """点击表格中包含指定文本的行（用于触发行 on_click 打开详情对话框）。
 
         策略（按可靠性顺序）：
-        1. ``page.evaluate`` 直接调用 ``el.click()`` 在最内层 ``flt-tappable`` 元素上 —
-           直接触发 Flet semantics 的 tap 事件，绕过 Playwright 的 actionability 检查。
-           选最内层（最小面积）的 ``flt-tappable`` 以避免命中父容器（如表格卡片）。
-        2. ``page.mouse.click()`` 在文本 bounding box 中心 — 通过 Flutter hit-testing
-           分发到行 Container.on_click（canvas 层面点击）。
-        3. ``flt-tappable`` 祖先元素 click — Playwright 标准点击。
-        4. 文本元素 force click — 兜底。
+        1. ``flt-semantics[flt-tappable]`` bounding_box 中心 → ``page.mouse.click`` —
+           **首选**: 真实鼠标事件通过 Flutter hit-testing 触发 GestureDetector.on_tap.
+           CanvasKit 不响应合成 DOM el.click() (Playwright click(force=True)),
+           只响应真实鼠标事件. GestureDetector(on_tap) 生成 flt-tappable 语义属性.
+        2. ``flt-semantics[role="button"]`` bounding_box 中心 → ``page.mouse.click`` —
+           降级: 旧版 Container(ink=True, on_click) 生成 role=button 但不生成 flt-tappable.
+        3. 文本节点 bounding_box 中心 → ``page.mouse.click`` — 纯文本 canvas 坐标点击.
+        4. ``flt-semantics[flt-tappable]`` force click — 合成 DOM 事件降级.
+        5. ``flt-semantics[role="button"]`` force click — 合成 DOM 事件降级.
+        6. 文本节点 force click — 最终兜底.
         """
         scaled = self.page._tm(timeout_ms)
         page = self.page.page
@@ -82,52 +89,118 @@ class ScreenerPage:
         # visible（非 attached）确保 CanvasKit 已渲染文本，bounding_box 返回有效坐标
         try:
             await text_loc.wait_for(state="visible", timeout=scaled)
-        except Exception:  # noqa: BLE001
-            await text_loc.wait_for(state="attached", timeout=scaled)
+            logger.debug("click_row_by_text: text_loc visible for '%s'", text)
+        except Exception as exc1:  # noqa: BLE001
+            logger.debug("click_row_by_text: text_loc visible failed for '%s', trying attached: %s", text, exc1)
+            try:
+                await text_loc.wait_for(state="attached", timeout=scaled)
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning("click_row_by_text: text_loc not even attached for '%s': %s", text, exc2, exc_info=True)
+                raise  # 连文本都找不到，直接抛，不静默
 
-        # 策略 1: page.evaluate 直接 el.click() 最内层 flt-tappable 元素
+        # 策略 1: flt-semantics[flt-tappable] 包含文本 → bounding_box 中心 → page.mouse.click
+        # 首选: 真实鼠标事件触发 Flutter hit-testing → GestureDetector.on_tap 回调.
+        # CanvasKit 不响应合成 DOM el.click() (force=True), 只响应真实鼠标事件.
         try:
-            clicked = await page.evaluate(
-                """(searchText) => {
-                    const elements = Array.from(document.querySelectorAll('[flt-tappable]'));
-                    const matching = elements.filter(el => el.textContent.includes(searchText));
-                    if (matching.length === 0) return false;
-                    // 选最小面积的（最内层 = 行 Container，避免命中表格卡片等父容器）
-                    matching.sort((a, b) => {
-                        const aBox = a.getBoundingClientRect();
-                        const bBox = b.getBoundingClientRect();
-                        return (aBox.width * aBox.height) - (bBox.width * bBox.height);
-                    });
-                    matching[0].click();
-                    return true;
-                }""",
-                text,
-            )
-            if clicked:
-                return
-        except Exception:  # noqa: BLE001
-            pass
+            tappable = page.locator("flt-semantics[flt-tappable]").filter(has_text=text).first
+            if await tappable.count() > 0:
+                box = await tappable.bounding_box()
+                if box and box["width"] > 0 and box["height"] > 0:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    await page.mouse.click(cx, cy)
+                    await page.wait_for_timeout(500)
+                    logger.debug(
+                        "click_row_by_text: strategy 1 SUCCESS (mouse.click on flt-tappable bb=(%s,%s)) for '%s'",
+                        cx,
+                        cy,
+                        text,
+                    )
+                    return
+                logger.debug("click_row_by_text: strategy 1 bounding_box invalid for '%s': %s", text, box)
+            else:
+                logger.debug("click_row_by_text: strategy 1 no flt-tappable for '%s'", text)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 1 failed for '%s': %s", text, exc)
 
-        # 策略 2: mouse.click 在文本中心（通过 Flutter hit-testing 触发行 on_click）
+        # 策略 2: flt-semantics[role="button"] 包含文本 → bounding_box 中心 → page.mouse.click
+        # 降级: 旧版 Container(ink=True, on_click) 生成 role=button 但不生成 flt-tappable.
+        try:
+            row_btn = page.locator('flt-semantics[role="button"]').filter(has_text=text).first
+            if await row_btn.count() > 0:
+                box = await row_btn.bounding_box()
+                if box and box["width"] > 0 and box["height"] > 0:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    await page.mouse.click(cx, cy)
+                    await page.wait_for_timeout(500)
+                    logger.debug(
+                        "click_row_by_text: strategy 2 SUCCESS (mouse.click on role=button bb=(%s,%s)) for '%s'",
+                        cx,
+                        cy,
+                        text,
+                    )
+                    return
+                logger.debug("click_row_by_text: strategy 2 bounding_box invalid for '%s': %s", text, box)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 2 failed for '%s': %s", text, exc)
+
+        # 策略 3: 文本 bounding_box 中心 → page.mouse.click
         try:
             box = await text_loc.bounding_box()
             if box and box["width"] > 0 and box["height"] > 0:
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
                 await page.mouse.click(cx, cy)
+                await page.wait_for_timeout(500)
+                logger.debug(
+                    "click_row_by_text: strategy 3 SUCCESS (mouse.click on text bb=(%s,%s)) for '%s'",
+                    cx,
+                    cy,
+                    text,
+                )
                 return
-        except Exception:  # noqa: BLE001
-            pass
+            logger.debug("click_row_by_text: strategy 3 text bounding_box invalid for '%s': %s", text, box)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 3 failed for '%s': %s", text, exc)
 
-        # 策略 3: 找文本的 flt-tappable 祖先（行 Container）并点击
+        # 策略 4: flt-semantics[flt-tappable] 包含文本 → Playwright click(force=True)
+        # 降级: 合成 DOM 事件 (对部分 Flet 控件有效, 但 CanvasKit 行点击不可靠)
         try:
-            # locator().filter(has=...) 匹配包含指定 locator 的元素；取 first 避免匹配多个
-            tappable_ancestor = page.locator("[flt-tappable]").filter(has=text_loc).first
-            if await tappable_ancestor.count() > 0:
-                await tappable_ancestor.click(force=True, timeout=self.page._tm(3000))
+            tappable_fc = page.locator("flt-semantics[flt-tappable]").filter(has_text=text).first
+            if await tappable_fc.count() > 0:
+                await tappable_fc.click(force=True, timeout=self.page._tm(3000))
+                logger.debug("click_row_by_text: strategy 4 SUCCESS (flt-tappable force click) for '%s'", text)
                 return
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 4 failed for '%s': %s", text, exc)
 
-        # 策略 4: 兜底直接 force click 文本
-        await text_loc.click(force=True, timeout=self.page._tm(3000))
+        # 策略 5: flt-semantics[role="button"] 包含文本 → Playwright click(force=True)
+        try:
+            row_btn_fc = page.locator('flt-semantics[role="button"]').filter(has_text=text).first
+            if await row_btn_fc.count() > 0:
+                await row_btn_fc.click(force=True, timeout=self.page._tm(3000))
+                logger.debug("click_row_by_text: strategy 5 SUCCESS (role=button force click) for '%s'", text)
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 5 failed for '%s': %s", text, exc)
+
+        # 策略 6: 兜底直接 force click 文本
+        try:
+            await text_loc.click(force=True, timeout=self.page._tm(3000))
+            logger.debug("click_row_by_text: strategy 6 SUCCESS (text force click) for '%s'", text)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("click_row_by_text: strategy 6 failed for '%s': %s", text, exc)
+
+        # 全部失败：抛出明确异常（不再静默），附带 DOM 调试信息
+        logger.error("click_row_by_text: ALL strategies failed for '%s'. Dumping semantics...", text)
+        self.page._dump_dom_debug(f"click_row_all_failed_{text}")
+        self.page._dump_semantics_debug()
+        raise RuntimeError(
+            f"click_row_by_text: all 6 strategies failed for text='{text}'. "
+            "Most likely the row Container.on_click callback is not wired, "
+            "or the role=button semantics node is not generated by ink=True, "
+            "or the row is rendered outside the visible viewport with zero bounding_box. "
+            "Check DEBUG logs above for per-strategy failure details."
+        )
