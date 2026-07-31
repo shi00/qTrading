@@ -1,21 +1,23 @@
-"""virtual_table — 声明式虚拟化表格 (Phase B.3).
+"""virtual_table — 声明式虚拟化表格 (方案 D: ListView 原生虚拟化).
 
 从命令式容器子类重写为 ``@ft.component def PaginatedTable(...) -> ft.Column``
 (CLAUDE.md §3.2 MVVM, §3.3).
 
-变更要点:
-- 命令式容器子类 → ``@ft.component`` 函数组件
-- 移除全部命令式 API (行/列/主题/视口的手动 setter 与手动刷新调用全部删除)
-- 状态驱动: rows/columns/sort_col/sort_asc/on_sort/on_row_click 由 props 推送
-- 内部 ``use_state`` 管滚动位置 (scroll_first) / 视口高度 (viewport_h)
+变更要点 (方案 D):
+- 删除自实现虚拟化 (compute_window / window_capacity / _ScrollCache / DEFAULT_VIEWPORT_ROWS / RERENDER_THRESHOLD)
+- 改用 ListView 原生虚拟化: build_controls_on_demand + item_extent + cache_extent + key
+- 虚拟化由 Flet 引擎层接管, Python 端构建全量行控件 (100 行规模下可忽略)
+- rows 变化时通过 key 重建 ListView 重置滚动位置 (scroll_to 对 ListView 无效, 见 flet-mcp 验证)
+
+保留:
+- @ft.component 函数组件形态 (MVVM 强制)
+- next_sort_state / _total_width 纯函数
+- _build_header / _build_cells / _build_row 单元构建 (theme-dependent)
+- hover 高亮 / 列头排序 / 行点击 / trend 色 / code TextSpan
 - theme 自动重渲染: ``ft.use_state(AppColors.get_observable_state)`` 订阅 Layer 2 表格色
-- 保留虚拟化: viewport 窗口渲染 (只渲染可见行 + 缓冲行) + 滚动同步 (header 固定)
-- 行池回收改为声明式 reconcile (Flet diff 行控件); ``use_ref`` 仅缓存滚动位置/视口即时值
-  (CLAUDE.md §3.3: use_ref 缓存数据允许, 缓存命令式实例禁止; 参考 resizable_splitter._DragCache)
 """
 
 import logging
-import math
 from collections.abc import Callable
 from typing import Any
 
@@ -29,28 +31,12 @@ logger = logging.getLogger(__name__)
 ROW_HEIGHT = 30
 HEADER_HEIGHT = 35
 BUFFER_ROWS = 8
-RERENDER_THRESHOLD = 4
-DEFAULT_VIEWPORT_ROWS = 30
 MIN_TABLE_WIDTH = 800
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
 
 
-class _ScrollCache:
-    """滚动节流缓存 (``use_ref`` 持久化, 避免 ``use_state`` 触发 re-render)。
-
-    缓存即时数值 (last_first/last_viewport_h) 而非命令式实例, 符合声明式红线
-    (参考 resizable_splitter._DragCache 模式)。
-    """
-
-    __slots__ = ("last_first", "last_viewport_h")
-
-    def __init__(self) -> None:
-        self.last_first: int = -1
-        self.last_viewport_h: float = 0.0
-
-
-# --- 纯函数 (虚拟化 + 排序逻辑, 供单元测试覆盖) ---
+# --- 纯函数 (排序逻辑, 供单元测试覆盖) ---
 
 
 def next_sort_state(
@@ -65,32 +51,6 @@ def next_sort_state(
     if sort_col == clicked_col:
         return sort_col, not sort_asc
     return clicked_col, True
-
-
-def window_capacity(viewport_h: float) -> int:
-    """视口可容纳行数 (含上下缓冲)。"""
-    if viewport_h > 0:
-        viewport_rows = math.ceil(viewport_h / ROW_HEIGHT)
-    else:
-        viewport_rows = DEFAULT_VIEWPORT_ROWS
-    return max(1, viewport_rows + 2 * BUFFER_ROWS)
-
-
-def compute_window(
-    target_first: int,
-    row_count: int,
-    viewport_h: float,
-) -> tuple[int, int]:
-    """计算应渲染的行窗口 ``[start, end)``。
-
-    start 在 target_first 前留 BUFFER_ROWS 缓冲, 并 clamp 到末尾不越界。
-    """
-    if row_count == 0:
-        return 0, 0
-    capacity = window_capacity(viewport_h)
-    start = max(0, min(target_first - BUFFER_ROWS, max(0, row_count - capacity)))
-    end = min(row_count, start + capacity)
-    return start, end
 
 
 def _total_width(columns: list[dict[str, Any]]) -> int:
@@ -243,15 +203,14 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Container:
-    """构建单个绝对定位行 (top = abs_idx * ROW_HEIGHT)。
+    """构建单个行 Container (方案 D: 不再绝对定位, 由 ListView 线性布局)。
 
     Args:
+        abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
         is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
     """
     row = ft.Container(
-        left=0,
-        top=abs_idx * ROW_HEIGHT,
         height=ROW_HEIGHT,
         width=total_w,
         ink=True,
@@ -273,20 +232,22 @@ def PaginatedTable(
     on_sort: Callable[[str, bool], None] | None = None,
     on_row_click: Callable[[dict[str, Any]], None] | None = None,
 ) -> ft.Column:
-    """视口虚拟化表格 (声明式, 保留 viewport 窗口渲染 + 滚动同步)。
+    """声明式虚拟化表格 (方案 D: ListView 原生虚拟化)。
 
     Args:
-        rows: 当页全量行数据 (dict 列表); 组件仅渲染 viewport 窗口内行。
+        rows: 当页全量行数据 (dict 列表); ListView 按需构建可见行。
         columns: 列定义 (id/label/width)。
         sort_col: 当前排序列 id; 表头显示方向箭头。
         sort_asc: 当前排序方向 (True=升序)。
         on_sort: 列头点击回调 (col_id, new_asc); 由消费方更新 sort_col/sort_asc props。
         on_row_click: 行点击回调 (row_data)。
 
-    虚拟化: 仅渲染 ``[start, end)`` 窗口 (viewport 行 + 2*BUFFER_ROWS 缓冲);
-    滚动同步由 ``use_state(scroll_first)`` 触发重渲染, ``use_ref`` 节流避免抖动。
-    行池回收改为声明式 reconcile (Flet diff 行控件); ``use_ref`` 仅缓存滚动位置即时值
-    (CLAUDE.md §3.3: use_ref 缓存数据允许, 缓存命令式实例禁止)。
+    虚拟化 (方案 D): 删除自实现 viewport 窗口计算, 改用 ListView 原生能力:
+    - ``build_controls_on_demand=True``: Flutter 引擎按需构建可见行
+    - ``item_extent=ROW_HEIGHT``: 固定行高, 跳过测量阶段
+    - ``cache_extent=BUFFER_ROWS * ROW_HEIGHT``: 上下各 BUFFER_ROWS 行缓冲
+    - ``key=f"vt_{rows_token}"``: rows 变化时重建 ListView 重置滚动位置
+      (scroll_to 对 ListView "ineffective", 见 flet-mcp 验证, 故用 key 重建)
     """
     # theme 订阅 (Layer 2 表格色随主题自动重渲染)
     ft.use_state(AppColors.get_observable_state)
@@ -294,26 +255,16 @@ def PaginatedTable(
     rows_list = rows or []
     cols_list = columns or []
 
-    scroll_first, set_scroll_first = ft.use_state(0)
-    viewport_h, set_viewport_h = ft.use_state(0.0)
     # P2-8 MAJ-2 (review fix): hover 触发链路落地 — hovered_idx=-1 表示无 hover
     hovered_idx, set_hovered_idx = ft.use_state(-1)
-    scroll_ref = ft.use_ref(_ScrollCache)
-    cache = scroll_ref.current
-    assert cache is not None
 
-    # rows 变更时重置滚动位置到顶部 (对齐原命令式数据推送行为)
+    # rows 变化时通过 key 重建 ListView 重置滚动位置 (对齐原命令式数据推送行为)
+    # scroll_to 对 ListView "ineffective" (flet-mcp 验证), 故用 key 重建
     rows_token = id(rows) if rows is not None else 0
-
-    def _reset_scroll_on_rows_change() -> None:
-        cache.last_first = -1
-        set_scroll_first(0)
-
-    ft.use_effect(_reset_scroll_on_rows_change, dependencies=[rows_token])
+    list_view_key = f"vt_{rows_token}"
 
     total_w = _total_width(cols_list)
     row_count = len(rows_list)
-    start, end = compute_window(scroll_first, row_count, viewport_h)
 
     header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort)
 
@@ -326,7 +277,7 @@ def PaginatedTable(
 
         return _on_hover
 
-    visible_rows = [
+    all_rows = [
         _build_row(
             abs_idx,
             rows_list[abs_idx],
@@ -336,35 +287,20 @@ def PaginatedTable(
             is_hovered=(abs_idx == hovered_idx),
             on_hover=_make_row_hover(abs_idx),
         )
-        for abs_idx in range(start, end)
+        # NOTE(lazy): Python 端构建全量行控件 (非窗口化), 由 ListView build_controls_on_demand 按需渲染. ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 改回自实现窗口化或分页加载.
+        for abs_idx in range(row_count)
     ]
 
-    canvas = ft.Stack(
-        controls=safe_controls(visible_rows),
-        height=row_count * ROW_HEIGHT,
-        width=total_w,
-        clip_behavior=ft.ClipBehavior.HARD_EDGE,
-    )
-
-    def _on_scroll(e) -> None:
-        vh = getattr(e, "viewport_dimension", None)
-        if vh:
-            new_vh = float(vh)
-            if abs(new_vh - cache.last_viewport_h) > 1.0:
-                cache.last_viewport_h = new_vh
-                set_viewport_h(new_vh)
-        offset = float(getattr(e, "pixels", None) or 0.0)
-        new_first = max(0, int(offset // ROW_HEIGHT))
-        if cache.last_first < 0 or abs(new_first - cache.last_first) >= RERENDER_THRESHOLD:
-            cache.last_first = new_first
-            set_scroll_first(new_first)
-
     list_view = ft.ListView(
-        controls=[canvas],
+        controls=safe_controls(all_rows),
         expand=True,
         spacing=0,
-        on_scroll=_on_scroll,
-        scroll_interval=100,
+        # 方案 D: 原生虚拟化配置 (显式声明用于契约测试)
+        build_controls_on_demand=True,  # 原生按需构建 (默认值, 显式声明便于契约测试)
+        item_extent=ROW_HEIGHT,  # 固定行高, Flutter 跳过测量
+        cache_extent=BUFFER_ROWS * ROW_HEIGHT,  # 上下各 BUFFER_ROWS 行缓冲
+        key=list_view_key,  # rows 变化时重建以重置滚动位置
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
     )
     header_container = ft.Container(
         content=ft.Row(safe_controls(header_controls), spacing=0),

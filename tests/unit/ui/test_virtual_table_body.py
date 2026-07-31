@@ -2,10 +2,16 @@
 
 补充 test_virtual_table.py 仅覆盖纯函数的不足，验证：
 - _build_header / _build_cells / _build_row 单元构建函数的分支逻辑
-- PaginatedTable 组件体 (lines 276-344) 的渲染结构 + _on_scroll handler 行为
+- PaginatedTable 组件体 的渲染结构 + ListView 原生虚拟化配置 (方案 D)
 
 配套 conftest.py 的 ``mock_app_colors_state`` 注入 Observable state，
 ``_v1_page_compat`` 让 ``control.page`` 可注入。
+
+变更要点 (方案 D):
+- 删除 TestPaginatedTableScrollHandler (不再有 _on_scroll handler)
+- 改写 TestPaginatedTableRenderStructure (ListView 直接含行, 无 Stack 中间层)
+- 改写 TestPaginatedTableRowsChangeEffect (key 重建替代 use_effect 重置)
+- 新增 TestPaginatedTableListViewConfig (验证 ListView 原生虚拟化配置)
 """
 
 # pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
@@ -30,7 +36,6 @@ from ui.components.virtual_table import (
     _build_cells,
     _build_header,
     _build_row,
-    _total_width,
 )
 from ui.theme import AppColors, AppStyles
 
@@ -352,10 +357,10 @@ class TestBuildRow:
     """_build_row 纯函数测试：单行构建 + on_row_click 绑定。"""
 
     def test_returns_container_with_correct_geometry(self):
+        """方案 D: 行不再绝对定位 (无 left/top), 由 ListView 线性布局。"""
         row = _build_row(5, _make_row_data(), _make_columns(), 800, None)
         assert isinstance(row, ft.Container)
-        assert row.left == 0
-        assert row.top == 5 * ROW_HEIGHT
+        # 方案 D: 不再设置 left/top (由 ListView 线性布局)
         assert row.height == ROW_HEIGHT
         assert row.width == 800
         assert row.ink is True
@@ -405,12 +410,12 @@ class TestBuildRow:
 
 
 # ---------------------------------------------------------------------------
-# PaginatedTable 组件体 (lines 251-355)
+# PaginatedTable 组件体 (方案 D: ListView 原生虚拟化)
 # ---------------------------------------------------------------------------
 
 
 class TestPaginatedTableRenderStructure:
-    """验证 PaginatedTable 渲染后的控件树结构 (lines 276-344 中 render 段)。"""
+    """验证 PaginatedTable 渲染后的控件树结构 (方案 D: ListView 直接含行, 无 Stack 中间层)。"""
 
     def test_renders_column_with_row(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
@@ -436,44 +441,25 @@ class TestPaginatedTableRenderStructure:
         assert header.height == HEADER_HEIGHT
         assert header.bgcolor == AppColors.TABLE_HEADER_BG
 
-    def test_list_view_has_on_scroll_and_interval(self, mock_i18n_state, mock_app_colors_state):
-        _, result = _render(_make_component())
-        list_view = result.controls[0].controls[0].controls[1]
-        assert callable(list_view.on_scroll)
-        assert list_view.scroll_interval == 100
+    def test_list_view_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
+        """方案 D: ListView.controls 直接是行 Container 列表 (无 Stack 中间层)。
 
-    def test_canvas_is_stack_with_correct_dimensions(self, mock_i18n_state, mock_app_colors_state):
+        100 行规模下 Python 端构建全量行控件, Flutter 端由 build_controls_on_demand 按需渲染。
+        """
         rows = [_make_row_data() for _ in range(5)]
         _, result = _render(_make_component(rows=rows))
         list_view = result.controls[0].controls[0].controls[1]
-        canvas = list_view.controls[0]
-        assert isinstance(canvas, ft.Stack)
-        assert canvas.height == 5 * ROW_HEIGHT
-        assert canvas.clip_behavior == ft.ClipBehavior.HARD_EDGE
+        assert isinstance(list_view, ft.ListView)
+        # 直接是行 Container, 不经过 Stack
+        assert len(list_view.controls) == 5
+        for row in list_view.controls:
+            assert isinstance(row, ft.Container)
 
-    def test_canvas_width_uses_total_width(self, mock_i18n_state, mock_app_colors_state):
-        cols = [{"id": "a", "width": 500}, {"id": "b", "width": 400}]
-        _, result = _render(_make_component(columns=cols))
-        list_view = result.controls[0].controls[0].controls[1]
-        canvas = list_view.controls[0]
-        assert canvas.width == _total_width(cols)
-
-    def test_empty_rows_renders_empty_canvas(self, mock_i18n_state, mock_app_colors_state):
+    def test_empty_rows_renders_empty_list_view(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
         list_view = result.controls[0].controls[0].controls[1]
-        canvas = list_view.controls[0]
-        assert canvas.height == 0
-        assert canvas.controls == []
-
-    def test_visible_rows_bounded_by_window(self, mock_i18n_state, mock_app_colors_state):
-        """500 行 + 默认视口 → 仅渲染 [0, 46) 窗口内的 46 行。"""
-        rows = [{"ts_code": f"{i:06d}.SH", "name": f"S{i}"} for i in range(500)]
-        cols = [{"id": "ts_code", "width": 120}, {"id": "name", "width": 200}]
-        _, result = _render(_make_component(rows=rows, columns=cols))
-        list_view = result.controls[0].controls[0].controls[1]
-        canvas = list_view.controls[0]
-        # 默认视口 capacity = 30 + 2*8 = 46
-        assert len(canvas.controls) == 46
+        assert isinstance(list_view, ft.ListView)
+        assert list_view.controls == []
 
     def test_header_row_contains_one_container_per_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component())
@@ -487,126 +473,64 @@ class TestPaginatedTableRenderStructure:
         assert result.expand is True
 
 
-class TestPaginatedTableScrollHandler:
-    """验证 _on_scroll handler 行为 (lines 312-323)。"""
+class TestPaginatedTableListViewConfig:
+    """验证 ListView 原生虚拟化配置 (方案 D 核心契约)。"""
 
-    def test_on_scroll_updates_viewport_height(self, mock_i18n_state, mock_app_colors_state):
-        """viewport_dimension 变化 > 1.0 时触发 set_viewport_h。"""
-        component = _make_component()
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
+    def test_list_view_build_controls_on_demand_true(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.build_controls_on_demand=True (原生按需构建)。"""
+        _, result = _render(_make_component())
+        list_view = result.controls[0].controls[0].controls[1]
+        assert list_view.build_controls_on_demand is True
 
-        # 清空 mount 期间累积的 schedule_update
-        page.session.scheduled_updates.clear()
-        # 触发 on_scroll，viewport_dimension=600.0（>1.0 差值）
-        e = MagicMock()
-        e.viewport_dimension = 600.0
-        e.pixels = 0.0
-        list_view.on_scroll(e)
-        # set_viewport_h 调用后应调度 update
-        assert len(page.session.scheduled_updates) > 0
+    def test_list_view_item_extent_is_row_height(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.item_extent=ROW_HEIGHT (固定行高, Flutter 跳过测量)。"""
+        _, result = _render(_make_component())
+        list_view = result.controls[0].controls[0].controls[1]
+        assert list_view.item_extent == ROW_HEIGHT
 
-    def test_on_scroll_small_viewport_change_no_update(self, mock_i18n_state, mock_app_colors_state):
-        """viewport_dimension 变化 <= 1.0 时不触发 set_viewport_h。"""
-        component = _make_component()
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
+    def test_list_view_cache_extent_set(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.cache_extent 显式设置 (上下缓冲, 替代自实现 BUFFER_ROWS)。"""
+        from ui.components.virtual_table import BUFFER_ROWS
 
-        # 先设置一个 viewport_h
-        e1 = MagicMock()
-        e1.viewport_dimension = 600.0
-        e1.pixels = 0.0
-        list_view.on_scroll(e1)
-        page.session.scheduled_updates.clear()
+        _, result = _render(_make_component())
+        list_view = result.controls[0].controls[0].controls[1]
+        # cache_extent = BUFFER_ROWS * ROW_HEIGHT (上下各 BUFFER_ROWS 行缓冲)
+        assert list_view.cache_extent == BUFFER_ROWS * ROW_HEIGHT
 
-        # 微小变化（0.5 < 1.0）→ 不触发 set_viewport_h
-        e2 = MagicMock()
-        e2.viewport_dimension = 600.5
-        e2.pixels = 0.0
-        list_view.on_scroll(e2)
-        # pixels=0 且 cache.last_first 已设为 0，不会触发 set_scroll_first
-        assert len(page.session.scheduled_updates) == 0
+    def test_list_view_key_changes_with_rows_token(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.key 随 rows 引用变化 (rows 变化时重建以重置滚动位置)。"""
+        rows1 = [_make_row_data()]
+        rows2 = [_make_row_data()]
+        _, result1 = _render(_make_component(rows=rows1))
+        _, result2 = _render(_make_component(rows=rows2))
+        list_view1 = result1.controls[0].controls[0].controls[1]
+        list_view2 = result2.controls[0].controls[0].controls[1]
+        # key 非空且随 rows 引用变化
+        assert list_view1.key is not None
+        assert list_view2.key is not None
+        assert list_view1.key != list_view2.key
 
-    def test_on_scroll_shifts_first_row(self, mock_i18n_state, mock_app_colors_state):
-        """pixels 滚动超过 RERENDER_THRESHOLD 时触发 set_scroll_first。"""
-        rows = [{"ts_code": f"{i:06d}.SH", "name": f"S{i}"} for i in range(500)]
-        cols = [{"id": "ts_code", "width": 120}, {"id": "name", "width": 200}]
-        component = _make_component(rows=rows, columns=cols)
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
+    def test_list_view_clip_behavior_hard_edge(self, mock_i18n_state, mock_app_colors_state):
+        """ListView.clip_behavior=HARD_EDGE (裁剪溢出行内容)。"""
+        _, result = _render(_make_component())
+        list_view = result.controls[0].controls[0].controls[1]
+        assert list_view.clip_behavior == ft.ClipBehavior.HARD_EDGE
 
-        page.session.scheduled_updates.clear()
-        # 滚动 200 行（>= RERENDER_THRESHOLD=4）
-        e = MagicMock()
-        e.viewport_dimension = 0  # 不触发 viewport_h 分支
-        e.pixels = 200 * ROW_HEIGHT
-        list_view.on_scroll(e)
-        assert len(page.session.scheduled_updates) > 0
-
-    def test_on_scroll_small_shift_no_update(self, mock_i18n_state, mock_app_colors_state):
-        """pixels 滚动 < RERENDER_THRESHOLD 时不触发 set_scroll_first。"""
-        rows = [{"ts_code": f"{i:06d}.SH", "name": f"S{i}"} for i in range(500)]
-        cols = [{"id": "ts_code", "width": 120}, {"id": "name", "width": 200}]
-        component = _make_component(rows=rows, columns=cols)
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
-
-        # 先触发一次大滚动设置 cache.last_first
-        e1 = MagicMock()
-        e1.viewport_dimension = 0
-        e1.pixels = 100 * ROW_HEIGHT
-        list_view.on_scroll(e1)
-        page.session.scheduled_updates.clear()
-
-        # 小滚动（< RERENDER_THRESHOLD=4 行）
-        e2 = MagicMock()
-        e2.viewport_dimension = 0
-        e2.pixels = 102 * ROW_HEIGHT  # 差 2 行 < 4
-        list_view.on_scroll(e2)
-        assert len(page.session.scheduled_updates) == 0
-
-    def test_on_scroll_no_viewport_dimension_no_update(self, mock_i18n_state, mock_app_colors_state):
-        """viewport_dimension 为 None 时不触发 set_viewport_h 分支。
-
-        pixels=0 → new_first=0，set_scroll_first(0) 与初值 0 相等，
-        框架等值优化不调度 schedule_update。本测试覆盖 ``if vh:`` 为 False 的分支，
-        断言 on_scroll 正常返回不抛异常即可（分支覆盖由 coverage 报告确认）。
-        """
-        component = _make_component()
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
-
-        page.session.scheduled_updates.clear()
-        e = MagicMock()
-        e.viewport_dimension = None
-        e.pixels = 0.0
-        # 不抛异常即说明 ``if vh:`` 分支正确跳过
-        list_view.on_scroll(e)
-        # set_scroll_first(0) 与初值相等，不触发 schedule_update
-        assert len(page.session.scheduled_updates) == 0
-
-    def test_on_scroll_no_pixels_uses_zero(self, mock_i18n_state, mock_app_colors_state):
-        """pixels 为 None 时 fallback 到 0.0。"""
-        component = _make_component()
-        page, _ = _render(component)
-        list_view = render_once(component).controls[0].controls[0].controls[1]
-
-        page.session.scheduled_updates.clear()
-        e = MagicMock()
-        e.viewport_dimension = 600.0
-        e.pixels = None
-        list_view.on_scroll(e)
-        # pixels=None → 0.0 → new_first=0，cache.last_first 初始 -1 < 0 → 触发 set_scroll_first
-        assert len(page.session.scheduled_updates) > 0
+    def test_list_view_no_on_scroll_handler(self, mock_i18n_state, mock_app_colors_state):
+        """方案 D: ListView 不再挂 on_scroll handler (虚拟化由引擎层接管)。"""
+        _, result = _render(_make_component())
+        list_view = result.controls[0].controls[0].controls[1]
+        assert list_view.on_scroll is None
 
 
 class TestPaginatedTableRowsChangeEffect:
-    """验证 _reset_scroll_on_rows_change effect (lines 290-294)。"""
+    """验证 rows 变化时 ListView key 重建行为 (方案 D: 替代 use_effect 重置滚动)。"""
 
-    def test_initial_mount_runs_reset_effect(self, mock_i18n_state, mock_app_colors_state):
-        """首次 mount 时 effect 执行 set_scroll_first(0)。"""
+    def test_initial_mount_renders_list_view(self, mock_i18n_state, mock_app_colors_state):
+        """首次 mount 时 ListView 正常渲染 (key 机制不阻塞初始渲染)。"""
         component = _make_component()
         run_mount_effects(component)
-        # _reset_scroll_on_rows_change 调用 set_scroll_first(0)
-        # set_scroll_first(0) 与初值 0 相等，不触发 schedule_update
-        # effect 本身已执行（cache.last_first=-1），mount 未抛异常即间接验证
+        result = render_once(component)
+        list_view = result.controls[0].controls[0].controls[1]
+        assert isinstance(list_view, ft.ListView)
+        assert list_view.key is not None
