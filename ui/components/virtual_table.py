@@ -207,13 +207,18 @@ def _build_row(
     on_row_click: Callable[[dict[str, Any]], None] | None,
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
-) -> ft.GestureDetector:
-    """构建单个行 (方案 D: GestureDetector 包裹, 生成 flt-tappable 语义属性)。
+) -> ft.Control:
+    """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
         is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
+
+    Note:
+        on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
+        "GestureDetector should have at least one event handler defined" 警告覆盖行文本
+        的语义节点 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖导致 E2E 失败)。
     """
     inner = ft.Container(
         height=ROW_HEIGHT,
@@ -223,9 +228,11 @@ def _build_row(
         content=ft.Row(safe_controls(_build_cells(row_data, columns)), spacing=0),
         on_hover=on_hover,
     )
+    if on_row_click is None:
+        return inner
     return ft.GestureDetector(
         content=inner,
-        on_tap=_make_row_click_handler(on_row_click, row_data) if on_row_click is not None else None,
+        on_tap=_make_row_click_handler(on_row_click, row_data),
     )
 
 

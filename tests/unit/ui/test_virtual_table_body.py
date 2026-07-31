@@ -354,11 +354,25 @@ class TestBuildCells:
 
 
 class TestBuildRow:
-    """_build_row 纯函数测试：单行构建 + on_row_click 绑定 (方案 D: GestureDetector 包裹)."""
+    """_build_row 纯函数测试：单行构建 + on_row_click 绑定 (方案 D: on_row_click 非空时 GestureDetector 包裹).
+
+    返回类型分支 (PR #392 回归修复):
+    - on_row_click=None → 直接返回 Container (避免 GestureDetector 无事件处理器警告覆盖语义节点)
+    - on_row_click 非 None → 返回 GestureDetector 包裹 Container (生成 flt-tappable 语义属性)
+    """
+
+    def test_returns_container_when_no_click_handler(self):
+        """on_row_click=None 时直接返回 Container (PR #392 回归修复: 避免 GestureDetector 警告)."""
+        row = _build_row(5, _make_row_data(), _make_columns(), 800, None)
+        assert isinstance(row, ft.Container)
+        assert row.height == ROW_HEIGHT
+        assert row.width == 800
+        assert row.ink is True
 
     def test_returns_gesture_detector_with_inner_container(self):
-        """方案 D: 行返回 GestureDetector, 内部包裹 Container (生成 flt-tappable 语义属性)."""
-        row = _build_row(5, _make_row_data(), _make_columns(), 800, None)
+        """on_row_click 非空时返回 GestureDetector, 内部包裹 Container (生成 flt-tappable 语义属性)."""
+        on_row_click = MagicMock()
+        row = _build_row(5, _make_row_data(), _make_columns(), 800, on_row_click)
         assert isinstance(row, ft.GestureDetector)
         inner = row.content
         assert isinstance(inner, ft.Container)
@@ -368,20 +382,17 @@ class TestBuildRow:
         assert inner.ink is True
 
     def test_bgcolor_from_app_styles(self):
-        row = _build_row(3, _make_row_data(), _make_columns(), 800, None)
+        on_row_click = MagicMock()
+        row = _build_row(3, _make_row_data(), _make_columns(), 800, on_row_click)
         inner = row.content
         assert inner.bgcolor == AppStyles.data_table_row(3)
 
     def test_content_is_row_of_cells(self):
-        row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
+        on_row_click = MagicMock()
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
         inner = row.content
         assert isinstance(inner.content, ft.Row)
         assert len(inner.content.controls) == 4
-
-    def test_no_on_row_click_no_tap_handler(self):
-        """方案 D: on_row_click=None 时 GestureDetector.on_tap=None."""
-        row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
-        assert row.on_tap is None
 
     def test_with_on_row_click_attaches_tap_handler(self):
         """方案 D: on_row_click 非空时 GestureDetector.on_tap 为 callable."""
@@ -400,21 +411,24 @@ class TestBuildRow:
 
     def test_is_hovered_false_uses_odd_even_color(self):
         """P2-8 MAJ-2: is_hovered=False (默认) → bgcolor 为 ODD/EVEN 色 (非 TABLE_ROW_HOVER)."""
-        row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
+        on_row_click = MagicMock()
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
         inner = row.content
         assert inner.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
         assert inner.bgcolor != AppColors.TABLE_ROW_HOVER
 
     def test_is_hovered_true_uses_hover_color(self):
         """P2-8 MAJ-2: is_hovered=True → bgcolor 为 TABLE_ROW_HOVER."""
-        row = _build_row(0, _make_row_data(), _make_columns(), 800, None, is_hovered=True)
+        on_row_click = MagicMock()
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, is_hovered=True)
         inner = row.content
         assert inner.bgcolor == AppColors.TABLE_ROW_HOVER
 
     def test_on_hover_attached_to_inner_container_when_provided(self):
         """P2-8 MAJ-2: 传入 on_hover 回调时, 内部 Container.on_hover 非空 (GestureDetector 无 on_hover 用于 bgcolor 切换)."""
         on_hover = MagicMock()
-        row = _build_row(0, _make_row_data(), _make_columns(), 800, None, on_hover=on_hover)
+        on_row_click = MagicMock()
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, on_hover=on_hover)
         inner = row.content
         assert callable(inner.on_hover)
 
@@ -451,9 +465,10 @@ class TestPaginatedTableRenderStructure:
         assert header.bgcolor == AppColors.TABLE_HEADER_BG
 
     def test_rows_column_contains_all_rows_directly(self, mock_i18n_state, mock_app_colors_state):
-        """方案 D-v2: Column.controls 直接是行 GestureDetector 列表 (无 ListView/Stack 中间层)。
+        """方案 D-v2: Column.controls 直接是行控件列表 (无 ListView/Stack 中间层)。
 
         100 行规模下 Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行.
+        on_row_click=None 时行返回 Container (PR #392 回归修复: 避免 GestureDetector 警告).
         """
         rows = [_make_row_data() for _ in range(5)]
         _, result = _render(_make_component(rows=rows))
@@ -461,10 +476,24 @@ class TestPaginatedTableRenderStructure:
         assert isinstance(rows_clip_container, ft.Container)
         rows_column = rows_clip_container.content
         assert isinstance(rows_column, ft.Column)
-        # 直接是行 GestureDetector, 不经过 ListView/Stack
+        # 直接是行 Container (on_row_click=None), 不经过 ListView/Stack
         assert len(rows_column.controls) == 5
         for row in rows_column.controls:
+            assert isinstance(row, ft.Container)
+
+    def test_rows_column_contains_gesture_detectors_when_click_handler_set(
+        self, mock_i18n_state, mock_app_colors_state
+    ):
+        """方案 D: on_row_click 非空时行返回 GestureDetector (生成 flt-tappable 语义属性)."""
+        rows = [_make_row_data() for _ in range(3)]
+        on_row_click = MagicMock()
+        _, result = _render(_make_component(rows=rows, on_row_click=on_row_click))
+        rows_clip_container = result.controls[1]
+        rows_column = rows_clip_container.content
+        assert len(rows_column.controls) == 3
+        for row in rows_column.controls:
             assert isinstance(row, ft.GestureDetector)
+            assert isinstance(row.content, ft.Container)
 
     def test_empty_rows_renders_empty_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
