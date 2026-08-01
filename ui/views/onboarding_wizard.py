@@ -389,7 +389,11 @@ def OnboardingWizard(
                 if onboarding_vm.sync_in_progress:
                     await onboarding_vm.cancel_sync()
             except Exception as exc:
-                logger.debug("[OnboardingWizard] Cleanup cancel sync failed: %s", exc, exc_info=True)
+                logger.debug(
+                    "[OnboardingWizard] Cleanup cancel sync failed: %s",
+                    DataSanitizer.sanitize_error(exc),
+                    exc_info=True,
+                )
 
         page.run_task(_do_cleanup)
 
@@ -418,7 +422,7 @@ def OnboardingWizard(
                 except Exception as ex:
                     logger.debug(
                         "[OnboardingWizard] Failed to update page locale configuration: %s",
-                        ex,
+                        DataSanitizer.sanitize_error(ex),
                         exc_info=True,
                     )
         except Exception as ex:
