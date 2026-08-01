@@ -31,7 +31,7 @@ def _get_page() -> ft.Page | None:
 
 def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
     """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
-    show_toast = typing.cast(typing.Any, page).show_toast
+    show_toast = getattr(page, "show_toast", None)
     if show_toast is not None:
         show_toast(msg, msg_type)
 
