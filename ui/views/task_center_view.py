@@ -17,6 +17,7 @@ from collections.abc import Callable
 import flet as ft
 
 from core.i18n import Message
+from ui.components.error_history_store import open_github_issues, record_error
 from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -336,6 +337,10 @@ def TaskCenterView(active: bool = True) -> ft.Container:
     # Phase 6.2 (FR-UX-006): Details dialog state (task_id being viewed, None = closed)
     details_task_id, set_details_task_id = ft.use_state(None)
 
+    # Issue #448: 已记录错误历史的 FAILED 任务 ID 集合 (只增不减, 避免重复记录)
+    # 场景: FAILED → CANCELLED (clear_finished) → 再 FAILED 不会重复记录
+    known_failed_ids_ref = ft.use_ref(lambda: set[str]())
+
     # --- Handlers ---
     def _on_cancel(task_id: str) -> None:
         UILogger.log_action("TaskCenterView", "Click", f"btn_cancel | task_id={task_id}")
@@ -361,6 +366,34 @@ def TaskCenterView(active: bool = True) -> ft.Container:
 
     def _on_next(e: ft.ControlEvent) -> None:  # noqa: ARG001
         vm.go_next()
+
+    # Issue #448: FAILED 任务记录错误历史 (只增不减的 known_failed_ids 去重)
+    # 场景: FAILED → CANCELLED (clear_finished) → 再 FAILED 不会重复记录
+    # retry 后再次 FAILED 视为新的失败事件, 但因 id 已在 known 集合, 也不重复记录
+    def _record_failed_tasks() -> None:
+        current_failed = {t.id for t in state.tasks if t.status == TaskStatus.FAILED}
+        known = known_failed_ids_ref.current or set()
+        new_failed = current_failed - known
+        if not new_failed:
+            # 仍更新 known 集合 (只增不减: 已知 FAILED id 即使任务被清理也保留)
+            known_failed_ids_ref.current = known | current_failed
+            return
+        for tid in new_failed:
+            task = next((t for t in state.tasks if t.id == tid), None)
+            if task is None:
+                continue
+            # Issue #448 review-2 HIGH-2: task.error 是 i18n key, 需翻译为文案后传 details
+            # (与 _build_task_card L167 I18n.get(row.error) 一致, 避免错误历史显示 raw key)
+            error_msg = I18n.get(task.error) if task.error else I18n.get("task_details_no_error")
+            record_error(
+                source="task_center",
+                title=I18n.get("task_failed_title"),
+                message=_render_task_field(task.name),
+                details=error_msg,
+            )
+        known_failed_ids_ref.current = known | current_failed
+
+    ft.use_effect(_record_failed_tasks, dependencies=[state.tasks])
 
     # --- Pagination slice ---
     start = (state.current_page - 1) * PAGE_SIZE
@@ -492,6 +525,28 @@ def TaskCenterView(active: bool = True) -> ft.Container:
                 break  # pragma: no cover - 同上
 
     if details_row is not None:
+        # Issue #448: 详情对话框 actions — FAILED 任务额外显示"联系支持"按钮
+        details_actions: list[ft.Control] = []
+        if details_row.status == TaskStatus.FAILED:
+            details_actions.append(
+                ft.TextButton(
+                    I18n.get("common_contact_support"),
+                    icon=ft.Icons.SUPPORT_AGENT,
+                    icon_color=AppColors.PRIMARY,
+                    style=ft.ButtonStyle(
+                        color=AppColors.PRIMARY,
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+                        shape=ft.RoundedRectangleBorder(radius=6),
+                    ),
+                    on_click=safe_on_click(lambda e: open_github_issues()),
+                )
+            )
+        details_actions.append(
+            ft.TextButton(
+                I18n.get("common_close"),
+                on_click=safe_on_click(_on_close_details),
+            )
+        )
         details_dialog = ft.AlertDialog(  # pragma: no cover - 详情对话框构建仅集成测试覆盖
             modal=True,
             title=ft.Text(I18n.get("task_details_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
@@ -518,7 +573,7 @@ def TaskCenterView(active: bool = True) -> ft.Container:
                         color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Text(
-                        details_row.error or I18n.get("task_details_no_error"),
+                        I18n.get(details_row.error) if details_row.error else I18n.get("task_details_no_error"),
                         size=AppStyles.FONT_SIZE_BODY,
                         color=AppColors.ERROR if details_row.error else AppColors.TEXT_HINT,
                         selectable=True,
@@ -528,12 +583,7 @@ def TaskCenterView(active: bool = True) -> ft.Container:
                 spacing=6,
                 scroll=ft.ScrollMode.AUTO,
             ),
-            actions=[
-                ft.TextButton(
-                    I18n.get("common_close"),
-                    on_click=safe_on_click(_on_close_details),
-                ),
-            ],
+            actions=details_actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )
     else:

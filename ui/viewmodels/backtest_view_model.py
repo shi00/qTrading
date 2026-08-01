@@ -42,6 +42,10 @@ class BacktestState:
     spec.md §Flet use_state setter 安全性).
     ceiling: BacktestResult 拆解为 tuple[Row, ...] 需重写 BacktestResultPanel.
     upgrade: BacktestResultPanel 接收 tuple[Row, ...] 形式时, 移除自定义 __eq__/__hash__.
+
+    Issue #448 新增字段:
+    - ``error_details``: 脱敏后错误详情 (供 ErrorState details 展示)
+      __eq__/__hash__ 同步包含 error_details (B1 修复: error_details 变化触发重渲染)
     """
 
     is_running: bool = False
@@ -51,9 +55,14 @@ class BacktestState:
     status_color: str = ""
     # 回测结果直接放入 state (BacktestResult 是 strategies 层 frozen dataclass 领域对象)
     result: BacktestResult | None = None
+    # Issue #448: 脱敏后错误详情 (status_color == "error" 时供 ErrorState details 展示)
+    error_details: str = ""
 
     def __eq__(self, other: object) -> bool:
-        """自定义 __eq__: result 字段用 identity 比较, 避免 DataFrame __eq__ 抛 TypeError."""
+        """自定义 __eq__: result 字段用 identity 比较, 避免 DataFrame __eq__ 抛 TypeError.
+
+        Issue #448 (B1 修复): error_details 加入比较, 确保错误详情变化触发重渲染.
+        """
         if not isinstance(other, BacktestState):
             return NotImplemented
         return (
@@ -62,10 +71,12 @@ class BacktestState:
             and self.progress_message == other.progress_message
             and self.status_message == other.status_message
             and self.status_color == other.status_color
+            and self.error_details == other.error_details
             and self.result is other.result
         )
 
     def __hash__(self) -> int:
+        # Issue #448 (B1 修复): error_details 加入 hash 计算
         return hash(
             (
                 self.is_running,
@@ -73,6 +84,7 @@ class BacktestState:
                 self.progress_message,
                 self.status_message,
                 self.status_color,
+                self.error_details,
                 id(self.result),
             )
         )
@@ -252,6 +264,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             status_message=Message("backtest_starting"),
             status_color="info",
             result=None,
+            error_details="",  # Issue #448 m4: 清空上次错误详情
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -316,19 +329,22 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     _log = logger.warning
                 else:
                     _log = logger.error
+                sanitized = DataSanitizer.sanitize_error(e)
                 _log(
                     "[BacktestVM] Backtest failed (%s): %s",
                     error_info["code"],
-                    DataSanitizer.sanitize_error(e),
+                    sanitized,
                     exc_info=True,
                 )
                 # F3-11: 失败路径显式终态（progress 清空避免 UI 残留文案）
+                # Issue #448: 同时设置 error_details (供 View 的 ErrorState details 展示)
                 self._set_state(
                     is_running=False,
                     progress=0.0,
                     progress_message=None,
                     status_message=Message("backtest_failed"),
                     status_color="error",
+                    error_details=sanitized,
                 )
                 raise
 

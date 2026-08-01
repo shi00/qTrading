@@ -19,10 +19,13 @@
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from enum import IntEnum
 
 import flet as ft
 
+from ui.components.error_history_dialog import build_error_history_dialog
+from ui.components.error_history_store import get_global_state as get_error_history_state
 from ui.components.flet_type_helpers import (
     get_control_attr,
     safe_controls,
@@ -234,6 +237,56 @@ def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
     )
 
 
+def _build_notification_button(
+    error_count: int,
+    on_click: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """构造通知中心铃铛按钮 (Issue #448, 带错误数角标).
+
+    复用 ``_build_nav_badge_icon`` 的 ``ft.Stack`` 叠加数字小圆点模式。
+    ``error_count`` 上限 99, 超过显示 "99+"。
+
+    Args:
+        error_count: 错误历史条数 (>0 由调用方保证).
+        on_click: 点击回调 (打开 ErrorHistoryDialog).
+    """
+    icon_btn = ft.IconButton(
+        ft.Icons.NOTIFICATIONS_OUTLINED,
+        on_click=safe_on_click(on_click),
+        tooltip=I18n.get("nav_notifications"),
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+    )
+    if error_count == 0:
+        return icon_btn
+    # 角标 (复用 _build_nav_badge_icon 的 Stack 模式)
+    badge_text = str(error_count) if error_count <= 99 else "99+"
+    badge_w = 16 if len(badge_text) == 1 else 22
+    return ft.Stack(
+        [
+            icon_btn,
+            ft.Container(
+                content=ft.Text(
+                    badge_text,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=ft.Colors.ON_ERROR,
+                    text_align=ft.TextAlign.CENTER,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                width=badge_w,
+                height=16,
+                border_radius=8,
+                bgcolor=AppColors.ERROR,
+                alignment=ft.Alignment.CENTER,
+                left=20,
+                top=0,
+                padding=ft.Padding.symmetric(horizontal=2, vertical=0),
+            ),
+        ],
+        width=40,
+        height=40,
+    )
+
+
 @ft.component
 def AppLayout() -> ft.Container:
     """主应用布局 (声明式).
@@ -255,6 +308,11 @@ def AppLayout() -> ft.Container:
     # --- Pure UI state ---
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
+
+    # --- Issue #448: 错误历史通知中心 (订阅 ErrorHistoryState 触发角标重渲染) ---
+    ft.use_state(get_error_history_state)  # 订阅 @ft.observable state 变化
+    error_history_open, set_error_history_open = ft.use_state(False)
+    error_count = len(get_error_history_state().errors)
 
     # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
     async def _do_tab_switch(new_tab: int) -> None:
@@ -329,6 +387,11 @@ def AppLayout() -> ft.Container:
         content=ft.Column(
             [
                 collapse_btn,
+                # Issue #448: 通知中心铃铛按钮 (始终可见, 折叠侧边栏时仍可点击)
+                _build_notification_button(
+                    error_count=error_count,
+                    on_click=lambda _e: set_error_history_open(True),
+                ),
                 ft.Image(
                     src="/icon.png",
                     width=48,
@@ -365,6 +428,14 @@ def AppLayout() -> ft.Container:
         bgcolor=AppColors.BACKGROUND,
     )
     logger.info("[AppLayout] construction complete, returning Container")
+
+    # Issue #448: 挂载 ErrorHistoryDialog (对齐 task_center_view details_dialog 模式)
+    error_dialog = build_error_history_dialog(
+        is_open=error_history_open,
+        on_close=lambda: set_error_history_open(False),
+        errors=get_error_history_state().errors,
+    )
+    ft.use_dialog(error_dialog)
 
     return ft.Container(
         content=ft.Row(

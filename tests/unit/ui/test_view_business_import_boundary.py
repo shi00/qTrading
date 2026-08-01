@@ -191,6 +191,12 @@ ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = {
     # 无配套 ViewModel, 下沉需评估方案 (新增 MarkdownViewModel 或经父 VM 转发), 不适合在本 PR 驱动.
     # 暂时豁免, 后续独立任务修复后移除本条目.
     ("ui/components/_markdown_safe.py", "utils.thread_pool"),
+    # Issue #448: error_history_store.py 的 open_github_issues 函数 (ErrorState on_contact_support
+    # 回调) 调用 webbrowser.open 经 ThreadPoolManager offload (R16 防阻塞主循环). 与 _markdown_safe.py
+    # 同类冲突 (utils.thread_pool 在 View 层). error_history_store 是错误历史全局状态存储模块,
+    # 无独立 ViewModel, 下沉需评估方案 (新增 ErrorHistoryViewModel 或经父 VM 转发), 不适合在本 PR 驱动.
+    # 暂时豁免, 后续与 _markdown_safe.py / stock_detail_dialog.py 一并清理时移除本条目.
+    ("ui/components/error_history_store.py", "utils.thread_pool"),
 }
 
 

@@ -15,7 +15,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
-from ui.i18n import get_observable_state
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 
@@ -95,24 +95,35 @@ def ErrorState(
     icon: str = "",
     title: str = "",
     message: str = "",
+    details: str = "",
     on_retry: Callable[[], None] | None = None,
     retry_text: str | None = None,
     on_cta: Callable[[], None] | None = None,
     cta_text: str | None = None,
+    on_contact_support: Callable[[], None] | None = None,
+    contact_text: str | None = None,
 ) -> ft.Container:
-    """错误态占位组件 (P1-3).
+    """错误态占位组件 (P1-3 + Issue #448 增强).
+
+    Issue #448 新增:
+    - ``details``: 错误详情 (可展开/折叠, 已脱敏)
+    - ``on_contact_support`` / ``contact_text``: 联系支持按钮 (打开 GitHub issues)
 
     Args:
         icon: ft.Icons.* 字符串 (如 ``ft.Icons.ERROR_OUTLINE``); 空字符串不渲染图标。
         title: 标题文案 (已翻译字符串)。
         message: 描述文案 (已翻译字符串)。
+        details: 错误详情 (已脱敏字符串); 非空时渲染展开/折叠按钮 + 详情容器。
         on_retry: 重试回调 (可选); None 时不渲染重试按钮。
         retry_text: 重试按钮文案 (已翻译字符串); ``on_retry`` 非空时必填。
         on_cta: 次操作回调 (可选, 如导航到设置页); None 时不渲染 CTA 按钮。
         cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta`` 非空时必填。
+        on_contact_support: 联系支持回调 (可选); None 时不渲染联系支持按钮。
+        contact_text: 联系支持按钮文案 (已翻译字符串); ``on_contact_support`` 非空时必填。
     """
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
+    is_expanded, set_is_expanded = ft.use_state(False)  # details 展开/折叠状态
 
     def _on_retry_click(_e: ft.ControlEvent) -> None:
         if on_retry is not None:
@@ -121,6 +132,13 @@ def ErrorState(
     def _on_cta_click(_e: ft.ControlEvent) -> None:
         if on_cta is not None:
             on_cta()
+
+    def _on_toggle_details(_e: ft.ControlEvent) -> None:
+        set_is_expanded(not is_expanded)
+
+    def _on_contact_support_click(_e: ft.ControlEvent) -> None:
+        if on_contact_support is not None:
+            on_contact_support()
 
     column_controls: list[ft.Control] = []
     if icon:
@@ -161,6 +179,43 @@ def ErrorState(
                 content=cta_text,
                 icon=ft.Icons.SETTINGS,
                 on_click=safe_on_click(_on_cta_click),
+                style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+            ),
+        )
+    # Issue #448: 错误详情展开/折叠 (details 非空时渲染)
+    if details:
+        column_controls.append(
+            ft.TextButton(
+                content=(I18n.get("common_collapse") if is_expanded else I18n.get("common_error_details")),
+                icon=(ft.Icons.KEYBOARD_ARROW_UP if is_expanded else ft.Icons.KEYBOARD_ARROW_DOWN),
+                on_click=safe_on_click(_on_toggle_details),
+                style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+            ),
+        )
+        if is_expanded:
+            column_controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        details,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                        selectable=True,  # 方便复制
+                        max_lines=10,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    padding=ft.Padding.all(8),
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    border_radius=6,
+                    width=500,
+                ),
+            )
+    # Issue #448: 联系支持按钮 (on_contact_support 非空时渲染)
+    if on_contact_support is not None and contact_text:
+        column_controls.append(
+            ft.TextButton(
+                content=contact_text,
+                icon=ft.Icons.HELP_OUTLINE,
+                on_click=safe_on_click(_on_contact_support_click),
                 style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
             ),
         )

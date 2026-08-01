@@ -329,12 +329,24 @@ class TestWatchlistViewRendering:
         )
         component = make_component(WatchlistView, active=True)
         run_mount_effects(component)
-        result = render_once(component)
+        # render_once 触发渲染并调用 I18n.get, 返回值未直接断言 (改用 I18n.get 调用记录验证)
+        render_once(component)
 
-        controls = _collect_all_controls(result)
-        # 错误提示渲染了含 error key 的 Text
-        texts = [c for c in controls if isinstance(c, ft.Text)]
-        assert any(getattr(t, "value", "") == "watchlist_load_failed" for t in texts)
+        # Issue #448: load_error 非空时 body 渲染为 ErrorState 子组件 (Component 实例)
+        # 验证 ErrorState 被实际调用并传入正确 props (通过 mock I18n.get 接收的 key 间接验证)
+        # I18n.get("watchlist_load_failed_title") 和 I18n.get("watchlist_load_failed_message")
+        # 已在 render_once 中被调用, mock_i18n_for_view.get 已记录这些调用
+        called_keys = [call.args[0] for call in mock_i18n_for_view.get.call_args_list]
+        assert "watchlist_load_failed_title" in called_keys, (
+            "WatchlistView 应调用 I18n.get('watchlist_load_failed_title') 用于 ErrorState title"
+        )
+        assert "watchlist_load_failed_message" in called_keys, (
+            "WatchlistView 应调用 I18n.get('watchlist_load_failed_message') 用于 ErrorState message"
+        )
+        assert "common_retry" in called_keys, "WatchlistView 应调用 I18n.get('common_retry') 用于重试按钮"
+        assert "common_contact_support" in called_keys, (
+            "WatchlistView 应调用 I18n.get('common_contact_support') 用于联系支持按钮"
+        )
 
 
 class TestWatchlistViewLoadEffect:

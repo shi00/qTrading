@@ -4,6 +4,11 @@
 - VM 通过 ``use_viewmodel(factory=lambda: WatchlistViewModel())`` 内部模式消费
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 异步操作通过 ``page.run_task`` 调度 (R16); CancelledError 必须 raise (R2)
+
+Issue #448 改造:
+- 加载失败 → ErrorState (替换列表, 含 details + 重试 + 联系支持)
+- 增删失败 → toast 提示 (保留列表), 同时记录到错误历史
+- 错误历史记录通过 use_effect 监听 state.load_error / state.action_error 变化触发
 """
 
 import asyncio
@@ -13,7 +18,8 @@ import typing
 import flet as ft
 
 from ui.components.confirm_dialog import ConfirmDialog
-from ui.components.state_views import EmptyState
+from ui.components.error_history_store import open_github_issues, record_error
+from ui.components.state_views import EmptyState, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -107,6 +113,9 @@ def WatchlistView(
     confirm_open, set_confirm_open = ft.use_state(False)
     pending_remove_ts_code, set_pending_remove_ts_code = ft.use_state("")
 
+    # Issue #448: 上一次 load_error 引用 (用于去重, 避免重复记录错误历史)
+    previous_load_error_ref = ft.use_ref(lambda: None)
+
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
         if not active:
@@ -114,6 +123,50 @@ def WatchlistView(
         await vm.load_watchlist()
 
     ft.use_effect(_load_effect, dependencies=[active])
+
+    # Issue #448: 加载失败重试 (复用 vm.load_watchlist, page.run_task offload)
+    def _retry_load() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(vm.load_watchlist)
+
+    # Issue #448: load_error 记录错误历史 (use_effect 监听 state.load_error + error_details)
+    def _record_load_error_if_new() -> None:
+        current = state.load_error
+        if current is not None and current is not previous_load_error_ref.current:
+            record_error(
+                source="watchlist",
+                title=I18n.get("watchlist_load_failed_title"),
+                message=I18n.get(current.key, **current.params),
+                details=state.error_details,
+            )
+        previous_load_error_ref.current = current
+
+    ft.use_effect(
+        _record_load_error_if_new,
+        dependencies=[state.load_error, state.error_details],
+    )
+
+    # Issue #448: action_error toast 提示 + 错误历史记录 (use_effect 监听 state.action_error)
+    def _show_action_error() -> None:
+        if state.action_error is None:
+            return
+        page = _get_page()
+        if page is not None:
+            _safe_show_toast(
+                page,
+                I18n.get(state.action_error.key, **state.action_error.params),
+                "error",
+            )
+        # 同时记录到错误历史 (action_error 不携带 error_details, 传空串)
+        record_error(
+            source="watchlist",
+            title=I18n.get("watchlist_action_failed_title"),
+            message=I18n.get(state.action_error.key, **state.action_error.params),
+        )
+        vm.clear_action_error()
+
+    ft.use_effect(_show_action_error, dependencies=[state.action_error])
 
     # --- 移除关注 ---
     async def _do_remove(ts_code: str) -> None:
@@ -153,8 +206,19 @@ def WatchlistView(
         set_confirm_open(False)
         set_pending_remove_ts_code("")
 
-    # --- 渲染 ---
-    if state.is_loading:
+    # --- 渲染 (Issue #448: 三态 — load_error → ErrorState; is_loading → ProgressRing; 否则正常) ---
+    if state.load_error is not None:
+        body = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("watchlist_load_failed_title"),
+            message=I18n.get("watchlist_load_failed_message"),
+            details=state.error_details,
+            on_retry=_retry_load,
+            retry_text=I18n.get("common_retry"),
+            on_contact_support=open_github_issues,
+            contact_text=I18n.get("common_contact_support"),
+        )
+    elif state.is_loading:
         body = ft.Column(
             [ft.ProgressRing()],
             alignment=ft.MainAxisAlignment.CENTER,
@@ -175,25 +239,6 @@ def WatchlistView(
             spacing=4,
         )
 
-    # 错误提示
-    error_banner = None
-    if state.load_error is not None:
-        error_banner = ft.Container(
-            content=ft.Text(
-                I18n.get(state.load_error.key, **state.load_error.params),
-                color=AppColors.ERROR,
-                size=AppStyles.FONT_SIZE_BODY_SM,
-            ),
-            padding=ft.Padding.all(8),
-            bgcolor=AppColors.SURFACE_VARIANT,
-            border_radius=8,
-        )
-
-    content_controls: list[ft.Control] = []
-    if error_banner is not None:
-        content_controls.append(error_banner)
-    content_controls.append(body)
-
     # pending 行的显示名 (stock_name 优先, 空则用 ts_code, 与 _build_watchlist_row 一致)
     pending_name = pending_remove_ts_code
     for _r in state.watchlist_rows:
@@ -211,7 +256,7 @@ def WatchlistView(
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
-                ft.Container(content=ft.Column(content_controls, expand=True, spacing=8), expand=True),
+                ft.Container(content=body, expand=True),
                 ConfirmDialog(
                     open_state=confirm_open,
                     title=I18n.get("watchlist_confirm_remove_title"),

@@ -389,6 +389,8 @@ class _FakeDataExplorerState:
     sql_result_columns: tuple[str, ...] = ()
     sql_result_rows: tuple[SqlResultRow, ...] = ()
     sql_error: str | None = None
+    # Issue #448: sql_error_details 存脱敏后错误详情
+    sql_error_details: str = ""
     # Phase 6.4 (FR-UX-006): 数据新鲜度字段 (对齐 DataExplorerState)
     data_latest_date: str = ""
     data_lag_days: int = 0
@@ -848,13 +850,13 @@ class TestSQLConsoleTabComponentBody:
         component = make_component(SQLConsoleTab, vm=vm)
         result, _ = _mount(component)
 
-        # empty_state should not be visible
-        containers = _find_by_type(result, ft.Container)
-        empty_state = next(
-            (c for c in containers if getattr(c, "visible", True) is False and _has_terminal_icon(c)),
-            None,
+        # Issue #448: 条件渲染 — has_data 分支不渲染 empty_state (无 TERMINAL icon)
+        # PaginatedTable 是 @ft.component 函数渲染为 Container, 无法用 isinstance 验证,
+        # 改为验证 empty_state TERMINAL icon 不存在 (has_data → 走 result_table 分支)
+        icons = _find_by_type(result, ft.Icon)
+        assert not any(getattr(i, "icon", None) == ft.Icons.TERMINAL for i in icons), (
+            "有 SQL 结果时应渲染 PaginatedTable, 不应渲染 empty_state TERMINAL icon"
         )
-        assert isinstance(empty_state, ft.Container) and empty_state.visible is False
 
     def test_sql_editor_present(
         self,

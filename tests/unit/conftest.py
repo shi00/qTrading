@@ -153,3 +153,18 @@ def _reset_i18n_state():
     I18n._initialized = True
     I18n._listeners = saved_listeners
     I18n._missing_keys = set()
+
+
+@pytest.fixture(autouse=True)
+def _reset_error_history_state():
+    """Reset error_history_store global state before and after each unit test.
+
+    Issue #448: error_history_store 持有 module-level singleton _state (ErrorHistoryState),
+    不由 singleton_registry 管理。record_error/clear_history 直接访问 _state 并修改 errors 列表,
+    若不在测试间重置会导致跨测试状态污染 (R7 测试状态污染): 一个测试记录的错误会出现在后续测试断言中。
+    """
+    from ui.components.error_history_store import _reset_state_for_test
+
+    _reset_state_for_test()
+    yield
+    _reset_state_for_test()

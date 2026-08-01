@@ -6,6 +6,11 @@
 - VM 只产出 Message (i18n key)，不感知 locale，不 import flet
 
 L771 合规：state 业务数据用 tuple[WatchlistRow, ...]，无 dual-track。
+
+Issue #448 改造:
+- 区分 load_error (列表加载失败, 显示 ErrorState) 和 action_error (增删失败, toast 提示)
+- 新增 error_details 字段携带脱敏后错误详情 (R9 兜底: VM 不脱敏, 由 record_error 内部强制脱敏)
+- 新增 clear_action_error() 方法供 View 在 toast 提示后清除
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +44,18 @@ class WatchlistRow:
 
 @dataclass(frozen=True)
 class WatchlistState:
-    """WatchlistViewModel 的不可变状态快照 (L771 合规, 无 dual-track)."""
+    """WatchlistViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
+
+    Issue #448 新增字段:
+    - ``action_error``: 增删操作失败 (toast 提示, 不替换列表)
+    - ``error_details``: 脱敏后错误详情 (供 ErrorState details 展示)
+    """
 
     watchlist_rows: tuple[WatchlistRow, ...] = ()
     is_loading: bool = False
     load_error: Message | None = None
+    action_error: Message | None = None  # Issue #448: 增删操作失败
+    error_details: str = ""  # Issue #448: 脱敏后错误详情 (load_error 配套)
 
 
 class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
@@ -52,6 +65,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     1. 管理关注列表状态 (frozen WatchlistState snapshot)
     2. 调用 CacheManager 代理方法 add/remove/get/is_in
     3. add/remove 后自动刷新列表
+    4. Issue #448: 区分 load_error (替换列表) 和 action_error (toast 提示)
     """
 
     def __init__(self, cache: CacheManager | None = None):
@@ -63,7 +77,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_watchlist(self) -> None:
         """加载关注列表 (从 DB 读取并转换为 tuple[WatchlistRow, ...])."""
-        self._set_state(is_loading=True, load_error=None)
+        self._set_state(is_loading=True, load_error=None, error_details="")
         try:
             df = await self.cache.get_watchlist()
             rows = _df_to_watchlist_rows(df)
@@ -72,7 +86,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             self._set_state(is_loading=False)
             raise
         except Exception as e:
-            _handle_error(e, "load_watchlist", self)
+            _handle_load_error(e, "load_watchlist", self)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def add_to_watchlist(
@@ -81,25 +95,33 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         stock_name: str,
         note: str | None = None,
     ) -> None:
-        """加入关注并刷新列表."""
+        """加入关注并刷新列表.
+
+        Issue #448: cache.add_to_watchlist 失败走 action_error (toast 提示),
+        不替换列表; load_watchlist() 内部错误走 load_error (ErrorState).
+        """
         try:
             await self.cache.add_to_watchlist(ts_code, stock_name, note)
             await self.load_watchlist()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _handle_error(e, "add_to_watchlist", self)
+            _handle_action_error(e, "add_to_watchlist", self)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def remove_from_watchlist(self, ts_code: str) -> None:
-        """移除关注并刷新列表."""
+        """移除关注并刷新列表.
+
+        Issue #448: cache.remove_from_watchlist 失败走 action_error (toast 提示),
+        不替换列表; load_watchlist() 内部错误走 load_error (ErrorState).
+        """
         try:
             await self.cache.remove_from_watchlist(ts_code)
             await self.load_watchlist()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _handle_error(e, "remove_from_watchlist", self)
+            _handle_action_error(e, "remove_from_watchlist", self)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def is_in_watchlist(self, ts_code: str) -> bool:
@@ -111,6 +133,10 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         except Exception as e:
             logger.warning("[WatchlistVM] is_in_watchlist error: %s", e, exc_info=True)
             return False
+
+    def clear_action_error(self) -> None:
+        """Issue #448: 清除 action_error (View 在 toast 提示后调用)."""
+        self._set_state(action_error=None)
 
 
 # ============================================================
@@ -138,10 +164,8 @@ def _df_to_watchlist_rows(df: pd.DataFrame | None) -> tuple[WatchlistRow, ...]:
     )
 
 
-def _handle_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
-    """统一错误处理: classify_error + Message + 日志 (对齐 DataExplorerViewModel)."""
-    error_info = classify_error(e, context="db")
-    severity = classify_severity(e, context="db")
+def _log_error(e: Exception, op: str, error_info: dict[str, str], severity: str) -> None:
+    """统一错误日志 (按严重度选择日志级别)."""
     if severity == "system":
         logger.critical("[WatchlistVM] SYSTEM-LEVEL failure in %s: %s", op, e, exc_info=True)
     elif severity == "recoverable":
@@ -154,9 +178,35 @@ def _handle_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
         )
     else:
         logger.error("[WatchlistVM] Operational error in %s: %s", op, e, exc_info=True)
+
+
+def _handle_load_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
+    """Issue #448: 加载错误 — 设置 load_error + error_details (显示 ErrorState).
+
+    error_details 由 DataSanitizer.sanitize_error 脱敏后存入 state,
+    供 View 的 ErrorState details 展示。record_error 内部还会再次脱敏兜底。
+    """
+    error_info = classify_error(e, context="db")
+    severity = classify_severity(e, context="db")
+    _log_error(e, op, error_info, severity)
+    sanitized = DataSanitizer.sanitize_error(e)
     vm._set_state(
         is_loading=False,
         load_error=Message(
+            error_info.get("message_key", "common_err_unknown"),
+            error_info.get("format_args") or {},
+        ),
+        error_details=sanitized,
+    )
+
+
+def _handle_action_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
+    """Issue #448: 操作错误 (增删) — 设置 action_error (toast 提示, 不替换列表)."""
+    error_info = classify_error(e, context="db")
+    severity = classify_severity(e, context="db")
+    _log_error(e, op, error_info, severity)
+    vm._set_state(
+        action_error=Message(
             error_info.get("message_key", "common_err_unknown"),
             error_info.get("format_args") or {},
         ),

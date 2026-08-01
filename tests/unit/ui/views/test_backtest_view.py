@@ -89,6 +89,8 @@ class _FakeBacktestViewModel:
             status_message: Any = None
             status_color: str = ""
             result: Any = None
+            # Issue #448: BacktestState 新增 error_details 字段 (回测失败详情)
+            error_details: str = ""
 
         self._state = _State()
 

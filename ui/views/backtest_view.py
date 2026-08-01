@@ -13,6 +13,13 @@
 - BacktestConfigPanel/BacktestResultPanel 作为子组件函数直接调用，props 从 VM state 推送
 - page 访问改用 ``ft.context.page``（try/except 守卫）
 - selected_strategy/no_strategy_error 为 UI 局部状态（use_state）
+
+Issue #448 改造:
+- 回测失败 (status_color == "error") 时结果面板区域显示 ErrorState (含 details + 重试 + 联系支持)
+- task_rejected (warning) 保留 status_text, 不显示 ErrorState
+- 错误历史记录通过 use_effect 监听 state.status_color + state.error_details 变化触发
+- 重试机制保存上次 strategy + config, _retry_backtest 调用 _on_run_backtest(last_config)
+- cancel_backtest 不记录错误历史 (m5: 用户主动取消)
 """
 
 import logging
@@ -20,8 +27,10 @@ import logging
 import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
+from ui.components.error_history_store import open_github_issues, record_error
 from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.components.state_views import ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -63,6 +72,12 @@ def BacktestView(active: bool = True) -> ft.Container:
     selected_strategy, set_selected_strategy = ft.use_state(lambda: next(iter(strategies), None))
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
 
+    # Issue #448: 上次运行的 strategy + config (供 ErrorState 重试使用)
+    last_strategy_ref = ft.use_ref(lambda: None)
+    last_config_ref = ft.use_ref(lambda: None)
+    # Issue #448: 上一次 status_color (用于去重, 避免重复记录错误历史)
+    previous_status_color_ref = ft.use_ref(lambda: "")
+
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
@@ -74,6 +89,9 @@ def BacktestView(active: bool = True) -> ft.Container:
         if not selected_strategy:
             set_no_strategy_error(True)
             return
+        # Issue #448: 保存本次 strategy + config (供 _retry_backtest 使用)
+        last_strategy_ref.current = selected_strategy
+        last_config_ref.current = config
         backtest_config = vm.create_config(
             start_date=config["start_date"],
             end_date=config["end_date"],
@@ -94,6 +112,32 @@ def BacktestView(active: bool = True) -> ft.Container:
     def _on_cancel_backtest(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
         vm.cancel_backtest()
+
+    # Issue #448: 失败重试 (复用上次 strategy + config 重新运行)
+    def _retry_backtest() -> None:
+        strategy = last_strategy_ref.current
+        config = last_config_ref.current
+        if strategy and config:
+            _on_run_backtest(config)
+
+    # Issue #448: 回测失败记录错误历史 (use_effect 监听 state.status_color + error_details)
+    # m5: cancel_backtest (status 变为 CANCELLED warning) 不触发错误记录,
+    #     因 previous_status_color_ref 仅追踪 error 状态, cancel 时 status_color="warning" 不匹配
+    def _record_backtest_error() -> None:
+        current_color = state.status_color
+        if current_color == "error" and current_color is not previous_status_color_ref.current:
+            record_error(
+                source="backtest",
+                title=I18n.get("backtest_failed_title"),
+                message=I18n.get("backtest_failed_message"),
+                details=state.error_details,
+            )
+        previous_status_color_ref.current = current_color
+
+    ft.use_effect(
+        _record_backtest_error,
+        dependencies=[state.status_color, state.error_details],
+    )
 
     # --- Status / progress rendering (from VM state) ---
     if no_strategy_error and not state.is_running:
@@ -140,6 +184,22 @@ def BacktestView(active: bool = True) -> ft.Container:
         style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
     )
 
+    # Issue #448: 右侧面板 — error 时显示 ErrorState (保留配置面板供修改参数重试);
+    # warning (task_rejected) 保留 BacktestResultPanel, status_text 已展示警告
+    if state.status_color == "error" and state.result is None:
+        right_content = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("backtest_failed_title"),
+            message=I18n.get("backtest_failed_message"),
+            details=state.error_details,
+            on_retry=_retry_backtest,
+            retry_text=I18n.get("common_retry"),
+            on_contact_support=open_github_issues,
+            contact_text=I18n.get("common_contact_support"),
+        )
+    else:
+        right_content = BacktestResultPanel(result=state.result)
+
     return ft.Container(
         content=ft.Column(
             [
@@ -150,7 +210,7 @@ def BacktestView(active: bool = True) -> ft.Container:
                 ft.Container(height=16),
                 ResizableSplitter(
                     left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
-                    right_content=BacktestResultPanel(result=state.result),
+                    right_content=right_content,
                     config_key="ui_splitter_backtest_config",
                     default_width=360,
                     min_width=280,

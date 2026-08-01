@@ -26,6 +26,7 @@ import typing
 import flet as ft
 import pandas as pd
 
+from ui.components.error_history_store import open_github_issues, record_error
 from ui.components.flet_type_helpers import (
     get_control_attr,
     get_control_value,
@@ -736,6 +737,11 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
 
     通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
     SQL 结果从 ``state.sql_success``/``sql_result_columns``/``sql_result_rows`` 读取 (L771 合规).
+
+    Issue #448 改造:
+    - SQL 执行错误 (state.sql_error 非空) → 结果区域显示 ErrorState (含 details + 重试 + 联系支持)
+    - 错误历史记录通过 use_effect 监听 state.sql_error 变化触发
+    - 重试机制: _retry_sql 复用当前 sql_text 重新执行
     """
     # --- 订阅 VM state (外部模式) ---
     state, _ = use_viewmodel(vm=vm)
@@ -748,6 +754,8 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     sql_text, set_sql_text = ft.use_state("")
     status_text, set_status_text = ft.use_state(I18n.get("data_sql_ready"))
     status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+    # Issue #448: 上一次 sql_error (用于去重, 避免重复记录错误历史)
+    previous_sql_error_ref = ft.use_ref(lambda: None)
 
     # --- 异步 handler (R2: except Exception 不捕获 CancelledError) ---
     async def _run_query(e: ft.ControlEvent) -> None:
@@ -792,10 +800,31 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     def _set_sql(sql: str) -> None:
         set_sql_text(sql)
 
+    # Issue #448: 失败重试 (复用当前 sql_text 重新执行)
+    def _retry_sql() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_run_query, typing.cast(ft.ControlEvent, None))
+
+    # Issue #448: SQL 错误记录错误历史 (use_effect 监听 state.sql_error 变化)
+    def _record_sql_error_if_new() -> None:
+        current = state.sql_error
+        if current is not None and current is not previous_sql_error_ref.current:
+            record_error(
+                source="sql_console",
+                title=I18n.get("sql_execution_failed_title"),
+                message=I18n.get(current),
+                details=state.sql_error_details,
+            )
+        previous_sql_error_ref.current = current
+
+    ft.use_effect(_record_sql_error_if_new, dependencies=[state.sql_error, state.sql_error_details])
+
     # --- 派生渲染数据 (声明式: 从 state 读取, L771 合规) ---
     MAX_ROWS_UI = 100
     all_sql_rows = state.sql_result_rows
     has_data = state.sql_success and bool(all_sql_rows)
+    has_error = state.sql_error is not None
     if has_data:
         display_rows = all_sql_rows[:MAX_ROWS_UI] if len(all_sql_rows) > MAX_ROWS_UI else all_sql_rows
         result_cols = _build_sql_columns_spec(state.sql_result_columns, vm)
@@ -842,30 +871,47 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         visible=is_executing,
     )
 
-    empty_hint_text = ft.Text(
-        I18n.get("data_sql_empty_hint"),
-        color=AppColors.TEXT_HINT,
-        size=AppStyles.FONT_SIZE_LG,
-    )
-    empty_state = ft.Container(
-        content=ft.Column(
-            [
-                ft.Container(height=40),
-                ft.Icon(ft.Icons.TERMINAL, size=AppStyles.ICON_SIZE_XL, color=AppColors.TEXT_HINT),
-                empty_hint_text,
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
-        alignment=ft.Alignment.CENTER,
-        visible=not has_data,
-    )
-
-    result_table = ft.Container(
-        content=PaginatedTable(rows=result_rows, columns=result_cols),
-        visible=has_data,
-        expand=True,
-    )
+    # Issue #448: 结果区域条件渲染 (error → ErrorState; has_data → result_table; else → empty_state)
+    if has_error:
+        result_area = ft.Container(
+            content=ErrorState(
+                icon=ft.Icons.ERROR_OUTLINE,
+                title=I18n.get("sql_execution_failed_title"),
+                message=I18n.get(state.sql_error) if state.sql_error else "",
+                details=state.sql_error_details,
+                on_retry=_retry_sql,
+                retry_text=I18n.get("common_retry"),
+                on_contact_support=open_github_issues,
+                contact_text=I18n.get("common_contact_support"),
+            ),
+            expand=True,
+            padding=AppStyles.SPACING_SM,
+        )
+    elif has_data:
+        result_area = ft.Container(
+            content=PaginatedTable(rows=result_rows, columns=result_cols),
+            expand=True,
+            padding=AppStyles.SPACING_SM,
+        )
+    else:
+        result_area = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(height=40),
+                    ft.Icon(ft.Icons.TERMINAL, size=AppStyles.ICON_SIZE_XL, color=AppColors.TEXT_HINT),
+                    ft.Text(
+                        I18n.get("data_sql_empty_hint"),
+                        color=AppColors.TEXT_HINT,
+                        size=AppStyles.FONT_SIZE_LG,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            alignment=ft.Alignment.CENTER,
+            expand=True,
+            padding=AppStyles.SPACING_SM,
+        )
 
     return ft.Column(
         [
@@ -902,14 +948,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                 bgcolor=AppColors.SURFACE,
                 border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.BORDER)),
             ),
-            ft.Container(
-                content=ft.Column(
-                    [empty_state, result_table],
-                    scroll=ft.ScrollMode.AUTO,
-                ),
-                expand=True,
-                padding=AppStyles.SPACING_SM,
-            ),
+            result_area,
             ft.Container(
                 content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
                 padding=5,

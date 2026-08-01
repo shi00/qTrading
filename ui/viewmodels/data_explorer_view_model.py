@@ -13,6 +13,7 @@ import pandas as pd
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, classify_severity, get_error_message
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
@@ -79,8 +80,11 @@ class DataExplorerState:
     sql_success: bool = False
     sql_result_columns: tuple[str, ...] = ()
     sql_result_rows: tuple[SqlResultRow, ...] = ()
-    # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
+    # Issue #448: sql_error 存 i18n key (None=无错误), View 调 I18n.get() 翻译;
+    # sql_error_details 存脱敏后错误详情 (异常类型+截断message), 供 ErrorState details 展示.
+    # v3 M2: 不传 str(exc) 完整内容 (可能含 SQL 语句 + 用户数据), 改为异常类型名 + 截断 message.
     sql_error: str | None = None
+    sql_error_details: str = ""
     # Phase 6.4 (FR-UX-006): 数据新鲜度 (daily_quotes 最新 trade_date + 滞后天数)
     data_latest_date: str = ""  # YYYY-MM-DD formatted, empty = not loaded
     data_lag_days: int = 0  # today - latest_date in days
@@ -159,6 +163,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             sql_result_columns=(),
             sql_result_rows=(),
             sql_error=None,
+            sql_error_details="",
         )
         if self._db is not None:
             self._db.close()
@@ -506,8 +511,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         """Execute a read-only SQL query from the SQL Console.
 
         返回原始 dict ``{success, data, error}`` (供测试/状态显示), 同时将结果
-        转换为 ``sql_success``/``sql_result_columns``/``sql_result_rows``/``sql_error``
-        写入 state (供 View 渲染).
+        转换为 ``sql_success``/``sql_result_columns``/``sql_result_rows``/``sql_error``/
+        ``sql_error_details`` 写入 state (供 View 渲染).
+
+        Issue #448:
+        - ``sql_error`` 存 i18n key (None=无错误), View 调 ``I18n.get()`` 翻译
+        - ``sql_error_details`` 存脱敏后错误详情 (异常类型+截断message)
+        - v3 M2: 不传 ``str(exc)`` 完整内容 (可能含 SQL 语句 + 用户数据)
         """
         ensure_correlation_id()
         if self._disposed:
@@ -515,11 +525,22 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         if not sql or not sql.strip():
             return {"success": False, "data": None, "error": "Empty query"}
 
-        self._set_state(sql_is_executing=True)
+        # Issue #448: 清空上次错误
+        self._set_state(sql_is_executing=True, sql_error=None, sql_error_details="")
         try:
             result = await self._tp.run_async(TaskType.CPU, self._db.execute_sql, sql)
             # 声明式: 结果写入 state (L771 合规, tuple[Row, ...])
-            self._set_state(**_sql_result_to_state_fields(result))
+            state_fields = _sql_result_to_state_fields(result)
+            # Issue #448: 设置 sql_error + sql_error_details
+            if result.get("success", False):
+                state_fields["sql_error"] = None
+                state_fields["sql_error_details"] = ""
+            else:
+                # DB client 返回错误 (如 "Only SELECT allowed")
+                error_str = result.get("error") or ""
+                state_fields["sql_error"] = "data_sql_error"
+                state_fields["sql_error_details"] = DataSanitizer.sanitize_error(error_str)[:200] if error_str else ""
+            self._set_state(**state_fields)
             return result
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during execute_sql.")
@@ -541,11 +562,20 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", safe_error(e), exc_info=True)
-            # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
+            # Issue #448 v3 M2: 不传 str(e) 完整内容 (可能含 SQL 语句 + 用户数据),
+            # 改为异常类型名 + 截断 message, record_error 内部 sanitize_error 二次兜底
+            # Issue #448 review-2 HIGH-1: 先脱敏后截断 (与 L542 DB 错误路径一致),
+            # 避免截断切断 URL 凭证导致部分密码以明文残留
+            sanitized_details = DataSanitizer.sanitize_error(f"{type(e).__name__}: {str(e)}")[:200]
+            self._set_state(
+                sql_success=False,
+                sql_result_columns=(),
+                sql_result_rows=(),
+                sql_error="data_sql_error",
+                sql_error_details=sanitized_details,
+            )
             error_msg = get_error_message(error_info)
-            error_result = {"success": False, "data": None, "error": error_msg}
-            self._set_state(**_sql_result_to_state_fields(error_result))
-            return error_result
+            return {"success": False, "data": None, "error": error_msg}
         finally:
             self._set_state(sql_is_executing=False)
 
@@ -654,7 +684,10 @@ def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
     """execute_sql 返回的 dict → DataExplorerState 字段 dict (供 _set_state 使用).
 
     将 ``{success, data, error}`` 转换为 ``sql_success``/``sql_result_columns``/
-    ``sql_result_rows``/``sql_error`` 不可变字段.
+    ``sql_result_rows``/``sql_error``/``sql_error_details`` 不可变字段.
+
+    Note: ``sql_error`` 存原始 error 字符串 (向后兼容测试 mock). ``execute_sql``
+    会覆盖为 i18n key + ``sql_error_details`` 脱敏详情 (Issue #448).
     """
     success = bool(result.get("success", False))
     data = result.get("data")
@@ -666,6 +699,7 @@ def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
             "sql_result_columns": (),
             "sql_result_rows": (),
             "sql_error": error,
+            "sql_error_details": "",
         }
 
     # data 预期为 pd.DataFrame
@@ -676,4 +710,5 @@ def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
         "sql_result_columns": columns,
         "sql_result_rows": rows,
         "sql_error": error,
+        "sql_error_details": "",
     }

@@ -440,15 +440,18 @@ class TestExecuteSQL:
         assert len(vm.state.sql_result_rows) == 1
         assert vm.state.sql_result_rows[0].values == (1,)
         assert vm.state.sql_error is None
+        # Issue #448: sql_error_details 也应清空
+        assert vm.state.sql_error_details == ""
 
     async def test_error_result(self, vm, mock_db):
         expected = {"success": False, "data": None, "error": "Only SELECT allowed"}
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("DROP TABLE stock_basic")
         assert result["success"] is False
-        # 声明式: error 写入 state.sql_error
+        # Issue #448: sql_error 存 i18n key, sql_error_details 存脱敏后错误详情
         assert vm.state.sql_success is False
-        assert vm.state.sql_error == "Only SELECT allowed"
+        assert vm.state.sql_error == "data_sql_error"
+        assert "Only SELECT allowed" in vm.state.sql_error_details
         assert vm.state.sql_result_rows == ()
 
     async def test_exception_handling(self, vm, mock_db):
@@ -460,7 +463,10 @@ class TestExecuteSQL:
         assert vm.state.sql_is_executing is False
         # 声明式: 异常也写入 state (error dict 转换)
         assert vm.state.sql_success is False
-        assert vm.state.sql_error is not None
+        # Issue #448: sql_error 存 i18n key, sql_error_details 存脱敏后异常详情
+        assert vm.state.sql_error == "data_sql_error"
+        assert vm.state.sql_error_details != ""
+        assert "RuntimeError" in vm.state.sql_error_details
 
     async def test_empty_sql_returns_error(self, vm):
         result = await vm.execute_sql("")
