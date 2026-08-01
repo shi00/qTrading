@@ -566,7 +566,7 @@ class TestMaxSingleWeightConstraint:
     """测试单股权重上限约束"""
 
     def test_weight_capped_and_renormalized(self):
-        """测试权重截断后归一化（单次截断，归一化后可能略超上限）"""
+        """测试权重截断后迭代归一化收敛（F3-01: max(weight) <= max_weight + tolerance）。"""
         from strategies.backtest.position_sizer import apply_max_weight_constraint
 
         weights_df = pl.DataFrame(
@@ -581,8 +581,37 @@ class TestMaxSingleWeightConstraint:
 
         weight_sum = float(result["weight"].sum())
         assert abs(weight_sum - 1.0) < 1e-6
-        # Note: Single-pass approach may result in weights slightly exceeding max_weight
-        # after renormalization. This is expected behavior.
+        # F3-01: 迭代收敛保证 max(weight) <= max_weight + tolerance
+        assert float(result["weight"].max()) <= max_weight + 1e-6
+
+    def test_docstring_example_converges(self):
+        """F3-01: docstring 示例 [0.5,0.3,0.2] max=0.4 迭代收敛验证。"""
+        from strategies.backtest.position_sizer import apply_max_weight_constraint
+
+        weights_df = pl.DataFrame(
+            {
+                "ts_code": ["A", "B", "C"],
+                "weight": [0.5, 0.3, 0.2],
+            }
+        )
+        result = apply_max_weight_constraint(weights_df, 0.4)
+        assert abs(float(result["weight"].sum()) - 1.0) < 1e-6
+        assert float(result["weight"].max()) <= 0.4 + 1e-6
+
+    def test_weight_capped_when_n_times_max_lt_one(self):
+        """F3-01: n * max_weight < 1 时全取 max_weight（剩余留现金）。"""
+        from strategies.backtest.position_sizer import apply_max_weight_constraint
+
+        weights_df = pl.DataFrame(
+            {
+                "ts_code": ["A", "B", "C", "D", "E"],
+                "weight": [0.3, 0.25, 0.2, 0.15, 0.1],
+            }
+        )
+        # n=5, max_weight=0.1 → n*max=0.5 < 1 → 全取 0.1
+        result = apply_max_weight_constraint(weights_df, 0.1)
+        assert result["weight"].to_list() == [0.1, 0.1, 0.1, 0.1, 0.1]
+        assert abs(float(result["weight"].sum()) - 0.5) < 1e-6  # 剩余 0.5 留现金
 
     def test_weight_renormalized_after_cap(self):
         """测试截断后权重重新归一化"""

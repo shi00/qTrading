@@ -1706,6 +1706,7 @@
     "backtest_completed": "回测完成，耗时 {duration}ms",
     "backtest_success": "回测成功，夏普比率: {sharpe}",
     "backtest_failed": "回测失败",
+    "backtest_cancelled": "回测已取消",
     "backtest_already_running": "回测任务正在运行中",
     "backtest_task_rejected": "回测任务提交失败",
     "backtest_done": "回测完成",

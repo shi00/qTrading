@@ -317,6 +317,20 @@ class PortfolioSimulator:
                 entry_price = float(quote.select("raw_open").item())
                 qfq_entry_price = float(quote.select("qfq_open").item())
 
+            # F3-06: 防御价格为 0/负的数据损坏，避免 ZeroDivisionError 及 pnl 计算虚高
+            if entry_price <= 0 or qfq_entry_price <= 0:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "buy",
+                        "reason": "invalid_price",
+                        "intended_volume": 0,
+                    }
+                )
+                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (invalid_price)")
+                continue
+
             target_value = available_cash * weight
             volume = int(target_value / entry_price / 100) * 100
 

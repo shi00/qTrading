@@ -1706,6 +1706,7 @@
     "backtest_completed": "Backtest completed in {duration}ms",
     "backtest_success": "Backtest successful, Sharpe: {sharpe}",
     "backtest_failed": "Backtest failed",
+    "backtest_cancelled": "Backtest cancelled",
     "backtest_already_running": "Backtest is already running",
     "backtest_task_rejected": "Backtest task submission failed",
     "backtest_done": "Backtest Complete",
