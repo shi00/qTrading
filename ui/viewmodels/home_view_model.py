@@ -126,7 +126,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         try:
             cb(snap)
         except Exception as e:
-            logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
+            logger.warning(
+                "[HomeVM] Subscriber error: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     def init(self) -> None:
         """Initialize subscriptions (无回调参数,View 通过 subscribe 订阅 state)。"""
@@ -139,7 +143,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
-            logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
+            logger.warning(
+                "[HomeVM] Dispose error: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
         super().dispose()
 
     @staticmethod
