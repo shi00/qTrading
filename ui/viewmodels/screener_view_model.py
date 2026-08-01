@@ -722,7 +722,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                                 save_err,
                                 exc_info=True,
                             )
-                            save_failed_reason = str(save_err) or save_err.__class__.__name__
+                            save_failed_reason = DataSanitizer.sanitize_error(save_err) or save_err.__class__.__name__
 
                     if save_failed_reason is not None:
                         self._set_state(
@@ -800,7 +800,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     status_color="error",
                     status_action_key=None,
                 )
-                raise RuntimeError(f"Strategy execution crashed: {e}") from e
+                raise RuntimeError(f"Strategy execution crashed: {DataSanitizer.sanitize_error(e)}") from e
             finally:
                 self._active_task_id = None  # Task 3.2: 所有退出路径清空, 防止误取消已结束的 task
 
@@ -892,7 +892,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         except Exception as e:
             logger.error("Sort failed: %s", e, exc_info=True)
-            self._set_state(loading=False)
+            self._set_state(
+                loading=False,
+                status_message=Message("screener_sort_failed"),
+                status_color="error",
+            )
 
     @staticmethod
     def _sort_helper(df, col, ascending):
@@ -1245,8 +1249,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             history_tree=replace(
                 self._state.history_tree,
                 rows=merged_rows,
-                offset=offset + len(df) * 5,
-                has_more=len(df) >= 5,
+                offset=offset + len(df),
+                has_more=len(df) >= 30,
             )
         )
 

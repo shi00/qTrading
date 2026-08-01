@@ -264,6 +264,7 @@
     "screener_done": "Filtering complete, found {count} stocks",
     "screener_saved": "(Saved)",
     "screener_exec_error": "Execution Error",
+    "screener_sort_failed": "Sort Failed",
     "screener_cancelled": "Strategy execution cancelled by user",
     "screener_task_rejected": "Task submission rejected, please retry later",
     "screener_blocked": "Blocked: {reason}",
