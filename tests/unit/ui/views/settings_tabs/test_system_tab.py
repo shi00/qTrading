@@ -14,7 +14,7 @@
 import asyncio
 import inspect
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
@@ -1432,3 +1432,119 @@ class TestDoExportDiagnostics:
         buttons = _get_save_buttons(env)
         diag_button = next(b for b in buttons if isinstance(b, ft.Button))
         assert diag_button.disabled is False
+
+
+# ============================================================================
+# VM save_* 抛 Exception → _do_* except Exception 分支 (R9 脱敏, L190/L206/L231/L255/L286/L300)
+# ============================================================================
+
+
+class TestDoSaveVMExceptionPaths:
+    """覆盖 _do_* 函数的 except Exception 分支 (R9 脱敏分支).
+
+    SystemSettingsViewModel.save_* 内部有 except Exception 捕获并返回 False,
+    现有 test_exception_path 测试只覆盖 ``if not success`` 分支.
+    要覆盖 _do_* 的 except Exception 分支, 需 mock save_* 本身抛异常.
+    """
+
+    def test_theme_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_theme 抛 Exception → _do_theme_change except Exception → snack 错误 (L190)."""
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdowns[1].on_select, _make_event("light"))
+        handler, args, _ = _await_run_task_handler(page)
+        with patch.object(SystemSettingsViewModel, "save_theme", new=AsyncMock(side_effect=RuntimeError("vm boom"))):
+            asyncio.run(handler(*args))
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_log_level_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_log_level 抛 Exception → _do_log_level_change except Exception → snack 错误 (L206)."""
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdowns[2].on_select, _make_event("DEBUG"))
+        handler, args, _ = _await_run_task_handler(page)
+        with patch.object(
+            SystemSettingsViewModel, "save_log_level", new=AsyncMock(side_effect=RuntimeError("vm boom"))
+        ):
+            asyncio.run(handler(*args))
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_concurrency_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_concurrency 抛 Exception → _do_save_concurrency except Exception → snack 错误 (L231)."""
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        fields = _get_text_fields(env)
+        _invoke(fields[0].on_change, _make_event("4"))
+        _rerender(env)
+        buttons = _get_save_buttons(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(buttons[0].on_click, _make_event())
+        handler, args, _ = _await_run_task_handler(page)
+        with patch.object(
+            SystemSettingsViewModel, "save_concurrency", new=AsyncMock(side_effect=RuntimeError("vm boom"))
+        ):
+            asyncio.run(handler(*args))
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_db_pool_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_db_pool 抛 Exception → _do_save_db_pool except Exception → snack 错误 (L255)."""
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        buttons = _get_save_buttons(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(buttons[2].on_click, _make_event())
+        handler, args, _ = _await_run_task_handler(page)
+        with patch.object(SystemSettingsViewModel, "save_db_pool", new=AsyncMock(side_effect=RuntimeError("vm boom"))):
+            asyncio.run(handler(*args))
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_thread_pool_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_thread_pool 抛 Exception → _do_save_thread_pool except Exception → snack 错误 (L286).
+
+        _do_save_thread_pool 在 save_thread_pool 前调 show_snack(common_preparing),
+        故 show_snack 被调用 2 次: common_preparing + sys_snack_save_err.
+        """
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        buttons = _get_save_buttons(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(buttons[1].on_click, _make_event())
+        handler, args, _ = _await_run_task_handler(page)
+        with patch.object(
+            SystemSettingsViewModel, "save_thread_pool", new=AsyncMock(side_effect=RuntimeError("vm boom"))
+        ):
+            asyncio.run(handler(*args))
+        # L270 show_snack(common_preparing) + L285 show_snack(sys_snack_save_err, ERROR)
+        assert env["show_snack"].call_count == 2
+        env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_no_proxy_save_vm_exception_calls_show_snack(self, system_tab_env) -> None:
+        """save_no_proxy 抛 Exception → _do_save_no_proxy except Exception → snack 错误 (L300)."""
+        from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+
+        env = system_tab_env
+        buttons = _get_save_buttons(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(buttons[3].on_click, _make_event())
+        handler, args, _ = _await_run_task_handler(page)
+        with (
+            patch.object(SystemSettingsViewModel, "save_no_proxy", new=AsyncMock(side_effect=RuntimeError("vm boom"))),
+            patch("utils.proxy_manager.ProxyManager"),
+        ):
+            asyncio.run(handler(*args))
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)

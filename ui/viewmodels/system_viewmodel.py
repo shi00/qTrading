@@ -173,7 +173,7 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
             except Exception as exc:
                 # IO 失败 → 通过 _emit_result 通知 View 显示失败消息
                 # i18n 状态驱动 (§3.2): VM 产出 locale 无关 reason, View 按 reason 映射 i18n key
-                logger.warning("[SystemViewModel] set_tushare_point_tier failed: %s", exc)
+                logger.warning("[SystemViewModel] set_tushare_point_tier failed: %s", DataSanitizer.sanitize_error(exc))
                 return self._emit_result(
                     {
                         "type": "set_tier_failed",

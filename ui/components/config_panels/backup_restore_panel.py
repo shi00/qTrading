@@ -31,6 +31,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,8 @@ def _generate_default_backup_path() -> Path:
     except OSError as e:
         logger.warning(
             "[BackupRestorePanel] cannot create backups dir %s: %s; fall back to CWD",
-            backups_dir,
-            e,
+            DataSanitizer.sanitize_error(str(backups_dir)),
+            DataSanitizer.sanitize_error(e),
         )
         return Path.cwd().resolve() / f"qtrading-backup-{timestamp}.dump"
     return backups_dir.resolve() / f"qtrading-backup-{timestamp}.dump"
@@ -99,7 +100,7 @@ def _on_restore_wizard_click_factory(
                 dialog_title=I18n.get("backup_select_file"),
             )
         except Exception as exc:
-            logger.error("[BackupRestorePanel] File pick failed: %s", exc, exc_info=True)
+            logger.error("[BackupRestorePanel] File pick failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
             return
         if not result:
             # 未选文件: 显示「查看离线恢复指引」提示, 不调用 start_restore_wizard

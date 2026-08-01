@@ -429,6 +429,30 @@ class TestClickHandlers:
             _set_context_page(None)
         vm.start_restore_wizard.assert_not_called()
 
+    def test_on_restore_wizard_click_pick_files_exception_logs_error(self, caplog) -> None:
+        """FilePicker.pick_files 抛 Exception → 记录脱敏日志, 不调 start_restore_wizard (R9 脱敏分支)."""
+        import asyncio
+        import logging
+
+        vm = MagicMock()
+        vm.start_restore_wizard = AsyncMock()
+        mock_file_picker = MagicMock()
+        mock_file_picker.pick_files = AsyncMock(side_effect=RuntimeError("pick failed"))
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
+            with caplog.at_level(logging.ERROR, logger="ui.components.config_panels.backup_restore_panel"):
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                asyncio.run(coro_func())
+        finally:
+            _set_context_page(None)
+
+        vm.start_restore_wizard.assert_not_called()
+        error_messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("File pick failed" in msg for msg in error_messages)
+
     def test_on_confirm_restore_click_calls_confirm_restore(self) -> None:
         """page 可用时调 page.run_task(vm.confirm_restore)."""
         vm = MagicMock()

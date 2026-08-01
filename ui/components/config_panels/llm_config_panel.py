@@ -39,17 +39,6 @@ from utils.llm_providers import (
 
 logger = logging.getLogger(__name__)
 
-MODELS_API_COMPATIBLE = {
-    "openai",
-    "deepseek",
-    "qwen",
-    "zhipu",
-    "moonshot",
-    "mistral",
-    "minimax",
-    "custom",
-}
-
 # --- Status display config ---
 
 _STATUS_ICON_MAP = {
