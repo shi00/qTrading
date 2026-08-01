@@ -123,9 +123,9 @@ async def test_detail_dialog_open_close(e2e_page):
     flaky 注记：xdist 并行运行时偶发 worker 崩溃（隔离运行稳定 PASS），
     用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）以吸收基础设施抖动。
 
-    Phase 9.1: 优化等待逻辑。先等待对话框关闭按钮出现（对话框渲染完成的稳定标志，
-    关闭按钮在对话框打开时立即渲染，不像 K 线图异步加载），再用 FAST timeout 验证字段。
-    避免 4 次 expect_text 串联等待在 CanvasKit 渲染抖动时累计超时。
+    Phase 9.2: 用 ``open_detail_dialog``（带重试验证对话框打开）替代单次
+    ``click_row_by_text``。根因：CanvasKit 抖动下 mouse.click 偶发未触发
+    Flutter hit-testing，对话框没打开，后续字段验证超时。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -133,15 +133,8 @@ async def test_detail_dialog_open_close(e2e_page):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    # 点击行（通过行内唯一文本"平安银行"定位）
-    await screener.click_row_by_text("平安银行", timeout_ms=TIMEOUTS.INTERACTION)
-
-    # 验证对话框打开：先等待关闭按钮出现（对话框渲染完成的稳定标志）
-    # stock_detail_dialog.py: actions=[TextButton(I18n.get("common_close"))]
-    # 关闭按钮在对话框打开时立即渲染（不像 K 线图异步加载），是稳定的渲染完成标志
-    close_text = I18n.get("common_close")  # "关闭"
-    close_btn = e2e_page.page.get_by_role("button", name=close_text)
-    await close_btn.wait_for(state="attached", timeout=TIMEOUTS.INTERACTION)
+    # 点击行打开对话框（带重试验证，吸收 CanvasKit hit-testing 抖动）
+    await screener.open_detail_dialog("平安银行")
 
     # 对话框已渲染完成，字段应立即可见（FAST timeout 验证）
     pe_label = I18n.get("detail_pe")  # "PE(TTM)"
@@ -155,6 +148,7 @@ async def test_detail_dialog_open_close(e2e_page):
     await screener.expect_text(price_label, timeout_ms=TIMEOUTS.FAST)
 
     # 点击关闭按钮
+    close_text = I18n.get("common_close")
     await screener.page.click_button(close_text, timeout_ms=TIMEOUTS.INTERACTION)
 
     # 验证对话框关闭：等待详情字段标签消失（DOM 移除或隐藏）
@@ -220,6 +214,7 @@ async def test_export_screener_results_excel(e2e_page):
     assert filename.endswith(".xlsx"), f"文件名扩展名不符（期望 .xlsx）: {filename}"
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_detail_dialog_outside_click_close(e2e_page):
     """测试：点击对话框外部 → 验证对话框关闭。
 
@@ -227,11 +222,12 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     当前状态：Task 5.1 已修复 ``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=False)``
     + ``on_dismiss=_close`` 回调（commit 91f9006c），点击对话框外部应触发 on_dismiss 关闭对话框。
 
-    Phase 9.1: 修复点击位置根因。原 ``mouse.click(10, 10)`` 命中 NavigationRail
-    （Flet 0.86.x 中 nav rail 位于左侧 0-80px），未触发 AlertDialog on_dismiss，
-    导致 PE 标签不消失、测试超时。改为点击视口右下角（远离 nav rail 和对话框中心），
-    确保点击落在对话框外部。对话框最大 900x700（``_dialog_size``），视口通常 1280x800，
-    右下角 (w-10, h-10) 肯定在对话框外部且在 nav rail 右侧。
+    flaky 注记：CanvasKit 抖动下 ``click_row_by_text`` 偶发未触发 ``on_tap``，
+    对话框没打开导致后续步骤超时。用 ``open_detail_dialog``（带重试）+ flaky 标记吸收抖动。
+
+    Phase 9.2: ① 用 ``open_detail_dialog`` 替代单次 ``click_row_by_text``；
+    ② 改进外部点击坐标计算：优先用 ``role="dialog"`` bounding_box 右侧外部，
+    回退到视口右下角（远离 NavigationRail 左侧 0-80px 和对话框中心）。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -239,21 +235,29 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    # 点击行打开对话框
-    await screener.click_row_by_text("平安银行", timeout_ms=TIMEOUTS.INTERACTION)
+    # 点击行打开对话框（带重试验证，吸收 CanvasKit hit-testing 抖动）
+    await screener.open_detail_dialog("平安银行")
 
-    # 验证对话框打开：等待 PE 标签出现
     pe_label = I18n.get("detail_pe")
-    await screener.expect_text(pe_label, timeout_ms=TIMEOUTS.INTERACTION)
 
-    # 点击对话框外部（视口右下角，远离 NavigationRail 和对话框中心）
-    # 不用 (10, 10)：Flet 0.86.x 中 NavigationRail 位于左侧 0-80px，
-    # (10, 10) 命中 nav rail 而非对话框外部，不触发 on_dismiss
+    # 点击对话框外部：优先用 role="dialog" bounding_box 右侧外部坐标
+    # 回退到视口右下角（远离 NavigationRail 左侧 0-80px 和对话框中心）
     viewport = await e2e_page.page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
-    await e2e_page.page.mouse.click(viewport["w"] - 10, viewport["h"] - 10)
+    dialog_loc = e2e_page.page.get_by_role("dialog")
+    click_x = viewport["w"] - 10
+    click_y = viewport["h"] - 10
+    if await dialog_loc.count() > 0:
+        box = await dialog_loc.bounding_box()
+        if box and box["width"] > 0:
+            # 对话框右侧外部（x = 右边缘 + 10px），y = 对话框中心高度
+            candidate_x = box["x"] + box["width"] + 10
+            if candidate_x < viewport["w"]:
+                click_x = candidate_x
+                click_y = box["y"] + box["height"] / 2
+
+    await e2e_page.page.mouse.click(click_x, click_y)
 
     # 期望对话框关闭：等待 PE 标签消失（modal=False + on_dismiss 应触发关闭）
-    # timeout 用 TIMEOUTS.INTERACTION（8s）足够等待对话框关闭动画
     pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
     await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
 
