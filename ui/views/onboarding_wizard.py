@@ -257,7 +257,7 @@ def _create_overview_card(
         )
 
     card_content = ft.Container(
-        padding=20,
+        padding=AppStyles.SPACING_XL,
         border_radius=16,
         bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
         border=border,
@@ -585,7 +585,7 @@ def OnboardingWizard(
             label=I18n.get_language_label(),
             tooltip=I18n.get_language_label(),
             value=language_value,
-            width=200,
+            width=AppStyles.CONTROL_WIDTH_MD,
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,

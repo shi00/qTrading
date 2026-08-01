@@ -10,15 +10,15 @@
 - 状态驱动: current_tab / nav_collapsed 用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
 - 子视图直接函数调用消费 (HomeView()/ScreenerView()/...), 无 use_ref cache
-- resize 用 ``use_effect`` + ``page.on_resize`` (防抖 + state 更新触发重渲染)
 - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
 - PageRefMixin 兼容桩已在 Phase G.3 删除 (声明式改造收官)
+- Phase 10.2: ViewportState/resize 重渲染链删除 — 7 视图全部 ``_ = viewport`` 零消费,
+  resize 防抖仅驱动无消费者的全树重渲染 (YAGNI); 布局响应由 ResponsiveRow 客户端断点承担
 """
 
 import asyncio
 import logging
 import os
-import typing
 from enum import IntEnum
 
 import flet as ft
@@ -40,7 +40,6 @@ from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
 from ui.views.task_center_view import TaskCenterView
-from ui.views.viewport_state import ViewportState
 from ui.views.watchlist_view import WatchlistView
 from utils.log_decorators import UILogger
 
@@ -48,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 # Tab 切换防抖 (ms) — 快速连续点击导航时, 最后一次点击生效
 DEBOUNCE_MS = 50
-# Resize 防抖 (ms) — 窗口拖拽时, 停止后触发一次重渲染
-RESIZE_DEBOUNCE_MS = 100
 
 
 class NavTabs(IntEnum):
@@ -71,7 +68,7 @@ def _get_page() -> ft.Page | None:
 
 
 @ft.component
-def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
+def _build_pages_stack(current_tab: int) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
     项目内存硬约束 #34: state-driven rendering (ft.Stack + visible prop)
@@ -90,7 +87,6 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
 
     Args:
         current_tab: 当前激活的 NavTabs 值, 控制 visible prop。
-        viewport: AppLayout 维护的窗口尺寸快照, 下发给所有子视图 (Phase 6.2 P2-1)。
     """
     is_e2e = os.environ.get("E2E_TESTING") == "true"
 
@@ -104,7 +100,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
     pages = [
         ft.Container(
             content=_make_content(
-                lambda: HomeView(active=current_tab == NavTabs.MARKET, viewport=viewport),
+                lambda: HomeView(active=current_tab == NavTabs.MARKET),
                 current_tab == NavTabs.MARKET,
             ),
             expand=True,
@@ -112,7 +108,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: ScreenerView(active=current_tab == NavTabs.SCREENER, viewport=viewport),
+                lambda: ScreenerView(active=current_tab == NavTabs.SCREENER),
                 current_tab == NavTabs.SCREENER,
             ),
             expand=True,
@@ -120,7 +116,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: BacktestView(active=current_tab == NavTabs.BACKTEST, viewport=viewport),
+                lambda: BacktestView(active=current_tab == NavTabs.BACKTEST),
                 current_tab == NavTabs.BACKTEST,
             ),
             expand=True,
@@ -128,7 +124,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: DataExplorerView(active=current_tab == NavTabs.DATA, viewport=viewport),
+                lambda: DataExplorerView(active=current_tab == NavTabs.DATA),
                 current_tab == NavTabs.DATA,
             ),
             expand=True,
@@ -136,7 +132,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: TaskCenterView(active=current_tab == NavTabs.TASKS, viewport=viewport),
+                lambda: TaskCenterView(active=current_tab == NavTabs.TASKS),
                 current_tab == NavTabs.TASKS,
             ),
             expand=True,
@@ -144,7 +140,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: SettingsView(active=current_tab == NavTabs.SETTINGS, viewport=viewport),
+                lambda: SettingsView(active=current_tab == NavTabs.SETTINGS),
                 current_tab == NavTabs.SETTINGS,
             ),
             expand=True,
@@ -152,7 +148,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST, viewport=viewport),
+                lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST),
                 current_tab == NavTabs.WATCHLIST,
             ),
             expand=True,
@@ -247,7 +243,6 @@ def AppLayout() -> ft.Container:
     - 状态驱动: current_tab / nav_collapsed 用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 子视图直接函数调用消费 (无 use_ref cache), 每次重渲染重新构造
-    - resize 用 ``use_effect`` + ``page.on_resize`` (防抖 + state 更新触发重渲染)
     - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
@@ -260,8 +255,6 @@ def AppLayout() -> ft.Container:
     # --- Pure UI state ---
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
-    # 窗口尺寸快照 (resize 事件驱动, 触发重渲染让子视图按新尺寸布局)
-    window_size, set_window_size = ft.use_state((0.0, 0.0))
 
     # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
     async def _do_tab_switch(new_tab: int) -> None:
@@ -284,42 +277,6 @@ def AppLayout() -> ft.Container:
 
     def _toggle_nav(e: ft.ControlEvent) -> None:
         set_nav_collapsed(not nav_collapsed)
-
-    # --- Resize 处理 (use_effect + page.on_resize, 防抖 + state 更新) ---
-    # debounce_task 用 use_ref 持有（跨 re-render 持久 + cleanup 可访问，非命令式控件实例）
-    debounce_task_ref = ft.use_ref(None)
-
-    def _setup_resize() -> None:
-        page = _get_page()
-        if page is None:
-            return
-
-        async def _do_resize(width: float, height: float) -> None:
-            try:
-                await asyncio.sleep(RESIZE_DEBOUNCE_MS / 1000)
-            except asyncio.CancelledError:
-                raise  # R2: 必须传播
-            set_window_size((width, height))
-            debounce_task_ref.current = None
-
-        def _on_resize(e: ft.ControlEvent) -> None:
-            if debounce_task_ref.current is not None:
-                debounce_task_ref.current.cancel()
-            width = float(getattr(e, "width", 0) or 0)
-            height = float(getattr(e, "height", 0) or 0)
-            debounce_task_ref.current = page.run_task(_do_resize, width, height)
-
-        page.on_resize = typing.cast("ft.EventHandler[ft.PageResizeEvent] | None", _on_resize)
-
-    def _cleanup_resize() -> None:
-        page = _get_page()
-        if page is not None:
-            page.on_resize = None
-        if debounce_task_ref.current is not None:
-            debounce_task_ref.current.cancel()
-            debounce_task_ref.current = None
-
-    ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
     # --- PubSub 导航订阅 (P1-3 批次 2 #55): home_view ErrorState CTA 通过 TOPIC_NAVIGATE 广播 ---
 
@@ -350,13 +307,6 @@ def AppLayout() -> ft.Container:
             page.pubsub.unsubscribe_topic(TOPIC_NAVIGATE)
 
     ft.use_effect(_setup_navigate, dependencies=[], cleanup=_cleanup_navigate)
-
-    # --- ViewportState (Phase 6.2 P2-1): 基于 window_size 计算响应式断点 ---
-    viewport = ViewportState(
-        width=window_size[0],
-        height=window_size[1],
-        breakpoint="compact" if window_size[0] < 600 else "medium" if window_size[0] < 840 else "expanded",
-    )
 
     # --- 渲染 ---
     logger.info("[AppLayout] construction start, current_tab=%s", current_tab)
@@ -409,9 +359,9 @@ def AppLayout() -> ft.Container:
 
     logger.info("[AppLayout] building pages stack")
     body = ft.Container(
-        content=_build_pages_stack(int(current_tab), viewport),
+        content=_build_pages_stack(int(current_tab)),
         expand=True,
-        padding=20,
+        padding=AppStyles.SPACING_XL,
         bgcolor=AppColors.BACKGROUND,
     )
     logger.info("[AppLayout] construction complete, returning Container")

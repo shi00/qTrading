@@ -45,7 +45,6 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
-from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -290,7 +289,6 @@ def _format_history_date(date_str) -> tuple[str, str]:
 def ScreenerView(
     initial_strategy: str | None = None,
     active: bool = True,
-    viewport: ViewportState | None = None,
 ) -> ft.Container:
     """选股视图 (声明式).
 
@@ -304,11 +302,7 @@ def ScreenerView(
 
     Args:
         initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)
     """
-    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
-    _ = viewport
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
     # FR-UX-004, Task 4.2: 关注列表 VM (详情对话框「加入关注」按钮消费)
@@ -792,7 +786,7 @@ def ScreenerView(
                 focused_border_color=AppColors.PRIMARY,
                 text_size=AppStyles.FONT_SIZE_BODY,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                width=200,
+                width=AppStyles.CONTROL_WIDTH_MD,
                 on_change=lambda e, n=p_name: _update_param(n, _parse_num(e.control.value if e and e.control else "")),
             )
 
@@ -808,7 +802,7 @@ def ScreenerView(
                 focused_border_color=AppColors.PRIMARY,
                 text_size=AppStyles.FONT_SIZE_BODY,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                width=200,
+                width=AppStyles.CONTROL_WIDTH_MD,
                 on_select=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
             )
 
@@ -994,7 +988,7 @@ def ScreenerView(
                 ),
                 border=ft.Border.all(1, AppColors.DIVIDER),
                 border_radius=8,
-                padding=16,
+                padding=AppStyles.SPACING_LG,
                 bgcolor=AppColors.SURFACE,
                 margin=ft.Margin.only(bottom=10),
             )
@@ -1045,7 +1039,7 @@ def ScreenerView(
             ),
             border=ft.Border.all(1, AppColors.DIVIDER),
             border_radius=8,
-            padding=16,
+            padding=AppStyles.SPACING_LG,
             bgcolor=AppColors.SURFACE,
             margin=ft.Margin.only(bottom=10),
         )
@@ -1066,7 +1060,7 @@ def ScreenerView(
                     content=ft.Text(
                         I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=AppStyles.FONT_SIZE_BODY
                     ),
-                    padding=20,
+                    padding=AppStyles.SPACING_XL,
                 )
             )
         else:
@@ -1285,7 +1279,7 @@ def ScreenerView(
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
-        **AppStyles.dashboard_card(padding=20),
+        **AppStyles.dashboard_card(padding=AppStyles.SPACING_XL),
     )
 
     # 2. 表格区
@@ -1315,7 +1309,7 @@ def ScreenerView(
                     label=I18n.get("screener_page_size"),
                     options=_build_page_size_options(),
                     value=str(state.page_size),
-                    width=120,
+                    width=AppStyles.CONTROL_WIDTH_SM,
                     dense=True,
                     text_size=AppStyles.FONT_SIZE_BODY,
                     on_select=safe_on_select(_on_page_size_change),

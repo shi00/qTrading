@@ -507,7 +507,7 @@ def _build_onboarding_view(on_complete: Callable[[], Any]) -> ft.Container:
     return ft.Container(
         content=OnboardingWizard(on_complete=on_complete),
         expand=True,
-        padding=40,
+        padding=AppStyles.EMPTY_STATE_PADDING,
     )
 
 

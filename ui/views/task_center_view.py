@@ -27,7 +27,6 @@ from ui.viewmodels.task_center_view_model import (
     TaskRow,
     TaskStatus,
 )
-from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -318,7 +317,7 @@ def _build_task_card(
 
 
 @ft.component
-def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
+def TaskCenterView(active: bool = True) -> ft.Container:
     """Task center dashboard (declarative).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -328,11 +327,7 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
 
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
-    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
-    _ = viewport
     state, vm = use_viewmodel(TaskCenterViewModel)
     # Subscribe to i18n + theme changes (triggers auto-rerender on locale/theme switch)
     ft.use_state(get_observable_state)

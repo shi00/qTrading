@@ -89,7 +89,7 @@ V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止�
 | 生命周期/副作用 | `did_mount`/`will_unmount` | `use_effect(setup, dependencies, cleanup)` |
 | i18n 热切换 | `I18n.subscribe`/`unsubscribe` + `refresh_locale` + 手动刷新 | locale 作为声明式状态源，切换自动重渲染（不再手动订阅/刷新） |
 | 下拉刷新 | ~~`refresh_dropdown_options` 两步 update 绕过~~（已删除） | 状态驱动重建 options，自动绕过 |
-| 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
+| 响应式 | `handle_resize` 鸭子分发 + 断点手算 | `ResponsiveRow` + `AppStyles.COL_*` 预置配置，客户端断点驱动布局 |
 | page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片已删除 |
 | ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, commands)`，View 只读 state + 调 commands（见 [MVVM 表现层](../patterns/mvvm.md)） |
 
@@ -137,7 +137,7 @@ def MetricCard(label: str):
   - **不手动订阅**：声明式组件内禁止调用 `I18n.subscribe()` / `I18n.unsubscribe()` / `refresh_locale`。locale 由 View 层独立状态源（通常在根组件由 `use_state` 持有，通过 props/context 下发）驱动重渲染。
   - **VM 不感知 locale**：ViewModel state 不含 locale 字段；VM 只产出 i18n key 与 params（封装为 `Message(key, params)`），View 渲染时按当前 locale 解析：`I18n.get(msg.key, **msg.params)`。
   - **唯一 canonical 示例**见 [§5 ViewModel 消费](#5-viewmodel-消费mvvm-桥接) 中的 `ScreenerView`（`state.status` 为 `Message` 对象，View 渲染时调用 `I18n.get(state.status.key, **state.status.params)`）。
-- **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
+- **响应式**：视图栅格经 `ResponsiveRow` + `AppStyles.COL_*` 预置配置统一消费（沿用 Flet 默认断点），客户端断点驱动布局。**不再**实现 `handle_resize` 鸭子分发，也无需根组件 `page.on_resize` 订阅。
 - **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数已在 Phase R.4.1 删除（声明式下不再需要）。
 
 ### 5. ViewModel 消费（MVVM 桥接）
@@ -219,7 +219,7 @@ def ScreenerView():
 | 异步线程 | `asyncio.to_thread` / `page.run_thread` | `ThreadPoolManager.run_async(TaskType.IO/CPU)`（CLAUDE.md §3.1 R16 红线） |
 | API 约束表 | 通用手册 §17 迁移表 | 本节 [V0→V1 迁移 API 表](#v0v1-迁移-api-表) + [声明式组件内 API 契约](#声明式组件内-api-契约)（含检测方式，与 [`pyproject.toml`](../../pyproject.toml) 锁定版本对齐） |
 | 版本锁定 | 通用手册示例值 | `flet` / `flet-desktop` / `flet-charts` 三包均以 `==` 精确锁定（锁定值见 [`pyproject.toml`](../../pyproject.toml)，见 [依赖管理](../guides/dependency-management.md)） |
-| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | compact/standard/ultra_wide 1200/1600/2400（见 [`ui/theme.py`](../../ui/theme.py) 的 `AppStyles` 断点常量） |
+| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | 沿用 Flet `ResponsiveRow` 默认断点，视图栅格经 [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置统一消费；桌面端 `page.window.min_width=1280` |
 | 桌面打包 | `flet pack`（通用手册 §13.5） | PyInstaller（[`AStockScreener.spec`](../../AStockScreener.spec)，见 [PyInstaller 打包](../guides/dependency-management.md)） |
 | Dialog 管理 | `ft.use_dialog()` Hook（通用手册 §10.1，声明式唯一推荐） | 项目规范一致：声明式组件内唯一契约为 `ft.use_dialog()`；`page.show_dialog()`/`page.pop_dialog()` 仅作为 V0→V1 迁移入口，声明式组件内禁用（见 [声明式组件内 API 契约](#声明式组件内-api-契约)） |
 
