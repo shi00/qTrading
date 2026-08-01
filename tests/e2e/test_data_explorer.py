@@ -54,11 +54,18 @@ async def test_sql_console(e2e_page):
     await e2e_page.expect_text("平安银行", timeout_ms=TIMEOUTS.NAV)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_table_viewer_filter(e2e_page):
     """测试：数据表过滤查询 — 按股票代码过滤后结果仅含目标股票。
 
     种子数据 daily_quotes 共 120 行（2 只股票 × 60 天），过滤 ts_code=000001.SZ 后
     仅剩平安银行 60 行。验证过滤查询不报错且结果包含目标数据。
+
+    flaky 注记：Windows CI 环境下 CanvasKit 语义节点渲染偶发抖动，
+    fill_textbox/select_dropdown 的 Playwright 输入未触发应用 on_change 回调
+    （页面停留在"暂无行情数据"空态），导致 30s 超时。
+    与 PR 改动无关（PR #402 未触及 data_explorer 业务代码）。
+    用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）吸收基础设施抖动。
     """
     # 导航到数据页
     data_label = I18n.get("nav_data")
