@@ -165,8 +165,15 @@ def LocalModelConfigPanel(
                 page.services.remove(file_picker)
         except RuntimeError:
             pass
-        # 清理未提交的验证状态 (P1-1: 经 VM 命令转发, 避免View 直接 import LocalModelManager)
-        vm.cancel_verification()
+        # F4-U-3: cancel_verification 已改为 async (offload _shutdown_worker 到线程池, R16)，
+        # cleanup 是同步函数，用 page.run_task 调度 async 命令；page 不可用时降级跳过
+        # （cleanup 路径，跳过不影响组件卸载安全性）
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.cancel_verification)
+        except RuntimeError:
+            pass
 
     ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
 

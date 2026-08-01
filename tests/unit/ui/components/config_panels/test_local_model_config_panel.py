@@ -568,13 +568,18 @@ class TestCleanupFilePicker:
         assert len(pickers_after) == 0
 
     def test_cleanup_calls_vm_cancel_verification(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """卸载时调 vm.cancel_verification() (P1-1: 经 VM 命令转发, 不直调 LocalModelManager)."""
-        vm, _, _, component = _render_panel()
-        vm.cancel_verification.assert_not_called()  # 挂载时不调
+        """卸载时经 page.run_task 调度 vm.cancel_verification (F4-U-3: async 命令经 run_task 调度).
+
+        F4-U-3: cancel_verification 改为 async (offload _shutdown_worker 到线程池, R16),
+        cleanup 同步函数通过 page.run_task 调度 async 命令, 不直接调用。
+        """
+        vm, page, _, component = _render_panel()
+        run_task = _page_run_task(page)
+        run_task.reset_mock()  # 挂载期间 run_task 可能被调用, 清空记录
 
         run_unmount_effects(component)
 
-        vm.cancel_verification.assert_called_once_with()
+        run_task.assert_called_once_with(vm.cancel_verification)
 
     def test_cleanup_skips_remove_when_picker_not_in_services(self, mock_i18n_state, mock_app_colors_state) -> None:
         """page.services 不含 picker → remove 跳过 (不抛 ValueError)。
@@ -591,9 +596,8 @@ class TestCleanupFilePicker:
     def test_cleanup_handles_page_runtime_error_gracefully(self, mock_i18n_state, mock_app_colors_state) -> None:
         """_cleanup_file_picker: ft.context.page 抛 RuntimeError → except 捕获, 不抛异常。
 
-        覆盖源码 162-163 行的 `except RuntimeError: pass` 分支。
-        先正常渲染, 卸载前 patch ft.context 让 page property 抛 RuntimeError,
-        验证 cleanup 仍能继续执行 vm.cancel_verification()。
+        F4-U-3: page 不可用时, cancel_verification 降级跳过 (无法调度 async 命令,
+        cleanup 路径跳过不影响组件卸载安全性)。
         """
         vm, _, _, component = _render_panel()
         # 卸载前 patch ft.context 让 page 抛 RuntimeError
@@ -604,8 +608,8 @@ class TestCleanupFilePicker:
             # 卸载不应抛异常 (RuntimeError 被 except 捕获)
             run_unmount_effects(component)
 
-        # cleanup 仍调用了 vm.cancel_verification (RuntimeError 不阻断后续逻辑)
-        vm.cancel_verification.assert_called_once_with()
+        # page 不可用时, cancel_verification 不被调用 (降级跳过, 无法调度 async 命令)
+        vm.cancel_verification.assert_not_called()
 
 
 # ============================================================================
@@ -1133,7 +1137,11 @@ class TestLocalModelConfigPanelIsolation:
         assert sliders2[0].value == 40.0
 
     def test_cleanup_calls_vm_cancel_verification_only(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """卸载时仅调 vm.cancel_verification(), View 层不触碰 LocalModelManager 单例 (P1-1)."""
-        vm, _, _, component = _render_panel()
+        """卸载时经 page.run_task 调度 vm.cancel_verification, View 层不触碰 LocalModelManager 单例 (P1-1 + F4-U-3)."""
+        vm, page, _, component = _render_panel()
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+
         run_unmount_effects(component)
-        vm.cancel_verification.assert_called_once_with()
+
+        run_task.assert_called_once_with(vm.cancel_verification)

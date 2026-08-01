@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -337,17 +338,18 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
             error_info = classify_error(ex, context="general")
             severity = classify_severity(ex, context="general")
+            sanitized = DataSanitizer.sanitize_error(ex)  # F4-U-1: R9 异常消息脱敏
             if severity == "system":
                 logger.critical(
                     "[AIBrainSettingsVM] SYSTEM-LEVEL failure saving config: %s",
-                    ex,
+                    sanitized,
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[AIBrainSettingsVM] Error saving config (%s): %s",
                     error_info["code"],
-                    ex,
+                    sanitized,
                     exc_info=True,
                 )
             self._set_state(save_state=SAVE_ERROR, warning_message="")

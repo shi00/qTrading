@@ -452,7 +452,8 @@ def _check_reasoning_support(model: str) -> bool:
                 tag = m.get("tag", "")
                 tags = tag if isinstance(tag, list) else [tag]
                 if "reasoning" in tags:
-                    # Bidirectional substring match: "qwen3.6-max" matches "qwen3.6-max-preview"
+                    # F4-S-4: Exact match (conservative: avoid false-positive reasoning
+                    # support detection for variant model names like "qwen3.6-max-no-reasoning")
                     model_lower = model.lower()
                     model_id_lower = m["id"].lower()
                     if model_lower == model_id_lower:
