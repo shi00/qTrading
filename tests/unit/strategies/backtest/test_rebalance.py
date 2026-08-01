@@ -1,3 +1,4 @@
+import math
 from datetime import date
 
 import polars as pl
@@ -727,33 +728,41 @@ class TestICCalculationWithRebalanceFreq:
         return engine
 
     def test_ic_with_daily_freq_uses_next_day_return(self) -> None:
-        """测试 daily 频率下 IC 使用次日收益。"""
+        """测试 daily 频率下 IC 使用次日收益。
+
+        F3-03: IC 计算需 >=3 只股票（Spearman 相关性要求），使用 3 只股票。
+        daily 频率：next_rebalance_date = execution_date 的下一日。
+        """
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [
             date(2024, 1, 2),
             date(2024, 1, 3),
             date(2024, 1, 4),
         ]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
         signals = pl.DataFrame(
             {
-                "signal_date": [date(2024, 1, 2)],
-                "execution_date": [date(2024, 1, 3)],
-                "ts_code": ["000001.SZ"],
-                "signal_rank": [1],
+                "signal_date": [date(2024, 1, 2)] * 3,
+                "execution_date": [date(2024, 1, 3)] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
             }
         )
+        # 3 只股票 × 3 个交易日 = 9 行
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
-                "trade_date": trade_dates,
-                "raw_open": [10.0, 10.0, 10.5],
-                "raw_close": [10.0, 10.2, 10.8],
-                "qfq_open": [10.0, 10.0, 10.5],
-                "qfq_close": [10.0, 10.2, 10.8],
+                "ts_code": codes * 3,
+                "trade_date": [d for d in trade_dates for _ in range(3)],
+                "raw_open": [10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.5, 20.8, 31.0],
+                "raw_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.8, 21.2, 31.5],
+                "qfq_open": [10.0, 20.0, 30.0, 10.0, 20.0, 30.0, 10.5, 20.8, 31.0],
+                "qfq_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.8, 21.2, 31.5],
             }
         )
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert len(ic_series) == 2
+        # 仅 signal_date=1/2 有信号 → 1 个 IC；signal_date=1/3 无信号 → 跳过
+        assert len(ic_series) == 1
+        assert not math.isnan(ic_series[0])
 
     def test_ic_with_weekly_freq_uses_weekly_return(self) -> None:
         """测试 weekly 频率下 IC 使用周度收益。
@@ -763,6 +772,7 @@ class TestICCalculationWithRebalanceFreq:
         - 执行日：2024-01-09
         - 下一次调仓日：2024-01-15（下周一）
         - IC 应计算 01-09 open 到 01-15 open 的收益
+        F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
         engine = self._make_engine(rebalance_freq="weekly")
         trade_dates = [
@@ -773,26 +783,106 @@ class TestICCalculationWithRebalanceFreq:
             date(2024, 1, 15),
             date(2024, 1, 16),
         ]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
         signals = pl.DataFrame(
             {
-                "signal_date": [date(2024, 1, 8)],
-                "execution_date": [date(2024, 1, 9)],
-                "ts_code": ["000001.SZ"],
-                "signal_rank": [1],
+                "signal_date": [date(2024, 1, 8)] * 3,
+                "execution_date": [date(2024, 1, 9)] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
             }
         )
+        # 3 只股票 × 6 个交易日 = 18 行
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ"] * 6,
-                "trade_date": trade_dates,
-                "raw_open": [10.0, 10.0, 10.2, 10.3, 10.5, 10.6],
-                "raw_close": [10.0, 10.1, 10.3, 10.4, 10.7, 10.8],
-                "qfq_open": [10.0, 10.0, 10.2, 10.3, 10.5, 10.6],
-                "qfq_close": [10.0, 10.1, 10.3, 10.4, 10.7, 10.8],
+                "ts_code": codes * 6,
+                "trade_date": [d for d in trade_dates for _ in range(3)],
+                "raw_open": [
+                    10.0,
+                    20.0,
+                    30.0,  # 1/8
+                    10.0,
+                    20.0,
+                    30.0,  # 1/9 exec
+                    10.2,
+                    20.3,
+                    30.4,  # 1/10
+                    10.3,
+                    20.4,
+                    30.5,  # 1/11
+                    10.5,
+                    20.8,
+                    31.0,  # 1/15 next rebalance
+                    10.6,
+                    20.9,
+                    31.1,  # 1/16
+                ],
+                "raw_close": [
+                    10.0,
+                    20.0,
+                    30.0,  # 1/8
+                    10.1,
+                    20.2,
+                    30.3,  # 1/9
+                    10.3,
+                    20.4,
+                    30.5,  # 1/10
+                    10.4,
+                    20.5,
+                    30.6,  # 1/11
+                    10.7,
+                    21.0,
+                    31.3,  # 1/15
+                    10.8,
+                    21.1,
+                    31.4,  # 1/16
+                ],
+                "qfq_open": [
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.2,
+                    20.3,
+                    30.4,
+                    10.3,
+                    20.4,
+                    30.5,
+                    10.5,
+                    20.8,
+                    31.0,
+                    10.6,
+                    20.9,
+                    31.1,
+                ],
+                "qfq_close": [
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.1,
+                    20.2,
+                    30.3,
+                    10.3,
+                    20.4,
+                    30.5,
+                    10.4,
+                    20.5,
+                    30.6,
+                    10.7,
+                    21.0,
+                    31.3,
+                    10.8,
+                    21.1,
+                    31.4,
+                ],
             }
         )
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert len(ic_series) == 5
+        # 仅 signal_date=1/8 有信号 → 1 个 IC
+        assert len(ic_series) == 1
+        assert not math.isnan(ic_series[0])
 
     def test_ic_with_monthly_freq_uses_monthly_return(self) -> None:
         """测试 monthly 频率下 IC 使用月度收益。
@@ -801,6 +891,7 @@ class TestICCalculationWithRebalanceFreq:
         - 信号日：2024-01-29
         - 执行日：2024-01-30
         - 下一次调仓日：2024-02-01（下月初）
+        F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
         engine = self._make_engine(rebalance_freq="monthly")
         trade_dates = [
@@ -810,26 +901,94 @@ class TestICCalculationWithRebalanceFreq:
             date(2024, 2, 1),
             date(2024, 2, 2),
         ]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
         signals = pl.DataFrame(
             {
-                "signal_date": [date(2024, 1, 29)],
-                "execution_date": [date(2024, 1, 30)],
-                "ts_code": ["000001.SZ"],
-                "signal_rank": [1],
+                "signal_date": [date(2024, 1, 29)] * 3,
+                "execution_date": [date(2024, 1, 30)] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
             }
         )
+        # 3 只股票 × 5 个交易日 = 15 行
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ"] * 5,
-                "trade_date": trade_dates,
-                "raw_open": [10.0, 10.0, 10.1, 10.5, 10.6],
-                "raw_close": [10.0, 10.1, 10.2, 10.7, 10.8],
-                "qfq_open": [10.0, 10.0, 10.1, 10.5, 10.6],
-                "qfq_close": [10.0, 10.1, 10.2, 10.7, 10.8],
+                "ts_code": codes * 5,
+                "trade_date": [d for d in trade_dates for _ in range(3)],
+                "raw_open": [
+                    10.0,
+                    20.0,
+                    30.0,  # 1/29
+                    10.0,
+                    20.0,
+                    30.0,  # 1/30 exec
+                    10.1,
+                    20.1,
+                    30.1,  # 1/31
+                    10.5,
+                    20.6,
+                    30.7,  # 2/1 next rebalance
+                    10.6,
+                    20.7,
+                    30.8,  # 2/2
+                ],
+                "raw_close": [
+                    10.0,
+                    20.0,
+                    30.0,  # 1/29
+                    10.1,
+                    20.2,
+                    30.2,  # 1/30
+                    10.2,
+                    20.3,
+                    30.3,  # 1/31
+                    10.7,
+                    20.9,
+                    31.0,  # 2/1
+                    10.8,
+                    21.0,
+                    31.1,  # 2/2
+                ],
+                "qfq_open": [
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.1,
+                    20.1,
+                    30.1,
+                    10.5,
+                    20.6,
+                    30.7,
+                    10.6,
+                    20.7,
+                    30.8,
+                ],
+                "qfq_close": [
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.1,
+                    20.2,
+                    30.2,
+                    10.2,
+                    20.3,
+                    30.3,
+                    10.7,
+                    20.9,
+                    31.0,
+                    10.8,
+                    21.0,
+                    31.1,
+                ],
             }
         )
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert len(ic_series) == 4
+        # 仅 signal_date=1/29 有信号 → 1 个 IC
+        assert len(ic_series) == 1
+        assert not math.isnan(ic_series[0])
 
     def test_ic_returns_zero_for_insufficient_data(self) -> None:
         """测试数据不足时 IC 返回空序列。"""

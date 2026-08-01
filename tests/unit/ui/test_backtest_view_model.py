@@ -443,7 +443,9 @@ class TestBacktestViewModelRunBacktest:
 
         assert vm.state.is_running is False
         assert vm.state.status_color == "error"
-        assert vm.state.progress == 1.0
+        # F3-11: 异常路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
         # Both starting (info) and failed (error) states were observed
         assert any(s.status_color == "info" for s in snapshots)
         assert any(s.status_color == "error" for s in snapshots)
@@ -595,8 +597,9 @@ class TestBacktestViewModelRunBacktest:
         # Result must remain None (no partial result)
         assert vm.state.result is None
 
-        # Verify final progress was set to 1.0 (from finally block)
-        assert vm.state.progress == 1.0
+        # F3-11: 取消路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
 
         # Simulate a late progress callback after cancellation
         if captured_progress_cb:
@@ -604,7 +607,7 @@ class TestBacktestViewModelRunBacktest:
 
         # The late callback should NOT have updated state — is_running is False,
         # meaning the guard in _progress_callback prevented the update
-        assert vm.state.progress == 1.0
+        assert vm.state.progress == 0.0
         assert vm.state.progress_message != Message("late update")
 
     @pytest.mark.asyncio
@@ -647,8 +650,9 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.status_color == "error"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "backtest_failed"
-        # Verify progress was set to 1.0 (final state from finally block)
-        assert vm.state.progress == 1.0
+        # F3-11: 失败路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
 
 
 class TestBacktestViewModelCoverageGaps:
