@@ -30,6 +30,7 @@ from ui.viewmodels.local_model_config_panel_view_model import (
     LocalModelConfigPanelViewModel,
     LocalModelConfigState,
 )
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ async def _select_file(vm: LocalModelConfigPanelViewModel, file_picker: ft.FileP
         if result and len(result) > 0:
             vm.update_model_path(result[0].path or "")
     except Exception as e:
-        logger.error("[LocalModelConfigPanel] File pick failed: %s", e, exc_info=True)
+        logger.error("[LocalModelConfigPanel] File pick failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
 
 def _on_select_file_click_factory(

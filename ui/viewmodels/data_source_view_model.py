@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
@@ -346,7 +347,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # View detects health_checking False transition as "cancelled/finished"
                 raise
             except Exception as e:
-                logger.error("[DataSourceVM] Health check failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Health check failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 error_info = classify_error(e, context="general")
                 self._emit_health_error(_error_info_to_message(error_info))
                 raise
@@ -564,7 +565,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             except InitSyncError as e:
                 # Task 3.1: InitSyncError 携带 Message (替代翻译字符串), 透传给 RuntimeError.
                 # TaskManager 内部不使用 task.result, 故 RuntimeError 携带 Message 不影响 UI.
-                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Init sync failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(Message("ds_init_fail_generic"), "error")
                 raise RuntimeError(e.args[0]) from e
@@ -572,7 +573,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # Task 5.1: snack 消费 classify_error 结果 (具体错误原因 + action),
                 # RuntimeError 仍透传 ds_init_fail_fmt (TaskManager 不使用 task.result).
                 snack_msg, action_key = self._classify_sync_error(e)
-                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Init sync failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(snack_msg, "error", action_key=action_key)
                 raise RuntimeError(Message("ds_init_fail_fmt")) from e

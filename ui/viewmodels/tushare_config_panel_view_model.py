@@ -256,7 +256,7 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
                 except Exception as probe_exc:
                     logger.warning(
                         "[TushareConfigVM] Capability probe failed (non-critical): %s",
-                        probe_exc,
+                        DataSanitizer.sanitize_error(probe_exc),
                         exc_info=True,
                     )
                     self._show_success(self._raw_message("Token verified — Some API status unknown"))

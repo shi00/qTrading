@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from utils.config_handler import ConfigHandler
 from utils.config_models import AppConfig
+from utils.sanitizers import DataSanitizer
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
@@ -130,7 +131,7 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         except Exception as exc:
             logger.error(
                 "[DatabaseStatusVM] refresh_status failed: %s",
-                exc,
+                DataSanitizer.sanitize_error(exc),
                 exc_info=True,
             )
             self._set_state(
@@ -189,4 +190,8 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         try:
             subprocess.Popen(cmd_args + [path])
         except OSError as exc:
-            logger.error("[DatabaseStatusVM] failed to open file manager for %s: %s", path, exc)
+            logger.error(
+                "[DatabaseStatusVM] failed to open file manager for %s: %s",
+                DataSanitizer.sanitize_error(path),
+                DataSanitizer.sanitize_error(exc),
+            )
