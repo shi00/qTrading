@@ -16,6 +16,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from data.sync.base import safe_error  # F5-P3: R9 异常脱敏
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
@@ -138,7 +139,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         try:
             cb(snap)
         except Exception as e:
-            logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
+            logger.warning("[DataExplorerVM] Subscriber error: %s", safe_error(e), exc_info=True)
 
     def dispose(self):
         """Release resources held by this ViewModel."""
@@ -190,17 +191,19 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in init_tables: %s", e, exc_info=True)
+                logger.critical(
+                    "[DataExplorerVM] SYSTEM-LEVEL failure in init_tables: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in init_tables: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in init_tables: %s", e, exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in init_tables: %s", safe_error(e), exc_info=True)
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
@@ -245,7 +248,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             logger.warning("[DataExplorerVM] Cancelled during load_data_freshness.")
             raise
         except Exception as e:
-            logger.warning("[DataExplorerVM] load_data_freshness failed (non-fatal): %s", e, exc_info=True)
+            logger.warning("[DataExplorerVM] load_data_freshness failed (non-fatal): %s", safe_error(e), exc_info=True)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_table_schema(self, table_name: str):
@@ -269,17 +272,21 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in load_table_schema: %s", e, exc_info=True)
+                logger.critical(
+                    "[DataExplorerVM] SYSTEM-LEVEL failure in load_table_schema: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in load_table_schema: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in load_table_schema: %s", e, exc_info=True)
+                logger.error(
+                    "[DataExplorerVM] Operational error in load_table_schema: %s", safe_error(e), exc_info=True
+                )
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
@@ -343,17 +350,17 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in query_data: %s", e, exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in query_data: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in query_data: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in query_data: %s", e, exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in query_data: %s", safe_error(e), exc_info=True)
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
@@ -390,17 +397,19 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in query_count: %s", e, exc_info=True)
+                logger.critical(
+                    "[DataExplorerVM] SYSTEM-LEVEL failure in query_count: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in query_count: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in query_count: %s", e, exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in query_count: %s", safe_error(e), exc_info=True)
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
@@ -439,17 +448,19 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in export_data: %s", e, exc_info=True)
+                logger.critical(
+                    "[DataExplorerVM] SYSTEM-LEVEL failure in export_data: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in export_data: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in export_data: %s", e, exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in export_data: %s", safe_error(e), exc_info=True)
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
@@ -517,17 +528,19 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in execute_sql: %s", e, exc_info=True)
+                logger.critical(
+                    "[DataExplorerVM] SYSTEM-LEVEL failure in execute_sql: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[DataExplorerVM] Recoverable error (%s) in execute_sql: %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in execute_sql: %s", safe_error(e), exc_info=True)
             # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
             error_msg = get_error_message(error_info)
             error_result = {"success": False, "data": None, "error": error_msg}

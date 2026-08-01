@@ -49,6 +49,11 @@ _SINA_EMPTY_THRESHOLD = 3
 _SINA_FAILURE_ERROR_INTERVAL = 3
 _HOT_CONCEPTS_TIMEOUT_SECONDS = 15.0
 
+# F5-P1: 保护 _SINA_CONSECUTIVE_EMPTY 和 _SINA_CONSECUTIVE_FAILURES 的并发读写。
+# us_api 在 IO 线程池中访问，concept 在事件循环线程中访问，共享 dict 必须 同锁保护。
+# 临界区无 IO（logger 调用移出锁外），无需超时。
+_SINA_STATE_LOCK = threading.Lock()
+
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
 
@@ -57,6 +62,11 @@ _CLS_CONSECUTIVE_FAILURES = 0
 _CLS_FAILURE_THRESHOLD = 3
 _CLS_CIRCUIT_OPENED_AT = 0.0
 _CLS_CIRCUIT_COOLDOWN_SECONDS = 60.0
+
+# F5-P1: 保护 _CLS_CONSECUTIVE_FAILURES 和 _CLS_CIRCUIT_OPENED_AT 的并发读写。
+# 多个 get_latest_global_news 并发调用时，await 切换点间存在竞态，需锁保护
+# 熔断器状态一致性（计数达阈值时熔断时间必须已设置）。临界区无 IO，无需超时。
+_CLS_STATE_LOCK = threading.Lock()
 
 
 def _run_with_python_string_storage(fetcher):
@@ -291,10 +301,14 @@ class NewsFetcher:
         global _CLS_CONSECUTIVE_FAILURES, _CLS_CIRCUIT_OPENED_AT
         now_ts = get_now().timestamp()  # 遵循系统统一时间获取规范
 
-        # 1. 熔断判定
-        if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
+        # 1. 熔断判定（F5-P1: 锁内读取 failures 与 opened_at 保证一致性，锁外判断+记日志）
+        with _CLS_STATE_LOCK:
+            cls_failures = _CLS_CONSECUTIVE_FAILURES
+            cls_opened_at = _CLS_CIRCUIT_OPENED_AT
+
+        if cls_failures >= _CLS_FAILURE_THRESHOLD:
             # 熔断开启期间（冷却窗口内），直接快速失败
-            if now_ts - _CLS_CIRCUIT_OPENED_AT < _CLS_CIRCUIT_COOLDOWN_SECONDS:
+            if now_ts - cls_opened_at < _CLS_CIRCUIT_COOLDOWN_SECONDS:
                 logger.warning("[NewsFetcher] CLS circuit breaker is OPEN. Fast failing request.")
                 return []
             else:
@@ -316,10 +330,13 @@ class NewsFetcher:
             # 使用全局 IO 线程池异步执行请求，防止阻塞 asyncio 事件循环
             data = await ThreadPoolManager().run_async(TaskType.IO, _fetch_cls)
 
-            # 请求成功，闭合熔断器并清空计数
-            if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
+            # 请求成功，闭合熔断器并清空计数（F5-P1: 锁内重置，锁外记日志）
+            with _CLS_STATE_LOCK:
+                was_open = _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD
+                _CLS_CONSECUTIVE_FAILURES = 0
+
+            if was_open:
                 logger.info("[NewsFetcher] CLS circuit breaker CLOSED (recovered).")
-            _CLS_CONSECUTIVE_FAILURES = 0
 
             # 3. 健壮解析 JSON
             if not data or not isinstance(data, dict) or "data" not in data or "roll_data" not in data["data"]:
@@ -383,28 +400,34 @@ class NewsFetcher:
             return []
         except Exception as e:
             # 异常处理，递增连续失败计数并视情况触发熔断
-            _CLS_CONSECUTIVE_FAILURES += 1
-            if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
-                if _CLS_CONSECUTIVE_FAILURES == _CLS_FAILURE_THRESHOLD:
+            # F5-P1: 锁内完成 read-modify-write（递增+阈值判断+熔断时间设置），锁外记日志
+            with _CLS_STATE_LOCK:
+                _CLS_CONSECUTIVE_FAILURES += 1
+                count = _CLS_CONSECUTIVE_FAILURES
+                if count >= _CLS_FAILURE_THRESHOLD:
                     _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
-                    _log_with_severity(
-                        e,
-                        "[NewsFetcher] CLS API failed 3 consecutive times. Circuit breaker OPENED. Error: %s",
-                        DataSanitizer.sanitize_error(e),
-                    )
+                    is_threshold = count == _CLS_FAILURE_THRESHOLD
                 else:
-                    # 半开探活失败：重置冷却计时器，使下一个 60s 窗口从此刻重新计时
-                    _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
-                    _log_with_severity(
-                        e,
-                        "[NewsFetcher] CLS API failed in HALF-OPEN state. Cooldown reset. Error: %s",
-                        DataSanitizer.sanitize_error(e),
-                    )
+                    is_threshold = None  # 未达阈值标志
+
+            if is_threshold is True:
+                _log_with_severity(
+                    e,
+                    "[NewsFetcher] CLS API failed 3 consecutive times. Circuit breaker OPENED. Error: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+            elif is_threshold is False:
+                # 半开探活失败：重置冷却计时器，使下一个 60s 窗口从此刻重新计时
+                _log_with_severity(
+                    e,
+                    "[NewsFetcher] CLS API failed in HALF-OPEN state. Cooldown reset. Error: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
             else:
                 _log_with_severity(
                     e,
                     "[NewsFetcher] CLS API request failed (%d/%d): %s",
-                    _CLS_CONSECUTIVE_FAILURES,
+                    count,
                     _CLS_FAILURE_THRESHOLD,
                     DataSanitizer.sanitize_error(e),
                 )
@@ -476,18 +499,26 @@ class NewsFetcher:
                         # that could result from MITM tampering on legacy HTTP.
                         if not isinstance(data, dict):
                             logger.warning("[News] Sina US API returned non-dict JSON, skipping")
-                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            # F5-P1: 锁内递增，锁外无 IO
+                            with _SINA_STATE_LOCK:
+                                _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
                             return []
                         result = data.get("data", [])
                         if not isinstance(result, list):
                             logger.warning("[News] Sina US API 'data' field is not a list, skipping")
-                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            # F5-P1: 锁内递增
+                            with _SINA_STATE_LOCK:
+                                _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
                             return []
                         if result:
-                            _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+                            # F5-P1: 锁内重置
+                            with _SINA_STATE_LOCK:
+                                _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
                         else:
-                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-                            count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+                            # F5-P1: read-modify-write 同临界区，logger 移出锁外
+                            with _SINA_STATE_LOCK:
+                                _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                                count = _SINA_CONSECUTIVE_EMPTY["us_api"]
                             if count >= _SINA_EMPTY_THRESHOLD:
                                 logger.warning(
                                     "[News] Sina US API returned empty data %d consecutive times. Data source may be degraded.",
@@ -497,16 +528,20 @@ class NewsFetcher:
                                 logger.warning("[News] Sina US API returned empty data (consecutive: %d)", count)
                         return result
                     except json.JSONDecodeError as e:
-                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-                        count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+                        # F5-P1: read-modify-write 同临界区，logger 移出锁外
+                        with _SINA_STATE_LOCK:
+                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            count = _SINA_CONSECUTIVE_EMPTY["us_api"]
                         _log_with_severity(
                             e,
                             "[News] Failed to decode JSON from Sina US API (consecutive: %d)",
                             count,
                         )
                         return []
-            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-            count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+            # F5-P1: read-modify-write 同临界区，logger 移出锁外
+            with _SINA_STATE_LOCK:
+                _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                count = _SINA_CONSECUTIVE_EMPTY["us_api"]
             log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
             log_fn("[News] Sina US API JSONP structure invalid (consecutive: %d)", count)
             return []
@@ -625,8 +660,10 @@ class NewsFetcher:
             logger.warning("[News] Hot concepts fetch cancelled during shutdown.")
             raise
         except TimeoutError as e:
-            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
-            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            # F5-P1: read-modify-write 同临界区，logger 移出锁外
+            with _SINA_STATE_LOCK:
+                _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+                count = _SINA_CONSECUTIVE_FAILURES["concept"]
             if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
                 _log_with_severity(
                     e,
@@ -652,8 +689,10 @@ class NewsFetcher:
             )
             return []
         except Exception as e:
-            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
-            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            # F5-P1: read-modify-write 同临界区，logger 移出锁外
+            with _SINA_STATE_LOCK:
+                _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+                count = _SINA_CONSECUTIVE_FAILURES["concept"]
             if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
                 _log_with_severity(
                     e,
@@ -672,8 +711,10 @@ class NewsFetcher:
 
         if df is None:
             # None means the underlying call returned nothing usable — treat as failure
-            _SINA_CONSECUTIVE_FAILURES["concept"] += 1
-            count = _SINA_CONSECUTIVE_FAILURES["concept"]
+            # F5-P1: read-modify-write 同临界区，logger 移出锁外
+            with _SINA_STATE_LOCK:
+                _SINA_CONSECUTIVE_FAILURES["concept"] += 1
+                count = _SINA_CONSECUTIVE_FAILURES["concept"]
             logger.warning(
                 "[News] Hot concepts fetch returned None. Consecutive failures: %d.",
                 count,
@@ -686,9 +727,11 @@ class NewsFetcher:
             return []
 
         if df.empty:
-            _SINA_CONSECUTIVE_EMPTY["concept"] += 1
-            _SINA_CONSECUTIVE_FAILURES["concept"] = 0
-            count = _SINA_CONSECUTIVE_EMPTY["concept"]
+            # F5-P1: empty 递增 + failures 重置需同临界区（避免 failures 未重置时 empty 计数已递增）
+            with _SINA_STATE_LOCK:
+                _SINA_CONSECUTIVE_EMPTY["concept"] += 1
+                _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+                count = _SINA_CONSECUTIVE_EMPTY["concept"]
             if count >= _SINA_EMPTY_THRESHOLD:
                 logger.warning(
                     "[News] Concept boards data empty %d consecutive times. Data source may be degraded.",
@@ -696,8 +739,10 @@ class NewsFetcher:
                 )
             return []
 
-        _SINA_CONSECUTIVE_EMPTY["concept"] = 0
-        _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+        # F5-P1: 成功路径，两个计数器重置需同临界区
+        with _SINA_STATE_LOCK:
+            _SINA_CONSECUTIVE_EMPTY["concept"] = 0
+            _SINA_CONSECUTIVE_FAILURES["concept"] = 0
 
         # Sina returns: 板块, 涨跌幅
         if "涨跌幅" in df.columns:
