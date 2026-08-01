@@ -250,6 +250,30 @@ class TestComputeTechnicalStructure:
         result = AIStrategyMixin._compute_technical_structure(df)
         assert result["ma_alignment"] != "数据不足"
 
+    def test_nan_close_does_not_produce_nan_pct(self):
+        """F4-ST-003: NaN close 不应输出 "nan%" 到 AI prompt。
+
+        修复前：current_price/ma20 为 NaN 时，deviation/pct_5d 计算为 NaN，
+        f"{deviation:+.1f}%" 输出 "nan%"，污染 AI prompt。
+        修复后：NaN 检查降级为 i18n 占位或 0.0。
+        """
+        import numpy as np
+
+        # 构造含 NaN close 的数据（最后 5 天含 NaN）
+        closes = [10.0 + i * 0.1 for i in range(25)] + [np.nan] * 5
+        df = pd.DataFrame(
+            {
+                "trade_date": [f"202403{str(i).zfill(2)}" for i in range(1, 31)],
+                "close": closes,
+                "vol": [1000000.0] * 30,
+            }
+        )
+        result = AIStrategyMixin._compute_technical_structure(df)
+
+        # F4-ST-003: 任何字段都不应含 "nan"
+        for key, value in result.items():
+            assert "nan" not in str(value).lower(), f"F4-ST-003 违规：{key} 含 'nan': {value}"
+
 
 class TestGetLimitPct:
     def test_st_stock(self):
@@ -747,6 +771,43 @@ class TestRunAiAnalysis:
             assert expected_prompt in messages, f"ack prompt not found in on_progress calls; messages={messages}"
             # AIService.analyze_stock 未被调用
             mock_ai_instance.analyze_stock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_triggers_news_tasks_cleanup_in_finally(self):
+        """F4-ST-001: CancelledError 发生时 try/finally 应确保 _cancel_orphan_news_tasks 被调用。
+
+        修复前：gather_return_exceptions_propagating_cancel 在 CancelledError 时直接 raise，
+        导致后续 _cancel_orphan_news_tasks 调用成为死代码，news_tasks 资源泄漏。
+        修复后：try/finally 确保任何路径下 news_tasks 都被清理。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+            patch.object(AIStrategyMixin, "_cancel_orphan_news_tasks", new=AsyncMock()) as mock_cancel,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # CancelledError 传播
+            with pytest.raises(asyncio.CancelledError):
+                await s.run_ai_analysis(candidates, context)
+
+            # F4-ST-001: finally 块应调用 _cancel_orphan_news_tasks 清理资源
+            mock_cancel.assert_called_once()  # noqa: weak-assertion 下一行强断言验证参数类型
+            # 强断言：验证传入的是 PreFetchedContext 实例（含 news_tasks 字段）
+            assert isinstance(mock_cancel.call_args.args[0], PreFetchedContext)
 
 
 class TestCancelOrphanNewsTasks:

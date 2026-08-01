@@ -220,6 +220,42 @@ class TestSaveAiSettingsStateMachine:
         assert result is False
         llm_vm.save_config.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_save_exception_sanitizes_sensitive_path_in_log(self, mock_config_handler, mock_thread_pool, caplog):
+        """F4-U-1: R9 异常消息脱敏 — 含敏感路径的异常消息体不应原样传给 logger format string。
+
+        注：exc_info=True 输出的 traceback 由 Python 自动生成（含原始异常消息），
+        这是项目既有模式（services/local_model_manager.py 等多处一致），
+        sanitize_error 仅脱敏传给 logger 的 format string 参数。
+        """
+        import logging
+
+        sensitive_path = "C:\\Users\\secret\\api_key.txt"
+        mock_thread_pool.run_async = AsyncMock(side_effect=OSError(f"disk error accessing {sensitive_path}"))
+        llm_vm = MagicMock()
+        llm_vm.save_config = AsyncMock(return_value=True)
+        local_vm = MagicMock()
+        local_vm.get_current_config.return_value = {"model_path": ""}
+        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ui.viewmodels.ai_brain_settings_view_model"),
+            patch("ui.viewmodels.ai_brain_settings_view_model.logger") as mock_logger,
+        ):
+            result = await vm.save_ai_settings()
+
+        assert result is False
+        assert vm.state.save_state == "error"
+        # F4-U-1: 传给 logger 的 format string 参数（sanitize_error 输出）不应含原始路径
+        for call in mock_logger.error.call_args_list + mock_logger.critical.call_args_list:
+            args = call.args
+            # 格式: logger.error("...: %s", sanitized, exc_info=True)
+            if len(args) >= 2:
+                sanitized_arg = args[1]
+                assert sensitive_path not in str(sanitized_arg), (
+                    f"R9 违规：原始路径出现在 logger format 参数中: {sanitized_arg}"
+                )
+
 
 # --- ThreadPoolManager 调用契约 (R16) ---
 

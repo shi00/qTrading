@@ -385,13 +385,20 @@ class LocalModelManager:
         self._result_queue = None
         self._worker_ready = False
 
-    def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
+    async def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
         """Start a persistent worker subprocess with the given model.
 
         Returns True if worker process was started, False on failure.
         Thread-safe: protected by _worker_lock.
         Call _await_worker_ready() after this to wait for model loading.
+
+        F4-S-1: 整个函数体 offload 到线程池，因为 _shutdown_worker_locked 含
+        process.join(timeout) 同步阻塞（最坏 ~12s），不能在事件循环线程执行 (R16)。
         """
+        return await ThreadPoolManager().run_async(TaskType.IO, self._ensure_worker_impl, model_path, core_config)
+
+    def _ensure_worker_impl(self, model_path: str, core_config: dict) -> bool:
+        """_ensure_worker 的同步实现，在线程池中执行。"""
         with self._worker_lock:
             if (
                 self._worker_proc is not None
@@ -436,7 +443,8 @@ class LocalModelManager:
             if self._cancel_event.is_set():
                 logger.info("[LocalModel] Cancel event detected while waiting for worker ready.")
                 self._worker_ready = False
-                self._shutdown_worker()
+                # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+                await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
                 return False
 
             remaining = deadline - asyncio.get_running_loop().time()
@@ -480,7 +488,8 @@ class LocalModelManager:
                 logger.error("[LocalModel] Persistent worker crashed before ready. exitcode=%s", exitcode)
             else:
                 logger.error("[LocalModel] Persistent worker failed to become ready within %ss.", timeout)
-            self._shutdown_worker()
+            # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+            await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return False
 
         status, payload = result
@@ -493,7 +502,8 @@ class LocalModelManager:
         # 经 sanitize_error 脱敏后再记录（与子进程内 sanitize_error 模式一致）
         logger.error("[LocalModel] Persistent worker failed: %s", DataSanitizer.sanitize_error(payload))
         self._worker_ready = False
-        self._shutdown_worker()
+        # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+        await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
         return False
 
     def get_loaded_model_path(self) -> str:
@@ -636,7 +646,7 @@ class LocalModelManager:
                         )
 
                     logger.info("[LocalModel] Starting persistent subprocess worker...")
-                    if not self._ensure_worker(model_path, core_config):
+                    if not await self._ensure_worker(model_path, core_config):
                         return False
                     if not await self._await_worker_ready(timeout=float(load_timeout)):
                         return False
@@ -735,7 +745,9 @@ class LocalModelManager:
                 "[LocalModel] Verification timed out after %ds, auto-cancelling.",
                 _VERIFICATION_TIMEOUT_SECONDS,
             )
-            self.cancel_verification()
+            # F4-S-1: cancel_verification → unload_model → _shutdown_worker 含 join timeout (~12s)，
+            # offload 到线程池避免阻塞事件循环 (R16 举一反三)
+            await ThreadPoolManager().run_async(TaskType.IO, self.cancel_verification)
 
         core_config = {
             "n_threads": config.get("n_threads", 4),
@@ -745,7 +757,7 @@ class LocalModelManager:
             "flash_attn": config.get("flash_attn", True),
         }
 
-        if not self._ensure_worker(path, core_config):
+        if not await self._ensure_worker(path, core_config):
             raise RuntimeError("Persistent worker failed to start. Check logs for details.")
 
         if not self._worker_ready:
@@ -804,7 +816,8 @@ class LocalModelManager:
             while True:
                 if self._cancel_event.is_set():
                     logger.info("[LocalModel] Cancel event detected during inference polling, aborting.")
-                    self._shutdown_worker()
+                    # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+                    await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
                     raise RuntimeError("Inference cancelled by user (unload_model called).")
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -840,7 +853,8 @@ class LocalModelManager:
                 timeout_val,
                 elapsed,
             )
-            self._shutdown_worker()
+            # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+            await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             raise LocalInferenceTimeoutError(
                 f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
             ) from te
@@ -910,7 +924,12 @@ class LocalModelManager:
 
     @classmethod
     def cancel_verification_if_active(cls):
-        """Synchronously cancel verification. Safe to call from sync code (e.g. will_unmount)."""
+        """Cancel verification synchronously. Blocks up to ~12s for worker shutdown.
+
+        WARNING: NOT safe for Flet event handlers (R16). Must be called from
+        ThreadPool or non-UI thread. For async contexts, use cancel_verification
+        via ThreadPoolManager.run_async(TaskType.IO, ...) instead.
+        """
         inst = cls._instance
         if inst is not None:
             inst.cancel_verification()
