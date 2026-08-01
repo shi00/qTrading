@@ -335,6 +335,39 @@ class TestEmbeddedPostgresServiceCoverage:
         # 清理单例
         EmbeddedPostgresService._reset_singleton()
 
+    def test_reset_singleton_warning_sanitizes_registered_secret(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """F6-P1: _reset_singleton 的 WARNING 日志中含已注册 secret 的异常消息经 sanitize_error 脱敏。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.sanitizers import DataSanitizer
+
+        service = EmbeddedPostgresService(
+            sidecar_binary=tmp_path / "fake.exe",
+            data_dir=tmp_path / "postgres" / "17" / "data",
+            install_dir=tmp_path / "postgres" / "17" / "install",
+        )
+        secret = "mock_pg_password_55432"
+        DataSanitizer.register_secret(secret)
+        try:
+            # mock stop_sync 抛含明文 secret 的异常
+            with patch.object(service, "stop_sync", side_effect=RuntimeError(f"stop failed password={secret}")):
+                with caplog.at_level(logging.WARNING, logger="qtrading.embedded_postgres"):
+                    EmbeddedPostgresService._reset_singleton()
+
+                # 验证 WARNING 日志中 secret 被脱敏为 ***，不出现明文
+                warning_msgs = [r.message for r in caplog.records if "_reset_singleton stop failed" in r.message]
+                assert warning_msgs, (
+                    f"期望 WARNING 日志含 '_reset_singleton stop failed'，实际：{[r.message for r in caplog.records]}"
+                )
+                for msg in warning_msgs:
+                    assert secret not in msg, f"R9 违规：WARNING 日志泄露明文 secret: {msg}"
+                    assert "***" in msg, f"期望脱敏标记 ***，实际：{msg}"
+        finally:
+            DataSanitizer._reset_known_secrets()
+        # 清理单例
+        EmbeddedPostgresService._reset_singleton()
+
     def test_from_config_uses_explicit_paths(self, tmp_path: Path) -> None:
         """from_config 使用 AppConfig 显式设置的 sidecar_path/data_root/install_root。"""
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
