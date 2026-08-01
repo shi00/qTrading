@@ -851,7 +851,10 @@ class TaskManager:
             clipped = text[:max_len]
         try:
             return clipped.encode("utf-8", "replace").decode("utf-8", "ignore")
-        except (UnicodeDecodeError, UnicodeEncodeError) as e:
+        except (
+            UnicodeDecodeError,
+            UnicodeEncodeError,
+        ) as e:  # pragma: no cover - UTF-8 replace/ignore 策略下 encode/decode 几乎不可能抛出
             logger.debug(
                 "[TaskManager] UTF-8 sanitize failed, using raw clipped: %s",
                 DataSanitizer.sanitize_error(e),
