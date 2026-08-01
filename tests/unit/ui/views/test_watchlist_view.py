@@ -118,6 +118,16 @@ def _click_icon_button(button: ft.IconButton) -> None:
     button.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支，pyright 推断为 0 参，运行时接收 ControlEvent]
 
 
+def _rerender(component: Any) -> Any:
+    """重新渲染组件 (声明式范式下 set_state 后需手动 render_once 让闭包捕获新 state)。
+
+    参考 tests/unit/ui/views/settings_tabs/test_ai_brain_tab.py:_rerender。
+    """
+    from tests.unit.ui.component_renderer import render_once
+
+    return render_once(component)
+
+
 # ---------------------------------------------------------------------------
 # 纯函数测试
 # ---------------------------------------------------------------------------
@@ -221,11 +231,28 @@ class TestBuildWatchlistRow:
 
 @pytest.fixture
 def mock_watchlist_vm(monkeypatch):
-    """注入 FakeWatchlistViewModel 替代真实 VM。"""
+    """注入 FakeWatchlistViewModel 替代真实 VM, 并 Mock ConfirmDialog 捕获 on_confirm/on_cancel 回调。
+
+    Mock ConfirmDialog 模式参考 test_ai_brain_tab.py (P1-4 批次 2):
+    open_state=True 时捕获 on_confirm/on_cancel, 供测试手动触发确认/取消流程。
+    """
     import ui.views.watchlist_view as watchlist_view_module
 
     fake_vm = _FakeWatchlistViewModel()
     monkeypatch.setattr(watchlist_view_module, "WatchlistViewModel", lambda: fake_vm)
+
+    # Mock ConfirmDialog: 捕获 on_confirm/on_cancel 回调 (open_state=True 时)
+    captured_callbacks: dict[str, Any] = {}
+
+    def _fake_confirm_dialog(**kwargs: Any) -> Any:
+        if kwargs.get("open_state"):
+            captured_callbacks["on_confirm"] = kwargs.get("on_confirm")
+            captured_callbacks["on_cancel"] = kwargs.get("on_cancel")
+        return MagicMock(name="ConfirmDialog")
+
+    monkeypatch.setattr(watchlist_view_module, "ConfirmDialog", _fake_confirm_dialog)
+    fake_vm.captured_callbacks = captured_callbacks  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
+
     return fake_vm
 
 
@@ -337,9 +364,10 @@ class TestWatchlistViewLoadEffect:
 class TestWatchlistViewRemoveCallback:
     """测试移除关注回调（含 R2 CancelledError 传播）。"""
 
-    def test_on_remove_triggers_run_task(
+    def test_on_remove_opens_confirm_dialog(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
+        """点击删除按钮弹出 ConfirmDialog (不直接调 run_task 删除)."""
         from tests.unit.ui.component_renderer import (
             FakePage,
             make_component,
@@ -363,11 +391,81 @@ class TestWatchlistViewRemoveCallback:
         ]
         assert len(icon_buttons) == 1
         _click_icon_button(icon_buttons[0])
-        # page.run_task 应被调用（调度 _do_remove），验证调用参数而非裸 .called 标志
+        # 点击删除按钮不应直接调 run_task (改为打开 ConfirmDialog)
+        assert not page.run_task.called
+        # 重渲染让 ConfirmDialog 以 open_state=True 渲染并捕获 on_confirm 回调
+        _rerender(component)
+        on_confirm = mock_watchlist_vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None  # noqa: weak-assertion 验证 ConfirmDialog 已打开, on_confirm 为后续测试的前置 guard
+
+    def test_confirm_remove_triggers_do_remove(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_confirm 触发 _do_confirm_remove → page.run_task(_do_remove, ts_code)."""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        # 点击 IconButton → 打开 ConfirmDialog
+        icon_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
+        ]
+        _click_icon_button(icon_buttons[0])
+        _rerender(component)
+        # 触发 on_confirm → _do_confirm_remove → page.run_task
+        on_confirm = mock_watchlist_vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None
+        on_confirm()
+        # page.run_task 被调用, 第一个参数是 _do_remove 闭包, 第二个是 ts_code
         assert page.run_task.call_count == 1
         assert page.run_task.call_args is not None
-        # _do_remove 闭包 + ts_code 参数
         assert page.run_task.call_args.args[1] == "000001.SZ"
+
+    def test_cancel_remove_does_not_trigger_do_remove(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_cancel 仅关闭对话框, 不调 page.run_task."""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        # 点击 IconButton → 打开 ConfirmDialog
+        icon_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
+        ]
+        _click_icon_button(icon_buttons[0])
+        _rerender(component)
+        # 触发 on_cancel → _do_cancel_remove (不调 run_task)
+        on_cancel = mock_watchlist_vm.captured_callbacks.get("on_cancel")
+        assert on_cancel is not None
+        on_cancel()
+        assert not page.run_task.called
 
     def test_do_remove_success_calls_vm_and_toast(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
@@ -394,9 +492,13 @@ class TestWatchlistViewRemoveCallback:
             for c in _collect_all_controls(result)
             if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
         ]
+        _click_icon_button(icon_buttons[0])
+        _rerender(component)
         # page.run_task 同步执行 _do_remove
         page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
-        _click_icon_button(icon_buttons[0])
+        on_confirm = mock_watchlist_vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None
+        on_confirm()
 
         assert ("remove_from_watchlist", {"ts_code": "000001.SZ"}) in mock_watchlist_vm.method_calls
         assert any("watchlist_removed" in msg for msg, _ in toast_calls)
@@ -430,10 +532,14 @@ class TestWatchlistViewRemoveCallback:
             for c in _collect_all_controls(result)
             if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
         ]
+        _click_icon_button(icon_buttons[0])
+        _rerender(component)
         page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_confirm = mock_watchlist_vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None  # noqa: weak-assertion R2 前置 guard: on_confirm 为后续 pytest.raises 块的调用对象
         # R2 红线：CancelledError 必须 raise（不吞没）；pytest.raises 即为断言
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，pytest.raises 本身即为强断言
-            _click_icon_button(icon_buttons[0])
+            on_confirm()
 
     def test_do_remove_exception_shows_error_toast(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
@@ -466,15 +572,24 @@ class TestWatchlistViewRemoveCallback:
             for c in _collect_all_controls(result)
             if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
         ]
-        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
-        # 不应抛异常
         _click_icon_button(icon_buttons[0])
+        _rerender(component)
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_confirm = mock_watchlist_vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None
+        # 不应抛异常
+        on_confirm()
         assert any("watchlist_remove_failed" in msg for msg, _ in toast_calls)
 
     def test_on_remove_no_page_does_not_crash(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
-        """page 为 None 时 _on_remove 不应 crash（_get_page 返回 None 保护）。"""
+        """page 为 None 时 _on_remove 提前返回 (不 crash).
+
+        state setter 隐式依赖 page 上下文; page 不可用时 _on_remove 提前返回不调 setter,
+        ConfirmDialog 不会打开. on_click 回调在真实 Flet 运行时总在 page 上下文中触发,
+        本测试模拟极端场景验证健壮性 (参考 home_view._refresh_clicked 的 page guard).
+        """
         from flet.controls.context import _context_page
 
         from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
@@ -492,5 +607,5 @@ class TestWatchlistViewRemoveCallback:
             for c in _collect_all_controls(result)
             if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
         ]
-        # 触发 on_click 不应抛异常（page 为 None 时 _on_remove 直接返回）
+        # 触发 on_click 不应抛异常 (page=None 时 _on_remove 提前返回, 不调 state setter)
         _click_icon_button(icon_buttons[0])

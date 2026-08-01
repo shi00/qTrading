@@ -488,6 +488,8 @@
     "watchlist_remove": "移除关注",
     "watchlist_removed": "已移除关注",
     "watchlist_remove_failed": "移除关注失败",
+    "watchlist_confirm_remove_title": "确认移除关注",
+    "watchlist_confirm_remove_body": "确定移除「{name}」吗？",
     "watchlist_empty_title": "暂无关注的股票",
     "watchlist_empty_message": "从选股结果或股票详情对话框中加入关注",
     "common_query": "查询",

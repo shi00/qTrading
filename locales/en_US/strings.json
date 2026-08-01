@@ -586,6 +586,8 @@
     "watchlist_remove": "Remove from watchlist",
     "watchlist_removed": "Removed from watchlist",
     "watchlist_remove_failed": "Failed to remove from watchlist",
+    "watchlist_confirm_remove_title": "Confirm Removal",
+    "watchlist_confirm_remove_body": "Remove \"{name}\" from watchlist?",
     "watchlist_empty_title": "No watched stocks yet",
     "watchlist_empty_message": "Add stocks from screener results or stock detail dialog",
     "common_query": "Query",

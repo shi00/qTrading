@@ -12,6 +12,7 @@ import typing
 
 import flet as ft
 
+from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.state_views import EmptyState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -102,6 +103,10 @@ def WatchlistView(
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
+    # 删除确认对话框 state (复用 ConfirmDialog 组件, 消费方驱动 open_state, 防误删)
+    confirm_open, set_confirm_open = ft.use_state(False)
+    pending_remove_ts_code, set_pending_remove_ts_code = ft.use_state("")
+
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
         if not active:
@@ -126,9 +131,27 @@ def WatchlistView(
                 _safe_show_toast(page, I18n.get("watchlist_remove_failed"), "error")
 
     def _on_remove(ts_code: str) -> None:
+        # 弹出 ConfirmDialog 二次确认 (防误删); 实际删除在 _do_confirm_remove
+        # state setter 隐式依赖 page 上下文 (内部访问 context.page);
+        # page 不可用时提前返回, 避免 RuntimeError (参考 home_view._refresh_clicked 的 page guard)
+        if _get_page() is None:
+            return
+        set_pending_remove_ts_code(ts_code)
+        set_confirm_open(True)
+
+    def _do_confirm_remove() -> None:
+        """ConfirmDialog on_confirm: 执行删除并关闭对话框。"""
+        ts_code = pending_remove_ts_code
+        set_confirm_open(False)
+        set_pending_remove_ts_code("")
         page = _get_page()
         if page is not None:
             page.run_task(_do_remove, ts_code)
+
+    def _do_cancel_remove() -> None:
+        """ConfirmDialog on_cancel: 仅关闭对话框, 不执行删除。"""
+        set_confirm_open(False)
+        set_pending_remove_ts_code("")
 
     # --- 渲染 ---
     if state.is_loading:
@@ -171,6 +194,13 @@ def WatchlistView(
         content_controls.append(error_banner)
     content_controls.append(body)
 
+    # pending 行的显示名 (stock_name 优先, 空则用 ts_code, 与 _build_watchlist_row 一致)
+    pending_name = pending_remove_ts_code
+    for _r in state.watchlist_rows:
+        if _r.ts_code == pending_remove_ts_code:
+            pending_name = _r.stock_name or _r.ts_code
+            break
+
     return ft.Container(
         content=ft.Column(
             [
@@ -182,6 +212,15 @@ def WatchlistView(
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 ft.Container(content=ft.Column(content_controls, expand=True, spacing=8), expand=True),
+                ConfirmDialog(
+                    open_state=confirm_open,
+                    title=I18n.get("watchlist_confirm_remove_title"),
+                    body=I18n.get("watchlist_confirm_remove_body", name=pending_name),
+                    on_confirm=_do_confirm_remove,
+                    on_cancel=_do_cancel_remove,
+                    confirm_text=I18n.get("common_confirm"),
+                    cancel_text=I18n.get("common_cancel"),
+                ),
             ],
             expand=True,
             spacing=12,
