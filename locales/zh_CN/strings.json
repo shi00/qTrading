@@ -149,6 +149,7 @@
     "screener_done": "筛选完成，共 {count} 只股票",
     "screener_saved": "(已保存)",
     "screener_exec_error": "执行中出错",
+    "screener_sort_failed": "排序失败",
     "screener_cancelled": "策略执行已被用户取消",
     "screener_task_rejected": "任务提交被拒绝，请稍后重试",
     "screener_blocked": "中止: {reason}",

@@ -203,7 +203,7 @@ def _safe_show_toast(
 
     P2-10: action_text/on_action 透传 (导出成功"打开文件夹"按钮)。
     """
-    show_toast = typing.cast(typing.Any, page).show_toast
+    show_toast = getattr(page, "show_toast", None)
     if show_toast is not None:
         show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
 
@@ -609,6 +609,11 @@ def ScreenerView(
             await vm.load_history_data(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
             raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Load history for date failed: %s", ex, exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
     def _on_tree_item_click(trade_date: str, strategy_name: str | None = None, run_id: str | None = None) -> None:
         page = _get_page()
