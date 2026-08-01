@@ -208,7 +208,7 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Control:
-    """构建单个行 (方案 F: Semantics 包裹提供 button 语义 + label).
+    """构建单个行 (方案 F-v2: Semantics + container=True 提供独立 button 语义节点).
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
@@ -216,20 +216,27 @@ def _build_row(
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
 
     Note:
-        方案 F: 用 ft.Semantics 包裹行 Container, 手动提供 button 语义 + label.
+        方案 F-v2: 用 ft.Semantics(container=True) 包裹行 Container, 创建独立语义容器节点.
 
-        根因: 行 Container 的 on_click + ink=True 在 Flutter 端生成 Material > InkWell,
-        InkWell 默认使用 MergeSemantics 合并子节点语义到 button 节点.
-        但 InkWell 的直接子节点是 Row (不是 Text), MergeSemantics 只合并直接子节点,
-        不会递归合并 Row 内多层嵌套的 Text label, 导致 button 节点 text='' (E2E 修复: PR #373).
+        根因 (PR #373 前序修复 85beefb0 失败原因):
+        - 行 Container 的 on_click + ink=True 在 Flutter 端生成 Material > InkWell,
+          InkWell 默认使用 MergeSemantics 合并子节点语义到 button 节点.
+          但 InkWell 的直接子节点是 Row (不是 Text), MergeSemantics 只合并直接子节点,
+          不会递归合并 Row 内多层嵌套的 Text label, 导致 button 节点 text=''.
+        - 85beefb0 用 ft.Semantics(label=row_label, button=True, exclude_semantics=True) 包裹,
+          但未设置 container=True. Flutter Semantics widget 默认 container=false, 不创建
+          独立语义容器节点; exclude_semantics=True 又排除了子节点语义, 导致 label 既无独立
+          节点可附着, 也无法合并到子节点, 整个 Semantics 子树 label 丢失
+          (DOM dump 证实: flt-semantic-node role=button text='').
 
         对比: 表头 _build_header 的 on_click 设置在内层 Container(直接包含 Text) 上,
         InkWell 的 MergeSemantics 合并直接子节点 Text 的 label -> button 节点 text='name (名称)' 成功.
 
-        修复: ft.Semantics(content=inner, label=row_label, button=True, exclude_semantics=True)
-        Semantics 的 label 成为 flt-semantic-node 的 text, Playwright get_by_text 可匹配 "平安银行".
-        exclude_semantics=True 排除 Container InkWell 的空 button 语义, 避免重复节点.
-        Container 的 on_click 事件不受影响 (事件处理与语义树独立, 基于命中测试).
+        修复: ft.Semantics(content=inner, label=row_label, button=True,
+        exclude_semantics=True, container=True). container=True 让 Semantics 创建独立
+        flt-semantics 节点, label 成为节点 text, Playwright get_by_text 可匹配 "平安银行".
+        button=True 提供 role=button. exclude_semantics=True 排除 inner InkWell 的空 button
+        语义, 避免重复节点. Container 的 on_click 事件不受影响 (事件处理与语义树独立, 基于命中测试).
     """
     inner = ft.Container(
         height=ROW_HEIGHT,
@@ -242,13 +249,16 @@ def _build_row(
     if on_row_click is None:
         return inner
     inner.on_click = _make_row_click_handler(on_row_click, row_data)
-    # 方案 F: Semantics 提供 button 语义 + label (行内文本拼接)
+    # 方案 F-v2: Semantics 提供 button 语义 + label (行内文本拼接) + container=True 独立节点
+    # container=True 是关键: 默认 False 时 Semantics 不创建独立节点, label 无处附着
+    # (PR #373 前序修复 85beefb0 缺失 container=True 导致 label 丢失, E2E 持续失败).
     row_label = " ".join(str(row_data.get(str(col["id"]), "")) for col in columns)
     return ft.Semantics(
         content=inner,
         label=row_label,
         button=True,
         exclude_semantics=True,
+        container=True,
     )
 
 
