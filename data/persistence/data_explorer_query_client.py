@@ -311,16 +311,18 @@ class DataExplorerQueryClient:
         try:
             self._ensure_engine()
         except RuntimeError as e:
-            return {"success": False, "data": None, "error": str(e)}
+            # F5-P2: R9 脱敏，避免异常消息含 DB 连接字符串等敏感信息流向 UI
+            return {"success": False, "data": None, "error": safe_error(e)}
 
         # 1. Security Check with sqlparse
         try:
             parsed = sqlparse.parse(sql_query)
         except Exception as e:
+            # F5-P2: R9 脱敏
             return {
                 "success": False,
                 "data": None,
-                "error": f"SQL Parse Error: {e!s}",
+                "error": f"SQL Parse Error: {safe_error(e)}",
             }
 
         if not parsed:
@@ -380,4 +382,5 @@ class DataExplorerQueryClient:
                         else f"Warning: Result truncated to {MAX_FETCH} rows for performance.",
                     }
         except Exception as e:
-            return {"success": False, "data": None, "error": str(e)}
+            # F5-P2: R9 脱敏，避免异常消息含 DB 连接字符串等敏感信息流向 UI
+            return {"success": False, "data": None, "error": safe_error(e)}
