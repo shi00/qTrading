@@ -400,6 +400,15 @@ class AppColors:
         return cls._state
 
     @classmethod
+    def get_current_theme_mode(cls) -> ft.ThemeMode:
+        """获取当前 ThemeMode（公开访问接口，避免外部访问 _CURRENT_THEME_MODE 私有变量）。
+
+        Returns:
+            当前主题模式 (DARK / LIGHT)
+        """
+        return cls._CURRENT_THEME_MODE
+
+    @classmethod
     def load_theme(cls, theme_name: str = ThemeName.DARK):
         """
         加载指定主题的自定义色 (Layer 2)。

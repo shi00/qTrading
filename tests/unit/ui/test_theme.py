@@ -467,3 +467,24 @@ class TestUpDownSingleTrackContract:
         for theme in (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA):
             assert "UP" not in CUSTOM_COLOR_PRESETS[theme], f"{theme} preset 含 UP key"
             assert "DOWN" not in CUSTOM_COLOR_PRESETS[theme], f"{theme} preset 含 DOWN key"
+
+
+# ============================================================================
+# get_current_theme_mode 公开访问接口 (P3-M12-009)
+# ============================================================================
+
+
+class TestGetCurrentThemeMode:
+    """P3-M12-009: get_current_theme_mode 公开方法避免外部访问 _CURRENT_THEME_MODE。"""
+
+    def test_get_current_theme_mode_returns_loaded_theme(self):
+        """get_current_theme_mode 返回 load_theme 设置的 ThemeMode。"""
+        AppColors.load_theme(ThemeName.LIGHT)
+        assert AppColors.get_current_theme_mode() == ft.ThemeMode.LIGHT
+        AppColors.load_theme(ThemeName.DARK)
+        assert AppColors.get_current_theme_mode() == ft.ThemeMode.DARK
+
+    def test_get_current_theme_mode_default_is_dark(self):
+        """默认 ThemeMode 为 DARK（_CURRENT_THEME_MODE 初始值）。"""
+        # fixture 恢复后 _CURRENT_THEME_MODE 回到默认值 DARK
+        assert AppColors.get_current_theme_mode() == ft.ThemeMode.DARK

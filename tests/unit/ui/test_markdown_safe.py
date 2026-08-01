@@ -1,12 +1,17 @@
 """SEC-010: Tests for safe_open_url whitelist enforcement on ft.Markdown on_tap_link."""
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import webbrowser
 
 from ui.components._markdown_safe import (
     ALLOWED_DOMAINS,
     _is_allowed_domain,
+    _open_url_async,
     safe_open_url,
 )
+from utils.thread_pool import TaskType
 import pytest
 
 
@@ -66,8 +71,14 @@ class TestSafeOpenUrl:
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_whitelisted_url_opened(self, mock_open):
         url = "https://finance.eastmoney.com/stock/000001"
-        safe_open_url(self._make_event(url))
-        mock_open.assert_called_once_with(url)
+        e = MagicMock()
+        e.data = url
+        e.control = MagicMock()
+        e.control.page = MagicMock()
+        safe_open_url(e)
+        # R16: webbrowser.open 通过 page.run_task 调度 _open_url_async 异步执行
+        mock_open.assert_not_called()
+        e.control.page.run_task.assert_called_once_with(_open_url_async, url)
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_non_whitelisted_url_not_opened(self, mock_open):
@@ -97,8 +108,14 @@ class TestSafeOpenUrl:
             "https://tushare.pro/c",
         ):
             mock_open.reset_mock()
-            safe_open_url(self._make_event(url))
-            mock_open.assert_called_once_with(url)
+            e = MagicMock()
+            e.data = url
+            e.control = MagicMock()
+            e.control.page = MagicMock()
+            safe_open_url(e)
+            # R16: webbrowser.open 通过 page.run_task 调度，不直接调用
+            mock_open.assert_not_called()
+            e.control.page.run_task.assert_called_once_with(_open_url_async, url)
 
 
 class TestSafeOpenUrlToast:
@@ -134,7 +151,9 @@ class TestSafeOpenUrlToast:
     def test_whitelisted_url_does_not_show_toast(self, mock_open):
         e = self._make_event_with_page("https://eastmoney.com/stock")
         safe_open_url(e)
-        mock_open.assert_called_once_with("https://eastmoney.com/stock")
+        # R16: webbrowser.open 通过 page.run_task 调度，不直接调用
+        mock_open.assert_not_called()
+        e.control.page.run_task.assert_called_once_with(_open_url_async, "https://eastmoney.com/stock")
         # 白名单链接不应触发 toast
         assert not e.control.page.show_toast.called
 
@@ -156,3 +175,41 @@ class TestSafeOpenUrlToast:
             safe_open_url(e)
             mock_open.assert_not_called()
             mock_logger.warning.assert_called()
+
+    @patch("ui.components._markdown_safe.webbrowser.open")
+    def test_whitelisted_url_without_page_falls_back_to_sync(self, mock_open):
+        """R16: 白名单 URL 无 page 访问时降级为同步调用 + 警告日志。"""
+        e = MagicMock()
+        e.data = "https://eastmoney.com/stock"
+        e.control = None
+        e.page = None
+        with patch("ui.components._markdown_safe.logger") as mock_logger:
+            safe_open_url(e)
+            mock_open.assert_called_once_with("https://eastmoney.com/stock")
+            mock_logger.warning.assert_called()
+
+
+class TestOpenUrlAsync:
+    """R16: _open_url_async 通过 ThreadPoolManager offload webbrowser.open。"""
+
+    @pytest.mark.asyncio
+    async def test_open_url_async_calls_webbrowser_via_threadpool(self):
+        """_open_url_async 通过 ThreadPoolManager.run_async 调用 webbrowser.open。"""
+        url = "https://eastmoney.com/stock"
+        with patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls:
+            mock_tp = MagicMock()
+            mock_tp_cls.return_value = mock_tp
+            mock_tp.run_async = AsyncMock(return_value=None)
+            await _open_url_async(url)
+            mock_tp.run_async.assert_called_once_with(TaskType.IO, webbrowser.open, url)
+
+    @pytest.mark.asyncio
+    async def test_open_url_async_propagates_cancelled_error(self):
+        """R2: _open_url_async 透传 asyncio.CancelledError。"""
+        url = "https://eastmoney.com/stock"
+        with patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls:
+            mock_tp = MagicMock()
+            mock_tp_cls.return_value = mock_tp
+            mock_tp.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 守卫：CancelledError 透传即契约，无附加状态可断言
+                await _open_url_async(url)

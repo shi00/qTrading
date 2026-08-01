@@ -185,6 +185,12 @@ ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = {
     # 修复需先评估下沉方案 (新增 StockDetailViewModel 或经父 VM 转发), 不适合在本任务驱动修复.
     # 暂时豁免以让扫描器落地, 后续独立任务修复后移除本条目.
     ("ui/components/stock_detail_dialog.py", "utils.thread_pool"),
+    # PR #402 T6: _markdown_safe.py R16 修复 (webbrowser.open 同步阻塞) 需 ThreadPoolManager
+    # offload. 与 stock_detail_dialog.py 同类冲突 (R16/§3.2 要求 ThreadPoolManager vs MVVM 边界
+    # 禁止 View import utils.thread_pool). _markdown_safe.py 是 ft.Markdown on_tap_link 回调工具,
+    # 无配套 ViewModel, 下沉需评估方案 (新增 MarkdownViewModel 或经父 VM 转发), 不适合在本 PR 驱动.
+    # 暂时豁免, 后续独立任务修复后移除本条目.
+    ("ui/components/_markdown_safe.py", "utils.thread_pool"),
 }
 
 

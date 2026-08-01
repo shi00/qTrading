@@ -899,3 +899,58 @@ class TestVMIntegrationContracts:
             assert len(snapshots) >= 1
             assert vm.state.total_count == 1
             vm.dispose()
+
+
+# ============================================================
+# Test: P3-M12-008 静默 except 补充 debug 日志
+# ============================================================
+
+
+class TestSilentExceptDebugLog:
+    """P3-M12-008: 两处 except pass 补充 debug 日志以便诊断。"""
+
+    def test_dispose_cancel_failure_logs_debug(self, caplog):
+        """dispose 时 cancel handle 失败应记录 debug 日志。"""
+        from unittest.mock import MagicMock
+
+        vm = _DefaultVM()
+        vm.subscribe(lambda s: None)
+
+        # 设置一个 cancel 会抛异常的 handle
+        bad_handle = MagicMock()
+        bad_handle.cancel.side_effect = RuntimeError("cancel failed")
+        vm._pending_notify_handle = bad_handle
+
+        with caplog.at_level("DEBUG", logger="ui.viewmodels.observable_mixin"):
+            vm.dispose()
+
+        # 断言 debug 日志被发出
+        assert any("dispose cancel handle failed" in r.getMessage() for r in caplog.records)
+
+    def test_dispatch_cancel_old_handle_failure_logs_debug(self, caplog):
+        """跨线程 dispatch 时 cancel old handle 失败应记录 debug 日志。"""
+        import threading
+        from unittest.mock import MagicMock
+
+        vm = _DefaultVM()
+        vm.subscribe(lambda s: None)
+
+        # 设置一个 cancel 会抛异常的 old_handle
+        bad_handle = MagicMock()
+        bad_handle.cancel.side_effect = RuntimeError("cancel failed")
+        vm._pending_notify_handle = bad_handle
+
+        # 构造跨线程场景：fake loop + 不同 tid
+        fake_loop = MagicMock()
+        fake_loop.is_running.return_value = True
+        fake_loop.call_soon_threadsafe.return_value = MagicMock()
+
+        with caplog.at_level("DEBUG", logger="ui.viewmodels.observable_mixin"):
+            vm._dispatch_notification_impl(
+                subs_snap=list(vm._subscribers),
+                state_snap=vm._state,
+                loop=fake_loop,
+                owner_tid=threading.get_ident() + 1,  # 不同 tid → cross_thread
+            )
+
+        assert any("throttle cancel old handle failed" in r.getMessage() for r in caplog.records)

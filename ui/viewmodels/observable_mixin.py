@@ -227,7 +227,8 @@ class ObservableViewModelMixin[T]:
                 captured_handle.cancel()
             except Exception:
                 # cancel 失败静默处理：已执行中 cancel 返回 False 时抛错不影响关闭
-                pass
+                # 加 debug 日志以便诊断（P3-M12-008）
+                logger.debug("[ObservableMixin] dispose cancel handle failed", exc_info=True)
 
         # 让子类有机会在 dispose 末尾做额外清理（保留语义兼容）
         self._on_after_dispose(subs_snapshot, pending_snapshot, captured_loop)
@@ -381,7 +382,8 @@ class ObservableViewModelMixin[T]:
             try:
                 old_handle.cancel()
             except Exception:
-                pass
+                # 加 debug 日志以便诊断（P3-M12-008）
+                logger.debug("[ObservableMixin] throttle cancel old handle failed", exc_info=True)
 
         try:
             handle = loop.call_soon_threadsafe(fire_and_wrap)
