@@ -852,7 +852,11 @@ class TaskManager:
         try:
             return clipped.encode("utf-8", "replace").decode("utf-8", "ignore")
         except (UnicodeDecodeError, UnicodeEncodeError) as e:
-            logger.debug("[TaskManager] UTF-8 sanitize failed, using raw clipped: %s", e, exc_info=True)
+            logger.debug(
+                "[TaskManager] UTF-8 sanitize failed, using raw clipped: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):

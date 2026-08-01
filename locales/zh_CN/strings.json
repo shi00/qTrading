@@ -23,6 +23,7 @@
     "task_cancelled_desc": "用户已中止操作",
     "task_failed_desc": "任务执行失败",
     "task_interrupted_desc": "应用上次异常退出，任务被中断",
+    "task_starting_desc": "正在启动...",
     "task_empty_title": "暂无任务",
     "task_empty_subtitle": "当数据同步、AI 选股等操作执行时，会在此处显示进度",
     "task_status_queued": "等待中",
