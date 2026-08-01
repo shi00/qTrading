@@ -169,7 +169,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
                     ),
                 ],
             ),
-            padding=16,
+            padding=AppStyles.SPACING_LG,
             bgcolor=AppColors.SURFACE,
             border_radius=12,
         ),

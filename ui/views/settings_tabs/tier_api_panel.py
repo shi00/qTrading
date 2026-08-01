@@ -395,7 +395,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     api_list_view = ft.ListView(
         controls=_build_api_list_controls(current_tier, probe_status, vm),
         spacing=4,
-        padding=8,
+        padding=AppStyles.SPACING_SM,
         height=list_height,
         auto_scroll=False,
     )

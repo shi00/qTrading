@@ -497,7 +497,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
-        padding=12,
+        padding=AppStyles.SPACING_MD,
         bgcolor=ft.Colors.SURFACE,
         border=ft.Border.only(left=ft.BorderSide(4, data.color)),  # type: ignore[untyped]  # [reason: ft.Border.only/ft.BorderSide 类型存根缺失, 返回 Any, flet 类型标注滞后]
         border_radius=8,

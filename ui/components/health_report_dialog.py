@@ -96,7 +96,7 @@ def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
             ],
             alignment=ft.MainAxisAlignment.START,
         ),
-        padding=20,
+        padding=AppStyles.SPACING_XL,
         border_radius=8,
         gradient=_make_gradient(color),
         border=ft.Border.all(1, ft.Colors.with_opacity(0.3, color)),
@@ -131,7 +131,7 @@ def _build_metric_tile(
             spacing=4,
             alignment=ft.MainAxisAlignment.CENTER,
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         bgcolor=AppColors.SURFACE_VARIANT,
         border_radius=6,
         expand=True,
@@ -263,7 +263,7 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
             ft.Icon(status_icon, size=AppStyles.FONT_SIZE_LG, color=icon_color),
             ft.Text(
                 name,
-                width=120,
+                width=AppStyles.CONTROL_WIDTH_SM,
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
@@ -473,7 +473,7 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
     return ft.Container(
         width=width,
         height=height,
-        padding=20,
+        padding=AppStyles.SPACING_XL,
         content=ft.Column(
             controls=[
                 header,
@@ -801,7 +801,7 @@ def _build_scan_content(
                 ft.Text(status_display, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                 ft.ProgressBar(
                     value=progress_value,
-                    width=400,
+                    width=AppStyles.CONTROL_WIDTH_LG,
                     color=AppColors.PRIMARY,
                     bgcolor=AppColors.SURFACE_VARIANT,
                 ),

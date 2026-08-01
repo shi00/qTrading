@@ -39,9 +39,9 @@
 
 ### 2.5 响应式不隐藏操作入口
 
-- **响应式布局**：`ResponsiveRow` 在 compact 断点（< 1200px）下不得 `visible=False` 隐藏操作入口（如「运行」「保存」按钮）。
+- **响应式布局**：窄布局下不得通过 `visible=False` 隐藏操作入口（如「运行」「保存」按钮）。
 - **替代方案**：若空间不足，操作入口可折叠到菜单（`ft.PopupMenuItem`）或图标按钮（带 `tooltip`），但不得完全隐藏。
-- **响应式断点**：使用项目三档断点 compact/standard/ultra_wide（1200/1600/2400，见 [`ui/theme.py`](../../ui/theme.py) `AppStyles`），不使用 Flet 默认 xs/sm/md/lg/xl/xxl。
+- **响应式栅格**：视图栅格统一使用 [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置（`COL_FULL`/`COL_HALF`/`COL_THIRD`/`COL_QUARTER`/`COL_TWO_THIRDS`），其断点键沿用 Flet `ResponsiveRow` 默认档位（xs/sm/md/lg）；桌面端窗口最小宽度 1280（`app/window_lifecycle.py`），布局设计以该宽度为下限。
 
 ## 3. 审查清单（PR 评审用）
 

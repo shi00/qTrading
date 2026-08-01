@@ -75,7 +75,7 @@ VM 须满足 `_ViewModelProtocol`（结构性类型，见 [`ui/hooks.py`](../../
 | Dropdown 事件 | `on_change` | **`on_select`** | [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表) 第 13 项 |
 | `use_effect` cleanup | setup 返回 cleanup 函数 | **显式 `cleanup=` 参数传入** | [v1-api-constraints.md §声明式组件内 API 契约](./v1-api-constraints.md#声明式组件内-api-契约) |
 | 异步阻塞段 | `asyncio.to_thread` / `page.run_thread` | **`ThreadPoolManager.run_async(TaskType.IO/CPU)`** | R16 红线（见 §5） |
-| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | **compact/standard/ultra_wide 1200/1600/2400** | [`ui/theme.py`](../../ui/theme.py) `AppStyles` 断点常量 |
+| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | **沿用 Flet 默认断点**，视图栅格经 `AppStyles.COL_*` 预置配置统一消费 | [`ui/theme.py`](../../ui/theme.py) `AppStyles` |
 | 桌面打包 | `flet pack` | **PyInstaller**（[`AStockScreener.spec`](../../AStockScreener.spec)） | [依赖管理](../guides/dependency-management.md) |
 
 ---

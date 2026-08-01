@@ -82,7 +82,7 @@ def _metric_card(label: str, value: str, value_color: str) -> ft.Container:
             ],
             spacing=4,
         ),
-        padding=12,
+        padding=AppStyles.SPACING_MD,
         bgcolor=AppColors.CARD_BG,
         border_radius=8,
     )
@@ -240,7 +240,7 @@ def _build_nav_chart(result: BacktestResult | None) -> ft.Container:
             bottom_axis=fch.ChartAxis(label_size=40),
             expand=True,
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         expand=True,
     )
     return container
@@ -345,7 +345,7 @@ def _build_trades_table(
             scroll=ft.ScrollMode.AUTO,
             expand=True,
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         expand=True,
     )
 
@@ -377,7 +377,7 @@ def _build_ic_chart(result: BacktestResult | None) -> ft.Container:
             bottom_axis=fch.ChartAxis(label_size=40),
             expand=True,
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         expand=True,
     )
     return container
@@ -430,7 +430,7 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
             border=ft.Border.all(1, AppColors.DIVIDER),
             vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         expand=True,
     )
 

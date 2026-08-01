@@ -197,7 +197,7 @@ def NewsFeed(
                     ),
                     on_click=safe_on_click(on_load_more_click),
                     height=40,
-                    width=120,
+                    width=AppStyles.CONTROL_WIDTH_SM,
                 ),
                 alignment=ft.Alignment.CENTER,
                 padding=ft.Padding.only(top=10, bottom=10),

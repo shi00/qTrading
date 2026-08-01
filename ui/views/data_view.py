@@ -42,7 +42,6 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, MAX_EXPORT_ROWS, SqlResultRow, TableRow
-from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -194,7 +193,6 @@ def _ceil_div(n: int, d: int) -> int:
 def TableViewerTab(
     vm: DataExplorerViewModel,
     active: bool = True,
-    viewport: ViewportState | None = None,
 ) -> ft.Column:
     """Tab 1: 可视化表浏览器 (声明式).
 
@@ -204,11 +202,7 @@ def TableViewerTab(
     Args:
         vm: 外部传入的 DataExplorerViewModel (由 DataExplorerView 实例化并共享)。
         active: 当前 tab 是否激活 (控制副作用执行)。
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
-    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
-    _ = viewport
     # --- 订阅 VM state (外部模式) ---
     state, _ = use_viewmodel(vm=vm)
 
@@ -525,7 +519,7 @@ def TableViewerTab(
 
     filter_val = ft.TextField(
         label=I18n.get("data_filter_val"),
-        width=200,
+        width=AppStyles.CONTROL_WIDTH_MD,
         value=filter_val_text,
         on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
         on_submit=safe_on_change(_on_query_click),
@@ -565,7 +559,7 @@ def TableViewerTab(
                         stroke_width=4,
                         color=AppColors.PRIMARY,
                     ),
-                    padding=20,
+                    padding=AppStyles.SPACING_XL,
                     border_radius=50,
                     bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
                 ),
@@ -934,7 +928,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
 
 
 @ft.component
-def DataExplorerView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
+def DataExplorerView(active: bool = True) -> ft.Container:
     """数据浏览器主视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -946,8 +940,6 @@ def DataExplorerView(active: bool = True, viewport: ViewportState | None = None)
 
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
@@ -1011,7 +1003,7 @@ def DataExplorerView(active: bool = True, viewport: ViewportState | None = None)
                 tab_bar,
                 ft.TabBarView(
                     expand=True,
-                    controls=[TableViewerTab(vm=vm, active=active, viewport=viewport), SQLConsoleTab(vm=vm)],
+                    controls=[TableViewerTab(vm=vm, active=active), SQLConsoleTab(vm=vm)],
                 ),
             ],
         ),
