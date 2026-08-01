@@ -544,7 +544,7 @@ class TestCacheManagerWriteReadDb:
         mock_dao = MagicMock()
         mock_dao._read_db = AsyncMock(return_value=pd.DataFrame())
         with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
-            await mgr._read_db("SELECT * FROM test")
+            await mgr.read_db("SELECT * FROM test")
             mock_dao._read_db.assert_called_once_with("SELECT * FROM test", None, suppress_errors=True)
 
 
@@ -571,9 +571,6 @@ class TestCacheManagerPublicWriteReadDb:
             result = await mgr.read_db("SELECT * FROM test")
             mock_dao._read_db.assert_called_once_with("SELECT * FROM test", None, suppress_errors=True)
             assert len(result) == 1
-
-    def test_read_db_backward_compat_alias(self):
-        assert CacheManager._read_db is CacheManager.read_db
 
 
 class TestCacheManagerCheckComprehensiveHealth:
