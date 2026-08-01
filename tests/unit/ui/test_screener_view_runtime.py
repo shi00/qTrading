@@ -1736,6 +1736,44 @@ class TestLoadHistoryForDate:
             asyncio.run(handler(*args))
         assert isinstance(exc_info.value, asyncio.CancelledError)
 
+    def test_exception_shows_error_toast(self, screener_view_env) -> None:
+        """_load_history_for_date: vm.load_history_data 抛普通 Exception → 显示错误 toast (不传播)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        async def _raise(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("db connection lost")
+
+        fake_vm.load_history_data = _raise
+
+        fake_vm._history_tree_data = {
+            "20240615": [{"strategy_name": "value", "run_id": "abc12345", "cnt": 5}],
+        }
+
+        segs = _get_segmented_buttons(env)
+        page.run_task.reset_mock()
+        _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
+
+        tree_handler, tree_args, _ = _await_run_task_handler(page)
+        asyncio.run(tree_handler(*tree_args))
+        _rerender(env)
+
+        # 点击策略 ListTile 触发 _load_history_for_date
+        list_tiles = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ListTile)]
+        strategy_tiles = [t for t in list_tiles[1:] if t.on_click is not None]
+        assert len(strategy_tiles) >= 1
+
+        page.run_task.reset_mock()
+        _invoke(strategy_tiles[0].on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        # 普通 Exception 不传播, 内部 except 块捕获并显示错误 toast
+        asyncio.run(handler(*args))
+
+        # 验证 show_toast 被调用 (screener_load_failed 错误提示, 强断言验证参数)
+        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
+
 
 # ============================================================================
 # Handler 测试: _on_row_click / _on_detail_close

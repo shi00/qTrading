@@ -48,6 +48,7 @@ from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPa
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.log_decorators import UILogger
 from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -195,13 +196,14 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
 
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            sanitized = DataSanitizer.sanitize_error(e)  # F4-U-2: R9 异常消息脱敏
             if severity == "system":
-                logger.critical("[AIBrainTab] SYSTEM-LEVEL failure saving config: %s", e, exc_info=True)
+                logger.critical("[AIBrainTab] SYSTEM-LEVEL failure saving config: %s", sanitized, exc_info=True)
             else:
                 logger.error(
                     "[AIBrainTab] Error saving config (%s): %s",
                     error_info["code"],
-                    e,
+                    sanitized,
                     exc_info=True,
                 )
             show_snack_callback(

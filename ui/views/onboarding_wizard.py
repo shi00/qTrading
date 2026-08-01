@@ -252,7 +252,7 @@ def _create_overview_card(
         shadow = ft.BoxShadow(
             spread_radius=0,
             blur_radius=8,
-            color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
+            color=ft.Colors.with_opacity(0.1, ft.Colors.SHADOW),
             offset=ft.Offset(0, 2),
         )
 

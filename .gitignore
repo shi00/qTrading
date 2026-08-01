@@ -111,6 +111,12 @@ temp_pr*.txt
 *.COMMIT_MSG*
 .pr-body*
 *.pr-body*
+# CI/E2E 调试临时产物（f1_* 来自 gh run view，main_e2e_* 来自 E2E 调试，ruff_diff 来自格式化预览）
+f1_*.txt
+f1_*.log
+main_e2e_*.txt
+main_e2e_*.zip
+ruff_diff.txt
 
 # 3. Environment Variables & Secrets
 .env
@@ -147,6 +153,3 @@ Plans*.md
 
 # 9. Static analysis reports (auto-generated, not source code)
 pyright_report.txt
-
-# 10. Plans directory
-docs/plans/

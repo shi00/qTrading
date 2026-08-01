@@ -919,8 +919,8 @@ class TestScreenerViewModelLoadHistoryTree:
         assert row_0515.total_cnt == 7
         assert len(row_0515.strategies) == 1
         assert row_0515.strategies[0]["run_id"] == "r3"
-        # offset = 0 + len(df) * 5 = 15, has_more = len(df) >= 5 is False
-        assert screener_vm.state.history_tree.offset == 15
+        # offset = 0 + len(df) = 3, has_more = len(df) >= 30 is False
+        assert screener_vm.state.history_tree.offset == 3
         assert screener_vm.state.history_tree.has_more is False
 
     async def test_with_empty_data(self, screener_vm):

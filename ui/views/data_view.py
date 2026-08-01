@@ -582,7 +582,7 @@ def TableViewerTab(
         alignment=ft.Alignment.CENTER,
         expand=True,
         padding=AppStyles.EMPTY_STATE_PADDING,
-        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),
+        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.SHADOW),
         border_radius=12,
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
     )

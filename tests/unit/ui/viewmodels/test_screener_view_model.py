@@ -3,6 +3,7 @@
 测试 VM stream card 生命周期方法 (state-driven, 不依赖 Flet 渲染)。
 """
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -604,3 +605,194 @@ class TestPresetManagement:
 
             result = await vm.delete_preset("不存在", "value_strategy")
         assert result is False
+
+
+# --- F1 module review fixes ---
+
+
+class TestHistoryTreeOffsetProgression:
+    """F1-A-1: load_history_tree offset 应按行数递增 (非 *5), has_more 与 DAO limit=30 对齐."""
+
+    @pytest.mark.asyncio
+    async def test_offset_progresses_by_row_count(self, vm):
+        """append 路径下 offset = prev_offset + len(df), 非 *5."""
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        # 构造 30 行 (run_id, trade_date, strategy_name, cnt) DataFrame
+        df_30 = pd.DataFrame(
+            {
+                "run_id": [f"run-{i}" for i in range(30)],
+                "trade_date": ["20260801"] * 30,
+                "strategy_name": ["test_strategy"] * 30,
+                "cnt": [1] * 30,
+            }
+        )
+
+        with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.get_history_tree = AsyncMock(return_value=df_30)
+
+            # 第一次加载 (append=False, offset 从 0 开始)
+            await vm.load_history_tree(append=False)
+            assert vm.state.history_tree.offset == 30  # 0 + 30, 非 0 + 150
+            assert vm.state.history_tree.has_more is True  # len(df)=30 >= 30
+
+            # 第二次加载 (append=True, offset 应为 30 + 30 = 60, 非 30 + 150)
+            await vm.load_history_tree(append=True)
+            assert vm.state.history_tree.offset == 60  # 30 + 30, 非 30 + 150
+            assert vm.state.history_tree.has_more is True
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_when_less_than_limit(self, vm):
+        """len(df) < 30 时 has_more=False."""
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        df_10 = pd.DataFrame(
+            {
+                "run_id": [f"run-{i}" for i in range(10)],
+                "trade_date": ["20260801"] * 10,
+                "strategy_name": ["test_strategy"] * 10,
+                "cnt": [1] * 10,
+            }
+        )
+
+        with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.get_history_tree = AsyncMock(return_value=df_10)
+
+            await vm.load_history_tree(append=False)
+            assert vm.state.history_tree.has_more is False  # len(df)=10 < 30
+            assert vm.state.history_tree.offset == 10
+
+
+class TestSaveResultsFailSanitization:
+    """F1-A-2: save_results 失败时 reason 经 DataSanitizer.sanitize_error 脱敏."""
+
+    @pytest.mark.asyncio
+    async def test_save_results_fail_sanitizes_sensitive_token(self, vm):
+        """含 password=secret 的异常消息应被脱敏为 password=***."""
+        import datetime as dt
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        from services.task_manager import TaskManager
+
+        strategy = type("MockStrategy", (), {})()
+        strategy.name_key = "strategy_test"
+        strategy.filter = lambda ctx: pd.DataFrame({"ts_code": ["000001.SZ"]})
+        vm.strategy_mgr.get_strategy.return_value = strategy
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+        # save_results 抛出含敏感信息的异常
+        vm.review_mgr.save_results = AsyncMock(
+            side_effect=RuntimeError("DB connect failed: password=secret123 host=db.example.com")
+        )
+
+        holder = type("Holder", (), {"task": None})()
+
+        def _sync_submit_task(*args, **kwargs):
+            coro_factory = kwargs["coroutine_factory"]
+            coro = coro_factory(task_id="test-task-id")
+            holder.task = asyncio.ensure_future(coro)
+            return "test-task-id"
+
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit_task),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("test_strategy")
+            assert holder.task is not None
+            await holder.task
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_unsaved"
+        reason = state.status_message.params.get("reason", "")
+        # 敏感值 secret123 必须被脱敏
+        assert "secret123" not in reason
+        assert "***" in reason
+
+
+class TestSortDataErrorHandling:
+    """F1-A-4: sort_data 失败时设置 status_message=screener_sort_failed."""
+
+    @pytest.mark.asyncio
+    async def test_sort_data_sets_error_status_on_failure(self, vm):
+        """排序异常时 status_message.key == screener_sort_failed, status_color == error."""
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        # 准备 _full_results 使排序路径可达
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]})
+
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(side_effect=RuntimeError("sort crashed"))
+
+            await vm.sort_data("name")
+
+        state = vm.state
+        assert state.loading is False
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_sort_failed"
+        assert state.status_color == "error"
+
+
+class TestExecuteScreeningSanitization:
+    """F1-A-8: _execute_screening 的 RuntimeError 消息经 DataSanitizer 脱敏."""
+
+    @pytest.mark.asyncio
+    async def test_runtime_error_sanitizes_sensitive_info(self, vm):
+        """策略执行抛出含 password=secret 的异常, RuntimeError 消息应脱敏."""
+        import datetime as dt
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        from services.task_manager import TaskManager
+
+        strategy = type("MockStrategy", (), {})()
+        strategy.name_key = "strategy_test"
+        # 策略 filter 抛出含敏感信息的异常
+        strategy.filter = lambda ctx: (_ for _ in ()).throw(RuntimeError("AI API error: Bearer sk-secret-key-123"))
+        vm.strategy_mgr.get_strategy.return_value = strategy
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+
+        holder = type("Holder", (), {"task": None, "exc": None})()
+
+        def _sync_submit_task(*args, **kwargs):
+            coro_factory = kwargs["coroutine_factory"]
+            coro = coro_factory(task_id="test-task-id")
+
+            async def _wrap():
+                try:
+                    await coro
+                except RuntimeError as e:
+                    holder.exc = e
+
+            holder.task = asyncio.ensure_future(_wrap())
+            return "test-task-id"
+
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit_task),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("test_strategy")
+            assert holder.task is not None
+            await holder.task
+
+        # RuntimeError 消息中的敏感 token 应被脱敏
+        assert holder.exc is not None
+        msg = str(holder.exc)
+        assert "sk-secret-key-123" not in msg
+        assert "***" in msg

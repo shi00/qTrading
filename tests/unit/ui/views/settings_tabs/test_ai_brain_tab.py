@@ -1144,6 +1144,35 @@ class TestDoSaveAISettingsExceptionPhase:
             asyncio.run(handler(*args))
         assert isinstance(exc_info.value, asyncio.CancelledError)
 
+    def test_exception_path_sanitizes_sensitive_path_in_log(self, ai_brain_tab_env) -> None:
+        """F4-U-2: R9 异常消息脱敏 — 含敏感路径的异常消息体不应原样传给 logger format string。
+
+        注：exc_info=True 输出的 traceback 由 Python 自动生成（含原始异常消息），
+        这是项目既有模式，sanitize_error 仅脱敏传给 logger 的 format string 参数。
+        """
+        env = ai_brain_tab_env
+        sensitive_path = "C:\\Users\\secret\\api_key.txt"
+        env["mock_config"].save_local_ai_config.side_effect = OSError(f"disk error accessing {sensitive_path}")
+        handler, args, _ = self._trigger_save(env)
+        with (
+            patch("services.ai_service.AIService"),
+            patch("utils.error_classifier.classify_error") as mock_classify,
+            patch("utils.error_classifier.classify_severity") as mock_severity,
+            patch("ui.views.settings_tabs.ai_brain_tab.logger") as mock_logger,
+        ):
+            mock_classify.return_value = {"code": "unknown"}
+            mock_severity.return_value = "operational"
+            asyncio.run(handler(*args))
+
+        # F4-U-2: 传给 logger 的 format string 参数（sanitize_error 输出）不应含原始路径
+        for call in mock_logger.error.call_args_list + mock_logger.critical.call_args_list:
+            args = call.args
+            if len(args) >= 2:
+                sanitized_arg = args[1]
+                assert sensitive_path not in str(sanitized_arg), (
+                    f"R9 违规：原始路径出现在 logger format 参数中: {sanitized_arg}"
+                )
+
 
 # ============================================================================
 # 3 个 async helper 测试: 成功/异常/CancelledError

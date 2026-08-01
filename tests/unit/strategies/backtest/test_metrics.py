@@ -1,5 +1,6 @@
 """回测指标计算模块单元测试"""
 
+import math
 from datetime import date
 
 import polars as pl
@@ -164,9 +165,29 @@ class TestBacktestMetrics:
         ir = BacktestMetrics.calc_ir(ic_series)
         assert ir > 0
 
+    def test_calc_ir_annualization_factor(self) -> None:
+        """F3-03: 动态年化系数 sqrt(ic_count / years) 验证。
+
+        相同 IC 序列，num_days=126 (years=0.5) 的 IR 应为 num_days=252 (years=1.0) 的 sqrt(2) 倍。
+        """
+        ic_series = pl.Series([0.05, 0.03, 0.07, 0.02, 0.04])
+        ir_252 = BacktestMetrics.calc_ir(ic_series, num_days=252)
+        ir_126 = BacktestMetrics.calc_ir(ic_series, num_days=126)
+        # years=1.0 → factor=sqrt(5/1)=sqrt(5); years=0.5 → factor=sqrt(5/0.5)=sqrt(10)
+        # 比值 = sqrt(10)/sqrt(5) = sqrt(2) ≈ 1.4142
+        assert ir_252 > 0
+        assert ir_126 > 0
+        assert abs(ir_126 / ir_252 - (2**0.5)) < 1e-6
+
     def test_calc_ir_zero_std(self) -> None:
         ic_series = pl.Series([0.05, 0.05, 0.05])
         assert BacktestMetrics.calc_ir(ic_series) == 0.0
+
+    def test_calc_ir_zero_num_days_uses_fallback(self) -> None:
+        """F3-03: num_days=0 时 years fallback 到 1.0，不爆除零。"""
+        ic_series = pl.Series([0.05, 0.03, 0.07, 0.02, 0.04])
+        ir = BacktestMetrics.calc_ir(ic_series, num_days=0)
+        assert math.isfinite(ir)
 
     def test_calc_information_ratio(
         self,
