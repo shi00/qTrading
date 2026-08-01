@@ -309,6 +309,25 @@ class TestOpenDir:
             vm.open_data_dir()
         mock_popen.assert_not_called()
 
+    def test_open_data_dir_handles_popen_oserror(self, vm):
+        """subprocess.Popen 抛 OSError 时记录脱敏日志, 不抛异常 (R9 脱敏分支)。"""
+        with (
+            patch("ui.viewmodels.database_status_view_model.platform.system", return_value="Windows"),
+            patch(
+                "ui.viewmodels.database_status_view_model.subprocess.Popen",
+                side_effect=OSError("file manager not found"),
+            ) as mock_popen,
+            patch("ui.viewmodels.database_status_view_model.Path.exists", return_value=True),
+        ):
+            import asyncio
+
+            asyncio.run(vm.refresh_status())
+            vm.open_data_dir()
+        # 强断言: 验证 Popen 调用参数 (explorer + data_dir 路径), 非 assert_called_once 弱断言
+        call_args = mock_popen.call_args[0][0]
+        assert call_args[0] == "explorer", f"应调用 explorer, 实际: {call_args[0]}"
+        assert "/fake/data" in call_args, f"应含 data_dir 路径, 实际: {call_args}"
+
 
 # --- VM i18n contract ---
 
