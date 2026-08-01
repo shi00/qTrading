@@ -892,7 +892,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             alignment=ft.MainAxisAlignment.CENTER,
             expand=True,
         ),
-        icon_color=ft.Colors.PURPLE,
+        icon_color=ft.Colors.TERTIARY,
         title_key="settings_init_data",
         subtitle_key="settings_hint_first_run",
     )

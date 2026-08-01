@@ -333,6 +333,7 @@ def LLMConfigPanel(
         editable=True,
         options=[ft.dropdown.Option(m) for m in state.custom_model_options],
         on_select=lambda e: vm.update_custom_model(e.control.value) if e.control.value else None,
+        on_text_change=lambda e: vm.update_custom_model(e.control.value) if e.control.value else None,
     )
 
     base_url_input = ft.TextField(

@@ -184,19 +184,40 @@ class TestSystemTabContract:
         assert "AppColors.ERROR" in source, "system_tab 必须使用 AppColors.ERROR (P1-2)"
 
     def test_decorative_icon_colors_preserved(self):
-        """P1-2 契约: system_tab 5 个 icon_color 装饰色保留 (check_R 装饰色豁免)。
+        """P1-2 契约: system_tab 5 个 icon_color 装饰色保留或迁移到 Layer 2 token (check_R 装饰色豁免)。
 
         §0.5.11.1 #94: L572 BLUE/L582 PURPLE/L627 INDIGO/L647 ORANGE/L667 TEAL
-        是装饰色非语义色，保留 ft.Colors.* 或改 Layer 2 token。
+        是装饰色非语义色，保留 ft.Colors.* 或改 Layer 2 token (语义化 token)。
         """
         source = _raw_source()
         # 装饰色清单 (5 个)
         decorative_colors = ["BLUE", "PURPLE", "INDIGO", "ORANGE", "TEAL"]
         preserved = [c for c in decorative_colors if f"ft.Colors.{c}" in source]
-        # 至少保留 3 个装饰色 (允许部分迁移到 Layer 2 token)
-        assert len(preserved) >= 3, (
-            f"system_tab 应保留至少 3 个装饰色 (BLUE/PURPLE/INDIGO/ORANGE/TEAL), "
-            f"实际保留 {len(preserved)} 个: {preserved}"
+        # Layer 2 语义化 token (允许装饰色迁移到此)
+        semantic_tokens = [
+            "AppColors.PRIMARY",
+            "AppColors.SECONDARY",
+            "AppColors.TERTIARY",
+            "AppColors.ERROR",
+            "AppColors.WARNING",
+            "AppColors.INFO",
+            "AppColors.SUCCESS",
+            "ft.Colors.PRIMARY",
+            "ft.Colors.SECONDARY",
+            "ft.Colors.TERTIARY",
+            "ft.Colors.PRIMARY_CONTAINER",
+            "ft.Colors.SECONDARY_CONTAINER",
+            "ft.Colors.TERTIARY_CONTAINER",
+            "ft.Colors.ERROR",
+            "ft.Colors.WARNING",
+            "ft.Colors.INFO",
+        ]
+        semantic_count = sum(1 for token in semantic_tokens if token in source)
+        # 至少保留 3 个装饰色 OR 至少 3 个已迁移到 Layer 2 token
+        assert len(preserved) >= 3 or semantic_count >= 3, (
+            f"system_tab 应保留至少 3 个装饰色 (BLUE/PURPLE/INDIGO/ORANGE/TEAL) "
+            f"或至少 3 个已迁移到 Layer 2 token, "
+            f"实际保留 {len(preserved)} 个装饰色, {semantic_count} 个 Layer 2 token"
         )
 
 

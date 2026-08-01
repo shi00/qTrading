@@ -215,7 +215,7 @@ def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
                 content=ft.Text(
                     badge_text,
                     size=AppStyles.FONT_SIZE_CAPTION,
-                    color=ft.Colors.WHITE,
+                    color=ft.Colors.ON_ERROR,
                     text_align=ft.TextAlign.CENTER,
                     weight=ft.FontWeight.BOLD,
                 ),
