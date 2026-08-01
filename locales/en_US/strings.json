@@ -93,6 +93,7 @@
     "settings_language_save_failed": "Failed to save language setting, please retry",
     "sys_hint_range_fmt": "Range: {min}-{max}",
     "settings_theme": "Theme",
+    "settings_theme_desc": "Switch UI theme color (Dark/Light/Navy/Dracula)",
     "settings_api": "API Settings",
     "settings_token": "Tushare Token",
     "settings_save": "Save Settings",

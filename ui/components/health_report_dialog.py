@@ -745,7 +745,7 @@ def _build_scan_result(result: dict, on_init_data: Callable[[], None] | None = N
         result_controls.append(
             ft.Row(
                 [
-                    ft.ElevatedButton(
+                    ft.Button(
                         I18n.get("scan_btn_init_data"),
                         icon=ft.Icons.CLOUD_DOWNLOAD,
                         on_click=lambda _e: on_init_data(),

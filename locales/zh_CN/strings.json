@@ -97,6 +97,7 @@
     "settings_language_save_failed": "语言设置保存失败，请重试",
     "sys_hint_range_fmt": "范围: {min}-{max}",
     "settings_theme": "主题",
+    "settings_theme_desc": "切换界面主题配色（深色/浅色/海军蓝/德古拉）",
     "settings_api": "API 设置",
     "settings_token": "Tushare Token",
     "settings_save": "保存设置",
