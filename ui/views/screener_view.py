@@ -1294,12 +1294,12 @@ def ScreenerView(
     right_controls = ft.Column(
         [
             status_row,
-            # backtest_btn 放在 run_btn 之后：避免 V1 M3 语义合并时 hit-testing
-            # 优先命中 backtest_btn 触发非预期跳转（保险措施，配合 flet_page.py
-            # btn fallback 排除 aria-current 的修复）
-            ft.Row(
-                [export_btn, export_excel_btn, run_btn, backtest_btn], spacing=15, alignment=ft.MainAxisAlignment.END
-            ),
+            ft.Row([export_btn, export_excel_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
+            # backtest_btn 独立一行右对齐：与导出/执行按钮同行会加宽 right_controls ~109px,
+            # 压缩左侧 left_controls 使参数面板 Row(wrap=True) 换行 (+78px 高度),
+            # 表体视口被压到 0 → 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
+            # 独立成行只增加 right_controls 固有高度, 不改变宽度, 参数面板不换行。
+            ft.Row([backtest_btn], alignment=ft.MainAxisAlignment.END),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -1382,7 +1382,10 @@ def ScreenerView(
     table_card = ft.Container(
         content=table_content,
         **AppStyles.dashboard_card(padding=0),
-        expand=True,
+        # expand=2: 表格区分得 main_body 剩余高度的 2/3 (log_card 1/3)。
+        # 1:1 均分时控制卡内容稍高 (如参数面板换行) 就会把表体视口压到 0,
+        # 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
+        expand=2,
     )
 
     # 3. AI 分析报告区 (仅 REALTIME 模式)
