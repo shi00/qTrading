@@ -27,6 +27,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_unmount_effects,
 )
 
 pytestmark = pytest.mark.unit
@@ -105,7 +106,7 @@ def app_layout_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     """
     from ui import app_layout as mod
 
-    # --- Mock 6 个子视图 (避免触发各自 VM 渲染) ---
+    # --- Mock 7 个子视图 (避免触发各自 VM 渲染) ---
     for view_name in [
         "HomeView",
         "ScreenerView",
@@ -113,6 +114,7 @@ def app_layout_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
         "DataExplorerView",
         "TaskCenterView",
         "SettingsView",
+        "WatchlistView",
     ]:
         monkeypatch.setattr(mod, view_name, MagicMock(return_value=MagicMock(name=view_name)))
 
@@ -340,7 +342,7 @@ class TestBuildPagesStackE2E:
         """E2E 模式下非激活视图的 factory 不被调用 (只构造 current_tab=MARKET 对应的 HomeView)."""
         from ui import app_layout as mod
 
-        # Mock 6 个子视图, 用 MagicMock 跟踪调用
+        # Mock 7 个子视图, 用 MagicMock 跟踪调用
         view_mocks: dict[str, MagicMock] = {}
         for view_name in [
             "HomeView",
@@ -349,6 +351,7 @@ class TestBuildPagesStackE2E:
             "DataExplorerView",
             "TaskCenterView",
             "SettingsView",
+            "WatchlistView",
         ]:
             mock = MagicMock(return_value=MagicMock(name=view_name))
             view_mocks[view_name] = mock
@@ -364,15 +367,22 @@ class TestBuildPagesStackE2E:
 
         # E2E 模式 + current_tab=MARKET (0): 只有 HomeView 被构造 (active=True)
         view_mocks["HomeView"].assert_called_once_with(active=True)
-        # 其他 5 个视图不应被调用
-        for view_name in ["ScreenerView", "BacktestView", "DataExplorerView", "TaskCenterView", "SettingsView"]:
+        # 其他 6 个视图不应被调用
+        for view_name in [
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+            "WatchlistView",
+        ]:
             view_mocks[view_name].assert_not_called(), f"E2E 模式下 {view_name} 不应被构造"
 
     def test_normal_mode_constructs_all_views(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
-        """正常模式下所有 6 个视图都被构造 (非 E2E 模式)."""
+        """正常模式下所有 7 个视图都被构造 (非 E2E 模式)."""
         from ui import app_layout as mod
 
-        # Mock 6 个子视图
+        # Mock 7 个子视图
         view_mocks: dict[str, MagicMock] = {}
         for view_name in [
             "HomeView",
@@ -381,6 +391,7 @@ class TestBuildPagesStackE2E:
             "DataExplorerView",
             "TaskCenterView",
             "SettingsView",
+            "WatchlistView",
         ]:
             mock = MagicMock(return_value=MagicMock(name=view_name))
             view_mocks[view_name] = mock
@@ -391,7 +402,7 @@ class TestBuildPagesStackE2E:
         component = make_component(mod._build_pages_stack, 0)
         render_once(component)
 
-        # 正常模式下所有 6 个视图都被构造
+        # 正常模式下所有 7 个视图都被构造
         for view_name in [
             "HomeView",
             "ScreenerView",
@@ -399,5 +410,186 @@ class TestBuildPagesStackE2E:
             "DataExplorerView",
             "TaskCenterView",
             "SettingsView",
+            "WatchlistView",
         ]:
             view_mocks[view_name].assert_called_once(), f"正常模式下 {view_name} 应被构造"
+
+
+# ============================================================================
+# _on_navigate 测试: TOPIC_NAVIGATE PubSub 事件处理
+# ============================================================================
+
+
+def _get_navigate_handler(env: dict) -> Any:
+    """从 pubsub.subscribe_topic 调用中提取 _on_navigate handler."""
+    page = env["page"]
+    subscribe_calls = page.pubsub.subscribe_topic.call_args_list
+    assert len(subscribe_calls) >= 1, "subscribe_topic 未被调用"
+    for call in subscribe_calls:
+        args, _ = call
+        if args and args[0] == env["mod"].TOPIC_NAVIGATE:
+            return args[1]
+    raise AssertionError(f"未找到 {env['mod'].TOPIC_NAVIGATE} 订阅的 handler")
+
+
+class TestOnNavigate:
+    """_on_navigate PubSub 事件处理测试 (P1-1 覆盖率补缺)."""
+
+    def test_unknown_topic_early_return(self, app_layout_env) -> None:
+        """topic != TOPIC_NAVIGATE 时早返回, 不调 page.run_task."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        handler("unknown_topic", "screener")
+        assert not page.run_task.called, "未知 topic 应早返回"
+
+    def test_valid_target_invokes_run_task(self, app_layout_env) -> None:
+        """合法 tab 名 + 不同 tab → page.run_task(_do_tab_switch, target)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        # current_tab 默认 MARKET (0), 导航到 SCREENER (1)
+        handler(env["mod"].TOPIC_NAVIGATE, "screener")
+        run_task_calls = page.run_task.call_args_list
+        assert len(run_task_calls) >= 1, "合法导航应调用 run_task"
+        call = run_task_calls[0]
+        handler_fn = call.args[0]
+        args = call.args[1:]
+        assert inspect.iscoroutinefunction(handler_fn), "handler 必须为协程函数"
+        assert args == (1,), f"应传 target_tab=1 (SCREENER), 实际 args={args}"
+
+    def test_unknown_target_keyerror_logged(self, app_layout_env) -> None:
+        """非法 tab 名 → KeyError 捕获 + logger.warning, 不调 run_task."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        with patch.object(env["mod"].logger, "warning") as mock_warn:
+            handler(env["mod"].TOPIC_NAVIGATE, "nonexistent_tab")
+            mock_warn.assert_called_once_with("[AppLayout] Unknown navigation target: %s", "nonexistent_tab")
+        assert page.run_task.call_count == 0, "非法 tab 名不应调用 run_task"
+
+    def test_same_tab_early_return(self, app_layout_env) -> None:
+        """target_tab == current_tab 时早返回, 不调 run_task."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        # current_tab 默认 MARKET (0), 导航到 market → 相同 tab
+        handler(env["mod"].TOPIC_NAVIGATE, "market")
+        assert not page.run_task.called, "相同 tab 应早返回"
+
+    def test_page_none_early_return(self, app_layout_env) -> None:
+        """page=None 时早返回, 不抛异常."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        with patch("ui.app_layout._get_page", return_value=None):
+            handler(env["mod"].TOPIC_NAVIGATE, "screener")
+        assert not page.run_task.called, "page=None 应早返回"
+
+
+# ============================================================================
+# _setup_navigate 测试: page=None 边界
+# ============================================================================
+
+
+class TestSetupNavigatePageNone:
+    """_setup_navigate page=None 早返回测试 (P1-1 覆盖率补缺)."""
+
+    def test_page_none_skips_subscribe(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """page=None 时 _setup_navigate 早返回, pubsub.subscribe_topic 不被调用."""
+        from ui import app_layout as mod
+
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+            "WatchlistView",
+        ]:
+            monkeypatch.setattr(mod, view_name, MagicMock(return_value=MagicMock(name=view_name)))
+        monkeypatch.setattr(mod, "I18n", MagicMock(get=lambda key, *a, **kw: key))
+        monkeypatch.setattr(mod, "UILogger", MagicMock())
+
+        component = make_component(mod.AppLayout)
+        # 不调用 run_mount_effects (会触发 _setup_navigate), 改为手动 patch _get_page 返回 None
+        page = FakePage()
+        page.pubsub = MagicMock()
+        page.pubsub.subscribe_topic = MagicMock()
+        page.pubsub.unsubscribe_topic = MagicMock()
+
+        with patch("ui.app_layout._get_page", return_value=None):
+            run_mount_effects(component, page=page)
+
+        assert not page.pubsub.subscribe_topic.called, "page=None 时不应订阅 TOPIC_NAVIGATE"
+
+
+# ============================================================================
+# _cleanup_navigate 测试: unmount 取消订阅
+# ============================================================================
+
+
+class TestCleanupNavigate:
+    """_cleanup_navigate unmount 取消订阅测试 (P1-1 覆盖率补缺)."""
+
+    def test_unmount_calls_unsubscribe(self, app_layout_env) -> None:
+        """组件 unmount 时 _cleanup_navigate 调用 page.pubsub.unsubscribe_topic."""
+        env = app_layout_env
+        component = env["component"]
+        page = env["page"]
+        page.pubsub.unsubscribe_topic.reset_mock()
+
+        run_unmount_effects(component)
+
+        page.pubsub.unsubscribe_topic.assert_called_once_with(env["mod"].TOPIC_NAVIGATE)
+
+
+# ============================================================================
+# _build_nav_destinations(running_count > 0) 测试: nav_tasks 角标分支
+# ============================================================================
+
+
+class TestBuildNavDestinationsWithBadge:
+    """_build_nav_destinations running_count > 0 角标构造测试 (P1-1 覆盖率补缺)."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n):
+        self.mock_i18n = mock_i18n
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        with patch("ui.app_layout.I18n", self.mock_i18n):
+            yield
+
+    def test_running_count_positive_adds_badge_to_nav_tasks(self):
+        """running_count > 0 时 nav_tasks 项 icon 为 ft.Stack (带角标), 其他项仍为 IconData."""
+        from ui.app_layout import _build_nav_destinations
+
+        destinations = _build_nav_destinations(running_count=5)
+        assert len(destinations) == 7
+
+        # nav_tasks 是第 5 项 (index=4), running_count > 0 → icon 为 ft.Stack
+        nav_tasks_dest = destinations[4]
+        assert isinstance(nav_tasks_dest.icon, ft.Stack), "running_count > 0 时 nav_tasks icon 应为 ft.Stack (带角标)"
+
+        # 其他项 icon 仍为 str (ft.IconData)
+        for i, dest in enumerate(destinations):
+            if i != 4:
+                assert not isinstance(dest.icon, ft.Stack), f"第 {i} 项不应有角标"
+
+    def test_running_count_zero_no_badge(self):
+        """running_count=0 时所有项 icon 均为 IconData (无角标)."""
+        from ui.app_layout import _build_nav_destinations
+
+        destinations = _build_nav_destinations(running_count=0)
+        for dest in destinations:
+            assert not isinstance(dest.icon, ft.Stack), "running_count=0 时不应有角标"
