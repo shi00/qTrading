@@ -80,6 +80,11 @@ def generate_kline_figure(
                     The MatplotlibChart control resizes adaptively.
     :param theme_mode: "light" | "dark" | None (auto-detect from AppColors).
     :returns: matplotlib.figure.Figure instance.
+
+    .. note::
+        本函数执行 mplfinance CPU 密集渲染，调用方在 Flet 事件处理器中
+        必须通过 ``ThreadPoolManager().run_async(TaskType.CPU, generate_kline_figure, ...)``
+        offload，否则违反 R16（UI 阻塞主循环）。
     """
     if df is None or df.empty:
         raise ValueError("Empty DataFrame — cannot render chart")
@@ -113,7 +118,7 @@ def generate_kline_figure(
 
     # ── 2. Theme ─────────────────────────────────────────────────
     if theme_mode is None:
-        is_dark = AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK
+        is_dark = AppColors.get_current_theme_mode() == ft.ThemeMode.DARK
     else:
         is_dark = theme_mode == "dark"
 

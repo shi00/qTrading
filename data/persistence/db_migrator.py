@@ -20,6 +20,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
+from data.sync.base import safe_error
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -255,14 +256,14 @@ class DatabaseMigrator:
                 logger.critical(
                     "[DatabaseMigrator] SYSTEM-LEVEL migration failure (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[DatabaseMigrator] Migration failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             raise
@@ -317,7 +318,7 @@ class DatabaseMigrator:
                 return await conn.run_sync(_sync_get_rev)
         except _CONNECTION_EXCEPTIONS as exc:
             # 连接级错误必须上抛，不能吞没为"全新数据库"
-            logger.error("[DBMigrator] Connection error getting revision: %s", exc)
+            logger.error("[DBMigrator] Connection error getting revision: %s", safe_error(exc))
             raise
         except ProgrammingError as exc:
             # ProgrammingError 需要区分：仅 "relation does not exist" 类错误
@@ -326,13 +327,13 @@ class DatabaseMigrator:
             if any(kw in msg for kw in _RELATION_NOT_FOUND_KEYWORDS):
                 logger.debug("[DBMigrator] ProgrammingError (likely fresh DB): %s", exc)
                 return None
-            logger.error("[DBMigrator] ProgrammingError (not relation-not-found): %s", exc)
+            logger.error("[DBMigrator] ProgrammingError (not relation-not-found): %s", safe_error(exc))
             raise
         except OperationalError as exc:
             # OperationalError 可能是权限/结构损坏等严重问题，上抛
-            logger.error("[DBMigrator] OperationalError getting revision: %s", exc)
+            logger.error("[DBMigrator] OperationalError getting revision: %s", safe_error(exc))
             raise
         except Exception as exc:
             # 其他未知异常：记录 warning 并上抛，避免误判为全新数据库
-            logger.warning("[DBMigrator] Unexpected error getting revision, re-raising: %s", exc)
+            logger.warning("[DBMigrator] Unexpected error getting revision, re-raising: %s", safe_error(exc))
             raise

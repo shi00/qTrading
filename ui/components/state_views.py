@@ -86,7 +86,7 @@ def EmptyState(
         ),
         alignment=ft.Alignment.CENTER,
         expand=True,
-        padding=40,
+        padding=AppStyles.EMPTY_STATE_PADDING,
     )
 
 
@@ -174,7 +174,7 @@ def ErrorState(
         ),
         alignment=ft.Alignment.CENTER,
         expand=True,
-        padding=40,
+        padding=AppStyles.EMPTY_STATE_PADDING,
     )
 
 

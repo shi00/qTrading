@@ -204,3 +204,38 @@ class ScreenerPage:
             "or the row is rendered outside the visible viewport with zero bounding_box. "
             "Check DEBUG logs above for per-strategy failure details."
         )
+
+    async def open_detail_dialog(self, row_text: str, max_attempts: int = 3) -> None:
+        """点击行打开详情对话框，带重试验证对话框已渲染。
+
+        根因（Phase 9.2）：``click_row_by_text`` 在 CI CanvasKit 抖动下，
+        mouse.click 执行了但 Flutter hit-testing 偶发未触发 ``on_tap``，
+        导致对话框没打开。此方法封装"点击 + 验证 + 重试"逻辑，
+        确保对话框真正打开后才返回。
+
+        验证标志：关闭按钮（``role="button", name=I18n.get("common_close")``）
+        在对话框打开时立即渲染（不像 K 线图异步加载），是稳定的渲染完成标志。
+        """
+        close_text = I18n.get("common_close")
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self.click_row_by_text(row_text, timeout_ms=TIMEOUTS.INTERACTION)
+                close_btn = self.page.page.get_by_role("button", name=close_text)
+                await close_btn.wait_for(state="attached", timeout=self.page._tm(TIMEOUTS.FAST))
+                if attempt > 1:
+                    logger.info("open_detail_dialog: succeeded on attempt %d for '%s'", attempt, row_text)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.debug(
+                    "open_detail_dialog: attempt %d/%d failed for '%s': %s",
+                    attempt,
+                    max_attempts,
+                    row_text,
+                    exc,
+                )
+        raise AssertionError(
+            f"open_detail_dialog: dialog did not open after {max_attempts} attempts for '{row_text}'. "
+            f"Last error: {last_exc}"
+        ) from last_exc

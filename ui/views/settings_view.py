@@ -28,7 +28,6 @@ from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTa
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.database_tab import DatabaseTab
 from ui.views.settings_tabs.system_tab import SystemTab
-from ui.views.viewport_state import ViewportState
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +117,7 @@ def _show_snack_impl(
 
 
 @ft.component
-def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
+def SettingsView(active: bool = True) -> ft.Container:
     """Settings view — declarative shell container.
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
@@ -129,11 +128,7 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
 
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
-    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
-    _ = viewport
     current_tab, set_current_tab = ft.use_state(0)
     ft.use_state(get_observable_state)
 

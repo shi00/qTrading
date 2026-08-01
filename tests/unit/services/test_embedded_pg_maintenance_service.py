@@ -447,3 +447,62 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         assert "--target-data-dir" in argv
         target_idx = argv.index("--target-data-dir") + 1
         assert argv[target_idx] == str(target)
+
+
+# =============================================================================
+# TestEmbeddedPgMaintenanceSanitization: R9 脱敏测试（3 个）
+# =============================================================================
+class TestEmbeddedPgMaintenanceSanitization:
+    """R9: stderr/stdout 含路径时经 DataSanitizer.sanitize_error 脱敏。"""
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_raise_for_exit_code_stderr_sanitized(self, maintenance_service, caplog) -> None:
+        """T2: _raise_for_exit_code 的 stderr 含路径时，caplog 中原始路径不出现。"""
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        sensitive_path = r"D:\workspace\Quantitative Trading\pgdata\base"
+        stderr = f'FATAL: data directory "{sensitive_path}" does not exist'
+        with (
+            _patch_run_async(40, "", stderr),
+            caplog.at_level("ERROR", logger="qtrading.embedded_pg_maintenance"),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="pgdata_corrupt"):
+                await maintenance_service.doctor()
+
+        # 反向断言：原始路径字符串不出现在 caplog 记录中
+        for record in caplog.records:
+            assert sensitive_path not in record.getMessage()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_json_parse_error_stdout_sanitized(self, maintenance_service) -> None:
+        """T3: doctor JSON 解析失败时异常消息中 stdout 路径被脱敏。"""
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        sensitive_path = r"D:\workspace\Quantitative Trading\pgdata\log"
+        stdout = f"not-valid-json{{ path={sensitive_path}"
+        with _patch_run_async(0, stdout):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="JSON parse failed") as exc_info:
+                await maintenance_service.doctor()
+
+        # 反向断言：原始路径字符串不出现在异常消息中
+        assert sensitive_path not in str(exc_info.value)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_maintenance_shell_json_parse_error_stdout_sanitized(self, maintenance_service) -> None:
+        """T3: maintenance_shell JSON 解析失败时异常消息中 stdout 路径被脱敏。"""
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        sensitive_path = r"D:\workspace\Quantitative Trading\pgdata\socket"
+        stdout = f"not-json path={sensitive_path}"
+        with _patch_run_async(0, stdout):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="JSON parse failed") as exc_info:
+                await maintenance_service.maintenance_shell()
+
+        # 反向断言：原始路径字符串不出现在异常消息中
+        assert sensitive_path not in str(exc_info.value)

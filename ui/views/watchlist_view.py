@@ -17,7 +17,6 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
-from ui.views.viewport_state import ViewportState
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +90,12 @@ def _build_watchlist_row(
 @ft.component
 def WatchlistView(
     active: bool = True,
-    viewport: ViewportState | None = None,
 ) -> ft.Container:
     """关注列表视图 (声明式).
 
     Args:
         active: 是否为当前激活视图 (控制是否加载数据)
-        viewport: AppLayout 下发的窗口尺寸快照 (当前未使用, YAGNI)
     """
-    _ = viewport
     state, vm = use_viewmodel(factory=lambda: WatchlistViewModel())
 
     # i18n / theme 订阅
@@ -191,6 +187,6 @@ def WatchlistView(
             spacing=12,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
-        **AppStyles.dashboard_card(padding=16),
+        **AppStyles.dashboard_card(padding=AppStyles.SPACING_LG),
         expand=True,
     )

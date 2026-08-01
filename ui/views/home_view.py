@@ -34,7 +34,6 @@ from ui.pubsub_topics import CACHE_CLEARED_TOPIC, TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel
-from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -46,7 +45,6 @@ logger = logging.getLogger(__name__)
 def HomeView(
     on_run_strategy: Callable[[], None] | None = None,
     active: bool = True,
-    viewport: ViewportState | None = None,
 ) -> ft.Container:
     """Home dashboard view (declarative).
 
@@ -59,13 +57,9 @@ def HomeView(
     Args:
         on_run_strategy: 保留参数兼容 app_layout 命令式调用 (Phase F.4 重写后移除);
             当前 HomeView 不使用此回调 (与原命令式实现一致 —— 参数被存储但从未调用)
-        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
-            当前未使用 (YAGNI, 后续任务改造内部布局时消费)
     """
     # 兼容 app_layout 命令式调用, 当前不使用 (原命令式实现亦未调用)
     _ = on_run_strategy
-    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
-    _ = viewport
 
     logger.info("[HomeView] construction start, active=%s", active)
 

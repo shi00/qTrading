@@ -7,6 +7,7 @@ import pandas as pd
 import sqlalchemy as sa
 import sqlparse
 
+from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 
@@ -70,7 +71,7 @@ class DataExplorerQueryClient:
                 try:
                     cls._shared_engine.dispose()
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("[DataExplorerQueryClient] close_all() failed: %s", e)
+                    logger.warning("[DataExplorerQueryClient] close_all() failed: %s", safe_error(e))
                 cls._shared_engine = None
 
     def _ensure_engine(self):
@@ -125,7 +126,7 @@ class DataExplorerQueryClient:
             insp = sa.inspect(self._engine)
             return sorted(insp.get_table_names())
         except Exception as e:
-            logger.error("Error fetching tables: %s", e)
+            logger.error("Error fetching tables: %s", safe_error(e))
             return []
 
     def get_table_schema(self, table_name: str):
@@ -146,7 +147,7 @@ class DataExplorerQueryClient:
                 )
             return columns
         except Exception as e:
-            logger.error("Error fetching schema for %s: %s", table_name, e)
+            logger.error("Error fetching schema for %s: %s", table_name, safe_error(e))
             return []
 
     def get_table_count(self, table_name: str, filters: list | None = None):
@@ -172,7 +173,7 @@ class DataExplorerQueryClient:
                 result = conn.execute(stmt)
                 return result.scalar() or 0
         except Exception as e:
-            logger.error("Error counting rows for %s: %s", table_name, e)
+            logger.error("Error counting rows for %s: %s", table_name, safe_error(e))
             return 0
 
     def get_latest_trade_date(self) -> str | None:
@@ -197,7 +198,7 @@ class DataExplorerQueryClient:
                     return None
                 return str(val)
         except Exception as e:
-            logger.error("Error fetching latest trade_date: %s", e)
+            logger.error("Error fetching latest trade_date: %s", safe_error(e))
             return None
 
     def _validate_table_name(self, table_name: str):
@@ -287,7 +288,7 @@ class DataExplorerQueryClient:
                 return pd.DataFrame(rows, columns=cols)
 
         except Exception as e:
-            logger.error("Error querying table %s: %s", table_name, e)
+            logger.error("Error querying table %s: %s", table_name, safe_error(e))
             return pd.DataFrame()
 
     def execute_sql(self, sql_query: typing.Any):

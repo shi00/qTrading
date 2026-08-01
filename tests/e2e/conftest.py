@@ -613,7 +613,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
 
 
 async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None:
-    """Function 级 teardown：失败时保存 trace + screenshot，关闭 context。"""
+    """Function 级 teardown：失败时保存 trace + screenshot，防御性清理残留对话框，关闭 context。"""
     pw_context = fp.get_context()
     if not pw_context:
         return
@@ -624,6 +624,15 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
             name = request.node.name
             await page.screenshot(path=str(ARTIFACT_DIR / f"{name}.png"))
             await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
+            # Phase 9.1: 失败时防御性清理残留 AlertDialog
+            # 按 Escape 关闭可能残留的对话框，防止 Flet 子进程 session 级
+            # dialog overlay state 跨用例污染（BrowserContext 隔离 DOM，
+            # 但 Flet 子进程 session 级共享，overlay 引用残留可能影响后续用例渲染）
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(200)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[e2e_teardown] Escape cleanup failed: %s", e)
         else:
             await context.tracing.stop()
     except asyncio.CancelledError:

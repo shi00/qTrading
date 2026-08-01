@@ -134,7 +134,7 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
             ],
             spacing=5,
         ),
-        padding=16,
+        padding=AppStyles.SPACING_LG,
         bgcolor=AppColors.SURFACE,
         border_radius=4,
         border=ft.Border.all(1, AppColors.BORDER),

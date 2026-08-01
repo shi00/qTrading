@@ -188,7 +188,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         label=I18n.get("failover_select_provider"),
         options=provider_options,
         value=state.dialog_provider or None,
-        width=400,
+        width=AppStyles.CONTROL_WIDTH_LG,
         on_select=lambda e: vm.update_dialog_provider(e.control.value) if e.control.value else None,
         disabled=state.dialog_is_edit,
     )
@@ -197,7 +197,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         label=I18n.get("failover_select_model"),
         options=model_options,
         value=state.dialog_model or None,
-        width=400,
+        width=AppStyles.CONTROL_WIDTH_LG,
         on_select=lambda e: vm.update_dialog_model(e.control.value) if e.control.value else None,
         visible=not state.dialog_custom_model,
     )
@@ -205,7 +205,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     custom_model_input = ft.TextField(
         label=I18n.get("llm_custom_model"),
         value=state.dialog_custom_model,
-        width=400,
+        width=AppStyles.CONTROL_WIDTH_LG,
         hint_text=I18n.get("failover_custom_model_hint"),
         on_change=lambda e: vm.update_dialog_custom_model(e.control.value),
     )
@@ -213,7 +213,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     base_url_input = ft.TextField(
         label=I18n.get("failover_base_url_optional"),
         value=state.dialog_base_url,
-        width=400,
+        width=AppStyles.CONTROL_WIDTH_LG,
         hint_text=I18n.get("failover_base_url_hint"),
         on_change=lambda e: vm.update_dialog_base_url(e.control.value),
     )
@@ -221,7 +221,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     api_key_input = ft.TextField(
         label=I18n.get("llm_api_key"),
         value=state.dialog_api_key,
-        width=400,
+        width=AppStyles.CONTROL_WIDTH_LG,
         password=True,
         can_reveal_password=True,
         on_change=lambda e: vm.update_dialog_api_key(e.control.value),
@@ -418,7 +418,7 @@ def FailoverConfigPanel(
                     color=AppColors.TEXT_HINT,
                     italic=True,
                 ),
-                padding=20,
+                padding=AppStyles.SPACING_XL,
                 alignment=ft.Alignment.CENTER,
             )
         ]

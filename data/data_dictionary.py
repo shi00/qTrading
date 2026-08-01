@@ -855,6 +855,8 @@ def validate_schema_definitions(strict: bool = False):
     import logging
     import os
 
+    from data.sync.base import safe_error
+
     logger = logging.getLogger(__name__)
 
     try:
@@ -914,9 +916,9 @@ def validate_schema_definitions(strict: bool = False):
             raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
 
     except ValueError as e:
-        logger.error("[DataDict] Schema validation failed in strict mode: %s", e)
+        logger.error("[DataDict] Schema validation failed in strict mode: %s", safe_error(e))
         raise
     except Exception as e:
-        logger.error("[DataDict] ORM validation failed: %s", e)
+        logger.error("[DataDict] ORM validation failed: %s", safe_error(e))
         if strict:
             raise
