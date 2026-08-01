@@ -263,6 +263,28 @@ def _reset_mock_keyring_store() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_context_page() -> Iterator[None]:
+    """每个测试前后均清理 _context_page ContextVar，防止 FakePage 跨测试泄漏。
+
+    ``attach_fake_page``（见 ``tests/unit/ui/component_renderer.py``）调用
+    ``_context_page.set(FakePage)`` 修改 ContextVar，若不清理会跨测试泄漏，
+    导致后续测试中 ``ft.context.page`` 不抛 RuntimeError 而返回残留 FakePage。
+
+    前置清理（yield 前）作为纵深防御：即使前序测试的后置清理因 Context 边界
+    （如 asyncio.run 创建新 Context）未生效，本测试仍以干净状态启动。
+    后置清理（yield 后）保持原有行为。
+
+    提升到项目根 conftest：覆盖 ``tests/unit/`` 非_ui/ 目录下使用
+    ``attach_fake_page`` 的测试（如 ``test_main_prepare_db_retry.py``）。
+    """
+    from flet.controls.context import _context_page
+
+    _context_page.set(None)
+    yield
+    _context_page.set(None)
+
+
+@pytest.fixture(autouse=True)
 def mock_external_services(request: pytest.FixtureRequest) -> Iterator[None]:
     """
     Globally mock external network and DB calls for unit tests to prevent CI timeouts.

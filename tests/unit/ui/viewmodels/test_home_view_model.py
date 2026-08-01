@@ -72,3 +72,59 @@ class TestSetLoading:
         vm.set_loading(True)
         vm.set_loading(False)
         assert vm.state.is_loading is False
+
+
+class TestDetectAiTagged:
+    """Task 8.1: _detect_ai_tagged 检测新闻是否被 AI 打标."""
+
+    def test_empty_tags_and_source_returns_false(self):
+        from ui.viewmodels.home_view_model import _detect_ai_tagged
+
+        assert _detect_ai_tagged("", "") is False
+        assert _detect_ai_tagged("", None) is False
+        assert _detect_ai_tagged(None, "") is False
+
+    def test_ai_prefix_tag_returns_true(self):
+        from ui.viewmodels.home_view_model import _detect_ai_tagged
+
+        assert _detect_ai_tagged("AI_LLM_科技", "") is True
+        assert _detect_ai_tagged("AI,科技", "") is True
+        assert _detect_ai_tagged("ai,科技", "") is True
+
+    def test_non_ai_tag_returns_false(self):
+        from ui.viewmodels.home_view_model import _detect_ai_tagged
+
+        assert _detect_ai_tagged("科技,金融", "") is False
+        assert _detect_ai_tagged("利好", "") is False
+
+    def test_ai_source_returns_true(self):
+        from ui.viewmodels.home_view_model import _detect_ai_tagged
+
+        assert _detect_ai_tagged("", "AI") is True
+        assert _detect_ai_tagged("", "ai") is True
+
+    def test_non_ai_source_returns_false(self):
+        from ui.viewmodels.home_view_model import _detect_ai_tagged
+
+        assert _detect_ai_tagged("", "CLS") is False
+        assert _detect_ai_tagged("", "Tushare") is False
+
+
+class TestNewsRowAiTagged:
+    """Task 8.1: NewsRow.is_ai_tagged 通过 _news_item_to_row 正确设置."""
+
+    def test_news_item_with_ai_tag_sets_is_ai_tagged(self):
+        from ui.viewmodels.home_view_model import _news_item_to_row
+
+        item = {"content": "test", "tags": "AI_LLM_科技", "source": "CLS"}
+        with patch("data.cache.cache_manager.CacheManager.normalize_news_item", return_value=item):
+            row = _news_item_to_row(item)
+        assert row.is_ai_tagged is True
+
+    def test_news_item_without_ai_tag(self):
+        from ui.viewmodels.home_view_model import _news_item_to_row
+
+        item = {"content": "test", "tags": "科技", "source": "CLS"}
+        with patch("data.cache.cache_manager.CacheManager.normalize_news_item", return_value=item):
+            row = _news_item_to_row(item)
+        assert row.is_ai_tagged is False

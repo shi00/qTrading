@@ -484,10 +484,13 @@ class _FakeScreenerViewModel:
 
 
 def _make_fake_page() -> FakePage:
-    """创建带 run_task / show_toast 的 fake page."""
+    """创建带 run_task / show_toast / pubsub 的 fake page."""
     page = FakePage()
     page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
     page.show_toast = MagicMock()  # type: ignore[attr-defined]
+    # Task 8.3: backtest 跳转按钮通过 page.pubsub.send_all_on_topic 广播导航
+    page.pubsub = MagicMock()  # type: ignore[attr-defined]
+    page.pubsub.send_all_on_topic = MagicMock()  # type: ignore[attr-defined]
     return page
 
 
@@ -909,6 +912,107 @@ class TestOnRunClick:
         with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
         assert isinstance(exc_info.value, asyncio.CancelledError)
+
+
+# ============================================================================
+# Handler 测试: _on_backtest_click_sync (Task 8.3: 选股→回测参数透传)
+# ============================================================================
+
+
+class TestOnBacktestClick:
+    """_on_backtest_click_sync (L453-461): 无策略早返回 / 成功跳转 / page=None 容错.
+
+    覆盖 L455-461:
+    - L455: UILogger.log_action("ScreenerView", "Click", "btn_jump_backtest")
+    - L456-457: if not state.selected_strategy: return
+    - L458: set_pending_prefill(strategy_key, params=dict(params_ref.current or {}))
+    - L459-461: page 可用 → page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
+    """
+
+    def test_no_strategy_early_return(self, screener_view_env) -> None:
+        """L456-457: state.selected_strategy=None → 早返回, 不调 set_pending_prefill."""
+        env = screener_view_env
+        page = env["page"]
+
+        from ui.viewmodels.backtest_view_model import _pending_prefill
+
+        _pending_prefill.clear()
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        # state.selected_strategy 默认 None
+        buttons = _get_buttons(env)
+        backtest_btn = next(b for b in buttons if isinstance(b, ft.Button) and b.icon == ft.Icons.SCIENCE)
+        _invoke(backtest_btn.on_click, _make_event())
+
+        # 验证: 未调用 set_pending_prefill (_pending_prefill 仍为空)
+        assert not _pending_prefill
+        # 验证: 未广播导航
+        assert not page.pubsub.send_all_on_topic.called
+
+    def test_with_strategy_sets_prefill_and_navigates(self, screener_view_env) -> None:
+        """L458-461: 选中策略 → set_pending_prefill + pubsub 广播导航到 backtest."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        from ui.viewmodels.backtest_view_model import _pending_prefill, consume_pending_prefill
+        from ui.views.screener_view import TOPIC_NAVIGATE
+
+        _pending_prefill.clear()
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        # 设置选中策略
+        fake_vm._set_state(selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+
+        buttons = _get_buttons(env)
+        backtest_btn = next(b for b in buttons if isinstance(b, ft.Button) and b.icon == ft.Icons.SCIENCE)
+        _invoke(backtest_btn.on_click, _make_event())
+
+        # 验证: set_pending_prefill 被调用 (_pending_prefill 含 strategy_key + params)
+        assert _pending_prefill.get("strategy_key") == "value"
+        assert _pending_prefill.get("params") == {}
+
+        # 验证: pubsub 广播导航到 backtest
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "backtest")
+
+        # 清理: consume_pending_prefill 清空 stash, 避免污染其他测试
+        consume_pending_prefill()
+
+    def test_page_none_no_pubsub_call(self, screener_view_env) -> None:
+        """L459-461: page=None → set_pending_prefill 仍执行, 但不调 pubsub."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        from flet.controls.context import _context_page
+
+        from ui.viewmodels.backtest_view_model import _pending_prefill, consume_pending_prefill
+
+        _pending_prefill.clear()
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        # 设置选中策略
+        fake_vm._set_state(selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+
+        # 模拟 page 不可用
+        saved = _context_page.get()
+        _context_page.set(None)
+        try:
+            buttons = _get_buttons(env)
+            backtest_btn = next(b for b in buttons if isinstance(b, ft.Button) and b.icon == ft.Icons.SCIENCE)
+            _invoke(backtest_btn.on_click, _make_event())
+        finally:
+            _context_page.set(saved)
+
+        # 验证: set_pending_prefill 仍执行 (page=None 不影响 stash)
+        assert _pending_prefill.get("strategy_key") == "value"
+        # 验证: pubsub 未被调用 (page=None 时早返回)
+        assert not page.pubsub.send_all_on_topic.called
+
+        # 清理
+        consume_pending_prefill()
 
 
 # ============================================================================
@@ -2016,6 +2120,42 @@ class TestBuildLogCard:
         # 验证 stream_cards 为空时不渲染卡片
         fake_vm = env["fake_vm"]
         assert len(fake_vm._state.stream_cards) == 0
+
+
+class TestStreamCardsTruncatedHint:
+    """Task 8.4: 卡片截断提示 (L1411-1420).
+
+    覆盖 L1413: state.stream_cards_truncated=True → 追加 ft.Text 截断提示.
+    截断提示含 ``ai_cards_truncated_hint`` i18n key, format(max=10).
+    """
+
+    def test_truncated_shows_hint_text(self, screener_view_env) -> None:
+        """L1413: stream_cards_truncated=True → 渲染含 ai_cards_truncated_hint 的 Text."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 设置截断标志 (REALTIME 模式默认, 无需切换)
+        fake_vm._set_state(stream_cards_truncated=True, strategies_loaded=True)
+        _rerender(env)
+
+        # 验证: 渲染树含 ai_cards_truncated_hint 文本 (mock I18n.get 返回 i18n[key])
+        texts = _get_texts(env)
+        hint_texts = [t for t in texts if "ai_cards_truncated_hint" in str(t.value)]
+        assert len(hint_texts) >= 1, "应渲染截断提示文本"
+
+    def test_not_truncated_no_hint_text(self, screener_view_env) -> None:
+        """L1413: stream_cards_truncated=False → 不渲染截断提示."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 确保截断标志为 False (默认值)
+        fake_vm._set_state(stream_cards_truncated=False, strategies_loaded=True)
+        _rerender(env)
+
+        # 验证: 渲染树不含 ai_cards_truncated_hint 文本
+        texts = _get_texts(env)
+        hint_texts = [t for t in texts if "ai_cards_truncated_hint" in str(t.value)]
+        assert len(hint_texts) == 0, "不应渲染截断提示文本"
 
 
 class TestBuildHistoryTree:

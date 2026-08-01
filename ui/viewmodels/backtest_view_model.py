@@ -30,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 TASK_NAME_PREFIX = "backtest"
 
+# Task 8.3: 选股→回测参数透传 — 模块级 pending prefill stash.
+# 选股页跳转前写入, 回测页 mount 时 consume_pending_prefill() 读取并清空.
+# 单次消费语义, 无持久化 (YAGNI: 跨视图临时传递, 不引入全局状态服务).
+_pending_prefill: dict[str, object] = {}
+
+
+def set_pending_prefill(strategy_key: str, params: dict | None = None) -> None:
+    """选股页调用: 暂存待透传的 strategy_key + params (Task 8.3)."""
+    _pending_prefill.clear()
+    _pending_prefill["strategy_key"] = strategy_key
+    _pending_prefill["params"] = dict(params) if params else {}
+
+
+def consume_pending_prefill() -> dict[str, object] | None:
+    """回测页 mount 时调用: 读取并清空 pending prefill (单次消费).
+
+    Returns:
+        含 strategy_key/params 的 dict, 或 None 表示无待消费 prefill.
+    """
+    if not _pending_prefill:
+        return None
+    data = dict(_pending_prefill)
+    _pending_prefill.clear()
+    return data
+
 
 @dataclass(frozen=True, eq=False)
 class BacktestState:

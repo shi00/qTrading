@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import flet as ft
 import pandas as pd
 import pytest
 
@@ -354,7 +355,6 @@ class TestHomeViewRuntime:
 
     def test_mount_returns_container(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
         """挂载 HomeView 不抛异常, 返回 ft.Container."""
-        import flet as ft
 
         from ui.views.home_view import HomeView
 
@@ -470,7 +470,6 @@ class TestHomeViewRuntime:
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:
         """渲染输出 header 含 title Text + IconButton (refresh)."""
-        import flet as ft
 
         from ui.views.home_view import HomeView
 
@@ -507,7 +506,6 @@ class TestHomeViewRuntime:
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:
         """market_data.stale=True 时 date_text 含 updating 后缀."""
-        import flet as ft
 
         from ui.views.home_view import HomeView
 
@@ -526,10 +524,10 @@ class TestHomeViewRuntime:
         # 找到 date Text (header 倒数第二个控件, 最后是 IconButton)
         date_text = header.controls[-2]
         assert isinstance(date_text, ft.Text)
-        # stale=True 时 value 应含 updating 后缀 (mock_i18n_state 用真实 I18nState 翻译)
+        # Task 8.1: stale=True 时显示「数据缓存于」明确告知用户当前为缓存快照
         from ui.i18n import I18n
 
-        assert I18n.get("home_data_updating") in date_text.value
+        assert I18n.get("market_data_cached_at").split("{")[0] in date_text.value
 
     def test_refresh_clicked_invokes_run_task(
         self,
@@ -995,3 +993,173 @@ class TestHomeViewExceptionPaths:
 
         # 不抛异常即通过; unsubscribe_topic 未被调用 (page 不可用)
         assert not page.pubsub.unsubscribe_topic.called
+
+
+# ============================================================================
+# Task 8.1: _on_view_stock 测试 (新闻「查看个股」跳转)
+# ============================================================================
+
+
+class TestOnViewStockNavigation:
+    """L117-128: _on_view_stock 新闻「查看个股」跳转 PubSub 广播测试.
+
+    覆盖:
+    - L122: _ = stock_code (参数消费占位)
+    - L123-124: try: page = ft.context.page
+    - L125-126: if page is not None: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")
+    - L127-128: except RuntimeError: logger.debug
+
+    实现方式: mock NewsFeed 捕获 on_view_stock 回调 (子组件在渲染中被展开为 ft.Control,
+    无法从渲染树提取 Component 描述符的 kwargs, 改用 mock 捕获调用契约).
+    """
+
+    def test_on_view_stock_broadcasts_navigate_to_screener(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """L125-126: page 可用时 → pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")."""
+        import ui.views.home_view as home_view_module
+        from ui.views.home_view import TOPIC_NAVIGATE, HomeView
+
+        # Mock NewsFeed 捕获 on_view_stock 回调
+        captured_props: dict = {}
+
+        def _fake_news_feed(**kwargs: Any) -> Any:
+            captured_props.update(kwargs)
+            return MagicMock(name="NewsFeed")
+
+        monkeypatch.setattr(home_view_module, "NewsFeed", _fake_news_feed)
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        on_view_stock = captured_props.get("on_view_stock")
+        assert on_view_stock is not None, "NewsFeed 应含 on_view_stock 回调"  # noqa: weak-assertion 后续 L1044 有 assert_called_once_with 强断言
+
+        # 触发回调 (模拟用户点击新闻中「查看个股」按钮)
+        page.pubsub.send_all_on_topic.reset_mock()
+        on_view_stock("600000")
+
+        # 验证: pubsub 广播导航到 screener tab
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener")
+
+    def test_on_view_stock_page_none_logs_debug(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """L127-128: page 不可用 (ft.context.page 抛 RuntimeError) → except 守卫, 不抛异常.
+
+        覆盖 except RuntimeError: logger.debug 分支.
+        """
+        from flet.controls.context import _context_page
+
+        import ui.views.home_view as home_view_module
+        from ui.views.home_view import HomeView
+
+        captured_props: dict = {}
+
+        def _fake_news_feed(**kwargs: Any) -> Any:
+            captured_props.update(kwargs)
+            return MagicMock(name="NewsFeed")
+
+        monkeypatch.setattr(home_view_module, "NewsFeed", _fake_news_feed)
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        on_view_stock = captured_props.get("on_view_stock")
+        assert on_view_stock is not None
+
+        # 模拟 page 不可用 (ft.context.page 抛 RuntimeError)
+        page.pubsub.send_all_on_topic.reset_mock()
+        token = _context_page.set(None)
+        try:
+            on_view_stock("600000")  # 不应抛异常
+        finally:
+            _context_page.reset(token)
+
+        # pubsub 未被调用 (page 不可用, 早返回)
+        assert not page.pubsub.send_all_on_topic.called
+
+
+class TestNavigateToDataSource:
+    """L104-115: _navigate_to_data_source ErrorState CTA 跳转测试.
+
+    覆盖:
+    - L110-111: try: page = ft.context.page
+    - L112-113: if page is not None: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings")
+    - L114-115: except RuntimeError: logger.debug
+    """
+
+    def test_navigate_to_data_source_broadcasts_navigate_to_settings(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """L112-113: load_error 状态 + page 可用 → ErrorState CTA 广播导航到 settings."""
+        import ui.views.home_view as home_view_module
+        from ui.views.home_view import TOPIC_NAVIGATE, HomeView
+
+        # 设置 load_error 触发 ErrorState 渲染
+        mock_home_vm._set_state(load_error="test error")
+
+        # Mock ErrorState 捕获 on_cta 回调
+        captured_props: dict = {}
+
+        def _fake_error_state(**kwargs: Any) -> Any:
+            captured_props.update(kwargs)
+            return MagicMock(name="ErrorState")
+
+        monkeypatch.setattr(home_view_module, "ErrorState", _fake_error_state)
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        on_cta = captured_props.get("on_cta")
+        assert on_cta is not None, "ErrorState 应含 on_cta 回调"  # noqa: weak-assertion 后续 L1127 有 assert_called_once_with 强断言
+
+        # 触发 CTA 回调
+        page.pubsub.send_all_on_topic.reset_mock()
+        on_cta()
+
+        # 验证: pubsub 广播导航到 settings tab
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings")
+
+    def test_navigate_to_data_source_page_none_logs_debug(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """L114-115: page 不可用 → except RuntimeError 守卫, 不抛异常."""
+        from flet.controls.context import _context_page
+
+        import ui.views.home_view as home_view_module
+        from ui.views.home_view import HomeView
+
+        mock_home_vm._set_state(load_error="test error")
+
+        captured_props: dict = {}
+
+        def _fake_error_state(**kwargs: Any) -> Any:
+            captured_props.update(kwargs)
+            return MagicMock(name="ErrorState")
+
+        monkeypatch.setattr(home_view_module, "ErrorState", _fake_error_state)
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        on_cta = captured_props.get("on_cta")
+        assert on_cta is not None
+
+        # 模拟 page 不可用
+        page.pubsub.send_all_on_topic.reset_mock()
+        token = _context_page.set(None)
+        try:
+            on_cta()  # 不应抛异常
+        finally:
+            _context_page.reset(token)
+
+        assert not page.pubsub.send_all_on_topic.called

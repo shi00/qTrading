@@ -219,6 +219,12 @@ def _build_row(
         on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
         "GestureDetector should have at least one event handler defined" 警告覆盖行文本
         的语义节点 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖导致 E2E 失败)。
+
+        方案 E/G (Container.on_click + MergeSemantics) 已被证伪并回退 (PR #373):
+        Container.on_click 在 Flutter 端生成 InkWell, 其语义合并会将子树所有 Text 语义
+        吸收进单个 role=button 节点且 label 为空 (E2E DOM dump: node-111 text='' aria=''),
+        导致行文本从语义树中彻底消失, get_by_text 无法匹配. GestureDetector 不合并子树
+        语义, Text 节点独立存在, 行文本保持可见.
     """
     inner = ft.Container(
         height=ROW_HEIGHT,

@@ -34,7 +34,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
-from ui.components.state_views import ErrorState
+from ui.components.state_views import EmptyState, ErrorState
 from ui.components.toast_manager import open_export_folder
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
@@ -598,6 +598,19 @@ def TableViewerTab(
         )
     elif is_loading:
         grid_content = loading_widget
+    elif state.table_columns and state.total_rows == 0:
+        # Task 8.5: 数据页空态引导 — 区分「表无数据」与「筛选无结果」
+        filter_applied = bool(state.filter_col and state.filter_val)
+        if filter_applied:
+            grid_content = EmptyState(
+                icon=ft.Icons.FILTER_ALT_OFF,
+                title=I18n.get("empty_filter_result"),
+            )
+        else:
+            grid_content = EmptyState(
+                icon=ft.Icons.INBOX,
+                title=I18n.get("empty_table_hint"),
+            )
     elif state.table_columns:
         grid_content = PaginatedTable(
             rows=rows_data,

@@ -111,6 +111,8 @@ class ScreenerState:
     logs: tuple[LogEntry, ...] = ()
     # AI streaming/placeholder cards (state-driven, §3.2 MVVM)
     stream_cards: tuple[StreamCard, ...] = ()
+    # Task 8.4: 卡片截断提示 — True 表示已有卡片被 _MAX_LOG_CARDS 截断
+    stream_cards_truncated: bool = False
     # Strategy selection (R.2.1: 内聚到 VM, 消除 View 双源真相)
     selected_strategy: str | None = None
     tier_hint: str | None = None
@@ -945,14 +947,19 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     def clear_stream_cards(self) -> None:
         """Clear all stream cards and buffers (called on new run)."""
         self._stream_buffers.clear()
-        self._set_state(stream_cards=())
+        self._set_state(stream_cards=(), stream_cards_truncated=False)
 
     def start_stream_card(self, name: str, is_analyzing: bool = False) -> None:
         """Create a new stream/placeholder card."""
         self._stream_buffers[name] = {"reasoning": "", "content": "", "last_flush": 0.0, "pending": False}
         card = StreamCard(name=name, is_analyzing=is_analyzing)
+        # Task 8.4: 检测截断 — 新增卡片导致超出 _MAX_LOG_CARDS 时标记 truncated
+        truncated = len(self._state.stream_cards) + 1 > _MAX_LOG_CARDS
         new_cards = (self._state.stream_cards + (card,))[-_MAX_LOG_CARDS:]
-        self._set_state(stream_cards=new_cards)
+        self._set_state(
+            stream_cards=new_cards,
+            stream_cards_truncated=self._state.stream_cards_truncated or truncated,
+        )
 
     def append_stream_chunk(self, name: str, chunk: str, is_reasoning: bool) -> None:
         """Accumulate LLM chunk, throttle-flush to state."""
