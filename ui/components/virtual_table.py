@@ -208,7 +208,7 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Control:
-    """构建单个行 (方案 G: MergeSemantics 递归合并子树 Text label).
+    """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
@@ -216,29 +216,15 @@ def _build_row(
         on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
 
     Note:
-        方案 G: 用 ft.MergeSemantics 包裹行 Container, 递归合并子树所有 Text label.
+        on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
+        "GestureDetector should have at least one event handler defined" 警告覆盖行文本
+        的语义节点 (PR #392 回归修复: data_explorer 表格行文本被警告文本覆盖导致 E2E 失败)。
 
-        根因 (PR #373 前序修复 85beefb0/f0c522d5 均失败):
-        - 行 Container 的 on_click + ink=True 在 Flutter 端生成 Material > InkWell,
-          InkWell 内部使用 MergeSemantics 合并子节点语义. 但 InkWell 的 MergeSemantics
-          只合并直接子节点 (Row), 不递归合并 Row 内多层嵌套的 Text label,
-          导致 button 节点 text='' (DOM dump 证实: id=flt-semantic-node-111 role=button text='').
-        - 85beefb0 用 ft.Semantics(label=row_label, button=True, exclude_semantics=True) 包裹,
-          未设置 container=True, label 无独立节点可附着 -> 失败.
-        - f0c522d5 补充 container=True 创建独立节点, 但 Flet Semantics.label 属性在
-          container=True + exclude_semantics=True 模式下未映射到 Flutter Web DOM 的
-          text/aria-label (DOM dump: role=button text='' aria='') -> 失败.
-
-        对比: 表头 _build_header 的 on_click 设置在内层 Container(直接包含 Text) 上,
-        InkWell 的 MergeSemantics 合并直接子节点 Text 的 label -> button 节点 text='name (名称)' 成功.
-
-        修复: ft.MergeSemantics(content=inner). Flet MergeSemantics (对应 Flutter
-        MergeSemantics widget) 递归合并子树所有语义到一个节点 (Flet 源码
-        merge_semantics.py: "Causes all the semantics of the subtree rooted at this
-        node to be merged into one node"), 包括 Row 内多层嵌套的 Text label.
-        outer MergeSemantics + inner InkWell(MergeSemantics) 双层合并, 最终 button 节点
-        text 包含所有 Text label (如 "平安银行 000001.SZ 银行..."), Playwright get_by_text
-        可匹配 "平安银行". Container 的 on_click 事件不受影响 (事件处理与语义树独立, 基于命中测试).
+        方案 E/G (Container.on_click + MergeSemantics) 已被证伪并回退 (PR #373):
+        Container.on_click 在 Flutter 端生成 InkWell, 其语义合并会将子树所有 Text 语义
+        吸收进单个 role=button 节点且 label 为空 (E2E DOM dump: node-111 text='' aria=''),
+        导致行文本从语义树中彻底消失, get_by_text 无法匹配. GestureDetector 不合并子树
+        语义, Text 节点独立存在, 行文本保持可见.
     """
     inner = ft.Container(
         height=ROW_HEIGHT,
@@ -250,10 +236,10 @@ def _build_row(
     )
     if on_row_click is None:
         return inner
-    inner.on_click = _make_row_click_handler(on_row_click, row_data)
-    # 方案 G: MergeSemantics 递归合并子树 Text label 到 button 节点
-    # 解决 InkWell 的 MergeSemantics 只合并直接子节点 (Row) 不递归的问题
-    return ft.MergeSemantics(content=inner)
+    return ft.GestureDetector(
+        content=inner,
+        on_tap=_make_row_click_handler(on_row_click, row_data),
+    )
 
 
 @ft.component

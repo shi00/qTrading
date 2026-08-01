@@ -354,112 +354,83 @@ class TestBuildCells:
 
 
 class TestBuildRow:
-    """_build_row 纯函数测试：单行构建 + on_row_click 绑定 (方案 F: Semantics 包裹).
+    """_build_row 纯函数测试：单行构建 + on_row_click 绑定 (方案 D: on_row_click 非空时 GestureDetector 包裹).
 
-    返回类型分支 (方案 F, E2E 修复 PR #373):
-    - on_row_click=None → 直接返回 Container (子 Text 提供语义, 无需 button)
-    - on_row_click 非 None → 返回 Semantics(button=True, label=行内文本, exclude_semantics=True)
-      包裹 Container(ink=True, on_click=...). Container 的 InkWell MergeSemantics 只合并
-      直接子节点(Row)语义不会递归到 Text, 导致 button 节点 text='' (E2E 找不到 "平安银行").
-      Semantics 提供 label 作为 button 节点 text, exclude_semantics 排除 InkWell 空 button.
+    返回类型分支 (PR #392 回归修复):
+    - on_row_click=None → 直接返回 Container (避免 GestureDetector 无事件处理器警告覆盖语义节点)
+    - on_row_click 非 None → 返回 GestureDetector 包裹 Container (生成 flt-tappable 语义属性)
     """
 
     def test_returns_container_when_no_click_handler(self):
-        """on_row_click=None 时直接返回 Container (子 Text 提供语义, 无需 button)."""
+        """on_row_click=None 时直接返回 Container (PR #392 回归修复: 避免 GestureDetector 警告)."""
         row = _build_row(5, _make_row_data(), _make_columns(), 800, None)
         assert isinstance(row, ft.Container)
         assert row.height == ROW_HEIGHT
         assert row.width == 800
         assert row.ink is True
 
-    def test_returns_semantics_with_label_when_click_handler_set(self):
-        """方案 F: on_row_click 非空时返回 Semantics(button=True, label=行内文本拼接).
-
-        Semantics 的 label 成为 flt-semantic-node 的 text, Playwright get_by_text 可匹配.
-        exclude_semantics=True 排除 Container InkWell 的空 button 语义.
-        """
+    def test_returns_gesture_detector_with_inner_container(self):
+        """on_row_click 非空时返回 GestureDetector, 内部包裹 Container (生成 flt-tappable 语义属性)."""
         on_row_click = MagicMock()
         row = _build_row(5, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert row.button is True
-        assert row.exclude_semantics is True
-        # label 为行内文本拼接 (ts_code + name + pct_chg + price)
-        assert row.label is not None
-        assert "Test Stock" in row.label
-        assert "600000.SH" in row.label
-        # content 为 Container(ink=True, on_click=...)
+        assert isinstance(row, ft.GestureDetector)
         inner = row.content
         assert isinstance(inner, ft.Container)
+        # 方案 D: 不再设置 left/top (由 Column 线性布局)
         assert inner.height == ROW_HEIGHT
         assert inner.width == 800
         assert inner.ink is True
-        assert callable(inner.on_click)
-
-    def test_semantics_label_contains_all_column_values(self):
-        """方案 F: Semantics.label 包含所有列的值 (E2E get_by_text 可匹配任意列文本)."""
-        on_row_click = MagicMock()
-        row_data = _make_row_data()
-        row = _build_row(0, row_data, _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert row.label is not None
-        # 所有列值都在 label 中
-        for col in _make_columns():
-            val = str(row_data.get(col["id"], ""))
-            assert val in row.label
 
     def test_bgcolor_from_app_styles(self):
         on_row_click = MagicMock()
         row = _build_row(3, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert row.content.bgcolor == AppStyles.data_table_row(3)
+        inner = row.content
+        assert inner.bgcolor == AppStyles.data_table_row(3)
 
     def test_content_is_row_of_cells(self):
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
         inner = row.content
         assert isinstance(inner.content, ft.Row)
         assert len(inner.content.controls) == 4
 
-    def test_with_on_row_click_attaches_click_handler(self):
-        """方案 F: on_row_click 非空时 Container.on_click 为 callable (Semantics.content)."""
+    def test_with_on_row_click_attaches_tap_handler(self):
+        """方案 D: on_row_click 非空时 GestureDetector.on_tap 为 callable."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert callable(row.content.on_click)
+        assert callable(row.on_tap)
 
     def test_on_row_click_handler_invokes_callback_with_row_data(self):
-        """方案 F: Container.on_click 触发时调用 on_row_click(row_data)."""
+        """方案 D: GestureDetector.on_tap 触发时调用 on_row_click(row_data)."""
         on_row_click = MagicMock()
         data = _make_row_data()
         row = _build_row(0, data, _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert callable(row.content.on_click)
-        row.content.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        assert callable(row.on_tap)
+        row.on_tap(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_tap as 0-arg, but runtime passes event]
         on_row_click.assert_called_once_with(data)
 
     def test_is_hovered_false_uses_odd_even_color(self):
         """P2-8 MAJ-2: is_hovered=False (默认) → bgcolor 为 ODD/EVEN 色 (非 TABLE_ROW_HOVER)."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click)
-        assert isinstance(row, ft.Semantics)
-        assert row.content.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
-        assert row.content.bgcolor != AppColors.TABLE_ROW_HOVER
+        inner = row.content
+        assert inner.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
+        assert inner.bgcolor != AppColors.TABLE_ROW_HOVER
 
     def test_is_hovered_true_uses_hover_color(self):
         """P2-8 MAJ-2: is_hovered=True → bgcolor 为 TABLE_ROW_HOVER."""
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, is_hovered=True)
-        assert isinstance(row, ft.Semantics)
-        assert row.content.bgcolor == AppColors.TABLE_ROW_HOVER
+        inner = row.content
+        assert inner.bgcolor == AppColors.TABLE_ROW_HOVER
 
-    def test_on_hover_attached_to_container_when_provided(self):
-        """P2-8 MAJ-2: 传入 on_hover 回调时, Container.on_hover 非空 (用于 bgcolor 切换)."""
+    def test_on_hover_attached_to_inner_container_when_provided(self):
+        """P2-8 MAJ-2: 传入 on_hover 回调时, 内部 Container.on_hover 非空 (GestureDetector 无 on_hover 用于 bgcolor 切换)."""
         on_hover = MagicMock()
         on_row_click = MagicMock()
         row = _build_row(0, _make_row_data(), _make_columns(), 800, on_row_click, on_hover=on_hover)
-        assert isinstance(row, ft.Semantics)
-        assert callable(row.content.on_hover)
+        inner = row.content
+        assert callable(inner.on_hover)
 
 
 # ---------------------------------------------------------------------------
@@ -510,14 +481,10 @@ class TestPaginatedTableRenderStructure:
         for row in rows_column.controls:
             assert isinstance(row, ft.Container)
 
-    def test_rows_column_contains_semantics_with_on_click_when_click_handler_set(
+    def test_rows_column_contains_gesture_detectors_when_click_handler_set(
         self, mock_i18n_state, mock_app_colors_state
     ):
-        """方案 F: on_row_click 非空时行返回 Semantics(button=True, label=行内文本).
-
-        Semantics 包裹 Container(ink=True, on_click=...), label 提供 button 节点 text
-        (E2E 修复: PR #373 行 InkWell MergeSemantics 只合并直接子节点 Row 语义, text='').
-        """
+        """方案 D: on_row_click 非空时行返回 GestureDetector (生成 flt-tappable 语义属性)."""
         rows = [_make_row_data() for _ in range(3)]
         on_row_click = MagicMock()
         _, result = _render(_make_component(rows=rows, on_row_click=on_row_click))
@@ -525,9 +492,8 @@ class TestPaginatedTableRenderStructure:
         rows_column = rows_clip_container.content
         assert len(rows_column.controls) == 3
         for row in rows_column.controls:
-            assert isinstance(row, ft.Semantics)
-            assert row.button is True
-            assert callable(row.content.on_click)
+            assert isinstance(row, ft.GestureDetector)
+            assert isinstance(row.content, ft.Container)
 
     def test_empty_rows_renders_empty_rows_column(self, mock_i18n_state, mock_app_colors_state):
         _, result = _render(_make_component(rows=[]))
