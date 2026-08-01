@@ -56,9 +56,6 @@ class DataExplorerQueryClient:
     _shared_engine: sa.Engine | None = None
     _engine_lock = threading.Lock()
 
-    def __init__(self):
-        pass
-
     @classmethod
     def close_all(cls) -> None:
         """关闭共享的同步引擎，供 ShutdownCoordinator 调用。
