@@ -16,6 +16,8 @@ import atexit
 import logging
 import threading
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 _registry: list[type[object]] = []
@@ -43,7 +45,10 @@ def _atexit_cleanup_all() -> None:
                 # NOTE(lazy): atexit 钩子内兜底避免单实例清理失败阻塞其他清理. ceiling: 单例 _atexit_cleanup 内逻辑不应抛异常. upgrade: 单例 _atexit_cleanup 内部分类处理或移除兜底.
                 except Exception as e:
                     logger.warning(
-                        "[SingletonRegistry] atexit cleanup failed for %s: %s", cls.__name__, e, exc_info=True
+                        "[SingletonRegistry] atexit cleanup failed for %s: %s",
+                        cls.__name__,
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
                     )
 
 
@@ -76,7 +81,12 @@ def reset_all_singletons() -> None:
                     cls._reset_singleton()  # type: ignore[attr-defined]
                 # NOTE(lazy): 测试清理兜底避免单个单例重置失败阻塞其他单例. ceiling: 单例 _reset_singleton 内逻辑不应抛异常. upgrade: 单例 _reset_singleton 内部分类处理或移除兜底.
                 except Exception as e:
-                    logger.warning("[SingletonRegistry] Failed to reset %s: %s", cls.__name__, e, exc_info=True)
+                    logger.warning(
+                        "[SingletonRegistry] Failed to reset %s: %s",
+                        cls.__name__,
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
             elif hasattr(cls, "_instance"):
                 logger.error(
                     "[SingletonRegistry] %s lacks _reset_singleton — "
@@ -90,7 +100,12 @@ def reset_all_singletons() -> None:
                         instance.close()
                     # NOTE(lazy): fallback close 兜底避免单例 close 失败阻塞 _instance=None. ceiling: 单例 close 不应抛异常. upgrade: 单例 close 内部分类处理或移除兜底.
                     except Exception as e:
-                        logger.warning("[SingletonRegistry] %s.close() failed: %s", cls.__name__, e, exc_info=True)
+                        logger.warning(
+                            "[SingletonRegistry] %s.close() failed: %s",
+                            cls.__name__,
+                            DataSanitizer.sanitize_error(e),
+                            exc_info=True,
+                        )
                 cls._instance = None  # type: ignore[attr-defined]
 
 

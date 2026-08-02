@@ -204,7 +204,11 @@ async def perform_window_shutdown(
         coordinator.force_exit(1)
         raise  # R2: 不吞没 CancelledError（force_exit 被替换为非强退实现时兜底）
     except Exception as e:
-        logger.error("[Main] do_cleanup raised unexpectedly: %s", e, exc_info=True)
+        log_exception_with_severity(
+            e,
+            context="general",
+            operation_label="Main do_cleanup raised unexpectedly",
+        )
         await asyncio.sleep(0.2)
         coordinator.force_exit(1)
         return False
