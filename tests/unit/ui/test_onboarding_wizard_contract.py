@@ -901,7 +901,8 @@ class TestOnboardingWizardComponentBody:
         run_unmount_effects(component)
 
         # cancel_sync 被调用证明 if sync_in_progress 分支已执行
-        fake_vm.cancel_sync.assert_called_once()
+        # assert_called_once_with() 验证无参数调用 (cancel_sync 签名无参, 强断言)
+        fake_vm.cancel_sync.assert_called_once_with()
 
     def test_loading_overlay_visible_when_validation_in_progress(
         self,
