@@ -405,22 +405,6 @@ except ImportError:
     LITELLM_AVAILABLE = False
     logger.warning("[AIService] LiteLLM not installed, cloud LLM features disabled")
 
-# Import litellm exceptions separately — they may not exist in older versions or mock environments
-_LITELLM_EXCEPTIONS_AVAILABLE = False
-if LITELLM_AVAILABLE:
-    try:
-        from litellm.exceptions import (  # type: ignore[import-untyped]
-            AuthenticationError as LitellmAuthenticationError,
-            ContentPolicyViolationError as LitellmContentPolicyViolationError,
-            InternalServerError as LitellmInternalServerError,
-            RateLimitError as LitellmRateLimitError,
-            ServiceUnavailableError as LitellmServiceUnavailableError,
-        )
-
-        _LITELLM_EXCEPTIONS_AVAILABLE = True
-    except ImportError:
-        pass
-
 
 def _check_reasoning_support(model: str) -> bool:
     """检查模型是否支持推理增强 (reasoning_content)"""
@@ -1176,42 +1160,7 @@ class AIService:
                     )
                     raise
 
-                is_transient = False
-
-                if _LITELLM_EXCEPTIONS_AVAILABLE:
-                    if isinstance(e, LitellmAuthenticationError):
-                        logger.error(
-                            "[AIService] Failover | ❌ Authentication error for %s, not retrying",
-                            model,
-                        )
-                        raise
-                    if isinstance(e, LitellmContentPolicyViolationError):
-                        logger.error(
-                            "[AIService] Failover | ❌ Content policy violation for %s, not retrying",
-                            model,
-                        )
-                        raise
-
-                    is_transient = isinstance(
-                        e,
-                        (
-                            LitellmRateLimitError,
-                            LitellmServiceUnavailableError,
-                            LitellmInternalServerError,
-                        ),
-                    )
-
-                is_transient = is_transient or isinstance(
-                    e,
-                    (
-                        TimeoutError,
-                        httpx.TimeoutException,
-                        httpx.ConnectError,
-                        httpx.ReadError,
-                        ConnectionError,
-                        OSError,
-                    ),
-                )
+                is_transient = bool(error_info.get("should_retry", False))
 
                 if is_transient:
                     # Truncate before sanitizing to avoid breaking sanitization markers
@@ -1229,7 +1178,7 @@ class AIService:
                 else:
                     logger.error(
                         "[AIService] Failover | ❌ Non-transient error (%s) for %s: %s",
-                        error_info["code"],
+                        error_info.get("code", "unknown"),
                         model,
                         error_type,
                     )

@@ -137,6 +137,52 @@ class TestClassifyErrorLLMContext:
         assert result["code"] == "insufficient_quota"
         assert result.get("should_retry") is False
 
+    def test_httpx_timeout_exception(self):
+        import httpx
+
+        result = classify_error(httpx.TimeoutException(""), context="llm")
+        assert result["code"] == "timeout"
+        assert result.get("should_retry") is True
+
+    def test_httpx_connect_error(self):
+        import httpx
+
+        result = classify_error(httpx.ConnectError(""), context="llm")
+        assert result["code"] == "network"
+        assert result.get("should_retry") is True
+
+    def test_stdlib_timeout_error_empty_string(self):
+        result = classify_error(TimeoutError(""), context="llm")
+        assert result["code"] == "timeout"
+        assert result.get("should_retry") is True
+
+    def test_stdlib_connection_error_empty_string(self):
+        result = classify_error(ConnectionError(""), context="llm")
+        assert result["code"] == "network"
+        assert result.get("should_retry") is True
+
+    def test_litellm_internal_server_error(self):
+        try:
+            from litellm.exceptions import InternalServerError
+
+            result = classify_error(
+                InternalServerError("500 internal server error", model="m", llm_provider="p"), context="llm"
+            )
+            assert result["code"] == "server_error"
+            assert result.get("should_retry") is True
+        except ImportError:
+            pass
+
+    def test_litellm_api_connection_error(self):
+        try:
+            from litellm.exceptions import APIConnectionError
+
+            result = classify_error(APIConnectionError("connection failed", model="m", llm_provider="p"), context="llm")
+            assert result["code"] == "network"
+            assert result.get("should_retry") is True
+        except ImportError:
+            pass
+
 
 class TestClassifyErrorDBContext:
     def test_value_error_format(self):
