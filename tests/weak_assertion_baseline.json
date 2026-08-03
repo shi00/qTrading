@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "total": 618,
+  "total": 776,
   "entries": [
     {
       "file": "integration/test_ai_concept_tagging.py",
@@ -18,24 +18,38 @@
     },
     {
       "file": "integration/test_api_tushare_client.py",
-      "line": 268,
+      "line": 449,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_set_token_rebuilds_rate_limiter",
+      "source_line": "            assert old_limiter is not None"
+    },
+    {
+      "file": "integration/test_api_tushare_client.py",
+      "line": 274,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            api_limiter.consume_async.assert_called_once()"
     },
     {
       "file": "integration/test_api_tushare_client.py",
-      "line": 269,
+      "line": 275,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            general_limiter.consume_async.assert_called_once()"
     },
     {
       "file": "integration/test_api_tushare_client.py",
-      "line": 324,
+      "line": 330,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            general_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "integration/test_config_panels.py",
+      "line": 168,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_validate_empty_host",
+      "source_line": "        assert error is not None"
     },
     {
       "file": "integration/test_config_panels.py",
@@ -67,45 +81,52 @@
     },
     {
       "file": "integration/test_data_cache_manager.py",
-      "line": 729,
+      "line": 734,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(IntegrityError):"
     },
     {
       "file": "integration/test_data_cache_manager.py",
-      "line": 739,
+      "line": 744,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(IntegrityError):"
     },
     {
       "file": "integration/test_data_processor.py",
-      "line": 681,
+      "line": 686,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.processor.cache.init_db.assert_called_once()  # type: ignore[untyped]"
     },
     {
       "file": "integration/test_data_processor.py",
-      "line": 1056,
+      "line": 1061,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_cache.close.assert_called_once()"
     },
     {
       "file": "integration/test_data_processor.py",
-      "line": 1042,
+      "line": 1047,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            strategy.cancel.assert_called_once()"
     },
     {
       "file": "integration/test_data_processor.py",
-      "line": 1505,
+      "line": 1510,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_latest.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_timestamp_fields.py",
+      "line": 62,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_created_at_column_exists",
+      "source_line": "        assert table is not None, f\"Table {table_name} not found in metadata\""
     },
     {
       "file": "integration/test_data_trade_calendar.py",
@@ -134,6 +155,20 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "    with pytest.raises(TimeoutError):"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 247,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_watchdog_uses_force_exit_callback",
+      "source_line": "        assert call_args is not None"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 264,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_watchdog_cancel_prevents_force_exit",
+      "source_line": "        assert call_args is not None"
     },
     {
       "file": "integration/test_graceful_shutdown.py",
@@ -186,7 +221,7 @@
     },
     {
       "file": "integration/test_historical_sync_integrity.py",
-      "line": 1525,
+      "line": 1534,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cache_manager._mock_conn.execute.assert_called_once()"
@@ -197,6 +232,13 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_read.assert_called_once()"
+    },
+    {
+      "file": "integration/test_prompt_template_consistency.py",
+      "line": 29,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_all_declarations_have_valid_injectors",
+      "source_line": "            assert decl.injector is not None, f\"Declaration {decl.name} 缺少 injector\""
     },
     {
       "file": "integration/test_review_round_trip.py",
@@ -214,98 +256,112 @@
     },
     {
       "file": "integration/test_review_run_review_integration.py",
-      "line": 86,
+      "line": 91,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_review_run_review_integration.py",
-      "line": 115,
+      "line": 120,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_review_run_review_integration.py",
-      "line": 156,
+      "line": 161,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 410,
+      "line": 415,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 517,
+      "line": 522,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 548,
+      "line": 553,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 579,
+      "line": 584,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 812,
+      "line": 817,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.get_index_daily_range.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 880,
+      "line": 885,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.get_index_daily.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 881,
+      "line": 886,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 954,
+      "line": 959,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "integration/test_service_review_manager.py",
-      "line": 1009,
+      "line": 1014,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "integration/test_service_task_manager.py",
-      "line": 137,
+      "line": 462,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_truncate_result_for_db_limits_length",
+      "source_line": "        assert out is not None"
+    },
+    {
+      "file": "integration/test_service_task_manager.py",
+      "line": 480,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_persist_uses_truncate_helper",
+      "source_line": "            assert params[7] is not None"
+    },
+    {
+      "file": "integration/test_service_task_manager.py",
+      "line": 142,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        callback.assert_called_once()"
     },
     {
       "file": "integration/test_service_task_manager.py",
-      "line": 414,
+      "line": 419,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TimeoutError):"
@@ -333,49 +389,70 @@
     },
     {
       "file": "unit/test_ai_mixin.py",
-      "line": 642,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        task1.cancel.assert_called_once()"
+      "line": 95,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_init",
+      "source_line": "        assert s._history_cache is not None"
     },
     {
       "file": "unit/test_ai_mixin.py",
-      "line": 2100,
+      "line": 2300,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_no_hasattr_needed_in_source",
+      "source_line": "        assert pf.macro_context is not None"
+    },
+    {
+      "file": "unit/test_ai_mixin.py",
+      "line": 731,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "            with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/test_ai_mixin.py",
+      "line": 804,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "            with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/test_ai_mixin.py",
+      "line": 2344,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(httpx.ReadTimeout):"
     },
     {
       "file": "unit/test_ai_mixin.py",
-      "line": 2154,
+      "line": 2398,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.TimeoutError):"
     },
     {
       "file": "unit/test_ai_mixin.py",
-      "line": 2167,
+      "line": 2411,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TimeoutError):"
     },
     {
       "file": "unit/test_ai_mixin.py",
-      "line": 2301,
+      "line": 2545,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "                with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_ai_service.py",
-      "line": 2207,
+      "line": 2212,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_rm.get_learning_context.assert_called_once()"
     },
     {
       "file": "unit/test_ai_service.py",
-      "line": 2250,
+      "line": 2255,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_rm.get_learning_context.assert_called_once()"
@@ -417,6 +494,13 @@
     },
     {
       "file": "unit/test_akshare_concept_client.py",
+      "line": 56,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_reset_singleton_clears_instance",
+      "source_line": "        assert AkshareConceptClient._instance is not None"
+    },
+    {
+      "file": "unit/test_akshare_concept_client.py",
       "line": 156,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
@@ -452,336 +536,364 @@
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 883,
+      "line": 375,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_date_conversion_catches_value_type_error",
+      "source_line": "        assert sig is not None, \"E-P1-1: _prepare_data_params should exist and be callable\""
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 909,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        read_fn.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1031,
+      "line": 1057,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        write_fn.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2336,
+      "line": 2406,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        db_fn.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2549,
+      "line": 2619,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        db_fn.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 546,
+      "line": 552,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_conn.exec_driver_sql.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 609,
+      "line": 635,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 620,
+      "line": 646,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1188,
+      "line": 1214,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_stmt.on_conflict_do_nothing.assert_called_once()"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1289,
+      "line": 1359,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1318,
+      "line": 1388,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1469,
+      "line": 1539,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1480,
+      "line": 1550,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2053,
+      "line": 2123,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2155,
+      "line": 2225,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2189,
+      "line": 2259,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 2201,
+      "line": 2271,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 2741,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 108,
+      "line": 215,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_md.preload_aliases.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 110,
+      "line": 217,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_ss_instance.start.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 136,
+      "line": 243,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_toast.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 161,
+      "line": 268,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_toast.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 322,
+      "line": 429,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client.get_capability_cache.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 700,
+      "line": 813,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_ss.return_value.start.assert_called_once()"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 570,
+      "line": 677,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 589,
+      "line": 696,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 617,
+      "line": 724,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_bootstrap.py",
-      "line": 639,
+      "line": 746,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_boundary_conditions.py",
-      "line": 273,
+      "line": 471,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_key_recovery_from_backup",
+      "source_line": "                assert recovered_key is not None"
+    },
+    {
+      "file": "unit/test_boundary_conditions.py",
+      "line": 278,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_boundary_conditions.py",
-      "line": 285,
+      "line": 290,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_boundary_conditions.py",
-      "line": 116,
+      "line": 121,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "                with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_boundary_conditions.py",
-      "line": 211,
+      "line": 216,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "                with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_concurrency_audit.py",
-      "line": 51,
+      "line": 56,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_concurrency_audit.py",
-      "line": 340,
+      "line": 345,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises((RuntimeError, ValueError)):"
     },
     {
       "file": "unit/test_concurrency_audit.py",
-      "line": 366,
+      "line": 371,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises((RuntimeError, ValueError)):"
     },
     {
+      "file": "unit/test_correlation.py",
+      "line": 54,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_set_generates_id_if_none",
+      "source_line": "        assert cid is not None"
+    },
+    {
       "file": "unit/test_data_explorer_query_client.py",
-      "line": 59,
+      "line": 64,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_create.assert_called_once()"
     },
     {
       "file": "unit/test_data_explorer_query_client.py",
-      "line": 98,
+      "line": 103,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        engine.dispose.assert_called_once()  # type: ignore[union-attr]"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 106,
+      "line": 111,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.cache.close.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 147,
+      "line": 152,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.strategies[\"historical\"].sync_daily_market_snapshot.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 335,
+      "line": 582,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.cache.init_db.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 459,
+      "line": 706,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.cache.get_index_daily_range.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 492,
+      "line": 739,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.api.get_index_daily.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 515,
+      "line": 762,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.cache.get_daily_quotes.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 526,
+      "line": 773,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp.cache.get_daily_quotes.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 668,
+      "line": 915,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dp._assign_basic_tier.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 94,
+      "line": 99,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cancel.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 538,
+      "line": 785,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            dp.cache.get_daily_quotes.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 550,
+      "line": 797,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            dp.cache.get_daily_quotes.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 582,
+      "line": 829,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            dp.init_data.assert_called_once()"
     },
     {
       "file": "unit/test_data_processor.py",
-      "line": 855,
+      "line": 1106,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_evt.clear.assert_called_once()"
@@ -806,6 +918,41 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            MockAITag.return_value.run.assert_called_once()"
+    },
+    {
+      "file": "unit/test_db_config_service.py",
+      "line": 344,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_url_missing_host_uses_default",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_db_config_service.py",
+      "line": 349,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_url_missing_database_uses_default",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_db_config_service.py",
+      "line": 358,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_url_with_encoded_password",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 72,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_returns_config_with_correct_paths",
+      "source_line": "        assert script_location is not None"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 77,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_config_file_name_set",
+      "source_line": "        assert cfg.config_file_name is not None"
     },
     {
       "file": "unit/test_db_migrator.py",
@@ -879,266 +1026,294 @@
     },
     {
       "file": "unit/test_detect_flaky.py",
-      "line": 226,
+      "line": 228,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_run.assert_called_once()"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 37,
+      "line": 42,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 846,
+      "line": 851,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 853,
+      "line": 858,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 860,
+      "line": 865,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 867,
+      "line": 872,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 874,
+      "line": 879,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 881,
+      "line": 886,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 888,
+      "line": 893,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 895,
+      "line": 900,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 902,
+      "line": 907,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_dao.py",
-      "line": 909,
+      "line": 914,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 455,
+      "line": 1195,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_counter_lock_works_across_event_loops",
+      "source_line": "        assert result1 is not None"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 560,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 474,
+      "line": 579,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 499,
+      "line": 604,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        progress_cb.assert_called_once()"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1029,
+      "line": 1134,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1052,
+      "line": 1148,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 1160,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(MemoryError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1271,
+      "line": 1379,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        progress_cb.assert_called_once()"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1605,
+      "line": 1713,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1708,
+      "line": 1796,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1652,
+      "line": 1817,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 1832,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 1760,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_financial_sync.py",
-      "line": 1671,
+      "line": 1779,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 216,
+      "line": 218,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ConnectionError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 224,
+      "line": 226,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(TimeoutError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 272,
+      "line": 274,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ConnectionError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 328,
+      "line": 330,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(TimeoutError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 354,
+      "line": 356,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 430,
+      "line": 432,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_historical_sync.py",
-      "line": 1133,
+      "line": 1181,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 45,
+      "line": 50,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._write_db.assert_called_once()"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 60,
+      "line": 65,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._write_db.assert_called_once()"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 88,
+      "line": 93,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(DatabaseQueryError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 431,
+      "line": 436,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 441,
+      "line": 446,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 448,
+      "line": 453,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 455,
+      "line": 460,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 462,
+      "line": 467,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_holder_dao.py",
-      "line": 469,
+      "line": 474,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
@@ -1156,6 +1331,41 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.QueueFull):"
+    },
+    {
+      "file": "unit/test_llm_config.py",
+      "line": 361,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_setup_client_azure_builds_correct_url",
+      "source_line": "            assert service._litellm_config is not None"
+    },
+    {
+      "file": "unit/test_llm_config.py",
+      "line": 612,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_get_provider_credential_fallback_to_default_base_url",
+      "source_line": "        assert cred[\"base_url\"] is not None"
+    },
+    {
+      "file": "unit/test_llm_providers.py",
+      "line": 25,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_existing_provider",
+      "source_line": "        assert provider is not None"
+    },
+    {
+      "file": "unit/test_llm_providers.py",
+      "line": 30,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_nonexistent_provider_returns_custom",
+      "source_line": "        assert provider is not None"
+    },
+    {
+      "file": "unit/test_logger_extended.py",
+      "line": 181,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_makedirs_failure_continues",
+      "source_line": "        assert logger is not None"
     },
     {
       "file": "unit/test_log_decorators_extended.py",
@@ -1207,130 +1417,193 @@
       "source_line": "            mock_info.assert_called_once()"
     },
     {
+      "file": "unit/test_lookahead_guard.py",
+      "line": 50,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_none_trade_date_non_backtest_returns_safe_fallback",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_lookahead_guard.py",
+      "line": 56,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_invalid_trade_date_non_backtest_returns_safe_fallback",
+      "source_line": "        assert result is not None"
+    },
+    {
       "file": "unit/test_macro_dao.py",
-      "line": 129,
+      "line": 170,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db_select.assert_called_once()"
     },
     {
       "file": "unit/test_macro_dao.py",
-      "line": 152,
+      "line": 193,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db_select.assert_called_once()"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 371,
+      "line": 99,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_m2_only",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 116,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_merge_missing_period_in_indicator",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 282,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_none_df",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 829,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_valid_indicator_new",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 856,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_m2_only",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 1410,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_merge_macro_data_with_empty_indicator",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 377,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        strategy.dao.save_macro_economy.assert_called_once()"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 395,
+      "line": 401,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        strategy.dao.save_macro_economy.assert_called_once()"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 901,
+      "line": 1025,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 918,
+      "line": 1042,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 932,
+      "line": 1056,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 965,
+      "line": 1089,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 983,
+      "line": 1107,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 1022,
+      "line": 1146,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        ctx.cache.update_sync_status.assert_called_once()"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 594,
+      "line": 606,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            ctx.cache.update_sync_status.assert_called_once()"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 950,
+      "line": 1074,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_macro_sync.py",
-      "line": 1166,
+      "line": 1290,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_market_dao.py",
-      "line": 247,
+      "line": 252,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db.assert_called_once()"
     },
     {
       "file": "unit/test_market_dao.py",
-      "line": 295,
+      "line": 300,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db.assert_called_once()"
     },
     {
       "file": "unit/test_market_dao.py",
-      "line": 305,
+      "line": 310,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db.assert_called_once()"
     },
     {
       "file": "unit/test_market_data_service.py",
-      "line": 144,
+      "line": 150,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_market_data_service.py",
-      "line": 531,
+      "line": 537,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        listener.assert_called_once()"
+    },
+    {
+      "file": "unit/test_market_data_service.py",
+      "line": 1082,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_metadata_manager.py",
@@ -1348,84 +1621,84 @@
     },
     {
       "file": "unit/test_news_fetcher.py",
-      "line": 924,
+      "line": 952,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_news_fetcher.py",
-      "line": 1693,
+      "line": 1736,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_get.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 160,
+      "line": 165,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cb.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 515,
+      "line": 520,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cb.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 675,
+      "line": 680,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc.cache.save_market_news.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 810,
+      "line": 815,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 1081,
+      "line": 1086,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 1118,
+      "line": 1123,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 252,
+      "line": 257,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._notify_listeners.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 356,
+      "line": 361,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc.cache.save_market_news.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 569,
+      "line": 574,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            alert_cb.assert_called_once()"
     },
     {
       "file": "unit/test_news_subscription.py",
-      "line": 1253,
+      "line": 1258,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._notify_listeners.assert_called_once()"
@@ -1474,535 +1747,654 @@
     },
     {
       "file": "unit/test_news_subscription_viewmodel.py",
-      "line": 134,
+      "line": 139,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cs.assert_called_once()"
     },
     {
-      "file": "unit/test_oversold_strategy.py",
+      "file": "unit/test_onboarding_api_contracts.py",
       "line": 158,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_initialize_system_quick_parameter_defaults_to_false",
+      "source_line": "        assert quick_param is not None"
+    },
+    {
+      "file": "unit/test_onboarding_api_contracts.py",
+      "line": 224,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_auto_update_time_default_exists",
+      "source_line": "        assert default_time is not None"
+    },
+    {
+      "file": "unit/test_onboarding_api_contracts.py",
+      "line": 305,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_database_panel_load_password_defaults_to_false",
+      "source_line": "        assert load_password_param is not None"
+    },
+    {
+      "file": "unit/test_oversold_strategy.py",
+      "line": 163,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    dp.trade_calendar.get_latest_trade_date.assert_called_once()"
     },
     {
       "file": "unit/test_oversold_strategy.py",
-      "line": 212,
+      "line": 217,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "    with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_oversold_strategy.py",
-      "line": 227,
+      "line": 232,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "    with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_oversold_strategy.py",
-      "line": 1018,
+      "line": 1026,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_polars_filter_async_offload.py",
-      "line": 59,
+      "line": 64,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_run_async.assert_called_once()"
     },
     {
+      "file": "unit/test_qfq.py",
+      "line": 35,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_qfq_ratio_series_pandas",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_qfq_property.py",
+      "line": 83,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_qfq_ratio_last_is_one_when_returned",
+      "source_line": "    assert result is not None"
+    },
+    {
+      "file": "unit/test_qfq_property.py",
+      "line": 95,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_qfq_ratio_consistency",
+      "source_line": "    assert result is not None"
+    },
+    {
       "file": "unit/test_quality_gate.py",
-      "line": 66,
+      "line": 71,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_quality_gate.py",
-      "line": 125,
+      "line": 130,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_quality_gate.py",
-      "line": 131,
+      "line": 136,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_quality_gate.py",
-      "line": 183,
+      "line": 312,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_quality_gate.py",
-      "line": 232,
+      "line": 361,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 84,
+      "line": 89,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 165,
+      "line": 170,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 328,
+      "line": 333,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 386,
+      "line": 391,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 407,
+      "line": 412,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 749,
+      "line": 754,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 786,
+      "line": 791,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 825,
+      "line": 830,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 969,
+      "line": 974,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1006,
+      "line": 1011,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1048,
+      "line": 1053,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1088,
+      "line": 1093,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1130,
+      "line": 1135,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1262,
+      "line": 1267,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1283,
+      "line": 1288,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1328,
+      "line": 1333,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1350,
+      "line": 1355,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1371,
+      "line": 1376,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1384,
+      "line": 1389,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1411,
+      "line": 1416,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1443,
+      "line": 1448,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 70,
+      "line": 41,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_init_creates_scheduler",
+      "source_line": "        assert svc.scheduler is not None"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 75,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_ch.save_config.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 246,
+      "line": 272,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 648,
+      "line": 676,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc.scheduler.start.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 782,
+      "line": 810,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1055,
+      "line": 1083,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_rm.save_results.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 423,
+      "line": 449,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 443,
+      "line": 469,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 481,
+      "line": 507,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 558,
+      "line": 584,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 671,
+      "line": 699,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 705,
+      "line": 733,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 729,
+      "line": 757,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 929,
+      "line": 957,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_dp.run_ai_concept_tagging.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 957,
+      "line": 985,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1082,
+      "line": 1110,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1112,
+      "line": 1140,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1132,
+      "line": 1160,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 291,
+      "line": 296,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_conn.execute.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 316,
+      "line": 321,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_conn.execute.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 347,
+      "line": 352,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 364,
+      "line": 369,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_thinking.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 536,
+      "line": 541,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_conn.execute.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 561,
+      "line": 566,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 616,
+      "line": 621,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 635,
+      "line": 640,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db.assert_called_once()"
     },
     {
       "file": "unit/test_screener_dao.py",
-      "line": 550,
+      "line": 555,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_screener_view_model.py",
-      "line": 486,
+      "line": 386,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_get_export_data_returns_df",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 1125,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_returns_dataframe",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 1482,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_set_history_viewing_status_with_strategy_name",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 1492,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_set_history_viewing_status_all_strategies",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 587,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.review_mgr.save_results.assert_called_once()"
     },
     {
       "file": "unit/test_screener_view_model.py",
-      "line": 549,
+      "line": 650,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.review_mgr.save_results.assert_called_once()"
     },
     {
       "file": "unit/test_screener_view_model.py",
-      "line": 597,
+      "line": 698,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_screener_view_model.py",
-      "line": 739,
+      "line": 840,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 196,
+      "line": 756,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_flush_db_before_close_processor",
+      "source_line": "        assert flush_idx is not None, \"_step2_flush_db_writes not found in cleanup steps\""
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 208,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 343,
+      "line": 355,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_toast.stop_all.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 353,
+      "line": 365,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_toast.stop_all.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 519,
+      "line": 531,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 914,
+      "line": 928,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 223,
+      "line": 235,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_instance.cancel_all_running_async.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 253,
+      "line": 265,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_sched._instance.stop.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 270,
+      "line": 282,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_news_instance.stop_async.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 287,
+      "line": 299,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_mds_instance.stop_async.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 304,
+      "line": 316,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_instance.flush_persistence.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 321,
+      "line": 333,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_instance.close.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 415,
+      "line": 427,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_dm.close_all.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 424,
+      "line": 436,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_dm.close_all.assert_called_once()"
     },
     {
       "file": "unit/test_shutdown.py",
-      "line": 1141,
+      "line": 1157,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/test_singletons_isolation.py",
+      "line": 34,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_data_processor_reset_clears_instance",
+      "source_line": "        assert DataProcessor._instance is not None"
+    },
+    {
+      "file": "unit/test_singletons_isolation.py",
+      "line": 46,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_scheduler_service_reset_clears_instance",
+      "source_line": "        assert SchedulerService._instance is not None"
+    },
+    {
+      "file": "unit/test_singletons_isolation.py",
+      "line": 59,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_local_model_manager_reset_clears_instance",
+      "source_line": "        assert LocalModelManager._instance is not None"
+    },
+    {
+      "file": "unit/test_singletons_isolation.py",
+      "line": 111,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_cache_manager_reset_clears_instance",
+      "source_line": "            assert CacheManager._instance is not None"
+    },
+    {
+      "file": "unit/test_singletons_isolation.py",
+      "line": 162,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_task_manager_reset_clears_instance",
+      "source_line": "            assert TaskManager._instance is not None"
     },
     {
       "file": "unit/test_singleton_atexit_cleanup.py",
@@ -2020,304 +2412,381 @@
     },
     {
       "file": "unit/test_startup_controller.py",
-      "line": 286,
+      "line": 329,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        ctrl._on_exit.assert_called_once()"
     },
     {
       "file": "unit/test_startup_controller.py",
-      "line": 345,
+      "line": 388,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_exit.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao.py",
-      "line": 404,
+      "line": 409,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao.py",
-      "line": 411,
+      "line": 416,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 118,
+      "line": 123,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 132,
+      "line": 137,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 169,
+      "line": 174,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 199,
+      "line": 204,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._save_upsert.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 225,
+      "line": 230,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._write_db.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 319,
+      "line": 324,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_conn.exec_driver_sql.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 338,
+      "line": 343,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 352,
+      "line": 357,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 459,
+      "line": 464,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 482,
+      "line": 487,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 491,
+      "line": 496,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 529,
+      "line": 534,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 543,
+      "line": 548,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._write_db.assert_called_once()"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 564,
+      "line": 569,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 574,
+      "line": 579,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_stock_dao_concepts.py",
-      "line": 583,
+      "line": 588,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(RuntimeError):"
     },
     {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 619,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 622,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 640,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 654,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 669,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 689,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 690,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 707,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
       "file": "unit/test_strategy_base.py",
-      "line": 454,
+      "line": 463,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "                mock_analyze.assert_called_once()"
     },
     {
       "file": "unit/test_sw_industry_sync.py",
-      "line": 189,
+      "line": 665,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(EngineDisposedError):"
+    },
+    {
+      "file": "unit/test_sw_industry_sync.py",
+      "line": 193,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_sw_industry_sync.py",
-      "line": 205,
+      "line": 209,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_sw_industry_sync.py",
-      "line": 231,
+      "line": 235,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(MemoryError):"
     },
     {
       "file": "unit/test_sw_industry_sync.py",
-      "line": 320,
+      "line": 324,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_sw_industry_sync.py",
-      "line": 370,
+      "line": 374,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_sync_dao.py",
-      "line": 169,
+      "line": 174,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_sync_dao.py",
-      "line": 177,
+      "line": 182,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
+      "file": "unit/test_sync_type_consistency.py",
+      "line": 127,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_sync_daily_market_snapshot_accepts_datetime_date",
+      "source_line": "        assert trade_date_param is not None, \"sync_daily_market_snapshot should have trade_date parameter\""
+    },
+    {
       "file": "unit/test_task_manager.py",
-      "line": 188,
+      "line": 759,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_long_string",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1445,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_submit_with_loop_schedules_enqueue",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1715,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_long_unicode_truncated",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 189,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cb.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 468,
+      "line": 469,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 644,
+      "line": 645,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 669,
+      "line": 670,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 689,
+      "line": 690,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 964,
+      "line": 965,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_sched.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1281,
+      "line": 1282,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_sched.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1378,
+      "line": 1379,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1446,
+      "line": 1447,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1558,
+      "line": 1559,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_notify.assert_called()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1920,
+      "line": 1961,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_notify.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 142,
+      "line": 143,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mgr._loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1214,
+      "line": 1215,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache.write_db.assert_called_once()"
-    },
-    {
-      "file": "unit/test_task_manager.py",
-      "line": 1813,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "            with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/test_task_manager.py",
-      "line": 1837,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            mock_persist.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
@@ -2327,29 +2796,92 @@
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
+      "file": "unit/test_task_manager.py",
+      "line": 1878,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_persist.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1895,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "            with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/test_technical_analysis.py",
+      "line": 46,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_sorted_ascending",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_technical_analysis.py",
+      "line": 57,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_sorted_descending_latest_factor_used",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_technical_analysis.py",
+      "line": 87,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_empty_df",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/test_technical_analysis.py",
+      "line": 119,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_no_trade_date_column",
+      "source_line": "        assert result is not None"
+    },
+    {
       "file": "unit/test_time_utils.py",
-      "line": 141,
+      "line": 29,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_returns_datetime",
+      "source_line": "        assert result.tzinfo is not None"
+    },
+    {
+      "file": "unit/test_time_utils.py",
+      "line": 40,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_cst_tz_defined",
+      "source_line": "        assert CST_TZ is not None"
+    },
+    {
+      "file": "unit/test_time_utils.py",
+      "line": 191,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_naive_datetime",
+      "source_line": "        assert result.tzinfo is not None"
+    },
+    {
+      "file": "unit/test_time_utils.py",
+      "line": 146,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ValueError):"
     },
     {
       "file": "unit/test_trade_calendar_service.py",
-      "line": 67,
+      "line": 72,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ValueError):"
     },
     {
       "file": "unit/test_trade_calendar_service.py",
-      "line": 98,
+      "line": 103,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc._cache.save_trade_cal.assert_called_once()"
     },
     {
       "file": "unit/test_trade_calendar_service.py",
-      "line": 136,
+      "line": 141,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ValueError):"
@@ -2363,147 +2895,196 @@
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 397,
+      "line": 400,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "            assert mock_persist_safe.called"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 415,
+      "line": 418,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "            assert mock_set.called"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 460,
+      "line": 463,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TushareAPIPermissionError):"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 484,
+      "line": 487,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TushareAPIPermissionError):"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 525,
+      "line": 510,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TushareAPIPermissionError):"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 535,
+      "line": 577,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TushareAPIPermissionError):"
     },
     {
       "file": "unit/test_tushare_capability.py",
-      "line": 434,
+      "line": 587,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "            with pytest.raises(TushareAPIPermissionError):"
+    },
+    {
+      "file": "unit/test_tushare_capability.py",
+      "line": 437,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "                with pytest.raises(TushareAPIPermissionError):"
+    },
+    {
+      "file": "unit/test_tushare_capability.py",
+      "line": 762,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "                with pytest.raises(TushareAPIPermissionError):"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 137,
+      "line": 200,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_get_pro_returns_pro_instance_when_token_set",
+      "source_line": "        assert client.pro is not None"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 948,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_with_limit",
+      "source_line": "        assert client._rate_limiter is not None"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 972,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_build_rate_limiters_honors_tier",
+      "source_line": "        assert client._rate_limiter is not None"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 979,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_probe_rate_limiter_is_50_rpm",
+      "source_line": "        assert client._probe_rate_limiter is not None"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 988,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_reload_rate_limiters_updates_instance",
+      "source_line": "        assert client._rate_limiter is not None"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 168,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(AttributeError):"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 521,
+      "line": 797,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 552,
+      "line": 829,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 578,
+      "line": 856,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 605,
+      "line": 884,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 635,
+      "line": 915,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 657,
+      "line": 938,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        client._handle_api_call.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 1797,
+      "line": 2138,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 858,
+      "line": 1139,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_wait.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 974,
+      "line": 1264,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            api_limiter.consume_async.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 975,
+      "line": 1265,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            api_limiter.on_success.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 993,
+      "line": 1283,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            rate_limiter.consume_async.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 994,
+      "line": 1284,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            rate_limiter.on_success.assert_called_once()"
     },
     {
       "file": "unit/test_tushare_client.py",
-      "line": 1347,
+      "line": 1664,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock.assert_called_once()"
@@ -2573,77 +3154,84 @@
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 290,
+      "line": 312,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_conn.execute.assert_called_once()"
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 313,
+      "line": 335,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 328,
+      "line": 350,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 343,
+      "line": 365,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 359,
+      "line": 381,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/test_backtest_dao.py",
-      "line": 369,
+      "line": 391,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/services/test_backtest_service.py",
-      "line": 178,
+      "line": 263,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_get_strategy_sets_key_attribute",
+      "source_line": "        assert strategy is not None"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 184,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
     },
     {
       "file": "unit/services/test_backtest_service.py",
-      "line": 316,
+      "line": 322,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
     },
     {
       "file": "unit/services/test_backtest_service.py",
-      "line": 388,
+      "line": 394,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_error.assert_called_once()"
     },
     {
       "file": "unit/services/test_backtest_service.py",
-      "line": 458,
+      "line": 464,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
     },
     {
       "file": "unit/services/test_backtest_service.py",
-      "line": 471,
+      "line": 477,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_error.assert_called_once()"
@@ -2663,78 +3251,57 @@
       "source_line": "        show_snack.assert_called_once()"
     },
     {
-      "file": "unit/ui/test_app_layout_contract.py",
-      "line": 407,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(dataclasses.FrozenInstanceError):"
-    },
-    {
       "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 66,
+      "line": 60,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "    assert page.run_task.called, \"page.run_task 未被调用\""
     },
     {
       "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 404,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        tasks[0].cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 410,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        tasks[1].cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 490,
-      "type": "weak_called_flag",
-      "detail": "assert m.called 裸布尔标志（不验证调用参数）",
-      "source_line": "        assert mock_task.cancel.called, \"_cleanup_resize 必须取消 pending task\""
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 271,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "            with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 456,
+      "line": 272,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 268,
+      "line": 100,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/4 = 50.0%) > 40% in test_init_assembles_default_engine_factory_and_strategy_lookup",
+      "source_line": "        assert vm.service._engine_factory is not None"
+    },
+    {
+      "file": "unit/ui/test_backtest_view_model.py",
+      "line": 311,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.service.list_results.assert_called_once()"
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 590,
+      "line": 714,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 66,
+      "line": 109,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_engine_cls.assert_called_once()"
     },
     {
       "file": "unit/ui/test_chart_utils.py",
-      "line": 210,
+      "line": 50,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_generate_kline_figure_with_trade_date_column",
+      "source_line": "        assert result is not None"
+    },
+    {
+      "file": "unit/ui/test_chart_utils.py",
+      "line": 169,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert mock_plot.called"
@@ -2811,213 +3378,374 @@
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 674,
+      "line": 709,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 689,
+      "line": 724,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 713,
+      "line": 748,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 736,
+      "line": 771,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 758,
+      "line": 793,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 777,
+      "line": 812,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 797,
+      "line": 832,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/test_data_explorer_view_model.py",
+      "line": 893,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1213,
+      "line": 1201,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_sync_button_disabled_when_action_loading",
+      "source_line": "        assert btn is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1289,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_secondary_cancel_button_visible_when_daily_sync",
+      "source_line": "        assert cancel_btn is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1348,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_cancel_button_click_invokes_vm_cancel_active_task",
+      "source_line": "        assert cancel_btn is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1631,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_snack_action_check_health_triggers_run_task",
+      "source_line": "        assert kwargs.get(\"action_text\") is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1663,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_snack_action_probe_credits_triggers_verify_token",
+      "source_line": "        assert on_action is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1975,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_confirm_dialog_destructive_style_for_clear_cache",
+      "source_line": "        assert confirm_btn.style is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1994,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_confirm_dialog_primary_style_for_full_sync",
+      "source_line": "        assert confirm_btn.style is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2058,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_sync_now_callback_triggers_full_sync",
+      "source_line": "        assert on_sync_now is not None, \"on_sync_now 回调应被传入 HealthReportDialog\""
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2095,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_init_data_callback_triggers_init_historical",
+      "source_line": "        assert on_deep_scan is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2151,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_tushare_on_save_ignores_empty_token",
+      "source_line": "        assert on_save is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2170,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_tushare_on_save_handles_exception",
+      "source_line": "        assert on_save is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2188,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_tushare_on_verify_success_calls_show_snack",
+      "source_line": "        assert on_verify is not None"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1457,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1235,
+      "line": 1479,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1359,
+      "line": 1603,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1420,
+      "line": 1629,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1660,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1684,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1746,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.pubsub.send_all_on_topic.assert_called()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1448,
+      "line": 1774,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1490,
+      "line": 1816,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1511,
+      "line": 1837,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1530,
+      "line": 1856,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1553,
+      "line": 1879,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1672,
+      "line": 1912,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 2137,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1708,
+      "line": 2173,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1725,
+      "line": 2190,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1761,
+      "line": 2226,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1779,
+      "line": 2244,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1953,
+      "line": 2418,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 947,
+      "line": 1222,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_refresh_click_triggers_query",
+      "source_line": "        assert btn_refresh is not None"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1322,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_prev_page_triggers_query",
+      "source_line": "        assert btn_prev is not None"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1372,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_next_page_triggers_query",
+      "source_line": "        assert btn_next is not None"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1646,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_run_query_with_empty_sql_returns_early",
+      "source_line": "        assert btn_run is not None"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1093,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.pubsub.subscribe_topic.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 968,
+      "line": 1114,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.pubsub.unsubscribe_topic.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 1395,
+      "line": 1543,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.show_toast.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 1428,
+      "line": 1576,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.show_toast.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 1780,
+      "line": 1928,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.show_toast.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 1801,
+      "line": 1949,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.show_toast.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 1957,
+      "line": 2106,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.show_toast.assert_called()"
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
-      "line": 2025,
+      "line": 2174,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/test_failover_config_panel.py",
+      "line": 140,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_returns_options_with_text_label",
+      "source_line": "            assert opt.text is not None"
+    },
+    {
+      "file": "unit/ui/test_failover_config_panel.py",
+      "line": 173,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_label_includes_display_tag_when_present",
+      "source_line": "        assert flash_label is not None"
     },
     {
       "file": "unit/ui/test_failover_config_panel.py",
@@ -3035,105 +3763,168 @@
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 883,
+      "line": 923,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        env[\"on_close\"].assert_called_once()"
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 892,
+      "line": 932,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        env[\"on_close\"].assert_called_once()"
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 893,
+      "line": 933,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        env[\"on_deep_scan\"].assert_called_once()"
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 993,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog.py",
-      "line": 1019,
-      "type": "weak_called_flag",
-      "detail": "assert m.called 裸布尔标志（不验证调用参数）",
-      "source_line": "        assert mock_rct.called, \"on_progress 必须通过 run_coroutine_threadsafe 调度回主 loop\""
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog.py",
-      "line": 1038,
+      "line": 969,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_close.assert_called_once()"
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 1061,
+      "line": 1001,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            mock_future.cancel.assert_called_once()"
+      "source_line": "        on_close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1097,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1140,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1168,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_future.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1235,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog_contract.py",
+      "line": 355,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_creates_tile_with_label_and_value",
+      "source_line": "        assert tile is not None"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog_contract.py",
+      "line": 363,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_creates_tile_with_sub_text",
+      "source_line": "        assert tile is not None"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog_contract.py",
+      "line": 371,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_creates_tile_without_sub_text",
+      "source_line": "        assert tile is not None"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog_contract.py",
+      "line": 502,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_create_row_global_uses_count_badge",
+      "source_line": "        assert count_container.bgcolor is not None"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 401,
+      "line": 1073,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_view_stock_page_none_logs_debug",
+      "source_line": "        assert on_view_stock is not None"
+    },
+    {
+      "file": "unit/ui/test_home_view.py",
+      "line": 1155,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_navigate_to_data_source_page_none_logs_debug",
+      "source_line": "        assert on_cta is not None"
+    },
+    {
+      "file": "unit/ui/test_home_view.py",
+      "line": 448,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.pubsub.subscribe_topic.assert_called_once()"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 512,
+      "line": 557,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert page.run_task.called"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 778,
+      "line": 823,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 834,
+      "line": 879,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 855,
+      "line": 900,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_home_view.py",
-      "line": 751,
+      "line": 796,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_sanitizer.sanitize_error.assert_called_once()"
     },
     {
       "file": "unit/ui/test_markdown_safe.py",
-      "line": 120,
+      "line": 137,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert e.control.page.show_toast.called"
     },
     {
       "file": "unit/ui/test_markdown_safe.py",
-      "line": 158,
+      "line": 177,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_markdown_safe.py",
+      "line": 189,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called()"
@@ -3154,35 +3945,42 @@
     },
     {
       "file": "unit/ui/test_onboarding_view_model.py",
-      "line": 390,
+      "line": 136,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_data_processor_lazy_init",
+      "source_line": "        assert dp is not None"
+    },
+    {
+      "file": "unit/ui/test_onboarding_view_model.py",
+      "line": 398,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        bound_vm.fn_push_schedule_state.assert_called_once()"
     },
     {
       "file": "unit/ui/test_onboarding_wizard_contract.py",
-      "line": 1009,
+      "line": 1045,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        fake_vm.next_step.assert_called_once()"
     },
     {
       "file": "unit/ui/test_onboarding_wizard_contract.py",
-      "line": 1010,
+      "line": 1046,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        fake_vm.prev_step.assert_called_once()"
     },
     {
       "file": "unit/ui/test_onboarding_wizard_contract.py",
-      "line": 1011,
+      "line": 1047,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        fake_vm.skip_step.assert_called_once()"
     },
     {
       "file": "unit/ui/test_onboarding_wizard_contract.py",
-      "line": 1039,
+      "line": 1075,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        fake_vm.skip_sync.assert_called_once()"
@@ -3196,63 +3994,105 @@
     },
     {
       "file": "unit/ui/test_resizable_splitter_body.py",
-      "line": 307,
+      "line": 312,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_resize.assert_called_once()"
     },
     {
       "file": "unit/ui/test_resizable_splitter_body.py",
-      "line": 322,
+      "line": 327,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_persist.assert_called_once()"
     },
     {
+      "file": "unit/ui/test_screener_view.py",
+      "line": 257,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_missing_apis_adds_warning_suffix",
+      "source_line": "        assert result[0].text is not None"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 855,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_no_strategy_early_return",
+      "source_line": "        assert page.run_task.call_args is not None"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1157,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_switch_to_history",
+      "source_line": "        assert page.run_task.call_args is not None"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1689,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_all_strategies_label_when_no_run_id",
+      "source_line": "        assert all_strategies_tile.on_click is not None"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1808,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_detail_close_clears_data",
+      "source_line": "        assert on_close is not None"
+    },
+    {
       "file": "unit/ui/test_settings_view.py",
-      "line": 311,
+      "line": 591,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_mount_first_tab_selected_by_default",
+      "source_line": "        assert first_style is not None"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 378,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_notify.assert_called_once()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 567,
+      "line": 751,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_data.assert_called()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 590,
+      "line": 774,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_data.assert_called()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 247,
+      "line": 310,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 486,
+      "line": 633,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 498,
+      "line": 645,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
     },
     {
       "file": "unit/ui/test_settings_view.py",
-      "line": 510,
+      "line": 657,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
@@ -3266,70 +4106,91 @@
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 169,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "    on_upgrade.assert_called_once()"
+      "line": 786,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (3/4 = 75.0%) > 40% in test_build_error_view_db_init_failed",
+      "source_line": "    assert btn_retry is not None"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 188,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "    on_ok.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_startup_views.py",
-      "line": 200,
+      "line": 544,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    on_exit.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 202,
+      "line": 682,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_exit.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 738,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_upgrade.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 757,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_ok.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 769,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_exit.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 771,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    on_retry.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 222,
+      "line": 791,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    on_retry.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 224,
+      "line": 793,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    on_reconfigure.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 226,
+      "line": 795,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "    on_skip.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 92,
+      "line": 99,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_classify.assert_called_once()"
     },
     {
       "file": "unit/ui/test_startup_views.py",
-      "line": 93,
+      "line": 100,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_msg.assert_called_once()"
     },
     {
       "file": "unit/ui/test_system_tab_contract.py",
-      "line": 566,
+      "line": 617,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mod.SystemViewModel.assert_called_once()"
@@ -3378,45 +4239,94 @@
     },
     {
       "file": "unit/ui/test_task_center_view.py",
-      "line": 194,
+      "line": 128,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_known_status_returns_color",
+      "source_line": "        assert color is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 148,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_all_known_statuses_have_colors",
+      "source_line": "        assert color is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 532,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_build_task_card_all_statuses",
+      "source_line": "        assert card is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 911,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_prev_button_disabled_on_first_page",
+      "source_line": "        assert btn_prev is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 921,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_next_button_disabled_on_last_page",
+      "source_line": "        assert btn_next is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 931,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_prev_button_enabled_on_non_first_page",
+      "source_line": "        assert btn_prev is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 941,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_next_button_triggers_go_next",
+      "source_line": "        assert btn_next is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 952,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_prev_button_triggers_go_prev",
+      "source_line": "        assert btn_prev is not None"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 199,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_tm.subscribe.assert_called_once()"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
-      "line": 219,
+      "line": 224,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_tm.unsubscribe.assert_called_once()"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
-      "line": 250,
+      "line": 255,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        callback.assert_called_once()"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
-      "line": 355,
+      "line": 360,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        callback.assert_called_once()"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
-      "line": 372,
+      "line": 377,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        self.mock_tm.clear_finished.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 469,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(AttributeError):"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
@@ -3426,64 +4336,85 @@
       "source_line": "        with pytest.raises(AttributeError):"
     },
     {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 479,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(AttributeError):"
+    },
+    {
       "file": "unit/ui/test_task_center_view_model.py",
-      "line": 81,
+      "line": 111,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 607,
+      "line": 1112,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_reset_state_for_test_clears_state",
+      "source_line": "        assert tm_module._state is not None"
+    },
+    {
+      "file": "unit/ui/test_toast_manager.py",
+      "line": 1133,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_autouse_fixture_calls_reset_state_for_test",
+      "source_line": "        assert fixture is not None, \"_reset_toast_state autouse fixture 必须存在\""
+    },
+    {
+      "file": "unit/ui/test_toast_manager.py",
+      "line": 612,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert page.run_task.called"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 634,
+      "line": 639,
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert page.run_task.called, \"page.run_task 未被调用\""
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 681,
+      "line": 686,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 712,
+      "line": 717,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 731,
+      "line": 736,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 755,
+      "line": 760,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.debug.assert_called_once()"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 821,
+      "line": 826,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
-      "line": 871,
+      "line": 876,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
@@ -3511,45 +4442,52 @@
     },
     {
       "file": "unit/ui/test_viewmodels.py",
-      "line": 483,
+      "line": 521,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_sm.get_all_names.assert_called_once()"
     },
     {
       "file": "unit/ui/test_viewmodels.py",
-      "line": 1135,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        mock_rcts.assert_called_once()"
+      "line": 688,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_viewmodels.py",
-      "line": 1214,
+      "line": 1227,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(FrozenInstanceError):"
     },
     {
       "file": "unit/ui/test_viewmodels.py",
-      "line": 1223,
+      "line": 1236,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(FrozenInstanceError):"
-    },
-    {
-      "file": "unit/ui/test_viewmodels.py",
-      "line": 662,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_virtual_table.py",
-      "line": 318,
+      "line": 278,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(RuntimeError):"
+    },
+    {
+      "file": "unit/ui/test_virtual_table_body.py",
+      "line": 537,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_rows_column_key_changes_with_rows_token",
+      "source_line": "        assert rows_col1.key is not None"
+    },
+    {
+      "file": "unit/ui/test_virtual_table_body.py",
+      "line": 580,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_initial_mount_renders_rows_column",
+      "source_line": "        assert rows_column.key is not None"
     },
     {
       "file": "unit/utils/test_config_handler.py",
@@ -3581,21 +4519,21 @@
     },
     {
       "file": "unit/utils/test_config_handler.py",
-      "line": 782,
+      "line": 881,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_save.assert_called_once()"
     },
     {
       "file": "unit/utils/test_config_handler.py",
-      "line": 798,
+      "line": 897,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_save.assert_called_once()"
     },
     {
       "file": "unit/utils/test_config_handler.py",
-      "line": 2081,
+      "line": 2416,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(ValidationError):"
@@ -3609,21 +4547,21 @@
     },
     {
       "file": "unit/utils/test_config_handler.py",
-      "line": 696,
+      "line": 795,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.debug.assert_called_once()"
     },
     {
       "file": "unit/utils/test_config_handler.py",
-      "line": 1794,
+      "line": 1902,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
     },
     {
       "file": "unit/utils/test_sanitizers.py",
-      "line": 690,
+      "line": 791,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(RuntimeError):"
@@ -3720,6 +4658,13 @@
       "source_line": "            with pytest.raises(DecryptionError):"
     },
     {
+      "file": "unit/ui/components/test_confirm_dialog.py",
+      "line": 194,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_cancel_btn_uses_primary_color",
+      "source_line": "        assert cancel_btn.style is not None"
+    },
+    {
       "file": "unit/ui/viewmodels/test_ai_brain_settings_view_model.py",
       "line": 83,
       "type": "weak_raises_only",
@@ -3735,80 +4680,122 @@
     },
     {
       "file": "unit/ui/viewmodels/test_automation_settings_view_model.py",
-      "line": 79,
+      "line": 81,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(FrozenInstanceError):"
     },
     {
       "file": "unit/ui/viewmodels/test_automation_settings_view_model.py",
-      "line": 144,
+      "line": 147,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
+      "file": "unit/ui/viewmodels/test_automation_settings_view_model.py",
+      "line": 228,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_config_panel_status_mixin.py",
+      "line": 100,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_show_warning_sets_status_message",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 82,
+      "line": 83,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(FrozenInstanceError):"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 183,
+      "line": 184,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_change.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 511,
+      "line": 512,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_test_success.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 538,
+      "line": 539,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_config_handler.save_db_config.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 561,
+      "line": 562,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_svc.create_database.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 610,
+      "line": 611,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_save.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 735,
+      "line": 736,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_test_success.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 921,
+      "line": 879,
+      "type": "weak_raises_only",
+      "detail": "pytest.raises 后无进一步断言",
+      "source_line": "        with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 960,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
-      "line": 936,
+      "line": 975,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_embedded_status_card_view_model.py",
+      "line": 52,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_init_sets_embedded_ready_status",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_embedded_status_card_view_model.py",
+      "line": 63,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_init_sets_info_message",
+      "source_line": "        assert vm.state.info_message is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_embedded_status_card_view_model.py",
+      "line": 80,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_state_property_returns_snapshot",
+      "source_line": "        assert snapshot is not None"
     },
     {
       "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
@@ -3910,56 +4897,63 @@
     },
     {
       "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 61,
+      "line": 112,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_subscribe_captures_main_loop_when_running",
+      "source_line": "        assert vm._main_loop is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
+      "line": 62,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(FrozenInstanceError):"
     },
     {
       "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 173,
+      "line": 174,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 218,
-      "type": "weak_called_flag",
-      "detail": "assert m.called 裸布尔标志（不验证调用参数）",
-      "source_line": "        assert mock_rct.called, \"on_progress 必须通过 run_coroutine_threadsafe 调度回主 loop\""
-    },
-    {
-      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 290,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        mock_future1.cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 291,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        mock_future2.cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 313,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        mock_future_pending.cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 336,
+      "line": 254,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_future.cancel.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
-      "line": 367,
+      "line": 299,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_future1.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
+      "line": 300,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_future2.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
+      "line": 322,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_future_pending.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
+      "line": 345,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_future.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_health_scan_view_model.py",
+      "line": 376,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_future.cancel.assert_called_once()"
@@ -3973,35 +4967,35 @@
     },
     {
       "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
-      "line": 557,
+      "line": 606,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_config_handler.save_llm_config.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
-      "line": 590,
+      "line": 639,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_config_handler.save_llm_config.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
-      "line": 645,
+      "line": 694,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_save.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
-      "line": 678,
+      "line": 727,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
-      "line": 955,
+      "line": 1004,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
@@ -4022,42 +5016,49 @@
     },
     {
       "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
-      "line": 561,
+      "line": 567,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_verify_success.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
-      "line": 631,
+      "line": 637,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        on_save.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
-      "line": 692,
+      "line": 698,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_commit.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
-      "line": 816,
+      "line": 826,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
-      "line": 805,
+      "line": 815,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/viewmodels/test_screener_view_model.py",
-      "line": 48,
+      "line": 254,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_clear_filters_does_not_clear_full_results",
+      "source_line": "        assert vm._full_results is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_screener_view_model.py",
+      "line": 49,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(AttributeError):"
@@ -4078,6 +5079,20 @@
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 593,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_show_error_sets_status",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 601,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_show_warning_sets_status",
+      "source_line": "        assert vm.state.status_message is not None"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
       "line": 76,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
@@ -4092,87 +5107,143 @@
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
-      "line": 239,
+      "line": 260,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_client.reload_rate_limiters.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
-      "line": 240,
+      "line": 261,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_client.clear_capability_cache.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
-      "line": 332,
+      "line": 354,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_pro.trade_cal.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
-      "line": 377,
+      "line": 431,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_client.probe_api_capabilities.assert_called_once()"
     },
     {
       "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
-      "line": 378,
+      "line": 432,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_strategy_manager.invalidate_dependency_cache.assert_called_once()"
     },
     {
       "file": "unit/ui/views/test_backtest_view.py",
-      "line": 479,
+      "line": 885,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_cta_opens_github_issues",
+      "source_line": "        assert on_cta is not None"
+    },
+    {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 953,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_retry_no_page_does_not_crash",
+      "source_line": "        assert on_retry is not None"
+    },
+    {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 480,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        page.run_task.assert_called_once()"
     },
     {
       "file": "unit/ui/views/test_backtest_view.py",
-      "line": 509,
+      "line": 510,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        env[\"fake_vm\"].create_config_mock.assert_called_once()"
     },
     {
       "file": "unit/ui/views/test_backtest_view.py",
-      "line": 525,
+      "line": 526,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        env[\"fake_vm\"].cancel_backtest_mock.assert_called_once()"
     },
     {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 1077,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            page.run_task.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/test_watchlist_view.py",
+      "line": 445,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_on_retry_calls_vm_load_watchlist",
+      "source_line": "        assert error_state is not None"
+    },
+    {
+      "file": "unit/ui/views/test_watchlist_view.py",
+      "line": 492,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_on_cta_calls_page_launch_url",
+      "source_line": "        assert error_state is not None"
+    },
+    {
+      "file": "unit/ui/views/test_watchlist_view.py",
+      "line": 627,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (2/4 = 50.0%) > 40% in test_confirm_remove_triggers_do_remove",
+      "source_line": "        assert on_confirm is not None"
+    },
+    {
+      "file": "unit/ui/views/test_watchlist_view.py",
+      "line": 663,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_cancel_remove_does_not_trigger_do_remove",
+      "source_line": "        assert on_cancel is not None"
+    },
+    {
+      "file": "unit/ui/views/test_watchlist_view.py",
+      "line": 776,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_do_remove_exception_shows_error_toast",
+      "source_line": "        assert on_confirm is not None"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 660,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_reset_ai_prompt_sets_default_prompt",
+      "source_line": "        assert on_confirm is not None, \"ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)\""
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 681,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_on_reset_news_prompt_sets_default_prompt",
+      "source_line": "        assert on_confirm is not None, \"ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)\""
+    },
+    {
       "file": "unit/ui/views/settings_tabs/test_database_tab.py",
-      "line": 187,
+      "line": 184,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(KeyError):"
     },
     {
-      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
-      "line": 243,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        mock_cls.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
-      "line": 254,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        fake_vm.reload_config.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
-      "line": 342,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        show_snack.assert_called_once()"
+      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
+      "line": 497,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_checkbox_uncheck_sets_auto_false",
+      "source_line": "        assert config[\"stamp_duty_rate\"] is not None"
     },
     {
       "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
@@ -4196,134 +5267,169 @@
       "source_line": "        on_run1.assert_called_once()"
     },
     {
-      "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
+      "file": "unit/ui/components/config_panels/test_backup_restore_panel.py",
+      "line": 233,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_mount_initializes_internal_vm",
+      "source_line": "        assert component is not None"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_database_status_panel.py",
       "line": 234,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_mount_initializes_internal_vm",
+      "source_line": "        assert component is not None"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_embedded_status_card.py",
+      "line": 190,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_mount_initializes_internal_vm",
+      "source_line": "        assert component is not None"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_llm_config_panel.py",
+      "line": 429,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_tag_translated_via_i18n",
+      "source_line": "        assert flash_opt.text is not None"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_llm_config_panel.py",
+      "line": 475,
+      "type": "weak_is_not_none_ratio",
+      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_list_tag_uses_first_non_internal_tag",
+      "source_line": "        assert o4_opt.text is not None"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
+      "line": 233,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_logger.error.assert_called_once()"
     },
     {
       "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
-      "line": 971,
+      "line": 970,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        run_task.assert_called_once()"
     },
     {
       "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 341,
+      "line": 343,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.save.assert_called_once()"
     },
     {
       "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 763,
+      "line": 790,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.save.assert_called_once()"
     },
     {
       "file": "unit/strategies/backtest/test_data_provider.py",
-      "line": 263,
+      "line": 268,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_processor.get_screening_data.assert_called_once()"
     },
     {
       "file": "unit/strategies/backtest/test_data_provider.py",
-      "line": 264,
+      "line": 269,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_processor.get_fundamental_screening_data.assert_called_once()"
     },
     {
       "file": "unit/strategies/backtest/test_data_provider.py",
-      "line": 320,
+      "line": 325,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
       "file": "unit/strategies/backtest/test_data_provider.py",
-      "line": 445,
+      "line": 450,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/strategies/backtest/test_data_provider.py",
-      "line": 498,
+      "line": 503,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cache.get_screening_data_range.assert_called_once()"
     },
     {
       "file": "unit/data/persistence/daos/test_express_dao.py",
-      "line": 146,
+      "line": 152,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/persistence/daos/test_express_dao.py",
-      "line": 155,
+      "line": 161,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_pledge_detail_dao.py",
-      "line": 128,
+      "line": 134,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_share_float_dao.py",
-      "line": 133,
+      "line": 139,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_stk_holdertrade_dao.py",
-      "line": 138,
+      "line": 144,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_sw_industry_dao.py",
-      "line": 164,
+      "line": 170,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_sw_industry_dao.py",
-      "line": 173,
+      "line": 179,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/persistence/daos/test_sw_industry_dao.py",
-      "line": 256,
+      "line": 262,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/data/persistence/daos/test_sw_industry_dao.py",
-      "line": 265,
+      "line": 271,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/data/persistence/daos/test_top_inst_dao.py",
-      "line": 132,
+      "line": 138,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
