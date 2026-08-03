@@ -13,7 +13,7 @@ import typing
 import flet as ft
 
 from ui.components.confirm_dialog import ConfirmDialog
-from ui.components.state_views import EmptyState
+from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -153,13 +153,49 @@ def WatchlistView(
         set_confirm_open(False)
         set_pending_remove_ts_code("")
 
+    # --- ErrorState 回调 (Task 11.2) ---
+    def _on_retry() -> None:
+        """ErrorState on_retry: 重新加载关注列表 (R16: page.run_task 调度 async)."""
+        page = _get_page()
+        if page is not None:
+            page.run_task(vm.load_watchlist)
+
+    def _on_cta() -> None:
+        """ErrorState on_cta: 打开 GitHub Issues.
+
+        page.launch_url 为 async (被 @deprecated 装饰器破坏 iscoroutinefunction 检测,
+        须用 async wrapper 包裹后通过 page.run_task 调度, R16).
+        """
+        page = _get_page()
+        if page is not None:
+
+            async def _open_issues() -> None:
+                await page.launch_url(GITHUB_ISSUES_URL)
+
+            page.run_task(_open_issues)
+
     # --- 渲染 ---
+    # Task 11.2: 完全失败 (rows 空 + load_error 非空) → ErrorState 替换 body;
+    # 部分失败 (rows 非空 + load_error 非空) → 保留 error_banner (不丢失已加载列表)
+    has_complete_failure = state.load_error is not None and not state.watchlist_rows
+
     if state.is_loading:
         body = ft.Column(
             [ft.ProgressRing()],
             alignment=ft.MainAxisAlignment.CENTER,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             expand=True,
+        )
+    elif has_complete_failure:
+        body = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("error_state_load_failed_title"),
+            message=I18n.get("error_state_load_failed_message"),
+            detail=state.load_error_detail,
+            on_retry=_on_retry,
+            retry_text=I18n.get("common_retry"),
+            on_cta=_on_cta,
+            cta_text=I18n.get("error_state_contact_support"),
         )
     elif not state.watchlist_rows:
         body = EmptyState(
@@ -175,9 +211,9 @@ def WatchlistView(
             spacing=4,
         )
 
-    # 错误提示
+    # 部分失败时保留 error_banner (rows 非空 + load_error 非空)
     error_banner = None
-    if state.load_error is not None:
+    if state.load_error is not None and state.watchlist_rows:
         error_banner = ft.Container(
             content=ft.Text(
                 I18n.get(state.load_error.key, **state.load_error.params),
