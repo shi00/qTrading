@@ -61,6 +61,44 @@ class TestHomeViewModelDispose:
         mock_news_service.remove_listener.assert_called_once()
 
 
+class TestHomeViewModelSubscriberErrorSanitization:
+    """覆盖 _invoke_single_subscriber except 块 (PR 466 L129): 异常隔离 + R9 脱敏."""
+
+    def test_subscriber_exception_is_sanitized_and_isolated(self, home_vm, caplog):
+        """L129: subscriber 抛异常时, DataSanitizer.sanitize_error 脱敏 + 不中断其他 subscriber.
+
+        与 test_dispose_handles_exceptions (L146) 同类: 验证 except 块中
+        DataSanitizer.sanitize_error(e) 被调用, 敏感信息不泄露到日志。
+        """
+        import logging
+
+        good_calls: list = []
+
+        def bad_cb(s):
+            raise RuntimeError("token=secret123 boom")
+
+        def good_cb(s):
+            good_calls.append(s)
+
+        home_vm.subscribe(bad_cb)
+        home_vm.subscribe(good_cb)
+
+        with caplog.at_level(logging.WARNING, logger="ui.viewmodels.home_view_model"):
+            home_vm._set_state(is_loading=True)
+
+        # 异常隔离: good_cb 仍被调用
+        assert len(good_calls) == 1
+        assert good_calls[0].is_loading is True
+
+        # R9 脱敏: warning 已记录, 原始敏感值不出现, 脱敏占位符出现
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "[HomeVM] Subscriber error" in msg
+        assert "secret123" not in msg
+        assert "token=***" in msg
+
+
 class TestHomeViewModelServiceHandlers:
     async def test_on_news_service_update_new_item(self, home_vm):
         from services.news_subscription_service import NewsUpdateType
