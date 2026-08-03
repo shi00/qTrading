@@ -54,230 +54,116 @@ pytestmark = pytest.mark.integration
 class TestOrmDaoAlignment:
     """Test that DAO save methods include all ORM model columns."""
 
-    def test_daily_quotes_alignment(self):
-        model_cols = get_model_columns(DailyQuotes)
-        dao_cols = extract_cols_from_method(QuoteDao.save_daily_quotes)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
+    def _assert_cols_aligned(self, method, model_cls, excluded=None, custom_gmc=None):
+        if excluded is None:
+            excluded = {"updated_at", "created_at"}
+        if custom_gmc:
+            model_cols = set(custom_gmc(model_cls))
+        else:
+            model_cols = get_model_columns(model_cls)
+        dao_cols = extract_cols_from_method(method)
+        name = getattr(method, "__name__", str(method))
+        assert dao_cols, f"Failed to extract columns from {name}"
+        expected = model_cols - excluded
         missing = expected - dao_cols
-        assert not missing, f"save_daily_quotes missing: {missing}"
+        assert not missing, f"{name} missing: {missing}"
+
+    def test_daily_quotes_alignment(self):
+        self._assert_cols_aligned(QuoteDao.save_daily_quotes, DailyQuotes)
 
     def test_moneyflow_daily_alignment(self):
-        model_cols = get_model_columns(MoneyflowDaily)
-        dao_cols = extract_cols_from_method(QuoteDao.save_moneyflow)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_moneyflow missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_moneyflow, MoneyflowDaily)
 
     def test_top_list_alignment(self):
-        model_cols = get_model_columns(TopList)
-        dao_cols = extract_cols_from_method(QuoteDao.save_top_list)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_top_list missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_top_list, TopList)
 
     def test_block_trade_alignment(self):
-        model_cols = get_model_columns(BlockTrade)
-        dao_cols = extract_cols_from_method(QuoteDao.save_block_trade)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_block_trade missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_block_trade, BlockTrade)
 
     def test_limit_list_alignment(self):
-        model_cols = get_model_columns(LimitList)
-        dao_cols = extract_cols_from_method(QuoteDao.save_limit_list)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_limit_list missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_limit_list, LimitList)
 
     def test_margin_daily_alignment(self):
-        model_cols = get_model_columns(MarginDaily)
-        dao_cols = extract_cols_from_method(QuoteDao.save_margin_daily)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_margin_daily missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_margin_daily, MarginDaily)
 
     def test_suspend_d_alignment(self):
-        model_cols = get_model_columns(SuspendD)
-        dao_cols = extract_cols_from_method(QuoteDao.save_suspend_d)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_suspend_d missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_suspend_d, SuspendD)
 
     def test_northbound_holding_alignment(self):
-        model_cols = get_model_columns(NorthboundHolding)
-        dao_cols = extract_cols_from_method(QuoteDao.save_northbound)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_northbound missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_northbound, NorthboundHolding)
 
     def test_index_daily_alignment(self):
-        model_cols = get_model_columns(IndexDaily)
-        dao_cols = extract_cols_from_method(QuoteDao.save_index_daily)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_index_daily missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_index_daily, IndexDaily)
 
     def test_index_dailybasic_alignment(self):
-        model_cols = get_model_columns(IndexDailyBasic)
-        dao_cols = extract_cols_from_method(QuoteDao.save_index_dailybasic)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_index_dailybasic missing: {missing}"
+        self._assert_cols_aligned(QuoteDao.save_index_dailybasic, IndexDailyBasic)
 
     def test_daily_indicators_alignment(self):
-        model_cols = get_model_columns(DailyIndicators)
-        dao_cols = extract_cols_from_method(MarketDao.save_daily_indicators)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_daily_indicators missing: {missing}"
+        self._assert_cols_aligned(MarketDao.save_daily_indicators, DailyIndicators)
 
     def test_moneyflow_hsgt_alignment(self):
-        model_cols = get_model_columns(MoneyflowHsgt)
-        dao_cols = extract_cols_from_method(MarketDao.save_moneyflow_hsgt)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_moneyflow_hsgt missing: {missing}"
+        self._assert_cols_aligned(MarketDao.save_moneyflow_hsgt, MoneyflowHsgt)
 
     def test_index_weight_alignment(self):
-        model_cols = get_model_columns(IndexWeight)
-        dao_cols = extract_cols_from_method(MarketDao.save_index_weights)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_index_weights missing: {missing}"
+        self._assert_cols_aligned(MarketDao.save_index_weights, IndexWeight)
 
     def test_financial_reports_alignment(self):
-        model_cols = get_model_columns(FinancialReports)
-        dao_cols = extract_cols_from_method(FinancialDao.save_financial_reports)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_financial_reports missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_financial_reports, FinancialReports)
 
     def test_fina_forecast_alignment(self):
-        model_cols = get_model_columns(FinaForecast)
-        dao_cols = extract_cols_from_method(FinancialDao.save_fina_forecast)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_fina_forecast missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_fina_forecast, FinaForecast)
 
     def test_fina_audit_alignment(self):
-        model_cols = get_model_columns(FinaAudit)
-        dao_cols = extract_cols_from_method(FinancialDao.save_fina_audit)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_fina_audit missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_fina_audit, FinaAudit)
 
     def test_fina_mainbz_alignment(self):
-        model_cols = get_model_columns(FinaMainbz)
-        dao_cols = extract_cols_from_method(FinancialDao.save_fina_mainbz)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_fina_mainbz missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_fina_mainbz, FinaMainbz)
 
     def test_dividend_alignment(self):
-        model_cols = get_model_columns(Dividend)
-        dao_cols = extract_cols_from_method(FinancialDao.save_dividend)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_dividend missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_dividend, Dividend)
 
     def test_pledge_stat_alignment(self):
-        model_cols = get_model_columns(PledgeStat)
-        dao_cols = extract_cols_from_method(FinancialDao.save_pledge_stat)
-        assert dao_cols is not None
         # ann_date excluded: Tushare pledge_stat API does not return it (MD-001)
-        expected = model_cols - {"updated_at", "created_at", "ann_date"}
-        missing = expected - dao_cols
-        assert not missing, f"save_pledge_stat missing: {missing}"
+        self._assert_cols_aligned(
+            FinancialDao.save_pledge_stat,
+            PledgeStat,
+            excluded={"updated_at", "created_at", "ann_date"},
+        )
 
     def test_repurchase_alignment(self):
-        model_cols = get_model_columns(Repurchase)
-        dao_cols = extract_cols_from_method(FinancialDao.save_repurchase)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_repurchase missing: {missing}"
+        self._assert_cols_aligned(FinancialDao.save_repurchase, Repurchase)
 
     def test_stock_basic_alignment(self):
-        model_cols = get_model_columns(StockBasic)
-        dao_cols = extract_cols_from_method(StockDao.save_stock_basic)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_stock_basic missing: {missing}"
+        self._assert_cols_aligned(StockDao.save_stock_basic, StockBasic)
 
     def test_trade_cal_alignment(self):
-        model_cols = get_model_columns(TradeCal)
-        dao_cols = extract_cols_from_method(StockDao.save_trade_cal)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_trade_cal missing: {missing}"
+        self._assert_cols_aligned(StockDao.save_trade_cal, TradeCal)
 
     def test_shibor_daily_alignment(self):
         # R17（迁移 0015）：属性名与列名一致，无需 orm_to_db_mapping
-        model_cols = get_model_columns(ShiborDaily)
-        dao_cols = extract_cols_from_method(MacroDao.save_shibor_daily)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_shibor_daily missing: {missing}"
+        self._assert_cols_aligned(MacroDao.save_shibor_daily, ShiborDaily)
 
     def test_stock_concepts_alignment(self):
-        model_cols = get_model_columns(StockConcepts)
-        dao_cols = extract_cols_from_method(StockDao.save_concepts)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_concepts missing: {missing}"
+        self._assert_cols_aligned(StockDao.save_concepts, StockConcepts)
 
     def test_stk_holdernumber_alignment(self):
         from data.persistence.models import get_model_columns as gmc_filtered
 
-        model_cols = set(gmc_filtered(StkHoldernumber))
-        dao_cols = extract_cols_from_method(HolderDao.save_holder_number)
-        assert dao_cols is not None
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_holder_number missing: {missing}"
+        self._assert_cols_aligned(HolderDao.save_holder_number, StkHoldernumber, custom_gmc=gmc_filtered)
 
     def test_macro_economy_alignment(self):
-        model_cols = get_model_columns(MacroEconomy)
-        dao_cols = extract_cols_from_method(MacroDao.save_macro_economy)
-        assert dao_cols is not None
         # get_model_columns excludes updated_at by default; created_at excluded here
-        expected = model_cols - {"updated_at", "created_at"}
-        missing = expected - dao_cols
-        assert not missing, f"save_macro_economy missing: {missing}"
+        self._assert_cols_aligned(MacroDao.save_macro_economy, MacroEconomy)
 
     def test_screening_history_alignment(self):
         from data.persistence.models import get_model_columns as gmc_filtered
 
-        model_cols = set(gmc_filtered(ScreeningHistory))
-        dao_cols = extract_cols_from_method(ScreenerDao.save_screening_results)
-        assert dao_cols is not None
-        # computed 列由 get_model_columns 自动排除；review_status 在 save 时显式设置为 PENDING
-        excluded = {"id", "updated_at", "created_at"}
-        expected = model_cols - excluded
-        missing = expected - dao_cols
-        assert not missing, f"save_screening_results missing: {missing}"
+        self._assert_cols_aligned(
+            ScreenerDao.save_screening_results,
+            ScreeningHistory,
+            excluded={"id", "updated_at", "created_at"},
+            custom_gmc=gmc_filtered,
+        )
 
     def test_screening_history_review_fields_updated_by_review_path(self):
         from data.persistence.models import ScreeningHistory
@@ -310,7 +196,7 @@ class TestQfqCalculation:
 
     def test_qfq_fields_are_not_in_save_cols(self):
         dao_cols = extract_cols_from_method(QuoteDao.save_daily_quotes)
-        assert dao_cols is not None
+        assert dao_cols, "Failed to extract columns from QuoteDao.save_daily_quotes"
         qfq_cols = {"qfq_open", "qfq_high", "qfq_low", "qfq_close"}
         assert dao_cols.isdisjoint(qfq_cols), f"save_daily_quotes should not persist qfq columns: {dao_cols & qfq_cols}"
 
@@ -320,7 +206,7 @@ class TestMoneyflowVolFields:
 
     def test_all_vol_fields_in_save_cols(self):
         dao_cols = extract_cols_from_method(QuoteDao.save_moneyflow)
-        assert dao_cols is not None
+        assert dao_cols, "Failed to extract columns from QuoteDao.save_moneyflow"
         vol_cols = {
             "buy_sm_vol",
             "sell_sm_vol",
@@ -332,8 +218,7 @@ class TestMoneyflowVolFields:
             "sell_elg_vol",
             "net_mf_vol",
         }
-        missing = vol_cols - dao_cols
-        assert not missing, f"save_moneyflow missing volume columns: {missing}"
+        assert vol_cols.issubset(dao_cols), f"save_moneyflow missing volume columns: {vol_cols - dao_cols}"
 
 
 class TestDaoSaveMethodCompleteness:
