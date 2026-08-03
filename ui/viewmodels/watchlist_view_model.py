@@ -23,6 +23,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class WatchlistState:
     watchlist_rows: tuple[WatchlistRow, ...] = ()
     is_loading: bool = False
     load_error: Message | None = None
+    load_error_detail: str | None = None
 
 
 class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
@@ -68,7 +70,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_watchlist(self) -> None:
         """加载关注列表 (从 DB 读取并转换为 tuple[WatchlistRow, ...])."""
-        self._set_state(is_loading=True, load_error=None)
+        self._set_state(is_loading=True, load_error=None, load_error_detail=None)
         try:
             df = await self.cache.get_watchlist()
             rows = _df_to_watchlist_rows(df)
@@ -143,22 +145,24 @@ def _handle_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
     """统一错误处理: classify_error + Message + 日志 (对齐 DataExplorerViewModel)."""
     error_info = classify_error(e, context="db")
     severity = classify_severity(e, context="db")
+    sanitized = DataSanitizer.sanitize_error(e)
     if severity == "system":
-        logger.critical("[WatchlistVM] SYSTEM-LEVEL failure in %s: %s", op, e, exc_info=True)
+        logger.critical("[WatchlistVM] SYSTEM-LEVEL failure in %s: %s", op, sanitized, exc_info=True)
     elif severity == "recoverable":
         logger.warning(
             "[WatchlistVM] Recoverable error (%s) in %s: %s",
             error_info["code"],
             op,
-            e,
+            sanitized,
             exc_info=True,
         )
     else:
-        logger.error("[WatchlistVM] Operational error in %s: %s", op, e, exc_info=True)
+        logger.error("[WatchlistVM] Operational error in %s: %s", op, sanitized, exc_info=True)
     vm._set_state(
         is_loading=False,
         load_error=Message(
             error_info.get("message_key", "common_err_unknown"),
             error_info.get("format_args") or {},
         ),
+        load_error_detail=sanitized,
     )

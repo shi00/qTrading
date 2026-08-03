@@ -22,6 +22,7 @@ from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ class BacktestState:
     status_color: str = ""
     # 回测结果直接放入 state (BacktestResult 是 strategies 层 frozen dataclass 领域对象)
     result: BacktestResult | None = None
+    # 已脱敏的错误详情 (Task 11.4): run_backtest 失败时由 DataSanitizer.sanitize_error 产出
+    error_detail: str | None = None
 
     def __eq__(self, other: object) -> bool:
         """自定义 __eq__: result 字段用 identity 比较, 避免 DataFrame __eq__ 抛 TypeError."""
@@ -60,6 +63,7 @@ class BacktestState:
             and self.status_message == other.status_message
             and self.status_color == other.status_color
             and self.result is other.result
+            and self.error_detail == other.error_detail
         )
 
     def __hash__(self) -> int:
@@ -71,6 +75,7 @@ class BacktestState:
                 self.status_message,
                 self.status_color,
                 id(self.result),
+                self.error_detail,
             )
         )
 
@@ -246,6 +251,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             status_message=Message("backtest_starting"),
             status_color="info",
             result=None,
+            error_detail=None,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -284,6 +290,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                         {"duration": result.duration_ms},
                     ),
                     status_color="success",
+                    error_detail=None,
                 )
 
                 return Message("backtest_success", {"sharpe": f"{result.metrics['sharpe_ratio']:.2f}"})
@@ -295,6 +302,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 self._set_state(
                     status_message=Message("backtest_failed"),
                     status_color="error",
+                    error_detail=DataSanitizer.sanitize_error(e),
                 )
                 raise
             finally:

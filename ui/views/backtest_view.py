@@ -22,6 +22,7 @@ import flet as ft
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.components.state_views import GITHUB_ISSUES_URL, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -62,6 +63,8 @@ def BacktestView(active: bool = True) -> ft.Container:
     strategies = ft.use_state(lambda: vm.get_available_strategies())[0]
     selected_strategy, set_selected_strategy = ft.use_state(lambda: next(iter(strategies), None))
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
+    # Task 11.3: 存储上次回测提交 (strategy_key, backtest_config) 供 ErrorState on_retry 复用
+    last_run, set_last_run = ft.use_state(lambda: None)  # type: ignore[assignment]  [reason: ft.use_state 无泛型支持, pyright 推断为 Never, 运行时正确]
 
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
@@ -87,9 +90,43 @@ def BacktestView(active: bool = True) -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
+                # Task 11.3: 存储 last_run 供 ErrorState on_retry 复用 (须在 page 可用时调用,
+                # set_last_run 触发 _schedule_update 需访问 context.page)
+                set_last_run((selected_strategy, backtest_config))
                 page.run_task(vm.run_backtest, selected_strategy, backtest_config)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
+
+    def _on_retry_backtest() -> None:
+        """Task 11.3: ErrorState on_retry — 重新提交上次回测配置 (R16: page.run_task 调度)."""
+        if last_run is None:
+            return
+        strategy, backtest_config = last_run  # type: ignore[reportGeneralTypeIssues]  [reason: ft.use_state 无泛型支持, pyright 推断 last_run 为 Never, 运行时为 tuple[str, BacktestConfig] | None]
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.run_backtest, strategy, backtest_config)
+        except RuntimeError:
+            logger.warning("[BacktestView] page not available for retry")
+
+    def _on_cta_report() -> None:
+        """Task 11.3: ErrorState on_cta — 打开 GitHub Issues.
+
+        page.launch_url 为 async (被 @deprecated 装饰器破坏 iscoroutinefunction 检测,
+        须用 async wrapper 包裹后通过 page.run_task 调度, R16).
+        """
+        try:
+            page = ft.context.page
+        except RuntimeError:
+            logger.warning("[BacktestView] page not available for launch_url")
+            return
+
+        if page is not None:
+
+            async def _open_issues() -> None:
+                await page.launch_url(GITHUB_ISSUES_URL)
+
+            page.run_task(_open_issues)
 
     def _on_cancel_backtest(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
@@ -140,6 +177,23 @@ def BacktestView(active: bool = True) -> ft.Container:
         style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
     )
 
+    # Task 11.3: 回测执行失败 (status_color=="error" 且 result is None) → ErrorState 替换结果面板;
+    # no_strategy_error 是 View 本地 state, result 为 None 但 status_color 非 error, 不触发 ErrorState
+    has_backtest_error = state.status_color == "error" and state.result is None
+    if has_backtest_error:
+        right_content = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("backtest_failed_title"),
+            message=I18n.get("backtest_failed_message"),
+            detail=state.error_detail,
+            on_retry=_on_retry_backtest,
+            retry_text=I18n.get("common_retry"),
+            on_cta=_on_cta_report,
+            cta_text=I18n.get("error_state_contact_support"),
+        )
+    else:
+        right_content = BacktestResultPanel(result=state.result)
+
     return ft.Container(
         content=ft.Column(
             [
@@ -150,7 +204,7 @@ def BacktestView(active: bool = True) -> ft.Container:
                 ft.Container(height=16),
                 ResizableSplitter(
                     left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
-                    right_content=BacktestResultPanel(result=state.result),
+                    right_content=right_content,
                     config_key="ui_splitter_backtest_config",
                     default_width=360,
                     min_width=280,

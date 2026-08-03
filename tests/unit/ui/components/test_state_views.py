@@ -203,3 +203,139 @@ class TestCallbacks:
         cta_btn = container.content.controls[2]
         cta_btn.on_click(None)
         assert called == ["cta"]
+
+
+class TestErrorStateDetail:
+    """ErrorState detail 参数测试 (Task 11.1)."""
+
+    def test_detail_none_does_not_render_toggle(self, mock_i18n_state, mock_app_colors_state):
+        """detail 为 None 时不渲染展开按钮。"""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+        )
+        container = render_once(c)
+        col = container.content
+        # icon + title + message = 3 controls, 无 detail toggle
+        assert len(col.controls) == 3
+
+    def test_detail_renders_toggle_button(self, mock_i18n_state, mock_app_colors_state):
+        """detail 非空时渲染展开按钮 (TextButton)."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+            detail="sanitized error detail",
+        )
+        container = render_once(c)
+        col = container.content
+        # icon + title + message + toggle_button = 4 controls
+        assert len(col.controls) == 4
+        toggle_btn = col.controls[3]
+        assert isinstance(toggle_btn, ft.TextButton)
+
+    def test_detail_collapsed_does_not_render_detail_text(self, mock_i18n_state, mock_app_colors_state):
+        """detail 非空但未展开时, 不渲染 detail text。"""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+            detail="sanitized error detail",
+        )
+        container = render_once(c)
+        col = container.content
+        # 仅 toggle button, 无 detail text
+        texts = [ctrl for ctrl in col.controls if isinstance(ctrl, ft.Text)]
+        # title + message = 2 Text (无 detail text)
+        assert len(texts) == 2
+
+    def test_detail_expanded_renders_selectable_text(self, mock_i18n_state, mock_app_colors_state):
+        """展开后渲染 detail text (包裹在 Container 中防溢出), 且 selectable=True。"""
+        from tests.unit.ui.component_renderer import attach_fake_page, make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+            detail="sanitized error detail",
+        )
+        attach_fake_page(c)
+        container = render_once(c)
+        col = container.content
+        # 点击 toggle 按钮展开
+        toggle_btn = col.controls[3]
+        assert isinstance(toggle_btn, ft.TextButton)
+        toggle_btn.on_click(None)  # type: ignore[reportOptionalCall, reportCallIssue]  [reason: 测试中 on_click 经 safe_on_click 包装必非 None, None 为 ControlEvent 占位]
+        # 重新渲染以获取展开后的控件树
+        container = render_once(c)
+        col = container.content
+        # icon + title + message + toggle + detail_container = 5 controls
+        assert len(col.controls) == 5
+        detail_container = col.controls[4]
+        assert isinstance(detail_container, ft.Container)
+        detail_text = detail_container.content
+        assert isinstance(detail_text, ft.Text)
+        assert detail_text.value == "sanitized error detail"
+        assert detail_text.selectable is True
+        assert detail_text.max_lines == 10
+        assert detail_text.overflow == ft.TextOverflow.ELLIPSIS
+
+    def test_detail_toggle_collapses_back(self, mock_i18n_state, mock_app_colors_state):
+        """再次点击 toggle 按钮收起详情。"""
+        from tests.unit.ui.component_renderer import attach_fake_page, make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+            detail="sanitized error detail",
+        )
+        attach_fake_page(c)
+        # 展开
+        container = render_once(c)
+        toggle_btn = container.content.controls[3]
+        toggle_btn.on_click(None)  # type: ignore[reportOptionalCall, reportCallIssue]  [reason: 测试中 on_click 经 safe_on_click 包装必非 None, None 为 ControlEvent 占位]
+        # 收起
+        container = render_once(c)
+        toggle_btn = container.content.controls[3]
+        toggle_btn.on_click(None)  # type: ignore[reportOptionalCall, reportCallIssue]  [reason: 测试中 on_click 经 safe_on_click 包装必非 None, None 为 ControlEvent 占位]
+        # 重新渲染
+        container = render_once(c)
+        col = container.content
+        # icon + title + message + toggle = 4 controls (无 detail text)
+        assert len(col.controls) == 4
+
+    def test_detail_with_cta_renders_both_buttons(self, mock_i18n_state, mock_app_colors_state):
+        """detail + on_cta 同时存在时, cta 按钮和 detail toggle 都渲染。"""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Error",
+            message="Failed",
+            detail="sanitized error detail",
+            on_cta=lambda: None,
+            cta_text="Report Issue",
+        )
+        container = render_once(c)
+        col = container.content
+        # icon + title + message + cta + toggle = 5 controls
+        assert len(col.controls) == 5
+        # cta 按钮在 toggle 之前
+        assert isinstance(col.controls[3], ft.TextButton)
+        assert col.controls[3].content == "Report Issue"
+        # toggle 按钮在 cta 之后
+        assert isinstance(col.controls[4], ft.TextButton)

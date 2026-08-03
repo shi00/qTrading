@@ -68,6 +68,7 @@ class TestStateImmutability:
         assert vm.state.watchlist_rows == ()
         assert vm.state.is_loading is False
         assert vm.state.load_error is None
+        assert vm.state.load_error_detail is None
 
 
 # --- load_watchlist ---
@@ -123,6 +124,30 @@ class TestLoadWatchlist:
         assert vm.state.load_error is not None
         assert isinstance(vm.state.load_error, Message)
         assert vm.state.is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_load_watchlist_sets_error_detail_on_exception(self, vm, mock_cache):
+        """Task 11.4: 失败时设置 load_error_detail (已脱敏)."""
+        mock_cache.get_watchlist.side_effect = RuntimeError("db error at /home/user/secret/path")
+        await vm.load_watchlist()
+        assert vm.state.load_error_detail is not None
+        # 路径应被脱敏 (DataSanitizer 将文件路径替换为 <PATH>)
+        assert "/home/user/secret/path" not in vm.state.load_error_detail
+        assert "<PATH>" in vm.state.load_error_detail
+
+    @pytest.mark.asyncio
+    async def test_load_watchlist_clears_error_detail_on_success(self, vm, mock_cache):
+        """Task 11.4: 成功后 load_error_detail=None (即使之前有错误)."""
+        # 先制造一次失败
+        mock_cache.get_watchlist.side_effect = RuntimeError("first error")
+        await vm.load_watchlist()
+        assert vm.state.load_error_detail is not None
+        # 再成功
+        mock_cache.get_watchlist.side_effect = None
+        mock_cache.get_watchlist.return_value = _make_watchlist_df()
+        await vm.load_watchlist()
+        assert vm.state.load_error_detail is None
+        assert vm.state.load_error is None
 
 
 # --- add_to_watchlist ---

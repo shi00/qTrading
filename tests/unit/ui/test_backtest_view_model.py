@@ -360,6 +360,7 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.result is mock_result
         assert vm.state.is_running is False
         assert vm.state.status_color == "success"
+        assert vm.state.error_detail is None
         assert execution_result is not None
 
     @pytest.mark.asyncio
@@ -444,9 +445,87 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.is_running is False
         assert vm.state.status_color == "error"
         assert vm.state.progress == 1.0
+        assert vm.state.error_detail is not None
+        # error_detail 应为脱敏后的错误信息 (包含原始消息文本)
+        assert "strategy crashed" in vm.state.error_detail
         # Both starting (info) and failed (error) states were observed
         assert any(s.status_color == "info" for s in snapshots)
         assert any(s.status_color == "error" for s in snapshots)
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_error_detail_is_sanitized(self):
+        """Task 11.4: 失败时 error_detail 经 DataSanitizer 脱敏 (路径/密钥被替换)."""
+        vm = BacktestViewModel()
+        vm.service.run_backtest = AsyncMock(
+            side_effect=RuntimeError("failed at C:\\Users\\secret\\token\\cache.db"),
+        )
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_san"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+
+            await vm.run_backtest("test_strategy", config)
+
+        assert captured_factory is not None
+        with pytest.raises(RuntimeError, match="failed at"):
+            await captured_factory(task_id="task_san")
+
+        assert vm.state.error_detail is not None
+        # Windows 路径应被脱敏为 <PATH>
+        assert "C:\\Users\\secret\\token\\cache.db" not in vm.state.error_detail
+        assert "<PATH>" in vm.state.error_detail
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_error_detail_cleared_on_retry_after_failure(self):
+        """Task 11.4: 失败后重新运行成功时 error_detail 被清空."""
+        vm, mock_result = self._make_vm_with_mocks()
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_retry"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+
+            # 第一次: 失败
+            vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("first fail"))
+            await vm.run_backtest("test_strategy", config)
+            assert captured_factory is not None
+            with pytest.raises(RuntimeError, match="first fail"):
+                await captured_factory(task_id="task_retry")
+            assert vm.state.error_detail is not None
+
+            # 第二次: 成功
+            vm.service.run_backtest = AsyncMock(return_value=mock_result)
+            await vm.run_backtest("test_strategy", config)
+            assert captured_factory is not None
+            await captured_factory(task_id="task_retry")
+            assert vm.state.error_detail is None
 
     @pytest.mark.asyncio
     async def test_run_backtest_task_rejected(self):
@@ -807,6 +886,7 @@ class TestBacktestStateEquality:
         assert base != replace(base, progress_message=Message("other"))
         assert base != replace(base, status_message=Message("other"))
         assert base != replace(base, status_color="warning")
+        assert base != replace(base, error_detail="some detail")
 
     def test_hash_is_deterministic_and_usable_as_dict_key(self):
         """__hash__ 不抛异常、确定性、可作 dict key。
