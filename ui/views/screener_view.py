@@ -777,6 +777,10 @@ def ScreenerView(
                 max_val=float(max_val),
                 step=float(step),
                 on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
+                # 固定宽度: 参数面板 ft.Row(wrap=True) 需要可测量宽度的子控件才能正确换行布局。
+                # width=None + Slider(expand=True) 导致宽度不确定 → 控件独占一行 →
+                # 参数面板变高 → table_card 视口高度被挤压到 0 → 表格行不生成语义节点 (PR #373 回归)。
+                width=AppStyles.CONTROL_WIDTH_MD,
             )
 
         if p_type == "number":
