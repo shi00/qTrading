@@ -419,6 +419,46 @@ class TestBuildTabs:
         self.mock_notify.assert_not_called()
         self.mock_system.assert_not_called()
 
+    def test_build_tabs_with_visited_tabs_constructs_all_visited(self):
+        """Issue #438: visited_tabs 含多个索引时, 所有已访问 Tab 被构造。"""
+        from ui.views.settings_view import _build_tabs
+
+        show_snack = MagicMock()
+        tabs = _build_tabs(show_snack, current_tab=2, visited_tabs={0, 2})
+
+        assert len(tabs) == 6
+        self.mock_data.assert_called_once_with(show_snack)  # tab 0 visited
+        self.mock_ai.assert_called_once_with(show_snack)  # tab 2 visited
+        # 未访问 Tab 不构造
+        self.mock_db.assert_not_called()
+        self.mock_auto.assert_not_called()
+        self.mock_notify.assert_not_called()
+        self.mock_system.assert_not_called()
+
+    def test_build_tabs_visible_prop_correct(self):
+        """Issue #438: visible prop 按 current_tab 设置, 已访问 Tab content 非 None。"""
+        from ui.views.settings_view import _build_tabs
+
+        tabs = _build_tabs(MagicMock(), current_tab=1, visited_tabs={0, 1})
+        assert len(tabs) == 6
+        # current_tab=1 → tabs[1].visible=True
+        assert tabs[1].visible is True
+        # tab 0 visited 但非 current → visible=False, content 非 None
+        assert tabs[0].visible is False
+        assert tabs[0].content is not None
+        # tab 2 未访问 → visible=False, content=None
+        assert tabs[2].visible is False
+        assert tabs[2].content is None
+
+    def test_build_tabs_default_visited_tabs_backward_compat(self):
+        """Issue #438: visited_tabs=None 默认 {current_tab}, 向后兼容现有测试。"""
+        from ui.views.settings_view import _build_tabs
+
+        show_snack = MagicMock()
+        _build_tabs(show_snack, current_tab=0)
+        self.mock_data.assert_called_once_with(show_snack)
+        self.mock_db.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _TAB_CONFIG 配置守护
@@ -637,16 +677,53 @@ class TestSettingsViewComponentBody:
         dividers = [c for c in _collect_controls(result) if isinstance(c, ft.Divider)]
         assert len(dividers) >= 1
 
-    def test_mount_renders_tab_body_container(
+    def test_mount_renders_tab_body_stack(
         self,
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """挂载后 tab_body 是 ft.Container, content 为第一个 tab 实例。"""
+        """Issue #438: 挂载后 tab_body 是 ft.Stack (visible prop 控制显隐)。"""
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
-        containers = [c for c in _collect_controls(result) if isinstance(c, ft.Container)]
-        # 至少有 tab_bar / tab_body / 根 Container
-        assert len(containers) >= 2
+        stacks = [c for c in _collect_controls(result) if isinstance(c, ft.Stack)]
+        assert len(stacks) >= 1
+
+    def test_tab_switch_preserves_visited_tab_state(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """Issue #438: 已访问 Tab 始终被构造 (visited_tabs 机制), 未访问 Tab 不构造。
+
+        visited_tabs 累积已访问索引, 已访问 Tab 每次渲染都被构造 (声明式范式,
+        工厂函数重新调用), 状态保持由 Flet diff 算法按树位置保持 use_viewmodel
+        hooks 状态 (与 AppLayout._build_pages_stack 模式一致)。本测试验证
+        visited_tabs 机制: 切换 Tab 后, 已访问 Tab 仍被构造, 未访问 Tab 不构造。
+        """
+        from tests.unit.ui.component_renderer import render_once
+
+        component, result = self._mount(mock_i18n_state, mock_app_colors_state)
+        buttons = _find_buttons(result)
+
+        # 首次挂载: 只有 tab 0 被构造 (visited_tabs={0}, call_count >= 1)
+        assert self.mock_data.call_count >= 1
+        self.mock_ai.assert_not_called()
+        self.mock_auto.assert_not_called()
+
+        # 切换到 tab 2 (首次访问, visited_tabs: {0} → {0, 2})
+        _trigger_callback(buttons[2].on_click, _make_tab_event("2"))
+        result = render_once(component)
+        # tab 2 (AIBrainTab) 现在被构造 (call_count >= 1 表示已加入 visited_tabs)
+        assert self.mock_ai.call_count >= 1
+
+        # 切回 tab 0 (已访问, visited_tabs 不变)
+        buttons = _find_buttons(result)
+        _trigger_callback(buttons[0].on_click, _make_tab_event("0"))
+        render_once(component)
+
+        # 未访问的 tab 3 (AutomationTab) 仍未被构造
+        self.mock_auto.assert_not_called()
+        # tab 2 仍被构造 (在 visited_tabs 中, 每次渲染都构造, call_count 持续增长)
+        assert self.mock_ai.call_count >= 1
 
     def test_show_snack_closure_calls_impl_with_captured_page(
         self,
