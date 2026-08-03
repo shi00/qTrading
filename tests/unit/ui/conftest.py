@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, create_autospec
 
@@ -49,6 +50,21 @@ def _v1_page_compat(monkeypatch):
 
     monkeypatch.setattr(ft.Control, "page", page)
     monkeypatch.setattr(ft.Control, "update", update)
+
+
+@pytest.fixture(autouse=True)
+def _reset_pending_prefill() -> Iterator[None]:
+    """每测前后清理 backtest_view_model._pending_prefill, 防止跨测试泄漏 (R7 测试隔离).
+
+    PR #373 Task 8.3 的 _pending_prefill 是模块级可变 dict (非 @register_singleton),
+    不被 tests/conftest.py 的 _reset_all_singletons autouse 覆盖; 选股→回测透传测试
+    若仅 set 未 consume (如断言失败路径) 会残留, 影响后续 mount BacktestView 的测试.
+    """
+    from ui.viewmodels.backtest_view_model import _pending_prefill
+
+    _pending_prefill.clear()
+    yield
+    _pending_prefill.clear()
 
 
 # 注：_reset_context_page fixture 已提升到 tests/conftest.py 项目根，覆盖所有目录

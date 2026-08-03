@@ -851,7 +851,6 @@
     "snack_full_sync_done_simple": "完整日更新完成！",
     "snack_sync_skipped_fmt": "同步完成，跳过 {skipped} 条已存在数据",
     "snack_sync_permission_skipped_fmt": "同步完成，{count} 张表因权限不足被跳过",
-    "snack_action_view_tier_api": "查看权限",
     "progress_sync_prepare": "准备同步...",
     "snack_sync_not_completed": "同步未完成，请重试",
     "progress_sync_market": "正在同步行情: {date}",

@@ -44,7 +44,7 @@ from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
+from ui.viewmodels.screener_view_model import _MAX_LOG_CARDS, ScreenerViewModel, StreamCard
 from ui.viewmodels.backtest_view_model import set_pending_prefill
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
 from utils.log_decorators import UILogger
@@ -1413,7 +1413,7 @@ def ScreenerView(
     if state.stream_cards_truncated:
         log_column_controls.append(
             ft.Text(
-                I18n.get("ai_cards_truncated_hint").format(max=10),
+                I18n.get("ai_cards_truncated_hint").format(max=_MAX_LOG_CARDS),
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,

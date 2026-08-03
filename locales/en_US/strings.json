@@ -955,7 +955,6 @@
     "snack_full_sync_done_simple": "Full sync complete!",
     "snack_sync_skipped_fmt": "Sync complete, skipped {skipped} existing records",
     "snack_sync_permission_skipped_fmt": "Sync complete, {count} table(s) skipped due to insufficient permissions",
-    "snack_action_view_tier_api": "View Permissions",
     "progress_sync_prepare": "Preparing...",
     "snack_sync_not_completed": "Sync incomplete, retry",
     "progress_sync_market": "Syncing quotes: {date}",
