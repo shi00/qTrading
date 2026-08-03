@@ -38,6 +38,8 @@ async def test_settings_language_switch(e2e_page):
     lang_zh = I18n.get("settings_lang_zh")
     await e2e_page.expect_text(lang_label, timeout_ms=10000)  # Wait for the tab to render
 
+    # 预定义 lang_label_en，防止 try 块提前抛异常时 finally 无法访问
+    lang_label_en = None
     try:
         await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
 
@@ -45,7 +47,15 @@ async def test_settings_language_switch(e2e_page):
         I18n.set_locale("en_US")
 
         # 验证 UI 文本已切换为英文（导航栏 "Screener" 出现）
-        await e2e_page.expect_text("Screener", timeout_ms=10000)
+        # [PITFALL FIX] 不用 expect_text，因为 Flet 0.86.3 CanvasKit 下 NavigationRail
+        # 语义节点合并导致 "Screener" 同时出现在父 aria-label 和子 button text 中，
+        # get_by_text strict mode 匹配多个节点立即报错。改用 has_text 轮询（非 strict）。
+        for _ in range(50):  # 50 * 200ms = 10s
+            if await e2e_page.has_text("Screener"):
+                break
+            await e2e_page.page.wait_for_timeout(200)
+        else:
+            pytest.fail("导航栏 'Screener' 在 10000ms 内未出现（语言切换失败）")
 
         # 强断言：验证设置页文案已切换为英文（而非仅导航栏变化）
         theme_label_en = I18n.get("settings_theme")
@@ -63,7 +73,9 @@ async def test_settings_language_switch(e2e_page):
         # 应对：通过 UI 主动切换回中文，触发 app 进程的 I18n.set_locale("zh_CN")。
         # 此时 app 已是英文界面，dropdown label 显示为 "Language"。
         try:
-            await e2e_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
+            # 若 try 块提前抛异常，lang_label_en 为 None，用英文 locale fallback
+            lang_label_restore = lang_label_en or I18n.get("settings_language", locale="en_US")
+            await e2e_page.select_dropdown(lang_label_restore, lang_zh, timeout_ms=10000)
             # 轮询等待中文导航文本重新出现，确认 locale 已还原
             nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
             for _ in range(25):
