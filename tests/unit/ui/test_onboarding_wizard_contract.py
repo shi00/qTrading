@@ -873,6 +873,37 @@ class TestOnboardingWizardComponentBody:
         assert mock_onboarding_vms["llm"].dispose_called is True
         assert mock_onboarding_vms["local_model"].dispose_called is True
 
+    def test_unmount_cleanup_logs_when_cancel_sync_fails(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """unmount 时 cancel_sync 抛异常, _do_cleanup 的 except 捕获并记 debug 日志.
+
+        覆盖 onboarding_wizard.py L391-395 logger.debug 分支:
+        - sync_in_progress=True 触发 cancel_sync 调用
+        - cancel_sync 抛异常 → except 捕获 → logger.debug (不传播)
+        - _make_fake_page 的 run_task 同步执行 _do_cleanup 协程
+        """
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, sync_in_progress=True)
+        fake_vm.cancel_sync = AsyncMock(side_effect=RuntimeError("cancel failed"))
+
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+
+        # unmount 触发 _cleanup → page.run_task(_do_cleanup) → cancel_sync 抛异常
+        # except 必须捕获, 否则 asyncio.run 会传播 RuntimeError 导致测试失败
+        run_unmount_effects(component)
+
+        # cancel_sync 被调用证明 if sync_in_progress 分支已执行
+        # assert_called_once_with() 验证无参数调用 (cancel_sync 签名无参, 强断言)
+        fake_vm.cancel_sync.assert_called_once_with()
+
     def test_loading_overlay_visible_when_validation_in_progress(
         self,
         mock_i18n_state,

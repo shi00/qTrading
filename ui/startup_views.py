@@ -30,6 +30,7 @@ from app.startup_controller import StartupContext, StartupController, StartupSta
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,12 @@ def _get_localized_detail(detail: str) -> str:
         if classified.get("message_key") != "db_err_unknown":
             return get_error_message(classified)
     except Exception as e:
-        logger.warning("[StartupView] Failed to classify error detail '%s': %s", detail, e, exc_info=True)
+        logger.warning(
+            "[StartupView] Failed to classify error detail '%s': %s",
+            DataSanitizer.sanitize_error(detail),
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
     return detail
 
 
