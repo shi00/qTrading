@@ -491,3 +491,19 @@ class TestSliderInputTextInput:
         text_field.on_blur(e_blur)
 
         callback.assert_not_called()  # 值未变化，不回调
+
+
+class TestSnapToStepEdgeCases:
+    """_snap_to_step 边界分支补强（L32 step<=0 防御分支）。"""
+
+    def test_step_zero_returns_clamped_value(self):
+        """step<=0 → 返回 clamp 后的值（不做 snap）。"""
+        from ui.components.slider_input import _snap_to_step
+
+        # step=0 → 不 snap，仅 clamp
+        assert _snap_to_step(55, 0, 100, 0) == 55
+        # step 负数 → 同样不 snap
+        assert _snap_to_step(55, 0, 100, -1) == 55
+        # clamp 仍然生效
+        assert _snap_to_step(150, 0, 100, 0) == 100
+        assert _snap_to_step(-10, 0, 100, 0) == 0
