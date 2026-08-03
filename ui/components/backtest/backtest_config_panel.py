@@ -33,6 +33,7 @@ from ui.components.flet_type_helpers import (
     safe_on_dismiss,
     safe_on_select,
 )
+from ui.components.slider_input import SliderInput
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -277,20 +278,20 @@ def BacktestConfigPanel(
         on_change=safe_on_change(_on_max_positions_change),
     )
 
-    def _on_commission_change(e: ft.ControlEvent) -> None:
-        val = get_control_value(e.control, ft.Slider)
-        set_commission(val if val is not None else 3.0)
+    def _on_commission_change(val: float) -> None:
+        set_commission(val)
 
-    commission_slider = ft.Slider(
-        min=0,
-        max=10,
-        divisions=10,
+    commission_input = SliderInput(
+        label=None,
         value=commission,
-        label="{value}",
+        min_val=0,
+        max_val=10,
+        step=1.0,
+        divisions=10,
+        fmt=lambda v: f"{v:g}‱",
+        on_change=_on_commission_change,
         expand=True,
-        on_change=safe_on_change(_on_commission_change),
     )
-    commission_text = ft.Text(f"{commission:g}‱", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
 
     stamp_duty_auto_checkbox = ft.Checkbox(
         label=I18n.get("backtest_stamp_duty_auto"),
@@ -298,40 +299,47 @@ def BacktestConfigPanel(
         on_change=safe_on_change(_on_stamp_duty_auto_change),
     )
 
-    def _on_stamp_duty_rate_change(e: ft.ControlEvent) -> None:
-        val = get_control_value(e.control, ft.Slider)
-        set_stamp_duty_rate(val if val is not None else 0.5)
+    def _on_stamp_duty_rate_change(val: float) -> None:
+        set_stamp_duty_rate(val)
 
-    stamp_duty_slider = ft.Slider(
-        min=0,
-        max=2,
-        divisions=4,
+    stamp_duty_input = SliderInput(
+        label=None,
         value=stamp_duty_rate,
-        label="{value}",
-        expand=True,
+        min_val=0,
+        max_val=2,
+        step=0.5,
+        divisions=4,
+        fmt=lambda v: f"{v:.1f}‰",
+        on_change=_on_stamp_duty_rate_change,
         disabled=stamp_duty_auto,
-        on_change=safe_on_change(_on_stamp_duty_rate_change),
+        expand=True,
     )
+
+    # 状态文案：auto=True 显示 "auto" 文案；auto=False 显示具体费率（与 TextField 一致，作为状态提示）
     if stamp_duty_auto:
         stamp_duty_text_value = I18n.get("backtest_stamp_duty_auto")
     else:
         stamp_duty_text_value = f"{stamp_duty_rate:.1f}‰"
-    stamp_duty_text = ft.Text(stamp_duty_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
-
-    def _on_slippage_change(e: ft.ControlEvent) -> None:
-        val = get_control_value(e.control, ft.Slider)
-        set_slippage(val if val is not None else 5.0)
-
-    slippage_slider = ft.Slider(
-        min=0,
-        max=20,
-        divisions=20,
-        value=slippage,
-        label="{value}",
-        expand=True,
-        on_change=safe_on_change(_on_slippage_change),
+    stamp_duty_text = ft.Text(
+        stamp_duty_text_value,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.TEXT_SECONDARY,
     )
-    slippage_text = ft.Text(f"{slippage:g} bps", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
+
+    def _on_slippage_change(val: float) -> None:
+        set_slippage(val)
+
+    slippage_input = SliderInput(
+        label=None,
+        value=slippage,
+        min_val=0,
+        max_val=20,
+        step=1.0,
+        divisions=20,
+        fmt=lambda v: f"{v:g} bps",
+        on_change=_on_slippage_change,
+        expand=True,
+    )
 
     run_btn = ft.Button(
         content=I18n.get("backtest_run"),
@@ -433,8 +441,7 @@ def BacktestConfigPanel(
                                             size=AppStyles.FONT_SIZE_BODY_SM,
                                             color=AppColors.TEXT_SECONDARY,
                                         ),
-                                        commission_slider,
-                                        commission_text,
+                                        commission_input,
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),
@@ -448,7 +455,7 @@ def BacktestConfigPanel(
                                                     size=AppStyles.FONT_SIZE_BODY_SM,
                                                     color=AppColors.TEXT_SECONDARY,
                                                 ),
-                                                stamp_duty_slider,
+                                                stamp_duty_input,
                                                 stamp_duty_text,
                                             ],
                                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -463,8 +470,7 @@ def BacktestConfigPanel(
                                             size=AppStyles.FONT_SIZE_BODY_SM,
                                             color=AppColors.TEXT_SECONDARY,
                                         ),
-                                        slippage_slider,
-                                        slippage_text,
+                                        slippage_input,
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),

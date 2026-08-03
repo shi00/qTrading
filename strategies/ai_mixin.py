@@ -150,6 +150,10 @@ class AIStrategyMixin:
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
         self._history_cache: TTLCache = TTLCache(maxsize=self._HISTORY_CACHE_MAX, ttl=self._HISTORY_CACHE_TTL)
+        # UX-2.3: 供 retry_single 复用（_last_prefetched 避免重新预取 news）
+        self._last_candidates_df: pd.DataFrame | None = None
+        self._last_prefetched: PreFetchedContext | None = None
+        self._last_dp = None
 
     def register_context_builder(self, name: str, builder: ContextBuilder) -> None:
         """
@@ -570,6 +574,10 @@ class AIStrategyMixin:
 
         # --- Strategy-specific prefetch hook ---
         prefetched = await self._prefetch_strategy_specific(candidates_df, context, prefetched)
+        # UX-2.3: 保留 batch state 供 retry_single 复用（避免重新预取 news/history）
+        self._last_candidates_df = candidates_df
+        self._last_prefetched = prefetched
+        self._last_dp = dp
 
         # D7: Prefetch macro_context once before concurrent loop to avoid thundering herd
         try:
@@ -592,17 +600,19 @@ class AIStrategyMixin:
         if on_progress:
             on_progress(0, total_tasks, I18n.get("ai_progress_init"))
 
+        on_card_error = context.get("on_card_error")  # UX-2.3: 单股失败回调
+
         async def analyze_one(row_data: dict) -> dict | None:
             async with screening_sem:
                 if dp and dp.is_cancelled():
-                    return None
+                    return None  # 已取消，不触发 on_card_error
                 stock_name = row_data.get("name", row_data.get("ts_code", "?"))
                 on_chunk = on_stream_start(stock_name) if on_stream_start else None
                 if on_card_start:
                     on_card_start(stock_name)
                 # Task 2.2: 未确认 AI 外发政策时跳过云端调用（保持 cache 预取等数据流不变）
                 if not ai_external_acknowledged:
-                    return None
+                    return None  # 预期跳过，不触发 on_card_error
                 try:
                     hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
                     news_list = []
@@ -619,7 +629,19 @@ class AIStrategyMixin:
                         ui_prompt_override=ui_prompt_override,
                         vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
                     )
+                    if res is None:
+                        # UX-2.3: 软失败（_mixin_analyze_single 内部已日志）
+                        if on_card_error:
+                            on_card_error(stock_name, I18n.get("ai_card_analysis_failed"))
+                        return None
                     return self._build_result_row(row_data, res)
+                except asyncio.CancelledError:
+                    raise  # R2 合规
+                except Exception as e:
+                    # UX-2.3: 网络错误等（_mixin_analyze_single raise 的异常）
+                    if on_card_error:
+                        on_card_error(stock_name, DataSanitizer.sanitize_error(e))
+                    raise  # 继续传播给 gather 收集（保持现有行为）
                 finally:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
                         on_chunk.final_flush()
@@ -643,6 +665,7 @@ class AIStrategyMixin:
                 raise res
             completed += 1
             if isinstance(res, Exception):
+                # UX-2.3: on_card_error 已在 analyze_one 内调用，此处仅日志
                 error_info = classify_error(res, context="general")
                 logger.error(
                     "[AIStrategyMixin] Task error (%s): %s", error_info["code"], DataSanitizer.sanitize_error(res)
@@ -683,6 +706,77 @@ class AIStrategyMixin:
             )
 
         return result_df.sort_values("ai_score", ascending=False)
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
+    async def retry_single(self, stock_name: str, context: dict) -> None:
+        """UX-2.3: 重试单股 AI 分析。
+
+        v3: 不走 run_ai_analysis（会覆盖 _last_candidates_df 与 _last_prefetched），
+        改为复用 _last_prefetched 直接调 _mixin_analyze_single。
+        避免重新预取 news/history（节省网络开销）+ 避免 _last_candidates_df 被覆盖。
+        """
+        on_card_error = context.get("on_card_error")  # R1-7: 前移到早退检查之前
+        if self._last_candidates_df is None or self._last_prefetched is None:
+            logger.warning("[AIStrategyMixin] retry_single: no cached batch state")
+            if on_card_error:
+                on_card_error(stock_name, I18n.get("ai_card_analysis_failed"))
+            return
+        df = self._last_candidates_df
+        mask = (df["name"] == stock_name) | (df["ts_code"] == stock_name)
+        single_records = df[mask].to_dict("records")
+        if not single_records:
+            logger.warning("[AIStrategyMixin] retry_single: stock %s not found", stock_name)
+            if on_card_error:
+                on_card_error(stock_name, I18n.get("ai_card_analysis_failed"))
+            return
+        row_data = single_records[0]
+        prefetched = self._last_prefetched
+        ai_client = AIService()
+        dp = context.get("data_processor") or self._last_dp
+        on_card_start = context.get("on_card_start")
+        on_result = context.get("on_result") or context.get("on_stream_result")
+        name_str = row_data.get("name", row_data.get("ts_code", "?"))
+        if on_card_start:
+            on_card_start(name_str)
+        try:
+            ts_code = row_data.get("ts_code")
+            hist_df = prefetched.history.get(ts_code, pd.DataFrame())
+            news_list: list = []
+            if ts_code in prefetched.news_tasks:
+                news_task = prefetched.news_tasks[ts_code]
+                if news_task.done() and news_task.cancelled():
+                    # UX-2.3 v4 P1-1: 原 news task 已被 cancel（批次取消场景），降级重新拉取
+                    if prefetched.news_as_of:
+                        news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+                    else:
+                        news_list = []
+                else:
+                    # task 未完成或正常完成，await 复用（CancelledError 由外层传播）
+                    news_list = await news_task
+            elif prefetched.news_as_of:
+                news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+            res = await self._mixin_analyze_single(
+                row_data,
+                dp,
+                ai_client,
+                prefetched,
+                history_df=hist_df,
+                news=news_list,
+                vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
+            )
+            if res is None:
+                if on_card_error:
+                    on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
+                return
+            result_row = self._build_result_row(row_data, res)
+            if result_row and on_result:
+                on_result(result_row)
+        except asyncio.CancelledError:
+            raise  # R2 合规
+        except Exception as e:
+            if on_card_error:
+                on_card_error(name_str, DataSanitizer.sanitize_error(e))
+            logger.error("[AIStrategyMixin] retry_single failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     @staticmethod
     async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:

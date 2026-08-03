@@ -59,6 +59,8 @@ class FakeScreenerState:
     strategy_desc: Message | None = None
     strategy_desc_color: str = "default"
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
+    status_action_key: str | None = None
+    is_retrying: bool = False
 
 
 class FakeScreenerViewModel:

@@ -29,6 +29,8 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
+from flet.components.component import Component
+
 from tests.unit.ui.component_renderer import (
     FakePage,
     make_component,
@@ -76,11 +78,12 @@ def _make_event(value: Any = None) -> MagicMock:
 
 
 def _walk_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树 (含 controls/items/content/tabs)。
-
-    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归)。
-    """
-    if root is None or not isinstance(root, ft.Control):
+    if root is None:
+        return []
+    if isinstance(root, Component):
+        rendered = render_once(root)
+        return _walk_controls(rendered)
+    if not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -89,10 +92,33 @@ def _walk_controls(root: Any) -> list[Any]:
             for child in children:
                 if child is not None:
                     result.extend(_walk_controls(child))
-    content = getattr(root, "content", None)
-    if isinstance(content, ft.Control):
-        result.extend(_walk_controls(content))
+    content_attr = getattr(root, "content", None)
+    if isinstance(content_attr, (ft.Control, Component)):
+        result.extend(_walk_controls(content_attr))
     return result
+
+
+def _find_gpu_layers_container(root: Any) -> ft.Container | None:
+    """查找直接包装 gpu_layers SliderInput 的 Container。
+
+    判定：Container.content 渲染后为 Column，Column 的直接子控件（Row）中
+    含有 Slider max=100。避免误匹配祖先 Container（其 content 递归包含子 Container）。
+    """
+    for ctrl in _walk_controls(root):
+        if not isinstance(ctrl, ft.Container):
+            continue
+        content = getattr(ctrl, "content", None)
+        if isinstance(content, Component):
+            content = render_once(content)
+        if not isinstance(content, ft.Column):
+            continue
+        # 仅检查 Column 的直接子控件（Row），不递归
+        for child in getattr(content, "controls", []):
+            if isinstance(child, ft.Row):
+                for row_child in getattr(child, "controls", []):
+                    if isinstance(row_child, ft.Slider) and row_child.max == 100:
+                        return ctrl
+    return None
 
 
 def _find_text_field(root: Any, label: str) -> ft.TextField:
@@ -819,33 +845,41 @@ class TestGpuAutoAndLayersDisplay:
         assert gpu_auto_sw.value is False
 
     def test_gpu_layers_input_hidden_when_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_gpu_auto=True → gpu_layers_input.visible=False。"""
+        """is_gpu_auto=True → gpu_layers_input 容器 visible=False。
+
+        P2-2 改造后 gpu_layers_input 是 SliderInput（被 ft.Container 包装），
+        visible 控制点在 Container 而非 Slider 本身。
+        """
         state = LocalModelConfigState(n_gpu_layers=-1)
         _, _, result, _ = _render_panel(state=state)
-        ctrls = _walk_controls(result)
-        # gpu_layers_input 是 Slider, min=0 max=100, visible=not is_gpu_auto
-        sliders = [c for c in ctrls if isinstance(c, ft.Slider) and c.max == 100]
-        assert len(sliders) == 1
-        assert sliders[0].visible is False
+        gpu_container = _find_gpu_layers_container(result)
+        assert gpu_container is not None
+        assert gpu_container.visible is False
 
     def test_gpu_layers_input_visible_when_not_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_gpu_auto=False → gpu_layers_input.visible=True。"""
+        """is_gpu_auto=False → gpu_layers_input 容器 visible=True。"""
         state = LocalModelConfigState(n_gpu_layers=20)
         _, _, result, _ = _render_panel(state=state)
-        ctrls = _walk_controls(result)
-        sliders = [c for c in ctrls if isinstance(c, ft.Slider) and c.max == 100]
-        assert len(sliders) == 1
-        assert sliders[0].visible is True
+        gpu_container = _find_gpu_layers_container(result)
+        assert gpu_container is not None
+        assert gpu_container.visible is True
 
     def test_gpu_layers_display_zero_when_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_gpu_auto=True → gpu_layers_display=0, slider.value=0.0。"""
+        """is_gpu_auto=True → gpu_layers_display=0, slider.value=0.0。
+
+        SliderInput 不设置 Slider.tooltip（改由 TextField 显示精确值），
+        故此处仅断言 slider.value，并通过 TextField.value 验证显示文本。
+        """
         state = LocalModelConfigState(n_gpu_layers=-1)
         _, _, result, _ = _render_panel(state=state)
         ctrls = _walk_controls(result)
         sliders = [c for c in ctrls if isinstance(c, ft.Slider) and c.max == 100]
         assert len(sliders) == 1
         assert sliders[0].value == 0.0
-        assert sliders[0].tooltip == "0"
+        # SliderInput 内 TextField 显示格式化后的值（默认 fmt 整数 -> "0"）
+        text_fields = [c for c in ctrls if isinstance(c, ft.TextField)]
+        gpu_text = next((t for t in text_fields if t.value == "0"), None)
+        assert gpu_text is not None
 
     def test_gpu_layers_display_state_value_when_not_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:
         """is_gpu_auto=False → gpu_layers_display=state.n_gpu_layers, slider.value=20.0。"""
@@ -855,7 +889,9 @@ class TestGpuAutoAndLayersDisplay:
         sliders = [c for c in ctrls if isinstance(c, ft.Slider) and c.max == 100]
         assert len(sliders) == 1
         assert sliders[0].value == 20.0
-        assert sliders[0].tooltip == "20"
+        text_fields = [c for c in ctrls if isinstance(c, ft.TextField)]
+        gpu_text = next((t for t in text_fields if t.value == "20"), None)
+        assert gpu_text is not None
 
 
 # ============================================================================
