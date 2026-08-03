@@ -465,7 +465,7 @@ def FailoverConfigPanel(
     btn_save = ft.Button(
         content=I18n.get("settings_save_ai"),
         icon=ft.Icons.SAVE,
-        on_click=lambda _e: vm.save_config(),
+        on_click=safe_on_click(lambda _e: vm.save_config()),
         style=AppStyles.primary_button(),
         height=36,
         visible=show_save_button,

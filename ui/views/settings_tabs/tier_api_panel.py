@@ -26,6 +26,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.system_viewmodel import ProbeResultRow, SystemViewModel
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +327,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
             raise
         except Exception as exc:
-            logger.error("[TierApiPanel] on_tier_changed failed: %s", exc, exc_info=True)
+            logger.error("[TierApiPanel] on_tier_changed failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
     def _on_tier_change(e: ft.ControlEvent) -> None:
         new_tier = get_control_value(e.control, ft.Dropdown) if e and e.control else None
@@ -347,7 +348,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
             raise
         except Exception as exc:
-            logger.error("[TierApiPanel] run_probe failed: %s", exc, exc_info=True)
+            logger.error("[TierApiPanel] run_probe failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
     def _on_probe_click(e: ft.ControlEvent) -> None:
         try:

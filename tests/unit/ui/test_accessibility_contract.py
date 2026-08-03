@@ -35,16 +35,25 @@ UI_DIR = PROJECT_ROOT / "ui"
 # ============================================================================
 
 
-# key: (relative_path, line_no, violation_type), value: 原因注释.
+# key: (relative_path, func_name, violation_type), value: 原因注释.
 # 白名单只豁免 "设计意图性违规", 不豁免 "尚未修复的违规".
-# 注意: 行号需与 ui/startup_views.py 中 ft.AlertDialog 调用保持同步。
-ALLOWED_VIOLATIONS: dict[tuple[str, int, str], str] = {
+# 按函数名 (而非行号) 豁免: 行号会随代码插入/删除而偏移, 函数名稳定.
+# func_name 为外层 FunctionDef/AsyncFunctionDef 名; 模块级调用用 "<MODULE>".
+ALLOWED_VIOLATIONS: dict[tuple[str, str, str], str] = {
     # startup_views.py DB 升级模态: 必需/进行中/失败状态意图性阻塞用户,
     # 不允许 close (DB 必须升级才能继续运行, 用户无其他选择).
-    # 行号随 LoadingView 增加 backoff countdown 参数而偏移 (297→389, 312→404, 347→439).
-    ("startup_views.py", 389, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
-    ("startup_views.py", 404, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
-    ("startup_views.py", 439, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
+    # 实际触发 missing_close 的仅 _build_upgrade_in_progress_dialog (actions=[]),
+    # 其余两个 actions=safe_controls([...]) 为 Call 节点, 扫描器保守不报;
+    # 一并登记以文档化三个 DB 升级模态的意图性阻塞设计.
+    ("startup_views.py", "_build_upgrade_dialog", "missing_close"): (
+        "DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"
+    ),
+    ("startup_views.py", "_build_upgrade_in_progress_dialog", "missing_close"): (
+        "DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"
+    ),
+    ("startup_views.py", "_build_upgrade_failed_dialog", "missing_close"): (
+        "DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"
+    ),
 }
 
 
@@ -61,6 +70,9 @@ class AccessibilityViolation:
     line: int
     violation_type: str  # missing_tooltip / missing_title / missing_close
     detail: str
+    # 外层函数名 (FunctionDef/AsyncFunctionDef); 模块级调用为 "<MODULE>".
+    # 用于白名单按符号豁免, 避免行号耦合 (代码插入导致行号偏移即破坏白名单).
+    func_name: str = "<MODULE>"
 
 
 def _is_call_named(node: ast.AST, attr_name: str) -> bool:
@@ -83,6 +95,17 @@ class _IconButtonVisitor(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.violations: list[AccessibilityViolation] = []
+        self._func_stack: list[str] = []  # 外层函数名栈, 模块级为空
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "IconButton"):
@@ -94,6 +117,7 @@ class _IconButtonVisitor(ast.NodeVisitor):
                         line=node.lineno,
                         violation_type="missing_tooltip",
                         detail=f"ft.IconButton(...) at line {node.lineno} 缺 tooltip 参数",
+                        func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
                     )
                 )
         self.generic_visit(node)
@@ -104,9 +128,21 @@ class _AlertDialogVisitor(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.violations: list[AccessibilityViolation] = []
+        self._func_stack: list[str] = []  # 外层函数名栈, 模块级为空
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "AlertDialog"):
+            func_name = self._func_stack[-1] if self._func_stack else "<MODULE>"
             # title 检查: 关键字必须存在且非空 Container
             title_kw = next((kw for kw in node.keywords if kw.arg == "title"), None)
             if title_kw is None:
@@ -116,6 +152,7 @@ class _AlertDialogVisitor(ast.NodeVisitor):
                         line=node.lineno,
                         violation_type="missing_title",
                         detail=f"ft.AlertDialog(...) at line {node.lineno} 缺 title 参数",
+                        func_name=func_name,
                     )
                 )
             elif self._is_empty_container(title_kw.value):
@@ -125,6 +162,7 @@ class _AlertDialogVisitor(ast.NodeVisitor):
                         line=node.lineno,
                         violation_type="missing_title",
                         detail=f"ft.AlertDialog(...) at line {node.lineno} title 为空 Container",
+                        func_name=func_name,
                     )
                 )
             # close button 检查: actions 列表中需有 close/dismiss/ok 类回调按钮
@@ -138,6 +176,7 @@ class _AlertDialogVisitor(ast.NodeVisitor):
                             line=node.lineno,
                             violation_type="missing_close",
                             detail=f"ft.AlertDialog(...) at line {node.lineno} actions 中无 close button",
+                            func_name=func_name,
                         )
                     )
         self.generic_visit(node)
@@ -248,11 +287,11 @@ def _filter_violations(
     violations: list[AccessibilityViolation],
     violation_type: str,
 ) -> list[AccessibilityViolation]:
-    """按 violation_type 过滤并剔除白名单豁免项."""
+    """按 violation_type 过滤并剔除白名单豁免项 (按函数名匹配, 不耦合行号)."""
     return [
         v
         for v in violations
-        if v.violation_type == violation_type and (v.file, v.line, v.violation_type) not in ALLOWED_VIOLATIONS
+        if v.violation_type == violation_type and (v.file, v.func_name, v.violation_type) not in ALLOWED_VIOLATIONS
     ]
 
 
@@ -271,7 +310,7 @@ class TestIconButtonAccessibility:
         """
         violations = _filter_violations(_scan_all(), "missing_tooltip")
         assert not violations, "IconButton 缺 tooltip 违规:\n" + "\n".join(
-            f"  {v.file}:{v.line} - {v.detail}" for v in violations
+            f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
         )
 
 
@@ -285,7 +324,7 @@ class TestAlertDialogAccessibility:
         """
         violations = _filter_violations(_scan_all(), "missing_title")
         assert not violations, "AlertDialog 缺 title 违规:\n" + "\n".join(
-            f"  {v.file}:{v.line} - {v.detail}" for v in violations
+            f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
         )
 
     def test_all_dialogs_have_close_button(self):
@@ -295,7 +334,7 @@ class TestAlertDialogAccessibility:
         """
         violations = _filter_violations(_scan_all(), "missing_close")
         assert not violations, "AlertDialog 缺 close button 违规:\n" + "\n".join(
-            f"  {v.file}:{v.line} - {v.detail}" for v in violations
+            f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
         )
 
 
@@ -458,3 +497,122 @@ dlg = ft.AlertDialog(
         v = _IconButtonVisitor()
         v.visit(tree)
         assert len(v.violations) == 1
+
+
+class TestFuncNameResolution:
+    """func_name 跟踪机制对抗性测试.
+
+    白名单按 (file, func_name, violation_type) 匹配, func_name 必须准确反映
+    AlertDialog 所在的外层函数名. 本类验证不同 AST 上下文下 func_name 的解析:
+    - 模块级: "<MODULE>"
+    - 类体内 (非方法): "<MODULE>" (ClassDef 不入栈, 设计意图)
+    - 方法内: 方法名
+    - 嵌套函数: 最内层函数名 (栈顶)
+
+    这些场景是 PR #464 修复 (行号→函数名) 的回归保护: 若未来重构 visitor
+    丢失 func_stack, 白名单将全部失效, 这些测试立即报警.
+    """
+
+    def test_func_name_module_level(self):
+        """模块级 AlertDialog 的 func_name 为 "<MODULE>"."""
+        source = "import flet as ft\ndlg = ft.AlertDialog(title=ft.Text('x'), actions=[])\n"
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        close_violations = [x for x in v.violations if x.violation_type == "missing_close"]
+        assert len(close_violations) == 1
+        assert close_violations[0].func_name == "<MODULE>"
+
+    def test_func_name_class_body_not_method(self):
+        """类体内 (非方法内) AlertDialog 的 func_name 为 "<MODULE>".
+
+        ClassDef 不入 func_stack, 类体直接赋值的 AlertDialog 视为模块级.
+        生产代码无此形式 (所有 AlertDialog 都在函数内), 此处仅锁定扫描器语义.
+        """
+        source = """
+import flet as ft
+class Foo:
+    dlg = ft.AlertDialog(title=ft.Text('x'), actions=[])
+"""
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        close_violations = [x for x in v.violations if x.violation_type == "missing_close"]
+        assert len(close_violations) == 1
+        assert close_violations[0].func_name == "<MODULE>"
+
+    def test_func_name_method(self):
+        """方法内 AlertDialog 的 func_name 为方法名."""
+        source = """
+import flet as ft
+class Foo:
+    def build_dialog(self):
+        return ft.AlertDialog(title=ft.Text('x'), actions=[])
+"""
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        close_violations = [x for x in v.violations if x.violation_type == "missing_close"]
+        assert len(close_violations) == 1
+        assert close_violations[0].func_name == "build_dialog"
+
+    def test_func_name_nested_function(self):
+        """嵌套函数内 AlertDialog 的 func_name 为最内层函数名 (栈顶)."""
+        source = """
+import flet as ft
+def outer():
+    def inner():
+        return ft.AlertDialog(title=ft.Text('x'), actions=[])
+    return inner()
+"""
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        close_violations = [x for x in v.violations if x.violation_type == "missing_close"]
+        assert len(close_violations) == 1
+        assert close_violations[0].func_name == "inner"
+
+    def test_func_name_async_function(self):
+        """async def 内 AlertDialog 的 func_name 为异步函数名."""
+        source = """
+import flet as ft
+async def build_dialog():
+    return ft.AlertDialog(title=ft.Text('x'), actions=[])
+"""
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        close_violations = [x for x in v.violations if x.violation_type == "missing_close"]
+        assert len(close_violations) == 1
+        assert close_violations[0].func_name == "build_dialog"
+
+    def test_whitelist_matches_by_func_name(self):
+        """白名单按 (file, func_name, violation_type) 匹配, 不依赖行号.
+
+        端到端验证: 同一函数内 AlertDialog 行号变化 (代码插入导致偏移) 时,
+        白名单仍能正确豁免. 这是 PR #464 修复的核心契约.
+        """
+        # 模拟 startup_views.py 中 _build_upgrade_in_progress_dialog 的结构
+        # actions=[] 触发 missing_close, 但白名单豁免该函数.
+        source = """
+import flet as ft
+def _build_upgrade_in_progress_dialog():
+    # 模拟代码插入: 注释行导致 AlertDialog 行号偏移
+    # line 1
+    # line 2
+    # line 3
+    return ft.AlertDialog(title=ft.Text('x'), actions=[])
+"""
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        # 模拟 _scan_file 填充 file 字段
+        for violation in v.violations:
+            violation.file = "startup_views.py"
+        # 模拟 _filter_violations: 按 (file, func_name, violation_type) 过滤
+        close_violations = [
+            x
+            for x in v.violations
+            if x.violation_type == "missing_close" and (x.file, x.func_name, x.violation_type) not in ALLOWED_VIOLATIONS
+        ]
+        assert len(close_violations) == 0, "白名单应按 func_name 豁免, 不受行号偏移影响"

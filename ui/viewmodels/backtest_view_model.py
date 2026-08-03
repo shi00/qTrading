@@ -22,11 +22,38 @@ from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.error_classifier import classify_error, classify_severity
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
 TASK_NAME_PREFIX = "backtest"
+
+# Task 8.3: 选股→回测参数透传 — 模块级 pending prefill stash.
+# 选股页跳转前写入, 回测页 mount 时 consume_pending_prefill() 读取并清空.
+# 单次消费语义, 无持久化 (YAGNI: 跨视图临时传递, 不引入全局状态服务).
+_pending_prefill: dict[str, object] = {}
+
+
+def set_pending_prefill(strategy_key: str, params: dict | None = None) -> None:
+    """选股页调用: 暂存待透传的 strategy_key + params (Task 8.3)."""
+    _pending_prefill.clear()
+    _pending_prefill["strategy_key"] = strategy_key
+    _pending_prefill["params"] = dict(params) if params else {}
+
+
+def consume_pending_prefill() -> dict[str, object] | None:
+    """回测页 mount 时调用: 读取并清空 pending prefill (单次消费).
+
+    Returns:
+        含 strategy_key/params 的 dict, 或 None 表示无待消费 prefill.
+    """
+    if not _pending_prefill:
+        return None
+    data = dict(_pending_prefill)
+    _pending_prefill.clear()
+    return data
 
 
 @dataclass(frozen=True, eq=False)
@@ -121,9 +148,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._subscribers: list[Callable[[BacktestState], None]] = []
         # P2-1: 跟踪 fire-and-forget task 生命周期，dispose 时取消避免孤儿 (对齐 ScreenerViewModel)
         self._background_tasks: set = set()
+        self._init_mixin_fields()  # F3-08: 初始化 mixin 字段 (锁/loop/disposed flag)
 
     def dispose(self):
-        """清理资源：先取消运行中任务（防孤儿），再清引用与状态。"""
+        """清理资源：先取消运行中任务（防孤儿），再调 super().dispose() 统一清理。"""
+        self._disposed = True  # F3-07: 业务短路（对齐 ScreenerVM），防 cancel_backtest 回调写状态
         self.cancel_backtest()
         self._task_id = None
         for t in list(self._background_tasks):
@@ -133,7 +162,8 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         # 会在任务完成时移除并读取 exception(), 避免 'Task exception was never retrieved'.
         # ceiling: 事件循环关闭导致 callback 不触发时, 任务随 VM 一起被 GC.
         # upgrade: 引入 async_dispose() 显式 await drain (本任务范围内不引入以保持微创).
-        self._subscribers.clear()
+        super().dispose()  # F3-07: mixin 统一清理 _disposed=True + clear subscribers(锁内) + cancel handle + 置 loop=None
+        # F3-07: 重置 state 到默认终态（UI 残留 is_running=True/progress=0.5 会导致 dispose 后仍渲染运行态）
         self._state = BacktestState()
 
     def _on_background_task_done(self, task: asyncio.Task) -> None:
@@ -179,10 +209,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             except Exception as e:
                 logger.debug("[BacktestVM] persist_splitter_width failed: %s", e, exc_info=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # 无事件循环 (测试环境), 静默跳过
+        loop = self._get_loop_or_none()  # F3-13: 统一 loop 获取（disposed 后返回 None，避免孤儿 task）
+        if loop is None:
+            return  # 无事件循环或已 disposed, 静默跳过
         task = loop.create_task(_persist())
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
@@ -222,6 +251,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             risk_free_rate=risk_free_rate,
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_backtest(
         self,
         strategy_key: str,
@@ -281,10 +311,12 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     cancel_check=_cancel_check,
                 )
 
-                # await 后重新读取 self._state 获取最新快照 (竞态安全);
-                # result 直接放入 state.result (L771 合规, 无 dual-track)
+                # 成功终态: is_running=False + progress=1.0 + result (L771 合规, 无 dual-track)
                 self._set_state(
                     result=result,
+                    is_running=False,
+                    progress=1.0,
+                    progress_message=Message("backtest_done"),
                     status_message=Message(
                         "backtest_completed",
                         {"duration": result.duration_ms},
@@ -293,24 +325,44 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     error_detail=None,
                 )
 
-                return Message("backtest_success", {"sharpe": f"{result.metrics['sharpe_ratio']:.2f}"})
+                return Message("backtest_success", {"sharpe": f"{result.metrics.get('sharpe_ratio', 0):.2f}"})
 
             except asyncio.CancelledError:
+                # F3-11: 取消路径显式终态（progress 清空避免 UI 残留文案）
+                self._set_state(
+                    is_running=False,
+                    progress=0.0,
+                    progress_message=None,
+                    status_message=Message("backtest_cancelled"),
+                    status_color="warning",
+                )
                 raise
             except Exception as e:
-                logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
+                # F3-09: classify_error + classify_severity 分级日志
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[BacktestVM] Backtest failed (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                # F3-11: 失败路径显式终态（progress 清空避免 UI 残留文案）
                 self._set_state(
+                    is_running=False,
+                    progress=0.0,
+                    progress_message=None,
                     status_message=Message("backtest_failed"),
                     status_color="error",
                     error_detail=DataSanitizer.sanitize_error(e),
                 )
                 raise
-            finally:
-                self._set_state(
-                    is_running=False,
-                    progress=1.0,
-                    progress_message=Message("backtest_done"),
-                )
 
         strategy_obj = get_strategy_registry().get(strategy_key)
         name_key = getattr(strategy_obj, "name_key", None) if strategy_obj else None
@@ -340,6 +392,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         if self._task_id:
             TaskManager().cancel_task(self._task_id)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_historical_results(
         self,
         strategy_name: str | None = None,
@@ -348,6 +401,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         """获取历史回测结果列表。"""
         return await self.service.list_results(strategy_name=strategy_name, limit=limit)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_historical_result(self, run_id: str) -> dict | None:
         """加载历史回测结果。"""
         result = await self.service.get_result(run_id)

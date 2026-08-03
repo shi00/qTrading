@@ -8,11 +8,12 @@
 - Tab 切换由 ``use_state(current_tabs)`` 驱动，条件渲染当前激活 tab
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除所有命令式生命周期回调与手动刷新方法
-- 3 个命令式 tabs (DataSourceTab/AIBrainTab/SystemTab) 仍命令式实例化（Phase E 待重写）
-- DatabaseTab/AutomationTab/NotificationsTab 已声明式 (Phase A.2/D.4)，直接函数调用
+- 6 个 tab 均已声明式化 (``@ft.component`` + ``use_viewmodel``), 直接函数调用
 - ``show_snack`` 用 ``ft.context.page`` 访问 page（try/except 守卫 RuntimeError）
-- Task 7.2: 6 个 tab 全部惰性构造 (仅 current_tab 实例化, 其他用空 Container 占位),
-  消除打开设置页即触发 AIService → litellm import 主线程阻塞
+- Issue #438: visited_tabs 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
+  (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``app_layout._build_pages_stack``
+  模式一致)。未访问 Tab 为空 Container, 避免首次构造触发 VM 构造链阻塞
+  (DataSourceViewModel → AIService → litellm import 18s+)。
 """
 
 import logging
@@ -55,18 +56,27 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     )
 
 
-def _build_tabs(show_snack: Callable, current_tab: int = 0) -> list[ft.Control]:
-    """Instantiate 6 tabs lazily — only construct ``current_tab``, others are empty Containers.
+def _build_tabs(
+    show_snack: Callable,
+    current_tab: int = 0,
+    visited_tabs: set[int] | None = None,
+) -> list[ft.Control]:
+    """构造已访问 Tab (``visible`` prop 控制显隐), 未访问 Tab 为空 Container。
 
-    Task 7.2: 正常模式与 E2E 模式统一为惰性构造 (原 e2e_mode 分支合并).
-    根因: DataSourceTab 的 DataSourceViewModel.__init__ → AIService() → litellm import
-    (18s+ 同步阻塞 MainThread); AIBrainTab 实例化 4 个 VM; SystemTab 的 TierApiPanel
-    调用 TushareClient()。惰性构造使打开设置页只构造当前 tab, 避免全量构造阻塞
-    Flet patch 下发 (与 app_layout.py _build_pages_stack E2E 优化一致).
+    Issue #438: 用 ``visited_tabs`` 跟踪已访问 Tab, 已访问 Tab 始终在控件树中
+    (``visible`` prop 控制显隐), 状态由 Flet diff 算法保持。未访问 Tab 为空
+    Container, 避免首次构造触发 VM 构造链阻塞 (与 ``app_layout._build_pages_stack``
+    模式一致)。
 
-    注意: 必须使用惰性工厂 (lambda + 条件调用), 不能先构造所有 tab 再过滤,
-    否则 VM 构造链仍会执行 (DataSourceTab(...) 会立即触发 DataSourceViewModel.__init__).
+    Args:
+        show_snack: snackbar 触发函数。
+        current_tab: 当前激活 Tab 索引 (控制 ``visible`` prop)。
+        visited_tabs: 已访问 Tab 索引集合。None 时默认 ``{current_tab}`` (惰性构造,
+            向后兼容)。已访问 Tab 被构造并放入 Stack, 未访问 Tab 为空 Container。
     """
+    if visited_tabs is None:
+        visited_tabs = {current_tab}
+
     tab_factories: list[Callable[[], ft.Control]] = [
         lambda: DataSourceTab(show_snack),
         lambda: DatabaseTab(show_snack),
@@ -75,7 +85,14 @@ def _build_tabs(show_snack: Callable, current_tab: int = 0) -> list[ft.Control]:
         lambda: NotificationsTab(show_snack),
         lambda: SystemTab(show_snack),
     ]
-    return [tab_factories[i]() if i == current_tab else ft.Container(expand=True) for i in range(len(tab_factories))]
+    return [
+        ft.Container(
+            content=tab_factories[i]() if i in visited_tabs else None,
+            visible=(i == current_tab),
+            expand=True,
+        )
+        for i in range(len(tab_factories))
+    ]
 
 
 def _show_snack_impl(
@@ -126,10 +143,14 @@ def SettingsView(active: bool = True) -> ft.Container:
     - 无 VM（纯 UI 容器）
     - page 在渲染时捕获 (供 _show_snack 闭包在 run_task 回调中使用)
 
+    Issue #438: ``visited_tabs`` 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
+    (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``AppLayout`` 模式一致)。
+
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
     """
     current_tab, set_current_tab = ft.use_state(0)
+    visited_tabs, set_visited_tabs = ft.use_state({0})
     ft.use_state(get_observable_state)
 
     # --- Capture page at render time for _show_snack closure ---
@@ -144,8 +165,8 @@ def SettingsView(active: bool = True) -> ft.Container:
         _show_snack_impl(_page, message, color, **kwargs)
 
     # --- Build tabs ---
-    # Task 7.2: 惰性构造 (仅 current_tab 实例化), 消除打开设置页即触发 AIService 构造链
-    tabs = _build_tabs(_show_snack, current_tab=current_tab)
+    # Issue #438: 已访问 Tab 构造并放入 Stack, 未访问 Tab 为空 Container (惰性构造)
+    tabs = _build_tabs(_show_snack, current_tab=current_tab, visited_tabs=visited_tabs)
     assert len(_TAB_CONFIG) == len(tabs), f"_TAB_CONFIG ({len(_TAB_CONFIG)}) and tabs ({len(tabs)}) length mismatch!"
 
     # --- Tab click handler ---
@@ -164,6 +185,9 @@ def SettingsView(active: bool = True) -> ft.Container:
             logger.warning("[SettingsView] Tab index out of range: %s", idx)
             return
         logger.debug("[SettingsView] Switching to tab index: %s", idx)
+        # Issue #438: 首次访问的 Tab 加入 visited_tabs (不可变更新, 触发重渲染构造该 Tab)
+        if idx not in visited_tabs:
+            set_visited_tabs(visited_tabs | {idx})
         set_current_tab(idx)
 
     # --- Tab bar ---
@@ -197,8 +221,8 @@ def SettingsView(active: bool = True) -> ft.Container:
         color=AppColors.TEXT_PRIMARY,
     )
 
-    # --- Tab body (conditional rendering) ---
-    tab_body = ft.Container(content=tabs[current_tab], expand=True)
+    # --- Tab body (Issue #438: ft.Stack + visible prop 替代条件渲染, 已访问 Tab 状态保持) ---
+    tab_body = ft.Stack(safe_controls(tabs), expand=True)
 
     # --- Assembly ---
     return ft.Container(

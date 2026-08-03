@@ -111,6 +111,8 @@ class ScreenerState:
     logs: tuple[LogEntry, ...] = ()
     # AI streaming/placeholder cards (state-driven, §3.2 MVVM)
     stream_cards: tuple[StreamCard, ...] = ()
+    # Task 8.4: 卡片截断提示 — True 表示已有卡片被 _MAX_LOG_CARDS 截断
+    stream_cards_truncated: bool = False
     # Strategy selection (R.2.1: 内聚到 VM, 消除 View 双源真相)
     selected_strategy: str | None = None
     tier_hint: str | None = None
@@ -722,7 +724,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                                 save_err,
                                 exc_info=True,
                             )
-                            save_failed_reason = str(save_err) or save_err.__class__.__name__
+                            save_failed_reason = DataSanitizer.sanitize_error(save_err) or save_err.__class__.__name__
 
                     if save_failed_reason is not None:
                         self._set_state(
@@ -800,7 +802,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     status_color="error",
                     status_action_key=None,
                 )
-                raise RuntimeError(f"Strategy execution crashed: {e}") from e
+                raise RuntimeError(f"Strategy execution crashed: {DataSanitizer.sanitize_error(e)}") from e
             finally:
                 self._active_task_id = None  # Task 3.2: 所有退出路径清空, 防止误取消已结束的 task
 
@@ -892,7 +894,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         except Exception as e:
             logger.error("Sort failed: %s", e, exc_info=True)
-            self._set_state(loading=False)
+            self._set_state(
+                loading=False,
+                status_message=Message("screener_sort_failed"),
+                status_color="error",
+            )
 
     @staticmethod
     def _sort_helper(df, col, ascending):
@@ -941,14 +947,19 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     def clear_stream_cards(self) -> None:
         """Clear all stream cards and buffers (called on new run)."""
         self._stream_buffers.clear()
-        self._set_state(stream_cards=())
+        self._set_state(stream_cards=(), stream_cards_truncated=False)
 
     def start_stream_card(self, name: str, is_analyzing: bool = False) -> None:
         """Create a new stream/placeholder card."""
         self._stream_buffers[name] = {"reasoning": "", "content": "", "last_flush": 0.0, "pending": False}
         card = StreamCard(name=name, is_analyzing=is_analyzing)
+        # Task 8.4: 检测截断 — 新增卡片导致超出 _MAX_LOG_CARDS 时标记 truncated
+        truncated = len(self._state.stream_cards) + 1 > _MAX_LOG_CARDS
         new_cards = (self._state.stream_cards + (card,))[-_MAX_LOG_CARDS:]
-        self._set_state(stream_cards=new_cards)
+        self._set_state(
+            stream_cards=new_cards,
+            stream_cards_truncated=self._state.stream_cards_truncated or truncated,
+        )
 
     def append_stream_chunk(self, name: str, chunk: str, is_reasoning: bool) -> None:
         """Accumulate LLM chunk, throttle-flush to state."""
@@ -1245,8 +1256,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             history_tree=replace(
                 self._state.history_tree,
                 rows=merged_rows,
-                offset=offset + len(df) * 5,
-                has_more=len(df) >= 5,
+                offset=offset + len(df),
+                has_more=len(df) >= 30,
             )
         )
 

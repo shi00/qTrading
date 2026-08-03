@@ -317,10 +317,6 @@ class CacheManager:
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params, suppress_errors=True)
 
-    # Backward compat alias for read_db; preserved for API stability
-    # (test_read_db_backward_compat_alias asserts this identity).
-    _read_db = read_db
-
     # --- Init & Reset ---
     @log_async_operation(
         operation_name="CacheManager.init_db",

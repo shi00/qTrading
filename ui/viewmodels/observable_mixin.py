@@ -23,6 +23,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, cast
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 _MAX_PENDING = 1000  # deque 上限，无 loop 场景下 OOM 防护
@@ -248,7 +250,7 @@ class ObservableViewModelMixin[T]:
         except Exception as e:  # noqa: BLE001  —  intentionally broad catch
             logger.error(
                 "[ObservableMixin] subscriber callback failed: %s",
-                e,
+                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 

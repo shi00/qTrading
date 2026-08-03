@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] schedule toggle save failed: %s",
-                ex,
+                DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
             return False
@@ -157,7 +158,9 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[AutomationSettingsVM] schedule time save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationSettingsVM] schedule time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -185,7 +188,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] ai concept toggle save failed: %s",
-                ex,
+                DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
             return False
@@ -207,7 +210,11 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[AutomationSettingsVM] ai concept time save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationSettingsVM] ai concept time save failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -229,7 +236,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] ai concept search engine save failed: %s",
-                ex,
+                DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
             return False
@@ -253,7 +260,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] nightly prediction time save failed: %s",
-                ex,
+                DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
             return False
@@ -281,7 +288,9 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[AutomationSettingsVM] news toggle save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationSettingsVM] news toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -305,7 +314,9 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[AutomationSettingsVM] interval save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationSettingsVM] interval save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)

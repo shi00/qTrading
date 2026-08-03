@@ -959,3 +959,125 @@ class TestBacktestViewErrorState:
         on_retry()
         # page.run_task 不应被调用 (page 为 None)
         assert not page.run_task.called
+
+
+# ============================================================================
+# Task 8.3: _consume_prefill 测试 (选股→回测参数透传)
+# ============================================================================
+
+
+class TestConsumePrefill:
+    """L75-82: _consume_prefill 消费 pending prefill (strategy_key + params).
+
+    覆盖:
+    - L76: consume_pending_prefill() 调用
+    - L79: strategy_key = prefill.get("strategy_key")
+    - L80-81: if strategy_key and strategy_key in strategies: set_selected_strategy
+    - L82: _prefilled_params.current = prefill.get("params")
+    """
+
+    def test_prefill_with_valid_strategy_sets_selected_strategy(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """L80-81: prefill.strategy_key 在 strategies 中 → set_selected_strategy(strategy_key)."""
+        from ui.views import backtest_view as mod
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        # 设置 prefill (在 mount 之前)
+        set_pending_prefill("volume_breakout", params={"window": 20})
+
+        try:
+            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉", "volume_breakout": "量价突破"})
+            _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
+
+            component = make_component(mod.BacktestView)
+            page = _make_fake_page()
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+            # 验证: 默认 selected_strategy 应为 volume_breakout (因 prefill 触发 set_selected_strategy)
+            # 而非 strategies 的第一个 (ma_cross)
+            dropdowns = _get_dropdowns({"result": render_once(component)})
+            # 通过 _on_run_backtest 间接验证 selected_strategy: 调用 run_backtest 时 strategy_key 应为 volume_breakout
+            # 直接通过 mount 后渲染的 dropdown.value 验证
+            assert dropdowns[0].value == "volume_breakout"
+        finally:
+            # 清理: 重置 _pending_prefill (consume 已清空, 但异常路径可能残留)
+            from ui.viewmodels.backtest_view_model import _pending_prefill
+
+            _pending_prefill.clear()
+
+    def test_prefill_with_invalid_strategy_keeps_default_selected(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """L80: prefill.strategy_key 不在 strategies 中 → 跳过 set_selected_strategy, 保留默认."""
+        from ui.views import backtest_view as mod
+        from ui.viewmodels.backtest_view_model import set_pending_prefill, _pending_prefill
+
+        set_pending_prefill("non_existent_strategy", params={"window": 30})
+
+        try:
+            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+            _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
+
+            component = make_component(mod.BacktestView)
+            page = _make_fake_page()
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+            # 验证: selected_strategy 仍为 strategies 的第一个 (ma_cross)
+            dropdowns = _get_dropdowns({"result": render_once(component)})
+            assert dropdowns[0].value == "ma_cross"
+        finally:
+            _pending_prefill.clear()
+
+    def test_prefill_none_returns_early(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """L77-78: 无 pending prefill (consume 返回 None) → 早返回, 保留默认 selected_strategy."""
+        from ui.views import backtest_view as mod
+        from ui.viewmodels.backtest_view_model import _pending_prefill
+
+        # 确保无 pending prefill
+        _pending_prefill.clear()
+
+        fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+        _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
+
+        component = make_component(mod.BacktestView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        # 验证: selected_strategy 为默认值 (ma_cross)
+        dropdowns = _get_dropdowns({"result": render_once(component)})
+        assert dropdowns[0].value == "ma_cross"
+
+    def test_prefill_params_passed_to_run_backtest(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """L82: prefill.params 透传到 _prefilled_params.current → run_backtest 第 3 个参数."""
+        from ui.views import backtest_view as mod
+        from ui.viewmodels.backtest_view_model import set_pending_prefill, _pending_prefill
+
+        test_params = {"window": 20, "stop_loss": 0.05}
+        set_pending_prefill("ma_cross", params=test_params)
+
+        try:
+            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+            mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
+
+            component = make_component(mod.BacktestView)
+            page = _make_fake_page()
+            page.run_task.reset_mock()
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+            # 触发 _on_run_backtest
+            on_run_backtest = mocks["captured_callbacks"]["on_run_backtest"]
+            on_run_backtest(_make_config())
+
+            # 验证: page.run_task 调用时, 第 4 个参数 (params) 应为 test_params
+            page.run_task.assert_called_once()
+            call_args = page.run_task.call_args
+            # 源码: page.run_task(vm.run_backtest, selected_strategy, backtest_config, _prefilled_params.current)
+            # call_args.args = (vm.run_backtest, "ma_cross", "fake_backtest_config", test_params)
+            assert call_args.args[3] == test_params
+        finally:
+            _pending_prefill.clear()

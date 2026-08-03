@@ -13,8 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import Any
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -61,11 +60,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         self.cache = cache or CacheManager()
         self._state: WatchlistState = WatchlistState()
         self._subscribers: list[Callable[[WatchlistState], None]] = []
-
-    def _set_state(self, **changes: Any) -> None:
-        """Update state fields and notify subscribers."""
-        self._state = replace(self._state, **changes)
-        self._notify()
+        self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def load_watchlist(self) -> None:
@@ -127,15 +122,19 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
 
 
 def _df_to_watchlist_rows(df: pd.DataFrame | None) -> tuple[WatchlistRow, ...]:
-    """DataFrame → tuple[WatchlistRow, ...] (L771 合规)."""
+    """DataFrame → tuple[WatchlistRow, ...] (L771 合规).
+
+    fillna("") 统一处理 None/NaN → "" (pandas to_dict 将 None 转为 NaN).
+    """
     if df is None or df.empty:
         return ()
+    df = df.fillna("")
     return tuple(
         WatchlistRow(
             ts_code=str(row.get("ts_code", "") or ""),
             stock_name=str(row.get("stock_name", "") or ""),
             added_at=str(row.get("added_at", "") or ""),
-            note=str(row.get("note", "") or "") if row.get("note") is not None else "",
+            note=str(row.get("note", "") or ""),
         )
         for row in df.to_dict("records")
     )

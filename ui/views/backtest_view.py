@@ -26,7 +26,7 @@ from ui.components.state_views import GITHUB_ISSUES_URL, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.backtest_view_model import BacktestViewModel
+from ui.viewmodels.backtest_view_model import BacktestViewModel, consume_pending_prefill
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,21 @@ def BacktestView(active: bool = True) -> ft.Container:
     # Task 11.3: 存储上次回测提交 (strategy_key, backtest_config) 供 ErrorState on_retry 复用
     last_run, set_last_run = ft.use_state(lambda: None)  # type: ignore[assignment]  [reason: ft.use_state 无泛型支持, pyright 推断为 Never, 运行时正确]
 
+    # Task 8.3: 选股→回测参数透传 — mount 时消费 pending prefill (strategy_key + params)
+    # params 经 ref 透传到 run_backtest, 避免不必要的重渲染 (params 仅在 run 时读取)
+    _prefilled_params = ft.use_ref(lambda: None)
+
+    def _consume_prefill() -> None:
+        prefill = consume_pending_prefill()
+        if prefill is None:
+            return
+        strategy_key = prefill.get("strategy_key")
+        if strategy_key and strategy_key in strategies:
+            set_selected_strategy(strategy_key)
+        _prefilled_params.current = prefill.get("params")
+
+    ft.use_effect(_consume_prefill, dependencies=[strategies])
+
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
@@ -93,19 +108,23 @@ def BacktestView(active: bool = True) -> ft.Container:
                 # Task 11.3: 存储 last_run 供 ErrorState on_retry 复用 (须在 page 可用时调用,
                 # set_last_run 触发 _schedule_update 需访问 context.page)
                 set_last_run((selected_strategy, backtest_config))
-                page.run_task(vm.run_backtest, selected_strategy, backtest_config)
+                # Task 8.3: 透传选股页 params (若有), 否则 None 用策略默认参数
+                page.run_task(vm.run_backtest, selected_strategy, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
 
     def _on_retry_backtest() -> None:
-        """Task 11.3: ErrorState on_retry — 重新提交上次回测配置 (R16: page.run_task 调度)."""
+        """Task 11.3: ErrorState on_retry — 重新提交上次回测配置 (R16: page.run_task 调度).
+
+        透传 _prefilled_params.current 与首次提交保持一致 (Task 8.3).
+        """
         if last_run is None:
             return
         strategy, backtest_config = last_run  # type: ignore[reportGeneralTypeIssues]  [reason: ft.use_state 无泛型支持, pyright 推断 last_run 为 Never, 运行时为 tuple[str, BacktestConfig] | None]
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(vm.run_backtest, strategy, backtest_config)
+                page.run_task(vm.run_backtest, strategy, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for retry")
 

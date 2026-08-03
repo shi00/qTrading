@@ -35,6 +35,8 @@ class TestNavQfqConsistency:
             initial_capital=1_000_000.0,
             max_position_count=10,
             cash_reserve_pct=0.1,
+            # F3-01: max_single_weight=1.0 隔离 NAV 口径测试与权重约束（单股全仓使 qfq/raw 差异可检测）
+            max_single_weight=1.0,
         )
 
     @pytest.fixture

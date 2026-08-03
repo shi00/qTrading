@@ -808,13 +808,13 @@ class TestBuildScanResultExtended:
         column = _build_scan_result(result, on_init_data=on_init_data)
         # 默认 6 个 controls + 2 个追加 (Divider + Row)
         # 默认 controls: Container(height=20), score_row, Divider, metrics_row, Divider, fundamentals_row
-        # 追加: Divider + Row(ElevatedButton)
+        # 追加: Divider + Row(Button) — V1 弃用 ElevatedButton, 改用 ft.Button (docs/flet/v1-api-constraints.md)
         assert len(column.controls) == 8
-        # 最后一个是 Row 含 ElevatedButton
+        # 最后一个是 Row 含 Button
         button_row = column.controls[-1]
         assert isinstance(button_row, ft.Row)
         button = button_row.controls[0]
-        assert isinstance(button, ft.ElevatedButton)
+        assert isinstance(button, ft.Button)
         # on_click 触发 on_init_data 回调
         assert button.on_click is not None
         button.on_click(None)  # type: ignore[reportCallIssue]  # [reason: Flet stub declares on_click as 0-arg, but runtime passes event]

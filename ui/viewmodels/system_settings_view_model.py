@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -194,7 +195,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemSettingsVM] Language | Change failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] Language | Change failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -216,7 +219,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] Theme | Change failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] Theme | Change failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -235,7 +240,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] LogLevel | Change failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] LogLevel | Change failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -257,7 +264,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] Concurrency | Save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] Concurrency | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -291,7 +300,7 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] DBPool | Save failed: %s", ex, exc_info=True)
+            logger.error("[SystemSettingsVM] DBPool | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             return False
         finally:
             self._set_state(is_saving=False)
@@ -319,13 +328,15 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
 
         try:
             await ThreadPoolManager().run_async(TaskType.IO, _save_thread_pool_sync)
-            await asyncio.to_thread(ThreadPoolManager().reload_config)
+            await ThreadPoolManager().run_async(TaskType.IO, ThreadPoolManager().reload_config)
             logger.info("Updated ThreadPool: IO=%s, CPU=%s", io_val, cpu_val)
             return True
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] ThreadPool | Save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] ThreadPool | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)
@@ -349,7 +360,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
-            logger.error("[SystemSettingsVM] No-proxy domains save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemSettingsVM] No-proxy domains save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             return False
         finally:
             self._set_state(is_saving=False)

@@ -33,6 +33,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,9 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] schedule toggle save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] schedule toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             settings_vm.set_auto_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -156,7 +159,9 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] schedule time save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] schedule time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -175,7 +180,9 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] ai concept toggle save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] ai concept toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             settings_vm.set_ai_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -192,7 +199,9 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] ai concept time save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] ai concept time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -208,7 +217,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] ai concept search engine save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] ai concept search engine save failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -225,7 +238,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[AutomationTab] nightly prediction time save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[AutomationTab] nightly prediction time save failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -533,7 +550,9 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[NotificationsTab] news toggle save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[NotificationsTab] news toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             settings_vm.set_news_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -551,7 +570,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[NotificationsTab] interval save failed: %s", ex, exc_info=True)
+            logger.error("[NotificationsTab] interval save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 

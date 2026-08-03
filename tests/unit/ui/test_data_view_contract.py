@@ -697,6 +697,125 @@ class TestTableViewerTabComponentBody:
         rings = _find_by_type(result, ft.ProgressRing)
         assert len(rings) > 0
 
+    def test_mount_shows_empty_filter_result_when_filter_applied(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """L607-614: 有 table_columns + total_rows=0 + filter_applied=True → EmptyState(FILTER_ALT_OFF).
+
+        覆盖 Task 8.5: 区分「表无数据」与「筛选无结果」空态引导.
+        条件: filter_col 与 filter_val 均非空 → filter_applied=True → 显示 empty_filter_result.
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        # Mock EmptyState 捕获调用参数 (子组件在测试渲染中不被展开, 通过 mock 验证调用契约)
+        captured_calls: list[dict] = []
+
+        def _fake_empty_state(**kwargs: Any) -> Any:
+            captured_calls.append(kwargs)
+            return MagicMock(name="EmptyState")
+
+        monkeypatch.setattr(mod, "EmptyState", _fake_empty_state)
+
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code", "name"),
+                total_rows=0,
+                filter_col="ts_code",
+                filter_val="600000",
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, vm=vm)
+        _mount(component)
+
+        # 验证: EmptyState 被调用且 icon=FILTER_ALT_OFF (筛选无结果空态)
+        # _mount 调用 render_once 2 次 (run_mount_effects 内 1 次 + _mount 内 1 次), 每次都触发 EmptyState
+        assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
+        assert all(c["icon"] == ft.Icons.FILTER_ALT_OFF for c in captured_calls), "所有调用都应使用 FILTER_ALT_OFF 图标"
+
+    def test_mount_shows_empty_table_hint_when_no_filter(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """L615-619: 有 table_columns + total_rows=0 + filter_applied=False → EmptyState(INBOX).
+
+        覆盖 Task 8.5 互补分支: 表本身无数据, 显示 empty_table_hint.
+        条件: filter_col=None 或 filter_val="" → filter_applied=False.
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured_calls: list[dict] = []
+
+        def _fake_empty_state(**kwargs: Any) -> Any:
+            captured_calls.append(kwargs)
+            return MagicMock(name="EmptyState")
+
+        monkeypatch.setattr(mod, "EmptyState", _fake_empty_state)
+
+        # 场景 1: filter_col=None
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code", "name"),
+                total_rows=0,
+                filter_col=None,
+                filter_val="",
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, vm=vm)
+        _mount(component)
+
+        assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
+        assert all(c["icon"] == ft.Icons.INBOX for c in captured_calls), "所有调用都应使用 INBOX 图标"
+
+    def test_mount_shows_empty_table_hint_when_filter_val_empty(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """L609: filter_col 设置但 filter_val="" → filter_applied=False → EmptyState(INBOX).
+
+        边界场景: bool(state.filter_col and state.filter_val) 因 filter_val="" 为 False.
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured_calls: list[dict] = []
+
+        def _fake_empty_state(**kwargs: Any) -> Any:
+            captured_calls.append(kwargs)
+            return MagicMock(name="EmptyState")
+
+        monkeypatch.setattr(mod, "EmptyState", _fake_empty_state)
+
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code",),
+                total_rows=0,
+                filter_col="ts_code",
+                filter_val="",
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, vm=vm)
+        _mount(component)
+
+        assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
+        assert all(c["icon"] == ft.Icons.INBOX for c in captured_calls), (
+            "filter_val='' 时 filter_applied=False, 所有调用应使用 INBOX 图标"
+        )
+
     def test_table_selector_has_options(
         self,
         mock_i18n_state,
@@ -1115,8 +1234,9 @@ class TestTableViewerTabEventHandlers:
         """_on_sort → vm.set_sort + vm.clear_error + vm.query_data。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
@@ -1155,8 +1275,9 @@ class TestTableViewerTabEventHandlers:
         """_on_sort: 无效 col_id 直接 return (不调 vm.set_sort)。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
@@ -1880,8 +2001,9 @@ class TestTableViewerTabAsyncErrorPaths:
         """_do_sort_query: vm.query_data 抛 Exception → 兜底捕获。"""
         from ui.views.data_view import TableViewerTab
 
+        # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
         vm = _FakeDataExplorerViewModel(
-            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
+            state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
 
         async def _raising_query(**kwargs: Any) -> pd.DataFrame:

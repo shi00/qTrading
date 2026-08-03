@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
+from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel, _df_to_watchlist_rows
 
 pytestmark = pytest.mark.unit
 
@@ -222,3 +222,35 @@ class TestWatchlistRow:
         row = WatchlistRow(ts_code="000001.SZ", stock_name="平安银行", added_at="2026-07-29", note="")
         with pytest.raises(FrozenInstanceError):  # noqa: weak-assertion frozen 契约：赋值即抛错，仅验证不可变性
             row.ts_code = "999999.SZ"  # type: ignore[misc]
+
+
+# --- _df_to_watchlist_rows (纯函数, 含 None 边界) ---
+
+
+class TestDfToWatchlistRows:
+    """_df_to_watchlist_rows 纯函数测试（含 None / empty / 缺列 边界）。"""
+
+    def test_none_df_returns_empty_tuple(self):
+        assert _df_to_watchlist_rows(None) == ()
+
+    def test_empty_df_returns_empty_tuple(self):
+        assert _df_to_watchlist_rows(pd.DataFrame()) == ()
+
+    def test_normal_df_returns_rows(self):
+        df = _make_watchlist_df()
+        rows = _df_to_watchlist_rows(df)
+        assert len(rows) == 2
+        assert rows[0].ts_code == "000001.SZ"
+        assert rows[0].stock_name == "平安银行"
+        assert rows[0].note == "测试备注"
+        # note=None → "" (L136 三元保护)
+        assert rows[1].note == ""
+
+    def test_missing_columns_returns_defaults(self):
+        df = pd.DataFrame([{"ts_code": "000001.SZ"}])  # 缺 stock_name/added_at/note
+        rows = _df_to_watchlist_rows(df)
+        assert len(rows) == 1
+        assert rows[0].ts_code == "000001.SZ"
+        assert rows[0].stock_name == ""
+        assert rows[0].added_at == ""
+        assert rows[0].note == ""

@@ -188,13 +188,18 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
 
     # --- validate ---
 
-    def _validate_for_verify(self) -> tuple[bool, Message | None]:
-        """验证模型路径和 timeout（用于 verify_model 前置校验）。"""
+    async def _validate_for_verify(self) -> tuple[bool, Message | None]:
+        """验证模型路径和 timeout（用于 verify_model 前置校验）。
+
+        F4-U-4: os.path.exists 通过 ThreadPoolManager offload 避免阻塞事件循环 (R16)。
+        """
         model_path = (self._state.model_path or "").strip()
         if not model_path:
             return False, Message("wizard_err_model_required")
 
-        if not os.path.exists(model_path):
+        # F4-U-4: os.path.exists 是同步 IO（stat），网络挂载路径可能阻塞数秒
+        path_exists = await ThreadPoolManager().run_async(TaskType.IO, os.path.exists, model_path)
+        if not path_exists:
             return False, Message("wizard_err_model_not_found")
 
         if not model_path.lower().endswith(".gguf"):
@@ -230,7 +235,7 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
             logger.warning("[LocalModelConfigVM] Verification already in progress")
             return False
 
-        is_valid, error_msg = self._validate_for_verify()
+        is_valid, error_msg = await self._validate_for_verify()
         if not is_valid:
             assert error_msg is not None
             self._show_error(error_msg)
@@ -326,17 +331,24 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
             if self._on_loading_change and self._show_internal_loading:
                 self._on_loading_change(False)
 
-    def cancel_verification(self) -> None:
+    async def cancel_verification(self) -> None:
         """取消未提交的验证状态 (P1-1: View cleanup 时经此 VM 命令转发, 避免View 直接 import LocalModelManager).
 
         语义: 调用 LocalModelManager.cancel_verification_if_active()。
         命名用 ``cancel_verification`` 而非 ``dispose`` 以避免与 Observable 协议的
         ``dispose()`` 命名冲突 (子类 dispose 用于清理订阅者, 不能被覆盖为业务命令)。
         异常静默: cleanup 路径不可抛异常阻断组件卸载, 仅记 debug 日志。
+
+        F4-U-3: cancel_verification_if_active 含 _shutdown_worker (~12s 同步阻塞)，
+        offload 到线程池避免阻塞事件循环 (R16)。View cleanup 经 page.run_task 调度。
         """
         try:
             from services.local_model_manager import LocalModelManager
 
-            LocalModelManager.cancel_verification_if_active()
+            await ThreadPoolManager().run_async(TaskType.IO, LocalModelManager.cancel_verification_if_active)
         except Exception as e:
-            logger.debug("[LocalModelConfigVM] cancel_verification failed: %s", e, exc_info=True)
+            logger.debug(
+                "[LocalModelConfigVM] cancel_verification failed: %s",
+                DataSanitizer.sanitize_error(e),  # F4-U-3: R9 异常脱敏
+                exc_info=True,
+            )

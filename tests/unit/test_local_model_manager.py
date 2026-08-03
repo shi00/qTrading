@@ -95,7 +95,7 @@ class TestPersistentWorkerEnsureWorker:
         mgr._worker_ready = True
         mgr._model_path = "/path/to/model.gguf"
 
-        result = mgr._ensure_worker("/path/to/model.gguf", {})
+        result = mgr._ensure_worker_impl("/path/to/model.gguf", {})
         assert result is True
 
     def test_ensure_worker_restarts_if_model_path_changed(self):
@@ -119,7 +119,7 @@ class TestPersistentWorkerEnsureWorker:
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
-            result = mgr._ensure_worker("/new/model.gguf", {"n_threads": 4})
+            result = mgr._ensure_worker_impl("/new/model.gguf", {"n_threads": 4})
             assert result is True
             mgr._shutdown_worker_locked.assert_called_once_with()
 
@@ -141,7 +141,7 @@ class TestPersistentWorkerEnsureWorker:
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
-            result = mgr._ensure_worker("/path/to/model.gguf", {})
+            result = mgr._ensure_worker_impl("/path/to/model.gguf", {})
             assert result is True
 
     @pytest.mark.asyncio
@@ -352,7 +352,7 @@ class TestPersistentWorkerModelReuse:
 
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", side_effect=mock_ensure),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(side_effect=mock_ensure)),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/path/to/model.gguf",
@@ -495,7 +495,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -532,7 +532,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {"n_threads": 4}
@@ -552,7 +552,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=False),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=False)),
             ):
                 mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
@@ -570,7 +570,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=False),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -597,7 +597,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                     patch.object(LocalModelManager, "_get_load_lock"),
                     patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                     patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                    patch.object(mgr, "_ensure_worker", return_value=True),
+                    patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                     patch.object(mgr, "_await_worker_ready", return_value=True),
                 ):
                     mock_ch.get_typed.return_value = ""
@@ -633,7 +633,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -662,7 +662,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
                 patch.object(mgr, "_shutdown_worker"),
             ):
@@ -693,7 +693,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -723,7 +723,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -751,7 +751,7 @@ class TestLocalModelManagerRunInferenceWithModel:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -801,7 +801,7 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
                 mock_ch.get_typed.return_value = ""
@@ -821,7 +821,7 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
                 mock_ch.get_typed.return_value = ""
@@ -844,7 +844,7 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
                 mock_ch.get_typed.return_value = ""
@@ -877,7 +877,7 @@ class TestLocalModelManagerLoadModelClearsCancel:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(
                     mgr,
                     "_await_worker_ready",
@@ -907,7 +907,7 @@ class TestLocalModelManagerSubprocessCleanup:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
                 patch.object(mgr, "_shutdown_worker"),
             ):
@@ -938,7 +938,7 @@ class TestLocalModelManagerSubprocessCleanup:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -1062,7 +1062,7 @@ class TestLoadModelClearsCancelEvent:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(
                     mgr,
                     "_await_worker_ready",
@@ -1102,7 +1102,7 @@ class TestShutdownWorkerLockedNoDeadlock:
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
-            mgr._ensure_worker("/path/to/model.gguf", {})
+            mgr._ensure_worker_impl("/path/to/model.gguf", {})
 
             mock_locked.assert_called_once_with()
             mock_public.assert_not_called()
@@ -1343,7 +1343,7 @@ class TestRunInferenceWorkerNotReady:
 
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -1372,7 +1372,7 @@ class TestRunInferenceWorkerNotReady:
 
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=False),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -1397,7 +1397,7 @@ class TestLoadModelOSError:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -1639,7 +1639,7 @@ class TestRunInferenceWorkerDiesDuringPolling:
 
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -1684,7 +1684,7 @@ class TestRunInferenceDeadlineReached:
 
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {
@@ -1718,6 +1718,176 @@ class TestRunInferenceDeadlineReached:
                 assert result == "late result"
 
 
+class TestF4S1ShutdownWorkerOffloaded:
+    """F4-S-1: run_inference/ _await_worker_ready 中 _shutdown_worker 调用通过 ThreadPoolManager offload (R16)."""
+
+    @pytest.mark.asyncio
+    async def test_run_inference_cancel_event_offloads_shutdown(self):
+        """F4-S-1: run_inference polling 中 _cancel_event.is_set() 分支应 offload _shutdown_worker."""
+
+        from utils.thread_pool import TaskType
+
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            mgr._cancel_event.set()  # 触发 cancel 分支
+
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+                patch.object(mgr, "_shutdown_worker") as mock_sw,
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm_cls.return_value = mock_tpm
+                # 模拟 run_async 立即返回 (offload 到线程池)
+                mock_tpm.run_async = AsyncMock(return_value=None)
+
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                with pytest.raises(RuntimeError, match="Inference cancelled by user"):
+                    await mgr.run_inference("test prompt")
+
+                # F4-S-1: 应通过 ThreadPoolManager.run_async(TaskType.IO, _shutdown_worker) offload
+                mock_tpm.run_async.assert_called_once_with(TaskType.IO, mgr._shutdown_worker)
+                mock_sw.assert_not_called()  # 不应直接同步调用
+
+    @pytest.mark.asyncio
+    async def test_run_inference_timeout_offloads_shutdown(self):
+        """F4-S-1: run_inference TimeoutError 分支应 offload _shutdown_worker."""
+        from services.local_model_manager import LocalInferenceTimeoutError
+        from utils.thread_pool import TaskType
+
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+                patch.object(mgr, "_shutdown_worker"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm_cls.return_value = mock_tpm
+                mock_tpm.run_async = AsyncMock(return_value=None)
+
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 1,
+                }
+
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue.get_nowait.side_effect = queue.Empty
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                with pytest.raises(LocalInferenceTimeoutError, match="timed out"):
+                    await mgr.run_inference("test prompt")
+
+                # F4-S-1: TimeoutError 分支也应 offload
+                mock_tpm.run_async.assert_called_once_with(TaskType.IO, mgr._shutdown_worker)
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_cancel_offloads_shutdown(self):
+        """F4-S-1: _await_worker_ready cancel_event 分支应 offload _shutdown_worker."""
+        from utils.thread_pool import TaskType
+
+        mgr = LocalModelManager()
+        mgr._cancel_event.set()  # 触发 cancel 分支
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._result_queue.get_nowait.side_effect = queue.Empty
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = False
+
+        with (
+            patch.object(mgr, "_shutdown_worker") as mock_sw,
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm_cls,
+        ):
+            mock_tpm = MagicMock()
+            mock_tpm_cls.return_value = mock_tpm
+            mock_tpm.run_async = AsyncMock(return_value=None)
+
+            result = await mgr._await_worker_ready(timeout=1.0)
+
+            assert result is False
+            mock_tpm.run_async.assert_called_once_with(TaskType.IO, mgr._shutdown_worker)
+            mock_sw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_worker_offload_does_not_block_event_loop(self):
+        """F4-S-1 行为级: _shutdown_worker 阻塞 2s 时事件循环不阻塞 (R16 回归保护).
+
+        若有人将 ``await ThreadPoolManager().run_async(...)`` 改回同步 ``self._shutdown_worker()``，
+        本测试会失败：事件循环被阻塞 2s，concurrent_done 不会被 set。
+        """
+        import asyncio
+        import threading
+        import time
+
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+            mgr._cancel_event.set()  # 触发 cancel 分支
+
+            shutdown_started = threading.Event()
+
+            def slow_shutdown():
+                shutdown_started.set()
+                time.sleep(2)  # 模拟 _shutdown_worker 同步阻塞
+
+            concurrent_done = asyncio.Event()
+
+            async def _concurrent():
+                # 等 shutdown 开始（确保在 _shutdown_worker 期间检测）
+                while not shutdown_started.is_set():
+                    await asyncio.sleep(0.01)
+                # 若事件循环未被阻塞，0.1s 后完成
+                await asyncio.sleep(0.1)
+                concurrent_done.set()
+
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+                patch.object(mgr, "_shutdown_worker", side_effect=slow_shutdown),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+                mgr._request_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue = MagicMock(spec=queue.Queue)
+                mgr._worker_ready = True
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                asyncio.create_task(_concurrent())
+
+                with pytest.raises(RuntimeError, match="Inference cancelled by user"):
+                    await mgr.run_inference("test prompt")
+
+                assert concurrent_done.is_set(), (
+                    "事件循环被阻塞: _shutdown_worker 未正确 offload，asyncio.sleep 未按时完成"
+                )
+
+
 class TestModelIntegritySha256:
     """SEC-H1: SHA-256 model file integrity verification tests."""
 
@@ -1733,7 +1903,7 @@ class TestModelIntegritySha256:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -1760,7 +1930,7 @@ class TestModelIntegritySha256:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 stored_values = {
@@ -1785,7 +1955,7 @@ class TestModelIntegritySha256:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True) as mock_ensure,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)) as mock_ensure,
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 stored_values = {
@@ -1831,7 +2001,7 @@ class TestLocalModelVerificationMode:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -1874,7 +2044,7 @@ class TestLocalModelVerificationMode:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=False),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=False)),
             ):
                 mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
@@ -1923,7 +2093,7 @@ class TestLocalModelVerificationMode:
             with (
                 patch.object(mgr, "unload_model") as mock_unload,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=False),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=False)),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/fake/model.gguf",
@@ -1965,7 +2135,7 @@ class TestLocalModelVerificationMode:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
@@ -2032,7 +2202,7 @@ class TestPayloadSanitization:
             mgr._model_path = "/path/to/model.gguf"
             with (
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
-                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {

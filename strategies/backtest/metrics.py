@@ -178,7 +178,16 @@ class BacktestMetrics:
         return float(correlation) if correlation is not None else 0.0
 
     @staticmethod
-    def calc_ir(ic_series: pl.Series) -> float:
+    def calc_ir(
+        ic_series: pl.Series,
+        num_days: int = 252,
+        trading_days_per_year: int = 252,
+    ) -> float:
+        """计算 IC 信息比率 (IR)。
+
+        年化系数 = sqrt(ic_count / years)，其中 years = num_days / 252。
+        IC 序列按调仓频率计算（非日频），不能用固定 sqrt(252) 年化。
+        """
         if len(ic_series) < 2:
             return 0.0
         ic_mean_raw = ic_series.mean()
@@ -189,7 +198,11 @@ class BacktestMetrics:
         ic_std_float = float(cast(float, ic_std_val))
         if ic_std_float < 1e-10:
             return 0.0
-        return ic_mean / ic_std_float * math.sqrt(252)
+        # 年化系数: ic_count / years = 每年 IC 样本数
+        years = num_days / trading_days_per_year if num_days > 0 else 1.0
+        ic_count = len(ic_series)
+        annualization_factor = math.sqrt(ic_count / years)
+        return ic_mean / ic_std_float * annualization_factor
 
     @staticmethod
     def calc_information_ratio(
@@ -248,7 +261,7 @@ class BacktestMetrics:
             "profit_factor": BacktestMetrics.calc_profit_factor(trades),
             "total_trades": len(trades),
             "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else 0.0,
-            "ic_ir": BacktestMetrics.calc_ir(ic_series),
+            "ic_ir": BacktestMetrics.calc_ir(ic_series, num_days=len(nav_curve)),
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,
         }

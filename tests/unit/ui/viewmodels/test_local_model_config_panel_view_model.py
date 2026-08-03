@@ -365,58 +365,64 @@ class TestLocalModelConfigPanelViewModelGetSetConfig:
 
 
 class TestLocalModelConfigPanelViewModelValidate:
-    def test_validate_empty_path_returns_false(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_empty_path_returns_false(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("")
-        is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+        is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is False
         assert error is not None
         assert error.key == "wizard_err_model_required"
 
-    def test_validate_nonexistent_path_returns_false(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_nonexistent_path_returns_false(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("/nonexistent/model.gguf")
         with patch("os.path.exists", return_value=False):
-            is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+            is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is False
         assert error is not None
         assert error.key == "wizard_err_model_not_found"
 
-    def test_validate_wrong_extension_returns_false(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_wrong_extension_returns_false(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("/models/model.bin")
         with patch("os.path.exists", return_value=True):
-            is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+            is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is False
         assert error is not None
         assert error.key == "wizard_err_model_format"
 
-    def test_validate_invalid_timeout_returns_false(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_invalid_timeout_returns_false(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("/models/model.gguf")
         vm.update_timeout("abc")
         with patch("os.path.exists", return_value=True):
-            is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+            is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is False
         assert error is not None
         assert error.key == "ai_snack_invalid_range"
 
-    def test_validate_timeout_out_of_range_returns_false(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_timeout_out_of_range_returns_false(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("/models/model.gguf")
         vm.update_timeout("9999")
         with patch("os.path.exists", return_value=True):
-            is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+            is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is False
         assert error is not None
         assert error.key == "ai_snack_invalid_range"
 
-    def test_validate_valid_config_returns_true(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_validate_valid_config_returns_true(self, mock_verify_model, mock_config_handler):
         vm = _make_vm(mock_verify_model)
         vm.update_model_path("/models/model.gguf")
         vm.update_timeout("300")
         with patch("os.path.exists", return_value=True):
-            is_valid, error = vm._validate_for_verify()  # type: ignore[attr-defined]
+            is_valid, error = await vm._validate_for_verify()  # type: ignore[attr-defined]
         assert is_valid is True
         assert error is None
 
@@ -832,14 +838,28 @@ class TestLocalModelConfigPanelViewModelCancelVerification:
     2. 异常静默: cleanup 路径不阻断组件卸载, 仅记 debug 日志
     """
 
-    def test_cancel_verification_calls_local_model_manager(self, mock_verify_model, mock_config_handler):
+    @pytest.fixture
+    def mock_tpm_passthrough(self):
+        """Mock ThreadPoolManager 让 run_async 直接调用 func (绕过线程池, F4-U-3)。"""
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=lambda task_type, func, *args: func(*args))
+        with patch("ui.viewmodels.local_model_config_panel_view_model.ThreadPoolManager", return_value=mock_tpm):
+            yield mock_tpm
+
+    @pytest.mark.asyncio
+    async def test_cancel_verification_calls_local_model_manager(
+        self, mock_verify_model, mock_config_handler, mock_tpm_passthrough
+    ):
         """DoD: cancel_verification() 转发到 LocalModelManager.cancel_verification_if_active()."""
         vm = _make_vm(mock_verify_model)
         with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active") as mock_cancel:
-            vm.cancel_verification()
+            await vm.cancel_verification()
         mock_cancel.assert_called_once_with()
 
-    def test_cancel_verification_swallows_exception_logs_debug(self, mock_verify_model, mock_config_handler, caplog):
+    @pytest.mark.asyncio
+    async def test_cancel_verification_swallows_exception_logs_debug(
+        self, mock_verify_model, mock_config_handler, mock_tpm_passthrough, caplog
+    ):
         """DoD: cancel_verification_if_active 抛异常时静默, 仅记 debug 日志 (cleanup 不阻断卸载)."""
         vm = _make_vm(mock_verify_model)
         with (
@@ -849,15 +869,18 @@ class TestLocalModelConfigPanelViewModelCancelVerification:
             ),
             caplog.at_level(logging.DEBUG),
         ):
-            vm.cancel_verification()  # 不应抛异常
+            await vm.cancel_verification()  # 不应抛异常
         assert any(
             "cancel_verification failed" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records
         )
 
-    def test_cancel_verification_does_not_change_state(self, mock_verify_model, mock_config_handler):
+    @pytest.mark.asyncio
+    async def test_cancel_verification_does_not_change_state(
+        self, mock_verify_model, mock_config_handler, mock_tpm_passthrough
+    ):
         """DoD: cancel_verification 不修改 VM state (cleanup 命令, 无副作用)."""
         vm = _make_vm(mock_verify_model)
         original_state = vm.state
         with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active"):
-            vm.cancel_verification()
+            await vm.cancel_verification()
         assert vm.state is original_state

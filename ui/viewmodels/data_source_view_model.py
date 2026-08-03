@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
@@ -346,7 +347,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # View detects health_checking False transition as "cancelled/finished"
                 raise
             except Exception as e:
-                logger.error("[DataSourceVM] Health check failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Health check failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 error_info = classify_error(e, context="general")
                 self._emit_health_error(_error_info_to_message(error_info))
                 raise
@@ -383,7 +384,27 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
             try:
-                await self._processor.run_daily_update(progress_callback=_progress)
+                result = await self._processor.run_daily_update(progress_callback=_progress)
+                # Task 8.2: 同步结果可见化 — 消费 SyncResult.skipped 与 skipped_permission 汇总
+                if result is not None and getattr(result, "skipped", 0) > 0:
+                    self._emit_snack(
+                        Message("snack_sync_skipped_fmt", {"skipped": result.skipped}),
+                        "info",
+                    )
+                # 查询 sync_status 表汇总 skipped_permission 表数 (降级提示, 非 fatal)
+                try:
+                    sync_df = await self._cache.get_sync_status()
+                    if sync_df is not None and hasattr(sync_df, "shape") and sync_df.shape[0] > 0:
+                        perm_skipped = int((sync_df["status"] == "skipped_permission").sum())
+                        if perm_skipped > 0:
+                            self._emit_snack(
+                                Message("snack_sync_permission_skipped_fmt", {"count": perm_skipped}),
+                                "warning",
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as perm_err:
+                    logger.debug("[DataSourceVM] skipped_permission summary failed: %s", perm_err)
                 self._emit_snack(
                     Message("snack_full_sync_done_simple"),
                     "success",
@@ -564,7 +585,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             except InitSyncError as e:
                 # Task 3.1: InitSyncError 携带 Message (替代翻译字符串), 透传给 RuntimeError.
                 # TaskManager 内部不使用 task.result, 故 RuntimeError 携带 Message 不影响 UI.
-                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Init sync failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(Message("ds_init_fail_generic"), "error")
                 raise RuntimeError(e.args[0]) from e
@@ -572,7 +593,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # Task 5.1: snack 消费 classify_error 结果 (具体错误原因 + action),
                 # RuntimeError 仍透传 ds_init_fail_fmt (TaskManager 不使用 task.result).
                 snack_msg, action_key = self._classify_sync_error(e)
-                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
+                logger.error("[DataSourceVM] Init sync failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(snack_msg, "error", action_key=action_key)
                 raise RuntimeError(Message("ds_init_fail_fmt")) from e
