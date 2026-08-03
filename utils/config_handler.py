@@ -138,7 +138,11 @@ class ConfigHandler:
                         keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", str(value["api_key"]))
                     # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                     except Exception as e:
-                        logger.debug("[ConfigHandler] Config encrypt fallback triggered: %s", e, exc_info=True)
+                        logger.debug(
+                            "[ConfigHandler] Config encrypt fallback triggered: %s",
+                            DataSanitizer.sanitize_error(e),
+                            exc_info=True,
+                        )
                         encrypted = SecurityManager.encrypt_data(str(value["api_key"]))
                         cred = provider_credentials.get(provider, {})
                         cred["api_key_encrypted"] = encrypted

@@ -142,7 +142,8 @@ class TestCalcICSeries:
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
-    def test_missing_execution_quotes_returns_zero_ic(self):
+    def test_missing_execution_quotes_skips_ic(self):
+        """F3-03: 无执行日行情时跳过（不产生 0.0 稀释 IC 序列）。"""
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
@@ -162,10 +163,10 @@ class TestCalcICSeries:
         )
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert ic_series.len() == 1
-        assert ic_series[0] == 0.0
+        assert ic_series.len() == 0
 
-    def test_missing_next_rebalance_quotes_returns_zero_ic(self):
+    def test_missing_next_rebalance_quotes_skips_ic(self):
+        """F3-03: 无下次调仓行情时跳过（不产生 0.0 稀释 IC 序列）。"""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
@@ -186,10 +187,10 @@ class TestCalcICSeries:
         )
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert ic_series.len() == 1
-        assert ic_series[0] == 0.0
+        assert ic_series.len() == 0
 
-    def test_insufficient_signal_quotes_returns_zero_ic(self):
+    def test_insufficient_signal_quotes_skips_ic(self):
+        """F3-03: 信号匹配后不足 3 只时跳过（不产生 0.0 稀释 IC 序列）。"""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         signals = pl.DataFrame(
@@ -210,38 +211,53 @@ class TestCalcICSeries:
         )
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert ic_series.len() == 2
-        assert ic_series[0] == 0.0
+        assert ic_series.len() == 0
 
     def test_valid_ic_calculation(self):
+        """F3-03: 有效信号 (>=3 只股票) 产生非空 IC 序列。"""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         signals = pl.DataFrame(
             {
-                "signal_date": [date(2024, 1, 2), date(2024, 1, 2)],
-                "execution_date": [date(2024, 1, 3), date(2024, 1, 3)],
-                "ts_code": ["000001.SZ", "000002.SZ"],
-                "signal_rank": [1, 2],
+                "signal_date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 2)],
+                "execution_date": [date(2024, 1, 3), date(2024, 1, 3), date(2024, 1, 3)],
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [1, 2, 3],
             }
         )
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
+                "ts_code": [
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000003.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000003.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000003.SZ",
+                ],
                 "trade_date": [
                     date(2024, 1, 2),
                     date(2024, 1, 2),
+                    date(2024, 1, 2),
                     date(2024, 1, 3),
                     date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
                     date(2024, 1, 4),
                     date(2024, 1, 4),
                 ],
-                "qfq_close": [10.0, 20.0, 10.2, 20.4, 10.5, 20.8],
-                "qfq_open": [9.9, 19.9, 10.1, 20.2, 10.4, 20.6],
+                "qfq_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.5, 20.8, 31.0],
+                "qfq_open": [9.9, 19.9, 29.9, 10.1, 20.2, 30.3, 10.4, 20.6, 30.9],
             }
         )
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
-        assert ic_series.len() == 2
+        # i=0: signal_date=2024-1-2 有 3 只信号 → 计算 IC; i=1: signal_date=2024-1-3 无信号 → 跳过
+        assert ic_series.len() == 1
+        assert not math.isnan(ic_series[0])
 
 
 class TestApplyQfq:
@@ -1326,16 +1342,37 @@ class TestVectorizationEquivalence:
         assert buy_trades["trade_date"][0] == date(2024, 1, 3)
 
     def test_calc_ic_series_multi_date_matches_expected(self):
-        """_calc_ic_series with multiple signal dates produces same IC values
-        regardless of partition_by vs filter implementation."""
+        """_calc_ic_series with multiple signal dates produces valid IC values
+        (>=3 stocks per date required for IC calculation)."""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
         signals = pl.DataFrame(
             {
-                "signal_date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 3)],
-                "execution_date": [date(2024, 1, 3), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 4)],
-                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
-                "signal_rank": [1, 2, 1, 2],
+                "signal_date": [
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                ],
+                "execution_date": [
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                    date(2024, 1, 4),
+                    date(2024, 1, 4),
+                ],
+                "ts_code": [
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000003.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000003.SZ",
+                ],
+                "signal_rank": [1, 2, 3, 1, 2, 3],
             }
         )
         quotes_df = pl.DataFrame(
@@ -1343,38 +1380,72 @@ class TestVectorizationEquivalence:
                 "ts_code": [
                     "000001.SZ",
                     "000002.SZ",
+                    "000003.SZ",
                     "000001.SZ",
                     "000002.SZ",
+                    "000003.SZ",
                     "000001.SZ",
                     "000002.SZ",
+                    "000003.SZ",
                     "000001.SZ",
                     "000002.SZ",
+                    "000003.SZ",
                 ],
                 "trade_date": [
                     date(2024, 1, 2),
                     date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
                     date(2024, 1, 3),
                     date(2024, 1, 3),
                     date(2024, 1, 4),
                     date(2024, 1, 4),
+                    date(2024, 1, 4),
+                    date(2024, 1, 5),
                     date(2024, 1, 5),
                     date(2024, 1, 5),
                 ],
-                "qfq_close": [10.0, 20.0, 10.5, 20.5, 11.0, 21.0, 11.5, 21.5],
-                "qfq_open": [9.9, 19.9, 10.4, 20.4, 10.9, 20.9, 11.4, 21.4],
+                "qfq_close": [
+                    10.0,
+                    20.0,
+                    30.0,
+                    10.5,
+                    20.5,
+                    30.5,
+                    11.0,
+                    21.0,
+                    31.0,
+                    11.5,
+                    21.5,
+                    31.5,
+                ],
+                "qfq_open": [
+                    9.9,
+                    19.9,
+                    29.9,
+                    10.4,
+                    20.4,
+                    30.4,
+                    10.9,
+                    20.9,
+                    30.9,
+                    11.4,
+                    21.4,
+                    31.4,
+                ],
             }
         )
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
-        # 3 signal dates (trade_dates[:-1]), so 3 IC values
-        assert ic_series.len() == 3
+        # F3-03: 2 有效信号日 (2024-1-2, 2024-1-3) → 2 个 IC; 2024-1-4 无信号 → 跳过
+        assert ic_series.len() == 2
         # IC values should be valid floats (not NaN)
         for v in ic_series.to_list():
             assert not math.isnan(v)
 
-    def test_calc_ic_series_missing_signal_date_returns_zero(self):
-        """A signal_date with no signals in the dict should produce 0.0 IC."""
+    def test_calc_ic_series_missing_signal_date_skipped(self):
+        """F3-03: A signal_date with no signals is skipped (no 0.0 produced)."""
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         # Signals only for 2024-01-03, not 2024-01-02
@@ -1397,8 +1468,8 @@ class TestVectorizationEquivalence:
 
         ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
-        # First signal_date (2024-01-02) has no signals -> 0.0
-        assert ic_series[0] == 0.0
+        # F3-03: 无信号日跳过，1 只股票 < 3 也跳过 → 空 IC 序列
+        assert ic_series.len() == 0
 
     def test_partition_by_lookup_matches_filter_directly(self):
         """Directly verify partition_by dict lookup returns same DataFrame as filter."""

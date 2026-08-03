@@ -963,3 +963,126 @@ class TestTierApiPanelR2CancelledErrorPropagation:
         cast(Any, button.on_click)(SimpleNamespace())
         # R2 红线: CancelledError 应从 _run_probe 传播到 _sync_run_task
         assert state["cancelled"] is True, "CancelledError 必须从 _run_probe 传播 (R2 红线)"
+
+
+# ============================================================================
+# except Exception 日志分支 (tier_api_panel.py L330 / L351, R9 脱敏)
+# ============================================================================
+
+
+class TestTierApiPanelExceptExceptionLogging:
+    """覆盖 _run_tier_change / _run_probe 的 except Exception 日志分支 (R9 脱敏).
+
+    tier_api_panel.py L323-330 (_run_tier_change) / L344-351 (_run_probe) 内:
+        except Exception as exc:
+            logger.error("... failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
+
+    测试模式: vm.on_tier_changed / vm.run_probe 抛 RuntimeError,
+    page.run_task 同步执行 coroutine, 验证 ERROR 日志含 "failed" + 异常不传播.
+    """
+
+    def _make_page_with_sync_run_task(self):
+        """创建 FakePage, 其 run_task 同步执行 coroutine (异常由 except 分支捕获, 不传播).
+
+        返回 (page, state); state["exception_escapes"] 标记是否有异常从 coroutine 逃逸
+        (except Exception 分支应捕获所有 Exception, 不应逃逸).
+        """
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.on_resize = None  # type: ignore[method-assign]
+        state: dict[str, bool] = {"exception_escapes": False}
+
+        def _sync_run_task(fn, *args, **kwargs):
+            result = fn(*args, **kwargs)
+            if inspect.iscoroutine(result):
+                try:
+                    asyncio.run(result)
+                except asyncio.CancelledError:
+                    # R2 守卫: CancelledError 不被 except Exception 吞没, 应传播
+                    raise
+                except Exception:
+                    # except Exception 分支应已捕获, 不应逃逸到此
+                    state["exception_escapes"] = True
+
+        # NOTE(lazy): 直接赋值普通函数, 不用 MagicMock(side_effect=...), 与 R2 测试一致
+        # (避免 MagicMock 在 traceback formatting 阶段触发递归).
+        # ceiling: 仅影响 except Exception 测试 page.run_task 注入.
+        # upgrade: 升级 pytest 或迁移到非 MagicMock fixture.
+        page.run_task = _sync_run_task  # type: ignore[method-assign]
+        return page, state
+
+    def test_run_tier_change_logs_on_exception(self, mock_i18n_state, mock_app_colors_state, caplog):
+        """_run_tier_change: vm.on_tier_changed 抛 RuntimeError → 记录脱敏日志 (L330, R9)."""
+        import logging
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(current_tier="points_5000")
+
+        async def _raising_on_tier_changed(new_tier, progress_callback=None):
+            raise RuntimeError("tier change boom")
+
+        vm.on_tier_changed = _raising_on_tier_changed  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 直接从 result.controls[2].controls 取 Dropdown (与 R2 测试同模式)
+        row = result.controls[2]
+        dropdown = next(c for c in row.controls if isinstance(c, ft.Dropdown))
+        e = SimpleNamespace(control=SimpleNamespace(value="points_120"))
+        with caplog.at_level(logging.ERROR, logger="ui.views.settings_tabs.tier_api_panel"):
+            cast(Any, dropdown.on_select)(e)
+
+        # except Exception 应捕获, 异常不逃逸
+        assert state["exception_escapes"] is False, "except Exception 应捕获 RuntimeError, 不应逃逸"
+        # ERROR 日志含 "on_tier_changed failed" (R9 脱敏分支)
+        error_messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("on_tier_changed failed" in msg for msg in error_messages), (
+            f"应记录 'on_tier_changed failed' ERROR 日志, 实际: {error_messages}"
+        )
+
+    def test_run_probe_logs_on_exception(self, mock_i18n_state, mock_app_colors_state, caplog):
+        """_run_probe: vm.run_probe 抛 RuntimeError → 记录脱敏日志 (L351, R9)."""
+        import logging
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+
+        async def _raising_run_probe(progress_callback=None):
+            raise RuntimeError("probe boom")
+
+        vm.run_probe = _raising_run_probe  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 直接从 result.controls[2].controls 取 Button (与 R2 测试同模式)
+        row = result.controls[2]
+        button = next(c for c in row.controls if isinstance(c, ft.Button))
+        with caplog.at_level(logging.ERROR, logger="ui.views.settings_tabs.tier_api_panel"):
+            cast(Any, button.on_click)(SimpleNamespace())
+
+        # except Exception 应捕获, 异常不逃逸
+        assert state["exception_escapes"] is False, "except Exception 应捕获 RuntimeError, 不应逃逸"
+        # ERROR 日志含 "run_probe failed" (R9 脱敏分支)
+        error_messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("run_probe failed" in msg for msg in error_messages), (
+            f"应记录 'run_probe failed' ERROR 日志, 实际: {error_messages}"
+        )

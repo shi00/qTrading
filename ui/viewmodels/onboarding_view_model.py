@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
 from ui.viewmodels import Message
@@ -394,7 +395,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             )
             return True
         except Exception as e:
-            logger.error("[OnboardingVM] Save schedule failed: %s", e, exc_info=True)
+            logger.error(
+                "[OnboardingVM] Save schedule failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return False
 
     def set_schedule_state(self, enabled: bool, time_str: str):
@@ -423,7 +428,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[OnboardingVM] Save language failed: %s", ex, exc_info=True)
+            logger.error(
+                "[OnboardingVM] Save language failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             return False
 
     def _set_validation_in_progress(self, in_progress: bool):
@@ -490,7 +499,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                 sync_progress_message=Message("wizard_status_cancelled"),
             )
         except Exception as e:
-            logger.warning("[OnboardingVM] Failed to cancel sync: %s", e, exc_info=True)
+            logger.warning(
+                "[OnboardingVM] Failed to cancel sync: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
         finally:
             self._set_state(sync_in_progress=False)
 

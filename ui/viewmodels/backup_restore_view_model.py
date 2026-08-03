@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.sanitizers import DataSanitizer
 
 if TYPE_CHECKING:
     from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
@@ -125,7 +126,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
                 backup_success_message=Message("backup_success", params={"path": result.output_path}),
             )
         except Exception as exc:
-            logger.error("[BackupRestoreVM] start_backup failed: %s", exc, exc_info=True)
+            logger.error("[BackupRestoreVM] start_backup failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
             self._set_state(
                 is_backing_up=False,
                 progress_message=None,

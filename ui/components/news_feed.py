@@ -31,6 +31,9 @@ _NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "mis
 # 在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
 NEWS_TITLE_CODE_TO_I18N_KEY: dict[str, str] = {"no_title": "news_no_title"}
 
+# A 股股票代码正则: 6 位数字, 可选 SH/SZ/BJ 前缀 (如 SZ000001, 600519)
+_STOCK_CODE_RE = re.compile(r"(?:SH|SZ|BJ)?(\d{6})")
+
 
 def _detect_sentiment(content: str) -> str:
     """Detect sentiment using word-boundary matching (case-insensitive)."""
@@ -73,7 +76,32 @@ def _translate_title_code(code: str) -> str:
     return I18n.get(i18n_key)
 
 
-def _build_news_item(row: NewsRow, news_id: str) -> ft.Container:
+def _extract_stock_code(content: str) -> str:
+    """从新闻内容中提取第一个 A 股股票代码 (6 位数字).
+
+    返回空字符串表示未找到。仅匹配 6 位连续数字, 过滤日期/年份等误匹配:
+    排除以 20 开头的年份模式 (如 20240101) 及纯 8 位日期。
+    """
+    if not content:
+        return ""
+    for m in _STOCK_CODE_RE.finditer(content):
+        code = m.group(1)
+        # 排除 8 位日期中的 6 位子串: 检查前后是否有连续数字
+        start = m.start(1)
+        end = m.end(1)
+        before = content[start - 1] if start > 0 else ""
+        after = content[end] if end < len(content) else ""
+        if before.isdigit() or after.isdigit():
+            continue
+        return code
+    return ""
+
+
+def _build_news_item(
+    row: NewsRow,
+    news_id: str,
+    on_view_stock: Callable[[str], None] | None = None,
+) -> ft.Container:
     """Build a single news item container (pure function).
 
     Receives a NewsRow + key, no state dependency.
@@ -92,27 +120,60 @@ def _build_news_item(row: NewsRow, news_id: str) -> ft.Container:
     else:
         bg_color = ft.Colors.TRANSPARENT
 
+    # 标签行: translated_tag + AI生成 badge (if applicable) + 时间 + 查看个股 link
+    tag_row_controls: list[ft.Control] = []
+    if translated_tag:
+        tag_row_controls.append(
+            ft.Text(
+                translated_tag,
+                color=AppColors.ACCENT,
+                weight=ft.FontWeight.BOLD,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            )
+        )
+    if row.is_ai_tagged:
+        tag_row_controls.append(
+            ft.Container(
+                content=ft.Text(
+                    I18n.get("ai_generated_tag"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_ON_PRIMARY,
+                ),
+                bgcolor=AppColors.ACCENT,
+                border_radius=4,
+                padding=ft.Padding.symmetric(horizontal=4, vertical=1),
+            )
+        )
+    tag_row_controls.append(ft.Container(expand=True))
+    tag_row_controls.append(
+        ft.Text(
+            time_str[-8:],
+            color=AppColors.TEXT_SECONDARY,
+            size=AppStyles.FONT_SIZE_BODY_SM,
+        )
+    )
+
+    # 查看个股 link (仅当内容含股票代码且提供回调时显示)
+    stock_code = _extract_stock_code(content)
+    content_controls: list[ft.Control] = [
+        ft.Text(content, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_PRIMARY),
+    ]
+    if stock_code and on_view_stock is not None:
+        content_controls.append(
+            ft.TextButton(
+                content=f"{I18n.get('news_view_stock')} ({stock_code})",
+                on_click=safe_on_click(lambda _e, c=stock_code: on_view_stock(c)),
+                style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                height=28,
+            )
+        )
+
     return ft.Container(
         key=news_id,
         content=ft.Column(
             [
-                ft.Row(
-                    [
-                        ft.Text(
-                            translated_tag,
-                            color=AppColors.ACCENT,
-                            weight=ft.FontWeight.BOLD,
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                        ),
-                        ft.Text(
-                            time_str[-8:],
-                            color=AppColors.TEXT_SECONDARY,
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Text(content, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_PRIMARY),
+                ft.Row(tag_row_controls, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                *content_controls,
             ],
         ),
         padding=10,
@@ -126,6 +187,7 @@ def NewsFeed(
     news_rows: tuple[NewsRow, ...] = (),
     has_more: bool = False,
     on_load_more_click: Callable[[ft.ControlEvent], None] | None = None,
+    on_view_stock: Callable[[str], None] | None = None,
 ) -> ft.Container:
     """News feed component (declarative).
 
@@ -143,6 +205,7 @@ def NewsFeed(
                    空时显示空状态
         has_more: 是否显示"加载更多"按钮
         on_load_more_click: "加载更多"按钮点击回调
+        on_view_stock: "查看个股"点击回调, 接收股票代码 (Task 8.1)
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)
@@ -180,7 +243,9 @@ def NewsFeed(
         )
 
     # --- Build news items ---
-    controls: list[ft.Control] = [_build_news_item(row, str(i)) for i, row in enumerate(news_rows)]
+    controls: list[ft.Control] = [
+        _build_news_item(row, str(i), on_view_stock=on_view_stock) for i, row in enumerate(news_rows)
+    ]
 
     # --- Load more button ---
     if has_more:

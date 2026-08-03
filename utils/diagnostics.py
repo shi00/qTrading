@@ -109,7 +109,11 @@ class SystemDiagnosticsCollector:
                     health_info = await dp.check_data_health()
             # NOTE(lazy): 健康检查失败降级为 status=red 不阻断诊断导出. ceiling: 健康检查内部异常. upgrade: check_data_health 内部统一走 classify_error.
             except Exception as e:
-                logger.error("[Diagnostics] Failed to gather health check data: %s", e, exc_info=True)
+                logger.error(
+                    "[Diagnostics] Failed to gather health check data: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
                 health_info = {"status": "red", "error": DataSanitizer.sanitize_error(e)}
 
             # 整合所有状态到一个 json 中
@@ -201,7 +205,12 @@ class SystemDiagnosticsCollector:
                     log_files_to_collect.append((sanitized_log_path, f"sanitized_{log_name}"))
                 # NOTE(lazy): 日志文件读取失败兜底(权限/文件被截断)跳过该文件. ceiling: 系统级 IO 故障. upgrade: 引入文件可读性预检或重试.
                 except Exception as e:
-                    logger.error("[Diagnostics] Failed to read log file %s: %s", log_name, e, exc_info=True)
+                    logger.error(
+                        "[Diagnostics] Failed to read log file %s: %s",
+                        log_name,
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
 
         # 3. 打包 ZIP
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_f:

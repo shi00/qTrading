@@ -32,7 +32,6 @@ from tests.unit.ui.component_renderer import (
 from ui.components.config_panels import llm_config_panel as panel_module
 from ui.components.config_panels.llm_config_panel import (
     LLMConfigPanel,
-    MODELS_API_COMPATIBLE,
     _build_links_row,
     _build_model_options,
     _build_provider_options,
@@ -46,6 +45,7 @@ from ui.components.config_panels.llm_config_panel import (
 )
 from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel, LLMConfigState
+from ui.viewmodels.llm_config_panel_view_model import MODELS_API_COMPATIBLE
 
 pytestmark = pytest.mark.unit
 

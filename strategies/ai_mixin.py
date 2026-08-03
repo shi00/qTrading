@@ -651,44 +651,52 @@ class AIStrategyMixin:
         all_records = candidates_df.to_dict("records")
         results: list = []
 
-        for batch_start in range(0, len(all_records), _BATCH_SIZE):
-            if dp and dp.is_cancelled():
-                break
-            batch = all_records[batch_start : batch_start + _BATCH_SIZE]
-            batch_tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in batch]
-            batch_results = await gather_return_exceptions_propagating_cancel(*batch_tasks)
-            results.extend(batch_results)
+        # F4-ST-001: try/finally 确保任何路径（含 CancelledError）下 news_tasks 被清理，
+        # 避免后台 HTTP 任务句柄/连接泄漏。gather_return_exceptions_propagating_cancel
+        # 在 CancelledError 时直接 raise，若无 try/finally，下方 for 循环与
+        # _cancel_orphan_news_tasks 调用将不会执行（成为死代码）。
+        try:
+            for batch_start in range(0, len(all_records), _BATCH_SIZE):
+                if dp and dp.is_cancelled():
+                    break
+                batch = all_records[batch_start : batch_start + _BATCH_SIZE]
+                batch_tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in batch]
+                batch_results = await gather_return_exceptions_propagating_cancel(*batch_tasks)
+                results.extend(batch_results)
 
-        for res in results:
-            if isinstance(res, asyncio.CancelledError):
-                await self._cancel_orphan_news_tasks(prefetched)
-                raise res
-            completed += 1
-            if isinstance(res, Exception):
-                # UX-2.3: on_card_error 已在 analyze_one 内调用，此处仅日志
-                error_info = classify_error(res, context="general")
-                logger.error(
-                    "[AIStrategyMixin] Task error (%s): %s", error_info["code"], DataSanitizer.sanitize_error(res)
-                )
-            elif isinstance(res, dict):
-                final_rows.append(res)
-                if on_result:
-                    on_result(res)
-            if on_progress:
-                on_progress(
-                    completed,
-                    total_tasks,
-                    I18n.get("ai_progress_done", done=completed, total=total_tasks),
-                )
+            for res in results:
+                # F4-ST-001: 防御性 — CancelledError 继承 BaseException 而非 Exception,
+                # 若未来 gather 实现变化导致 CancelledError 漏入 results, 此处显式 raise (R2)
+                if isinstance(res, asyncio.CancelledError):
+                    raise res
+                completed += 1
+                if isinstance(res, Exception):
+                    # UX-2.3: on_card_error 已在 analyze_one 内调用, 此处仅日志
+                    error_info = classify_error(res, context="general")
+                    logger.error(
+                        "[AIStrategyMixin] Task error (%s): %s", error_info["code"], DataSanitizer.sanitize_error(res)
+                    )
+                elif isinstance(res, dict):
+                    final_rows.append(res)
+                    if on_result:
+                        on_result(res)
+                if on_progress:
+                    on_progress(
+                        completed,
+                        total_tasks,
+                        I18n.get("ai_progress_done", done=completed, total=total_tasks),
+                    )
 
-        logger.info(
-            "[AIStrategyMixin] Complete. %d/%d processed, %d valid results",
-            completed,
-            total_tasks,
-            len(final_rows),
-        )
-
-        await self._cancel_orphan_news_tasks(prefetched)
+            logger.info(
+                "[AIStrategyMixin] Complete. %d/%d processed, %d valid results",
+                completed,
+                total_tasks,
+                len(final_rows),
+            )
+        finally:
+            # F4-ST-001: 无论正常完成、CancelledError 或异常，都清理 news_tasks
+            # _cancel_orphan_news_tasks 内部用 asyncio.gather(return_exceptions=True)（不 raise），finally 中安全
+            await self._cancel_orphan_news_tasks(prefetched)
 
         if not final_rows:
             return candidates_df  # Fallback: return math-only results
@@ -1069,7 +1077,15 @@ class AIStrategyMixin:
             ma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else None
             current_price = close.iloc[-1]
 
-            if ma5 is not None and ma10 is not None and ma20 is not None:
+            # F4-ST-003: NaN 防御 — MA 值为 NaN 时降级为 i18n 占位，避免输出 "nan"
+            if (
+                ma5 is not None
+                and ma10 is not None
+                and ma20 is not None
+                and not pd.isna(ma5)
+                and not pd.isna(ma10)
+                and not pd.isna(ma20)
+            ):
                 if ma5 > ma10 > ma20:
                     result["ma_alignment"] = (
                         f"{I18n.get('ai_ma_bullish')} (MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f})"
@@ -1083,7 +1099,7 @@ class AIStrategyMixin:
                         f"{I18n.get('ai_ma_crossing')} (MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f})"
                     )
 
-                if ma20 != 0:
+                if ma20 != 0 and not pd.isna(ma20) and not pd.isna(current_price):
                     deviation = ((current_price - ma20) / ma20) * 100
                     result["price_vs_ma20"] = f"{I18n.get('ai_ma20_deviation')} {deviation:+.1f}%"
                 else:
@@ -1117,11 +1133,13 @@ class AIStrategyMixin:
             # 5-day Price Trend
             if len(df) >= 5:
                 price_5d_ago = close.iloc[-5]
-                if price_5d_ago != 0:
+                # F4-ST-003: NaN 防御，避免输出 "nan%" 到 AI prompt
+                if price_5d_ago != 0 and not pd.isna(price_5d_ago) and not pd.isna(current_price):
                     pct_5d = ((current_price - price_5d_ago) / price_5d_ago) * 100
                 else:
                     pct_5d = 0.0
-                closes_5d = ", ".join([f"{c:.2f}" for c in close.tail(5).tolist()])
+                # F4-ST-003: 过滤 NaN closes 避免 "nan" 出现在 close 序列
+                closes_5d = ", ".join([f"{c:.2f}" for c in close.tail(5).tolist() if not pd.isna(c)])
                 result["price_trend_5d"] = (
                     f"{I18n.get('ai_price_trend_5d')} {pct_5d:+.1f}% ({I18n.get('ai_close_series')}: {closes_5d})"
                 )

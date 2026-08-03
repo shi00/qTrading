@@ -252,6 +252,16 @@ return ft.Column(
 
 **调试技巧**：E2E 失败时截图若显示表格只有表头无数据行，优先检查 `expand=True` 链路是否断裂。
 
+### 4.9 增量变更触发边缘状态视口塌陷（PR #373）
+
+**背景**：PR #373 修复 9 个 E2E 测试失败（`get_by_text("平安银行")` 超时）时定位的根因；前 7 次试错均误判为"语义树问题"，实际是布局视口塌陷。
+
+**根因（边缘状态 + 增量传导）**：main 基线表体视口仅 **6px**（边缘状态，未塌陷）→ Task 8.3 新增 `backtest_btn` → `right_controls +109px` → `left_controls(expand=True)` 压缩 → 参数面板 `Row(wrap=True)` 换行 +78px → `table_card` 视口压到 **0px** → Column 行节点 `flt-semantics` 存在但 `text=''`（Column 在视口 0px 时节点存在但文本不渲染，与 §4.5 的 ListView 节点不生成机制不同）→ `get_by_text` 超时。
+
+**修复**：`backtest_btn` 移入独立右对齐行 + `table_card expand=2`（行高 6px → 37px）。
+
+**诊断要点**：7 次试错均使用了 DOM dump 但误读 `text=''` 为语义合并缺陷，实际是 0px 视口导致文本不渲染；应用日志"策略执行成功"是误导性证据（UI 渲染与业务逻辑独立）。该试错模式违反 [core-protocol.md §5](../bug-fix/core-protocol.md#5-反模式快速自查)「试错式补丁」反模式。同类边缘状态风险排查见 [known-technical-debt.md](../debt/known-technical-debt.md) `P3-PR373-Viewport-Collapse-Audit`。
+
 ---
 
 ## 5. R16 UI 阻塞红线

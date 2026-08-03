@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, create_autospec
 
@@ -52,17 +53,22 @@ def _v1_page_compat(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _reset_context_page():
-    """每个测试后清理 _context_page ContextVar，防止 FakePage 跨测试泄漏。
+def _reset_pending_prefill() -> Iterator[None]:
+    """每测前后清理 backtest_view_model._pending_prefill, 防止跨测试泄漏 (R7 测试隔离).
 
-    ``attach_fake_page``（见 ``tests/unit/ui/component_renderer.py``）调用
-    ``_context_page.set(FakePage)`` 修改 ContextVar，若不清理会跨测试泄漏，
-    导致后续 UI 测试因 page 类型不匹配而失败。
+    PR #373 Task 8.3 的 _pending_prefill 是模块级可变 dict (非 @register_singleton),
+    不被 tests/conftest.py 的 _reset_all_singletons autouse 覆盖; 选股→回测透传测试
+    若仅 set 未 consume (如断言失败路径) 会残留, 影响后续 mount BacktestView 的测试.
     """
-    yield
-    from flet.controls.context import _context_page
+    from ui.viewmodels.backtest_view_model import _pending_prefill
 
-    _context_page.set(None)
+    _pending_prefill.clear()
+    yield
+    _pending_prefill.clear()
+
+
+# 注：_reset_context_page fixture 已提升到 tests/conftest.py 项目根，覆盖所有目录
+# （含 tests/unit/test_main_prepare_db_retry.py 等非 ui/ 目录调用 attach_fake_page 的场景）。
 
 
 @pytest.fixture

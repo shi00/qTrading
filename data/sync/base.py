@@ -18,11 +18,6 @@ from utils.correlation import ensure_correlation_id
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 
-# Forward declaration for type hinting if needed,
-# but usually avoid circular imports by strict typing or Protocol
-# from data.external.tushare_client import TushareClient
-# from data.cache.cache_manager import CacheManager
-
 logger = logging.getLogger(__name__)
 
 

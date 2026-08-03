@@ -607,23 +607,19 @@ class VectorBacktestEngine:
             day_signals = signals_by_date.get(signal_date, pl.DataFrame())
 
             if day_signals.is_empty():
-                ic_values.append(0.0)
                 continue
 
             execution_quotes = quotes_by_date.get(execution_date)
             if execution_quotes is None:
-                ic_values.append(0.0)
                 continue
 
             next_rebalance_date = self._get_next_rebalance_date(execution_date, trade_dates, self.config.rebalance_freq)
 
             if next_rebalance_date is None:
-                ic_values.append(0.0)
                 continue
 
             next_rebalance_quotes = quotes_by_date.get(next_rebalance_date)
             if next_rebalance_quotes is None:
-                ic_values.append(0.0)
                 continue
 
             signal_quotes = day_signals.join(execution_quotes, on="ts_code", how="inner").join(
@@ -631,7 +627,6 @@ class VectorBacktestEngine:
             )
 
             if signal_quotes.is_empty() or len(signal_quotes) < 3:
-                ic_values.append(0.0)
                 continue
 
             entry_price_col = "qfq_close" if self.config.execution_price == "next_close" else "qfq_open"
@@ -649,7 +644,7 @@ class VectorBacktestEngine:
             )
             ic_values.append(ic)
 
-        return pl.Series(ic_values)
+        return pl.Series(ic_values, dtype=pl.Float64)
 
     def _get_next_rebalance_date(
         self,

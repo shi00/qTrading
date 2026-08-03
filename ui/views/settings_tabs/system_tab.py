@@ -154,7 +154,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     except Exception as ex:
                         logger.debug(
                             "[SystemTab] Failed to update page locale configuration: %s",
-                            ex,
+                            DataSanitizer.sanitize_error(ex),
                             exc_info=True,
                         )
             if show_snack_callback:
@@ -187,7 +187,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemTab] Theme | Change failed: %s", ex, exc_info=True)
+            logger.error("[SystemTab] Theme | Change failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -203,7 +203,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemTab] LogLevel | Change failed: %s", ex, exc_info=True)
+            logger.error("[SystemTab] LogLevel | Change failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -228,7 +228,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemTab] Concurrency | Save failed: %s", ex, exc_info=True)
+            logger.error("[SystemTab] Concurrency | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -252,7 +252,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemTab] DBPool | Save failed: %s", ex, exc_info=True)
+            logger.error("[SystemTab] DBPool | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -283,7 +283,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except Exception as ex:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
-            logger.error("[SystemTab] ThreadPool | Save failed: %s", ex, exc_info=True)
+            logger.error("[SystemTab] ThreadPool | Save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
 
     async def _do_save_no_proxy(raw_text: str) -> None:
         try:
@@ -297,7 +297,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[SystemTab] No-proxy domains save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[SystemTab] No-proxy domains save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -586,7 +588,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # --- SettingRows ---
     row_language = SettingRow(
         icon=safe_icon_str(ft.Icons.LANGUAGE_ROUNDED),
-        icon_color=ft.Colors.BLUE,
+        icon_color=AppColors.PRIMARY,
         title=I18n.get("settings_language"),
         subtitle=I18n.get("settings_language_desc"),
         control=language_control,  # P3-17: Row(dropdown + ProgressRing)
@@ -596,12 +598,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     row_theme = SettingRow(
         icon=safe_icon_str(ft.Icons.COLOR_LENS_ROUNDED),
-        icon_color=ft.Colors.PURPLE,
+        icon_color=ft.Colors.TERTIARY,
         title=I18n.get("settings_theme"),
-        subtitle=I18n.get("settings_snack_theme_updated"),
+        subtitle=I18n.get("settings_theme_desc"),
         control=theme_dropdown,
         title_key="settings_theme",
-        subtitle_key="settings_snack_theme_updated",
+        subtitle_key="settings_theme_desc",
     )
 
     row_log = SettingRow(
@@ -641,7 +643,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
     row_thread_pool = SettingRow(
         icon=safe_icon_str(ft.Icons.MEMORY_ROUNDED),
-        icon_color=ft.Colors.INDIGO,
+        icon_color=ft.Colors.PRIMARY_CONTAINER,
         title=I18n.get("sys_thread_pool_title"),
         subtitle=I18n.get("sys_thread_pool_desc"),
         control=ft.Row(
@@ -661,7 +663,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
     row_db_pool = SettingRow(
         icon=safe_icon_str(ft.Icons.STORAGE_ROUNDED),
-        icon_color=ft.Colors.ORANGE,
+        icon_color=AppColors.WARNING,
         title=I18n.get("settings_db_pool"),
         subtitle=I18n.get("settings_pool_desc"),
         control=ft.Row(
@@ -681,7 +683,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
     row_proxy = SettingRow(
         icon=safe_icon_str(ft.Icons.PUBLIC_OFF_ROUNDED),
-        icon_color=ft.Colors.TEAL,
+        icon_color=ft.Colors.SECONDARY,
         title=I18n.get("settings_no_proxy_domains"),
         subtitle=I18n.get("settings_no_proxy_desc"),
         control=ft.Row(

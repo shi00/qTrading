@@ -14,9 +14,52 @@ import pytest
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
 from ui.viewmodels import Message
-from ui.viewmodels.backtest_view_model import BacktestState, BacktestViewModel
+from ui.viewmodels.backtest_view_model import (
+    BacktestState,
+    BacktestViewModel,
+    consume_pending_prefill,
+    set_pending_prefill,
+)
 
 pytestmark = pytest.mark.unit
+
+
+class TestPendingPrefill:
+    """Task 8.3: 选股→回测参数透传 stash 函数测试."""
+
+    def test_set_and_consume_prefill(self):
+        """set → consume 单次消费语义."""
+        set_pending_prefill("value_oversold", {"rsi_threshold": 25})
+        data = consume_pending_prefill()
+        assert data is not None
+        assert data["strategy_key"] == "value_oversold"
+        assert data["params"] == {"rsi_threshold": 25}
+
+    def test_consume_clears_stash(self):
+        """consume 后再次 consume 返回 None (单次消费)."""
+        set_pending_prefill("test_strategy")
+        consume_pending_prefill()
+        assert consume_pending_prefill() is None
+
+    def test_consume_empty_returns_none(self):
+        """无 pending 时 consume 返回 None."""
+        # 确保 stash 为空 (前序测试可能残留)
+        consume_pending_prefill()
+        assert consume_pending_prefill() is None
+
+    def test_set_overwrites_previous(self):
+        """多次 set 覆盖, 只保留最后一次."""
+        set_pending_prefill("strategy_a", {"a": 1})
+        set_pending_prefill("strategy_b", {"b": 2})
+        data = consume_pending_prefill()
+        assert data["strategy_key"] == "strategy_b"
+        assert data["params"] == {"b": 2}
+
+    def test_set_with_none_params(self):
+        """params=None 时存为空 dict."""
+        set_pending_prefill("test_strategy", None)
+        data = consume_pending_prefill()
+        assert data["params"] == {}
 
 
 class TestBacktestViewModel:
@@ -443,7 +486,9 @@ class TestBacktestViewModelRunBacktest:
 
         assert vm.state.is_running is False
         assert vm.state.status_color == "error"
-        assert vm.state.progress == 1.0
+        # F3-11: 异常路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
         # Both starting (info) and failed (error) states were observed
         assert any(s.status_color == "info" for s in snapshots)
         assert any(s.status_color == "error" for s in snapshots)
@@ -595,8 +640,9 @@ class TestBacktestViewModelRunBacktest:
         # Result must remain None (no partial result)
         assert vm.state.result is None
 
-        # Verify final progress was set to 1.0 (from finally block)
-        assert vm.state.progress == 1.0
+        # F3-11: 取消路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
 
         # Simulate a late progress callback after cancellation
         if captured_progress_cb:
@@ -604,7 +650,7 @@ class TestBacktestViewModelRunBacktest:
 
         # The late callback should NOT have updated state — is_running is False,
         # meaning the guard in _progress_callback prevented the update
-        assert vm.state.progress == 1.0
+        assert vm.state.progress == 0.0
         assert vm.state.progress_message != Message("late update")
 
     @pytest.mark.asyncio
@@ -647,8 +693,9 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.status_color == "error"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "backtest_failed"
-        # Verify progress was set to 1.0 (final state from finally block)
-        assert vm.state.progress == 1.0
+        # F3-11: 失败路径显式终态 progress=0.0（清空避免 UI 残留文案）
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
 
 
 class TestBacktestViewModelCoverageGaps:

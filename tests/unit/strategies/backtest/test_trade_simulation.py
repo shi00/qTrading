@@ -191,6 +191,48 @@ class TestTradeSimulation:
         no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
         assert len(no_quote_skips) == 1
 
+    def test_skip_buy_on_zero_entry_price(self, config: BacktestConfig) -> None:
+        """F3-06: entry_price <= 0 数据损坏时跳过买入，避免 ZeroDivisionError 及 pnl 虚高。"""
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
+
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 2)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "raw_open": [0.0],
+                "raw_close": [0.0],
+                "qfq_open": [0.0],
+                "qfq_close": [0.0],
+                "is_tradable": [True],
+                "limit_status": [None],
+            }
+        )
+
+        trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
+
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+
+        assert len(trades) == 0
+        invalid_price_skips = skipped.filter(pl.col("reason") == "invalid_price")
+        assert len(invalid_price_skips) == 1
+        assert any("invalid_price" in w for w in warnings)
+
     def test_normal_trade_without_limit_status(self, config: BacktestConfig) -> None:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config

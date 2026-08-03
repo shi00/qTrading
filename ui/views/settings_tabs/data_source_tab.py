@@ -284,7 +284,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.error("[DataSourceTab] HistoryRange | Failed to set config: %s", ex, exc_info=True)
+            logger.error(
+                "[DataSourceTab] HistoryRange | Failed to set config: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -892,7 +896,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             alignment=ft.MainAxisAlignment.CENTER,
             expand=True,
         ),
-        icon_color=ft.Colors.PURPLE,
+        icon_color=ft.Colors.TERTIARY,
         title_key="settings_init_data",
         subtitle_key="settings_hint_first_run",
     )

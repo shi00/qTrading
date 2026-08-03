@@ -165,9 +165,14 @@ def apply_max_weight_constraint(
     max_weight: float,
 ) -> pl.DataFrame:
     """
-    应用单股权重上限约束。
+    应用单股权重上限约束（迭代收敛算法）。
 
-    对超过上限的权重进行截断，然后重新归一化使总权重为 1。
+    截断后重新归一化可能导致权重再次超过 max_weight（例: [0.5,0.3,0.2] max=0.4 →
+    截断 [0.4,0.3,0.2] → 归一化 [0.444,...] → 0.444 > 0.4 失效）。
+    因此采用"截断→归一化"迭代直到收敛，保证 max(weight) <= max_weight + tolerance。
+
+    边界: N * max_weight < 1 时无法归一化到 1，所有取 max_weight（剩余留现金）。
+    兜底: 100 次迭代未收敛则强制截断（总权重可能 < 1，剩余留现金，优于违反约束）。
 
     Args:
         weights_df: 包含 ts_code 和 weight 列的 DataFrame
@@ -179,20 +184,36 @@ def apply_max_weight_constraint(
     if weights_df.is_empty():
         return weights_df
 
-    result = weights_df.with_columns(
-        pl.when(pl.col("weight") > max_weight)
-        .then(pl.lit(max_weight))
-        .otherwise(pl.col("weight"))
-        .alias("weight_capped")
-    )
+    n = weights_df.height
+    # N * max_weight < 1: 无法归一化到 1，所有取 max_weight（剩余留现金）
+    if n * max_weight < 1.0:
+        return weights_df.with_columns(pl.lit(max_weight).alias("weight"))
 
-    total_weight = result.select(pl.col("weight_capped").sum()).item()
+    result = weights_df
+    max_iterations = 100  # 线性收敛比率≈0.4，达 1e-6 需约 15 次，100 次足够
+    tolerance = 1e-6  # 放宽容差避免振荡
 
-    if total_weight is None or total_weight <= 0:
-        logger.warning("[apply_max_weight_constraint] Total weight is zero or null, returning original weights")
-        return weights_df
+    for _ in range(max_iterations):
+        # 截断
+        result = result.with_columns(
+            pl.when(pl.col("weight") > max_weight).then(pl.lit(max_weight)).otherwise(pl.col("weight")).alias("weight")
+        )
+        # 归一化
+        total_weight = result.select(pl.col("weight").sum()).item()
+        if total_weight is None or total_weight <= 0:
+            return weights_df
+        result = result.with_columns((pl.col("weight") / total_weight).alias("weight"))
+        # 检查收敛
+        max_current = result.select(pl.col("weight").max()).item()
+        if max_current is not None and max_current <= max_weight + tolerance:
+            break
 
-    result = result.with_columns((pl.col("weight_capped") / total_weight).alias("weight")).drop("weight_capped")
+    # 兜底：未收敛时强制截断（总权重可能 < 1，剩余留现金，优于违反约束）
+    max_current = result.select(pl.col("weight").max()).item()
+    if max_current is not None and max_current > max_weight + tolerance:
+        result = result.with_columns(
+            pl.when(pl.col("weight") > max_weight).then(pl.lit(max_weight)).otherwise(pl.col("weight")).alias("weight")
+        )
 
     return result
 

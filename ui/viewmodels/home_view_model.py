@@ -28,6 +28,7 @@ class NewsRow:
     tags: str = ""
     source: str = ""
     publish_time: str = ""
+    is_ai_tagged: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         try:
             cb(snap)
         except Exception as e:
-            logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
+            logger.warning(
+                "[HomeVM] Subscriber error: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     def init(self) -> None:
         """Initialize subscriptions (无回调参数,View 通过 subscribe 订阅 state)。"""
@@ -139,7 +144,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
-            logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
+            logger.warning(
+                "[HomeVM] Dispose error: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
         super().dispose()
 
     @staticmethod
@@ -366,6 +375,23 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 # ============================================================
 
 
+def _detect_ai_tagged(tags: str, source: str) -> bool:
+    """检测新闻是否被 AI 打标 (tags 含 AI_ 前缀或 source 标识 AI 来源).
+
+    AI 概念打标写入 stock_concepts 时 concept_id 以 'AI_LLM_' 前缀标识,
+    对应 news tags 中可能出现 'AI_' 前缀标签; source 为 'AI' 时亦视为 AI 生成.
+    """
+    if not tags and not source:
+        return False
+    # 精确匹配: 仅 bare "AI" 标签或 "AI_" 前缀标签视为 AI 打标,
+    # 避免 "AIRLINE"/"AIG" 等恰好以 AI 开头的普通标签误判.
+    for t in (tags or "").split(","):
+        t = t.strip().upper()
+        if t == "AI" or t.startswith("AI_"):
+            return True
+    return (source or "").upper() == "AI"
+
+
 def _news_item_to_row(item: Any) -> NewsRow:
     """单个 news item (dict) → NewsRow.
 
@@ -374,11 +400,14 @@ def _news_item_to_row(item: Any) -> NewsRow:
     from data.cache.cache_manager import CacheManager
 
     normalized = CacheManager.normalize_news_item(item, default_source="CLS")
+    tags = str(normalized.get("tags", "") or "")
+    source = str(normalized.get("source", "") or "")
     return NewsRow(
         content=str(normalized.get("content", "") or ""),
-        tags=str(normalized.get("tags", "") or ""),
-        source=str(normalized.get("source", "") or ""),
+        tags=tags,
+        source=source,
         publish_time=str(normalized.get("publish_time", "") or ""),
+        is_ai_tagged=_detect_ai_tagged(tags, source),
     )
 
 
@@ -392,6 +421,7 @@ def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
             tags=str(row.get("tags", "") or ""),
             source=str(row.get("source", "") or ""),
             publish_time=str(row.get("publish_time", "") or ""),
+            is_ai_tagged=_detect_ai_tagged(str(row.get("tags", "") or ""), str(row.get("source", "") or "")),
         )
         for row in df.to_dict("records")
     )

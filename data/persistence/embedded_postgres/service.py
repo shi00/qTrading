@@ -302,7 +302,9 @@ class EmbeddedPostgresService:
         try:
             ready = json.loads(ready_line)
         except json.JSONDecodeError as exc:
-            self._svc_logger.error("ready JSON parse failed: %s; line=%r", exc, ready_line)
+            self._svc_logger.error(
+                "ready JSON parse failed: %s; line=%r", DataSanitizer.sanitize_error(exc), ready_line
+            )
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"ready JSON parse failed: {exc}; line={ready_line!r}") from exc
 
@@ -333,7 +335,7 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"password_file not found: {password_file}") from exc
         except OSError as exc:
-            self._svc_logger.error("password_file read failed: %s", exc)
+            self._svc_logger.error("password_file read failed: %s", DataSanitizer.sanitize_error(exc))
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"password_file read failed: {exc}") from exc
 
@@ -394,7 +396,7 @@ class EmbeddedPostgresService:
                         log_file.write(line)
                         log_file.flush()
             except Exception as e:  # pragma: no cover  reader thread stdout fallback
-                logger.debug("stdout reader thread fallback: %s", e, exc_info=True)
+                logger.debug("stdout reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
         t = threading.Thread(
             target=_reader,
@@ -430,9 +432,11 @@ class EmbeddedPostgresService:
                             stderr_file.write(sanitized + "\n")  # type: ignore[attr-defined]
                             stderr_file.flush()  # type: ignore[attr-defined]
                         except Exception as e:  # file write fallback
-                            logger.debug("stderr reader write fallback: %s", e, exc_info=True)
+                            logger.debug(
+                                "stderr reader write fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                            )
             except Exception as e:  # pragma: no cover  reader thread stderr fallback
-                logger.debug("stderr reader thread fallback: %s", e, exc_info=True)
+                logger.debug("stderr reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
         t = threading.Thread(
             target=_reader,
@@ -460,13 +464,15 @@ class EmbeddedPostgresService:
             # 标准格式："<hex>  <filename>"，取首个空白前部分
             expected = expected_line.split()[0].lower()
         except OSError as exc:
-            self._svc_logger.warning("sha256 file read failed, skip verification: %s", exc)
+            self._svc_logger.warning(
+                "sha256 file read failed, skip verification: %s", DataSanitizer.sanitize_error(exc)
+            )
             return
 
         try:
             actual = hashlib.sha256(self._sidecar_binary.read_bytes()).hexdigest().lower()
         except OSError as exc:
-            self._svc_logger.error("sidecar binary read failed for sha256: %s", exc)
+            self._svc_logger.error("sidecar binary read failed for sha256: %s", DataSanitizer.sanitize_error(exc))
             raise EmbeddedPostgresStartError(f"sidecar binary read failed during sha256 verification: {exc}") from exc
 
         if actual != expected:
@@ -528,7 +534,7 @@ class EmbeddedPostgresService:
                 line = stream.readline()  # type: ignore[union-attr]
                 q.put(line if line is not None else "")
             except Exception as e:  # pragma: no cover  reader thread stream fallback (竞态难复现)
-                logger.debug("reader thread stream fallback: %s", e, exc_info=True)
+                logger.debug("reader thread stream fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 q.put("")
 
         t = threading.Thread(target=_reader, daemon=True)
@@ -544,18 +550,18 @@ class EmbeddedPostgresService:
             try:
                 self._process.kill()
             except Exception as e:  # subprocess kill fallback on failed start
-                logger.debug("cleanup_failed_start kill fallback: %s", e, exc_info=True)
+                logger.debug("cleanup_failed_start kill fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             try:
                 self._process.wait(timeout=5)
             except Exception as e:  # subprocess wait fallback on failed start
-                logger.debug("cleanup_failed_start wait fallback: %s", e, exc_info=True)
+                logger.debug("cleanup_failed_start wait fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._process = None
         self._connection_info = None
         if self._stderr_file is not None:
             try:
                 self._stderr_file.close()  # type: ignore[attr-defined]
             except Exception as e:  # file close fallback on failed start
-                logger.debug("cleanup_failed_start close fallback: %s", e, exc_info=True)
+                logger.debug("cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._stderr_file = None
 
     @log_async_operation(
@@ -593,7 +599,9 @@ class EmbeddedPostgresService:
                     try:
                         proc.stdin.close()
                     except Exception as e:  # stdin close fallback on stop
-                        logger.debug("stop_sync stdin close fallback: %s", e, exc_info=True)
+                        logger.debug(
+                            "stop_sync stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                        )
                 try:
                     proc.wait(timeout=self._stop_timeout)
                     self._svc_logger.info("embedded postgres stopped gracefully")
@@ -603,7 +611,9 @@ class EmbeddedPostgresService:
                     try:
                         proc.wait(timeout=5)
                     except Exception as e:  # subprocess wait fallback after kill
-                        logger.debug("stop_sync wait after kill fallback: %s", e, exc_info=True)
+                        logger.debug(
+                            "stop_sync wait after kill fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                        )
             finally:
                 self._process = None
                 self._connection_info = None
@@ -611,7 +621,9 @@ class EmbeddedPostgresService:
                     try:
                         self._stderr_file.close()  # type: ignore[attr-defined]
                     except Exception as e:  # file close fallback on stop
-                        logger.debug("stop_sync stderr_file close fallback: %s", e, exc_info=True)
+                        logger.debug(
+                            "stop_sync stderr_file close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                        )
                     self._stderr_file = None
 
     def collect_logs_summary(self, tail_bytes: int = 8192) -> dict[str, str]:
@@ -664,7 +676,7 @@ class EmbeddedPostgresService:
                 try:
                     inst.stop_sync()
                 except Exception as e:
-                    logger.warning("_reset_singleton stop failed: %s", e, exc_info=True)
+                    logger.warning("_reset_singleton stop failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             cls._instance = None
 
     @classmethod
@@ -680,4 +692,4 @@ class EmbeddedPostgresService:
             try:
                 inst.stop_sync()
             except Exception as e:
-                logger.warning("atexit cleanup failed: %s", e, exc_info=True)
+                logger.warning("atexit cleanup failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
