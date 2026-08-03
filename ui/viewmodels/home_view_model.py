@@ -375,8 +375,12 @@ def _detect_ai_tagged(tags: str, source: str) -> bool:
     """
     if not tags and not source:
         return False
-    if any(t.strip().upper().startswith("AI") for t in (tags or "").split(",") if t.strip()):
-        return True
+    # 精确匹配: 仅 bare "AI" 标签或 "AI_" 前缀标签视为 AI 打标,
+    # 避免 "AIRLINE"/"AIG" 等恰好以 AI 开头的普通标签误判.
+    for t in (tags or "").split(","):
+        t = t.strip().upper()
+        if t == "AI" or t.startswith("AI_"):
+            return True
     return (source or "").upper() == "AI"
 
 
