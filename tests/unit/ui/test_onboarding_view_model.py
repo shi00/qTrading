@@ -418,6 +418,45 @@ class TestOnboardingVMScheduleValidation:
         assert vm.state.schedule_time == "09:00"
         assert vm.state.normalized_schedule_time == "09:00"
 
+    async def test_save_config_exception_returns_false(self, bound_vm, mock_config_handler):
+        """ConfigHandler.save_config 抛异常时 _validate_and_save_schedule 返回 False.
+
+        覆盖 except 分支 logger.error (L397-401), 异常被捕获不传播,
+        step 不标记为 validated.
+        """
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(side_effect=RuntimeError("disk full"))
+        result = await bound_vm.validate_and_persist_current_step()
+        assert result is False
+        assert not bound_vm.step_validated.get("schedule", False)
+
+
+# =====================================================================
+# Test: Language Save
+# =====================================================================
+
+
+class TestOnboardingVMLanguage:
+    """save_language 异常路径覆盖 (L421-435 except 分支)."""
+
+    async def test_save_language_exception_returns_false(self, vm, mock_config_handler):
+        """ConfigHandler.set_locale 抛异常时返回 False (覆盖 L430-434 logger.error)."""
+        mock_config_handler.set_locale = MagicMock(side_effect=RuntimeError("IO error"))
+        result = await vm.save_language("zh_CN")
+        assert result is False
+
+    async def test_save_language_returns_false_when_set_locale_fails(self, vm, mock_config_handler):
+        """ConfigHandler.set_locale 返回 False 时返回 False (L423-425 路径)."""
+        mock_config_handler.set_locale = MagicMock(return_value=False)
+        result = await vm.save_language("zh_CN")
+        assert result is False
+
+    async def test_save_language_success_returns_true(self, vm, mock_config_handler):
+        """ConfigHandler.set_locale 返回 True 时返回 True (正常路径)."""
+        mock_config_handler.set_locale = MagicMock(return_value=True)
+        result = await vm.save_language("zh_CN")
+        assert result is True
+
 
 # =====================================================================
 # Test: Data Sync
