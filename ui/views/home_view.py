@@ -170,7 +170,11 @@ def HomeView(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as exc:
-            logger.error("[HomeView] Init failed: %s", exc, exc_info=True)
+            logger.error(
+                "[HomeView] Init failed: %s",
+                DataSanitizer.sanitize_error(exc),
+                exc_info=True,
+            )
 
     # --- PubSub 订阅/退订 (Phase 3.0.3 模式) ---
 
