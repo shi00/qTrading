@@ -627,3 +627,93 @@ class TestCrossProviderBaseUrlFallback:
         assert params["model"] == "custom/my-model"
         # custom 供应商在 LLM_PROVIDERS 中 base_url 为空，不应设置 api_base
         assert "api_base" not in params
+
+
+class TestUnifiedFailoverErrorClassification:
+    """测试统一 classify_error 判定后的 Failover 切卡与重试行为"""
+
+    @pytest.mark.asyncio
+    async def test_permanent_auth_error_raises_immediately(self):
+        """AuthenticationError (401) 不触发 failover 切卡，立即抛出"""
+        service = AIService()
+
+        call_count = 0
+
+        async def mock_completion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise Exception("401 unauthorized: Invalid API key")
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
+            mock_patch.side_effect = mock_completion
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                with pytest.raises(Exception) as exc_info:
+                    await service._chat_completion_with_failover(
+                        messages=[{"role": "user", "content": "test"}],
+                    )
+
+                assert "401 unauthorized" in str(exc_info.value)
+                assert call_count == 1, "永久错误不应触发切卡重试"
+
+    @pytest.mark.asyncio
+    async def test_transient_rate_limit_triggers_fallback(self):
+        """RateLimitError (429) 识别为瞬态错误并成功切卡"""
+        service = AIService()
+
+        call_count = 0
+
+        async def mock_completion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("429 too many requests")
+            return {"content": "ok"}
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
+            mock_patch.side_effect = mock_completion
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                result = await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+
+                assert result == {"content": "ok"}
+                assert call_count == 2, "429 瞬态错误应成功切卡"
+
+    @pytest.mark.asyncio
+    async def test_empty_string_connect_error_triggers_fallback(self):
+        """httpx.ConnectError("") (空字符串) 经 classify_error 精确类型匹配识别为瞬态错误并切卡"""
+        service = AIService()
+
+        call_count = 0
+
+        async def mock_completion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("")
+            return {"content": "ok"}
+
+        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
+            mock_patch.side_effect = mock_completion
+            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
+                mock_config.return_value = {
+                    "primary": "deepseek/deepseek-v4-flash",
+                    "fallbacks": ["qwen/qwen-max"],
+                }
+
+                result = await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+
+                assert result == {"content": "ok"}
+                assert call_count == 2, "空字符串 httpx.ConnectError 应切卡"
