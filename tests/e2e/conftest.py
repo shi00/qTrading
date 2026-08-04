@@ -1400,17 +1400,24 @@ def flet_app_ro(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
 
 
 @pytest.fixture(scope="session")
-def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e):
+def embedded_url_file_mut(tmp_path_factory):
+    """提供 flet_app_mut 预热使用的 sidecar URL 文件路径。"""
+    return tmp_path_factory.mktemp("embedded_url_mut") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_mut):
     """Mutating session pool：mutates_config 用例独立共享，与 read-only 池隔离。
 
-    pristine_config 只在此池内还原；不设置 QTRADING_EMBEDDED_PG_URL_FILE
-    （mutates_config 用例不依赖种子数据，与 wizard_app 一致）。
+    pristine_config 只在此池内还原；提供 embedded_url_file_mut 供 warmup_flet_app_mut
+    预热 sidecar PG + main(page) 初始化。
     """
     print("[E2E DIAG] flet_app_mut: spawning (pool=mut)", flush=True)
     app = _spawn_app_session(
         tmp_path_factory,
         real_sidecar_binary_e2e,
         pool_name="mut",
+        embedded_url_file=embedded_url_file_mut,
     )
     print(
         f"[E2E DIAG] flet_app_mut: ready, proc.pid={app.proc.pid}, url={app.url}",
@@ -1419,6 +1426,27 @@ def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e):
     yield app
     print(f"[E2E DIAG] flet_app_mut: teardown, terminating proc {app.proc.pid}", flush=True)
     _terminate(app.proc)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def warmup_flet_app_mut(e2e_browser, flet_app_mut: AppServer, embedded_url_file_mut: Path):
+    """预热 flet_app_mut：启动 Flet 子进程后触发 main(page) 连接，等待 sidecar + DB 初始化完成。
+
+    与 seed_e2e_data 预热 flet_app_ro 机制一致：保持 keep-alive 浏览器页面打开，
+    确保 flet_app_mut 的单例资源与 sidecar PG 在测试执行前完全就绪。
+    """
+    keep_alive_context = None
+    if not embedded_url_file_mut.exists():
+        logger.info("[E2E Warmup] triggering main(page) via browser to warm up flet_app_mut")
+        keep_alive_context = await _trigger_sidecar_startup_via_browser(
+            flet_app_mut, e2e_browser, embedded_url_file_mut, timeout_s=600.0
+        )
+    else:
+        logger.info("[E2E Warmup] embedded_url_file_mut already exists, flet_app_mut auto-started")
+    yield
+    if keep_alive_context is not None:
+        await keep_alive_context.close()
+        logger.info("[E2E Warmup] keep-alive context for flet_app_mut closed")
 
 
 @pytest.fixture(scope="session")
@@ -1461,8 +1489,26 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
     _terminate(proc)
 
 
+@pytest.fixture
+def _e2e_app_dep(request) -> AppServer:
+    """同步解析 e2e_page 依赖的 AppServer 实例（依 mutates_config 路由）。
+
+    避免在 async fixture (e2e_page) 内直接调用 request.getfixturevalue 触发
+    ``Runner.run() cannot be called from a running event loop`` 错误。
+
+    - mutates_config 用例 → flet_app_mut + warmup_flet_app_mut（独立 mutating pool）
+    - 其他用例 → flet_app_ro + seed_e2e_data（read-only pool，播种）
+    """
+    if request.node.get_closest_marker("mutates_config"):
+        request.getfixturevalue("warmup_flet_app_mut")
+        return typing.cast(AppServer, request.getfixturevalue("flet_app_mut"))
+    else:
+        request.getfixturevalue("seed_e2e_data")
+        return typing.cast(AppServer, request.getfixturevalue("flet_app_ro"))
+
+
 @pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page(e2e_browser, request):
+async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
     """Function 级 Page：依 mutates_config marker 路由到对应 session pool。
 
     - mutates_config 用例 → flet_app_mut（独立 mutating pool，不播种）
@@ -1477,12 +1523,7 @@ async def e2e_page(e2e_browser, request):
     loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
     fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
     """
-    if request.node.get_closest_marker("mutates_config"):
-        app = request.getfixturevalue("flet_app_mut")
-    else:
-        app = request.getfixturevalue("flet_app_ro")
-        request.getfixturevalue("seed_e2e_data")
-    fp = await _make_page(e2e_browser, app, request, check_db_error=True)
+    fp = await _make_page(e2e_browser, _e2e_app_dep, request, check_db_error=True)
     if request.node.get_closest_marker("slow"):
         fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
     yield fp
