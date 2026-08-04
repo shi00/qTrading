@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from playwright.async_api import Locator, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.timeouts import TIMEOUTS
@@ -57,10 +58,13 @@ class AnchorPage:
 
         返回节点 bounding rect dict {x,y,w,h} 或 None.
         exact=True:  textContent.trim() === eid_str       (LABEL)
-        exact=False: textContent.trim().startsWith(eid_str) (COMPLEX)
+        exact=False: textContent.trim().startsWith(eid_str + [. | \\n])
+                     (COMPLEX：Dropdown 用 "."，GestureDetector 合并节点用 "\\n"）
 
-        前缀匹配用 `.` 边界规避嵌套冲突：`startsWith(eid_str + ".")` 或 `=== eid_str`，
-        避免 `e2e.screener.run_button` 误命中 `e2e.screener.run_button_v2`。
+        前缀匹配用**分隔符边界**规避嵌套冲突：避免
+        `e2e.screener.run_button` 误命中 `e2e.screener.run_button_v2`。
+        分隔符支持 `.`（EID 命名空间层级）与 `\\n`（GD 合并节点 textContent 里
+        EID 与显示文本之间的换行分隔，PoC A7 实证）。
         """
         return await self.page.evaluate(
             """(args) => {
@@ -72,8 +76,11 @@ class AnchorPage:
                     .find(e => {
                         const t = (e.textContent || '').trim();
                         if (exact) return t === label;
-                        // 前缀匹配: t === label 或 t 以 label + "." 开头（避免前缀嵌套冲突）
-                        return t === label || t.startsWith(label + '.');
+                        // 前缀匹配: t === label, 或 t 以 label + "." / "\\n" 开头
+                        // ("." = EID 命名空间层级; "\\n" = GD 合并节点 EID 与显示文本分隔)
+                        return t === label
+                            || t.startsWith(label + '.')
+                            || t.startsWith(label + '\\n');
                     });
                 if (!el) return null;
                 const r = el.getBoundingClientRect();
@@ -163,7 +170,21 @@ class AnchorPage:
         """按 AnchorKind 分派 click 目标 bbox, 一律走真实鼠标事件."""
         eid_str, kind = eid
         if kind == AnchorKind.INTERACTIVE:
-            box = await self._locate_inner_tappable_bbox(eid_str, timeout_ms)
+            try:
+                box = await self._locate_inner_tappable_bbox(eid_str, timeout_ms)
+            except PlaywrightTimeoutError as exc:
+                # 分类误标兜底：检查是否实际是 COMPLEX（GD 合并节点 + label 落 textContent）
+                # 命中则抛出 actionable 报错，而非模糊 16s timeout（PoC A7 实证）
+                probe = await self._locate_by_text(eid_str, exact=False, role_filter="button")
+                if probe:
+                    raise RuntimeError(
+                        f"AnchorPage: EID {eid_str!r} declared INTERACTIVE but DOM shows "
+                        f"COMPLEX pattern (label in textContent, role=button, merged node). "
+                        f"Fix: change AnchorKind to COMPLEX in ui/testing/e2e_ids.py. "
+                        f"Root cause: outer control is GestureDetector/Container(on_click), "
+                        f"not ft.Button. See PoC A7 (reviews/poc/EVIDENCE.md)."
+                    ) from exc
+                raise
         elif kind == AnchorKind.COMPLEX:
             # COMPLEX 走 textContent 匹配, 需显式等待 (与 INTERACTIVE/INPUT 的 wait_for 对齐)
             r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
@@ -274,7 +295,10 @@ class AnchorPage:
                         .filter(e => {
                             const t = (e.textContent || '').trim();
                             if (args.exact) return t === args.label;
-                            return t === args.label || t.startsWith(args.label + '.');
+                            // 前缀匹配同 _locate_by_text: "." 或 "\\n" 分隔
+                            return t === args.label
+                                || t.startsWith(args.label + '.')
+                                || t.startsWith(args.label + '\\n');
                         }).length;
                 }""",
                 {

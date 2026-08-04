@@ -123,23 +123,37 @@ class TestAnchoredE2EMode:
         assert result.on_tap is None, "COMPLEX 类也不应设 on_tap（事件穿透到 Dropdown）"
 
     def test_interactive_kind_sets_button_true(self, monkeypatch):
-        """INTERACTIVE kind 设 button=True：CanvasKit 双轨映射仅在 content 为标准
-        交互控件时生成 aria-label 独立节点。GestureDetector 非标准交互控件，
-        button=True 强制 CanvasKit 将 Semantics 节点识别为按钮，确保 aria-label 生成.
+        """INTERACTIVE kind 设 button=True：辅助 Button 系列生成 aria-label 独立节点
+        （PoC A1 实证）。仅对 Flet 原生 Button 系列有意义；GestureDetector 类应归
+        COMPLEX（PoC A7 实证 button=True 对 GD 被引擎忽略）。
         """
         monkeypatch.setenv("E2E_TESTING", "true")
-        gesture = ft.GestureDetector(content=ft.Container(content=ft.Text("hdr")))
-        result = anchored(EIDS.SCREENER.column_header("pct_chg"), gesture)
+        btn = ft.Button("run")
+        result = anchored(EIDS.SCREENER.RUN_BUTTON, btn)
         assert isinstance(result, ft.Semantics)
         assert result.button is True, "INTERACTIVE kind 必须设 button=True"
 
     def test_complex_kind_does_not_set_button(self, monkeypatch):
-        """COMPLEX kind 不设 button：Dropdown 自身有 role=button 语义，无需额外标记."""
+        """COMPLEX kind 不设 button：Dropdown / GestureDetector 自身走 textContent 通道，
+        button=True 对 GD 被引擎忽略（PoC A7），对 Dropdown 无需额外标记（PoC A5）。
+        """
         monkeypatch.setenv("E2E_TESTING", "true")
         dd = ft.Dropdown(label="strategy")
         result = anchored(EIDS.SCREENER.STRATEGY_DROPDOWN, dd)
         assert isinstance(result, ft.Semantics)
         assert result.button is None or result.button is False, "COMPLEX kind 不应设 button=True"
+
+    def test_complex_kind_gesture_detector_does_not_set_button(self, monkeypatch):
+        """COMPLEX kind + GestureDetector 不设 button：PoC A7 实证 button=True 在
+        GD 合并链路被引擎忽略，且 GD 类应走 textContent 通道（与 Dropdown 同族）。
+        """
+        monkeypatch.setenv("E2E_TESTING", "true")
+        gesture = ft.GestureDetector(content=ft.Container(content=ft.Text("hdr")))
+        result = anchored(EIDS.SCREENER.column_header("pct_chg"), gesture)
+        assert isinstance(result, ft.Semantics)
+        assert result.button is None or result.button is False, (
+            "COMPLEX kind (含 GD) 不应设 button=True（PoC A7：引擎忽略且 GD 走 textContent 通道）"
+        )
 
 
 class TestEidsScreenerPr2:
@@ -156,16 +170,16 @@ class TestEidsScreenerPr2:
         assert kind == AnchorKind.INTERACTIVE
 
     def test_result_row_static_method(self):
-        """result_row(ts_code) 生成 前缀.ts_code 格式 EID，INTERACTIVE 类."""
+        """result_row(ts_code) 生成 前缀.ts_code 格式 EID，COMPLEX 类（PoC A7：GD-based 走 textContent 通道）."""
         eid_str, kind = EIDS.SCREENER.result_row("000001.SZ")
         assert eid_str == "e2e.screener.result_row.000001.SZ"
-        assert kind == AnchorKind.INTERACTIVE
+        assert kind == AnchorKind.COMPLEX
 
     def test_column_header_static_method(self):
-        """column_header(col_id) 生成 前缀.col_id 格式 EID，INTERACTIVE 类."""
+        """column_header(col_id) 生成 前缀.col_id 格式 EID，COMPLEX 类（PoC A7：GD-based 走 textContent 通道）."""
         eid_str, kind = EIDS.SCREENER.column_header("pct_chg")
         assert eid_str == "e2e.screener.column_header.pct_chg"
-        assert kind == AnchorKind.INTERACTIVE
+        assert kind == AnchorKind.COMPLEX
 
     def test_result_row_prefix_no_overlap_with_column_header(self):
         """result_row 与 column_header 前缀不重叠（避免 AnchorPage 定位误匹配）."""
