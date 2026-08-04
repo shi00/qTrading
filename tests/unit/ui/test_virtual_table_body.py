@@ -141,21 +141,22 @@ class TestBuildHeader:
     def test_no_on_sort_no_click_handler(self):
         headers = _build_header(_make_columns(), None, True, None)
         for h in headers:
-            # on_click 挂在内层 content 上（源码 _build_header: content.on_click = ...）
+            # on_sort=None 时 content 是 Container（无 GestureDetector 包裹）
             assert h.content.on_click is None
 
     def test_with_on_sort_attaches_click_handler(self):
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), None, True, on_sort)
         for h in headers:
-            assert callable(h.content.on_click)
+            # PR-2: on_sort 非空时 content 是 GestureDetector(on_tap=handler)
+            assert callable(h.content.on_tap)
 
     def test_on_sort_handler_invokes_callback_with_new_asc(self):
         """点击列头应调用 on_sort(col_id, new_asc=True)（新列默认升序）。"""
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), "name", False, on_sort)
         # 点击 pct_chg（新列）→ on_sort("pct_chg", True)
-        headers[2].content.on_click(MagicMock())
+        headers[2].content.on_tap(MagicMock())
         on_sort.assert_called_once_with("pct_chg", True)
 
     def test_on_sort_handler_same_column_toggles(self):
@@ -163,7 +164,7 @@ class TestBuildHeader:
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), "pct_chg", True, on_sort)
         # 点击 pct_chg（当前列，asc=True）→ on_sort("pct_chg", False)
-        headers[2].content.on_click(MagicMock())
+        headers[2].content.on_tap(MagicMock())
         on_sort.assert_called_once_with("pct_chg", False)
 
     def test_header_text_uses_table_header_text_color(self):

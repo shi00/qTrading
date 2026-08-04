@@ -14,7 +14,7 @@ import flet as ft
 import pytest
 
 from ui.testing.anchor import _e2e_enabled, anchored
-from ui.testing.e2e_ids import EIDS
+from ui.testing.e2e_ids import AnchorKind, EIDS
 
 pytestmark = pytest.mark.unit
 
@@ -121,3 +121,46 @@ class TestAnchoredE2EMode:
         assert result.content is dd
         assert result.container is True
         assert result.on_tap is None, "COMPLEX 类也不应设 on_tap（事件穿透到 Dropdown）"
+
+
+class TestEidsScreenerPr2:
+    """PR-2 新增 EIDS.SCREENER 常量 + 动态 anchor 静态方法契约."""
+
+    def test_export_csv_button_eid_format(self):
+        eid_str, kind = EIDS.SCREENER.EXPORT_CSV_BUTTON
+        assert eid_str == "e2e.screener.export_csv_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_export_excel_button_eid_format(self):
+        eid_str, kind = EIDS.SCREENER.EXPORT_EXCEL_BUTTON
+        assert eid_str == "e2e.screener.export_excel_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_result_row_static_method(self):
+        """result_row(ts_code) 生成 前缀.ts_code 格式 EID，INTERACTIVE 类."""
+        eid_str, kind = EIDS.SCREENER.result_row("000001.SZ")
+        assert eid_str == "e2e.screener.result_row.000001.SZ"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_column_header_static_method(self):
+        """column_header(col_id) 生成 前缀.col_id 格式 EID，INTERACTIVE 类."""
+        eid_str, kind = EIDS.SCREENER.column_header("pct_chg")
+        assert eid_str == "e2e.screener.column_header.pct_chg"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_result_row_prefix_no_overlap_with_column_header(self):
+        """result_row 与 column_header 前缀不重叠（避免 AnchorPage 定位误匹配）."""
+        row_eid = EIDS.SCREENER.result_row("000001.SZ")[0]
+        col_eid = EIDS.SCREENER.column_header("pct_chg")[0]
+        # 前缀匹配安全：row 前缀不以 col 前缀开头，反之亦然
+        assert not row_eid.startswith(EIDS.SCREENER._COLUMN_HEADER_PREFIX + ".")
+        assert not col_eid.startswith(EIDS.SCREENER._RESULT_ROW_PREFIX + ".")
+
+
+class TestEidsDetailDialog:
+    """PR-2 新增 EIDS.DETAIL_DIALOG 常量契约."""
+
+    def test_close_button_eid_format(self):
+        eid_str, kind = EIDS.DETAIL_DIALOG.CLOSE_BUTTON
+        assert eid_str == "e2e.detail_dialog.close_button"
+        assert kind == AnchorKind.INTERACTIVE

@@ -100,4 +100,5 @@ async def test_screener_anchor_click_run_button_triggers_callback(e2e_page: Flet
     await ap.click(EIDS.SCREENER.RUN_BUTTON)
 
     # on_click 触发后 state.loading=True，按钮文案变为"停止选股"
-    await e2e_page.expect_text("停止选股", timeout_ms=ap._tm(15000))
+    # timeout_ms 传原始值，expect_text 内部 self._tm() 会乘以 multiplier
+    await e2e_page.expect_text("停止选股", timeout_ms=15000)

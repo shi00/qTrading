@@ -2,14 +2,20 @@
 
 封装跨测试重复的导航与选股交互序列，消除测试代码重复。
 内部使用 FletPage helper 与 labels.py 提供的本地化文案。
+
+PR-2: ScreenerPage 交互方法迁移到 AnchorPage（anchor-based 精确定位），
+消除 CanvasKit 抖动下的文本/按钮误匹配。click_row_by_text/open_detail_dialog
+暂保留文本定位（PR-4 收尾删除，需 row_text→ts_code 映射才能迁移到 anchor）。
 """
 
 import logging
 
 from core.i18n import I18n
+from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
+from ui.testing.e2e_ids import EIDS
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +33,15 @@ class App:
 
 
 class ScreenerPage:
-    """选股页 Page Object，封装选策略→执行→等结果序列。"""
+    """选股页 Page Object，封装选策略→执行→等结果序列。
+
+    PR-2: 交互方法迁移到 AnchorPage（anchor-based 精确定位）。
+    """
 
     def __init__(self, page: FletPage):
         self.page = page
         self.app = App(page)
+        self.ap = AnchorPage(page.page, page)
 
     async def open(self) -> None:
         """导航到选股页。"""
@@ -39,14 +49,12 @@ class ScreenerPage:
 
     async def select_strategy(self, strategy_key: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择指定策略（通过策略 key，内部解析为本地化显示名）。"""
-        select_label = I18n.get("select_strategy")
         name = strategy_label(strategy_key)
-        await self.page.select_dropdown(select_label, name, timeout_ms=timeout_ms)
+        await self.ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
 
     async def run(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """点击执行选股按钮。"""
-        run_text = I18n.get("run_screening")
-        await self.page.click_button(run_text, timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
 
     async def expect_result(self, text: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
         """等待选股结果文本出现。"""
@@ -56,17 +64,25 @@ class ScreenerPage:
         """等待选股页任意文本出现。"""
         await self.page.expect_text(text, timeout_ms=timeout_ms)
 
-    async def click_column_header(self, col_label: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击表格列头触发排序（列头文本格式如 ``pct_chg (涨跌幅)``）。"""
-        await self.page.click_text(col_label, timeout_ms=timeout_ms)
+    async def click_column_header(self, col_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击表格列头触发排序（通过列 id，如 ``pct_chg``）。
+
+        PR-2: 迁移到 AnchorPage（col_id → EIDS.SCREENER.column_header(col_id)）。
+        列头文本仍可见（GestureDetector 不合并子树），文本验证不受影响。
+        """
+        await self.ap.click(EIDS.SCREENER.column_header(col_id), timeout_ms=timeout_ms)
 
     async def click_export(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击 CSV 导出按钮。"""
-        await self.page.click_button(I18n.get("screener_export"), timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.SCREENER.EXPORT_CSV_BUTTON, timeout_ms=timeout_ms)
 
     async def click_export_excel(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击 Excel 导出按钮。"""
-        await self.page.click_button(I18n.get("data_export_excel"), timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.SCREENER.EXPORT_EXCEL_BUTTON, timeout_ms=timeout_ms)
+
+    async def close_detail_dialog(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击详情对话框关闭按钮（PR-2: 迁移到 AnchorPage）。"""
+        await self.ap.click(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=timeout_ms)
 
     async def click_row_by_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击表格中包含指定文本的行（用于触发行 on_click 打开详情对话框）。
@@ -213,16 +229,15 @@ class ScreenerPage:
         导致对话框没打开。此方法封装"点击 + 验证 + 重试"逻辑，
         确保对话框真正打开后才返回。
 
-        验证标志：关闭按钮（``role="button", name=I18n.get("common_close")``）
+        验证标志：关闭按钮 anchor（``EIDS.DETAIL_DIALOG.CLOSE_BUTTON``）
         在对话框打开时立即渲染（不像 K 线图异步加载），是稳定的渲染完成标志。
+        PR-2: 验证迁移到 anchor（替代文本匹配），与 close_detail_dialog 定位策略一致。
         """
-        close_text = I18n.get("common_close")
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
                 await self.click_row_by_text(row_text, timeout_ms=TIMEOUTS.INTERACTION)
-                close_btn = self.page.page.get_by_role("button", name=close_text)
-                await close_btn.wait_for(state="attached", timeout=self.page._tm(TIMEOUTS.FAST))
+                await self.ap.expect_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=TIMEOUTS.FAST)
                 if attempt > 1:
                     logger.info("open_detail_dialog: succeeded on attempt %d for '%s'", attempt, row_text)
                 return
