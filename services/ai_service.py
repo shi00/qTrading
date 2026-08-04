@@ -1147,6 +1147,12 @@ class AIService:
             except Exception as e:
                 last_error = e
                 error_type = type(e).__name__
+
+                # LocalInferenceTimeoutError 是本地模型超时，不属于云端 failover 范畴，直接抛出
+                # 由 analyze_stock 的 except LocalInferenceTimeoutError 捕获并返回 {"error": "Local model timeout"}
+                if isinstance(e, LocalInferenceTimeoutError):
+                    raise
+
                 error_info = classify_error(e, context="llm")
                 severity = classify_severity(e, context="llm")
 

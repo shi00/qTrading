@@ -71,7 +71,6 @@ except ImportError:
 try:
     from litellm.exceptions import (  # type: ignore[import-untyped]
         APIConnectionError as LiteLLMAPIConnectionError,
-        APIError as LiteLLMAPIError,
         APITimeoutError as LiteLLMAPITimeoutError,
         AuthenticationError as LiteLLMAuthenticationError,
         ContentPolicyViolationError,
@@ -94,7 +93,6 @@ except ImportError:
     LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
     LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
     LiteLLMAPITimeoutError = None  # type: ignore[misc,assignment]
-    LiteLLMAPIError = None  # type: ignore[misc,assignment]
 
 
 def classify_severity(e: Exception, context: str = "general") -> str:
