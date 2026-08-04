@@ -19,17 +19,30 @@ from enum import Enum
 class AnchorKind(Enum):
     """决定 `AnchorPage` 定位/点击策略。
 
-    依据 PoC 实证（reviews/poc/EVIDENCE.md）CanvasKit 双轨映射：
+    依据 PoC 实证 CanvasKit 双轨映射（按 DOM 形态划分，非控件名）：
     - INTERACTIVE/INPUT → `[aria-label="EID"]` 独立节点 + 内层 `[flt-tappable]/input`
     - LABEL/COMPLEX → EID 落入 `textContent`（无 aria-label 独立节点）
 
-    `anchored()` 不依 kind 分叉生成逻辑（统一 `Semantics(container=True)` 包裹）。
+    `anchored()` 统一 `Semantics(container=True)` 包裹；INTERACTIVE 额外设
+    `button=True` 辅助 Button 系列生成 aria-label 独立节点（对 GestureDetector
+    场景被引擎忽略，故 GD 类应归 COMPLEX，PoC A7 实证）。
+
+    分类依据（PoC A1 / A5 / A7 实证 DOM）：
+    - INTERACTIVE：外层控件自带 role=button + label→aria-label 通道的 Flet 原生
+      Button 系列（ft.Button / ft.IconButton / ft.FilledButton / ft.OutlinedButton）
+      或 TextField（走 [aria-label] + input）。
+    - COMPLEX：内部合并 Semantics 子树 + label 落 textContent 的复合控件族：
+      ① ft.Dropdown / ft.PopupMenuButton（内层自带 role=button，PoC A5 已证）
+      ② ft.Container(on_click=…) / ft.GestureDetector(on_tap=…)（PoC A7 已证：
+         Flutter 引擎将外层 Semantics 与 GD 合并为单个 `flt-semantics[role="button"]`
+         节点，label 落 textContent，`ft.Semantics.button=True` 参数被引擎忽略）
+      定位统一走 `textContent` 前缀匹配（`.` 或 `\n` 分隔）+ `role="button"` 过滤。
     """
 
-    INTERACTIVE = "interactive"  # Button/IconButton/Container(on_click)/GestureDetector
+    INTERACTIVE = "interactive"  # Button 系列 / TextField (走 aria-label 独立节点)
     INPUT = "input"  # TextField/TextArea
     LABEL = "label"  # Text (纯展示, 无点击)
-    COMPLEX = "complex"  # Dropdown/PopupMenuButton (顶层已 role="button")
+    COMPLEX = "complex"  # Dropdown / GestureDetector / Container(on_click) (label 落 textContent)
 
 
 # EID 类型别名：(id_string, AnchorKind) 二元组
@@ -39,12 +52,52 @@ Eid = tuple[str, AnchorKind]
 class _ScreenerIds:
     """选股页 anchor 命名空间。
 
-    PR-1 仅启用 STRATEGY_DROPDOWN + RUN_BUTTON；其余位点的 EIDS 常量在
-    PR-2/PR-3 按改造进度补齐（append-only，禁止提前声明未使用常量）。
+    PR-1 启用 STRATEGY_DROPDOWN + RUN_BUTTON；PR-2 补齐 EXPORT_CSV_BUTTON +
+    EXPORT_EXCEL_BUTTON + result_row/column_header 动态 anchor；其余位点在
+    PR-3 按改造进度补齐（append-only，禁止提前声明未使用常量）。
     """
 
     STRATEGY_DROPDOWN: Eid = ("e2e.screener.strategy_dropdown", AnchorKind.COMPLEX)
     RUN_BUTTON: Eid = ("e2e.screener.run_button", AnchorKind.INTERACTIVE)
+    EXPORT_CSV_BUTTON: Eid = ("e2e.screener.export_csv_button", AnchorKind.INTERACTIVE)
+    EXPORT_EXCEL_BUTTON: Eid = ("e2e.screener.export_excel_button", AnchorKind.INTERACTIVE)
+
+    # 动态 anchor 前缀（静态方法生成，禁止调用方字符串拼接）
+    _RESULT_ROW_PREFIX = "e2e.screener.result_row"
+    _COLUMN_HEADER_PREFIX = "e2e.screener.column_header"
+
+    @staticmethod
+    def result_row(ts_code: str) -> Eid:
+        """生成单行 anchor（GestureDetector-based，走 COMPLEX textContent 通道）。
+
+        ts_code 格式: 6位数字 + .SZ/.SH（ASCII，不会互相前缀重叠）。
+        行用 GestureDetector(on_tap) 包裹；PoC A7 实证 Flutter 合并 Semantics + GD
+        为单个 `flt-semantics[role="button"]` 节点，label 落 textContent，
+        需按 COMPLEX 定位（textContent 前缀匹配 + role=button 过滤）。
+
+        Precondition: ts_code 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
+        """
+        return (f"{_ScreenerIds._RESULT_ROW_PREFIX}.{ts_code}", AnchorKind.COMPLEX)
+
+    @staticmethod
+    def column_header(col_id: str) -> Eid:
+        """生成列头 anchor（GestureDetector-based，走 COMPLEX textContent 通道）。
+
+        col_id 是数据列名（ASCII，如 pct_chg/close/name）。
+        列头用 GestureDetector(on_tap) 包裹（与行一致）；PoC A7 实证同 result_row，
+        需按 COMPLEX 定位。
+
+        Precondition: col_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
+        """
+        return (f"{_ScreenerIds._COLUMN_HEADER_PREFIX}.{col_id}", AnchorKind.COMPLEX)
+
+
+class _DetailDialogIds:
+    """股票详情对话框 anchor 命名空间。"""
+
+    CLOSE_BUTTON: Eid = ("e2e.detail_dialog.close_button", AnchorKind.INTERACTIVE)
 
 
 class EIDS:
@@ -54,3 +107,4 @@ class EIDS:
     """
 
     SCREENER = _ScreenerIds
+    DETAIL_DIALOG = _DetailDialogIds

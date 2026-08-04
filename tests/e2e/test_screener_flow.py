@@ -17,15 +17,12 @@ async def test_screener_page_loads(e2e_page):
     await screener.expect_text(I18n.get("select_strategy"), timeout_ms=TIMEOUTS.INTERACTION)
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_run_screener_strategy(e2e_page):
     """测试：执行放量突破策略，验证平安银行出现在选股结果中。
 
-    flaky 注记：Windows CI 环境下 CanvasKit 语义节点渲染偶发抖动，
-    select_dropdown/click_button 的 Playwright 点击未触发应用回调
-    （应用日志无 select/run 记录），导致 30s 超时。
-    与 PR 改动无关（E2E 模式下 prepare_database_runtime 成功路径行为等价）。
-    用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）吸收基础设施抖动。
+    PR-2: select_strategy/run 迁移到 AnchorPage（anchor 精确定位），消除
+    CanvasKit 语义节点渲染抖动下的 select_dropdown/click_button 误匹配，
+    移除 @pytest.mark.flaky（不再需要 rerun 吸收抖动）。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -102,16 +99,16 @@ async def test_screener_sort_by_column(e2e_page):
     # 列头文本格式: "pct_chg (涨跌幅)"（MetaDataManager.get_column_alias 渲染约定）
     col_label = f"pct_chg ({I18n.get('col_pct_chg')})"
 
+    # PR-2: 列头点击改用 anchor（col_id="pct_chg"），文本验证保持 col_label
     # 第一次点击 → 升序 (↑)，virtual_table.next_sort_state 新列默认升序
-    await screener.click_column_header(col_label, timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.click_column_header("pct_chg", timeout_ms=TIMEOUTS.INTERACTION)
     await screener.expect_text(f"{col_label} ↑", timeout_ms=TIMEOUTS.FAST)
 
     # 第二次点击 → 降序 (↓)，next_sort_state 翻转方向
-    await screener.click_column_header(col_label, timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.click_column_header("pct_chg", timeout_ms=TIMEOUTS.INTERACTION)
     await screener.expect_text(f"{col_label} ↓", timeout_ms=TIMEOUTS.FAST)
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_detail_dialog_open_close(e2e_page):
     """测试：点击行打开详情对话框，验证关键字段渲染，点击关闭按钮关闭对话框。
 
@@ -120,8 +117,8 @@ async def test_detail_dialog_open_close(e2e_page):
     2. 验证 ts_code/name/close/PE/PB 等字段标签渲染（StockDetailDialog 渲染约定）
     3. 点击"关闭"按钮 → 对话框隐藏
 
-    flaky 注记：xdist 并行运行时偶发 worker 崩溃（隔离运行稳定 PASS），
-    用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）以吸收基础设施抖动。
+    PR-2: 关闭按钮迁移到 AnchorPage（EIDS.DETAIL_DIALOG.CLOSE_BUTTON），
+    移除 @pytest.mark.flaky（anchor 精确定位消除误匹配）。
 
     Phase 9.2: 用 ``open_detail_dialog``（带重试验证对话框打开）替代单次
     ``click_row_by_text``。根因：CanvasKit 抖动下 mouse.click 偶发未触发
@@ -147,9 +144,8 @@ async def test_detail_dialog_open_close(e2e_page):
     await screener.expect_text(pb_label, timeout_ms=TIMEOUTS.FAST)
     await screener.expect_text(price_label, timeout_ms=TIMEOUTS.FAST)
 
-    # 点击关闭按钮
-    close_text = I18n.get("common_close")
-    await screener.page.click_button(close_text, timeout_ms=TIMEOUTS.INTERACTION)
+    # PR-2: 点击关闭按钮（anchor 精确定位，替代文本匹配）
+    await screener.close_detail_dialog(timeout_ms=TIMEOUTS.INTERACTION)
 
     # 验证对话框关闭：等待详情字段标签消失（DOM 移除或隐藏）
     # 用 Playwright locator.wait_for(state="hidden") 替代固定 sleep
@@ -214,7 +210,6 @@ async def test_export_screener_results_excel(e2e_page):
     assert filename.endswith(".xlsx"), f"文件名扩展名不符（期望 .xlsx）: {filename}"
 
 
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_detail_dialog_outside_click_close(e2e_page):
     """测试：点击对话框外部 → 验证对话框关闭。
 
@@ -222,8 +217,9 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     当前状态：Task 5.1 已修复 ``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=False)``
     + ``on_dismiss=_close`` 回调（commit 91f9006c），点击对话框外部应触发 on_dismiss 关闭对话框。
 
-    flaky 注记：CanvasKit 抖动下 ``click_row_by_text`` 偶发未触发 ``on_tap``，
-    对话框没打开导致后续步骤超时。用 ``open_detail_dialog``（带重试）+ flaky 标记吸收抖动。
+    PR-2: 移除 @pytest.mark.flaky。open_detail_dialog 内部已带 3 次重试吸收
+    CanvasKit hit-testing 抖动，anchor 化后 select/run 稳定触发策略执行，
+    对话框打开可靠性提升，不再需要额外 rerun 保险。
 
     Phase 9.2: ① 用 ``open_detail_dialog`` 替代单次 ``click_row_by_text``；
     ② 改进外部点击坐标计算：优先用 ``role="dialog"`` bounding_box 右侧外部，

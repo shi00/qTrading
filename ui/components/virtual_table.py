@@ -30,6 +30,8 @@ from typing import Any
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_controls
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import Eid
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -102,9 +104,17 @@ def _build_header(
     sort_col: str | None,
     sort_asc: bool,
     on_sort: Callable[[str, bool], None] | None,
-) -> list[ft.Container]:
-    """构建表头单元格 (theme-dependent)。"""
-    controls: list[ft.Container] = []
+    col_anchor: Callable[[str], Eid] | None = None,
+) -> list[ft.Control]:
+    """构建表头单元格 (theme-dependent)。
+
+    on_sort 非空时用 GestureDetector(on_tap) 包裹（与行一致），生成 flt-tappable
+    语义属性。Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
+    导致列头文本从语义树消失 + anchor 不可定位。
+
+    col_anchor 非空时用 anchored() 包裹 GestureDetector，加 E2E anchor。
+    """
+    controls: list[ft.Control] = []
     for col in columns:
         col_id = str(col["id"])
         label = str(col.get("label", col_id))
@@ -123,9 +133,17 @@ def _build_header(
             padding=ft.Padding.only(left=8, right=8),
         )
         if on_sort is not None:
-            content.on_click = _make_sort_handler(sort_col, sort_asc, col_id, on_sort)
+            gesture = ft.GestureDetector(
+                content=content,
+                on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),
+            )
+            if col_anchor is not None:
+                gesture = anchored(col_anchor(col_id), gesture)
+            control: ft.Control = gesture
+        else:
+            control = content
         width = int(col.get("width", 100))
-        controls.append(ft.Container(content, width=width))
+        controls.append(ft.Container(control, width=width))
     return controls
 
 
@@ -207,6 +225,7 @@ def _build_row(
     on_row_click: Callable[[dict[str, Any]], None] | None,
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
+    row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
 ) -> ft.Control:
     """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
@@ -236,10 +255,15 @@ def _build_row(
     )
     if on_row_click is None:
         return inner
-    return ft.GestureDetector(
+    gesture = ft.GestureDetector(
         content=inner,
         on_tap=_make_row_click_handler(on_row_click, row_data),
     )
+    if row_anchor is not None:
+        eid = row_anchor(row_data)
+        if eid is not None:
+            return anchored(eid, gesture)
+    return gesture
 
 
 @ft.component
@@ -250,6 +274,8 @@ def PaginatedTable(
     sort_asc: bool = True,
     on_sort: Callable[[str, bool], None] | None = None,
     on_row_click: Callable[[dict[str, Any]], None] | None = None,
+    col_anchor: Callable[[str], Eid] | None = None,
+    row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
 ) -> ft.Column:
     """声明式分页表格 (方案 D-v2: Column + scroll, 移除 ListView 视口虚拟化).
 
@@ -286,7 +312,7 @@ def PaginatedTable(
     total_w = _total_width(cols_list)
     row_count = len(rows_list)
 
-    header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort)
+    header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor)
 
     def _make_row_hover(abs_idx: int) -> Callable[[ft.HoverEvent], None]:
         """P2-8 MAJ-2: 构造单行 hover 回调, 切换 hovered_idx 触发重渲染。"""
@@ -306,6 +332,7 @@ def PaginatedTable(
             on_row_click,
             is_hovered=(abs_idx == hovered_idx),
             on_hover=_make_row_hover(abs_idx),
+            row_anchor=row_anchor,
         )
         # NOTE(lazy): Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)

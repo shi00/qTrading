@@ -26,6 +26,8 @@ import flet_charts as fch
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -801,7 +803,7 @@ def StockDetailDialog(
             on_add_to_watchlist(data.get("ts_code", ""), data.get("name", ""))
 
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
-    actions = [ft.TextButton(I18n.get("common_close"), on_click=_close)]
+    actions = [anchored(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, ft.TextButton(I18n.get("common_close"), on_click=_close))]
     if on_add_to_watchlist is not None:
         actions.insert(0, ft.TextButton(I18n.get("watchlist_add"), on_click=_add_to_watchlist))
     dialog = (

@@ -1272,21 +1272,27 @@ def ScreenerView(
                 visible=is_realtime,
             ),
         )
-    export_btn = ft.Button(
-        content=I18n.get("screener_export"),
-        icon=ft.Icons.DOWNLOAD,
-        on_click=safe_on_click(_on_export_csv_click),
-        disabled=export_btn_disabled,
-        style=AppStyles.outline_button(),
-        height=45,
+    export_btn = anchored(
+        EIDS.SCREENER.EXPORT_CSV_BUTTON,
+        ft.Button(
+            content=I18n.get("screener_export"),
+            icon=ft.Icons.DOWNLOAD,
+            on_click=safe_on_click(_on_export_csv_click),
+            disabled=export_btn_disabled,
+            style=AppStyles.outline_button(),
+            height=45,
+        ),
     )
-    export_excel_btn = ft.Button(
-        content=I18n.get("data_export_excel"),
-        icon=ft.Icons.TABLE_VIEW,
-        on_click=safe_on_click(_on_export_excel_click),
-        disabled=export_btn_disabled,
-        style=AppStyles.outline_button(),
-        height=45,
+    export_excel_btn = anchored(
+        EIDS.SCREENER.EXPORT_EXCEL_BUTTON,
+        ft.Button(
+            content=I18n.get("data_export_excel"),
+            icon=ft.Icons.TABLE_VIEW,
+            on_click=safe_on_click(_on_export_excel_click),
+            disabled=export_btn_disabled,
+            style=AppStyles.outline_button(),
+            height=45,
+        ),
     )
     # Task 8.3: 选股→回测跳转按钮 (仅 realtime 模式 + 选中策略时可用)
     backtest_btn = ft.Button(
@@ -1379,6 +1385,8 @@ def ScreenerView(
                     sort_asc=state.sort_ascending,
                     on_sort=_on_virtual_sort,
                     on_row_click=_on_row_click,
+                    col_anchor=EIDS.SCREENER.column_header,
+                    row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 pagination_row,

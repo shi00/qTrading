@@ -129,6 +129,7 @@ markers = [
     "no_db: Tests that do not require database (skip DB schema initialization in integration autouse fixture)",
     "embedded_real: Tests requiring real Rust sidecar binary + real embedded PostgreSQL (skip if sidecar binary missing)",
     "meta: Tests for scripts/* tooling (not business logic)",
+    "xdist_group(name): serial group for pytest-xdist load-balanced runs",
 ]
 
 [tool.coverage.run]
