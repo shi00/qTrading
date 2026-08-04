@@ -65,7 +65,7 @@ try:
     import httpx  # type: ignore[import-untyped]
 
     _HTTPX_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover -- httpx 是项目直接依赖，import 失败仅限可选环境
     _HTTPX_AVAILABLE = False
 
 try:
@@ -81,7 +81,7 @@ try:
     )
 
     _LITELLM_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover -- litellm 是项目直接依赖，import 失败仅限可选环境
     _LITELLM_AVAILABLE = False
     LiteLLMAuthenticationError = None  # type: ignore[misc,assignment]
     ContentPolicyViolationError = None  # type: ignore[misc,assignment]

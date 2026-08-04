@@ -119,6 +119,10 @@ def _create_mock_keyring() -> MagicMock:
 def _create_mock_litellm() -> MagicMock:
     from unittest.mock import AsyncMock
 
+    # 预导入真实 litellm.exceptions（在 sys.modules["litellm"] 被 mock 替换之前），
+    # 使 error_classifier 的 isinstance 检查能工作（litellm 异常类需为真实类型，非 MagicMock）
+    import litellm.exceptions  # noqa: F401 -- 注册 sys.modules["litellm.exceptions"] 为真实模块
+
     mock_lt = MagicMock()
     mock_lt.suppress_debug_info = True
     mock_lt.set_verbose = False
