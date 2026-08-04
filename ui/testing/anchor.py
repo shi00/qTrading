@@ -37,16 +37,23 @@ def anchored(eid: Eid, control: ft.Control) -> ft.Control:
     生产 build (`_e2e_enabled=False`): 直接返回原控件，零副作用。
     E2E build (`_e2e_enabled=True`): 用 `Semantics(container=True, label=eid_str)` 包裹。
 
-    AnchorKind 参数不影响生成逻辑（生成方式统一），仅供人类阅读 + AnchorPage
-    定位分派用。禁止让 `anchored()` 因 kind 走不同分支——那是过度抽象。
+    INTERACTIVE kind 额外设 `button=True`：CanvasKit 双轨映射仅在 `content` 为
+    标准交互控件（Button 等）时生成 `flt-semantics[aria-label=EID]` 独立节点。
+    GestureDetector 不是标准交互控件，`button=True` 强制 CanvasKit 将 Semantics
+    节点识别为按钮，确保 `aria-label` 生成（PR-2 列头/行 anchor 修复）。
 
     事件穿透：不设 `Semantics.on_tap` → Button.on_click / GestureDetector.on_tap
     正常触发。PoC A3 confirmed（reviews/poc/EVIDENCE.md）。
     """
     if not _e2e_enabled():
         return control
-    eid_str, _kind = eid
-    return ft.Semantics(container=True, label=eid_str, content=control)
+    eid_str, kind = eid
+    return ft.Semantics(
+        container=True,
+        label=eid_str,
+        content=control,
+        button=(kind == AnchorKind.INTERACTIVE),
+    )
 
 
 __all__ = ["AnchorKind", "Eid", "anchored"]

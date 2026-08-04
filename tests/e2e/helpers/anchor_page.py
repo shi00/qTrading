@@ -107,16 +107,28 @@ class AnchorPage:
         )
 
     async def _locate_inner_tappable_bbox(self, eid_str: str, timeout_ms: int) -> dict[str, Any]:
-        """INTERACTIVE: 定位 [aria-label] 后代 [flt-tappable] 并返回 bbox."""
+        """INTERACTIVE: 定位 [aria-label] 节点（含后代 [flt-tappable] 或自身可点击）并返回 bbox.
+
+        优先查找后代 `flt-tappable`（Button 等标准交互控件生成的语义节点）。
+        若后代不存在，回退到外层 `aria-label` 节点本身（`button=True` +
+        GestureDetector.on_tap 在 Semantics 节点自身生成可点击语义）。
+        """
         outer = self._locator_by_aria(eid_str)
         await outer.wait_for(state="attached", timeout=self._tm(timeout_ms))
         inner = self.page.locator(f'flt-semantics[aria-label="{eid_str}"] flt-semantics[flt-tappable]').first
-        await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
-        box = await inner.bounding_box()
+        try:
+            await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
+            box = await inner.bounding_box()
+            if box and box["width"] > 0 and box["height"] > 0:
+                return dict(box)
+        except Exception:
+            pass  # 后代 flt-tappable 不存在，回退到外层节点
+        # 回退：button=True 场景下，Semantics 节点自身即为可点击节点
+        box = await outer.first.bounding_box()
         if not box or box["width"] == 0 or box["height"] == 0:
             raise RuntimeError(
-                f"AnchorPage: no valid inner [flt-tappable] under [aria-label={eid_str!r}]. "
-                f"bbox={box}. Check Semantics(container=True) wraps an interactive control."
+                f"AnchorPage: no valid clickable node for [aria-label={eid_str!r}]. "
+                f"bbox={box}. Check Semantics(container=True, button=True) wraps an interactive control."
             )
         return dict(box)
 
