@@ -10,7 +10,7 @@ aiosignal==1.4.0
     # via aiohttp
 akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
-akshare==1.18.64
+akshare==1.18.81
     # via astockscreener (pyproject.toml)
 alembic==1.18.5
     # via astockscreener (pyproject.toml)
@@ -153,7 +153,7 @@ kiwisolver==1.5.0
     # via matplotlib
 korean-lunar-calendar==0.4.0
     # via exchange-calendars
-litellm==1.93.0
+litellm==1.95.0
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.34
     # via astockscreener (pyproject.toml)
