@@ -71,7 +71,6 @@ except ImportError:
 try:
     from litellm.exceptions import (  # type: ignore[import-untyped]
         APIConnectionError as LiteLLMAPIConnectionError,
-        APITimeoutError as LiteLLMAPITimeoutError,
         AuthenticationError as LiteLLMAuthenticationError,
         ContentPolicyViolationError,
         InternalServerError as LiteLLMInternalServerError,
@@ -92,7 +91,6 @@ except ImportError:
     ServiceUnavailableError = None  # type: ignore[misc,assignment]
     LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
     LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
-    LiteLLMAPITimeoutError = None  # type: ignore[misc,assignment]
 
 
 def classify_severity(e: Exception, context: str = "general") -> str:
@@ -176,8 +174,6 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
             if LiteLLMAPIConnectionError is not None and isinstance(e, LiteLLMAPIConnectionError):
                 return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
-            if LiteLLMAPITimeoutError is not None and isinstance(e, LiteLLMAPITimeoutError):
-                return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
 
         if _HTTPX_AVAILABLE:
             if isinstance(e, httpx.TimeoutException):
