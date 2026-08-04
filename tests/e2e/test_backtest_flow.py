@@ -1,8 +1,7 @@
 import pytest
 
 from ui.i18n import I18n
-from tests.e2e.labels import strategy_label
-from tests.e2e.pages import App
+from tests.e2e.pages import BacktestPage
 
 pytestmark = pytest.mark.e2e
 
@@ -10,26 +9,15 @@ pytestmark = pytest.mark.e2e
 @pytest.mark.slow
 async def test_backtest_flow(e2e_page):
     """测试：回测页面完整交互流 — 选择策略、修改初始资金、执行回测、验证指标卡片。"""
-    # 导航到回测页
-    app = App(e2e_page)
-    await app.goto("nav_backtest")
+    # 导航到回测页（PR-3: 迁移到 BacktestPage anchor 操作）
+    bp = BacktestPage(e2e_page)
+    await bp.open()
+    await bp.expect_title()
 
-    # 确认回测页标题
-    backtest_title = I18n.get("backtest_view_title")
-    await e2e_page.expect_text(backtest_title)
-
-    # 选择放量突破策略（传入本地化显示名，不再依赖 helper 内部 key→文案映射）
-    select_label = I18n.get("backtest_select_strategy")
-    vb_name = strategy_label("volume_breakout")
-    await e2e_page.select_dropdown(select_label, vb_name, timeout_ms=10000)
-
-    # 修改初始资金
-    capital_label = I18n.get("backtest_initial_capital")
-    await e2e_page.fill_textbox(capital_label, "500000", timeout_ms=8000)
-
-    # 点击开始回测
-    run_text = I18n.get("backtest_run")
-    await e2e_page.click_button(run_text, timeout_ms=10000)
+    # 选择放量突破策略 + 修改初始资金 + 点击开始回测（均通过 anchor）
+    await bp.select_strategy("volume_breakout", timeout_ms=10000)
+    await bp.fill_initial_capital("500000", timeout_ms=8000)
+    await bp.click_run(timeout_ms=10000)
 
     # 等待回测完成并验证核心指标卡片可见
     # 指标卡片仅在回测完成后渲染，第一个卡片用 60s 超时兼作完成信号

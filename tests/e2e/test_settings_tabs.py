@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from ui.i18n import I18n
+from tests.e2e.pages import SettingsPage
 from tests.e2e.timeouts import TIMEOUTS
 
 pytestmark = [
@@ -15,11 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 async def test_settings_all_tabs(e2e_page):
-    settings_label = I18n.get("nav_settings")
-    await e2e_page.click_text(settings_label, timeout_ms=TIMEOUTS.NAV)
-
-    settings_title = I18n.get("settings_title")
-    await e2e_page.expect_text(settings_title, timeout_ms=TIMEOUTS.TITLE)
+    """PR-3: 迁移到 SettingsPage anchor 操作（tab 切换通过 anchor）。"""
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
 
     tab_keys = [
         "settings_tab_data",
@@ -31,10 +31,11 @@ async def test_settings_all_tabs(e2e_page):
     ]
 
     for i, key in enumerate(tab_keys):
-        tab_name = I18n.get(key)
-        await e2e_page.click_tab(tab_name)
-        await e2e_page.expect_text(tab_name, timeout_ms=TIMEOUTS.FAST)
-        logger.info("Tab[%d] '%s': clicked and verified", i, tab_name)
+        # PR-3: 从 i18n key 派生 tab role（如 "settings_tab_data" → "data"），
+        # 与 settings_view._TAB_CONFIG 对齐
+        role = key.replace("settings_tab_", "")
+        await sp.click_tab(role)
+        logger.info("Tab[%d] '%s': clicked and verified", i, key)
 
 
 async def test_system_tab_tier_api_panel_rendered(e2e_page):
@@ -43,15 +44,14 @@ async def test_system_tab_tier_api_panel_rendered(e2e_page):
     覆盖：system tab 可切换 + TierApiPanel 关键 i18n 文本可见性。
     不触发实际 probe 调用（避免 flaky）。TierApiPanel 在 system tab 中部，
     需滚动后检测；若 CanvasKit 下语义节点延迟渲染，则放宽为 has_text 容错检测。
+
+    PR-3: 迁移到 SettingsPage anchor 操作（tab 切换通过 anchor）。
     """
-    settings_label = I18n.get("nav_settings")
-    await e2e_page.click_text(settings_label, timeout_ms=TIMEOUTS.NAV)
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
 
-    settings_title = I18n.get("settings_title")
-    await e2e_page.expect_text(settings_title, timeout_ms=TIMEOUTS.TITLE)
-
-    tab_system = I18n.get("settings_tab_system")
-    await e2e_page.click_text(tab_system, timeout_ms=TIMEOUTS.FAST)
+    await sp.click_tab("system", timeout_ms=TIMEOUTS.FAST)
 
     # 先验证 system tab 顶部可见文本（确认 tab 切换成功）
     theme_label = I18n.get("settings_theme")
@@ -94,23 +94,9 @@ async def test_system_tab_tier_api_panel_rendered(e2e_page):
 #   本地缓存), Tushare/LLM/DB 外部 API 调用被 abort, 触发错误 toast
 # - 不引入 xFail: 用 expect_text 轮询而非 sleep, 用 try/finally 还原状态
 # - mutates_config: 保存测试加 marker, 触发 pristine_config fixture 快照还原
+# - PR-3: tab 切换迁移到 SettingsPage anchor 操作；其余控件（TextField/Button）
+#   未 anchor 化，保留 FletPage.fill_textbox / click_button
 # ============================================================================
-
-
-async def _navigate_to_settings_tab(e2e_page, tab_key: str) -> None:
-    """导航到 Settings 页面的指定 tab（共用工具）。
-
-    点击 nav_settings → 等 title → 点击 tab 按钮 → 等 tab 渲染。
-    """
-    settings_label = I18n.get("nav_settings")
-    await e2e_page.click_text(settings_label, timeout_ms=TIMEOUTS.NAV)
-
-    settings_title = I18n.get("settings_title")
-    await e2e_page.expect_text(settings_title, timeout_ms=TIMEOUTS.TITLE)
-
-    tab_name = I18n.get(tab_key)
-    await e2e_page.click_tab(tab_name)
-    await e2e_page.expect_text(tab_name, timeout_ms=TIMEOUTS.FAST)
 
 
 async def _wait_for_any_text(e2e_page, texts: list[str], timeout_ms: int = 30000) -> str:
@@ -141,14 +127,20 @@ async def test_llm_config_save_and_validate(e2e_page):
     无效 key 触发异常 (网络离线/auth 失败), AIService 捕获后返回
     {"success": False, "message": error_info["message_key"]} (i18n key 字符串本身).
     VM 用 _raw_message 包装, View 渲染显示 key 本身 (源码 bug, 见 commit message).
+
+    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
-    await _navigate_to_settings_tab(e2e_page, "settings_tab_ai")
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
+    await sp.click_tab("ai")
 
     # 等待 LLM 面板渲染（测试连接按钮可见）
     test_btn_label = I18n.get("llm_test_connection")
     await e2e_page.expect_text(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
     # 填入无效 API Key 点击测试连接, 外部请求失败触发错误
+    # 注：LLM API Key TextField 未 anchor 化，保留 fill_textbox
     api_key_label = I18n.get("llm_api_key")
     await e2e_page.fill_textbox(api_key_label, "sk-invalid-e2e-test-key", timeout_ms=TIMEOUTS.INTERACTION)
 
@@ -205,8 +197,13 @@ async def test_tushare_token_validate_and_save(e2e_page):
     'e2e-dummy-token' 触发 Tushare 服务器 401/403 或网络异常, classify_error(context="token")
     返回 wizard_err_token_* 错误 key, get_error_message 返回翻译文本,
     VM 用 _raw_message 包装, View 渲染显示翻译文本.
+
+    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
-    await _navigate_to_settings_tab(e2e_page, "settings_tab_data")
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
+    await sp.click_tab("data")
 
     # 等待 Tushare 面板渲染（验证按钮可见）
     verify_btn_label = I18n.get("tushare_verify")
@@ -251,8 +248,13 @@ async def test_db_connection_test_and_save(e2e_page):
     password=_E2E_DB_PASSWORD from env var, database=astock). host="" 触发 VM validate()
     前置校验失败, 返回 wizard_err_host_required (最常见路径). 若 host 有值则走 asyncpg,
     可能返回 db_err_not_found (astock 不存在) / db_err_auth / db_err_refused 等.
+
+    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
-    await _navigate_to_settings_tab(e2e_page, "settings_tab_database")
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
+    await sp.click_tab("database")
 
     # P3-13: DatabaseTab 默认模式不渲染 ExternalPgForm, 需先开启"高级模式"开关
     advanced_switch_label = I18n.get("settings_db_advanced_mode")
@@ -291,8 +293,13 @@ async def test_local_model_load_and_reload(e2e_page):
     mock 策略: LocalModelConfigPanelViewModel.verify_model 的前置校验在调
     on_verify_model 回调前执行, 纯本地路径校验 (os.path.exists / endswith),
     不需要网络 mock. model_path 为空触发 required 分支.
+
+    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
-    await _navigate_to_settings_tab(e2e_page, "settings_tab_ai")
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
+    await sp.click_tab("ai")
 
     # 等待本地模型面板渲染（验证模型按钮可见）
     verify_btn_label = I18n.get("wizard_btn_verify_model")
@@ -320,13 +327,19 @@ async def test_ai_brain_test_connection(e2e_page):
 
     此测试与 test_llm_config_save_and_validate 互补, 聚焦 AI Brain tab 整体
     测试连接 UX, 验证 abort 路径的错误反馈.
+
+    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
-    await _navigate_to_settings_tab(e2e_page, "settings_tab_ai")
+    sp = SettingsPage(e2e_page)
+    await sp.open()
+    await sp.expect_title()
+    await sp.click_tab("ai")
 
     test_btn_label = I18n.get("llm_test_connection")
     await e2e_page.expect_text(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
     # 填入无效 Key, 外部请求失败触发错误
+    # 注：LLM API Key TextField 未 anchor 化，保留 fill_textbox
     api_key_label = I18n.get("llm_api_key")
     await e2e_page.fill_textbox(api_key_label, "sk-invalid-ai-brain-test", timeout_ms=TIMEOUTS.INTERACTION)
     await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)

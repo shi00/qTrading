@@ -397,6 +397,49 @@ class AppServer:
             )
 
 
+def _spawn_app_session(
+    tmp_path_factory,
+    real_sidecar_binary_e2e: str,
+    *,
+    pool_name: str,
+    embedded_url_file: Path | None = None,
+) -> AppServer:
+    """启动一个 Flet app 实例（embedded 模式），供 session-scoped fixture 复用。
+
+    pool_name: data_root 目录命名（ro/mut），隔离两个 pool 的 PG data 目录。
+    embedded_url_file: 若提供，sidecar 启动后将 URL 写入该文件（供 seed_e2e_data 读取）。
+                       None 时不设置 QTRADING_EMBEDDED_PG_URL_FILE（与 wizard_app 一致，
+                       mutates_config 用例不依赖种子数据）。
+    """
+    data_root = tmp_path_factory.mktemp(f"embedded_pg_data_{pool_name}")
+    env_overrides: dict[str, str] = {
+        "TS_TOKEN": "e2e-dummy-token",
+        "AI_API_KEY": "e2e-dummy-key",
+        "QTRADING_DATABASE_MODE": "embedded",
+        "AUTO_MIGRATE": "true",
+        # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
+        # null 后端：set/delete 为 no-op，get 返回 None。
+        # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
+        # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
+        "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+    }
+    if embedded_url_file is not None:
+        env_overrides["QTRADING_EMBEDDED_PG_URL_FILE"] = str(embedded_url_file)
+    proc, url, cfg_file = _spawn(
+        tmp_path_factory,
+        config={
+            "onboarding_complete": True,
+            "locale": "zh",
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
+            "embedded_pg_data_root": str(data_root),
+        },
+        env_overrides=env_overrides,
+        startup_timeout_s=300.0,
+    )
+    return AppServer(proc, url, cfg_file)
+
+
 async def _setup_canvaskit_intercept(page) -> None:
     """为 page 设置 CanvasKit + 字体本地化拦截，强制离线化 E2E 测试。
 
@@ -641,50 +684,6 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
         logger.debug("[e2e_teardown] tracing stop failed: %s", e)
     finally:
         await context.close()
-
-
-async def _ensure_locale_zh(fp: FletPage) -> None:
-    """语言状态污染安全网：确保 flet_app 内存中的 I18n locale 为 zh_CN。
-
-    test_settings_language_switch 切换语言后，其 finally 块可能因 CanvasKit
-    渲染延迟/snackbar 干扰而恢复失败，导致 flet_app 内存 locale 仍是 en_US。
-    pristine_config fixture 只还原磁盘配置和测试进程 I18n，不还原 app 内存 locale。
-    本函数作为最后防线，在 e2e_page teardown 时检查并恢复中文，避免污染后续测试。
-
-    设计要点：
-    - 快速检查 has_text(nav_settings_zh)：正常测试几乎无开销（中文存在则 early return）
-    - 恢复失败只 warning 不抛出：避免掩盖原始测试失败
-    - R2: asyncio.CancelledError 必须 raise
-    """
-    nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
-    try:
-        if await fp.has_text(nav_settings_zh):
-            return
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.debug("[e2e_page] locale 安全网 has_text 检查失败: %s", e, exc_info=True)
-        return
-
-    logger.warning("[e2e_page] 检测到语言污染（找不到中文导航文本），尝试通过 UI 恢复 zh_CN")
-    try:
-        nav_settings_en = I18n.get("nav_settings", locale="en_US")
-        await fp.click_text(nav_settings_en, timeout_ms=8000)
-        tab_system_en = I18n.get("settings_tab_system", locale="en_US")
-        await fp.click_text(tab_system_en, timeout_ms=8000)
-        lang_label_en = I18n.get("settings_language", locale="en_US")
-        lang_zh = I18n.get("settings_lang_zh")
-        await fp.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
-        for _ in range(25):
-            if await fp.has_text(nav_settings_zh):
-                logger.info("[e2e_page] locale 安全网成功恢复 zh_CN")
-                return
-            await fp.page.wait_for_timeout(200)
-        logger.warning("[e2e_page] locale 安全网未能确认中文恢复")
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[e2e_page] locale 安全网恢复失败: %s", e, exc_info=True)
 
 
 def _parse_asyncpg_dsn(sqlalchemy_url: str) -> str:
@@ -1378,64 +1377,57 @@ def embedded_url_file(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def flet_app(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
+def flet_app_ro(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
+    """Read-only session pool：read-only 用例共享，永不被 mutating 用例访问。
+
+    双 pool 隔离（方案 §4.3 Level 2）：消除 read-only 池被 mutating 池连坐污染。
+    sidecar URL 写入 embedded_url_file 供 seed_e2e_data 读取播种。
     """
-    [PITFALL_WARNING] 全局 Session 级 Flet App 与 状态污染 (Ripple Effect)
-
-    坑点：整个 E2E 测试套件只会在最开始启动 *一次* Flet 应用进程（为了节省启动时间）。
-    因此，所有的测试用例都在 **同一个正在运行的 App 实例** 上进行。
-
-    影响：如果你在测试 A 中修改了全局状态（例如：切换了语言、主题、甚至缓存了某个页面的数据），
-    这些状态修改会 **持久化并泄漏** 到测试 B、测试 C 中！
-
-    典型案例：
-    测试 A 切换语言到英文后失败退出，导致测试 B 寻找中文 "选股" 时全部抛出 Timeout 超时错误。
-
-    应对策略：
-    1. 【必须】所有修改了全局状态的测试用例，必须使用 `try...finally` 块确保将状态恢复到基准线！
-    2. 对于语言切换等破坏性极强的状态，建议放在测试套件的末尾执行（通过文件命名或 pytest 排序）。
-    3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
-
-    embedded 模式（spec.md §3 不变量 1）：与生产代码默认值一致，启动真实 sidecar +
-    真实 PG 16。``QTRADING_EMBEDDED_PG_URL_FILE`` 让 sidecar 启动后把 URL 写入文件，
-    供 ``seed_e2e_data`` fixture 读取后连接 sidecar DB 播种数据。
-    """
-    print("[E2E DIAG] flet_app fixture: start", flush=True)
-    data_root = tmp_path_factory.mktemp("embedded_pg_data")
-    print(f"[E2E DIAG] flet_app fixture: data_root={data_root}", flush=True)
-    print(f"[E2E DIAG] flet_app fixture: sidecar_binary={real_sidecar_binary_e2e}", flush=True)
-    print(f"[E2E DIAG] flet_app fixture: embedded_url_file={embedded_url_file}", flush=True)
-    print("[E2E DIAG] flet_app fixture: calling _spawn (startup_timeout_s=300)", flush=True)
-    proc, url, cfg_file = _spawn(
+    print("[E2E DIAG] flet_app_ro: spawning (pool=ro)", flush=True)
+    app = _spawn_app_session(
         tmp_path_factory,
-        config={
-            "onboarding_complete": True,
-            "locale": "zh",
-            "embedded_pg_enabled": True,
-            "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
-            "embedded_pg_data_root": str(data_root),
-        },
-        env_overrides={
-            "TS_TOKEN": "e2e-dummy-token",
-            "AI_API_KEY": "e2e-dummy-key",
-            "QTRADING_DATABASE_MODE": "embedded",
-            "QTRADING_EMBEDDED_PG_URL_FILE": str(embedded_url_file),
-            "AUTO_MIGRATE": "true",
-            # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
-            # null 后端：set/delete 为 no-op，get 返回 None。
-            # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
-            # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
-            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
-        },
-        startup_timeout_s=300.0,
+        real_sidecar_binary_e2e,
+        pool_name="ro",
+        embedded_url_file=embedded_url_file,
     )
-    print(f"[E2E DIAG] flet_app fixture: _spawn returned, proc.pid={proc.pid}, url={url}", flush=True)
-    app = AppServer(proc, url, cfg_file)
-    print("[E2E DIAG] flet_app fixture: yielding app", flush=True)
+    print(
+        f"[E2E DIAG] flet_app_ro: ready, proc.pid={app.proc.pid}, url={app.url}",
+        flush=True,
+    )
     yield app
-    print("[E2E DIAG] flet_app fixture: teardown, terminating proc", flush=True)
-    _terminate(proc)
-    print("[E2E DIAG] flet_app fixture: teardown done", flush=True)
+    print(f"[E2E DIAG] flet_app_ro: teardown, terminating proc {app.proc.pid}", flush=True)
+    _terminate(app.proc)
+
+
+@pytest.fixture(scope="session")
+def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e):
+    """Mutating session pool：mutates_config 用例独立共享，与 read-only 池隔离。
+
+    pristine_config 只在此池内还原；不设置 QTRADING_EMBEDDED_PG_URL_FILE
+    （mutates_config 用例不依赖种子数据，与 wizard_app 一致）。
+    """
+    print("[E2E DIAG] flet_app_mut: spawning (pool=mut)", flush=True)
+    app = _spawn_app_session(
+        tmp_path_factory,
+        real_sidecar_binary_e2e,
+        pool_name="mut",
+    )
+    print(
+        f"[E2E DIAG] flet_app_mut: ready, proc.pid={app.proc.pid}, url={app.url}",
+        flush=True,
+    )
+    yield app
+    print(f"[E2E DIAG] flet_app_mut: teardown, terminating proc {app.proc.pid}", flush=True)
+    _terminate(app.proc)
+
+
+@pytest.fixture(scope="session")
+def flet_app(flet_app_ro: AppServer) -> AppServer:
+    """Backward-compat alias → flet_app_ro。
+
+    保留以兼容 seed_e2e_data（仍依赖 flet_app 名字）。新代码应直接用 flet_app_ro。
+    """
+    return flet_app_ro
 
 
 @pytest.fixture(scope="session")
@@ -1470,22 +1462,30 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page(e2e_browser, flet_app: AppServer, seed_e2e_data: None, request):
-    """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
+async def e2e_page(e2e_browser, request):
+    """Function 级 Page：依 mutates_config marker 路由到对应 session pool。
 
-    性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
+    - mutates_config 用例 → flet_app_mut（独立 mutating pool，不播种）
+    - 其他用例 → flet_app_ro + seed_e2e_data（read-only pool，播种）
+
+    契约：mutates_config 用例不依赖种子数据（flet_app_mut 不播种）。
+    如需种子数据，移除 mutates_config marker 改用 read-only pool。
+
+    双 pool 隔离消除 read-only 池被 mutating 池连坐污染（方案 §4.3 Level 2）。
     CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
 
     loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
     fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
     """
-    fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
+    if request.node.get_closest_marker("mutates_config"):
+        app = request.getfixturevalue("flet_app_mut")
+    else:
+        app = request.getfixturevalue("flet_app_ro")
+        request.getfixturevalue("seed_e2e_data")
+    fp = await _make_page(e2e_browser, app, request, check_db_error=True)
     if request.node.get_closest_marker("slow"):
         fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
     yield fp
-    # 语言安全网：mutates_config 用例可能污染 flet_app 内存 locale
-    if request.node.get_closest_marker("mutates_config"):
-        await _ensure_locale_zh(fp)
     failed = any(
         getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
         for when in ("setup", "call")
@@ -1676,12 +1676,15 @@ async def embedded_real_flet_page(e2e_browser, embedded_real_flet_app: AppServer
 def pristine_config(request):
     """配置快照/还原：仅对标记 ``mutates_config`` 的用例激活。
 
-    用例前快照当前配置文件 + 测试进程 I18n locale，用例后还原。
+    用例前快照磁盘配置文件，用例后还原。
     覆盖主题/语言两个维度（配置文件整体快照，含 DB 等所有键）。
 
     注意：Flet app 是 session 级单进程，其内存中的 ConfigHandler 缓存无法从测试进程
-    直接清空。本 fixture 还原磁盘配置文件，确保下一次 app 重启读到干净配置；
-    同时还原测试进程的 I18n locale，避免后续用例的断言字符串语言错乱。
+    直接清空。本 fixture 还原磁盘配置文件，确保下一次 app 重启读到干净配置。
+
+    PR-3 改造：测试进程 I18n locale 还原由测试用例自身 finally 块负责（自治原则）。
+    Session pool 分层后 read-only 池与 mutating 池隔离，_ensure_locale_zh 安全网
+    已删除（方案 §4.3 Level 2）。
     """
     marker = request.node.get_closest_marker("mutates_config")
     if marker is None:
@@ -1689,9 +1692,10 @@ def pristine_config(request):
         return
 
     # 根据用例请求的 page fixture 推断对应的 app 配置文件
+    # mutates_config 用例路由到 flet_app_mut（方案 §4.3 双 pool 隔离）
     config_file: Path | None = None
     if "e2e_page" in request.fixturenames:
-        app: AppServer = request.getfixturevalue("flet_app")
+        app: AppServer = request.getfixturevalue("flet_app_mut")
         config_file = app.config_file
     elif "wizard_page" in request.fixturenames:
         app = request.getfixturevalue("wizard_app")
@@ -1702,9 +1706,6 @@ def pristine_config(request):
     if config_file and config_file.exists():
         file_snapshot = config_file.read_text(encoding="utf-8")
 
-    # 快照测试进程 I18n locale
-    locale_snapshot = I18n.current_locale()
-
     yield
 
     # 还原磁盘配置文件
@@ -1713,12 +1714,3 @@ def pristine_config(request):
             config_file.write_text(file_snapshot, encoding="utf-8")
         except OSError as e:
             logger.warning("[pristine_config] 还原配置文件失败 %s: %s", config_file, e)
-
-    # 还原测试进程 I18n locale
-    if I18n.current_locale() != locale_snapshot:
-        try:
-            I18n.set_locale(locale_snapshot)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[pristine_config] 还原 I18n locale 到 %s 失败: %s", locale_snapshot, e)

@@ -25,6 +25,8 @@ from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.state_views import GITHUB_ISSUES_URL, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel, consume_pending_prefill
 from utils.log_decorators import UILogger
@@ -175,25 +177,31 @@ def BacktestView(active: bool = True) -> ft.Container:
         color=AppColors.TEXT_PRIMARY,
     )
 
-    strategy_dropdown = ft.Dropdown(
-        label=I18n.get("backtest_select_strategy"),
-        options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
-        value=selected_strategy,
-        on_select=safe_on_select(_on_strategy_change),
-        width=AppStyles.CONTROL_WIDTH_LG,
-        bgcolor=AppColors.INPUT_BG,
-        border_color=AppColors.INPUT_BORDER,
-        color=AppColors.INPUT_TEXT,
+    strategy_dropdown = anchored(
+        EIDS.BACKTEST.STRATEGY_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("backtest_select_strategy"),
+            options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
+            value=selected_strategy,
+            on_select=safe_on_select(_on_strategy_change),
+            width=AppStyles.CONTROL_WIDTH_LG,
+            bgcolor=AppColors.INPUT_BG,
+            border_color=AppColors.INPUT_BORDER,
+            color=AppColors.INPUT_TEXT,
+        ),
     )
 
     status_text = ft.Text(status_value, color=status_color)
     progress_bar = ft.ProgressBar(visible=state.is_running, value=state.progress, expand=True)
     progress_text = ft.Text(progress_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
-    cancel_button = ft.Button(
-        content=I18n.get("common_cancel"),
-        on_click=safe_on_click(_on_cancel_backtest),
-        visible=state.is_running,
-        style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
+    cancel_button = anchored(
+        EIDS.BACKTEST.CANCEL_BUTTON,
+        ft.Button(
+            content=I18n.get("common_cancel"),
+            on_click=safe_on_click(_on_cancel_backtest),
+            visible=state.is_running,
+            style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
+        ),
     )
 
     # Task 11.3: 回测执行失败 (status_color=="error" 且 result is None) → ErrorState 替换结果面板;

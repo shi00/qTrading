@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from ui.i18n import I18n
+from tests.e2e.pages import WizardPage
 from tests.e2e.timeouts import TIMEOUTS
 
 
@@ -48,7 +49,11 @@ async def test_wizard_renders_welcome(wizard_page):
 
 @pytest.mark.mutates_config
 async def test_wizard_language_switch(wizard_page):
-    """测试：语言切换（纯 UI，无后端依赖）。"""
+    """测试：语言切换（纯 UI，无后端依赖）。
+
+    PR-3 注记：wizard 中的语言 dropdown 未 anchor 化（onboarding_wizard.py 仅
+    anchor 化了 PREV/SKIP/NEXT 按钮），保留 FletPage.select_dropdown 文本定位。
+    """
     lang_label = I18n.get("settings_language")
     lang_en = I18n.get("settings_lang_en")
     lang_zh = I18n.get("settings_lang_zh")
@@ -87,15 +92,19 @@ async def test_wizard_language_switch(wizard_page):
 
 
 async def test_wizard_forward_then_back(wizard_page):
-    """测试：欢迎→数据库→返回欢迎。"""
+    """测试：欢迎→数据库→返回欢迎。
+
+    PR-3: prev 按钮迁移到 WizardPage anchor 操作（btn_start 未 anchor 化，保留 click_button）。
+    """
+    wp = WizardPage(wizard_page)
     btn_start = I18n.get("wizard_btn_start")
     await wizard_page.click_button(btn_start)
 
     db_title = I18n.get("wizard_db_title")
     await wizard_page.expect_text(db_title)
 
-    btn_prev = I18n.get("wizard_btn_prev")
-    await wizard_page.click_button(btn_prev)
+    # PR-3: prev 按钮已 anchor 化，用 WizardPage.click_prev 定位
+    await wp.click_prev()
 
     welcome_guide = I18n.get("wizard_welcome_guide")
     await wizard_page.expect_text(welcome_guide)
@@ -116,7 +125,11 @@ async def test_wizard_forward_then_back(wizard_page):
     ),
 )
 async def test_wizard_db_validation_failure(wizard_page):
-    """测试：数据库校验失败时停留在当前步骤。"""
+    """测试：数据库校验失败时停留在当前步骤。
+
+    PR-3 注记：btn_start / btn_verify_next / db_host 等 TextField 未 anchor 化
+    （PR-3 范围仅 anchor 化 next/prev/skip/token），保留 FletPage.click_button / fill_textbox。
+    """
     btn_start = I18n.get("wizard_btn_start")
     await wizard_page.click_button(btn_start)
 
@@ -156,7 +169,11 @@ async def test_wizard_db_validation_failure(wizard_page):
     ),
 )
 async def test_wizard_db_validation_success(wizard_page):
-    """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。"""
+    """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。
+
+    PR-3 注记：btn_start / btn_verify_next / db_host 等 TextField 未 anchor 化
+    （PR-3 范围仅 anchor 化 next/prev/skip/token），保留 FletPage.click_button / fill_textbox。
+    """
     from tests.conftest import _get_test_db_url
 
     db_url = os.environ.get(

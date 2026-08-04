@@ -6,6 +6,11 @@
 PR-2: ScreenerPage 交互方法迁移到 AnchorPage（anchor-based 精确定位），
 消除 CanvasKit 抖动下的文本/按钮误匹配。click_row_by_text/open_detail_dialog
 暂保留文本定位（PR-4 收尾删除，需 row_text→ts_code 映射才能迁移到 anchor）。
+
+PR-3: 新增 SettingsPage / DataPage / BacktestPage / WizardPage，封装各视图
+anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2）。
+非 anchor 化控件（label 文本、无 anchor 的 TextField/Button）仍透传 FletPage
+方法（click_text / click_button / fill_textbox / expect_text / has_text）。
 """
 
 import logging
@@ -254,3 +259,157 @@ class ScreenerPage:
             f"open_detail_dialog: dialog did not open after {max_attempts} attempts for '{row_text}'. "
             f"Last error: {last_exc}"
         ) from last_exc
+
+
+# ============================================================================
+# PR-3: SettingsPage / DataPage / BacktestPage / WizardPage
+#
+# 设计原则（方案 §7.2 封装边界）：
+# - Page Object 持有 EIDS 引用，test_*.py 不直接 import EIDS
+# - anchor 化控件走 AnchorPage（精确定位）；非 anchor 化控件透传 FletPage 方法
+# - 不重写已稳定的 FletPage 文本/按钮定位逻辑，最小化改造范围
+# ============================================================================
+
+
+class SettingsPage:
+    """设置页 Page Object，封装 tab 切换 + 三个 Dropdown 的 anchor 操作。
+
+    非 anchor 化控件（如 System tab 内的高级模式开关、LLM API Key TextField）
+    仍透传 ``self.page`` 的 FletPage 方法（click_text / fill_textbox / click_button）。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.app = App(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """导航到设置页（通过侧边栏 nav_settings）。"""
+        await self.app.goto("nav_settings", timeout_ms=timeout_ms)
+
+    async def expect_title(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待设置页标题可见。"""
+        await self.page.expect_text(I18n.get("settings_title"), timeout_ms=timeout_ms)
+
+    async def click_tab(self, tab_role: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击指定 tab（通过 anchor，role 如 ``data`` / ``database`` / ``ai`` / ``tasks`` / ``notify`` / ``system``）。
+
+        从 i18n key ``settings_tab_<role>`` 派生，与 ``settings_view._TAB_CONFIG`` 对齐。
+        """
+        await self.ap.click(EIDS.SETTINGS.tab(tab_role), timeout_ms=timeout_ms)
+        # 等待 tab 文本可见（与原 _navigate_to_settings_tab 行为一致，验证 tab 切换成功）
+        await self.page.expect_text(I18n.get(f"settings_tab_{tab_role}"), timeout_ms=TIMEOUTS.FAST)
+
+    async def select_language(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择语言下拉项（通过 anchor）。"""
+        await self.ap.select_option(EIDS.SETTINGS.LANGUAGE_DROPDOWN, option_text, timeout_ms=timeout_ms)
+
+    async def select_theme(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择主题下拉项（通过 anchor）。"""
+        await self.ap.select_option(EIDS.SETTINGS.THEME_DROPDOWN, option_text, timeout_ms=timeout_ms)
+
+    async def select_log_level(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择日志级别下拉项（通过 anchor）。"""
+        await self.ap.select_option(EIDS.SETTINGS.LOG_LEVEL_DROPDOWN, option_text, timeout_ms=timeout_ms)
+
+
+class DataPage:
+    """数据浏览器页 Page Object，封装 3 个 Dropdown + 过滤值 TextField + 查询按钮的 anchor 操作。"""
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.app = App(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """导航到数据页（通过侧边栏 nav_data）。"""
+        await self.app.goto("nav_data", timeout_ms=timeout_ms)
+
+    async def expect_explorer_tab(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """等待数据浏览 Tab 标签可见（确认页面加载）。"""
+        await self.page.expect_text(I18n.get("data_tab_explorer"), timeout_ms=timeout_ms)
+
+    async def select_table(self, table_name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """选择数据表（通过 anchor，``table_name`` 如 ``daily_quotes`` / ``stock_basic``）。"""
+        await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
+
+    async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""
+        await self.ap.select_option(EIDS.DATA.FILTER_COL_DROPDOWN, col_label, timeout_ms=timeout_ms)
+
+    async def select_filter_op(self, op_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """选择过滤操作符（通过 anchor，``op_label`` 为本地化操作符如 ``=``）。"""
+        await self.ap.select_option(EIDS.DATA.FILTER_OP_DROPDOWN, op_label, timeout_ms=timeout_ms)
+
+    async def fill_filter_value(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填充过滤值（通过 anchor）。"""
+        await self.ap.fill(EIDS.DATA.FILTER_VALUE_INPUT, value, timeout_ms=timeout_ms)
+
+    async def click_query(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击查询按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.DATA.QUERY_BUTTON, timeout_ms=timeout_ms)
+
+
+class BacktestPage:
+    """回测页 Page Object，封装策略 Dropdown + 运行/取消按钮 + 初始资金 TextField 的 anchor 操作。"""
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.app = App(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """导航到回测页（通过侧边栏 nav_backtest）。"""
+        await self.app.goto("nav_backtest", timeout_ms=timeout_ms)
+
+    async def expect_title(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """等待回测页标题可见。"""
+        await self.page.expect_text(I18n.get("backtest_view_title"), timeout_ms=timeout_ms)
+
+    async def select_strategy(self, strategy_key: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """选择策略（通过 anchor，``strategy_key`` 如 ``volume_breakout``，内部解析为本地化名）。"""
+        name = strategy_label(strategy_key)
+        await self.ap.select_option(EIDS.BACKTEST.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
+
+    async def fill_initial_capital(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填充初始资金（通过 anchor）。"""
+        await self.ap.fill(EIDS.BACKTEST.INITIAL_CAPITAL_INPUT, value, timeout_ms=timeout_ms)
+
+    async def click_run(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击开始回测按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.BACKTEST.RUN_BUTTON, timeout_ms=timeout_ms)
+
+    async def click_cancel(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击取消按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.BACKTEST.CANCEL_BUTTON, timeout_ms=timeout_ms)
+
+
+class WizardPage:
+    """向导页 Page Object，封装 next/prev/skip 按钮 + token TextField 的 anchor 操作。
+
+    非 anchor 化控件（如 db_host/db_port/db_user/db_password/db_name TextField、
+    wizard_btn_start / wizard_btn_verify_next Button）仍透传 FletPage 方法
+    （fill_textbox / click_button）。这些控件未 anchor 化是 PR-3 范围决策
+    （wizard_page fixture 独立于 e2e_page，db 验证用例在 Windows/embedded 模式
+    下被 skipif 跳过，anchor 化收益有限）。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.ap = AnchorPage(page.page, page)
+
+    async def click_next(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 next 按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.WIZARD.NEXT_BUTTON, timeout_ms=timeout_ms)
+
+    async def click_prev(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 prev 按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.WIZARD.PREV_BUTTON, timeout_ms=timeout_ms)
+
+    async def click_skip(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 skip 按钮（通过 anchor）。"""
+        await self.ap.click(EIDS.WIZARD.SKIP_BUTTON, timeout_ms=timeout_ms)
+
+    async def fill_token(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填充 token 输入框（通过 anchor）。"""
+        await self.ap.fill(EIDS.WIZARD.TOKEN_INPUT, value, timeout_ms=timeout_ms)

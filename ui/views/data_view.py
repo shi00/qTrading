@@ -40,6 +40,8 @@ from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, MAX_EXPORT_ROWS, SqlResultRow, TableRow
 from utils.correlation import ensure_correlation_id
@@ -471,74 +473,89 @@ def TableViewerTab(
     rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
 
     # --- 构建 UI ---
-    table_selector = ft.Dropdown(
-        width=250,
-        label=I18n.get("data_select_table"),
-        value=state.current_table or None,
-        on_select=safe_on_select(_on_table_changed),
-        disabled=is_loading or not state.tables_loaded,
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_table_selector_options(state.tables_list, vm),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    table_selector = anchored(
+        EIDS.DATA.TABLE_DROPDOWN,
+        ft.Dropdown(
+            width=250,
+            label=I18n.get("data_select_table"),
+            value=state.current_table or None,
+            on_select=safe_on_select(_on_table_changed),
+            disabled=is_loading or not state.tables_loaded,
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            options=_build_table_selector_options(state.tables_list, vm),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    filter_col = ft.Dropdown(
-        label=I18n.get("data_filter_col"),
-        width=150,
-        value=effective_filter_col,
-        on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_filter_col_options(state.current_table, state.table_columns, vm),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    filter_col = anchored(
+        EIDS.DATA.FILTER_COL_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("data_filter_col"),
+            width=150,
+            value=effective_filter_col,
+            on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            options=_build_filter_col_options(state.current_table, state.table_columns, vm),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    filter_op = ft.Dropdown(
-        label=I18n.get("data_filter_op"),
-        width=100,
-        value=filter_op_value,
-        on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
-        options=_build_filter_op_options(),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=5,
+    filter_op = anchored(
+        EIDS.DATA.FILTER_OP_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("data_filter_op"),
+            width=100,
+            value=filter_op_value,
+            on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
+            options=_build_filter_op_options(),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=5,
+        ),
     )
 
-    filter_val = ft.TextField(
-        label=I18n.get("data_filter_val"),
-        width=AppStyles.CONTROL_WIDTH_MD,
-        value=filter_val_text,
-        on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
-        on_submit=safe_on_change(_on_query_click),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    filter_val = anchored(
+        EIDS.DATA.FILTER_VALUE_INPUT,
+        ft.TextField(
+            label=I18n.get("data_filter_val"),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            value=filter_val_text,
+            on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
+            on_submit=safe_on_change(_on_query_click),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    btn_query = ft.IconButton(
-        ft.Icons.SEARCH,
-        tooltip=I18n.get("common_query"),
-        on_click=safe_on_click(_on_query_click),
-        icon_color=AppColors.PRIMARY,
-        icon_size=AppStyles.FONT_SIZE_HEADLINE,
-        disabled=is_loading,
+    btn_query = anchored(
+        EIDS.DATA.QUERY_BUTTON,
+        ft.IconButton(
+            ft.Icons.SEARCH,
+            tooltip=I18n.get("common_query"),
+            on_click=safe_on_click(_on_query_click),
+            icon_color=AppColors.PRIMARY,
+            icon_size=AppStyles.FONT_SIZE_HEADLINE,
+            disabled=is_loading,
+        ),
     )
     btn_refresh = ft.IconButton(
         ft.Icons.REFRESH,
