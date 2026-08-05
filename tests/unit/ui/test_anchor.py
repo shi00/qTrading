@@ -248,6 +248,12 @@ class TestEidsPr3Namespaces:
         assert eid_str == "e2e.data.query_button"
         assert kind == AnchorKind.INTERACTIVE
 
+    def test_data_table_ready(self):
+        """PR-478 新增 TABLE_READY EID (LABEL kind, 仅做存在性探测)."""
+        eid_str, kind = EIDS.DATA.TABLE_READY
+        assert eid_str == "e2e.data.table_ready"
+        assert kind == AnchorKind.LABEL
+
     def test_backtest_strategy_dropdown(self):
         eid_str, kind = EIDS.BACKTEST.STRATEGY_DROPDOWN
         assert eid_str == "e2e.backtest.strategy_dropdown"
@@ -306,6 +312,7 @@ class TestEidsPr3NoPrefixNesting:
         EIDS.DATA.FILTER_OP_DROPDOWN[0],
         EIDS.DATA.FILTER_VALUE_INPUT[0],
         EIDS.DATA.QUERY_BUTTON[0],
+        EIDS.DATA.TABLE_READY[0],
         EIDS.BACKTEST.STRATEGY_DROPDOWN[0],
         EIDS.BACKTEST.CANCEL_BUTTON[0],
         EIDS.BACKTEST.RUN_BUTTON[0],

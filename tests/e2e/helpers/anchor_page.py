@@ -247,19 +247,32 @@ class AnchorPage:
         Dropdown 是 COMPLEX kind, 顶层节点即可点击展开.
         option 面板节点由 Flet 动态生成, 无 anchor 覆盖, 仍用文本匹配.
         剩余风险: 同视图两个 Dropdown 出现同名选项 - EIDS 命名规范强制唯一.
+
+        PR-478 修复:
+        - 用 ``Locator.click()`` 取代分离的 bbox+mouse.click: 在一个 action 内
+          重新定位并检查节点稳定性, CanvasKit 重绘后旧坐标不会失效.
+        - 选择后校验 dropdown ``aria-expanded="false"``: 点击未收合即立即抛错,
+          不再把选择失败伪装成后续查询或文本超时.
         """
         eid_str, kind = dropdown_eid
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
         await self.click(dropdown_eid, timeout_ms=timeout_ms)
+        # 触发节点: 展开后的 dropdown 顶层, 用于后续校验 aria-expanded
+        trigger = self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=eid_str).first
         option_loc = (
             self.page.locator('flt-semantics[role="button"]:not([aria-expanded])').filter(has_text=option_text).first
         )
-        await option_loc.wait_for(state="visible", timeout=self._tm(5000))
-        box = await option_loc.bounding_box()
-        if not box:
-            raise RuntimeError(f"AnchorPage.select_option: no bbox for option '{option_text}'")
-        await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        await option_loc.click(timeout=self._tm(timeout_ms))
+        # 校验 dropdown 已收合: 未收合说明选项点击未真正生效 (CanvasKit 抖动 / 坐标偏移)
+        deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+        while time.monotonic() < deadline:
+            if await trigger.get_attribute("aria-expanded") == "false":
+                return
+            await self.page.wait_for_timeout(100)
+        raise RuntimeError(
+            f"AnchorPage.select_option: selection did not settle: dropdown={eid_str!r}, option={option_text!r}"
+        )
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count

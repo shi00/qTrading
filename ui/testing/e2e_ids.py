@@ -129,6 +129,11 @@ class _DataIds:
     FILTER_OP_DROPDOWN: Eid = ("e2e.data.dropdown.filter_op", AnchorKind.COMPLEX)
     FILTER_VALUE_INPUT: Eid = ("e2e.data.filter_value_input", AnchorKind.INPUT)
     QUERY_BUTTON: Eid = ("e2e.data.query_button", AnchorKind.INTERACTIVE)
+    # PR-478 修复: 表格就绪信号 (LABEL, 仅做存在性探测). 仅在
+    # tables_loaded=True + table_columns 非空 + is_loading=False 时渲染.
+    # 切表时 reset_table_state 清空 table_columns → 信号先消失, 加载完成后再现,
+    # 让 E2E 可以等待真实加载完成而非固定 sleep.
+    TABLE_READY: Eid = ("e2e.data.table_ready", AnchorKind.LABEL)
 
 
 class _BacktestIds:

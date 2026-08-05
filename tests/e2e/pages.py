@@ -330,14 +330,16 @@ class DataPage:
         await self.page.expect_text(I18n.get("data_tab_explorer"), timeout_ms=timeout_ms)
 
     async def select_table(self, table_name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
-        """选择数据表（通过 anchor）。
+        """选择数据表（通过 anchor），并等待新表 schema 加载完成。
 
-        不在此处隐式等待 QUERY_BUTTON 状态：``is_loading`` 不会移除 QUERY_BUTTON
-        节点（仅 disable），``wait_for(state=detached)`` 永远超时；强制等待
-        ``attached`` 也无法反映 loading 完成。改由调用方在 ``click_query`` 前
-        显式 ``wait_for_timeout`` 等 schema 加载（见 test_data_explorer.py）。
+        PR-478 修复: 替代固定 ``wait_for_timeout(1000)`` sleep. 通过等待
+        ``TABLE_READY`` EID 先消失（reset_table_state 清空 table_columns）
+        再出现（load_table_schema 重新填充 table_columns）来确认切表完成.
+        只等待可见会误命中上一张表遗留的 ready 状态，必须先消失再出现.
         """
         await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
+        await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""
