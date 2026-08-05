@@ -248,23 +248,98 @@ class AnchorPage:
         option 面板节点由 Flet 动态生成, 无 anchor 覆盖, 仍用文本匹配.
         剩余风险: 同视图两个 Dropdown 出现同名选项 - EIDS 命名规范强制唯一.
 
-        PR-478 修复:
-        - 用 ``Locator.click()`` 取代分离的 bbox+mouse.click: 在一个 action 内
-          重新定位并检查节点稳定性, CanvasKit 重绘后旧坐标不会失效.
-        - 选择后校验 dropdown ``aria-expanded="false"``: 点击未收合即立即抛错,
-          不再把选择失败伪装成后续查询或文本超时.
+        PR-478 修复 (4 个复合缺陷, 见 reviews/问题定位.md):
+        - C1: ``self.click(...)`` 后主动 poll ``aria-expanded="true"``, 未展开
+              立即抛错 ``dropdown did not expand``, 不再静默等待选项 20s.
+        - C2: 选项点击用 ``page.mouse.click(cx, cy)`` 坐标点击, 与
+              ``AnchorPage.click`` 一致, 绕开 CanvasKit ``flt-semantics`` 上
+              不稳定的 actionability 检查.
+        - C3: 选项定位用精确文本匹配 (等值 / 空格 / ``(`` / ``\\n`` 分隔) 取代
+              ``filter(has_text=...)`` 子串匹配, 避免短文本 (如"代码") 误命中.
+        - C4: 展开前若残留 ``aria-expanded="true"`` 按 ``Escape`` 先收合, 避免
+              第二次 click 被 Material 3 DropdownMenu 解读为"关闭"而非"打开".
+        - 原有"收合校验"逻辑保留 (``selection did not settle``), 向后兼容.
         """
         eid_str, kind = dropdown_eid
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
-        await self.click(dropdown_eid, timeout_ms=timeout_ms)
-        # 触发节点: 展开后的 dropdown 顶层, 用于后续校验 aria-expanded
+
+        # 触发节点: dropdown 顶层 (role=button + aria-expanded), click 前定位避免
+        # 展开后的 DOM 变化导致 Locator 失效.
         trigger = self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=eid_str).first
-        option_loc = (
-            self.page.locator('flt-semantics[role="button"]:not([aria-expanded])').filter(has_text=option_text).first
+
+        # C4: 展开前若残留 aria-expanded="true" → 按 Escape 先收合,
+        # 避免第二次 click 变成"关闭" (Material 3 DropdownMenu toggle 语义).
+        try:
+            expanded_attr = await trigger.get_attribute("aria-expanded", timeout=self._tm(timeout_ms))
+        except PlaywrightTimeoutError:
+            expanded_attr = None
+        if expanded_attr == "true":
+            await self.page.keyboard.press("Escape")
+            collapse_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+            while time.monotonic() < collapse_deadline:
+                if await trigger.get_attribute("aria-expanded") == "false":
+                    break
+                await self.page.wait_for_timeout(100)
+
+        # 展开菜单
+        await self.click(dropdown_eid, timeout_ms=timeout_ms)
+
+        # C1: click 后主动 poll aria-expanded="true", 未展开立即抛错,
+        # 不再把"未展开"伪装成后续选项查找的 20s 静默超时.
+        expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+        expanded = False
+        while time.monotonic() < expand_deadline:
+            if await trigger.get_attribute("aria-expanded") == "true":
+                expanded = True
+                break
+            await self.page.wait_for_timeout(100)
+        if not expanded:
+            raise RuntimeError(
+                f"AnchorPage.select_option: dropdown did not expand: dropdown={eid_str!r}, option={option_text!r}"
+            )
+
+        # C3: 选项用精确文本匹配, 取代 filter(has_text=...) 子串匹配.
+        # 匹配规则覆盖 get_column_alias/get_table_alias 生成的 "key (alias)" 主线格式:
+        #   - 等值: textContent === option_text
+        #   - 空格分隔: "daily_quotes (日线行情)" 以 "daily_quotes " 开头
+        #   - '(' 分隔: "ts_code(代码)" 以 "ts_code(" 开头
+        #   - '\n' 分隔: CanvasKit 合并节点 EID 与显示文本分隔
+        #   - '\n' 后缀: 合并节点 EID 在前, option_text 在后
+        option_box = await self.page.evaluate(
+            """(args) => {
+                const {text} = args;
+                const els = Array.from(document.querySelectorAll(
+                    'flt-semantics[role="button"]:not([aria-expanded])'
+                ));
+                const el = els.find(e => {
+                    const t = (e.textContent || '').trim();
+                    return t === text
+                        || t.startsWith(text + ' ')
+                        || t.startsWith(text + '(')
+                        || t.startsWith(text + '\\n')
+                        || t.endsWith('\\n' + text);
+                });
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return {x: r.x, y: r.y, w: r.width, h: r.height};
+            }""",
+            {"text": option_text},
         )
-        await option_loc.click(timeout=self._tm(timeout_ms))
-        # 校验 dropdown 已收合: 未收合说明选项点击未真正生效 (CanvasKit 抖动 / 坐标偏移)
+        if not option_box or option_box["w"] <= 0 or option_box["h"] <= 0:
+            raise RuntimeError(
+                f"AnchorPage.select_option: option not found in dropdown menu: "
+                f"dropdown={eid_str!r}, option={option_text!r}"
+            )
+
+        # C2: 用 page.mouse.click(cx, cy) 坐标点击选项, 与 AnchorPage.click 一致,
+        # 绕开 CanvasKit flt-semantics 上不稳定的 actionability 检查.
+        cx = option_box["x"] + option_box["w"] / 2
+        cy = option_box["y"] + option_box["h"] / 2
+        await self.page.mouse.click(cx, cy)
+
+        # 原有"收合校验"逻辑保留: 点击未收合说明选项点击未真正生效
+        # (CanvasKit 抖动 / 坐标偏移).
         deadline = time.monotonic() + self._tm(timeout_ms) / 1000
         while time.monotonic() < deadline:
             if await trigger.get_attribute("aria-expanded") == "false":
