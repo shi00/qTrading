@@ -1428,7 +1428,7 @@ def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_mu
     _terminate(app.proc)
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def warmup_flet_app_mut(e2e_browser, flet_app_mut: AppServer, embedded_url_file_mut: Path):
     """预热 flet_app_mut：启动 Flet 子进程后触发 main(page) 连接，等待 sidecar + DB 初始化完成。
 

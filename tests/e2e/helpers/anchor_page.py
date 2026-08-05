@@ -48,8 +48,16 @@ class AnchorPage:
     # ----------------------------------------------------------------
 
     def _locator_by_aria(self, eid_str: str) -> Locator:
-        """INTERACTIVE/INPUT: [aria-label=EID] 独立节点."""
-        return self.page.locator(f'flt-semantics[aria-label="{eid_str}"]')
+        """INTERACTIVE/INPUT: 命中 aria-label 节点。
+
+        Flet 0.86.3 CanvasKit 引擎将 ft.Semantics(label=EID) 与内层 Button 自带 label
+        合并为 "<显示名>\\nEID"（见 e2e-artifacts/*-semantics.json 快照，与
+        flet_page.py:440 已有的合并注释一致）；INPUT 类 ft.TextField 无自身 semantic
+        label，保留纯 EID 形态。用 CSS 子串匹配 `*=` 覆盖两种形态，pattern 与
+        flet_page.py:65/130/140/443/493 一致；无子串重叠由 ui/testing/e2e_ids.py 的
+        EID 命名规范 + tests/unit/ui/test_anchor.py 的 no-prefix 断言保证。
+        """
+        return self.page.locator(f'flt-semantics[aria-label*="{eid_str}"]')
 
     async def _locate_by_text(
         self, eid_str: str, exact: bool, role_filter: str | None = None
@@ -122,7 +130,7 @@ class AnchorPage:
         """
         outer = self._locator_by_aria(eid_str)
         await outer.wait_for(state="attached", timeout=self._tm(timeout_ms))
-        inner = self.page.locator(f'flt-semantics[aria-label="{eid_str}"] flt-semantics[flt-tappable]').first
+        inner = outer.first.locator("flt-semantics[flt-tappable]").first
         try:
             await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
             box = await inner.bounding_box()
@@ -143,9 +151,7 @@ class AnchorPage:
         """INPUT: 定位 [aria-label] 后代 input/textarea 并返回 bbox."""
         outer = self._locator_by_aria(eid_str)
         await outer.wait_for(state="attached", timeout=self._tm(timeout_ms))
-        inner = self.page.locator(
-            f'flt-semantics[aria-label="{eid_str}"] input, flt-semantics[aria-label="{eid_str}"] textarea'
-        ).first
+        inner = outer.first.locator("input, textarea").first
         await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
         box = await inner.bounding_box()
         if not box:

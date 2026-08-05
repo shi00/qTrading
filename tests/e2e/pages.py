@@ -16,6 +16,7 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 import logging
 
 from core.i18n import I18n
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
@@ -330,8 +331,24 @@ class DataPage:
         await self.page.expect_text(I18n.get("data_tab_explorer"), timeout_ms=timeout_ms)
 
     async def select_table(self, table_name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
-        """选择数据表（通过 anchor，``table_name`` 如 ``daily_quotes`` / ``stock_basic``）。"""
+        """选择数据表 + 隐式等待 QUERY_BUTTON 就绪（is_loading=False 信号）。
+
+        ``select_option`` 触发 on_change → ``load_table_schema`` → ``is_loading=True``
+        → CanvasKit 剪枝 disabled IconButton 的 semantic 节点（见
+        ``e2e-artifacts/test_table_viewer-semantics.json``）；加载完成后
+        ``is_loading=False`` → 节点 re-attach。先等 detach 再等 re-attach 规避
+        ``wait_for(attached)`` 在节点尚未被剪枝时立即返回的竞态，替代用例侧固定 sleep。
+
+        B.1 修复后 ``_locator_by_aria`` 已用 ``[aria-label*=]`` 兼容复合 aria-label。
+        """
         await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
+        query_loc = self.ap._locator_by_aria(EIDS.DATA.QUERY_BUTTON[0]).first  # noqa: SLF001
+        # 先等节点 detach（loading 开始），再等 re-attach（loading 完成）。
+        try:
+            await query_loc.wait_for(state="detached", timeout=self.ap._tm(1500))  # noqa: SLF001
+        except PlaywrightTimeoutError:
+            pass  # 节点未 detach: loading 已瞬时完成或 on_change 尚未触发
+        await query_loc.wait_for(state="attached", timeout=self.ap._tm(timeout_ms * 2))  # noqa: SLF001
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""
