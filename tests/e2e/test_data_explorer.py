@@ -16,6 +16,9 @@ async def test_table_viewer(e2e_page):
 
     # 选择 daily_quotes 表 + 点击查询按钮（均通过 anchor）
     await dp.select_table("daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理 on_change → load_table_schema 完成（QUERY_BUTTON 不会因
+    # is_loading 移除节点，无法用 wait_for(state) 探测，固定 sleep 是最简方案）
+    await e2e_page.page.wait_for_timeout(1000)
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 
     # 验证表格中出现平安银行相关数据
@@ -59,8 +62,10 @@ async def test_table_viewer_filter(e2e_page):
     await dp.open()
     await dp.expect_explorer_tab()
 
-    # 选择 daily_quotes 表（通过 anchor；select_table 内置等待 QUERY_BUTTON 就绪）
+    # 选择 daily_quotes 表（通过 anchor）
     await dp.select_table("daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理 on_change → load_table_schema 完成（见 test_table_viewer 注释）
+    await e2e_page.page.wait_for_timeout(1000)
 
     # 设置过滤器：列=代码(ts_code)，操作符==（默认值），值=000001.SZ
     # 注：filter_op 的默认值已是 "="（见 ui/views/data_view.py 的 _build_filter_op_options），
@@ -95,14 +100,18 @@ async def test_table_viewer_switch(e2e_page):
     await dp.open()
     await dp.expect_explorer_tab()
 
-    # 选择 daily_quotes 表 + 查询（通过 anchor；select_table 内置等待 QUERY_BUTTON 就绪）
+    # 选择 daily_quotes 表 + 查询（通过 anchor）
     await dp.select_table("daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理 on_change → load_table_schema 完成（见 test_table_viewer 注释）
+    await e2e_page.page.wait_for_timeout(1000)
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 
     await e2e_page.expect_text("000001.SZ", timeout_ms=TIMEOUTS.NAV)
 
     # 切换到 stock_basic 表（通过 anchor；select_table 内置等待表结构加载完成）
     await dp.select_table("stock_basic", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理 on_change → load_table_schema 完成（见 test_table_viewer 注释）
+    await e2e_page.page.wait_for_timeout(1000)
 
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 

@@ -53,11 +53,19 @@ class AnchorPage:
         Flet 0.86.3 CanvasKit 引擎将 ft.Semantics(label=EID) 与内层 Button 自带 label
         合并为 "<显示名>\\nEID"（见 e2e-artifacts/*-semantics.json 快照，与
         flet_page.py:440 已有的合并注释一致）；INPUT 类 ft.TextField 无自身 semantic
-        label，保留纯 EID 形态。用 CSS 子串匹配 `*=` 覆盖两种形态，pattern 与
-        flet_page.py:65/130/140/443/493 一致；无子串重叠由 ui/testing/e2e_ids.py 的
-        EID 命名规范 + tests/unit/ui/test_anchor.py 的 no-prefix 断言保证。
+        label，保留纯 EID 形态。两种形态均以 EID **结尾**，用 CSS 后缀匹配 ``$=``
+        精确命中。
+
+        为什么不用 ``*=`` 子串匹配：EID 命名空间存在前缀重叠（如
+        ``e2e.settings.tab.data`` 是 ``e2e.settings.tab.database`` 的前缀），
+        ``*=`` 会同时匹配两者导致 strict mode violation（PR-478 CI 实证）。
+        ``$=`` 要求 aria-label 以 EID 结尾，前缀重叠不再误命中。
+
+        无后缀重叠由 ui/testing/e2e_ids.py 的 EID 命名规范 +
+        tests/unit/ui/test_anchor.py 的 no-prefix 断言保证（附录 A 命名规范
+        禁止 EID 之间互为后缀）。
         """
-        return self.page.locator(f'flt-semantics[aria-label*="{eid_str}"]')
+        return self.page.locator(f'flt-semantics[aria-label$="{eid_str}"]')
 
     async def _locate_by_text(
         self, eid_str: str, exact: bool, role_filter: str | None = None

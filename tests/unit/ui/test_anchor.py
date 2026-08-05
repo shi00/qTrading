@@ -330,3 +330,44 @@ class TestEidsPr3NoPrefixNesting:
             if eid.startswith("e2e.settings."):
                 assert not eid.startswith(tab_prefix + "."), f"tab 前缀 {tab_prefix} 是 {eid} 的前缀（定位误匹配风险）"
                 assert not tab_prefix.startswith(eid + "."), f"{eid} 是 tab 前缀 {tab_prefix} 的前缀（定位误匹配风险）"
+
+
+class TestEidsNoSuffixOverlap:
+    """EID 后缀重叠守护（PR-478 CI 回归）.
+
+    AnchorPage._locator_by_aria 用 ``[aria-label$=EID]`` 后缀匹配（PR-478 修复
+    strict mode violation: ``e2e.settings.tab.data`` 子串匹配误命中
+    ``e2e.settings.tab.database``）。若 EID A 是 EID B 的后缀，定位 A 会误匹配 B。
+    本测试确认所有动态 tab EID 两两不互为后缀.
+    """
+
+    # _TAB_CONFIG 的全部 role（见 ui/views/settings_view.py）
+    _TAB_ROLES = ["data", "database", "ai", "tasks", "notify", "system"]
+
+    def test_no_tab_eid_is_suffix_of_another(self):
+        """任两个 tab EID 互不为后缀（后缀匹配安全）.
+
+        回归场景：``e2e.settings.tab.data`` 与 ``e2e.settings.tab.database``
+        在 ``*=`` 子串匹配下会同时命中前者（data 是 database 的前缀），
+        导致 strict mode violation。``$=`` 后缀匹配规避此前缀重叠，
+        但仍需守护后缀重叠（如假设新增 ``base`` tab 会与 ``database`` 后缀重叠）。
+        """
+        tab_eids = [EIDS.SETTINGS.tab(role)[0] for role in self._TAB_ROLES]
+        for i, a in enumerate(tab_eids):
+            for b in tab_eids[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
+
+    def test_static_eids_no_suffix_overlap(self):
+        """所有静态 EID（含 SCREENER/DETAIL_DIALOG）两两不互为后缀."""
+        all_static = [
+            EIDS.SCREENER.STRATEGY_DROPDOWN[0],
+            EIDS.SCREENER.RUN_BUTTON[0],
+            EIDS.SCREENER.EXPORT_CSV_BUTTON[0],
+            EIDS.SCREENER.EXPORT_EXCEL_BUTTON[0],
+            EIDS.DETAIL_DIALOG.CLOSE_BUTTON[0],
+        ] + TestEidsPr3NoPrefixNesting._PR3_STATIC_EIDS
+        for i, a in enumerate(all_static):
+            for b in all_static[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
