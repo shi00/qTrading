@@ -40,6 +40,8 @@ from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, MAX_EXPORT_ROWS, SqlResultRow, TableRow
 from utils.correlation import ensure_correlation_id
@@ -241,6 +243,15 @@ def TableViewerTab(
     ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
 
     # --- 异步加载逻辑 (R2: except Exception 不捕获 CancelledError) ---
+    # PR-478 修复: 拆分为两个独立 effect, 避免 _init_tables 自取消.
+    # 原实现: _init_tables 调用 vm.init_tables() 触发 tables_loaded=True → Flet 重渲染
+    #   → 依赖变化重新调度同一 EffectHook → hook.cancel() 取消旧 _setup_task
+    #   → load_table_schema() 收到 CancelledError → table_columns/rows/total_rows 保持空.
+    # 拆分后:
+    #   - _init_tables 只修改 tables_loaded (effect 依赖), 自身完成即 return,
+    #     重渲染时再调度同一 effect (tables_loaded 已 True) 直接返回, 不取消自身.
+    #   - _load_initial_table 消费 tables_loaded=True, 调用 load_table_schema/query_data
+    #     修改的 table_columns/rows/total_rows 不在依赖中, 不会触发自身重调度.
     async def _load_schema_and_data() -> None:
         if state.is_loading:
             return
@@ -256,16 +267,10 @@ def TableViewerTab(
                 _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     async def _init_tables() -> None:
-        if not active:
-            return
-        if state.tables_loaded:
+        if not active or state.tables_loaded:
             return
         try:
-            tables = await vm.init_tables()
-            if tables:
-                await _load_schema_and_data()
-            # Phase 6.4 (FR-UX-006): 加载数据新鲜度 (非关键, 失败不阻塞)
-            await vm.load_data_freshness()
+            await vm.init_tables()
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -274,8 +279,24 @@ def TableViewerTab(
             if page is not None:
                 _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
 
+    async def _load_initial_table() -> None:
+        if not active or not state.tables_loaded:
+            return
+        try:
+            await _load_schema_and_data()
+            # Phase 6.4 (FR-UX-006): 加载数据新鲜度 (非关键, 失败不阻塞)
+            await vm.load_data_freshness()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            logger.error("[TableViewerTab] initial load error: %s", e, exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
+
     # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
     ft.use_effect(_init_tables, dependencies=[state.tables_loaded, active])
+    ft.use_effect(_load_initial_table, dependencies=[state.tables_loaded, active])
 
     # --- 异步 handler (供 page.run_task 调度) ---
     async def _do_table_change(new_table: str) -> None:
@@ -471,74 +492,89 @@ def TableViewerTab(
     rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
 
     # --- 构建 UI ---
-    table_selector = ft.Dropdown(
-        width=250,
-        label=I18n.get("data_select_table"),
-        value=state.current_table or None,
-        on_select=safe_on_select(_on_table_changed),
-        disabled=is_loading or not state.tables_loaded,
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_table_selector_options(state.tables_list, vm),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    table_selector = anchored(
+        EIDS.DATA.TABLE_DROPDOWN,
+        ft.Dropdown(
+            width=250,
+            label=I18n.get("data_select_table"),
+            value=state.current_table or None,
+            on_select=safe_on_select(_on_table_changed),
+            disabled=is_loading or not state.tables_loaded,
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            options=_build_table_selector_options(state.tables_list, vm),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    filter_col = ft.Dropdown(
-        label=I18n.get("data_filter_col"),
-        width=150,
-        value=effective_filter_col,
-        on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_filter_col_options(state.current_table, state.table_columns, vm),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    filter_col = anchored(
+        EIDS.DATA.FILTER_COL_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("data_filter_col"),
+            width=150,
+            value=effective_filter_col,
+            on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            options=_build_filter_col_options(state.current_table, state.table_columns, vm),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    filter_op = ft.Dropdown(
-        label=I18n.get("data_filter_op"),
-        width=100,
-        value=filter_op_value,
-        on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
-        options=_build_filter_op_options(),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=5,
+    filter_op = anchored(
+        EIDS.DATA.FILTER_OP_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("data_filter_op"),
+            width=100,
+            value=filter_op_value,
+            on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
+            options=_build_filter_op_options(),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=5,
+        ),
     )
 
-    filter_val = ft.TextField(
-        label=I18n.get("data_filter_val"),
-        width=AppStyles.CONTROL_WIDTH_MD,
-        value=filter_val_text,
-        on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
-        on_submit=safe_on_change(_on_query_click),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        height=36,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=AppStyles.SPACING_SM,
+    filter_val = anchored(
+        EIDS.DATA.FILTER_VALUE_INPUT,
+        ft.TextField(
+            label=I18n.get("data_filter_val"),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            value=filter_val_text,
+            on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
+            on_submit=safe_on_change(_on_query_click),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+            height=36,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=AppStyles.SPACING_SM,
+        ),
     )
 
-    btn_query = ft.IconButton(
-        ft.Icons.SEARCH,
-        tooltip=I18n.get("common_query"),
-        on_click=safe_on_click(_on_query_click),
-        icon_color=AppColors.PRIMARY,
-        icon_size=AppStyles.FONT_SIZE_HEADLINE,
-        disabled=is_loading,
+    btn_query = anchored(
+        EIDS.DATA.QUERY_BUTTON,
+        ft.IconButton(
+            ft.Icons.SEARCH,
+            tooltip=I18n.get("common_query"),
+            on_click=safe_on_click(_on_query_click),
+            icon_color=AppColors.PRIMARY,
+            icon_size=AppStyles.FONT_SIZE_HEADLINE,
+            disabled=is_loading,
+        ),
     )
     btn_refresh = ft.IconButton(
         ft.Icons.REFRESH,
@@ -731,8 +767,26 @@ def TableViewerTab(
         border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
     )
 
+    # PR-478 修复: TABLE_READY 信号 (LABEL kind, 仅做存在性探测).
+    # 仅在 tables_loaded + table_columns 非空 + is_loading=False 时渲染.
+    # 切表时 reset_table_state 清空 table_columns → 信号从 DOM 移除 (expect_hidden 通过);
+    # load_table_schema 完成后 table_columns 非空 → 信号重新挂载 (expect_visible 通过).
+    # 生产模式下 anchored() 返回原 Text (1px 透明空格, 用户不可见).
+    table_ready = state.tables_loaded and bool(state.table_columns) and not is_loading
+    controls: list[ft.Control] = [
+        toolbar_container,
+        ft.Container(content=grid_content, expand=True),
+        pagination_bar,
+    ]
+    if table_ready:
+        controls.append(
+            anchored(
+                EIDS.DATA.TABLE_READY,
+                ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.TRANSPARENT),
+            )
+        )
     return ft.Column(
-        [toolbar_container, ft.Container(content=grid_content, expand=True), pagination_bar],
+        controls,
         expand=True,
         spacing=0,
     )

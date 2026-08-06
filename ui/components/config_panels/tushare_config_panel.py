@@ -24,6 +24,8 @@ from ui.components.flet_type_helpers import (
 )
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
@@ -149,19 +151,22 @@ def TushareConfigPanel(
     ft.use_state(get_observable_state)
 
     # --- Build form controls (driven by state) ---
-    token_input = ft.TextField(
-        label=I18n.get("tushare_token_label"),
-        password=True,
-        can_reveal_password=True,
-        value=state.token,
-        on_change=lambda e: vm.update_token(e.control.value),
-        border_color=AppColors.PRIMARY,
-        label_style=ft.TextStyle(color=AppColors.PRIMARY),
+    # NOTE: width/hint_text 内联进构造器 (原 if compact 后置赋值在 E2E 模式下会
+    # 落到 ft.Semantics 而非内层 TextField, hint_text 字段不存在会抛错).
+    token_input = anchored(
+        EIDS.WIZARD.TOKEN_INPUT,
+        ft.TextField(
+            label=I18n.get("tushare_token_label"),
+            password=True,
+            can_reveal_password=True,
+            value=state.token,
+            on_change=lambda e: vm.update_token(e.control.value),
+            border_color=AppColors.PRIMARY,
+            label_style=ft.TextStyle(color=AppColors.PRIMARY),
+            width=AppStyles.CONTROL_WIDTH_LG if compact else None,
+            hint_text=I18n.get("tushare_token_hint") if compact else None,
+        ),
     )
-
-    if compact:
-        token_input.width = AppStyles.CONTROL_WIDTH_LG
-        token_input.hint_text = I18n.get("tushare_token_hint")
 
     # Task 2.1: token 存储透明说明（静态文案，不依赖 state，i18n 驱动 locale 切换）
     storage_hint_text = ft.Text(

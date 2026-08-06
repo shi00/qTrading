@@ -20,7 +20,7 @@
 """
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
 import pytest
@@ -89,6 +89,7 @@ class _FakeBacktestViewModel:
             status_message: Any = None
             status_color: str = ""
             result: Any = None
+            error_detail: Any = None
 
         self._state = _State()
 
@@ -735,6 +736,229 @@ class TestEmptyStrategiesEnv:
         assert not any(t.value == "i18n[backtest_no_strategy]" for t in texts), (
             "is_running=True 时, 即使 no_strategy_error=True 也不显示 backtest_no_strategy"
         )
+
+
+# ============================================================================
+# Task 11.3: ErrorState 错误态统一测试
+# ============================================================================
+
+
+class TestBacktestViewErrorState:
+    """Task 11.3: 回测失败 → ErrorState 替换结果面板; 恢复 → BacktestResultPanel."""
+
+    def test_error_state_renders_on_backtest_failure(self, backtest_view_env) -> None:
+        """status_color=="error" 且 result is None → ErrorState 作为 right_content."""
+        from flet.components.component import Component
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        from ui.viewmodels import Message
+
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+            error_detail="sanitized error detail",
+        )
+        _rerender(env)
+
+        # ResizableSplitter 的 right_content 应为 ErrorState Component
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        assert isinstance(right_content, Component)
+        assert getattr(right_content.fn, "__name__", "") == "ErrorState"
+        # detail 参数已透传
+        assert right_content.kwargs.get("detail") == "sanitized error detail"
+
+    def test_result_panel_restored_on_success(self, backtest_view_env) -> None:
+        """status_color="success" → BacktestResultPanel 恢复 (非 ErrorState)."""
+        from flet.components.component import Component
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        from ui.viewmodels import Message
+
+        # 先设为 error
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+        )
+        _rerender(env)
+
+        # 再设为 success (有 result)
+        fake_result = MagicMock(name="success_result")
+        fake_vm._set_state(
+            status_message=Message("backtest_completed", {}),
+            status_color="success",
+            result=fake_result,
+        )
+        _rerender(env)
+
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        # right_content 应为 BacktestResultPanel mock (非 ErrorState Component)
+        assert not isinstance(right_content, Component)
+        mod.BacktestResultPanel.assert_called_with(result=fake_result)
+
+    def test_no_strategy_error_does_not_trigger_error_state(self, backtest_view_empty_env) -> None:
+        """no_strategy_error=True 时 result=None 但 status_color 非 error → 不触发 ErrorState.
+
+        no_strategy_error 是 View 本地 state, status_color 仍为 "" (默认), 不满足
+        ``state.status_color == "error"`` 条件, ErrorState 不渲染.
+        """
+        from flet.components.component import Component
+
+        env = backtest_view_empty_env
+        # 触发 no_strategy_error=True
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+        on_run_backtest(_make_config())
+        _rerender(env)
+
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        # right_content 应为 BacktestResultPanel mock (非 ErrorState Component)
+        assert not isinstance(right_content, Component)
+
+    def test_on_retry_resubmits_last_backtest(self, backtest_view_env) -> None:
+        """on_retry 回调重新提交上次回测配置 (strategy + backtest_config)."""
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        from ui.viewmodels import Message
+
+        # 1. 触发 _on_run_backtest 存储 last_run
+        page.run_task.reset_mock()
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+        on_run_backtest(_make_config())
+
+        # 2. 设为 error 状态
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+        )
+        _rerender(env)
+
+        # 3. 从 ErrorState Component 提取 on_retry
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        on_retry = right_content.kwargs.get("on_retry")
+        assert on_retry is not None
+
+        # 4. 重置 mock, 触发 on_retry
+        page.run_task.reset_mock()
+        on_retry()
+
+        # 5. page.run_task 被调用, 传入 vm.run_backtest + "ma_cross" + "fake_backtest_config"
+        call_args = page.run_task.call_args
+        assert call_args is not None, "page.run_task 未被调用"
+        assert call_args.args[0] == fake_vm.run_backtest
+        assert call_args.args[1] == "ma_cross"
+        assert call_args.args[2] == "fake_backtest_config"
+
+    def test_on_cta_opens_github_issues(self, backtest_view_env) -> None:
+        """on_cta 回调通过 async wrapper + page.run_task 调度 page.launch_url 打开 GitHub Issues.
+
+        关键验证: handler 须通过 inspect.iscoroutinefunction 检查 (page.launch_url 被
+        @deprecated 装饰器破坏 iscoroutinefunction 检测, 须用 async wrapper 包裹).
+        """
+        import inspect
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        from ui.viewmodels import Message
+
+        # 设为 error 状态
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+        )
+        _rerender(env)
+
+        # 从 ErrorState Component 提取 on_cta
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        on_cta = right_content.kwargs.get("on_cta")
+        assert on_cta is not None
+
+        # page.launch_url mock (AsyncMock 因 launch_url 为 async def)
+        page.launch_url = AsyncMock()  # type: ignore[method-assign]
+        page.run_task.reset_mock()
+
+        # 触发 on_cta
+        on_cta()
+
+        # page.run_task 被调用, 传入 async wrapper (须通过 iscoroutinefunction 检查)
+        handler = page.run_task.call_args.args[0]
+        assert inspect.iscoroutinefunction(handler), "handler 须为 coroutine function (通过 run_task 检查)"
+
+        # 验证 async wrapper 内部调用 page.launch_url(GITHUB_ISSUES_URL)
+        import asyncio
+
+        asyncio.run(handler())
+        page.launch_url.assert_called_once_with("https://github.com/shi00/qTrading/issues")
+
+    def test_on_cta_report_no_page_does_not_crash(self, backtest_view_env) -> None:
+        """_on_cta_report 在 ft.context.page 抛 RuntimeError 时不崩溃 (P3-1 补测)."""
+        from flet.controls.context import _context_page
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        from ui.viewmodels import Message
+
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+        )
+        _rerender(env)
+
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        on_cta = right_content.kwargs.get("on_cta")
+        assert on_cta is not None  # noqa: weak-assertion no-crash 测试无显式终态断言, 此为 on_cta() 调用前置 sanity check
+
+        # 模拟 ft.context.page 抛 RuntimeError (组件卸载后或无 page 上下文)
+        _context_page.set(None)
+        # 触发 on_cta 不应抛异常
+        on_cta()
+
+    def test_on_retry_no_page_does_not_crash(self, backtest_view_env) -> None:
+        """_on_retry_backtest 在 ft.context.page 抛 RuntimeError 时不崩溃 (P3-1 补测)."""
+        from flet.controls.context import _context_page
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        from ui.viewmodels import Message
+
+        # 1. 触发 _on_run_backtest 存储 last_run (需要 page 上下文)
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+        on_run_backtest(_make_config())
+
+        # 2. 设为 error 状态
+        fake_vm._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            result=None,
+        )
+        _rerender(env)
+
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        on_retry = right_content.kwargs.get("on_retry")
+        assert on_retry is not None
+
+        # 3. 模拟 ft.context.page 抛 RuntimeError
+        page.run_task.reset_mock()
+        _context_page.set(None)
+        # 触发 on_retry 不应抛异常
+        on_retry()
+        # page.run_task 不应被调用 (page 为 None)
+        assert not page.run_task.called
 
 
 # ============================================================================

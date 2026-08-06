@@ -62,9 +62,18 @@ except ImportError:
     _ASYNCPG_AVAILABLE = False
 
 try:
+    import httpx  # type: ignore[import-untyped]
+
+    _HTTPX_AVAILABLE = True
+except ImportError:  # pragma: no cover -- httpx 是项目直接依赖，import 失败仅限可选环境
+    _HTTPX_AVAILABLE = False
+
+try:
     from litellm.exceptions import (  # type: ignore[import-untyped]
+        APIConnectionError as LiteLLMAPIConnectionError,
         AuthenticationError as LiteLLMAuthenticationError,
         ContentPolicyViolationError,
+        InternalServerError as LiteLLMInternalServerError,
         NotFoundError as LiteLLMNotFoundError,
         PermissionDeniedError,
         RateLimitError,
@@ -72,7 +81,7 @@ try:
     )
 
     _LITELLM_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover -- litellm 是项目直接依赖，import 失败仅限可选环境
     _LITELLM_AVAILABLE = False
     LiteLLMAuthenticationError = None  # type: ignore[misc,assignment]
     ContentPolicyViolationError = None  # type: ignore[misc,assignment]
@@ -80,6 +89,8 @@ except ImportError:
     LiteLLMNotFoundError = None  # type: ignore[misc,assignment]
     RateLimitError = None  # type: ignore[misc,assignment]
     ServiceUnavailableError = None  # type: ignore[misc,assignment]
+    LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
+    LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
 
 
 def classify_severity(e: Exception, context: str = "general") -> str:
@@ -159,6 +170,21 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 return {"code": "rate_limit", "message_key": "llm_err_rate_limit", "should_retry": True}
             if ServiceUnavailableError is not None and isinstance(e, ServiceUnavailableError):
                 return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
+            if LiteLLMInternalServerError is not None and isinstance(e, LiteLLMInternalServerError):
+                return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
+            if LiteLLMAPIConnectionError is not None and isinstance(e, LiteLLMAPIConnectionError):
+                return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
+
+        if _HTTPX_AVAILABLE:
+            if isinstance(e, httpx.TimeoutException):
+                return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
+            if isinstance(e, (httpx.ConnectError, httpx.ReadError, httpx.NetworkError)):
+                return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
+
+        if isinstance(e, TimeoutError):
+            return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
+        if isinstance(e, (ConnectionError, OSError)):
+            return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
 
         if "insufficient_quota" in error_str or "quota" in error_str or "402" in error_str:
             return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota", "should_retry": False}

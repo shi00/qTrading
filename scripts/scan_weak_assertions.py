@@ -303,6 +303,29 @@ def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: ast.FunctionDef | 
     return True
 
 
+def _check_function_is_not_none_ratio(
+    func: ast.FunctionDef, threshold: float = 0.40
+) -> tuple[bool, int, int, float, ast.Assert | None]:
+    """检查测试函数内部 `assert X is not None` 的比例是否超过 threshold (>40%)。
+
+    仅当函数内总断言数 >= 2 时生效。返回 (is_over_threshold, inn_count, total_asserts, ratio, first_node)。
+    """
+    total_asserts = 0
+    inn_count = 0
+    first_node: ast.Assert | None = None
+    for child in ast.walk(func):
+        if isinstance(child, ast.Assert):
+            total_asserts += 1
+            if _is_is_not_none_assert(child):
+                inn_count += 1
+                if first_node is None:
+                    first_node = child
+    if total_asserts < 2:
+        return False, inn_count, total_asserts, 0.0, None
+    ratio = inn_count / total_asserts
+    return ratio > threshold, inn_count, total_asserts, ratio, first_node
+
+
 def _find_parent_func(node: ast.AST, test_funcs: list[ast.FunctionDef]) -> ast.FunctionDef | None:
     """查找包含 node 的 test_ 函数（按 lineno 范围匹配）。"""
     lineno = getattr(node, "lineno", None)
@@ -334,6 +357,24 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
             test_funcs.append(node)
+
+    # 1. 检查测试函数级别的 is not None 占比是否 > 40%
+    for tf in test_funcs:
+        is_over, inn_cnt, tot_cnt, ratio, first_inn = _check_function_is_not_none_ratio(tf, threshold=0.40)
+        if is_over and first_inn is not None:
+            line_no = getattr(first_inn, "lineno", None) or tf.lineno
+            if isinstance(line_no, int):
+                source_line = source_lines[line_no - 1] if 0 < line_no <= len(source_lines) else ""
+                if not is_whitelisted(source_line):
+                    issues.append(
+                        WeakAssertion(
+                            rel_path=rel,
+                            line_no=line_no,
+                            issue_type="weak_is_not_none_ratio",
+                            detail=f"is not None 断言占比过高 ({inn_cnt}/{tot_cnt} = {ratio:.1%}) > 40% in {tf.name}",
+                            source_line=source_line,
+                        )
+                    )
 
     for node in ast.walk(tree):
         # 仅处理有 lineno 的语句级节点（跳过 Module/arguments/Load 等内部节点）

@@ -15,8 +15,11 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
-from ui.i18n import get_observable_state
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+
+# GitHub Issues 入口 (ErrorState on_cta "反馈问题" 默认目标; 消费方共享避免 DRY 违反)
+GITHUB_ISSUES_URL = "https://github.com/shi00/qTrading/issues"
 
 
 @ft.component
@@ -95,6 +98,7 @@ def ErrorState(
     icon: str = "",
     title: str = "",
     message: str = "",
+    detail: str | None = None,
     on_retry: Callable[[], None] | None = None,
     retry_text: str | None = None,
     on_cta: Callable[[], None] | None = None,
@@ -106,13 +110,16 @@ def ErrorState(
         icon: ft.Icons.* 字符串 (如 ``ft.Icons.ERROR_OUTLINE``); 空字符串不渲染图标。
         title: 标题文案 (已翻译字符串)。
         message: 描述文案 (已翻译字符串)。
+        detail: 错误详情 (已脱敏字符串, 由 VM 经 ``DataSanitizer.sanitize_error()`` 产出);
+            None 时不渲染详情展开按钮。
         on_retry: 重试回调 (可选); None 时不渲染重试按钮。
         retry_text: 重试按钮文案 (已翻译字符串); ``on_retry`` 非空时必填。
-        on_cta: 次操作回调 (可选, 如导航到设置页); None 时不渲染 CTA 按钮。
+        on_cta: 次操作回调 (可选, 如反馈问题/导航到设置页); None 时不渲染 CTA 按钮。
         cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta`` 非空时必填。
     """
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
+    is_expanded, set_is_expanded = ft.use_state(False)
 
     def _on_retry_click(_e: ft.ControlEvent) -> None:
         if on_retry is not None:
@@ -121,6 +128,9 @@ def ErrorState(
     def _on_cta_click(_e: ft.ControlEvent) -> None:
         if on_cta is not None:
             on_cta()
+
+    def _on_toggle_detail(_e: ft.ControlEvent) -> None:
+        set_is_expanded(not is_expanded)
 
     column_controls: list[ft.Control] = []
     if icon:
@@ -164,6 +174,31 @@ def ErrorState(
                 style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
             ),
         )
+    if detail:
+        toggle_text = I18n.get("error_state_hide_details") if is_expanded else I18n.get("error_state_show_details")
+        toggle_icon = ft.Icons.EXPAND_LESS if is_expanded else ft.Icons.EXPAND_MORE
+        column_controls.append(
+            ft.TextButton(
+                content=toggle_text,
+                icon=toggle_icon,
+                on_click=safe_on_click(_on_toggle_detail),
+                style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+            ),
+        )
+        if is_expanded:
+            column_controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        detail,
+                        selectable=True,
+                        max_lines=10,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    width=600,
+                ),
+            )
 
     return ft.Container(
         content=ft.Column(
@@ -178,4 +213,4 @@ def ErrorState(
     )
 
 
-__all__ = ["EmptyState", "ErrorState"]
+__all__ = ["EmptyState", "ErrorState", "GITHUB_ISSUES_URL"]

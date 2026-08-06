@@ -35,6 +35,8 @@ from ui.components.flet_type_helpers import (
 )
 from ui.components.slider_input import SliderInput
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -237,14 +239,17 @@ def BacktestConfigPanel(
     def _on_initial_capital_change(e: ft.ControlEvent) -> None:
         set_initial_capital(get_control_value(e.control, ft.TextField) or "")
 
-    initial_capital_input = ft.TextField(
-        label=I18n.get("backtest_initial_capital"),
-        value=initial_capital,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        bgcolor=AppColors.INPUT_BG,
-        border_color=AppColors.INPUT_BORDER,
-        color=AppColors.INPUT_TEXT,
-        on_change=safe_on_change(_on_initial_capital_change),
+    initial_capital_input = anchored(
+        EIDS.BACKTEST.INITIAL_CAPITAL_INPUT,
+        ft.TextField(
+            label=I18n.get("backtest_initial_capital"),
+            value=initial_capital,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            bgcolor=AppColors.INPUT_BG,
+            border_color=AppColors.INPUT_BORDER,
+            color=AppColors.INPUT_TEXT,
+            on_change=safe_on_change(_on_initial_capital_change),
+        ),
     )
 
     def _on_rebalance_select(e: ft.ControlEvent) -> None:
@@ -341,13 +346,16 @@ def BacktestConfigPanel(
         expand=True,
     )
 
-    run_btn = ft.Button(
-        content=I18n.get("backtest_run"),
-        icon=ft.Icons.PLAY_ARROW,
-        on_click=safe_on_click(_on_run_click),
-        style=ft.ButtonStyle(
-            bgcolor=AppColors.PRIMARY,
-            color=AppColors.TEXT_ON_PRIMARY,
+    run_btn = anchored(
+        EIDS.BACKTEST.RUN_BUTTON,
+        ft.Button(
+            content=I18n.get("backtest_run"),
+            icon=ft.Icons.PLAY_ARROW,
+            on_click=safe_on_click(_on_run_click),
+            style=ft.ButtonStyle(
+                bgcolor=AppColors.PRIMARY,
+                color=AppColors.TEXT_ON_PRIMARY,
+            ),
         ),
     )
 

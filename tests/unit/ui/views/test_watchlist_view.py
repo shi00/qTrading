@@ -12,13 +12,15 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import flet as ft
 import pytest
+from flet.components.component import Component
 
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistState
 from ui.views.watchlist_view import (
+    GITHUB_ISSUES_URL,
     WatchlistView,
     _build_watchlist_row,
     _get_page,
@@ -110,6 +112,43 @@ def _collect_all_controls(root: ft.Control | None) -> list[ft.Control]:
     if isinstance(content, ft.Control):
         result.extend(_collect_all_controls(content))
     return result
+
+
+def _find_component_by_fn_name(root: Any, fn_name: str) -> Component | None:
+    """在渲染树中按 fn.__name__ 查找 Component (子组件未展开时的定位)."""
+    visited: set[int] = set()
+
+    def _walk(c: Any) -> Component | None:
+        if c is None or id(c) in visited:
+            return None
+        visited.add(id(c))
+        if isinstance(c, Component):
+            if getattr(c.fn, "__name__", "") == fn_name:
+                return c
+            for v in list(c.args) + list(c.kwargs.values()):
+                result = _walk(v)
+                if result is not None:
+                    return result
+        elif isinstance(c, list):
+            for x in c:
+                result = _walk(x)
+                if result is not None:
+                    return result
+        elif isinstance(c, ft.Control):
+            for attr in ("controls", "items", "tabs", "content"):
+                children = getattr(c, attr, None)
+                if isinstance(children, list):
+                    for x in children:
+                        result = _walk(x)
+                        if result is not None:
+                            return result
+                elif children is not None:
+                    result = _walk(children)
+                    if result is not None:
+                        return result
+        return None
+
+    return _walk(root)
 
 
 def _click_icon_button(button: ft.IconButton) -> None:
@@ -318,7 +357,161 @@ class TestWatchlistViewRendering:
         # 不应渲染 empty state icon
         assert not any(isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.STAR_BORDER for c in controls)
 
-    def test_renders_error_banner(self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state):
+    def test_renders_error_state_on_complete_failure(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """Task 11.2: 完全失败 (rows 空 + load_error 非空) → ErrorState 替换 body."""
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        from ui.viewmodels import Message
+
+        mock_watchlist_vm._state = WatchlistState(
+            load_error=Message("watchlist_load_failed", {}),
+            load_error_detail="sanitized error detail",
+            is_loading=False,
+            watchlist_rows=(),
+        )
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        # ErrorState 作为子组件渲染 (Component 未展开, 通过 fn name 定位)
+        error_state = _find_component_by_fn_name(result, "ErrorState")
+        assert error_state is not None
+        # 验证 detail 参数传递
+        assert error_state.kwargs.get("detail") == "sanitized error detail"
+        # 不渲染 EmptyState (无 EmptyState Component)
+        empty_state = _find_component_by_fn_name(result, "EmptyState")
+        assert empty_state is None
+
+    def test_renders_error_banner_on_partial_failure(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """Task 11.2: 部分失败 (rows 非空 + load_error 非空) → 保留 error_banner + 列表."""
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        from ui.viewmodels import Message
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(
+            load_error=Message("watchlist_load_failed", {}),
+            is_loading=False,
+            watchlist_rows=rows,
+        )
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        controls = _collect_all_controls(result)
+        # 保留 error_banner (含 error key 的 Text)
+        texts = [c for c in controls if isinstance(c, ft.Text)]
+        assert any(getattr(t, "value", "") == "watchlist_load_failed" for t in texts)
+        # 保留列表 (STAR_OUTLINED icon)
+        assert any(isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.STAR_OUTLINED for c in controls)
+        # 不渲染 ErrorState (无 ErrorState Component)
+        error_state = _find_component_by_fn_name(result, "ErrorState")
+        assert error_state is None
+
+
+class TestWatchlistViewErrorStateCallbacks:
+    """Task 11.2: ErrorState on_retry / on_cta 回调测试."""
+
+    def test_on_retry_calls_vm_load_watchlist(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_retry 回调通过 page.run_task 调度 vm.load_watchlist."""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        from ui.viewmodels import Message
+
+        mock_watchlist_vm._state = WatchlistState(
+            load_error=Message("watchlist_load_failed", {}),
+            is_loading=False,
+            watchlist_rows=(),
+        )
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        # 定位 ErrorState Component, 提取 on_retry 回调
+        error_state = _find_component_by_fn_name(result, "ErrorState")
+        assert error_state is not None
+        on_retry = error_state.kwargs.get("on_retry")
+        assert on_retry is not None
+
+        # 重置 mock (过滤 mount 时 load_watchlist 的调用)
+        mock_watchlist_vm.method_calls.clear()
+        page.run_task.reset_mock()
+
+        # 触发 on_retry
+        on_retry()
+
+        # page.run_task 被调用, 传入 vm.load_watchlist
+        assert page.run_task.call_args.args[0] == mock_watchlist_vm.load_watchlist
+
+    def test_on_cta_calls_page_launch_url(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_cta 回调通过 async wrapper + page.run_task 调度 page.launch_url 打开 GitHub Issues.
+
+        关键验证: handler 须通过 inspect.iscoroutinefunction 检查 (page.launch_url 被
+        @deprecated 装饰器破坏 iscoroutinefunction 检测, 须用 async wrapper 包裹).
+        """
+        import inspect
+
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        from ui.viewmodels import Message
+
+        mock_watchlist_vm._state = WatchlistState(
+            load_error=Message("watchlist_load_failed", {}),
+            is_loading=False,
+            watchlist_rows=(),
+        )
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.launch_url = AsyncMock()  # type: ignore[assignment]
+        page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        # 定位 ErrorState Component, 提取 on_cta 回调
+        error_state = _find_component_by_fn_name(result, "ErrorState")
+        assert error_state is not None
+        on_cta = error_state.kwargs.get("on_cta")
+        assert on_cta is not None
+
+        # 触发 on_cta
+        on_cta()
+
+        # page.run_task 被调用, 传入 async wrapper (须通过 iscoroutinefunction 检查)
+        handler = page.run_task.call_args.args[0]
+        assert inspect.iscoroutinefunction(handler), "handler 须为 coroutine function (通过 run_task 检查)"
+
+        # 验证 async wrapper 内部调用 page.launch_url(GITHUB_ISSUES_URL)
+        import asyncio
+
+        asyncio.run(handler())
+        page.launch_url.assert_called_once_with(GITHUB_ISSUES_URL)
+
+    def test_on_retry_no_page_does_not_crash(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """page 为 None 时 on_retry 不应 crash (_get_page 返回 None 保护)."""
+        from flet.controls.context import _context_page
+
         from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 
         from ui.viewmodels import Message
@@ -326,15 +519,19 @@ class TestWatchlistViewRendering:
         mock_watchlist_vm._state = WatchlistState(
             load_error=Message("watchlist_load_failed", {}),
             is_loading=False,
+            watchlist_rows=(),
         )
         component = make_component(WatchlistView, active=True)
         run_mount_effects(component)
+        _context_page.set(None)
         result = render_once(component)
 
-        controls = _collect_all_controls(result)
-        # 错误提示渲染了含 error key 的 Text
-        texts = [c for c in controls if isinstance(c, ft.Text)]
-        assert any(getattr(t, "value", "") == "watchlist_load_failed" for t in texts)
+        error_state = _find_component_by_fn_name(result, "ErrorState")
+        assert error_state is not None  # noqa: weak-assertion no-crash 测试无显式终态断言, 此为 on_retry() 调用前置 sanity check
+        on_retry = error_state.kwargs.get("on_retry")
+        assert on_retry is not None  # noqa: weak-assertion no-crash 测试无显式终态断言, 此为 on_retry() 调用前置 sanity check
+        # 触发 on_retry 不应抛异常 (page 为 None)
+        on_retry()
 
 
 class TestWatchlistViewLoadEffect:

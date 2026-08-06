@@ -44,6 +44,8 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import _MAX_LOG_CARDS, ScreenerViewModel, StreamCard
 from ui.viewmodels.backtest_view_model import set_pending_prefill
@@ -1228,17 +1230,20 @@ def ScreenerView(
     )
 
     # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
-    strategy_dropdown = ft.Dropdown(
-        label=I18n.get("select_strategy"),
-        options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
-        value=state.selected_strategy,
-        on_select=safe_on_select(_on_strategy_change),
-        width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=AppStyles.FONT_SIZE_LG,
-        bgcolor=AppColors.INPUT_BG,
-        border_color=AppColors.INPUT_BORDER,
-        color=AppColors.INPUT_TEXT,
-        focused_border_color=AppColors.PRIMARY,
+    strategy_dropdown = anchored(
+        EIDS.SCREENER.STRATEGY_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("select_strategy"),
+            options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
+            value=state.selected_strategy,
+            on_select=safe_on_select(_on_strategy_change),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            text_size=AppStyles.FONT_SIZE_LG,
+            bgcolor=AppColors.INPUT_BG,
+            border_color=AppColors.INPUT_BORDER,
+            color=AppColors.INPUT_TEXT,
+            focused_border_color=AppColors.PRIMARY,
+        ),
     )
 
     realtime_controls = ft.Column(
@@ -1286,30 +1291,39 @@ def ScreenerView(
             visible=is_realtime,
         )
     else:
-        run_btn = ft.Button(
-            content=I18n.get("run_screening"),
-            icon=ft.Icons.PLAY_ARROW,
-            on_click=safe_on_click(_on_run_click_sync),
-            disabled=run_disabled,
-            style=AppStyles.primary_button(),
-            height=45,
-            visible=is_realtime,
+        run_btn = anchored(
+            EIDS.SCREENER.RUN_BUTTON,
+            ft.Button(
+                content=I18n.get("run_screening"),
+                icon=ft.Icons.PLAY_ARROW,
+                on_click=safe_on_click(_on_run_click_sync),
+                disabled=run_disabled,
+                style=AppStyles.primary_button(),
+                height=45,
+                visible=is_realtime,
+            ),
         )
-    export_btn = ft.Button(
-        content=I18n.get("screener_export"),
-        icon=ft.Icons.DOWNLOAD,
-        on_click=safe_on_click(_on_export_csv_click),
-        disabled=export_btn_disabled,
-        style=AppStyles.outline_button(),
-        height=45,
+    export_btn = anchored(
+        EIDS.SCREENER.EXPORT_CSV_BUTTON,
+        ft.Button(
+            content=I18n.get("screener_export"),
+            icon=ft.Icons.DOWNLOAD,
+            on_click=safe_on_click(_on_export_csv_click),
+            disabled=export_btn_disabled,
+            style=AppStyles.outline_button(),
+            height=45,
+        ),
     )
-    export_excel_btn = ft.Button(
-        content=I18n.get("data_export_excel"),
-        icon=ft.Icons.TABLE_VIEW,
-        on_click=safe_on_click(_on_export_excel_click),
-        disabled=export_btn_disabled,
-        style=AppStyles.outline_button(),
-        height=45,
+    export_excel_btn = anchored(
+        EIDS.SCREENER.EXPORT_EXCEL_BUTTON,
+        ft.Button(
+            content=I18n.get("data_export_excel"),
+            icon=ft.Icons.TABLE_VIEW,
+            on_click=safe_on_click(_on_export_excel_click),
+            disabled=export_btn_disabled,
+            style=AppStyles.outline_button(),
+            height=45,
+        ),
     )
     # Task 8.3: 选股→回测跳转按钮 (仅 realtime 模式 + 选中策略时可用)
     backtest_btn = ft.Button(
@@ -1402,6 +1416,8 @@ def ScreenerView(
                     sort_asc=state.sort_ascending,
                     on_sort=_on_virtual_sort,
                     on_row_click=_on_row_click,
+                    col_anchor=EIDS.SCREENER.column_header,
+                    row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 pagination_row,

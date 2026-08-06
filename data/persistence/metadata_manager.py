@@ -1,14 +1,26 @@
+import threading
 import typing
 
 from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
+from utils.singleton_registry import register_singleton
 
 
+@register_singleton
 class MetaDataManager:
+    _instance = None
     _alias_cache: dict[tuple, str] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def _reset_singleton(cls):
+        with cls._lock:
+            cls._instance = None
+            cls._alias_cache.clear()
 
     @classmethod
     def invalidate_cache(cls):
-        cls._alias_cache.clear()
+        with cls._lock:
+            cls._alias_cache.clear()
 
     @classmethod
     def preload_aliases(cls):
@@ -24,12 +36,14 @@ class MetaDataManager:
 
     @classmethod
     def get_table_alias(cls, table_name: str) -> str:
-        cache_key = ("table", table_name)
-        cached = cls._alias_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         from core.i18n import I18n
+
+        locale = I18n.current_locale()
+        cache_key = ("table", table_name, locale)
+        with cls._lock:
+            cached = cls._alias_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
         table_def = TABLE_DEFINITIONS.get(table_name)
         if table_def and "alias" in table_def:
@@ -38,17 +52,20 @@ class MetaDataManager:
         else:
             result = table_name
 
-        cls._alias_cache[cache_key] = result
+        with cls._lock:
+            cls._alias_cache[cache_key] = result
         return result
 
     @classmethod
     def get_column_alias(cls, table_name: str | None, col_name: str) -> str:
-        cache_key = ("col", table_name, col_name)
-        cached = cls._alias_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         from core.i18n import I18n
+
+        locale = I18n.current_locale()
+        cache_key = ("col", table_name, col_name, locale)
+        with cls._lock:
+            cached = cls._alias_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
         alias_key = None
 
@@ -68,25 +85,39 @@ class MetaDataManager:
         else:
             result = col_name
 
-        cls._alias_cache[cache_key] = result
+        with cls._lock:
+            cls._alias_cache[cache_key] = result
         return result
 
     @classmethod
     def get_raw_alias(cls, term: typing.Any, context_table: typing.Any = None):
-        cache_key = ("raw", context_table, term)
-        cached = cls._alias_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
         from core.i18n import I18n
 
+        locale = I18n.current_locale()
+        is_hashable = isinstance(term, (str, int, float, tuple)) or term is None
+        term_key = (
+            term
+            if is_hashable
+            else (
+                tuple(term)
+                if isinstance(term, list)
+                else (tuple(sorted(term.items())) if isinstance(term, dict) else str(term))
+            )
+        )
+        cache_key = ("raw", context_table, term_key, locale)
+
+        with cls._lock:
+            cached = cls._alias_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         alias_key = None
-        if context_table:
+        if is_hashable and context_table:
             table_def = TABLE_DEFINITIONS.get(context_table)
             if table_def and "columns" in table_def:
                 alias_key = table_def["columns"].get(term)
 
-        if not alias_key:
+        if is_hashable and not alias_key:
             alias_key = COMMON_COLUMNS.get(term)
 
         if alias_key:
@@ -94,5 +125,6 @@ class MetaDataManager:
         else:
             result = term
 
-        cls._alias_cache[cache_key] = result
+        with cls._lock:
+            cls._alias_cache[cache_key] = result
         return result

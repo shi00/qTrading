@@ -30,6 +30,8 @@ from ui.components.flet_type_helpers import (
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles, ThemeName
 from ui.viewmodels.system_settings_view_model import (
     CONCURRENCY_MAX,
@@ -396,19 +398,22 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     section_header = SectionHeader(I18n.get("sys_core_config"), title_key="sys_core_config")
 
-    language_dropdown = ft.Dropdown(
-        label=I18n.get_language_label(),
-        value=settings_state.language_value,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=AppStyles.FONT_SIZE_LG,
-        border_radius=8,
-        content_padding=AppStyles.SPACING_SM,
-        options=_build_language_options(),
-        on_select=safe_on_select(_on_language_change),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        disabled=is_changing_language,  # P3-17: 切换期间禁用, 防重复提交
+    language_dropdown = anchored(
+        EIDS.SETTINGS.LANGUAGE_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get_language_label(),
+            value=settings_state.language_value,
+            width=AppStyles.CONTROL_WIDTH_MD,
+            text_size=AppStyles.FONT_SIZE_LG,
+            border_radius=8,
+            content_padding=AppStyles.SPACING_SM,
+            options=_build_language_options(),
+            on_select=safe_on_select(_on_language_change),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+            disabled=is_changing_language,  # P3-17: 切换期间禁用, 防重复提交
+        ),
     )
     # P3-17: 切换期间显示 ProgressRing (复用 backtest loading 范式)
     language_control: ft.Control = ft.Row(
@@ -426,18 +431,21 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
-    theme_dropdown = ft.Dropdown(
-        label=I18n.get("settings_theme"),
-        value=settings_state.theme_value,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=AppStyles.FONT_SIZE_LG,
-        border_radius=8,
-        content_padding=AppStyles.SPACING_SM,
-        options=_build_theme_options(),
-        on_select=safe_on_select(_on_theme_change),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+    theme_dropdown = anchored(
+        EIDS.SETTINGS.THEME_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("settings_theme"),
+            value=settings_state.theme_value,
+            width=AppStyles.CONTROL_WIDTH_MD,
+            text_size=AppStyles.FONT_SIZE_LG,
+            border_radius=8,
+            content_padding=AppStyles.SPACING_SM,
+            options=_build_theme_options(),
+            on_select=safe_on_select(_on_theme_change),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+        ),
     )
 
     concurrency_input = ft.TextField(
@@ -458,18 +466,21 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_color=AppColors.INPUT_BORDER,
     )
 
-    log_level_dropdown = ft.Dropdown(
-        label=I18n.get("settings_log_level"),
-        value=settings_state.log_level_value,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=AppStyles.FONT_SIZE_LG,
-        border_radius=8,
-        content_padding=AppStyles.SPACING_SM,
-        options=_build_log_level_options(),
-        on_select=safe_on_select(_on_log_level_change),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+    log_level_dropdown = anchored(
+        EIDS.SETTINGS.LOG_LEVEL_DROPDOWN,
+        ft.Dropdown(
+            label=I18n.get("settings_log_level"),
+            value=settings_state.log_level_value,
+            width=AppStyles.CONTROL_WIDTH_MD,
+            text_size=AppStyles.FONT_SIZE_LG,
+            border_radius=8,
+            content_padding=AppStyles.SPACING_SM,
+            options=_build_log_level_options(),
+            on_select=safe_on_select(_on_log_level_change),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border_color=AppColors.INPUT_BORDER,
+        ),
     )
 
     pool_size_input = ft.TextField(

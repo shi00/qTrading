@@ -242,7 +242,8 @@ class TestTushareClientHandleApiCall:
             new=AsyncMock(return_value=pd.DataFrame({"a": [1]})),
         ):
             result = await client._handle_api_call(mock_func)
-            assert result is not None
+            assert isinstance(result, pd.DataFrame)
+            assert not result.empty
 
     @pytest.mark.asyncio
     async def test_column_renames(self, tushare_client_mocks):
@@ -264,7 +265,7 @@ class TestTushareClientHandleApiCallPaginated:
         df = pd.DataFrame({"a": list(range(5))})
         client._handle_api_call = AsyncMock(return_value=df)
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=1)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 5
 
     @pytest.mark.asyncio
@@ -296,7 +297,7 @@ class TestTushareClientHandleApiCallPaginated:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 10
 
     @pytest.mark.asyncio
@@ -322,7 +323,7 @@ class TestTushareClientHandleApiCallPaginated:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=1)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 10
 
     @pytest.mark.asyncio
@@ -364,7 +365,7 @@ class TestTushareClientHandleApiCallPaginated:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 15  # 10 + 5 拼接
         assert call_count[0] == 3  # 第三页空页后中断
 
@@ -451,7 +452,7 @@ class TestPaginatedPermissionErrorPropagation:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 10
 
     @pytest.mark.asyncio
@@ -477,10 +478,9 @@ class TestPaginatedPermissionErrorPropagation:
             raise Exception("API error on page 3")
 
         client._handle_api_call = mock_handle
-        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
-            result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
+        result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert len(result) == 20  # df1 + df2 拼接
         assert call_count[0] == 3  # 第三页失败后中断
         # 验证记 warning 日志（page 索引从 0 开始，第三页对应 page=2）
@@ -721,7 +721,8 @@ class TestTushareClientApiMethods:
         client, mock_ts, mock_ch = tushare_client_mocks
         client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await client.get_stock_basic()
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert list(result.columns) == ["ts_code"]
 
     @pytest.mark.asyncio
     async def test_get_daily_quotes(self, tushare_client_mocks):
@@ -738,7 +739,7 @@ class TestTushareClientApiMethods:
 
         client._handle_api_call = mock_handle
         result = await client.get_daily_quotes(trade_date="20240614")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert "adj_factor" in result.columns
 
     @pytest.mark.asyncio
@@ -759,7 +760,8 @@ class TestTushareClientApiMethods:
         client, mock_ts, mock_ch = tushare_client_mocks
         client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"period": ["202401"]}))
         result = await client.get_macro_data("cn_cpi")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert "period" in result.columns
 
     @pytest.mark.asyncio
     async def test_get_cn_gdp_wrapper_returns_none_when_pro_is_none(self, tushare_client_mocks):
@@ -789,7 +791,8 @@ class TestTushareClientApiMethods:
         client._handle_api_call = AsyncMock(return_value=expected_df)
         result = await client.get_cn_gdp(quarter="2024Q4")
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         # 验证 _handle_api_call 被调用，传入 pro.cn_gdp + quarter + 显式 fields
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
@@ -821,7 +824,8 @@ class TestTushareClientApiMethods:
         client._handle_api_call = AsyncMock(return_value=expected_df)
         result = await client.get_top_inst(trade_date="20240614")
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.top_inst callable
@@ -847,7 +851,8 @@ class TestTushareClientApiMethods:
         client._handle_api_call = AsyncMock(return_value=expected_df)
         result = await client.get_stk_limit(trade_date="20240614")
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.stk_limit callable
@@ -874,7 +879,8 @@ class TestTushareClientApiMethods:
         client._handle_api_call = AsyncMock(return_value=expected_df)
         result = await client.get_index_classify(level="L1", src="SW2021")
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.index_classify callable
@@ -904,7 +910,8 @@ class TestTushareClientApiMethods:
         client._handle_api_call = AsyncMock(return_value=expected_df)
         result = await client.get_index_member_all(index_code="801010.SI")
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.index_member_all callable
@@ -926,7 +933,8 @@ class TestTushareClientApiMethods:
 
         result = await client.get_index_member_all(index_code=None)
 
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
         assert call_args.kwargs["index_code"] is None
@@ -1127,7 +1135,7 @@ class TestTushareClientExecutorTimeout:
             new=AsyncMock(return_value=pd.DataFrame({"a": [1]})),
         ) as mock_wait:
             result = await client._handle_api_call(mock_func)
-            assert result is not None
+            assert isinstance(result, pd.DataFrame)
             mock_wait.assert_called_once()
             call_args = mock_wait.call_args
             assert call_args[1]["timeout"] == client.timeout * 1.5
@@ -1147,7 +1155,7 @@ class TestTushareClientExecutorTimeout:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
                 assert call_count[0] == 2
 
     @pytest.mark.asyncio
@@ -1165,7 +1173,7 @@ class TestTushareClientExecutorTimeout:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
                 assert call_count[0] == 2
 
     @pytest.mark.asyncio
@@ -1208,7 +1216,7 @@ class TestTushareClientHandleApiCallPartial:
         loop = asyncio.get_running_loop()
         with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
             result = await client._handle_api_call(mock_func)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         # 验证 api_name="daily" 被正确标记为 available
         assert client.is_api_available("daily") is True
 
@@ -1232,7 +1240,8 @@ class TestTushareClientHandleApiCallPartial:
                 start_date=datetime.date(2024, 6, 1),
                 end_date=datetime.datetime(2024, 6, 30),
             )
-            assert result is not None
+            assert isinstance(result, pd.DataFrame)
+            assert not result.empty
 
     @pytest.mark.asyncio
     async def test_api_limiter_consume_and_on_success(self, tushare_client_mocks):
@@ -1251,7 +1260,7 @@ class TestTushareClientHandleApiCallPartial:
             mock_func = MagicMock()
             mock_func.__name__ = "top10_holders"
             result = await client._handle_api_call(mock_func)
-            assert result is not None
+            assert isinstance(result, pd.DataFrame)
             api_limiter.consume_async.assert_called_once()
             api_limiter.on_success.assert_called_once()
 
@@ -1270,7 +1279,7 @@ class TestTushareClientHandleApiCallPartial:
         mock_func.__name__ = "unknown_api_not_in_overrides"
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=fake_wait_for):
             result = await client._handle_api_call(mock_func)
-            assert result is not None
+            assert isinstance(result, pd.DataFrame)
             rate_limiter.consume_async.assert_called_once()
             rate_limiter.on_success.assert_called_once()
 
@@ -1295,7 +1304,7 @@ class TestTushareClientHandleApiCallPartial:
         loop = asyncio.get_running_loop()
         with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
             result = await client._handle_api_call(partial_func)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         # 验证 api_name 走 str(func) fallback 路径，capability cache 以 str(partial) 为 key
         assert client.is_api_available(expected_api_name) is True
 
@@ -1374,7 +1383,7 @@ class TestTushareClientHandleApiCallErrors:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
                 assert call_count[0] == 2
 
     @pytest.mark.asyncio
@@ -1392,7 +1401,7 @@ class TestTushareClientHandleApiCallErrors:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_network_error_retries(self, tushare_client_mocks):
@@ -1409,7 +1418,7 @@ class TestTushareClientHandleApiCallErrors:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_network_error_timeout_string(self, tushare_client_mocks):
@@ -1426,7 +1435,7 @@ class TestTushareClientHandleApiCallErrors:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_retry_exhausted_on_last_attempt(self, tushare_client_mocks):
@@ -1468,7 +1477,7 @@ class TestTushareClientGetTradeCal:
         client, _, _ = tushare_client_mocks
         client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
         result = await client.get_trade_cal("20240601", "20240630", is_open=1)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         call_kwargs = client._handle_api_call.call_args
         assert call_kwargs[1]["is_open"] == "1"
 
@@ -1477,7 +1486,7 @@ class TestTushareClientGetTradeCal:
         client, _, _ = tushare_client_mocks
         client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
         result = await client.get_trade_cal("20240601", "20240630")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         call_kwargs = client._handle_api_call.call_args
         assert "is_open" not in call_kwargs[1]
 
@@ -1757,7 +1766,7 @@ class TestTushareClientSimpleApiMethods:
             return_value=pd.DataFrame({"trade_date": ["20240614"], "north_money": [100.0]})
         )
         result = await client.get_moneyflow_hsgt(trade_date="20240614")
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert result.attrs["column_units"]["north_money"] == "million_cny"
 
     @pytest.mark.asyncio
@@ -2368,7 +2377,7 @@ class TestIsRateLimitKeywordPrecision:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
                 result = await client._handle_api_call(MagicMock())
-                assert result is not None
+                assert isinstance(result, pd.DataFrame)
         # reduce_rate 被调用（rate_limit 路径，factor=0.5 降频）
         client._rate_limiter.reduce_rate.assert_called_once_with(factor=0.5)
 
@@ -2425,7 +2434,7 @@ class TestPaginatedTruncationFlag:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=1)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert result.attrs.get("truncated") is True
 
     @pytest.mark.asyncio
@@ -2443,7 +2452,7 @@ class TestPaginatedTruncationFlag:
 
         client._handle_api_call = mock_handle
         result = await client._handle_api_call_paginated(MagicMock(), max_pages=10)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         assert result.attrs.get("truncated") is not True
 
 
