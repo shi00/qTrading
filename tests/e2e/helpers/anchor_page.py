@@ -268,21 +268,38 @@ class AnchorPage:
             option_handle = await self.page.evaluate_handle(
                 """(args) => {
                     const {text} = args;
-                    const els = Array.from(document.querySelectorAll(
-                        'flt-semantics[role="button"]:not([aria-expanded])'
-                    ));
-                    return els.find(e => {
-                        const t = (e.textContent || '').trim();
+                    const selectors = [
+                        'flt-semantics[role="option"]',
+                        'flt-semantics[role="menuitem"]',
+                        'flt-semantics[role="button"]:not([aria-expanded])',
+                        'flt-semantics:not([aria-expanded])'
+                    ];
+                    const rawEls = Array.from(document.querySelectorAll(selectors.join(',')));
+                    const els = rawEls.filter(e => {
                         const r = e.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) return false;
-                        return t === text
-                            || t.startsWith(text + ' ')
-                            || t.startsWith(text + '(')
-                            || t.includes('(' + text + ')')
-                            || t.includes(text)
-                            || t.startsWith(text + '\\n')
-                            || t.endsWith('\\n' + text);
-                    }) || null;
+                        return r.width > 0 && r.height > 0;
+                    });
+
+                    const normText = text.trim();
+                    // 1. 精确匹配
+                    let found = els.find(e => (e.textContent || '').trim() === normText);
+                    if (found) return found;
+
+                    // 2. 前缀/别名匹配 (e.g. "stock_basic (股票列表)" 或 "stock_basic (Stock Basic)")
+                    found = els.find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t.startsWith(normText + ' ')
+                            || t.startsWith(normText + '(')
+                            || t.startsWith(normText + '\\n');
+                    });
+                    if (found) return found;
+
+                    // 3. 括号/包含匹配
+                    found = els.find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t.includes('(' + normText + ')') || t.includes(normText);
+                    });
+                    return found || null;
                 }""",
                 {"text": option_text},
             )

@@ -24,12 +24,13 @@ class MetaDataManager:
 
     @classmethod
     def get_table_alias(cls, table_name: str) -> str:
-        cache_key = ("table", table_name)
+        from core.i18n import I18n
+
+        locale = I18n.current_locale()
+        cache_key = ("table", table_name, locale)
         cached = cls._alias_cache.get(cache_key)
         if cached is not None:
             return cached
-
-        from core.i18n import I18n
 
         table_def = TABLE_DEFINITIONS.get(table_name)
         if table_def and "alias" in table_def:
@@ -43,7 +44,10 @@ class MetaDataManager:
 
     @classmethod
     def get_column_alias(cls, table_name: str | None, col_name: str) -> str:
-        cache_key = ("col", table_name, col_name)
+        from core.i18n import I18n
+
+        locale = I18n.current_locale()
+        cache_key = ("col", table_name, col_name, locale)
         cached = cls._alias_cache.get(cache_key)
         if cached is not None:
             return cached
