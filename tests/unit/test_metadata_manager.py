@@ -148,7 +148,7 @@ class TestPreloadAliases:
         MetaDataManager.invalidate_cache()
         MetaDataManager.preload_aliases()
         for table_name in TABLE_DEFINITIONS:
-            cache_key = ("table", table_name)
+            cache_key = ("table", table_name, mock_i18n.current_locale())
             assert cache_key in MetaDataManager._alias_cache, f"Table {table_name} not preloaded"
 
     @patch("core.i18n.I18n")
