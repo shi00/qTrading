@@ -154,6 +154,62 @@ class _WizardIds:
     TOKEN_INPUT: Eid = ("e2e.wizard.token_input", AnchorKind.INPUT)
 
 
+class _NavIds:
+    """导航栏 anchor 命名空间 (PR-4 Task 4.0/4.1)。
+
+    NavigationRailDestination.label 用 ``anchored()`` 包裹 ``ft.Text``。
+    AnchorKind=LABEL（纯展示，无点击，EID 落 textContent）。
+
+    Task 4.0 PoC 验证 T-3 不确定性：``NavigationRail(extended=False)`` 折叠态下
+    ``Semantics(container=True)`` 包裹的 label 是否仍暴露到 DOM。PASS 则 4.1 P2-1
+    nav 迁移维持 LABEL 策略；FAIL 则改用 icon ``tooltip`` 或 ``IconButton`` wrap。
+    """
+
+    MARKET: Eid = ("e2e.nav.market", AnchorKind.LABEL)
+    SCREENER: Eid = ("e2e.nav.screener", AnchorKind.LABEL)
+    BACKTEST: Eid = ("e2e.nav.backtest", AnchorKind.LABEL)
+    DATA: Eid = ("e2e.nav.data", AnchorKind.LABEL)
+    TASKS: Eid = ("e2e.nav.tasks", AnchorKind.LABEL)
+    SETTINGS: Eid = ("e2e.nav.settings", AnchorKind.LABEL)
+    WATCHLIST: Eid = ("e2e.nav.watchlist", AnchorKind.LABEL)
+
+
+class _HomeIds:
+    """首页 KPI 卡片 anchor 命名空间 (PR-4 Task 4.1, P2-2)。
+
+    ``MarketDashboard`` 组件的 KPI 卡片标题用 ``anchored()`` 包裹 ``ft.Text``。
+    AnchorKind=LABEL（纯展示，无点击，EID 落 textContent）。
+    """
+
+    KPI_SH: Eid = ("e2e.home.kpi.sh", AnchorKind.LABEL)
+    KPI_SZ: Eid = ("e2e.home.kpi.sz", AnchorKind.LABEL)
+    KPI_CYB: Eid = ("e2e.home.kpi.cyb", AnchorKind.LABEL)
+    KPI_NORTHBOUND: Eid = ("e2e.home.kpi.northbound", AnchorKind.LABEL)
+
+
+class _TaskCenterIds:
+    """任务中心 anchor 命名空间 (PR-4 Task 4.1, P2-3)。
+
+    任务行卡片整体用 ``anchored()`` 包裹（``ft.Container`` 无 ``on_click``）。
+    AnchorKind=LABEL（卡片整体纯展示，EID 落 textContent）。
+
+    task_id 来自 ``TaskRow.id``（UUID 前 12 字符，ASCII）。
+    """
+
+    TASK_LIST: Eid = ("e2e.task_center.task_list", AnchorKind.LABEL)
+
+    _TASK_ROW_PREFIX = "e2e.task_center.task_row"
+
+    @staticmethod
+    def task_row(task_id: str) -> Eid:
+        """生成单个任务行 anchor (LABEL, 卡片整体无 on_click)。
+
+        Precondition: task_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
+        """
+        return (f"{_TaskCenterIds._TASK_ROW_PREFIX}.{task_id}", AnchorKind.LABEL)
+
+
 class EIDS:
     """E2E anchor ID 命名空间根。
 
@@ -166,3 +222,6 @@ class EIDS:
     DATA = _DataIds
     BACKTEST = _BacktestIds
     WIZARD = _WizardIds
+    NAV = _NavIds
+    HOME = _HomeIds
+    TASK_CENTER = _TaskCenterIds
