@@ -141,8 +141,8 @@ class TestSliderInputRender:
 
         slider = _find_control(result, ft.Slider)
         text_field = _find_control(result, ft.TextField)
-        assert slider is not None
-        assert text_field is not None
+        assert slider is not None  # noqa: weak-assertion null-check before asserting disabled property
+        assert text_field is not None  # noqa: weak-assertion null-check before asserting disabled property
         assert slider.disabled is True
         assert text_field.disabled is True
 
