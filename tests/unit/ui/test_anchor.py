@@ -197,3 +197,184 @@ class TestEidsDetailDialog:
         eid_str, kind = EIDS.DETAIL_DIALOG.CLOSE_BUTTON
         assert eid_str == "e2e.detail_dialog.close_button"
         assert kind == AnchorKind.INTERACTIVE
+
+
+class TestEidsPr3Namespaces:
+    """PR-3 新增 EIDS.SETTINGS/DATA/BACKTEST/WIZARD 常量契约."""
+
+    def test_settings_language_dropdown(self):
+        eid_str, kind = EIDS.SETTINGS.LANGUAGE_DROPDOWN
+        assert eid_str == "e2e.settings.language_dropdown"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_settings_theme_dropdown(self):
+        eid_str, kind = EIDS.SETTINGS.THEME_DROPDOWN
+        assert eid_str == "e2e.settings.theme_dropdown"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_settings_log_level_dropdown(self):
+        eid_str, kind = EIDS.SETTINGS.LOG_LEVEL_DROPDOWN
+        assert eid_str == "e2e.settings.log_level_dropdown"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_settings_tab_static_method(self):
+        """tab(role) 生成 e2e.settings.tab.<role> 格式 EID，INTERACTIVE 类."""
+        eid_str, kind = EIDS.SETTINGS.tab("system")
+        assert eid_str == "e2e.settings.tab.system"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_data_table_dropdown(self):
+        eid_str, kind = EIDS.DATA.TABLE_DROPDOWN
+        assert eid_str == "e2e.data.dropdown.table"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_data_filter_col_dropdown(self):
+        eid_str, kind = EIDS.DATA.FILTER_COL_DROPDOWN
+        assert eid_str == "e2e.data.dropdown.filter_col"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_data_filter_op_dropdown(self):
+        eid_str, kind = EIDS.DATA.FILTER_OP_DROPDOWN
+        assert eid_str == "e2e.data.dropdown.filter_op"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_data_filter_value_input(self):
+        eid_str, kind = EIDS.DATA.FILTER_VALUE_INPUT
+        assert eid_str == "e2e.data.filter_value_input"
+        assert kind == AnchorKind.INPUT
+
+    def test_data_query_button(self):
+        eid_str, kind = EIDS.DATA.QUERY_BUTTON
+        assert eid_str == "e2e.data.query_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_data_table_ready(self):
+        """PR-478 新增 TABLE_READY EID (LABEL kind, 仅做存在性探测)."""
+        eid_str, kind = EIDS.DATA.TABLE_READY
+        assert eid_str == "e2e.data.table_ready"
+        assert kind == AnchorKind.LABEL
+
+    def test_backtest_strategy_dropdown(self):
+        eid_str, kind = EIDS.BACKTEST.STRATEGY_DROPDOWN
+        assert eid_str == "e2e.backtest.strategy_dropdown"
+        assert kind == AnchorKind.COMPLEX
+
+    def test_backtest_cancel_button(self):
+        eid_str, kind = EIDS.BACKTEST.CANCEL_BUTTON
+        assert eid_str == "e2e.backtest.cancel_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_backtest_run_button(self):
+        eid_str, kind = EIDS.BACKTEST.RUN_BUTTON
+        assert eid_str == "e2e.backtest.run_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_backtest_initial_capital_input(self):
+        eid_str, kind = EIDS.BACKTEST.INITIAL_CAPITAL_INPUT
+        assert eid_str == "e2e.backtest.initial_capital_input"
+        assert kind == AnchorKind.INPUT
+
+    def test_wizard_next_button(self):
+        eid_str, kind = EIDS.WIZARD.NEXT_BUTTON
+        assert eid_str == "e2e.wizard.next_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_wizard_prev_button(self):
+        eid_str, kind = EIDS.WIZARD.PREV_BUTTON
+        assert eid_str == "e2e.wizard.prev_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_wizard_skip_button(self):
+        eid_str, kind = EIDS.WIZARD.SKIP_BUTTON
+        assert eid_str == "e2e.wizard.skip_button"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_wizard_token_input(self):
+        eid_str, kind = EIDS.WIZARD.TOKEN_INPUT
+        assert eid_str == "e2e.wizard.token_input"
+        assert kind == AnchorKind.INPUT
+
+
+class TestEidsPr3NoPrefixNesting:
+    """PR-3 新增 EIDS 前缀嵌套冲突守护（附录 A 命名规范）.
+
+    AnchorPage._locate_by_text 用 ``=== label || startsWith(label + '.')`` 边界匹配.
+    若 EID A 是 EID B 的前缀（A = "e2e.data.dropdown", B = "e2e.data.dropdown.table"），
+    定位 A 时会误匹配 B。本测试确认所有静态 EID 两两不互为前缀.
+    """
+
+    _PR3_STATIC_EIDS = [
+        EIDS.SETTINGS.LANGUAGE_DROPDOWN[0],
+        EIDS.SETTINGS.THEME_DROPDOWN[0],
+        EIDS.SETTINGS.LOG_LEVEL_DROPDOWN[0],
+        EIDS.DATA.TABLE_DROPDOWN[0],
+        EIDS.DATA.FILTER_COL_DROPDOWN[0],
+        EIDS.DATA.FILTER_OP_DROPDOWN[0],
+        EIDS.DATA.FILTER_VALUE_INPUT[0],
+        EIDS.DATA.QUERY_BUTTON[0],
+        EIDS.DATA.TABLE_READY[0],
+        EIDS.BACKTEST.STRATEGY_DROPDOWN[0],
+        EIDS.BACKTEST.CANCEL_BUTTON[0],
+        EIDS.BACKTEST.RUN_BUTTON[0],
+        EIDS.BACKTEST.INITIAL_CAPITAL_INPUT[0],
+        EIDS.WIZARD.NEXT_BUTTON[0],
+        EIDS.WIZARD.PREV_BUTTON[0],
+        EIDS.WIZARD.SKIP_BUTTON[0],
+        EIDS.WIZARD.TOKEN_INPUT[0],
+    ]
+
+    def test_no_static_eid_is_prefix_of_another(self):
+        """任两个静态 EID 互不为前缀（边界匹配安全）."""
+        for i, a in enumerate(self._PR3_STATIC_EIDS):
+            for b in self._PR3_STATIC_EIDS[i + 1 :]:
+                assert not b.startswith(a + "."), f"{a} 是 {b} 的前缀（定位误匹配风险）"
+                assert not a.startswith(b + "."), f"{b} 是 {a} 的前缀（定位误匹配风险）"
+
+    def test_settings_tab_prefix_not_prefix_of_static(self):
+        """tab 动态前缀 e2e.settings.tab 不与 settings 静态 EID 前缀嵌套."""
+        tab_prefix = EIDS.SETTINGS._TAB_PREFIX
+        for eid in self._PR3_STATIC_EIDS:
+            if eid.startswith("e2e.settings."):
+                assert not eid.startswith(tab_prefix + "."), f"tab 前缀 {tab_prefix} 是 {eid} 的前缀（定位误匹配风险）"
+                assert not tab_prefix.startswith(eid + "."), f"{eid} 是 tab 前缀 {tab_prefix} 的前缀（定位误匹配风险）"
+
+
+class TestEidsNoSuffixOverlap:
+    """EID 后缀重叠守护（PR-478 CI 回归）.
+
+    AnchorPage._locator_by_aria 用 ``[aria-label$=EID]`` 后缀匹配（PR-478 修复
+    strict mode violation: ``e2e.settings.tab.data`` 子串匹配误命中
+    ``e2e.settings.tab.database``）。若 EID A 是 EID B 的后缀，定位 A 会误匹配 B。
+    本测试确认所有动态 tab EID 两两不互为后缀.
+    """
+
+    # _TAB_CONFIG 的全部 role（见 ui/views/settings_view.py）
+    _TAB_ROLES = ["data", "database", "ai", "tasks", "notify", "system"]
+
+    def test_no_tab_eid_is_suffix_of_another(self):
+        """任两个 tab EID 互不为后缀（后缀匹配安全）.
+
+        回归场景：``e2e.settings.tab.data`` 与 ``e2e.settings.tab.database``
+        在 ``*=`` 子串匹配下会同时命中前者（data 是 database 的前缀），
+        导致 strict mode violation。``$=`` 后缀匹配规避此前缀重叠，
+        但仍需守护后缀重叠（如假设新增 ``base`` tab 会与 ``database`` 后缀重叠）。
+        """
+        tab_eids = [EIDS.SETTINGS.tab(role)[0] for role in self._TAB_ROLES]
+        for i, a in enumerate(tab_eids):
+            for b in tab_eids[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
+
+    def test_static_eids_no_suffix_overlap(self):
+        """所有静态 EID（含 SCREENER/DETAIL_DIALOG）两两不互为后缀."""
+        all_static = [
+            EIDS.SCREENER.STRATEGY_DROPDOWN[0],
+            EIDS.SCREENER.RUN_BUTTON[0],
+            EIDS.SCREENER.EXPORT_CSV_BUTTON[0],
+            EIDS.SCREENER.EXPORT_EXCEL_BUTTON[0],
+            EIDS.DETAIL_DIALOG.CLOSE_BUTTON[0],
+        ] + TestEidsPr3NoPrefixNesting._PR3_STATIC_EIDS
+        for i, a in enumerate(all_static):
+            for b in all_static[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"

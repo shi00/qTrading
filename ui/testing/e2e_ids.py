@@ -100,6 +100,60 @@ class _DetailDialogIds:
     CLOSE_BUTTON: Eid = ("e2e.detail_dialog.close_button", AnchorKind.INTERACTIVE)
 
 
+class _SettingsIds:
+    """设置页 anchor 命名空间。"""
+
+    LANGUAGE_DROPDOWN: Eid = ("e2e.settings.language_dropdown", AnchorKind.COMPLEX)
+    THEME_DROPDOWN: Eid = ("e2e.settings.theme_dropdown", AnchorKind.COMPLEX)
+    LOG_LEVEL_DROPDOWN: Eid = ("e2e.settings.log_level_dropdown", AnchorKind.COMPLEX)
+
+    _TAB_PREFIX = "e2e.settings.tab"
+
+    @staticmethod
+    def tab(role: str) -> Eid:
+        """生成 Tab 按钮 anchor（ft.Button，走 INTERACTIVE aria-label 通道）。
+
+        role 是 tab 角色名（ASCII，如 data/database/ai/tasks/notify/system），
+        从 _TAB_CONFIG 的 i18n_key 去掉 ``settings_tab_`` 前缀派生。
+
+        Precondition: role 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_SettingsIds._TAB_PREFIX}.{role}", AnchorKind.INTERACTIVE)
+
+
+class _DataIds:
+    """数据浏览器页 anchor 命名空间。"""
+
+    TABLE_DROPDOWN: Eid = ("e2e.data.dropdown.table", AnchorKind.COMPLEX)
+    FILTER_COL_DROPDOWN: Eid = ("e2e.data.dropdown.filter_col", AnchorKind.COMPLEX)
+    FILTER_OP_DROPDOWN: Eid = ("e2e.data.dropdown.filter_op", AnchorKind.COMPLEX)
+    FILTER_VALUE_INPUT: Eid = ("e2e.data.filter_value_input", AnchorKind.INPUT)
+    QUERY_BUTTON: Eid = ("e2e.data.query_button", AnchorKind.INTERACTIVE)
+    # PR-478 修复: 表格就绪信号 (LABEL, 仅做存在性探测). 仅在
+    # tables_loaded=True + table_columns 非空 + is_loading=False 时渲染.
+    # 切表时 reset_table_state 清空 table_columns → 信号先消失, 加载完成后再现,
+    # 让 E2E 可以等待真实加载完成而非固定 sleep.
+    TABLE_READY: Eid = ("e2e.data.table_ready", AnchorKind.LABEL)
+
+
+class _BacktestIds:
+    """回测页 anchor 命名空间。"""
+
+    STRATEGY_DROPDOWN: Eid = ("e2e.backtest.strategy_dropdown", AnchorKind.COMPLEX)
+    CANCEL_BUTTON: Eid = ("e2e.backtest.cancel_button", AnchorKind.INTERACTIVE)
+    RUN_BUTTON: Eid = ("e2e.backtest.run_button", AnchorKind.INTERACTIVE)
+    INITIAL_CAPITAL_INPUT: Eid = ("e2e.backtest.initial_capital_input", AnchorKind.INPUT)
+
+
+class _WizardIds:
+    """向导页 anchor 命名空间。"""
+
+    NEXT_BUTTON: Eid = ("e2e.wizard.next_button", AnchorKind.INTERACTIVE)
+    PREV_BUTTON: Eid = ("e2e.wizard.prev_button", AnchorKind.INTERACTIVE)
+    SKIP_BUTTON: Eid = ("e2e.wizard.skip_button", AnchorKind.INTERACTIVE)
+    TOKEN_INPUT: Eid = ("e2e.wizard.token_input", AnchorKind.INPUT)
+
+
 class EIDS:
     """E2E anchor ID 命名空间根。
 
@@ -108,3 +162,7 @@ class EIDS:
 
     SCREENER = _ScreenerIds
     DETAIL_DIALOG = _DetailDialogIds
+    SETTINGS = _SettingsIds
+    DATA = _DataIds
+    BACKTEST = _BacktestIds
+    WIZARD = _WizardIds

@@ -23,6 +23,8 @@ import flet as ft
 
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
@@ -192,13 +194,16 @@ def SettingsView(active: bool = True) -> ft.Container:
 
     # --- Tab bar ---
     tab_buttons = [
-        ft.Button(
-            content=I18n.get(key),
-            icon=icon,
-            tooltip=I18n.get(key),
-            data=str(i),
-            on_click=safe_on_click(_on_tab_click),
-            style=_get_tab_button_style(is_selected=(i == current_tab)),
+        anchored(
+            EIDS.SETTINGS.tab(key.replace("settings_tab_", "")),
+            ft.Button(
+                content=I18n.get(key),
+                icon=icon,
+                tooltip=I18n.get(key),
+                data=str(i),
+                on_click=safe_on_click(_on_tab_click),
+                style=_get_tab_button_style(is_selected=(i == current_tab)),
+            ),
         )
         for i, (key, icon) in enumerate(_TAB_CONFIG)
     ]

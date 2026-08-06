@@ -592,7 +592,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         self._set_state(tables_loaded=False)
 
     def reset_table_state(self):
-        """Reset pagination, sort, and filter state for a table switch."""
+        """Reset pagination, sort, and filter state for a table switch.
+
+        PR-478 修复: 同时清空 table_columns/numeric_cols/table_rows/total_rows,
+        使切表后 TABLE_READY EID 能可靠地从「消失」翻转到「出现」(等待真实
+        加载状态而非上一张表遗留状态). TABLE_DROPDOWN 的 on_change → _do_table_change
+        调用本方法在 set_table 之后、load_table_schema 之前执行.
+        """
         self._set_state(
             current_page=1,
             sort_col_index=None,
@@ -600,6 +606,10 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             filter_col=None,
             filter_op="=",
             filter_val="",
+            table_columns=(),
+            numeric_cols=frozenset(),
+            table_rows=(),
+            total_rows=0,
             error_message=None,
         )
 

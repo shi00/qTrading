@@ -45,6 +45,8 @@ from ui.components.flet_type_helpers import (
 )
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
@@ -1016,12 +1018,15 @@ def OnboardingWizard(
     if config.show_prev:
         is_sync_step = config.id == "data_sync"
         nav_buttons.append(
-            ft.Button(
-                content=I18n.get("wizard_btn_prev"),
-                icon=ft.Icons.ARROW_BACK,
-                on_click=safe_on_click(_on_prev),
-                style=AppStyles.secondary_button(),
-                disabled=(state.sync_in_progress and is_sync_step) or state.validation_in_progress,
+            anchored(
+                EIDS.WIZARD.PREV_BUTTON,
+                ft.Button(
+                    content=I18n.get("wizard_btn_prev"),
+                    icon=ft.Icons.ARROW_BACK,
+                    on_click=safe_on_click(_on_prev),
+                    style=AppStyles.secondary_button(),
+                    disabled=(state.sync_in_progress and is_sync_step) or state.validation_in_progress,
+                ),
             )
         )
     else:
@@ -1029,21 +1034,27 @@ def OnboardingWizard(
 
     if config.show_skip:
         nav_buttons.append(
-            ft.TextButton(
-                content=I18n.get(config.skip_text_key),
-                on_click=safe_on_click(_on_skip),
-                disabled=state.validation_in_progress,
+            anchored(
+                EIDS.WIZARD.SKIP_BUTTON,
+                ft.TextButton(
+                    content=I18n.get(config.skip_text_key),
+                    on_click=safe_on_click(_on_skip),
+                    disabled=state.validation_in_progress,
+                ),
             )
         )
 
     if config.show_next:
         nav_buttons.append(
-            ft.Button(
-                content=I18n.get(config.next_text_key),
-                icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
-                on_click=safe_on_click(_on_next),
-                style=AppStyles.primary_button(),
-                disabled=state.validation_in_progress,
+            anchored(
+                EIDS.WIZARD.NEXT_BUTTON,
+                ft.Button(
+                    content=I18n.get(config.next_text_key),
+                    icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
+                    on_click=safe_on_click(_on_next),
+                    style=AppStyles.primary_button(),
+                    disabled=state.validation_in_progress,
+                ),
             )
         )
 

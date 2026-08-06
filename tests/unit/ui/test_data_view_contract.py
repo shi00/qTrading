@@ -1200,8 +1200,9 @@ class TestTableViewerTabEventHandlers:
         calls = [c[0] for c in vm.method_calls]
         assert "set_filter" in calls
         assert "query_data" in calls
-        # query_data should be called with page=1
-        query_call = next(c for c in vm.method_calls if c[0] == "query_data")
+        # PR-478: mount 的 _load_initial_table 也会调 query_data() (无 page 参数),
+        # 需过滤出 click handler 触发的带 page 参数的调用
+        query_call = next(c for c in vm.method_calls if c[0] == "query_data" and "page" in c[1])
         assert query_call[1].get("page") == 1
 
     def test_on_refresh_click_triggers_query(
@@ -1322,7 +1323,8 @@ class TestTableViewerTabEventHandlers:
         assert btn_prev is not None
         btn_prev.on_click(MagicMock())
 
-        query_call = next(c for c in vm.method_calls if c[0] == "query_data")
+        # PR-478: 过滤出 click handler 触发的带 page 参数的 query_data 调用
+        query_call = next(c for c in vm.method_calls if c[0] == "query_data" and "page" in c[1])
         assert query_call[1].get("page") == 2
 
     def test_on_prev_page_disabled_on_page_1(
@@ -1344,8 +1346,10 @@ class TestTableViewerTabEventHandlers:
         btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
         btn_prev.on_click(MagicMock())
 
-        calls = [c[0] for c in vm.method_calls]
-        assert "query_data" not in calls
+        # PR-478: mount 的 _load_initial_table 会调 query_data() (无 page 参数),
+        # 点击 disabled 按钮不应产生带 page 参数的 query_data 调用
+        query_calls_with_page = [c for c in vm.method_calls if c[0] == "query_data" and "page" in c[1]]
+        assert not query_calls_with_page
 
     def test_on_next_page_triggers_query(
         self,
@@ -1372,7 +1376,8 @@ class TestTableViewerTabEventHandlers:
         assert btn_next is not None
         btn_next.on_click(MagicMock())
 
-        query_call = next(c for c in vm.method_calls if c[0] == "query_data")
+        # PR-478: 过滤出 click handler 触发的带 page 参数的 query_data 调用
+        query_call = next(c for c in vm.method_calls if c[0] == "query_data" and "page" in c[1])
         assert query_call[1].get("page") == 2
 
     def test_on_next_page_disabled_on_last_page(
@@ -1400,8 +1405,10 @@ class TestTableViewerTabEventHandlers:
         btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
         btn_next.on_click(MagicMock())
 
-        calls = [c[0] for c in vm.method_calls]
-        assert "query_data" not in calls
+        # PR-478: mount 的 _load_initial_table 会调 query_data() (无 page 参数),
+        # 点击 disabled 按钮不应产生带 page 参数的 query_data 调用
+        query_calls_with_page = [c for c in vm.method_calls if c[0] == "query_data" and "page" in c[1]]
+        assert not query_calls_with_page
 
     def test_on_export_current_triggers_export(
         self,
@@ -1584,13 +1591,22 @@ class TestTableViewerTabEventHandlers:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """tables_loaded=False 时 _init_tables 调用 vm.init_tables。"""
+        """tables_loaded=False 时 _init_tables 调用 vm.init_tables。
+
+        PR-478: effect 拆分后 _init_tables 只调 init_tables 并设 tables_loaded=True,
+        _load_initial_table 消费 tables_loaded=True 调 load_table_schema/query_data.
+        测试需 run_render_effects 模拟 tables_loaded 变化后的重渲染.
+        """
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(tables_loaded=False))
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
+        # 模拟 init_tables 设 tables_loaded=True 后的重渲染, 触发 _load_initial_table
+        # _mount 的第二次 render_once 已将 deps 设为 [True,True], prev_deps 为 [False,True],
+        # 直接调 _run_render_effects 检测到 deps 变化并重调度 (不调 render_once 以免 prev_deps 被刷新)
+        component._run_render_effects()
 
         calls = [c[0] for c in vm.method_calls]
         assert "init_tables" in calls
@@ -1912,7 +1928,11 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_load_schema_and_data: vm.load_table_schema 抛 Exception → show_toast。"""
+        """_load_schema_and_data: vm.load_table_schema 抛 Exception → show_toast。
+
+        PR-478: effect 拆分后异常处理在 _load_initial_table, 需 run_render_effects
+        模拟 tables_loaded 变化后的重渲染才能触发 _load_schema_and_data.
+        """
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(tables_loaded=False))
@@ -1924,6 +1944,9 @@ class TestTableViewerTabAsyncErrorPaths:
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
+        # 模拟 init_tables 设 tables_loaded=True 后的重渲染, 触发 _load_initial_table
+        # → _load_schema_and_data → load_table_schema 抛异常 → show_toast
+        component._run_render_effects()
 
         page.show_toast.assert_called_once()
 

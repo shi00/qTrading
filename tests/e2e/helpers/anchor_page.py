@@ -48,8 +48,24 @@ class AnchorPage:
     # ----------------------------------------------------------------
 
     def _locator_by_aria(self, eid_str: str) -> Locator:
-        """INTERACTIVE/INPUT: [aria-label=EID] 独立节点."""
-        return self.page.locator(f'flt-semantics[aria-label="{eid_str}"]')
+        """INTERACTIVE/INPUT: 命中 aria-label 节点。
+
+        Flet 0.86.3 CanvasKit 引擎将 ft.Semantics(label=EID) 与内层 Button 自带 label
+        合并为 "<显示名>\\nEID"（见 e2e-artifacts/*-semantics.json 快照，与
+        flet_page.py:440 已有的合并注释一致）；INPUT 类 ft.TextField 无自身 semantic
+        label，保留纯 EID 形态。两种形态均以 EID **结尾**，用 CSS 后缀匹配 ``$=``
+        精确命中。
+
+        为什么不用 ``*=`` 子串匹配：EID 命名空间存在前缀重叠（如
+        ``e2e.settings.tab.data`` 是 ``e2e.settings.tab.database`` 的前缀），
+        ``*=`` 会同时匹配两者导致 strict mode violation（PR-478 CI 实证）。
+        ``$=`` 要求 aria-label 以 EID 结尾，前缀重叠不再误命中。
+
+        无后缀重叠由 ui/testing/e2e_ids.py 的 EID 命名规范 +
+        tests/unit/ui/test_anchor.py 的 no-prefix 断言保证（附录 A 命名规范
+        禁止 EID 之间互为后缀）。
+        """
+        return self.page.locator(f'flt-semantics[aria-label$="{eid_str}"]')
 
     async def _locate_by_text(
         self, eid_str: str, exact: bool, role_filter: str | None = None
@@ -122,7 +138,7 @@ class AnchorPage:
         """
         outer = self._locator_by_aria(eid_str)
         await outer.wait_for(state="attached", timeout=self._tm(timeout_ms))
-        inner = self.page.locator(f'flt-semantics[aria-label="{eid_str}"] flt-semantics[flt-tappable]').first
+        inner = outer.first.locator("flt-semantics[flt-tappable]").first
         try:
             await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
             box = await inner.bounding_box()
@@ -143,9 +159,7 @@ class AnchorPage:
         """INPUT: 定位 [aria-label] 后代 input/textarea 并返回 bbox."""
         outer = self._locator_by_aria(eid_str)
         await outer.wait_for(state="attached", timeout=self._tm(timeout_ms))
-        inner = self.page.locator(
-            f'flt-semantics[aria-label="{eid_str}"] input, flt-semantics[aria-label="{eid_str}"] textarea'
-        ).first
+        inner = outer.first.locator("input, textarea").first
         await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
         box = await inner.bounding_box()
         if not box:
@@ -233,19 +247,127 @@ class AnchorPage:
         Dropdown 是 COMPLEX kind, 顶层节点即可点击展开.
         option 面板节点由 Flet 动态生成, 无 anchor 覆盖, 仍用文本匹配.
         剩余风险: 同视图两个 Dropdown 出现同名选项 - EIDS 命名规范强制唯一.
+
+        PR-478 修复 (4 个复合缺陷, 见 reviews/问题定位.md):
+        - C1: ``self.click(...)`` 后主动 poll ``aria-expanded="true"``, 未展开
+              立即抛错 ``dropdown did not expand``, 不再静默等待选项 20s.
+        - C2: 选项点击用 ``page.mouse.click(cx, cy)`` 坐标点击, 与
+              ``AnchorPage.click`` 一致, 绕开 CanvasKit ``flt-semantics`` 上
+              不稳定的 actionability 检查.
+        - C3: 选项定位用精确文本匹配 (等值 / 空格 / ``(`` / ``\\n`` 分隔) 取代
+              ``filter(has_text=...)`` 子串匹配, 避免短文本 (如"代码") 误命中.
+        - C4: 展开前若残留 ``aria-expanded="true"`` 按 ``Escape`` 先收合, 避免
+              第二次 click 被 Material 3 DropdownMenu 解读为"关闭"而非"打开".
+        - 原有"收合校验"逻辑保留 (``selection did not settle``), 向后兼容.
         """
         eid_str, kind = dropdown_eid
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
-        await self.click(dropdown_eid, timeout_ms=timeout_ms)
-        option_loc = (
-            self.page.locator('flt-semantics[role="button"]:not([aria-expanded])').filter(has_text=option_text).first
-        )
-        await option_loc.wait_for(state="visible", timeout=self._tm(5000))
-        box = await option_loc.bounding_box()
-        if not box:
-            raise RuntimeError(f"AnchorPage.select_option: no bbox for option '{option_text}'")
-        await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+        async def _find_option_element() -> Any:
+            option_handle = await self.page.evaluate_handle(
+                """(args) => {
+                    const {text} = args;
+                    const selectors = [
+                        'flt-semantics[role="option"]',
+                        'flt-semantics[role="menuitem"]',
+                        'flt-semantics[role="button"]:not([aria-expanded])',
+                        'flt-semantics:not([aria-expanded])'
+                    ];
+                    const rawEls = Array.from(document.querySelectorAll(selectors.join(',')));
+                    const els = rawEls.filter(e => {
+                        const r = e.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+
+                    const normText = text.trim();
+                    // 1. 精确匹配
+                    let found = els.find(e => (e.textContent || '').trim() === normText);
+                    if (found) return found;
+
+                    // 2. 前缀/别名匹配 (e.g. "stock_basic (股票列表)" 或 "stock_basic (Stock Basic)")
+                    found = els.find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t.startsWith(normText + ' ')
+                            || t.startsWith(normText + '(')
+                            || t.startsWith(normText + '\\n');
+                    });
+                    if (found) return found;
+
+                    // 3. 括号/包含匹配
+                    found = els.find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t.includes('(' + normText + ')') || t.includes(normText);
+                    });
+                    return found || null;
+                }""",
+                {"text": option_text},
+            )
+            return option_handle.as_element()
+
+        # 1. 优先探测选项是否已经在 DOM 中呈展开态
+        option_element = await _find_option_element()
+        if not option_element:
+            # 展开菜单：获取 Dropdown bbox
+            r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
+            box = self._normalize_box(r)
+
+            # 策略 A: 点击右侧下拉箭角 (width - 15px), 直接触发表单展开
+            arrow_x = box["x"] + max(box["width"] - 15.0, box["width"] / 2)
+            arrow_y = box["y"] + box["height"] / 2
+            await self.page.mouse.click(arrow_x, arrow_y)
+
+            # 短轮询等待选项出现（600ms 内）
+            quick_deadline = time.monotonic() + 0.6
+            while time.monotonic() < quick_deadline:
+                option_element = await _find_option_element()
+                if option_element:
+                    break
+                await self.page.wait_for_timeout(100)
+
+            # 策略 B: 若未出现，点击中心并按 ArrowDown 强制唤起下拉
+            if not option_element:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await self.page.mouse.click(cx, cy)
+                await self.page.keyboard.press("ArrowDown")
+
+                expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+                while time.monotonic() < expand_deadline:
+                    option_element = await _find_option_element()
+                    if option_element:
+                        break
+                    await self.page.wait_for_timeout(100)
+
+        if not option_element:
+            raise RuntimeError(
+                f"AnchorPage.select_option: option not found in dropdown menu: "
+                f"dropdown={eid_str!r}, option={option_text!r}"
+            )
+
+        # 2. 用 force=True 强力点击选项，在 ElementHandle 被 DOM 卸载时重新获取
+        for click_attempt in range(3):
+            try:
+                await option_element.click(force=True)
+                break
+            except Exception as click_err:
+                if click_attempt < 2 and "not attached" in str(click_err).lower():
+                    await self.page.wait_for_timeout(150)
+                    fresh_elem = await _find_option_element()
+                    if fresh_elem:
+                        option_element = fresh_elem
+                        continue
+                raise
+
+        # 3. 等待菜单收合与 Flet 事件循环处理
+        settle_deadline = time.monotonic() + 1.0
+        while time.monotonic() < settle_deadline:
+            try:
+                if not await option_element.is_visible():
+                    break
+            except Exception:
+                break
+            await self.page.wait_for_timeout(100)
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count
