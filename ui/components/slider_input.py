@@ -164,6 +164,9 @@ def SliderInput(
                 color=AppColors.TEXT_SECONDARY,
             )
         )
+    # 根因防范 (PR #472 E2E 修复): 将包含 Slider(expand=True) 的水平 Row 包裹在固定 height=38
+    # 的 Container 约束中，在 SliderInput 内部提供明确的垂直高度界限，防止 Expand 组件在外部
+    # 无限高父元素 (如无约束 Row/Wrap) 中向上传导 Unbounded Height 导致整个控制视图膨胀崩溃。
     column_controls.append(
         ft.Container(
             content=ft.Row(

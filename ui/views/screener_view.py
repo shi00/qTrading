@@ -924,6 +924,11 @@ def ScreenerView(
         for group_name, title, controls in rendered_groups:
             if group_name == "advanced":
                 continue
+            # 根因防范 (PR #472 E2E 修复): Flutter CanvasKit 渲染引擎下，当 ft.Row(wrap=True) 包含
+            # 带有 expand=True (如 SliderInput 内部 Slider) 的控件时，Wrap 交叉轴 (高度) 测量由于缺乏
+            # 确定的最大高度限制而陷入无界递归 (Unbounded Height)，导致 control_card 膨胀至数千像素
+            # 填满视口，并将下方 table_card 高度压塌为 0 (致使 E2E 表格 DOM 语义节点无法生成)。
+            # 此处将每个参数控件封装在 height=60 的 Container 约束容器中，保证 Wrap 计算出确定高度。
             wrapped_controls = [ft.Container(content=c, height=60) for c in controls]
             result.append(
                 ft.Container(
