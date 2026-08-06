@@ -291,19 +291,26 @@ class FletPage:
                 self.page.locator(f'[role="menuitem"][aria-label*="{opt_match_key}" i]').first,
             ]
 
+        async def _is_loc_rendered(loc) -> bool:
+            try:
+                if await loc.count() > 0:
+                    return await loc.evaluate(
+                        "e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }"
+                    )
+            except Exception:
+                pass
+            return False
+
         async def check_option_visible() -> bool:
             for loc in get_option_locators():
-                try:
-                    if await loc.count() > 0 and await loc.is_visible():
-                        return True
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("check_option_visible: locator check failed: %s", exc)
+                if await _is_loc_rendered(loc):
+                    return True
             return False
 
         async def click_option() -> bool:
             for idx, loc in enumerate(get_option_locators()):
                 try:
-                    if await loc.count() > 0 and await loc.is_visible():
+                    if await _is_loc_rendered(loc):
                         if logger.isEnabledFor(logging.DEBUG):
                             desc = await loc.evaluate("""e => ({
                                 tag: e.tagName,

@@ -46,7 +46,7 @@ async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_w
     """
     # 1. 验证欢迎页
     welcome_guide = I18n.get("wizard_welcome_guide")
-    await embedded_real_wizard_page.expect_text(welcome_guide)
+    await embedded_real_wizard_page.expect_text(welcome_guide, timeout_ms=TIMEOUTS.PAGE_OPEN)
 
     # 2. 点击 "开始使用" 进入 database step
     btn_start = I18n.get("wizard_btn_start")

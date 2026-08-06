@@ -429,7 +429,7 @@ def _spawn_app_session(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
-            "locale": "zh",
+            "locale": "zh_CN",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
             "embedded_pg_data_root": str(data_root),
@@ -1470,7 +1470,7 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
-            "locale": "zh",
+            "locale": "zh_CN",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
             "embedded_pg_data_root": str(data_root),
@@ -1559,7 +1559,7 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
-            "locale": "zh",
+            "locale": "zh_CN",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(fake_sidecar_path),
         },
@@ -1630,7 +1630,7 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
-            "locale": "zh",
+            "locale": "zh_CN",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),
             "embedded_pg_data_root": str(data_root),
@@ -1676,7 +1676,7 @@ def embedded_real_flet_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
-            "locale": "zh",
+            "locale": "zh_CN",
             "onboarding_complete": True,
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(real_sidecar_binary_e2e),

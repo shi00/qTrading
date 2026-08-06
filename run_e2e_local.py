@@ -36,12 +36,13 @@ def main() -> int:
     print(f"Workroot={workroot}")
     print("-" * 80)
 
+    test_targets = sys.argv[1:] if len(sys.argv) > 1 else ["tests/e2e/"]
+
     cmd = [
         sys.executable,
         "-m",
         "pytest",
-        "tests/e2e/test_screener_flow.py::test_detail_dialog_open_close",
-        "tests/e2e/test_screener_flow.py::test_detail_dialog_outside_click_close",
+        *test_targets,
         "-o",
         "addopts=",
         "-p",

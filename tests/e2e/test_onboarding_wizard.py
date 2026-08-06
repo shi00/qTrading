@@ -41,7 +41,7 @@ def _parse_db_url(url: str) -> dict[str, str]:
 async def test_wizard_renders_welcome(wizard_page):
     """测试：向导启动后停在欢迎页。"""
     welcome_guide = I18n.get("wizard_welcome_guide")
-    await wizard_page.expect_text(welcome_guide)
+    await wizard_page.expect_text(welcome_guide, timeout_ms=TIMEOUTS.PAGE_OPEN)
 
     db_title = I18n.get("wizard_overview_db_title")
     assert await wizard_page.has_text(db_title)
@@ -72,12 +72,6 @@ async def test_wizard_language_switch(wizard_page):
 
         assert zh_disappeared, f"中文欢迎词 '{welcome_guide_zh}' 未能在切换语言后消失"
     finally:
-        # [PITFALL FIX] 必须还原 wizard_app 内存中的 I18n locale！
-        # 坑点：pristine_config fixture 只还原磁盘配置文件和测试进程 I18n，
-        #       但 wizard_app 是 session 级单进程，其内存中的 I18n._locale 仍是 en_US。
-        #       这会导致后续 wizard 测试寻找中文 "开始使用" 按钮时全部超时失败。
-        # 应对：通过 UI 主动切换回中文，触发 app 进程的 I18n.set_locale("zh_CN")。
-        # 此时 app 已是英文界面，dropdown label 显示为 "Language"。
         lang_label_en = I18n.get("settings_language", locale="en_US")
         try:
             await wizard_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=TIMEOUTS.INTERACTION)
@@ -87,8 +81,8 @@ async def test_wizard_language_switch(wizard_page):
                     break
                 await wizard_page.page.wait_for_timeout(200)
         except Exception as e:  # noqa: BLE001
-            # 还原失败时不抛出，避免掩盖原始测试失败；下游测试会显式失败暴露问题
             logger.warning("[onboarding_wizard] restore language to zh failed: %s", e, exc_info=True)
+            I18n.set_locale("zh_CN")
 
 
 async def test_wizard_forward_then_back(wizard_page):

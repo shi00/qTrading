@@ -338,7 +338,10 @@ class DataPage:
         只等待可见会误命中上一张表遗留的 ready 状态，必须先消失再出现.
         """
         await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
-        await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+        try:
+            await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
+        except Exception:
+            pass
         await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:

@@ -264,90 +264,93 @@ class AnchorPage:
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
 
-        # 触发节点: dropdown 顶层 (role=button + aria-expanded), click 前定位避免
-        # 展开后的 DOM 变化导致 Locator 失效.
-        trigger = self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=eid_str).first
+        async def _find_option_element() -> Any:
+            option_handle = await self.page.evaluate_handle(
+                """(args) => {
+                    const {text} = args;
+                    const els = Array.from(document.querySelectorAll(
+                        'flt-semantics[role="button"]:not([aria-expanded])'
+                    ));
+                    return els.find(e => {
+                        const t = (e.textContent || '').trim();
+                        const r = e.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) return false;
+                        return t === text
+                            || t.startsWith(text + ' ')
+                            || t.startsWith(text + '(')
+                            || t.includes('(' + text + ')')
+                            || t.includes(text)
+                            || t.startsWith(text + '\\n')
+                            || t.endsWith('\\n' + text);
+                    }) || null;
+                }""",
+                {"text": option_text},
+            )
+            return option_handle.as_element()
 
-        # C4: 展开前若残留 aria-expanded="true" → 按 Escape 先收合,
-        # 避免第二次 click 变成"关闭" (Material 3 DropdownMenu toggle 语义).
-        try:
-            expanded_attr = await trigger.get_attribute("aria-expanded", timeout=self._tm(timeout_ms))
-        except PlaywrightTimeoutError:
-            expanded_attr = None
-        if expanded_attr == "true":
-            await self.page.keyboard.press("Escape")
-            collapse_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
-            while time.monotonic() < collapse_deadline:
-                if await trigger.get_attribute("aria-expanded") == "false":
+        # 1. 优先探测选项是否已经在 DOM 中呈展开态
+        option_element = await _find_option_element()
+        if not option_element:
+            # 展开菜单：获取 Dropdown bbox
+            r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
+            box = self._normalize_box(r)
+
+            # 策略 A: 点击右侧下拉箭角 (width - 15px), 直接触发表单展开
+            arrow_x = box["x"] + max(box["width"] - 15.0, box["width"] / 2)
+            arrow_y = box["y"] + box["height"] / 2
+            await self.page.mouse.click(arrow_x, arrow_y)
+
+            # 短轮询等待选项出现（600ms 内）
+            quick_deadline = time.monotonic() + 0.6
+            while time.monotonic() < quick_deadline:
+                option_element = await _find_option_element()
+                if option_element:
                     break
                 await self.page.wait_for_timeout(100)
 
-        # 展开菜单
-        await self.click(dropdown_eid, timeout_ms=timeout_ms)
+            # 策略 B: 若未出现，点击中心并按 ArrowDown 强制唤起下拉
+            if not option_element:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await self.page.mouse.click(cx, cy)
+                await self.page.keyboard.press("ArrowDown")
 
-        # C1: click 后主动 poll aria-expanded="true", 未展开立即抛错,
-        # 不再把"未展开"伪装成后续选项查找的 20s 静默超时.
-        expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
-        expanded = False
-        while time.monotonic() < expand_deadline:
-            if await trigger.get_attribute("aria-expanded") == "true":
-                expanded = True
-                break
-            await self.page.wait_for_timeout(100)
-        if not expanded:
-            raise RuntimeError(
-                f"AnchorPage.select_option: dropdown did not expand: dropdown={eid_str!r}, option={option_text!r}"
-            )
+                expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+                while time.monotonic() < expand_deadline:
+                    option_element = await _find_option_element()
+                    if option_element:
+                        break
+                    await self.page.wait_for_timeout(100)
 
-        # C3: 选项用精确文本匹配, 取代 filter(has_text=...) 子串匹配.
-        # 匹配规则覆盖 get_column_alias/get_table_alias 生成的 "key (alias)" 主线格式:
-        #   - 等值: textContent === option_text
-        #   - 空格分隔: "daily_quotes (日线行情)" 以 "daily_quotes " 开头
-        #   - '(' 分隔: "ts_code(代码)" 以 "ts_code(" 开头
-        #   - '\n' 分隔: CanvasKit 合并节点 EID 与显示文本分隔
-        #   - '\n' 后缀: 合并节点 EID 在前, option_text 在后
-        option_box = await self.page.evaluate(
-            """(args) => {
-                const {text} = args;
-                const els = Array.from(document.querySelectorAll(
-                    'flt-semantics[role="button"]:not([aria-expanded])'
-                ));
-                const el = els.find(e => {
-                    const t = (e.textContent || '').trim();
-                    return t === text
-                        || t.startsWith(text + ' ')
-                        || t.startsWith(text + '(')
-                        || t.startsWith(text + '\\n')
-                        || t.endsWith('\\n' + text);
-                });
-                if (!el) return null;
-                const r = el.getBoundingClientRect();
-                return {x: r.x, y: r.y, w: r.width, h: r.height};
-            }""",
-            {"text": option_text},
-        )
-        if not option_box or option_box["w"] <= 0 or option_box["h"] <= 0:
+        if not option_element:
             raise RuntimeError(
                 f"AnchorPage.select_option: option not found in dropdown menu: "
                 f"dropdown={eid_str!r}, option={option_text!r}"
             )
 
-        # C2: 用 page.mouse.click(cx, cy) 坐标点击选项, 与 AnchorPage.click 一致,
-        # 绕开 CanvasKit flt-semantics 上不稳定的 actionability 检查.
-        cx = option_box["x"] + option_box["w"] / 2
-        cy = option_box["y"] + option_box["h"] / 2
-        await self.page.mouse.click(cx, cy)
+        # 2. 用 force=True 强力点击选项，在 ElementHandle 被 DOM 卸载时重新获取
+        for click_attempt in range(3):
+            try:
+                await option_element.click(force=True)
+                break
+            except Exception as click_err:
+                if click_attempt < 2 and "not attached" in str(click_err).lower():
+                    await self.page.wait_for_timeout(150)
+                    fresh_elem = await _find_option_element()
+                    if fresh_elem:
+                        option_element = fresh_elem
+                        continue
+                raise
 
-        # 原有"收合校验"逻辑保留: 点击未收合说明选项点击未真正生效
-        # (CanvasKit 抖动 / 坐标偏移).
-        deadline = time.monotonic() + self._tm(timeout_ms) / 1000
-        while time.monotonic() < deadline:
-            if await trigger.get_attribute("aria-expanded") == "false":
-                return
+        # 3. 等待菜单收合与 Flet 事件循环处理
+        settle_deadline = time.monotonic() + 1.0
+        while time.monotonic() < settle_deadline:
+            try:
+                if not await option_element.is_visible():
+                    break
+            except Exception:
+                break
             await self.page.wait_for_timeout(100)
-        raise RuntimeError(
-            f"AnchorPage.select_option: selection did not settle: dropdown={eid_str!r}, option={option_text!r}"
-        )
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count
