@@ -8,6 +8,7 @@ from data.data_processor import DataProcessor
 from data.domain_services.market_data_service import MarketDataService  # noqa: F401
 from data.external.akshare_concept_client import AkshareConceptClient  # noqa: F401
 from data.external.tushare_client import TushareClient  # noqa: F401
+from data.persistence.metadata_manager import MetaDataManager  # noqa: F401
 from services.ai_service import AIService
 from services.local_model_manager import LocalModelManager
 from services.news_subscription_service import NewsSubscriptionService

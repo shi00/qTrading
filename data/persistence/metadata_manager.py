@@ -7,12 +7,14 @@ from utils.singleton_registry import register_singleton
 
 @register_singleton
 class MetaDataManager:
+    _instance = None
     _alias_cache: dict[tuple, str] = {}
     _lock = threading.Lock()
 
     @classmethod
     def _reset_singleton(cls):
         with cls._lock:
+            cls._instance = None
             cls._alias_cache.clear()
 
     @classmethod
