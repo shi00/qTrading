@@ -165,10 +165,13 @@ def SliderInput(
             )
         )
     column_controls.append(
-        ft.Row(
-            [slider, text_field],
-            spacing=8,
-            alignment=ft.MainAxisAlignment.START,
+        ft.Container(
+            content=ft.Row(
+                [slider, text_field],
+                spacing=8,
+                alignment=ft.MainAxisAlignment.START,
+            ),
+            height=38,
         )
     )
     return ft.Column(

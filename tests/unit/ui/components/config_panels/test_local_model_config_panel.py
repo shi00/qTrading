@@ -114,8 +114,9 @@ def _find_gpu_layers_container(root: Any) -> ft.Container | None:
             continue
         # 仅检查 Column 的直接子控件（Row），不递归
         for child in getattr(content, "controls", []):
-            if isinstance(child, ft.Row):
-                for row_child in getattr(child, "controls", []):
+            row = getattr(child, "content", child) if isinstance(child, ft.Container) else child
+            if isinstance(row, ft.Row):
+                for row_child in getattr(row, "controls", []):
                     if isinstance(row_child, ft.Slider) and row_child.max == 100:
                         return ctrl
     return None
@@ -857,7 +858,7 @@ class TestGpuAutoAndLayersDisplay:
         state = LocalModelConfigState(n_gpu_layers=-1)
         _, _, result, _ = _render_panel(state=state)
         gpu_container = _find_gpu_layers_container(result)
-        assert gpu_container is not None
+        assert gpu_container is not None  # noqa: weak-assertion null-check before checking visible
         assert gpu_container.visible is False
 
     def test_gpu_layers_input_visible_when_not_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:
@@ -865,7 +866,7 @@ class TestGpuAutoAndLayersDisplay:
         state = LocalModelConfigState(n_gpu_layers=20)
         _, _, result, _ = _render_panel(state=state)
         gpu_container = _find_gpu_layers_container(result)
-        assert gpu_container is not None
+        assert gpu_container is not None  # noqa: weak-assertion null-check before checking visible
         assert gpu_container.visible is True
 
     def test_gpu_layers_display_zero_when_is_gpu_auto(self, mock_i18n_state, mock_app_colors_state) -> None:

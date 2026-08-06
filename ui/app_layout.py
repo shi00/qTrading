@@ -155,7 +155,7 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
             visible=current_tab == NavTabs.WATCHLIST,
         ),
     ]
-    return ft.Stack(safe_controls(pages), expand=True)
+    return ft.Stack(safe_controls(pages), expand=True, fit=ft.StackFit.EXPAND)
 
 
 def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDestination]:

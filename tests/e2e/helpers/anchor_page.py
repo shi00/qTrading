@@ -261,8 +261,20 @@ class AnchorPage:
         - 原有"收合校验"逻辑保留 (``selection did not settle``), 向后兼容.
         """
         eid_str, kind = dropdown_eid
-        if kind != AnchorKind.COMPLEX:
-            raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
+        # 0. 若 Dropdown 按钮当前已选中该选项且菜单未展开，则直接返回无需重复点击
+        current_dd_text = await self.page.evaluate(
+            """(eid) => {
+                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                    .find(e => (e.textContent || '').trim().startsWith(eid));
+                return el ? (el.textContent || '') : '';
+            }""",
+            eid_str,
+        )
+        if (
+            option_text in current_dd_text
+            and not await self.page.locator('flt-semantics[role="button"][aria-expanded="true"]').count()
+        ):
+            return
 
         async def _find_option_element() -> Any:
             option_handle = await self.page.evaluate_handle(
@@ -277,6 +289,8 @@ class AnchorPage:
                     const rawEls = Array.from(document.querySelectorAll(selectors.join(',')));
                     const els = rawEls.filter(e => {
                         const r = e.getBoundingClientRect();
+                        const t = (e.textContent || '').trim();
+                        if (t.includes('e2e.')) return false;
                         return r.width > 0 && r.height > 0;
                     });
 
