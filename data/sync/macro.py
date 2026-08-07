@@ -289,9 +289,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     quarter = _latest_quarter_before(latest_period)
                     df_gdp = await self.context.api.get_cn_gdp(quarter=quarter)
                 else:
-                    # 首次同步：拉取去年 Q4（确保已发布）
                     current_year = get_now().year
                     df_gdp = await self.context.api.get_cn_gdp(quarter=f"{current_year - 1}Q4")
+            except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
+                raise
             except TushareAPIPermissionError:
                 logger.warning("[MacroSync] Monthly | ⛔ Permission denied for cn_gdp, skipping GDP")
                 # GDP 权限不足不阻断 m2/cpi/ppi 同步，df_gdp 保持 None

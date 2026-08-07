@@ -2113,6 +2113,23 @@ class TestConfigReviewFixes:
         )
         assert result is False
 
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    def test_save_llm_config_empty_api_key_clears_keyring_and_returns_true(self, mock_del, mock_save):
+        """P3-Config-SaveLLM-Empty-Path-Untested: save_llm_config 清空 api_key (api_key="") 并且带 custom_models 时返回 True 并删除 keyring 密码"""
+        result = cfg_mod.ConfigHandler.save_llm_config(
+            provider="openai",
+            model="gpt-4o",
+            base_url="https://api.openai.com",
+            api_key="",
+            custom_models=["custom-model-1"],
+        )
+        assert result is True
+        mock_del.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key")
+        save_args_list = [call[0][0] for call in mock_save.call_args_list]
+        assert any(args.get("llm_custom_models") == ["custom-model-1"] for args in save_args_list)
+        assert any(args.get("ai_api_key") == "" for args in save_args_list)
+
     # === F7: load_config IO 错误返回默认配置 ===
 
     def test_load_config_returns_defaults_on_io_error(self):

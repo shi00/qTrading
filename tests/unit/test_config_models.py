@@ -204,9 +204,13 @@ class TestGetDefaultConfig:
         r1 = get_default_config()
         r2 = get_default_config()
         assert r1 is not r2
-        # 修改 r1 的嵌套结构不影响 r2
+        # 修改 r1 的一级与二级嵌套结构不影响 r2
         r1["sync_integrity"]["quality_threshold"] = 999
         assert r2["sync_integrity"]["quality_threshold"] == 80
+
+        # 修改 r1 的深层嵌套结构（quality_weights）不影响 r2
+        r1["sync_integrity"]["quality_weights"]["daily_quotes"] = 999
+        assert r2["sync_integrity"]["quality_weights"]["daily_quotes"] == 30
 
 
 class TestConfigValidationResult:

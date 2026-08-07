@@ -280,7 +280,8 @@ class SchedulerService:
             logger.error(
                 "[Scheduler] Job '%s' raised an exception: %s",
                 event.job_id,
-                DataSanitizer.sanitize_error(event.exception),
+                DataSanitizer.sanitize_error(event.exception, show_traceback=True),
+                exc_info=True,
             )
 
     def stop(self):
