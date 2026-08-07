@@ -24,8 +24,64 @@ from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.home_view_model import NewsRow
 
-_POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
-_NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
+# 英文关键词（保留原有，\b 单词边界匹配）
+_POSITIVE_EN_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
+_NEGATIVE_EN_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
+
+# 中文关键词（双字词及以上，按长度降序排列以避免重叠计数）
+_POSITIVE_CN_KEYWORDS = (
+    "涨停板",
+    "一字涨停",
+    "大涨",
+    "暴涨",
+    "飙升",
+    "上涨",
+    "走高",
+    "走强",
+    "突破新高",
+    "创新高",
+    "利好",
+    "逆势上涨",
+    "强势上涨",
+    "高开高走",
+    "放量上涨",
+    "反弹",
+    "领涨",
+)
+_NEGATIVE_CN_KEYWORDS = (
+    "跌停板",
+    "一字跌停",
+    "大跌",
+    "暴跌",
+    "下挫",
+    "跳水",
+    "重挫",
+    "走弱",
+    "破位下行",
+    "利空",
+    "逆势下跌",
+    "弱势下跌",
+    "低开低走",
+    "放量下跌",
+    "回调",
+    "领跌",
+)
+
+# 中文否定词模式：匹配关键词前 0-2 个否定字 + 可选间隔字（是/有）
+# 覆盖场景: "不上涨"/"没有上涨"/"不是上涨"/"未下跌"
+_CN_NEGATION_CHAR = "[不未非没]"
+_CN_NEGATION_PREFIX_RE = re.compile(rf"{_CN_NEGATION_CHAR}{{0,2}}[是有]{{0,1}}")
+
+# 预编译中文关键词正则（正向+负向）
+_CN_POSITIVE_PATTERNS = tuple(
+    re.compile(rf"({_CN_NEGATION_PREFIX_RE.pattern}{re.escape(kw)})") for kw in _POSITIVE_CN_KEYWORDS
+)
+_CN_NEGATIVE_PATTERNS = tuple(
+    re.compile(rf"({_CN_NEGATION_PREFIX_RE.pattern}{re.escape(kw)})") for kw in _NEGATIVE_CN_KEYWORDS
+)
+
+# 否定词检测正则（预编译）
+_CN_IS_NEGATED_RE = re.compile(rf"{_CN_NEGATION_CHAR}{{1,2}}")
 
 # data 层返回业务 code (如 "no_title"), View 层维护 code → i18n key 映射,
 # 在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
@@ -36,12 +92,56 @@ _STOCK_CODE_RE = re.compile(r"(?:SH|SZ|BJ)?(\d{6})")
 
 
 def _detect_sentiment(content: str) -> str:
-    """Detect sentiment using word-boundary matching (case-insensitive)."""
+    """Detect sentiment using bilingual keyword matching.
+
+    中文: 否定词窗口检测 + 区间去重（避免重叠子串重复计数）
+    英文: \\b 单词边界匹配（保留原有逻辑）
+    """
     if not content:
         return "neutral"
     text = content.lower()
-    pos_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _POSITIVE_KEYWORDS)
-    neg_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _NEGATIVE_KEYWORDS)
+
+    # --- 中文匹配 ---
+    pos_cn = 0
+    neg_cn = 0
+    matched_spans: list[tuple[int, int]] = []
+
+    def _has_overlap(span: tuple[int, int]) -> bool:
+        """检查新区间是否与已有区间重叠。"""
+        s, e = span
+        return any(not (e <= ms or s >= me) for ms, me in matched_spans)
+
+    # 中文正向关键词
+    for pattern in _CN_POSITIVE_PATTERNS:
+        for m in pattern.finditer(text):
+            span = m.span()
+            if _has_overlap(span):
+                continue
+            matched_spans.append(span)
+            if _CN_IS_NEGATED_RE.match(m.group(1)):
+                neg_cn += 1
+            else:
+                pos_cn += 1
+
+    # 中文负向关键词
+    for pattern in _CN_NEGATIVE_PATTERNS:
+        for m in pattern.finditer(text):
+            span = m.span()
+            if _has_overlap(span):
+                continue
+            matched_spans.append(span)
+            if _CN_IS_NEGATED_RE.match(m.group(1)):
+                pos_cn += 1
+            else:
+                neg_cn += 1
+
+    # --- 英文匹配（保留原有 \\b 单词边界逻辑）---
+    pos_en = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _POSITIVE_EN_KEYWORDS)
+    neg_en = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _NEGATIVE_EN_KEYWORDS)
+
+    # --- 汇总判定 ---
+    pos_count = pos_cn + pos_en
+    neg_count = neg_cn + neg_en
     if pos_count > neg_count:
         return "positive"
     if neg_count > pos_count:

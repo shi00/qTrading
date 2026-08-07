@@ -217,6 +217,170 @@ class TestDetectSentiment:
         assert _detect_sentiment("Earnings miss forecasts") == "negative"
 
 
+class TestDetectSentimentChinese:
+    """中文情感检测测试 — 新增于 Issue #417 修复。"""
+
+    # --- 中文正向 ---
+
+    def test_chinese_positive_zhangtingban(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("该股涨停板，封板资金达10亿") == "positive"
+
+    def test_chinese_positive_dazhang(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("贵州茅台大涨5%，创新高") == "positive"
+
+    def test_chinese_positive_lihao(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("政策利好刺激市场反弹") == "positive"
+
+    def test_chinese_positive_lingzhang(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("新能源板块领涨，比亚迪飙升") == "positive"
+
+    def test_chinese_positive_yiziting(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("该股一字涨停，市场情绪高涨") == "positive"
+
+    def test_chinese_positive_fangkgaozou(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("股价高开高走，成交量放大") == "positive"
+
+    # --- 中文负向 ---
+
+    def test_chinese_negative_dietingban(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("该股跌停板，封单超5000万") == "negative"
+
+    def test_chinese_negative_baodie(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("芯片股集体暴跌，板块重挫") == "negative"
+
+    def test_chinese_negative_lihai(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("利空消息导致股价跳水") == "negative"
+
+    def test_chinese_negative_lingdie(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("煤炭板块领跌，个股下挫") == "negative"
+
+    def test_chinese_negative_yizidie(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("该股一字跌停，市场恐慌") == "negative"
+
+    def test_chinese_negative_ditou(self):
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("股价低开低走，放量下跌") == "negative"
+
+    # --- 否定词测试 ---
+
+    def test_negation_bu_shangzhang(self):
+        """否定正向关键词应减少正向计数。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("该股未上涨，表现平平")
+        # "上涨" 被 "未" 否定，不应判为正向
+        assert result != "positive"
+
+    def test_negation_wei_xiadie(self):
+        """否定负向关键词应产生正向计数。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("大盘并未下跌，企稳反弹") == "positive"
+
+    def test_negation_bingfei_lihai(self):
+        """双重否定："并非利空" 应转为正向。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("并非利空，市场反弹") == "positive"
+
+    def test_negation_with_interval_meiyou(self):
+        """否定词+间隔字: "没有上涨" 应被否定。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("该股没有上涨，表现平平")
+        assert result != "positive"
+
+    def test_negation_with_interval_bushi(self):
+        """否定词+间隔字: "不是上涨" 应被否定。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("该股不是上涨，是震荡")
+        assert result != "positive"
+
+    def test_negation_mei_keyword(self):
+        """否定词"没"："没下跌" 应被否定。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("股价没下跌，企稳反弹")
+        assert result == "positive"
+
+    # --- 重叠去重 ---
+
+    def test_overlap_yizi_zhangtingban(self):
+        """ "一字涨停板" 仅计1次（"涨停板"不应重复计数）。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("该股一字涨停板") == "positive"
+
+    def test_overlap_no_duplicate(self):
+        """同一文本中关键词不应重复计数。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("涨停板封板")
+        assert result == "positive"
+
+    # --- 中英混合 ---
+
+    def test_mixed_both_positive(self):
+        """中英文正向同时出现。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("Stock surge, 该股涨停板") == "positive"
+
+    def test_mixed_both_negative(self):
+        """中英文负向同时出现。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("Market plunge, 大盘暴跌") == "negative"
+
+    def test_mixed_english_positive_chinese_negative(self):
+        """英文正向 + 中文负向（数量决定结果）。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("Stock surge but 大盘跳水")
+        # surge=1 pos(英文), 跳水=1 neg(中文) → equal → neutral
+        assert result == "neutral"
+
+    def test_mixed_chinese_negative_english_positive(self):
+        """中文负向多于英文正向。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        result = _detect_sentiment("该股暴跌重挫，Market surge")
+        # 暴跌=1 neg, 重挫=1 neg, surge=1 pos → neg>pos
+        assert result == "negative"
+
+    # --- 中文中性 ---
+
+    def test_chinese_neutral(self):
+        """无情感关键词的中文新闻。"""
+        from ui.components.news_feed import _detect_sentiment
+
+        assert _detect_sentiment("公司发布年报，营收稳定") == "neutral"
+
+
 # ---------------------------------------------------------------------------
 # Pure function tests: _translate_tag
 # ---------------------------------------------------------------------------
