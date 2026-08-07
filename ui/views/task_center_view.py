@@ -20,6 +20,8 @@ from core.i18n import Message
 from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.task_center_view_model import (
     PAGE_SIZE,
@@ -100,7 +102,7 @@ def _build_task_card(
     on_cancel: Callable[[str], None],
     on_retry: Callable[[str], None] | None = None,
     on_view_details: Callable[[str], None] | None = None,
-) -> ft.Container:
+) -> ft.Control:
     """Build a single task card with status badge, progress, and actions.
 
     Pure function — no self/state dependency. Receives immutable TaskRow + callbacks.
@@ -313,7 +315,8 @@ def _build_task_card(
         ),
         animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
     )
-    return card
+    # PR-4 Task 4.1 P2-3: 任务行卡片整体 anchor 化 (LABEL kind, 卡片无 on_click, EID 落 textContent)
+    return anchored(EIDS.TASK_CENTER.task_row(row.id), card)
 
 
 @ft.component
@@ -454,6 +457,8 @@ def TaskCenterView(active: bool = True) -> ft.Container:
         spacing=0,
         padding=ft.Padding.only(top=8),
     )
+    # PR-4 Task 4.1 P2-3: 任务列表区域 anchor 化 (LABEL kind, E2E 探测任务列表存在性)
+    scroll_area = anchored(EIDS.TASK_CENTER.TASK_LIST, scroll_area)
 
     # --- Pagination footer ---
     btn_prev = ft.IconButton(

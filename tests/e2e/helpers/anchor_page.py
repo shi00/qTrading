@@ -83,7 +83,7 @@ class AnchorPage:
         EID 与显示文本之间的换行分隔，PoC A7 实证）。
         """
         return await self.page.evaluate(
-            """(args) => {
+            r"""(args) => {
                 const {label, exact, roleFilter} = args;
                 const q = roleFilter
                     ? 'flt-semantics[role="' + roleFilter + '"]'
@@ -91,12 +91,12 @@ class AnchorPage:
                 const el = Array.from(document.querySelectorAll(q))
                     .find(e => {
                         const t = (e.textContent || '').trim();
-                        if (exact) return t === label;
-                        // 前缀匹配: t === label, 或 t 以 label + "." / "\\n" 开头
-                        // ("." = EID 命名空间层级; "\\n" = GD 合并节点 EID 与显示文本分隔)
+                        if (exact) return t === label || t.startsWith(label + '\n');
+                        // 前缀匹配: t === label, 或 t 以 label + "." / "\n" 开头
+                        // ("." = EID 命名空间层级; "\n" = GD 合并节点 EID 与显示文本分隔)
                         return t === label
                             || t.startsWith(label + '.')
-                            || t.startsWith(label + '\\n');
+                            || t.startsWith(label + '\n');
                     });
                 if (!el) return null;
                 const r = el.getBoundingClientRect();
@@ -225,6 +225,30 @@ class AnchorPage:
             box = self._normalize_box(r)
         await self.page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
+    async def click_label(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 LABEL kind anchor 的位置（依赖事件冒泡到可点击父容器）。
+
+        适用场景：LABEL anchor 包裹的控件本身不可点击，但位于可点击父容器内
+        （如 ``NavigationRailDestination`` 的 label）。``click`` 方法拒绝 LABEL kind
+        （语义上 LABEL 是 display-only），本方法显式声明"点击 LABEL 位置"的意图，
+        通过真实鼠标事件触发父容器的 hit-testing。
+
+        与 ``click`` 的区别：``click`` 按 AnchorKind 分派到 INTERACTIVE/COMPLEX/INPUT
+        的可点击节点；``click_label`` 直接点击 LABEL textContent 的 bbox 中心，
+        依赖事件冒泡。
+        """
+        eid_str, kind = eid
+        if kind != AnchorKind.LABEL:
+            raise RuntimeError(
+                f"AnchorPage.click_label: only supports LABEL, got {kind} for {eid_str!r}. "
+                f"Use click() for INTERACTIVE/COMPLEX/INPUT."
+            )
+        r = await self._wait_for_text_anchor(eid_str, exact=True, role_filter=None, timeout_ms=timeout_ms)
+        box = self._normalize_box(r)
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        await self.page.mouse.click(cx, cy)
+
     async def fill(self, eid: Eid, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, kind = eid
         if kind != AnchorKind.INPUT:
@@ -266,7 +290,7 @@ class AnchorPage:
 
         async def _find_option_element() -> Any:
             option_handle = await self.page.evaluate_handle(
-                """(args) => {
+                r"""(args) => {
                     const {text} = args;
                     const selectors = [
                         'flt-semantics[role="option"]',
@@ -290,7 +314,7 @@ class AnchorPage:
                         const t = (e.textContent || '').trim();
                         return t.startsWith(normText + ' ')
                             || t.startsWith(normText + '(')
-                            || t.startsWith(normText + '\\n');
+                            || t.startsWith(normText + '\n');
                     });
                     if (found) return found;
 
@@ -409,18 +433,18 @@ class AnchorPage:
         role_filter = "button" if kind == AnchorKind.COMPLEX else None
         return int(
             await self.page.evaluate(
-                """(args) => {
+                r"""(args) => {
                     const q = args.roleFilter
                         ? 'flt-semantics[role="' + args.roleFilter + '"]'
                         : 'flt-semantics';
                     return Array.from(document.querySelectorAll(q))
                         .filter(e => {
                             const t = (e.textContent || '').trim();
-                            if (args.exact) return t === args.label;
-                            // 前缀匹配同 _locate_by_text: "." 或 "\\n" 分隔
+                            if (args.exact) return t === args.label || t.startsWith(args.label + '\n');
+                            // 前缀匹配同 _locate_by_text: "." 或 "\n" 分隔
                             return t === args.label
                                 || t.startsWith(args.label + '.')
-                                || t.startsWith(args.label + '\\n');
+                                || t.startsWith(args.label + '\n');
                         }).length;
                 }""",
                 {

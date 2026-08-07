@@ -20,21 +20,41 @@ from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
-from ui.testing.e2e_ids import EIDS
+from ui.testing.e2e_ids import EIDS, Eid
 
 logger = logging.getLogger(__name__)
 
+# PR-4 Task 4.2: nav i18n key → EID 映射 (与 app_layout._NAV_EIDS 对齐)
+_NAV_EIDS: dict[str, Eid] = {
+    "nav_market": EIDS.NAV.MARKET,
+    "nav_screener": EIDS.NAV.SCREENER,
+    "nav_backtest": EIDS.NAV.BACKTEST,
+    "nav_data": EIDS.NAV.DATA,
+    "nav_tasks": EIDS.NAV.TASKS,
+    "nav_settings": EIDS.NAV.SETTINGS,
+    "nav_watchlist": EIDS.NAV.WATCHLIST,
+}
+
 
 class App:
-    """顶层导航 Page Object，封装侧边栏导航点击。"""
+    """顶层导航 Page Object，封装侧边栏导航点击。
+
+    PR-4 Task 4.2: 导航点击迁移到 AnchorPage.click_label (anchor-based 精确定位)，
+    消除 CanvasKit 抖动下的文本误匹配。
+    """
 
     def __init__(self, page: FletPage):
         self.page = page
+        self.ap = AnchorPage(page.page, page)
 
     async def goto(self, nav_key: str, timeout_ms: int = TIMEOUTS.NAV) -> None:
-        """导航到指定页面（通过 nav i18n key，如 "nav_screener"）。"""
-        label = I18n.get(nav_key)
-        await self.page.click_text(label, timeout_ms=timeout_ms)
+        """导航到指定页面（通过 nav i18n key，如 "nav_screener"）。
+
+        PR-4 Task 4.2: 使用 anchor-based click_label 替代 click_text。
+        nav label 是 LABEL kind，click_label 点击 label 位置依赖事件冒泡到
+        NavigationRailDestination 父容器。
+        """
+        await self.ap.click_label(_NAV_EIDS[nav_key], timeout_ms=timeout_ms)
 
 
 class ScreenerPage:
@@ -424,3 +444,110 @@ class WizardPage:
     async def fill_token(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """填充 token 输入框（通过 anchor）。"""
         await self.ap.fill(EIDS.WIZARD.TOKEN_INPUT, value, timeout_ms=timeout_ms)
+
+
+# ============================================================================
+# PR-4 Task 4.2: NavPage / HomePage / TaskCenterPage
+#
+# 设计原则（方案 §7.2 封装边界）：
+# - Page Object 持有 EIDS 引用，test_*.py 不直接 import EIDS
+# - nav 导航走 click_label (LABEL kind anchor)
+# - KPI 卡片 / 任务行走 expect_visible (LABEL kind anchor, 纯展示断言)
+# - 非 anchor 化控件（页面标题、新闻区标题等）仍透传 FletPage.expect_text
+# ============================================================================
+
+
+class NavPage:
+    """导航栏 Page Object，封装 nav label anchor 的点击与可见性断言。
+
+    PR-4 Task 4.2: nav label 是 LABEL kind anchor，click_label 点击 label 位置
+    依赖事件冒泡到 NavigationRailDestination 父容器。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.ap = AnchorPage(page.page, page)
+
+    async def goto(self, nav_key: str, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """导航到指定页面（通过 nav i18n key，如 "nav_screener"）。"""
+        await self.ap.click_label(_NAV_EIDS[nav_key], timeout_ms=timeout_ms)
+
+    async def expect_visible(self, nav_key: str, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """断言指定 nav label 可见（通过 anchor）。"""
+        await self.ap.expect_visible(_NAV_EIDS[nav_key], timeout_ms=timeout_ms)
+
+
+class HomePage:
+    """首页 Page Object，封装 KPI 卡片 anchor 断言。
+
+    PR-4 Task 4.2: KPI 卡片标题是 LABEL kind anchor (e2e.home.kpi.*)，
+    走 expect_visible (textContent 精确匹配)。非 anchor 化控件（页面标题、
+    热门概念标题、新闻区标题）仍透传 FletPage.expect_text。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.ap = AnchorPage(page.page, page)
+
+    async def expect_title(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待首页标题可见。"""
+        await self.page.expect_text(I18n.get("home_title"), timeout_ms=timeout_ms)
+
+    async def expect_kpi_sh(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言上证指数 KPI 卡片可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.HOME.KPI_SH, timeout_ms=timeout_ms)
+
+    async def expect_kpi_sz(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言深证成指 KPI 卡片可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.HOME.KPI_SZ, timeout_ms=timeout_ms)
+
+    async def expect_kpi_cyb(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言创业板指 KPI 卡片可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.HOME.KPI_CYB, timeout_ms=timeout_ms)
+
+    async def expect_kpi_northbound(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言北向资金 KPI 卡片可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.HOME.KPI_NORTHBOUND, timeout_ms=timeout_ms)
+
+    async def expect_hot_concepts_title(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待热门概念区标题可见（非 anchor 化，走文本断言）。"""
+        await self.page.expect_text(I18n.get("home_hot_concepts"), timeout_ms=timeout_ms)
+
+    async def expect_live_news_title(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待新闻区标题可见（非 anchor 化，走文本断言）。"""
+        await self.page.expect_text(I18n.get("home_live_news"), timeout_ms=timeout_ms)
+
+
+class TaskCenterPage:
+    """任务中心 Page Object，封装任务列表区域 anchor 断言。
+
+    PR-4 Task 4.2: 任务列表区域是 LABEL kind anchor (e2e.task_center.task_list)，
+    走 expect_visible。任务行卡片是动态 LABEL kind anchor (task_row(task_id))，
+    但 task_id 在运行时生成，E2E 测试通常通过任务名文本断言而非 task_id anchor。
+    非 anchor 化控件（页面标题、空状态文本）仍透传 FletPage.expect_text/has_text。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.app = App(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """导航到任务中心页（通过侧边栏 nav_tasks）。"""
+        await self.app.goto("nav_tasks", timeout_ms=timeout_ms)
+
+    async def expect_title(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待任务中心标题可见。"""
+        await self.page.expect_text(I18n.get("nav_tasks"), timeout_ms=timeout_ms)
+
+    async def expect_task_list(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """断言任务列表区域可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.TASK_CENTER.TASK_LIST, timeout_ms=timeout_ms)
+
+    async def has_empty_state(self) -> bool:
+        """检查是否显示空状态（非 anchor 化，走文本匹配）。"""
+        return await self.page.has_text(I18n.get("task_empty_title"))
+
+    async def expect_task_name(self, name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
+        """等待指定任务名出现（非 anchor 化，走文本断言）。"""
+        await self.page.expect_text(name, timeout_ms=timeout_ms)

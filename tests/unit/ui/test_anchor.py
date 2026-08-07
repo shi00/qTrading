@@ -199,6 +199,154 @@ class TestEidsDetailDialog:
         assert kind == AnchorKind.INTERACTIVE
 
 
+class TestEidsPr4Nav:
+    """PR-4 Task 4.0/4.1 新增 EIDS.NAV 常量契约."""
+
+    def test_nav_market_eid(self):
+        eid_str, kind = EIDS.NAV.MARKET
+        assert eid_str == "e2e.nav.market"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_screener_eid(self):
+        eid_str, kind = EIDS.NAV.SCREENER
+        assert eid_str == "e2e.nav.screener"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_backtest_eid(self):
+        eid_str, kind = EIDS.NAV.BACKTEST
+        assert eid_str == "e2e.nav.backtest"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_data_eid(self):
+        eid_str, kind = EIDS.NAV.DATA
+        assert eid_str == "e2e.nav.data"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_tasks_eid(self):
+        eid_str, kind = EIDS.NAV.TASKS
+        assert eid_str == "e2e.nav.tasks"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_settings_eid(self):
+        eid_str, kind = EIDS.NAV.SETTINGS
+        assert eid_str == "e2e.nav.settings"
+        assert kind == AnchorKind.LABEL
+
+    def test_nav_watchlist_eid(self):
+        eid_str, kind = EIDS.NAV.WATCHLIST
+        assert eid_str == "e2e.nav.watchlist"
+        assert kind == AnchorKind.LABEL
+
+    _NAV_EIDS = [
+        EIDS.NAV.MARKET[0],
+        EIDS.NAV.SCREENER[0],
+        EIDS.NAV.BACKTEST[0],
+        EIDS.NAV.DATA[0],
+        EIDS.NAV.TASKS[0],
+        EIDS.NAV.SETTINGS[0],
+        EIDS.NAV.WATCHLIST[0],
+    ]
+
+    def test_nav_eids_no_prefix_overlap(self):
+        """任两个 NAV EID 互不为前缀（_locate_by_text 边界匹配安全）."""
+        for i, a in enumerate(self._NAV_EIDS):
+            for b in self._NAV_EIDS[i + 1 :]:
+                assert not b.startswith(a + "."), f"{a} 是 {b} 的前缀（定位误匹配风险）"
+                assert not a.startswith(b + "."), f"{b} 是 {a} 的前缀（定位误匹配风险）"
+
+    def test_nav_eids_no_suffix_overlap(self):
+        """任两个 NAV EID 互不为后缀（_locator_by_aria ``$=`` 匹配安全）."""
+        for i, a in enumerate(self._NAV_EIDS):
+            for b in self._NAV_EIDS[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
+
+    def test_nav_eids_no_cross_namespace_prefix_overlap(self):
+        """NAV EID 不与其他命名空间静态 EID 互为前缀（跨命名空间边界匹配安全）.
+
+        例: ``e2e.nav.screener`` 不应以 ``e2e.screener.*`` 开头，反之亦然。
+        """
+        other_static = [
+            EIDS.SCREENER.STRATEGY_DROPDOWN[0],
+            EIDS.SCREENER.RUN_BUTTON[0],
+            EIDS.SETTINGS.LANGUAGE_DROPDOWN[0],
+            EIDS.DATA.TABLE_DROPDOWN[0],
+            EIDS.BACKTEST.STRATEGY_DROPDOWN[0],
+            EIDS.WIZARD.NEXT_BUTTON[0],
+        ]
+        for nav_eid in self._NAV_EIDS:
+            for other in other_static:
+                assert not other.startswith(nav_eid + "."), f"NAV {nav_eid} 是 {other} 的前缀"
+                assert not nav_eid.startswith(other + "."), f"{other} 是 NAV {nav_eid} 的前缀"
+
+
+class TestEidsPr4Home:
+    """PR-4 Task 4.1 新增 EIDS.HOME 常量契约 (P2-2: KPI 卡片)."""
+
+    def test_home_kpi_sh_eid(self):
+        eid_str, kind = EIDS.HOME.KPI_SH
+        assert eid_str == "e2e.home.kpi.sh"
+        assert kind == AnchorKind.LABEL
+
+    def test_home_kpi_sz_eid(self):
+        eid_str, kind = EIDS.HOME.KPI_SZ
+        assert eid_str == "e2e.home.kpi.sz"
+        assert kind == AnchorKind.LABEL
+
+    def test_home_kpi_cyb_eid(self):
+        eid_str, kind = EIDS.HOME.KPI_CYB
+        assert eid_str == "e2e.home.kpi.cyb"
+        assert kind == AnchorKind.LABEL
+
+    def test_home_kpi_northbound_eid(self):
+        eid_str, kind = EIDS.HOME.KPI_NORTHBOUND
+        assert eid_str == "e2e.home.kpi.northbound"
+        assert kind == AnchorKind.LABEL
+
+    _HOME_EIDS = [
+        EIDS.HOME.KPI_SH[0],
+        EIDS.HOME.KPI_SZ[0],
+        EIDS.HOME.KPI_CYB[0],
+        EIDS.HOME.KPI_NORTHBOUND[0],
+    ]
+
+    def test_home_eids_no_prefix_overlap(self):
+        """任两个 HOME EID 互不为前缀（_locate_by_text 边界匹配安全）."""
+        for i, a in enumerate(self._HOME_EIDS):
+            for b in self._HOME_EIDS[i + 1 :]:
+                assert not b.startswith(a + "."), f"{a} 是 {b} 的前缀（定位误匹配风险）"
+                assert not a.startswith(b + "."), f"{b} 是 {a} 的前缀（定位误匹配风险）"
+
+    def test_home_eids_no_suffix_overlap(self):
+        """任两个 HOME EID 互不为后缀（_locator_by_aria ``$=`` 匹配安全）."""
+        for i, a in enumerate(self._HOME_EIDS):
+            for b in self._HOME_EIDS[i + 1 :]:
+                assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"
+                assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
+
+
+class TestEidsPr4TaskCenter:
+    """PR-4 Task 4.1 新增 EIDS.TASK_CENTER 常量契约 (P2-3: 任务行)."""
+
+    def test_task_list_eid(self):
+        eid_str, kind = EIDS.TASK_CENTER.TASK_LIST
+        assert eid_str == "e2e.task_center.task_list"
+        assert kind == AnchorKind.LABEL
+
+    def test_task_row_static_method(self):
+        """task_row(task_id) 生成 前缀.task_id 格式 EID，LABEL 类（卡片无 on_click）."""
+        eid_str, kind = EIDS.TASK_CENTER.task_row("abc123def456")
+        assert eid_str == "e2e.task_center.task_row.abc123def456"
+        assert kind == AnchorKind.LABEL
+
+    def test_task_row_prefix_no_overlap_with_task_list(self):
+        """task_row 前缀与 task_list 不重叠（避免 AnchorPage 定位误匹配）."""
+        row_eid = EIDS.TASK_CENTER.task_row("abc123def456")[0]
+        list_eid = EIDS.TASK_CENTER.TASK_LIST[0]
+        assert not row_eid.startswith(list_eid + ".")
+        assert not list_eid.startswith(EIDS.TASK_CENTER._TASK_ROW_PREFIX + ".")
+
+
 class TestEidsPr3Namespaces:
     """PR-3 新增 EIDS.SETTINGS/DATA/BACKTEST/WIZARD 常量契约."""
 
@@ -366,14 +514,23 @@ class TestEidsNoSuffixOverlap:
                 assert not b.endswith(a), f"{a} 是 {b} 的后缀（$= 匹配误命中风险）"
 
     def test_static_eids_no_suffix_overlap(self):
-        """所有静态 EID（含 SCREENER/DETAIL_DIALOG）两两不互为后缀."""
-        all_static = [
-            EIDS.SCREENER.STRATEGY_DROPDOWN[0],
-            EIDS.SCREENER.RUN_BUTTON[0],
-            EIDS.SCREENER.EXPORT_CSV_BUTTON[0],
-            EIDS.SCREENER.EXPORT_EXCEL_BUTTON[0],
-            EIDS.DETAIL_DIALOG.CLOSE_BUTTON[0],
-        ] + TestEidsPr3NoPrefixNesting._PR3_STATIC_EIDS
+        """所有静态 EID（含 SCREENER/DETAIL_DIALOG/NAV/HOME/TASK_CENTER）两两不互为后缀."""
+        all_static = (
+            [
+                EIDS.SCREENER.STRATEGY_DROPDOWN[0],
+                EIDS.SCREENER.RUN_BUTTON[0],
+                EIDS.SCREENER.EXPORT_CSV_BUTTON[0],
+                EIDS.SCREENER.EXPORT_EXCEL_BUTTON[0],
+                EIDS.DETAIL_DIALOG.CLOSE_BUTTON[0],
+                EIDS.HOME.KPI_SH[0],
+                EIDS.HOME.KPI_SZ[0],
+                EIDS.HOME.KPI_CYB[0],
+                EIDS.HOME.KPI_NORTHBOUND[0],
+                EIDS.TASK_CENTER.TASK_LIST[0],
+            ]
+            + TestEidsPr3NoPrefixNesting._PR3_STATIC_EIDS
+            + TestEidsPr4Nav._NAV_EIDS
+        )
         for i, a in enumerate(all_static):
             for b in all_static[i + 1 :]:
                 assert not a.endswith(b), f"{b} 是 {a} 的后缀（$= 匹配误命中风险）"

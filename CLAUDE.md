@@ -85,13 +85,14 @@
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md)（核心协议 + 稳定规则 ID + review-profiles 按需加载）；项目红线见 §3、架构边界见 §4 |
 | 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
-| 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 docs/guides/how-to.md「6. 新增与升级依赖」 |
+| 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`、[docs/guides/ci-cd.md](./docs/guides/ci-cd.md)、[docs/guides/dependency-management.md](./docs/guides/dependency-management.md)；Flet 升级见 [docs/flet/upgrade-checklist.md](./docs/flet/upgrade-checklist.md) |
 | 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 docs/guides/how-to.md「7. 新增回测配置」 |
 | 修改 UI 布局/响应式 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
+| 新增/修改 E2E 测试 | docs/flet/canvaskit-rendering-e2e-guide.md（CanvasKit 渲染坑点 + EIDS 分类速查表）、docs/guides/testing.md、`tests/e2e/helpers/anchor_page.py`；E2E 定位优先用 anchor-based（`AnchorPage`），禁止依赖文本模糊匹配；Flet 控件坑点（ListView 视口为 0、Container.on_click 无 flt-tappable、expand 传递断裂等）见 docs/flet/project-differences.md §4.5-4.9 |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | Git 操作 / 分支 / worktree | §3 R18、[docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「Worktree 强制使用」「标准工作流」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
@@ -166,7 +167,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-当前活动规范中无未解决的技术债；活跃跟踪中的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
+当前 CLAUDE.md/CONTRIBUTING.md 规范条目中无未解决的规范缺口；代码层面的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
@@ -219,8 +220,9 @@ app → 编排所有层，仅被 main.py 调用
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
-| Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
-| Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
+| Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 项目差异 / 升级协同机制 | [v1-api-constraints.md](./docs/flet/v1-api-constraints.md)、[project-differences.md](./docs/flet/project-differences.md) |
+| Flet 升级检查清单 / API 核验记录模板 / 无障碍基线 | [upgrade-checklist.md](./docs/flet/upgrade-checklist.md)、[api-verification-template.md](./docs/flet/api-verification-template.md)、[accessibility-baseline.md](./docs/flet/accessibility-baseline.md) |
+| 测试规范与 CanvasKit E2E 避坑指南（双轨语义树映射 + 5 坑点 + EIDS 分类速查表） | [docs/guides/testing.md](./docs/guides/testing.md)、[docs/flet/canvaskit-rendering-e2e-guide.md](./docs/flet/canvaskit-rendering-e2e-guide.md) |
 | Flet MCP 使用规范（AI 验证 Flet API 的操作指南） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |

@@ -17,8 +17,18 @@ import typing
 import flet as ft
 
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.home_view_model import HotConceptRow, HsgtRow, MarketIndexRow
+
+# PR-4 Task 4.1 P2-2: KPI 卡片 i18n key → EID 映射 (LABEL kind, 走 textContent 通道)
+_KPI_EIDS: dict[str, Eid] = {
+    "home_index_sh": EIDS.HOME.KPI_SH,
+    "home_index_sz": EIDS.HOME.KPI_SZ,
+    "home_index_cyb": EIDS.HOME.KPI_CYB,
+    "home_northbound": EIDS.HOME.KPI_NORTHBOUND,
+}
 
 
 def _resolve_color(color_str: str | None) -> str:
@@ -37,11 +47,14 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(
-                    I18n.get(title_key),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    no_wrap=True,
+                anchored(
+                    _KPI_EIDS[title_key],
+                    ft.Text(
+                        I18n.get(title_key),
+                        size=AppStyles.FONT_SIZE_LG,
+                        color=AppColors.TEXT_SECONDARY,
+                        no_wrap=True,
+                    ),
                 ),
                 ft.Text(
                     info.value,
@@ -73,11 +86,14 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(
-                    I18n.get("home_northbound"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    no_wrap=True,
+                anchored(
+                    EIDS.HOME.KPI_NORTHBOUND,
+                    ft.Text(
+                        I18n.get("home_northbound"),
+                        size=AppStyles.FONT_SIZE_LG,
+                        color=AppColors.TEXT_SECONDARY,
+                        no_wrap=True,
+                    ),
                 ),
                 ft.Text(
                     info.value,

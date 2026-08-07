@@ -32,6 +32,8 @@ from ui.components.flet_type_helpers import (
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.views.backtest_view import BacktestView
@@ -57,6 +59,19 @@ class NavTabs(IntEnum):
     TASKS = 4
     SETTINGS = 5
     WATCHLIST = 6
+
+
+# nav i18n key → EIDS.NAV.{role} 映射 (PR-4 Task 4.0/4.1: nav label anchor 化)
+# 与 _build_nav_destinations 的 nav_items 顺序对齐
+_NAV_EIDS: dict[str, Eid] = {
+    "nav_market": EIDS.NAV.MARKET,
+    "nav_screener": EIDS.NAV.SCREENER,
+    "nav_backtest": EIDS.NAV.BACKTEST,
+    "nav_data": EIDS.NAV.DATA,
+    "nav_tasks": EIDS.NAV.TASKS,
+    "nav_settings": EIDS.NAV.SETTINGS,
+    "nav_watchlist": EIDS.NAV.WATCHLIST,
+}
 
 
 def _get_page() -> ft.Page | None:
@@ -180,15 +195,21 @@ def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDes
         icon_content: ft.IconData | ft.Stack = icon
         if label_key == "nav_tasks" and running_count > 0:
             icon_content = _build_nav_badge_icon(icon, running_count)
+        # PR-4 Task 4.0/4.1: nav label anchor 化 (LABEL kind, 走 textContent 通道)
+        # Task 4.0 PoC 验证 T-3: 折叠态 (extended=False) 下 anchor 是否仍暴露到 DOM
+        label_control = anchored(
+            _NAV_EIDS[label_key],
+            ft.Text(
+                I18n.get(label_key),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                weight=ft.FontWeight.BOLD,
+            ),
+        )
         destinations.append(
             ft.NavigationRailDestination(
                 icon=icon_content,
                 selected_icon=selected_icon,
-                label=ft.Text(
-                    I18n.get(label_key),
-                    size=AppStyles.FONT_SIZE_BODY_SM,
-                    weight=ft.FontWeight.BOLD,
-                ),
+                label=label_control,
             )
         )
     return destinations
