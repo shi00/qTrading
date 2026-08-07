@@ -916,6 +916,32 @@ class TestGetLlmConfigCustomModelsIsolation:
         result["custom_models"]["test_provider"] = ["model_x"]
         assert "test_provider" not in cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_models"]
 
+    # --- Issue #70 (P2-2): custom_model_contexts 返回契约与 deepcopy 隔离 ---
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    def test_custom_model_contexts_is_deepcopy_not_reference(self, mock_kr, mock_load):
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        cmc = result["custom_model_contexts"]
+        assert cmc == cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_model_contexts"]
+        assert cmc is not cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_model_contexts"]
+
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    def test_mutating_custom_model_contexts_does_not_affect_default(self, mock_kr, mock_load):
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        result["custom_model_contexts"]["test_provider"] = {"model_x": 32000}
+        assert "test_provider" not in cfg_mod.ConfigHandler.DEFAULT_CONFIG["llm_custom_model_contexts"]
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_custom_model_contexts": {"custom": {"my-model": 32000}}},
+    )
+    @patch.object(cfg_mod.keyring, "get_password", return_value=None)
+    def test_custom_model_contexts_passed_through(self, mock_kr, mock_load):
+        result = cfg_mod.ConfigHandler.get_llm_config()
+        assert result["custom_model_contexts"] == {"custom": {"my-model": 32000}}
+
 
 class TestGetNoProxyDomainsIsolation:
     """R3-1b: get_no_proxy_domains() must return a copy of the list,
