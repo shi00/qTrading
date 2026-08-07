@@ -40,6 +40,8 @@ def _to_tests_relative(file_path: str) -> str:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     files = [f for f in sys.argv[1:] if f.endswith(".py") and Path(f).name.startswith("test_")]
     if not files:
         return 0

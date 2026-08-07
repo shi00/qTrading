@@ -31,6 +31,7 @@ from data.constants import (
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
 from core.i18n import I18n
+from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
@@ -326,7 +327,6 @@ class HealthCheckMixin:
                 logger.warning("[DataProcessor] HealthCheck | No trade date available, using today.")
                 end_date = get_now().date()
             end_date_obj = parse_date(end_date)
-            from utils.config_handler import ConfigHandler
 
             years = ConfigHandler.get_init_history_years()
             # Use a safe 2.0 multiplier for trade-days to natural-days conversion
@@ -347,9 +347,11 @@ class HealthCheckMixin:
 
             api_latest_official = None
             try:
-                from data.external.tushare_client import TushareClient
+                tc = getattr(self, "api", None)
+                if tc is None:
+                    from data.external.tushare_client import TushareClient
 
-                tc = TushareClient()
+                    tc = TushareClient()
                 api_cal_df = await tc.trade_cal(  # type: ignore[attr-defined]
                     start_date=end_date_obj.strftime("%Y%m%d"),
                     end_date=end_date_obj.strftime("%Y%m%d"),

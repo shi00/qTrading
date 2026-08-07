@@ -119,14 +119,25 @@ class TestSchedulerServiceOnJobEvents:
         event.exception = asyncio.CancelledError()
         svc._on_job_error(event)
 
+    @patch("utils.scheduler_service.logger")
     @patch("utils.scheduler_service.ConfigHandler")
-    def test_on_job_error_other(self, mock_ch):
+    def test_on_job_error_other(self, mock_ch, mock_logger):
         mock_ch.get_setting.return_value = None
         svc = SchedulerService()
         event = MagicMock()
         event.job_id = "test_job"
-        event.exception = RuntimeError("test error")
+        event.exception = RuntimeError("sensitive token=sk-secret123")
         svc._on_job_error(event)
+        from utils.sanitizers import DataSanitizer
+
+        mock_logger.error.assert_called_once_with(
+            "[Scheduler] Job '%s' raised an exception: %s",
+            "test_job",
+            DataSanitizer.sanitize_error(event.exception, show_traceback=True),
+            exc_info=True,
+        )
+        args, _ = mock_logger.error.call_args
+        assert "sk-secret123" not in str(args)
 
 
 class TestSchedulerServiceCheckConfigSync:
