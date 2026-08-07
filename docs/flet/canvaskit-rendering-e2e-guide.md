@@ -1,7 +1,7 @@
 # Flutter Web CanvasKit 渲染行为与 E2E 定位指南
 
 > **核心地位**：记录本项目绑定的 Flutter Web CanvasKit 渲染引擎特性、HTML 语义树生成规则、版本依赖锁定机制以及 E2E 测试定位与交互坑点。
-> **适用版本**：Flet V1（绑定 Flet Web 0.86.3，使用 Flutter Web Engine Revision `0cd610717bde95fd88343c64f81c11ba4e5c0010`）。
+> **适用版本**：Flet V1（版本以 [`pyproject.toml`](../../pyproject.toml) 锁定为准；Flutter Web Engine Revision 从 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision` 读取，查询命令见 [upgrade-checklist.md §3.4](./upgrade-checklist.md#34-canvaskit-版本验证)）。
 > **相关文档**：
 > - [Flet V1 API 关键约束](./v1-api-constraints.md)
 > - [项目 Flet 差异与高风险 API](./project-differences.md)
@@ -13,7 +13,7 @@
 ## 1. CanvasKit 引擎版本锁定与资源拦截
 
 ### 1.1 引擎版本与 `engineRevision` 依赖
-Flet Web 依赖 Flutter Web Engine 运行时。项目在 `pyproject.toml` 中锁定 `flet==0.86.3` / `flet-web==0.86.3`。
+Flet Web 依赖 Flutter Web Engine 运行时。Flet 版本由 [`pyproject.toml`](../../pyproject.toml) 锁定（`flet` / `flet-desktop` / `flet-charts` 三包，版本见该文件），`flet-web` 作为 `flet` 的 transitive dependency 同版本发布。
 - **动态加载机制**：Flet Web 启动时，`flutter_bootstrap.js` 会从谷歌 CDN 动态下载 CanvasKit 二进制：
   `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/chromium/canvaskit.wasm`
 - **本地 Mock 缓存**：E2E 测试通过 `tests/e2e/conftest.py::_setup_canvaskit_intercept` 离线化拦截。`mock_assets/canvaskit/` 保存了匹配 `engineRevision` 的 `canvaskit.js` / `canvaskit.wasm` 和 CJK 字体分片。
