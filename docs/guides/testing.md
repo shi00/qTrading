@@ -6,7 +6,7 @@
 
 ### 测试架构
 
-分为 `unit/` (单元测试, 纯逻辑隔离), `integration/` (集成测试, 依赖 PostgreSQL), `e2e/` (端到端测试)。
+分为 `unit/` (单元测试, 纯逻辑隔离), `integration/` (集成测试, 依赖 PostgreSQL), `e2e/` (端到端测试)。Flutter Web CanvasKit 渲染行为与 E2E 避坑指南详见 [`docs/flet/canvaskit-rendering-e2e-guide.md`](../flet/canvaskit-rendering-e2e-guide.md)。
 
 测试 marker 清单见 [`pyproject.toml`](../../pyproject.toml) 的 `[tool.pytest.ini_options].markers`（含 `unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` 等）。本文档不手工维护子集，以 `pyproject.toml` 为单一事实源。
 
