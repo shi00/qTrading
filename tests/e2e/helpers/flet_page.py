@@ -579,7 +579,8 @@ class FletPage:
                 shots_dir = Path(__file__).resolve().parents[3] / "logs" / "e2e_screenshots"
                 shots_dir.mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y%m%d_%H%M%S")
-                shot_path = shots_dir / f"fail_{ts}_{text[:20].replace('/', '_').replace('\\\\', '_')}.png"
+                safe_text = text[:20].replace("/", "_").replace("\\", "_")
+                shot_path = shots_dir / f"fail_{ts}_{safe_text}.png"
                 await self.page.screenshot(path=str(shot_path), full_page=True)
                 logger.error("[E2E SCREENSHOT] saved to %s", shot_path)
                 inputs = await self.page.eval_on_selector_all(

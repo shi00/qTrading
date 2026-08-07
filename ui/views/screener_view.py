@@ -183,8 +183,12 @@ def _build_table_data(df: pd.DataFrame, vm: ScreenerViewModel) -> tuple[list, li
         label = vm.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
-    records = df[visible_cols].to_dict("records")  # type: ignore[call-overload]
-    formatted_rows = [{col: _format_cell_value(col, val) for col, val in row.items()} for row in records]  # type: ignore[arg-type]
+    raw_records = df.to_dict("records")  # type: ignore[call-overload]
+    formatted_rows: list[dict[str, typing.Any]] = []
+    for raw in raw_records:
+        fmt: dict[str, typing.Any] = {col: _format_cell_value(col, raw[col]) for col in visible_cols}
+        fmt["_raw"] = raw  # #423: 携带原始行引用, 供 _on_row_click 反查 (替代 ts_code 字典反查, 避免同名多行覆盖)
+        formatted_rows.append(fmt)
     return vt_columns, formatted_rows
 
 
@@ -635,9 +639,12 @@ def ScreenerView(
             page.run_task(_load_history_for_date, trade_date, strategy_name, run_id)
 
     def _on_row_click(row_data: dict) -> None:
-        """行点击 → 打开详情对话框。"""
-        ts_code = row_data.get("ts_code", "")
-        raw_data = _raw_row_lookup.get(ts_code, row_data)
+        """行点击 → 打开详情对话框。
+
+        #423: 通过 formatted_row 携带的 _raw 引用反查原始行 (含隐藏列),
+        避免 ts_code 同名多行时字典反查错行. _raw 缺失时 fallback 到 row_data 本身.
+        """
+        raw_data = row_data.get("_raw", row_data)
         set_detail_dialog_data(typing.cast(typing.Any, raw_data))
 
     def _on_detail_close() -> None:
@@ -740,10 +747,8 @@ def ScreenerView(
     # 表格数据: 从 VM 读取当前页
     df = vm.get_current_page_data()
     if df is not None and not df.empty:
-        _raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
         vt_columns, formatted_rows = _build_table_data(df, vm)
     else:
-        _raw_row_lookup = {}
         vt_columns = []
         formatted_rows = []
 

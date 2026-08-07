@@ -332,6 +332,23 @@ class AnchorPage:
             )
             return option_handle.as_element()
 
+        # 0. C4: 若下拉残留 expanded 状态（上次选择未完全收合），先按 Escape 收合
+        expanded_check = await self.page.evaluate(
+            r"""(args) => {
+                const {label} = args;
+                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                    .find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t === label || t.startsWith(label + '.') || t.startsWith(label + '\n');
+                    });
+                return el ? el.getAttribute('aria-expanded') : null;
+            }""",
+            {"label": eid_str},
+        )
+        if expanded_check == "true":
+            await self.page.keyboard.press("Escape")
+            await self.page.wait_for_timeout(300)
+
         # 1. 优先探测选项是否已经在 DOM 中呈展开态
         option_element = await _find_option_element()
         if not option_element:
