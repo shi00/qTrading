@@ -793,3 +793,95 @@ class TestExcInfoDowngrade:
 
         for record in caplog.records:
             assert sensitive_key not in record.message, f"API key leaked in log: {record.message}"
+
+
+class TestPIISanitization:
+    """PII 脱敏: 手机号、身份证号、邮箱检测与替换"""
+
+    def test_phone_number_detected(self):
+        text = "用户电话: 13812345678 需要联系"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "13812345678" not in result
+        assert "***" in result
+
+    def test_phone_number_with_spaces(self):
+        text = "联系电话 138 1234 5678 请回复"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "138" in result
+        assert "1234" in result
+        assert "5678" in result
+
+    def test_id_card_detected(self):
+        text = "身份证号: 110101199001011234"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "110101199001011234" not in result
+        assert "***" in result
+
+    def test_id_card_with_x_checksum(self):
+        text = "身份证: 11010119900101123X"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "11010119900101123X" not in result
+        assert "***" in result
+
+    def test_email_detected(self):
+        text = "联系邮箱: test.user@example.com"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "test.user@example.com" not in result
+        assert "***" in result
+
+    def test_email_with_dash_domain(self):
+        text = "邮箱: admin@my-server.co.uk"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "admin@my-server.co.uk" not in result
+        assert "***" in result
+
+    def test_stock_code_not_matched_as_phone(self):
+        """股票代码不应被手机号正则误匹配"""
+        text = "股票代码: 600519.SH 今日涨幅5%"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "600519" in result
+
+    def test_order_number_not_matched_as_id(self):
+        """订单号不应被身份证正则误匹配"""
+        text = "订单号: 20240115001234567"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "20240115001234567" in result
+
+    def test_multiple_pii_in_one_text(self):
+        """一段文本中同时包含手机号、身份证、邮箱"""
+        text = "用户信息: 手机 13812345678，身份证 11010119900101123X，邮箱 john@example.com"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "13812345678" not in result
+        assert "11010119900101123X" not in result
+        assert "john@example.com" not in result
+        assert result.count("***") == 3
+
+    def test_pii_in_sanitize_error(self):
+        """sanitize_error 应检测异常消息中的 PII"""
+        err = ValueError("用户 13812345678 登录失败，邮箱 test@example.com 未验证")
+        result = DataSanitizer.sanitize_error(err)
+        assert "13812345678" not in result
+        assert "test@example.com" not in result
+
+    def test_pii_in_sanitize_dict_non_sensitive_key(self):
+        """sanitize_dict 非敏感 key 的 str 值含 PII 时应替换"""
+        data = {"message": "客服电话: 13812345678"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert "13812345678" not in result["message"]
+        assert "***" in result["message"]
+
+    def test_phone_at_text_boundary(self):
+        """文本开头/结尾的手机号应被检测"""
+        text = "13812345678 是我的电话"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "13812345678" not in result
+
+        text2 = "请拨打 13812345678"
+        result2 = DataSanitizer._sanitize_pii_text(text2)
+        assert "13812345678" not in result2
+
+    def test_short_number_not_matched(self):
+        """短数字串不应被误匹配"""
+        text = "价格: 1381234 (仅7位)"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "1381234" in result

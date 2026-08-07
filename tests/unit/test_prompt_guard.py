@@ -382,3 +382,30 @@ class TestNeutralizeExternalText:
         text = "abcde" + "\u200b" * 2000
         result = neutralize_external_text(text, max_len=100)
         assert result == "abcde"
+
+    def test_pii_phone_number_masked(self):
+        """外部文本中的手机号应被脱敏"""
+        text = "突发新闻: 用户投诉电话 13812345678 无法接通"
+        result = neutralize_external_text(text)
+        assert "13812345678" not in result
+        assert "***" in result
+
+    def test_pii_email_masked(self):
+        """外部文本中的邮箱应被脱敏"""
+        text = "公司公告: 联系邮箱 support@company.com 已更换"
+        result = neutralize_external_text(text)
+        assert "support@company.com" not in result
+        assert "***" in result
+
+    def test_pii_id_card_masked(self):
+        """外部文本中的身份证号应被脱敏"""
+        text = "用户实名: 11010119900101123X 已通过验证"
+        result = neutralize_external_text(text)
+        assert "11010119900101123X" not in result
+        assert "***" in result
+
+    def test_no_false_positive_stock_code(self):
+        """股票代码不应被手机号正则误匹配"""
+        text = "贵州茅台 600519.SH 涨停，涨幅10%"
+        result = neutralize_external_text(text)
+        assert "600519" in result

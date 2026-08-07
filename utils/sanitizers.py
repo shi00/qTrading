@@ -150,6 +150,30 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
+    # PII 检测: 手机号、身份证号、邮箱
+    # 参考: https://blog.csdn.net/weixin_40369899/article/details/135644486 (手机号)
+    # 参考: https://cloud.tencent.com/developer/article/2275911 (身份证)
+    # 参考: https://www.regular-expressions.info/email.html (邮箱)
+    # 边界检查: (?<!\d)...(?!\d) 避免匹配股票代码/订单号等正常数字串
+    _PATTERN_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+    _PATTERN_ID_CARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
+    _PATTERN_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+    @staticmethod
+    def _sanitize_pii_text(text: str) -> str:
+        """检测并替换文本中的 PII（手机号/身份证/邮箱）。
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            PII 已替换为 *** 的文本
+        """
+        text = DataSanitizer._PATTERN_PHONE.sub("***", text)
+        text = DataSanitizer._PATTERN_ID_CARD.sub("***", text)
+        text = DataSanitizer._PATTERN_EMAIL.sub("***", text)
+        return text
+
     @staticmethod
     def sanitize_error(exception: Exception | str, show_traceback: bool = False) -> str:
         """
@@ -190,6 +214,9 @@ class DataSanitizer:
             if secret in msg:
                 msg = msg.replace(secret, "***")
 
+        # PII 检测: 手机号/身份证/邮箱
+        msg = DataSanitizer._sanitize_pii_text(msg)
+
         # 如果需要堆栈,也要脱敏
         if show_traceback and isinstance(exception, BaseException):
             import traceback
@@ -215,6 +242,8 @@ class DataSanitizer:
                 for secret in list(DataSanitizer._known_secrets):
                     if secret in line:
                         line = line.replace(secret, "***")
+                # PII 检测
+                line = DataSanitizer._sanitize_pii_text(line)
                 tb_clean.append(line)
             return "\n".join(tb_clean)
 
@@ -273,6 +302,8 @@ class DataSanitizer:
                     for _secret in list(DataSanitizer._known_secrets):
                         if _secret in v:
                             v = v.replace(_secret, "***")
+                    # PII 检测: 非敏感 key 的 str 值也可能包含 PII
+                    v = DataSanitizer._sanitize_pii_text(v)
                 result[k] = v
 
         return result
