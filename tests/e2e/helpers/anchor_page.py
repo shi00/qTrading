@@ -315,12 +315,24 @@ class AnchorPage:
                         const r = e.getBoundingClientRect();
                         if (r.width <= 0 || r.height <= 0) return false;
                         const t = (e.textContent || '').trim();
-                        if (t.includes('e2e.')) return false;
-                        if (dropdownEid && (t.startsWith(dropdownEid + '\n') || t.startsWith(dropdownEid + '.'))) return false;
+                        // 仅过滤当前 dropdown 的触发器
+                        // if (t.includes('e2e.')) return false;  // 移除过于宽泛的过滤
+                        if (dropdownEid && t.startsWith(dropdownEid + '\n')) return false;
                         return true;
                     });
 
                     const normText = text.trim();
+
+                    // 0. eid.option 格式精确匹配 (如 "e2e.data.dropdown.table.daily_quotes\n日线行情")
+                    if (dropdownEid) {
+                        const fullEid = dropdownEid + '.' + normText;
+                        let found = els.find(e => {
+                            const t = (e.textContent || '').trim();
+                            return t.startsWith(fullEid + '\n') || t === fullEid;
+                        });
+                        if (found) return found;
+                    }
+
                     // 1. 精确匹配
                     let found = els.find(e => (e.textContent || '').trim() === normText);
                     if (found) return found;
