@@ -7,6 +7,8 @@ from tests.e2e.pages import SettingsPage
 from tests.e2e.timeouts import TIMEOUTS
 
 pytestmark = [
+    pytest.mark.timeout(180),
+    pytest.mark.timeout_e2e_standard,
     pytest.mark.e2e,
     # E2E 设置面板测试共享 Flet 子进程 / DB / 配置文件，并行执行会互相干扰
     # (端口冲突、配置竞争、Flet 服务实例冲突)，强制串行执行

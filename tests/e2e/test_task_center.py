@@ -4,7 +4,7 @@ from tests.e2e.labels import strategy_label
 from tests.e2e.pages import ScreenerPage, TaskCenterPage
 from tests.e2e.timeouts import TIMEOUTS
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 
 async def test_task_center_shows_task(e2e_page):

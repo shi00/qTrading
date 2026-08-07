@@ -3,7 +3,7 @@ import pytest
 from ui.i18n import I18n
 from tests.e2e.timeouts import TIMEOUTS
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(60), pytest.mark.e2e, pytest.mark.timeout_e2e_smoke]
 NAV_KEYS = [
     "nav_market",
     "nav_screener",

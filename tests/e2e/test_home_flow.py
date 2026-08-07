@@ -3,7 +3,7 @@ import pytest
 from tests.e2e.pages import HomePage
 from tests.e2e.timeouts import TIMEOUTS
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 
 async def test_home_view_loads(e2e_page):

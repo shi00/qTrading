@@ -28,6 +28,8 @@ from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
 pytestmark = [
+    pytest.mark.timeout(60),
+    pytest.mark.timeout_e2e_smoke,
     pytest.mark.e2e,
     pytest.mark.embedded_real,
     pytest.mark.network,

@@ -21,7 +21,7 @@ import pytest
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 
 async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page) -> None:
