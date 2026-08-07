@@ -2,6 +2,8 @@ import re
 import logging
 import unicodedata
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 MAX_PROMPT_LENGTH = 8000
@@ -144,6 +146,7 @@ def neutralize_external_text(text: str, max_len: int = 2000) -> str:
        so XML-style structural tags (e.g. ``</recent_news>``, ``<system>``) lose
        their tag semantics and cannot close/open prompt structure tags.
     3. Truncates to ``max_len`` to bound prompt size.
+    4. PII detection: masks phone numbers, ID cards, and email addresses.
 
     Unlike :func:`validate_prompt`, this is applied to external data fields
     (news titles, stock names, global context) rather than user-typed prompts,
@@ -155,6 +158,8 @@ def neutralize_external_text(text: str, max_len: int = 2000) -> str:
         text = str(text)
     text = _ZERO_WIDTH_RE.sub("", text)
     text = text.replace("<", "‹").replace(">", "›")
+    # PII 检测: 手机号/身份证/邮箱
+    text = DataSanitizer._sanitize_pii_text(text)
     if len(text) > max_len:
         text = text[:max_len]
     return text
