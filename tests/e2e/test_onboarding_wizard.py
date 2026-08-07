@@ -12,7 +12,7 @@ from tests.e2e.timeouts import TIMEOUTS
 
 from urllib.parse import unquote_plus
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 logger = logging.getLogger(__name__)
 

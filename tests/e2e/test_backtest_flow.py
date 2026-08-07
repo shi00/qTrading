@@ -3,7 +3,7 @@ import pytest
 from ui.i18n import I18n
 from tests.e2e.pages import BacktestPage
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 
 @pytest.mark.slow

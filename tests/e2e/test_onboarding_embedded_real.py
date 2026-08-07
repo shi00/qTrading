@@ -31,7 +31,12 @@ from tests.e2e.helpers.app_launcher import PROJECT_ROOT
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
-pytestmark = [pytest.mark.e2e, pytest.mark.embedded_real]
+pytestmark = [
+    pytest.mark.timeout(600),
+    pytest.mark.timeout_e2e_real,
+    pytest.mark.e2e,
+    pytest.mark.embedded_real,
+]
 
 
 async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_wizard_page) -> None:

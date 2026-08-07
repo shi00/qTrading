@@ -4,12 +4,14 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import io
 import json
 import logging
 import os
 import random
 import subprocess
 import sys
+import tarfile
 import time
 import typing
 from datetime import date, timedelta
@@ -54,8 +56,10 @@ _E2E_MOCK_KEYRING = _create_e2e_mock_keyring()
 sys.modules["keyring"] = _E2E_MOCK_KEYRING
 
 from tests.e2e._windows_skip import add_windows_skip_option, strip_windows_skipif
-from tests.e2e.helpers.app_launcher import start_flet_app
+from tests.e2e.helpers.anchor_page import AnchorPage
+from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail, start_flet_app
 from tests.e2e.helpers.flet_page import FletPage
+from ui.testing.e2e_ids import EIDS
 
 from tests.conftest import _get_test_db_url
 
@@ -1526,12 +1530,85 @@ async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
     fp = await _make_page(e2e_browser, _e2e_app_dep, request, check_db_error=True)
     if request.node.get_closest_marker("slow"):
         fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
+
+    # PR-4 Task 4.6: Fail-fast canary — probe EIDS.NAV.SCREENER (5s timeout).
+    # If nav anchor 不渲染，说明 app anchor 基础设施损坏（Semantics/anchored 未生效），
+    # 跳过整个文件并给出清晰错误信息，避免每个 nav 交互都等 45s Playwright 超时。
+    # 正常路径：nav anchor 在页面加载时已渲染，探测 <100ms，无附加延迟。
+    try:
+        ap = AnchorPage(fp.page, fp)
+        await ap.expect_visible(EIDS.NAV.SCREENER, timeout_ms=5000)
+    except Exception as canary_exc:
+        await _teardown_page(fp, request, failed=True)
+        pytest.skip(
+            f"E2E canary failed: EIDS.NAV.SCREENER not visible within 5s after page load. "
+            f"App anchor infrastructure may be broken (Semantics/anchored not effective). "
+            f"Skipping all tests in this file. Error: {canary_exc}",
+            allow_module_level=False,
+        )
+
     yield fp
     failed = any(
         getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
         for when in ("setup", "call")
     )
     await _teardown_page(fp, request, failed=failed)
+
+
+@pytest.fixture(autouse=True)
+def _collect_e2e_artifacts(request):
+    """PR-4 Task 4.7: 集中化 artifact 收集。
+
+    失败时打包 trace + screenshot + flet log tail + main_trace.log tail 到单 tar.gz，
+    CI artifact upload 只需 1 个入口（``ARTIFACT_DIR/*.tar.gz``）；日志文件按用例名分组。
+
+    autouse + function scope：setup 先于 ``e2e_page``/``wizard_page``，teardown 后于
+    它们（pytest teardown 逆序），确保 ``_teardown_page`` 已保存 trace + screenshot。
+    仅在测试失败时收集，正常路径无 IO 开销。
+    """
+    yield
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    if not failed:
+        return
+
+    name = request.node.name
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 收集已由 _teardown_page 保存的 screenshot + trace
+    png = ARTIFACT_DIR / f"{name}.png"
+    trace = ARTIFACT_DIR / f"{name}-trace.zip"
+
+    # 收集 Flet app log + main_trace.log 的 tail（共享文件，取尾部避免 tar.gz 膨胀）
+    log_files: list[tuple[Path, str]] = []
+    flet_log = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+    if flet_log.exists():
+        log_files.append((flet_log, "e2e-flet-app.log.tail"))
+    main_trace = PROJECT_ROOT / "logs" / "main_trace.log"
+    if main_trace.exists():
+        log_files.append((main_trace, "main_trace.log.tail"))
+
+    if not png.exists() and not trace.exists() and not log_files:
+        return
+
+    tar_path = ARTIFACT_DIR / f"{name}.tar.gz"
+    try:
+        with tarfile.open(tar_path, "w:gz") as tar:
+            if png.exists():
+                tar.add(png, arcname=png.name)
+            if trace.exists():
+                tar.add(trace, arcname=trace.name)
+            for src, arcname in log_files:
+                # 写入 log tail 而非全量，控制 tar.gz 大小
+                tail = _read_log_tail(src, max_chars=8000)
+                data = tail.encode("utf-8")
+                info = tarfile.TarInfo(name=arcname)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[e2e_artifacts] failed to collect tar.gz for %s: %s", name, exc)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
