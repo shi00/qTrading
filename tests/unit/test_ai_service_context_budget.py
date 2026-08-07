@@ -156,6 +156,16 @@ class TestGetModelContextWindow:
             }
             assert _get_model_context_window(llm_config) == DEFAULT_CONTEXT_WINDOW
 
+    def test_custom_model_context_non_dict_provider_ignored_without_error(self):
+        """provider 的覆盖值非 dict（如 list/str 非法配置）时不抛错，静默回退（评审 Rvd-2）。"""
+        for bad in ([32000], "32k"):
+            llm_config = {
+                "provider": "custom",
+                "model": "my-custom-model",
+                "custom_model_contexts": {"custom": bad},
+            }
+            assert _get_model_context_window(llm_config) == DEFAULT_CONTEXT_WINDOW
+
     def test_custom_model_context_override_precedence_over_builtin(self):
         """覆盖优先于内置 LLM_PROVIDERS 信息。"""
         llm_config = {
@@ -237,6 +247,18 @@ class TestApplyContextBudget:
         ]
         _, names = _apply_context_budget(sections, budget_tokens=1_000_000)
         assert names == ["tech"]
+
+    def test_low_priority_small_cut_before_high_priority_large(self):
+        """大体积高优先级段不应被先掏空：优先级为主、token 数为辅（评审 Rvd-1）。"""
+        # financials 优先级更高（priority 小）但体积巨大；news 优先级低（priority 大）但体积小。
+        # 预算极小：应优先裁低优先级的小段 news，而非先掏空高优先级的大段 financials。
+        financials = self._mk("financials", 1, "F" * 100_000, truncatable=True)
+        news = self._mk("news", 5, "N" * 50, truncatable=True)
+        _, names = _apply_context_budget([financials, news], budget_tokens=1)
+        # 优先级低的 news 先被整体丢弃（min_chars=0）
+        assert "news" not in names
+        # 高优先级 financials 保留（即便它体积最大）
+        assert "financials" in names
 
 
 # ---------------------------------------------------------------------------

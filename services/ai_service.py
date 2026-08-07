@@ -109,8 +109,10 @@ def _get_model_context_window(llm_config: dict, model_override: str | None = Non
         provider, model = model.split("/", 1)
 
     # 1) per-model context 覆盖（P2-2）：自定义/未知模型可显式声明，运行时以此为准。
+    # 防御容错：provider 值若非 dict（如 list/str 等非法配置），忽略该覆盖不抛错。
     override_map = llm_config.get("custom_model_contexts") or {}
-    override_ctx = override_map.get(provider, {}).get(model)
+    provider_ctx = override_map.get(provider) or {}
+    override_ctx = provider_ctx.get(model) if isinstance(provider_ctx, dict) else None
     if isinstance(override_ctx, int) and override_ctx > 0:
         return override_ctx
 
@@ -148,7 +150,8 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
     if _total(cur) <= budget_tokens:
         return "\n\n".join(s[3] for s in cur), [s[0] for s in cur]
 
-    # 迭代削减：每次裁掉 token 最大且优先级最低（priority 数字最大）的可截断 section 一半
+    # 迭代削减：优先裁优先级最低（priority 数字最大）的可截断 section；
+    # 在同一优先级内再裁 token 最大的，避免大体积高优先级段被先掏空。
     while True:
         reducible = [s for s in cur if s[2] and len(s[3]) > s[4]]
         if not reducible:
@@ -157,7 +160,7 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
                 _total(cur),
             )
             break
-        target = max(reducible, key=lambda s: (_estimate_tokens(s[3]), s[1]))
+        target = max(reducible, key=lambda s: (s[1], _estimate_tokens(s[3])))
         new_len = max(target[4], round(len(target[3]) * 0.5))
         target[3] = target[3][:new_len]
         if _total(cur) <= budget_tokens:
