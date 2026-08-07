@@ -186,6 +186,26 @@ class TestBuildTableData:
         assert rows[0]["name"] == "test"
         assert rows[0]["close"] == "12.34"
 
+    def test_raw_reference_attached(self):
+        """#423: formatted_row 携带 _raw 引用, 指向对应原始行 (含隐藏列)."""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "name": ["平安银行", "平安银行"],
+                "trade_date": ["20260101", "20260102"],  # 隐藏列
+                "close": [10.5, 11.0],
+            }
+        )
+        _, rows = _build_table_data(df, self._make_vm())
+        assert len(rows) == 2
+        # trade_date 在 _HIDDEN_COLS 中: formatted_row 顶层不含 (仅 _raw 携带原始值)
+        assert "trade_date" not in rows[0]  # 顶层无 trade_date (验证隐藏)
+        # _raw 携带对应原始行 (含隐藏列), 同名多行各自独立
+        assert rows[0]["_raw"]["trade_date"] == "20260101"
+        assert rows[0]["_raw"]["close"] == 10.5
+        assert rows[1]["_raw"]["trade_date"] == "20260102"
+        assert rows[1]["_raw"]["close"] == 11.0
+
 
 class TestParseNum:
     """_parse_num 纯函数测试: 尝试解析数值, 失败时返回原字符串。"""
