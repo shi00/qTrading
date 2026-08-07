@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import sys
 
 import pytest
 
@@ -111,9 +110,8 @@ async def test_wizard_forward_then_back(wizard_page):
 # embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
 # "验证失败"场景不存在；外部 DB 配置验证失败流程由集成测试覆盖（test_onboarding_wizard_integration.py）。
 @pytest.mark.skipif(
-    sys.platform == "win32" or os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
+    os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
     reason=(
-        "Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题 (P3-WinE2E-Skip); "
         "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
         "外部 DB 配置验证失败场景不存在（embedded 验证为 always-true）"
     ),
@@ -153,11 +151,8 @@ async def test_wizard_db_validation_failure(wizard_page):
 # embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
 # 外部 DB 配置验证流程由集成测试覆盖（test_onboarding_wizard_integration.py）。
 @pytest.mark.skipif(
-    sys.platform == "win32" or os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
+    os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
     reason=(
-        "Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败"
-        "（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在"
-        " wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip); "
         "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
         "外部 DB 配置验证流程由集成测试覆盖"
     ),
