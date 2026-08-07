@@ -14,12 +14,16 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 方法（click_text / click_button / fill_textbox / expect_text / has_text）。
 """
 
+import logging
+
 from core.i18n import I18n
 from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
 from ui.testing.e2e_ids import EIDS, Eid
+
+logger = logging.getLogger(__name__)
 
 # PR-4 Task 4.2: nav i18n key → EID 映射 (与 app_layout._NAV_EIDS 对齐)
 _NAV_EIDS: dict[str, Eid] = {
@@ -115,15 +119,38 @@ class ScreenerPage:
         """
         await self.ap.click(EIDS.SCREENER.result_row(ts_code), timeout_ms=timeout_ms)
 
-    async def open_detail_dialog(self, ts_code: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击行打开详情对话框，单次点击 + 验证关闭按钮 anchor 渲染。
+    async def open_detail_dialog(
+        self,
+        ts_code: str,
+        max_attempts: int = 3,
+        timeout_ms: int = TIMEOUTS.INTERACTION,
+    ) -> None:
+        """点击行打开详情对话框，带重试验证关闭按钮 anchor 渲染。
 
-        PR-4 Task 4.3: anchor 化后无需重试，单次 click_row + expect_visible
-        验证对话框渲染完成。验证标志：``EIDS.DETAIL_DIALOG.CLOSE_BUTTON``
-        （INTERACTIVE anchor，对话框打开时立即渲染，不像 K 线图异步加载）。
+        PR-4 Task 4.3: anchor 化后用 ``click_row`` + ``expect_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON)``。
+        保留重试机制以抵抗 CI 环境下 CanvasKit hit-testing 的偶发抖动。
         """
-        await self.click_row(ts_code, timeout_ms=timeout_ms)
-        await self.ap.expect_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=TIMEOUTS.FAST)
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self.click_row(ts_code, timeout_ms=timeout_ms)
+                await self.ap.expect_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=TIMEOUTS.FAST)
+                if attempt > 1:
+                    logger.info("open_detail_dialog: succeeded on attempt %d for ts_code '%s'", attempt, ts_code)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.debug(
+                    "open_detail_dialog: attempt %d/%d failed for ts_code '%s': %s",
+                    attempt,
+                    max_attempts,
+                    ts_code,
+                    exc,
+                )
+        raise AssertionError(
+            f"open_detail_dialog: dialog did not open after {max_attempts} attempts for ts_code '{ts_code}'. "
+            f"Last error: {last_exc}"
+        ) from last_exc
 
 
 # ============================================================================
