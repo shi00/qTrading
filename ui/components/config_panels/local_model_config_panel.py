@@ -15,12 +15,12 @@
 """
 
 import logging
-import typing
 from collections.abc import Callable
 
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
+from ui.components.slider_input import SliderInput
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -206,14 +206,15 @@ def LocalModelConfigPanel(
         on_change=lambda e: vm.update_timeout(e.control.value),
     )
 
-    threads_input = ft.Slider(
-        min=1,
-        max=16,
-        divisions=15,
+    threads_input = SliderInput(
+        label=None,
         value=float(state.n_threads),
-        label="{value}",
-        tooltip=str(state.n_threads),
-        on_change=lambda e: vm.update_threads(typing.cast("int | float", e.control.value)),
+        min_val=1,
+        max_val=16,
+        step=1.0,
+        divisions=15,
+        on_change=lambda v: vm.update_threads(int(v)),
+        expand=True,
     )
 
     gpu_auto_switch = ft.Switch(
@@ -222,15 +223,18 @@ def LocalModelConfigPanel(
         on_change=lambda e: vm.update_gpu_auto(e.control.value),
     )
 
-    gpu_layers_input = ft.Slider(
-        min=0,
-        max=100,
-        divisions=100,
-        value=float(gpu_layers_display),
-        label="{value}",
-        tooltip=str(gpu_layers_display),
+    gpu_layers_input = ft.Container(
         visible=not is_gpu_auto,
-        on_change=lambda e: vm.update_gpu_layers(typing.cast("int | float", e.control.value)),
+        content=SliderInput(
+            label=None,
+            value=float(gpu_layers_display),
+            min_val=0,
+            max_val=100,
+            step=1.0,
+            divisions=100,
+            on_change=lambda v: vm.update_gpu_layers(int(v)),
+            expand=True,
+        ),
     )
 
     batch_input = ft.Dropdown(

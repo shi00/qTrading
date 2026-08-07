@@ -1874,5 +1874,9 @@
     "col_sw_l2_code": "SW L2 Code",
     "col_sw_l2_name": "SW L2 Name",
     "col_sw_l3_code": "SW L3 Code",
-    "col_sw_l3_name": "SW L3 Name"
+    "col_sw_l3_name": "SW L3 Name",
+    "ai_card_retry": "Retry analysis",
+    "ai_card_analysis_failed": "Analysis failed",
+    "ai_retry_strategy_changed": "Strategy changed, cannot retry last analysis",
+    "ai_retry_failed": "Retry failed"
 }

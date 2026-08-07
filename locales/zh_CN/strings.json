@@ -1874,5 +1874,9 @@
     "col_sw_l2_code": "二级行业代码",
     "col_sw_l2_name": "二级行业名称",
     "col_sw_l3_code": "三级行业代码",
-    "col_sw_l3_name": "三级行业名称"
+    "col_sw_l3_name": "三级行业名称",
+    "ai_card_retry": "重试分析",
+    "ai_card_analysis_failed": "分析失败",
+    "ai_retry_strategy_changed": "策略已切换，无法重试上次分析",
+    "ai_retry_failed": "重试失败"
 }

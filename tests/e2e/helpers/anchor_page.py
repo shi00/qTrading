@@ -285,8 +285,20 @@ class AnchorPage:
         - 原有"收合校验"逻辑保留 (``selection did not settle``), 向后兼容.
         """
         eid_str, kind = dropdown_eid
-        if kind != AnchorKind.COMPLEX:
-            raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
+        # 0. 若 Dropdown 按钮当前已选中该选项且菜单未展开，则直接返回无需重复点击
+        current_dd_text = await self.page.evaluate(
+            """(eid) => {
+                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                    .find(e => (e.textContent || '').trim().startsWith(eid));
+                return el ? (el.textContent || '') : '';
+            }""",
+            eid_str,
+        )
+        if (
+            option_text in current_dd_text
+            and not await self.page.locator('flt-semantics[role="button"][aria-expanded="true"]').count()
+        ):
+            return
 
         async def _find_option_element() -> Any:
             option_handle = await self.page.evaluate_handle(
@@ -303,11 +315,24 @@ class AnchorPage:
                         const r = e.getBoundingClientRect();
                         if (r.width <= 0 || r.height <= 0) return false;
                         const t = (e.textContent || '').trim();
-                        if (dropdownEid && (t.startsWith(dropdownEid + '\n') || t.startsWith(dropdownEid + '.'))) return false;
+                        // 仅过滤当前 dropdown 的触发器
+                        // if (t.includes('e2e.')) return false;  // 移除过于宽泛的过滤
+                        if (dropdownEid && t.startsWith(dropdownEid + '\n')) return false;
                         return true;
                     });
 
                     const normText = text.trim();
+
+                    // 0. eid.option 格式精确匹配 (如 "e2e.data.dropdown.table.daily_quotes\n日线行情")
+                    if (dropdownEid) {
+                        const fullEid = dropdownEid + '.' + normText;
+                        let found = els.find(e => {
+                            const t = (e.textContent || '').trim();
+                            return t.startsWith(fullEid + '\n') || t === fullEid;
+                        });
+                        if (found) return found;
+                    }
+
                     // 1. 精确匹配
                     let found = els.find(e => (e.textContent || '').trim() === normText);
                     if (found) return found;

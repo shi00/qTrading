@@ -136,7 +136,7 @@ def _get_export_button(env: dict) -> ft.Button:
 
 
 def _walk_all_controls(root: Any) -> list:
-    """递归返回所有 ft.Control (用于搜索 dropdown / button / slider / text)."""
+    """递归返回所有 ft.Control 与 Component (用于搜索 dropdown / button / slider / text / SliderInput)."""
     found: list[Any] = []
     visited: set[int] = set()
 
@@ -147,6 +147,7 @@ def _walk_all_controls(root: Any) -> list:
         if isinstance(c, ft.Control):
             found.append(c)
         if isinstance(c, Component):
+            found.append(c)
             for v in list(c.args) + list(c.kwargs.values()):
                 if v is not None:
                     _walk(v)
@@ -213,6 +214,15 @@ def _get_sliders(env: dict) -> list[ft.Slider]:
         if isinstance(ctrl, ft.Slider) and ctrl not in sliders:
             sliders.append(ctrl)
     return sliders
+
+
+def _get_slider_inputs(env: dict) -> list[Component]:
+    """返回渲染树中所有 SliderInput Component 实例 (UX 3.2)."""
+    inputs: list[Component] = []
+    for ctrl in _walk_all_controls(env["result"]):
+        if isinstance(ctrl, Component) and getattr(ctrl.fn, "__name__", "") == "SliderInput":
+            inputs.append(ctrl)
+    return inputs
 
 
 def _get_segmented_buttons(env: dict) -> list[ft.SegmentedButton]:
@@ -2091,12 +2101,13 @@ class TestBuildParamControl:
     """_build_param_control: 四类型 (slider/number/dropdown/textarea) + ai_system_prompt 特殊处理."""
 
     def test_slider_param_rendered(self, screener_view_with_params_env) -> None:
-        """type=slider → ft.Slider 控件渲染."""
+        """type=slider → SliderInput 组件渲染 (UX 3.2)."""
         env = screener_view_with_params_env
-        sliders = _get_sliders(env)
-        assert len(sliders) >= 1
-        assert sliders[0].min == 0
-        assert sliders[0].max == 100
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) >= 1
+        kwargs = slider_inputs[0].kwargs
+        assert kwargs.get("min_val") == 0
+        assert kwargs.get("max_val") == 100
 
     def test_number_param_rendered(self, screener_view_with_params_env) -> None:
         """type=number → ft.TextField 渲染 (keyboard_type=NUMBER)."""
@@ -2134,14 +2145,14 @@ class TestBuildParamsPanel:
     def test_no_strategy_returns_empty(self, screener_view_env) -> None:
         """state.selected_strategy=None → 参数面板为空."""
         env = screener_view_env
-        sliders = _get_sliders(env)
-        assert len(sliders) == 0
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) == 0
 
     def test_with_params_renders_controls(self, screener_view_with_params_env) -> None:
-        """state.selected_strategy=value → 参数面板含 slider + textfield + dropdown."""
+        """state.selected_strategy=value → 参数面板含 SliderInput + textfield + dropdown."""
         env = screener_view_with_params_env
-        sliders = _get_sliders(env)
-        assert len(sliders) >= 1
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) >= 1
 
     def test_advanced_group_in_expansion_tile(self, screener_view_with_params_env) -> None:
         """advanced group 参数 → ExpansionTile 渲染."""

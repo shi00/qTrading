@@ -166,11 +166,13 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
                 lambda: WatchlistView(active=current_tab == NavTabs.WATCHLIST),
                 current_tab == NavTabs.WATCHLIST,
             ),
-            expand=True,
-            visible=current_tab == NavTabs.WATCHLIST,
         ),
     ]
-    return ft.Stack(safe_controls(pages), expand=True)
+    # 根因防范 (PR #472 E2E 修复): 显式设置 fit=ft.StackFit.EXPAND。默认 StackFit.LOOSE 会导致 Stack
+    # 按照非定位子项的 Intrinsic Preferred Height 进行自底向上塌陷。当子视图包含弹性空间 (如 expand=True 的 Column) 时，
+    # LOOSE 模式会导致页面容器坍塌为仅固定顶部元素高度，将下方的表格区挤压至 0 高度。
+    # EXPAND 强制顶级 Stack 自顶向下将父容器 Bounds 布局约束完整下发给所有 Stack 子页面。
+    return ft.Stack(safe_controls(pages), expand=True, fit=ft.StackFit.EXPAND)
 
 
 def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDestination]:

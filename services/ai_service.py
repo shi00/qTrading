@@ -470,18 +470,26 @@ class AIServiceUnavailableError(Exception):
     pass
 
 
-def _sanitize_free_text(value: str) -> str:
-    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output."""
+def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
+    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output.
+
+    UX-2.2: max_len 可配置。None 时读 ConfigHandler.get_ai_free_text_max_len()。
+    """
     if not isinstance(value, str):
         return value
+    if max_len is None:
+        # 延迟导入避免循环依赖
+        from utils.config_handler import ConfigHandler
+
+        max_len = ConfigHandler.get_ai_free_text_max_len()
     cleaned = _CONTROL_CHARS_RE.sub("", value)
-    if len(cleaned) > _FREE_TEXT_MAX_LEN:
+    if len(cleaned) > max_len:
         logger.warning(
             "[AIService] Output validation: free-text field truncated from %d to %d chars",
             len(cleaned),
-            _FREE_TEXT_MAX_LEN,
+            max_len,
         )
-        cleaned = cleaned[:_FREE_TEXT_MAX_LEN]
+        cleaned = cleaned[:max_len]
     return cleaned
 
 
@@ -511,10 +519,14 @@ def validate_ai_analysis_response(response: dict) -> dict:
             response["recommendation"] = rec_lower
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
+    # UX-2.2: 读一次配置避免每字段重复读
+    from utils.config_handler import ConfigHandler
+
+    free_text_max_len = ConfigHandler.get_ai_free_text_max_len()
     for field in _FREE_TEXT_FIELDS:
         val = response.get(field)
         if isinstance(val, str):
-            response[field] = _sanitize_free_text(val)
+            response[field] = _sanitize_free_text(val, max_len=free_text_max_len)
 
     return response
 
