@@ -92,6 +92,7 @@
 | 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
+| 新增/修改 E2E 测试 | docs/flet/canvaskit-rendering-e2e-guide.md（CanvasKit 渲染坑点 + EIDS 分类速查表）、docs/guides/testing.md、`tests/e2e/helpers/anchor_page.py`；E2E 定位优先用 anchor-based（`AnchorPage`），禁止依赖文本模糊匹配；Flet 控件坑点（ListView 视口为 0、Container.on_click 无 flt-tappable、expand 传递断裂等）见 docs/flet/project-differences.md §4.5-4.9 |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | Git 操作 / 分支 / worktree | §3 R18、[docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「Worktree 强制使用」「标准工作流」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
@@ -221,6 +222,7 @@ app → 编排所有层，仅被 main.py 调用
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
 | Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
 | Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
+| 测试规范与 CanvasKit E2E 避坑指南（双轨语义树映射 + 5 坑点 + EIDS 分类速查表） | [docs/guides/testing.md](./docs/guides/testing.md)、[docs/flet/canvaskit-rendering-e2e-guide.md](./docs/flet/canvaskit-rendering-e2e-guide.md) |
 | Flet MCP 使用规范（AI 验证 Flet API 的操作指南） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
