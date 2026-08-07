@@ -62,9 +62,12 @@ class TestEstimateTokens:
 
     def test_fallback_path_on_tiktoken_error_not_underestimate_cjk(self):
         """tiktoken 加载失败时回退 len(text)//1，CJK 字符不得被低估（每字至少 1 token）。"""
-        with patch.object(ai_mod, "_tiktoken_enc_error", False), patch(
-            "builtins.__import__",
-            side_effect=ImportError("tiktoken unavailable"),
+        with (
+            patch.object(ai_mod, "_tiktoken_enc_error", False),
+            patch(
+                "builtins.__import__",
+                side_effect=ImportError("tiktoken unavailable"),
+            ),
         ):
             _reset_token_estimator()
             cjk = "平安银行股份有限公司"  # 9 个 CJK 字符
@@ -135,7 +138,7 @@ class TestGetModelContextWindow:
         assert _get_model_context_window(llm_config) == 32000
 
     def test_custom_model_context_override_with_prefix(self):
-        """"provider/model" 拆分的生效模型也能命中覆盖映射。"""
+        """ "provider/model" 拆分的生效模型也能命中覆盖映射。"""
         llm_config = {
             "provider": "custom",
             "model": "my-custom-model",

@@ -1605,9 +1605,7 @@ class AIService:
             labels.append("ai_label_news")
             _label_section["ai_label_news"] = "recent_news"
         if financials_content and "Data not available" not in financials_content:
-            sections.append(
-                ("financials", 1, True, f"<financials>\n{financials_content}\n</financials>", None, 0)
-            )
+            sections.append(("financials", 1, True, f"<financials>\n{financials_content}\n</financials>", None, 0))
             for lbl in financial_labels or []:
                 labels.append(lbl)
                 _label_section[lbl] = "financials"
