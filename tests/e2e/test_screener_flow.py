@@ -5,7 +5,7 @@ from tests.e2e.labels import strategy_desc_label
 from tests.e2e.pages import ScreenerPage
 from tests.e2e.timeouts import TIMEOUTS
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
 
 async def test_screener_page_loads(e2e_page):
@@ -120,9 +120,8 @@ async def test_detail_dialog_open_close(e2e_page):
     PR-2: 关闭按钮迁移到 AnchorPage（EIDS.DETAIL_DIALOG.CLOSE_BUTTON），
     移除 @pytest.mark.flaky（anchor 精确定位消除误匹配）。
 
-    Phase 9.2: 用 ``open_detail_dialog``（带重试验证对话框打开）替代单次
-    ``click_row_by_text``。根因：CanvasKit 抖动下 mouse.click 偶发未触发
-    Flutter hit-testing，对话框没打开，后续字段验证超时。
+    PR-4 Task 4.3: 行点击迁移到 anchor（result_row(ts_code)），open_detail_dialog
+    单次点击 + 验证关闭按钮渲染，替代 Phase 9.2 的 3 次重试（anchor 定位稳定）。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -130,8 +129,8 @@ async def test_detail_dialog_open_close(e2e_page):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    # 点击行打开对话框（带重试验证，吸收 CanvasKit hit-testing 抖动）
-    await screener.open_detail_dialog("平安银行")
+    # 点击行打开对话框（anchor 精确定位 + 验证对话框渲染）
+    await screener.open_detail_dialog("000001.SZ")
 
     # 对话框已渲染完成，字段应立即可见（FAST timeout 验证）
     pe_label = I18n.get("detail_pe")  # "PE(TTM)"
@@ -217,13 +216,13 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     当前状态：Task 5.1 已修复 ``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=False)``
     + ``on_dismiss=_close`` 回调（commit 91f9006c），点击对话框外部应触发 on_dismiss 关闭对话框。
 
-    PR-2: 移除 @pytest.mark.flaky。open_detail_dialog 内部已带 3 次重试吸收
-    CanvasKit hit-testing 抖动，anchor 化后 select/run 稳定触发策略执行，
+    PR-2: 移除 @pytest.mark.flaky。anchor 化后 select/run 稳定触发策略执行，
     对话框打开可靠性提升，不再需要额外 rerun 保险。
 
-    Phase 9.2: ① 用 ``open_detail_dialog`` 替代单次 ``click_row_by_text``；
-    ② 改进外部点击坐标计算：优先用 ``role="dialog"`` bounding_box 右侧外部，
+    Phase 9.2: 改进外部点击坐标计算：优先用 ``role="dialog"`` bounding_box 右侧外部，
     回退到视口右下角（远离 NavigationRail 左侧 0-80px 和对话框中心）。
+    PR-4 Task 4.3: 行点击迁移到 anchor，open_detail_dialog 单次点击 + 验证渲染，
+    替代 Phase 9.2 的 3 次重试。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -231,8 +230,8 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    # 点击行打开对话框（带重试验证，吸收 CanvasKit hit-testing 抖动）
-    await screener.open_detail_dialog("平安银行")
+    # 点击行打开对话框（anchor 精确定位 + 验证对话框渲染）
+    await screener.open_detail_dialog("000001.SZ")
 
     pe_label = I18n.get("detail_pe")
 

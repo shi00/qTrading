@@ -130,6 +130,9 @@ markers = [
     "embedded_real: Tests requiring real Rust sidecar binary + real embedded PostgreSQL (skip if sidecar binary missing)",
     "meta: Tests for scripts/* tooling (not business logic)",
     "xdist_group(name): serial group for pytest-xdist load-balanced runs",
+    "timeout_e2e_smoke: E2E smoke tests with 60s per-test timeout",
+    "timeout_e2e_standard: E2E standard tests with 180s per-test timeout",
+    "timeout_e2e_real: E2E real sidecar tests with 600s per-test timeout",
 ]
 
 [tool.coverage.run]

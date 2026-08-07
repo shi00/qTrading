@@ -14,7 +14,7 @@ from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.pages import ScreenerPage
 from ui.testing.e2e_ids import EIDS
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.timeout(60), pytest.mark.e2e, pytest.mark.timeout_e2e_smoke]
 
 
 async def test_screener_anchor_dom_present(e2e_page: FletPage):

@@ -96,6 +96,13 @@ repos:
         files: ^(core|data|services|strategies|utils|app|ui)/.*\.py$|^scripts/check_redlines\.py$|^\.pre-commit-config\.yaml$
         pass_filenames: false
 
+      - id: e2e-anchor-check
+        name: E2E anchor reference check
+        entry: python scripts/check_e2e_anchors.py
+        language: system
+        files: ^(ui|tests)/.*\.py$|^scripts/check_e2e_anchors\.py$|^\.pre-commit-config\.yaml$
+        pass_filenames: false
+
       - id: theme-contrast-check
         name: WCAG theme contrast check
         entry: python scripts/check_theme_contrast.py

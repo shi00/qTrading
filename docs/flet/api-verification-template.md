@@ -45,6 +45,20 @@
 
 ## 历史核验记录
 
+### engineRevision 修正 @ 0.86 最新补丁 (2026-08-07)
+
+- **API**: CanvasKit engineRevision（非 Flet API，但影响 E2E 测试基础设施）
+- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **核验来源**:
+  - 项目运行期验证: 读取 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision`，实际值为 `0cd610717bde95fd88343c64f81c11ba4e5c0010`
+- **项目结论**: 需追加复验
+  - 理由: 下方 2026-07-27 记录声称"engineRevision 未变化（`a10d8ac38de835021c8d2f920dbf50a920ccc030`）"，该值是 0.86.2 的 engineRevision。0.86.3 升级后 engineRevision 已变更为 `0cd610717bde95fd88343c64f81c11ba4e5c0010`，表明 0.86.2→0.86.3 跨越了一次 Flutter engine 升级。需按 [upgrade-checklist.md §3.9](./upgrade-checklist.md#39-canvaskit-语义树行为验证flet-升级必查) 验证 CanvasKit 语义树行为是否漂移。
+- **需更新文件**:
+  - [x] docs/flet/canvaskit-rendering-e2e-guide.md（去除版本硬编码，改为以 pyproject.toml 为准）
+  - [x] docs/flet/upgrade-checklist.md（新增 §3.9 CanvasKit 语义树行为验证）
+  - [x] docs/debt/known-technical-debt.md（P3-WinE2E-Skip 条目追加 engineRevision 变更说明）
+- **核验人**: AI 助手 (GLM-5.2)
+
 ### Flet 0.86 升级核验 @ 0.86 最新补丁 (2026-07-27)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API

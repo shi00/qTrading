@@ -14,7 +14,7 @@
 
 本文件是 **项目 Flet 差异与高风险 API 清单**，仅记录 AStockScreener 相对 Flet 官方默认的**分叉点**、**项目验证过的高风险 API** 与 **R16 UI 阻塞红线**。通用 Flet 教程（路由、Services、存储、构建打包、移动/Web 适配、响应式布局、控件清单等）请直接查阅 [Flet 官方文档](https://docs.flet.dev/)，本文件不再复制，避免与上游漂移。
 
-API 约束表、声明式组件契约、V1 声明式 UI 开发规范见 [v1-api-constraints.md](./v1-api-constraints.md)；升级时的验证步骤见 [upgrade-checklist.md](./upgrade-checklist.md)。
+API 约束表、声明式组件契约、V1 声明式 UI 开发规范见 [v1-api-constraints.md](./v1-api-constraints.md)；Flutter Web CanvasKit 渲染行为与 E2E 避坑指南见 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md)；升级时的验证步骤见 [upgrade-checklist.md](./upgrade-checklist.md)。
 
 **优先级**（后者被前者覆盖）：
 
