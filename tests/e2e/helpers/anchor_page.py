@@ -83,7 +83,7 @@ class AnchorPage:
         EID 与显示文本之间的换行分隔，PoC A7 实证）。
         """
         return await self.page.evaluate(
-            """(args) => {
+            r"""(args) => {
                 const {label, exact, roleFilter} = args;
                 const q = roleFilter
                     ? 'flt-semantics[role="' + roleFilter + '"]'
@@ -91,12 +91,12 @@ class AnchorPage:
                 const el = Array.from(document.querySelectorAll(q))
                     .find(e => {
                         const t = (e.textContent || '').trim();
-                        if (exact) return t === label;
-                        // 前缀匹配: t === label, 或 t 以 label + "." / "\\n" 开头
-                        // ("." = EID 命名空间层级; "\\n" = GD 合并节点 EID 与显示文本分隔)
+                        if (exact) return t === label || t.startsWith(label + '\n');
+                        // 前缀匹配: t === label, 或 t 以 label + "." / "\n" 开头
+                        // ("." = EID 命名空间层级; "\n" = GD 合并节点 EID 与显示文本分隔)
                         return t === label
                             || t.startsWith(label + '.')
-                            || t.startsWith(label + '\\n');
+                            || t.startsWith(label + '\n');
                     });
                 if (!el) return null;
                 const r = el.getBoundingClientRect();
@@ -290,7 +290,7 @@ class AnchorPage:
 
         async def _find_option_element() -> Any:
             option_handle = await self.page.evaluate_handle(
-                """(args) => {
+                r"""(args) => {
                     const {text} = args;
                     const selectors = [
                         'flt-semantics[role="option"]',
@@ -314,7 +314,7 @@ class AnchorPage:
                         const t = (e.textContent || '').trim();
                         return t.startsWith(normText + ' ')
                             || t.startsWith(normText + '(')
-                            || t.startsWith(normText + '\\n');
+                            || t.startsWith(normText + '\n');
                     });
                     if (found) return found;
 
@@ -433,18 +433,18 @@ class AnchorPage:
         role_filter = "button" if kind == AnchorKind.COMPLEX else None
         return int(
             await self.page.evaluate(
-                """(args) => {
+                r"""(args) => {
                     const q = args.roleFilter
                         ? 'flt-semantics[role="' + args.roleFilter + '"]'
                         : 'flt-semantics';
                     return Array.from(document.querySelectorAll(q))
                         .filter(e => {
                             const t = (e.textContent || '').trim();
-                            if (args.exact) return t === args.label;
-                            // 前缀匹配同 _locate_by_text: "." 或 "\\n" 分隔
+                            if (args.exact) return t === args.label || t.startsWith(args.label + '\n');
+                            // 前缀匹配同 _locate_by_text: "." 或 "\n" 分隔
                             return t === args.label
                                 || t.startsWith(args.label + '.')
-                                || t.startsWith(args.label + '\\n');
+                                || t.startsWith(args.label + '\n');
                         }).length;
                 }""",
                 {
