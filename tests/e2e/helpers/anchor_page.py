@@ -291,7 +291,7 @@ class AnchorPage:
         async def _find_option_element() -> Any:
             option_handle = await self.page.evaluate_handle(
                 r"""(args) => {
-                    const {text} = args;
+                    const {text, dropdownEid} = args;
                     const selectors = [
                         'flt-semantics[role="option"]',
                         'flt-semantics[role="menuitem"]',
@@ -301,7 +301,10 @@ class AnchorPage:
                     const rawEls = Array.from(document.querySelectorAll(selectors.join(',')));
                     const els = rawEls.filter(e => {
                         const r = e.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0;
+                        if (r.width <= 0 || r.height <= 0) return false;
+                        const t = (e.textContent || '').trim();
+                        if (dropdownEid && (t.startsWith(dropdownEid + '\n') || t.startsWith(dropdownEid + '.'))) return false;
+                        return true;
                     });
 
                     const normText = text.trim();
@@ -325,9 +328,26 @@ class AnchorPage:
                     });
                     return found || null;
                 }""",
-                {"text": option_text},
+                {"text": option_text, "dropdownEid": eid_str},
             )
             return option_handle.as_element()
+
+        # 0. C4: 若下拉残留 expanded 状态（上次选择未完全收合），先按 Escape 收合
+        expanded_check = await self.page.evaluate(
+            r"""(args) => {
+                const {label} = args;
+                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                    .find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t === label || t.startsWith(label + '.') || t.startsWith(label + '\n');
+                    });
+                return el ? el.getAttribute('aria-expanded') : null;
+            }""",
+            {"label": eid_str},
+        )
+        if expanded_check == "true":
+            await self.page.keyboard.press("Escape")
+            await self.page.wait_for_timeout(300)
 
         # 1. 优先探测选项是否已经在 DOM 中呈展开态
         option_element = await _find_option_element()
@@ -341,8 +361,8 @@ class AnchorPage:
             arrow_y = box["y"] + box["height"] / 2
             await self.page.mouse.click(arrow_x, arrow_y)
 
-            # 短轮询等待选项出现（600ms 内）
-            quick_deadline = time.monotonic() + 0.6
+            # 短轮询等待选项出现（最多等待 2s）
+            quick_deadline = time.monotonic() + min(self._tm(timeout_ms) / 1000, 2.0)
             while time.monotonic() < quick_deadline:
                 option_element = await _find_option_element()
                 if option_element:
