@@ -24,6 +24,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -246,6 +247,30 @@ class TestVolumeBreakoutStrategy:
         names = {p["name"] for p in params}
         assert names == {"pct_chg_min", "pct_chg_max", "turnover_min"}
 
+    async def test_silver_tier_does_not_log_bronze_warning(self, caplog) -> None:
+        """SILVER 策略运行时不输出 BRONZE 警告日志。"""
+        strategy = VolumeBreakoutStrategy()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "pct_chg": [3.0],
+                "turnover_rate": [5.0],
+            }
+        )
+        context = {
+            "screening_data": df,
+            "data_processor": _make_dp(),
+            "params": {},
+        }
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            caplog.set_level(logging.WARNING)
+            await strategy.filter(context)
+        assert "BRONZE-tier data" not in caplog.text
+
 
 # ============================================================================
 # NorthboundHoldingStrategy — 基础冒烟
@@ -298,6 +323,25 @@ class TestNorthboundHoldingStrategy:
         strategy = NorthboundHoldingStrategy()
         params = strategy.get_parameters()
         assert {p["name"] for p in params} == {"nb_ratio_min"}
+
+    async def test_bronze_tier_logs_warning(self, caplog) -> None:
+        """BRONZE 策略运行时输出警告日志。"""
+        strategy = NorthboundHoldingStrategy()
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"], "total_mv": [100.0]}),
+            "data_processor": _make_dp(),
+            "params": {},
+            "northbound_data": pd.DataFrame(),
+        }
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            caplog.set_level(logging.WARNING)
+            await strategy.filter(context)
+        assert "BRONZE-tier data" in caplog.text
+        assert strategy.name in caplog.text
 
 
 # ============================================================================
@@ -359,6 +403,25 @@ class TestInstitutionalStrategy:
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"top_list": lhb_df, "params": {}}).collect()
         assert result.height == 0
+
+    async def test_bronze_tier_logs_warning(self, caplog) -> None:
+        """BRONZE 策略运行时输出警告日志。"""
+        strategy = InstitutionalStrategy()
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"], "total_mv": [100.0]}),
+            "data_processor": _make_dp(),
+            "params": {},
+            "top_list": pd.DataFrame(),
+        }
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            caplog.set_level(logging.WARNING)
+            await strategy.filter(context)
+        assert "BRONZE-tier data" in caplog.text
+        assert strategy.name in caplog.text
 
 
 # ============================================================================
@@ -423,6 +486,25 @@ class TestBlockTradeStrategy:
         strategy = BlockTradeStrategy()
         params = strategy.get_parameters()
         assert {p["name"] for p in params} == {"block_amount_min"}
+
+    async def test_bronze_tier_logs_warning(self, caplog) -> None:
+        """BRONZE 策略运行时输出警告日志。"""
+        strategy = BlockTradeStrategy()
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"], "total_mv": [100.0]}),
+            "data_processor": _make_dp(),
+            "params": {},
+            "block_trade": pd.DataFrame(),
+        }
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            caplog.set_level(logging.WARNING)
+            await strategy.filter(context)
+        assert "BRONZE-tier data" in caplog.text
+        assert strategy.name in caplog.text
 
 
 # ============================================================================
