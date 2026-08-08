@@ -1176,7 +1176,7 @@ def ScreenerView(
                 ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=AppStyles.FONT_SIZE_XL),
                 ft.Text(
                     I18n.get("screener_title"),
-                    size=AppStyles.FONT_SIZE_HEADLINE,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
