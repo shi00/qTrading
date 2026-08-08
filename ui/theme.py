@@ -449,6 +449,15 @@ class AppStyles:
 
     # --- Font Size Tokens (P1-1: 8 档字号, 消除魔术数字) ---
     # 映射: 11→CAPTION, 12→BODY_SM, 13→BODY, 14→LG, 16→TITLE, 18→HEADLINE, 20→HEADLINE, 22→XL, 24→XL, 28→DISPLAY
+    #
+    # 字号使用规范 (Issue #445):
+    #   页面主标题 → FONT_SIZE_XL (24) — 各视图顶部主标题
+    #   区块标题   → FONT_SIZE_HEADLINE (20) — 卡片/区块标题
+    #   重要正文   → FONT_SIZE_LG (14) — 强调性文字
+    #   普通正文   → FONT_SIZE_BODY (13) — 默认正文
+    #   小号正文   → FONT_SIZE_BODY_SM (12) — 表格/卡片内容
+    #   辅助说明   → FONT_SIZE_CAPTION (11) — 注释/说明文字
+    #   展示级数字 → FONT_SIZE_DISPLAY (28) — 仪表盘大数字
     FONT_SIZE_CAPTION = 11  # 辅助说明文字
     FONT_SIZE_BODY_SM = 12  # 小号正文 (表格/卡片)
     FONT_SIZE_BODY = 13  # 正文 (默认)

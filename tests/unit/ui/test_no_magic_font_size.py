@@ -51,3 +51,42 @@ def test_no_magic_font_size_in_ui():
         "UI 源代码的 size/text_size/icon_size 不得使用字面数值 (P1-1). "
         "请改用 AppStyles.FONT_SIZE_CAPTION/BODY_SM/BODY/LG/TITLE/HEADLINE/XL/DISPLAY:\n" + "\n".join(offenders)
     )
+
+
+# 页面主标题必须使用 FONT_SIZE_XL (Issue #445)
+_VIEWS_DIR = _PROJECT_ROOT / "ui" / "views"
+
+# 页面主标题 i18n key 模式 (以 _title 结尾的通常是页面主标题)
+_PAGE_TITLE_KEY_PATTERN = re.compile(r'I18n\.get\("([^"]*_title)"')
+
+
+def test_page_title_uses_xl_size():
+    """各视图页面主标题必须使用 FONT_SIZE_XL (24), 不得使用 FONT_SIZE_HEADLINE (20).
+
+    规范见 ui/theme.py AppStyles 类注释 (Issue #445).
+    仅检查 i18n key 以 _title 结尾的页面主标题.
+    """
+    offenders: list[str] = []
+    for f in sorted(_VIEWS_DIR.glob("*.py")):
+        if "__pycache__" in f.parts:
+            continue
+        if f.name.startswith("__"):
+            continue
+        src = f.read_text(encoding="utf-8")
+        # 找同时包含 weight=BOLD 和 FONT_SIZE_HEADLINE 的行
+        for i, line in enumerate(src.splitlines(), 1):
+            if "weight=ft.FontWeight.BOLD" in line and "FONT_SIZE_HEADLINE" in line:
+                # 检查是否是页面主标题 (i18n key 以 _title 结尾)
+                key_match = _PAGE_TITLE_KEY_PATTERN.search(line)
+                if key_match:
+                    i18n_key = key_match.group(1)
+                    offenders.append(
+                        f"{f.relative_to(_PROJECT_ROOT)}:{i}: "
+                        f"页面标题 ({i18n_key}) 使用 FONT_SIZE_HEADLINE 而非 FONT_SIZE_XL: "
+                        f"{line.strip()[:80]}"
+                    )
+    assert not offenders, (
+        "视图页面主标题必须使用 FONT_SIZE_XL (24) (Issue #445). "
+        "区块标题/对话框标题使用 FONT_SIZE_HEADLINE (20) 是允许的. "
+        "违规位置:\n" + "\n".join(offenders)
+    )
