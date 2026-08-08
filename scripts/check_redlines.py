@@ -588,6 +588,23 @@ def _check_R_no_bare_ft_colors_in_tree(tree: ast.Module, source_path: Path) -> t
     return errors, warnings
 
 
+def _iter_ui_scan_files() -> list[Path]:
+    """枚举 UI 生产代码待扫描文件（ui/views/ + ui/components/ + ui/startup_views.py）。
+
+    供 R_no_bare_ft_colors_in_ui 与 R_no_bare_font_size_in_ui 复用，保证扫描域一致。
+    theme.py 是 token 定义源头，不在 ui/views|ui/components|startup_views 范围内，天然排除。
+    """
+    scan_paths: list[Path] = []
+    for sub in ("ui/views", "ui/components"):
+        d = ROOT / sub
+        if d.exists():
+            scan_paths.extend(_iter_py_files(d))
+    startup = ROOT / "ui" / "startup_views.py"
+    if startup.exists():
+        scan_paths.append(startup)
+    return scan_paths
+
+
 def check_R_no_bare_ft_colors_in_ui() -> list[str]:
     """扫描 UI 层裸 ft.Colors.<COLOR> 色值引用。
 
@@ -598,17 +615,7 @@ def check_R_no_bare_ft_colors_in_ui() -> list[str]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    scan_paths: list[Path] = []
-    # ui/views/ + ui/components/
-    for sub in ("ui/views", "ui/components"):
-        d = ROOT / sub
-        if d.exists():
-            for p in _iter_py_files(d):
-                scan_paths.append(p)
-    # ui/startup_views.py
-    startup = ROOT / "ui" / "startup_views.py"
-    if startup.exists():
-        scan_paths.append(startup)
+    scan_paths = _iter_ui_scan_files()
 
     for p in scan_paths:
         tree = _parse_module(p)
@@ -754,6 +761,74 @@ def check_R_tushare_token_log() -> list[str]:
 
 
 # ============================================================================
+# R_no_bare_font_size_in_ui: UI 层裸字号数值拦截（必须用 AppStyles.FONT_SIZE_* token）
+# ============================================================================
+
+
+def _is_ft_control_call(node: ast.AST, control_name: str) -> str | None:
+    """识别 ``ft.Text(...)`` / ``ft.TextStyle(...)`` 调用（value 为 Name 'ft'）。
+
+    命中时返回控件名（即 ``func.attr``，如 ``"Text"``），否则返回 None。
+    返回字符串而非 bool，便于调用方直接使用控件名，避免对 ``node.func.attr`` 的属性访问。
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if func.attr != control_name:
+        return None
+    if isinstance(func.value, ast.Name) and func.value.id == "ft":
+        return func.attr
+    return None
+
+
+def _check_R_no_bare_font_size_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查 AST 中 ft.Text/ft.TextStyle 的 size= 字面量数值。
+
+    规则：`ft.Text(size=13)` / `ft.TextStyle(size=20)` 等 size 为 int 字面量 → 违规，
+    必须改为 `size=AppStyles.FONT_SIZE_*` token。
+    放行：size 为变量名、AppStyles.FONT_SIZE_* 属性引用、或非 int 字面量表达式。
+    """
+    errors: list[str] = []
+    rel = source_path.relative_to(ROOT)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        control_name = _is_ft_control_call(node, "Text") or _is_ft_control_call(node, "TextStyle")
+        if control_name is None:
+            continue
+        for kw in node.keywords:
+            if kw.arg != "size":
+                continue
+            value = kw.value
+            # 仅拦截 int 字面量（13/20/24 等）；变量/属性/表达式放行
+            if isinstance(value, ast.Constant) and isinstance(value.value, int):
+                errors.append(
+                    f"R_no_bare_font_size_in_ui: {rel}:{node.lineno}: "
+                    f"ft.{control_name}(size={value.value}) 硬编码字号数值，"
+                    f"必须引用 AppStyles.FONT_SIZE_CAPTION/BODY_SM/BODY/LG/TITLE/HEADLINE/XL/DISPLAY token"
+                )
+    return errors
+
+
+def check_R_no_bare_font_size_in_ui() -> list[str]:
+    """扫描 UI 层裸字号数值引用（必须用 AppStyles.FONT_SIZE_* token）。
+
+    扫描范围: ui/views/, ui/components/, ui/startup_views.py（与 R_no_bare_ft_colors_in_ui 一致）
+    退出码: 0 通过；返回非空 list 表示有 error (1 失败)。
+    """
+    errors: list[str] = []
+    for p in _iter_ui_scan_files():
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        errors.extend(_check_R_no_bare_font_size_in_tree(tree, p))
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -768,6 +843,7 @@ def main() -> int:
         ("R14 策略未注册", check_R14()),
         ("R15 单例未注册", check_R15()),
         ("R_no_bare_ft_colors_in_ui", check_R_no_bare_ft_colors_in_ui()),
+        ("R_no_bare_font_size_in_ui", check_R_no_bare_font_size_in_ui()),
         ("R_tushare_token_log", check_R_tushare_token_log()),
     ]
     all_errors: list[str] = []

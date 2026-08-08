@@ -178,6 +178,34 @@ def ScreenerView():
 - async 窗口/控件方法必须 `await`。
 - 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法新代码禁止（已重写为 `@ft.component` + `use_effect(setup, dependencies, cleanup)`，命令式控件已删除）；例外清单见本文末。
 
+### 7. 样式 Token 使用规范（字号 / 图标 / 间距 / 宽度）
+
+> 单一权威来源：**[`ui/theme.py`](../../ui/theme.py) 的 `AppStyles` 类**。以下为使用语义速查，一切以 `AppStyles` 实际定义为最终依据。
+
+**强制规则（违反等同红线，由 `scripts/check_redlines.py` 的 `R_no_bare_font_size_in_ui` 检查守护，见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）：**
+
+1. **一律使用 `AppStyles.FONT_SIZE_*` token，禁止在 `ft.Text(size=...)` / `ft.TextStyle(size=...)` 等处硬编码字面数值**（如 `size=13`、`text_size=20`）。
+2. **严格按语义选择 token**，不得用数值相近的 token 顶替功能层级。尤须区分：
+   - **页面主标题**（各视图顶部标题）→ `FONT_SIZE_XL` (24)
+   - **区块/卡片标题** → `FONT_SIZE_HEADLINE` (20)
+   - 常见错误：把页面主标题写成 `FONT_SIZE_HEADLINE`（历史 Issue #445 根因）。
+3. 图标尺寸、间距、控件宽度同理使用 `AppStyles.ICON_SIZE_*` / `SPACING_*` / `CONTROL_WIDTH_*` / `COL_*` token，禁止裸数值。
+
+**字号 token × 语义对照表：**
+
+| Token | 值 | 语义场景 |
+|-------|-----|---------|
+| `FONT_SIZE_CAPTION` | 11 | 辅助说明 / 注释文字 |
+| `FONT_SIZE_BODY_SM` | 12 | 小号正文（表格 / 卡片内容） |
+| `FONT_SIZE_BODY` | 13 | 默认正文 |
+| `FONT_SIZE_LG` | 14 | 强调性正文 |
+| `FONT_SIZE_TITLE` | 16 | 标题 |
+| `FONT_SIZE_HEADLINE` | 20 | 大标题（区块 / 卡片标题） |
+| `FONT_SIZE_XL` | 24 | **页面主标题** |
+| `FONT_SIZE_DISPLAY` | 28 | 展示级（仪表盘大数字） |
+
+> 映射关系（11→CAPTION … 28→DISPLAY）与每个 token 的用途注释均维护在 [`ui/theme.py`](../../ui/theme.py) `AppStyles` 中；新增粒度时只改 `theme.py`，勿在视图内直接写数值。
+
 ## 依赖管理
 
 > 本节已迁移到 [../guides/dependency-management.md](../guides/dependency-management.md)。
