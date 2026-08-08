@@ -242,7 +242,7 @@ def WatchlistView(
             [
                 ft.Text(
                     I18n.get("watchlist_title"),
-                    size=AppStyles.FONT_SIZE_HEADLINE,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
