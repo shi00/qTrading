@@ -803,8 +803,9 @@ def _check_R_no_bare_font_size_in_tree(tree: ast.Module, source_path: Path) -> l
             if kw.arg != "size":
                 continue
             value = kw.value
-            # 仅拦截 int 字面量（13/20/24 等）；变量/属性/表达式放行
-            if isinstance(value, ast.Constant) and isinstance(value.value, int):
+            # 仅拦截 int 字面量（13/20/24 等），排除 bool（bool 是 int 子类但 size=True 无意义）；
+            # 变量/属性/表达式/float 放行
+            if isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool):
                 errors.append(
                     f"R_no_bare_font_size_in_ui: {rel}:{node.lineno}: "
                     f"ft.{control_name}(size={value.value}) 硬编码字号数值，"
@@ -856,7 +857,9 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_tushare_token_log）")
+    print(
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log）"
+    )
     return 0
 
 

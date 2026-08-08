@@ -1062,6 +1062,39 @@ class TestRNoBareFontSizePureFunction:
         errs = self._check(code, self._ui_path("ui/views/foo.py"))
         assert errs == []
 
+    def test_bool_size_not_flagged(self):
+        """size=True/False → 放行 (bool 是 int 子类但无字号语义，排除避免误报)。"""
+        code = "t = ft.Text('x', size=True)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_float_size_not_flagged(self):
+        """size=13.5 (float) → 放行 (仅拦截 int，float 实践中不使用)。"""
+        code = "t = ft.Text('x', size=13.5)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_text_size_keyword_not_flagged(self):
+        """text_size=13 (非 size= 关键字) → 放行 (检查器仅守护 size= 关键字)。"""
+        code = "d = ft.Dropdown(text_size=13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_nested_text_in_container_detected(self):
+        """嵌套在容器中的 ft.Text(size=13) → 仍被检测 (ast.walk 遍历所有节点)。"""
+        code = "c = ft.Column([ft.Text('x', size=13)])\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=13" in errs[0]
+
+    def test_textstyle_inside_text_detected(self):
+        """ft.Text(style=ft.TextStyle(size=20)) 双层嵌套 → TextStyle 被检测。"""
+        code = "t = ft.Text('x', style=ft.TextStyle(size=20))\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=20" in errs[0]
+        assert "TextStyle" in errs[0]
+
 
 # ============================================================================
 # R_no_bare_font_size_in_ui 集成测试 (当前代码库契约)

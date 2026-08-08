@@ -182,14 +182,14 @@ def ScreenerView():
 
 > 单一权威来源：**[`ui/theme.py`](../../ui/theme.py) 的 `AppStyles` 类**。以下为使用语义速查，一切以 `AppStyles` 实际定义为最终依据。
 
-**强制规则（违反等同红线，由 `scripts/check_redlines.py` 的 `R_no_bare_font_size_in_ui` 检查守护，见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）：**
+**强制规则：**
 
-1. **一律使用 `AppStyles.FONT_SIZE_*` token，禁止在 `ft.Text(size=...)` / `ft.TextStyle(size=...)` 等处硬编码字面数值**（如 `size=13`、`text_size=20`）。
+1. **一律使用 `AppStyles.FONT_SIZE_*` token，禁止在 `ft.Text(size=...)` / `ft.TextStyle(size=...)` 处硬编码 int 字面数值**（如 `size=13`）。此规则由 `scripts/check_redlines.py` 的 `R_no_bare_font_size_in_ui` 检查自动守护（pre-commit `redline-check` hook）。
 2. **严格按语义选择 token**，不得用数值相近的 token 顶替功能层级。尤须区分：
    - **页面主标题**（各视图顶部标题）→ `FONT_SIZE_XL` (24)
    - **区块/卡片标题** → `FONT_SIZE_HEADLINE` (20)
    - 常见错误：把页面主标题写成 `FONT_SIZE_HEADLINE`（历史 Issue #445 根因）。
-3. 图标尺寸、间距、控件宽度同理使用 `AppStyles.ICON_SIZE_*` / `SPACING_*` / `CONTROL_WIDTH_*` / `COL_*` token，禁止裸数值。
+3. 图标尺寸、间距、控件宽度同理使用 `AppStyles.ICON_SIZE_*` / `SPACING_*` / `CONTROL_WIDTH_*` / `COL_*` token，禁止裸数值。此规则暂为人工评审，尚未自动化守护。
 
 **字号 token × 语义对照表：**
 
