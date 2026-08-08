@@ -25,8 +25,8 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     5. Phase 2: AI analysis (via AIStrategyMixin) — graceful degradation when AI is not configured
 
     Subclasses can override `required_quality_tier` to raise the data quality bar.
-    Default is BRONZE (availability check only). Strategies that depend on
-    historical continuity (e.g. technical indicators) should set SILVER.
+    Default is SILVER (continuity check). Strategies that only need data availability
+    (e.g. snapshot-based filters) can set BRONZE, but will receive a runtime warning.
 
     Subclasses can set `enable_ai_analysis = False` (inherited from AIStrategyMixin)
     to skip Phase 2 AI analysis entirely.
@@ -47,6 +47,14 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     required_tables: tuple[str, ...] = ("daily_quotes",)
 
     async def filter(self, context: StrategyContext):
+        if self.required_quality_tier == QualityTier.BRONZE:
+            logger.warning(
+                "[Strategy] %s: running on BRONZE-tier data (lowest quality). "
+                "This strategy only checks data availability, not historical continuity. "
+                "Consider upgrading to SILVER if you need MA/RSI or other technical indicators.",
+                self.name,
+            )
+
         _check_tier(
             context.get("data_processor"),
             self.required_quality_tier,
