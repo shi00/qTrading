@@ -22,6 +22,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _base_class_names,
     _check_R4_in_tree,
     _check_R_no_bare_ft_colors_in_tree,
+    _check_R_no_bare_font_size_in_tree,
     _decorator_names,
     _extract_cache_manager_dao_instances,
     _extract_dao_classes,
@@ -37,6 +38,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R4,
     check_R4_in_tests,
     check_R_no_bare_ft_colors_in_ui,
+    check_R_no_bare_font_size_in_ui,
     main,
 )
 
@@ -966,4 +968,150 @@ class TestRNoBareFtColorsIntegration:
 
     def test_main_returns_zero_with_bare_color_check(self):
         """main() 包含 R_no_bare_ft_colors_in_ui 检查后仍应返回 0 (当前代码库合规)。"""
+        assert main() == 0
+
+
+# ============================================================================
+# R_no_bare_font_size_in_ui 纯函数测试
+# ============================================================================
+
+
+class TestRNoBareFontSizePureFunction:
+    """R_no_bare_font_size_in_ui 纯函数测试: ft.Text/ft.TextStyle size= 裸数值拦截分类逻辑。
+
+    规则：`ft.Text(size=13)` / `ft.TextStyle(size=20)` 等 size 为 int 字面量 → 违规 (error)，
+    必须改为 `size=AppStyles.FONT_SIZE_*` token。
+    放行：size 为变量名、AppStyles.FONT_SIZE_* 属性引用、或非 int 字面量表达式。
+    """
+
+    def _check(self, code: str, source_path: Path) -> list[str]:
+        tree = ast.parse(code)
+        return _check_R_no_bare_font_size_in_tree(tree, source_path)
+
+    def _ui_path(self, rel: str) -> Path:
+        """构造 ROOT 下 ui/ 路径 (用于 rel 计算)。"""
+        return ROOT / rel
+
+    def test_text_bare_int_flagged(self):
+        """ft.Text(size=13) 硬编码字号 → error。"""
+        code = "t = ft.Text('hello', size=13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "R_no_bare_font_size_in_ui" in errs[0]
+        assert "size=13" in errs[0]
+
+    def test_text_xl_int_flagged(self):
+        """ft.Text(size=24) 硬编码页面主标题字号 → error (历史 Issue #445 根因场景)。"""
+        code = "t = ft.Text('page title', size=24)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=24" in errs[0]
+
+    def test_text_style_bare_int_flagged(self):
+        """ft.TextStyle(size=20) 硬编码字号 → error。"""
+        code = "s = ft.TextStyle(size=20)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=20" in errs[0]
+
+    def test_token_attribute_not_flagged(self):
+        """size=AppStyles.FONT_SIZE_BODY 属性引用 → 放行。"""
+        code = "t = ft.Text('body', size=AppStyles.FONT_SIZE_BODY)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_token_variable_not_flagged(self):
+        """size 为变量名 → 放行。"""
+        code = "size = 13\nt = ft.Text('body', size=size)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_non_ft_control_not_flagged(self):
+        """非 ft.Text/ft.TextStyle 的 size 参数 → 放行 (如 button.height 无关)。"""
+        code = "b = ft.Button(width=13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_other_module_text_not_flagged(self):
+        """非 ft 模块的 Text 调用 → 放行 (如 other.Text(size=13))。"""
+        code = "t = other.Text('x', size=13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_positional_size_not_flagged(self):
+        """size 作为位置参数 → 放行 (规则仅匹配 size= 关键字)。"""
+        code = "t = ft.Text('x', 13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_multiple_text_one_error(self):
+        """单个 ft.Text 仅报一个 error (一个控件一个违规)。"""
+        code = "t = ft.Text('x', size=12)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+
+    def test_multiple_controls_count_correctly(self):
+        """多个违规按控件数计数。"""
+        code = "a = ft.Text('a', size=11)\nb = ft.TextStyle(size=12)\nc = ft.Text('c')\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 2
+
+    def test_string_size_not_flagged(self):
+        """size 为字符串 (如 'bold') → 放行 (非 int 字面量)。"""
+        code = "t = ft.Text('x', size='inherit')\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_bool_size_not_flagged(self):
+        """size=True/False → 放行 (bool 是 int 子类但无字号语义，排除避免误报)。"""
+        code = "t = ft.Text('x', size=True)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_float_size_not_flagged(self):
+        """size=13.5 (float) → 放行 (仅拦截 int，float 实践中不使用)。"""
+        code = "t = ft.Text('x', size=13.5)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_text_size_keyword_not_flagged(self):
+        """text_size=13 (非 size= 关键字) → 放行 (检查器仅守护 size= 关键字)。"""
+        code = "d = ft.Dropdown(text_size=13)\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+
+    def test_nested_text_in_container_detected(self):
+        """嵌套在容器中的 ft.Text(size=13) → 仍被检测 (ast.walk 遍历所有节点)。"""
+        code = "c = ft.Column([ft.Text('x', size=13)])\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=13" in errs[0]
+
+    def test_textstyle_inside_text_detected(self):
+        """ft.Text(style=ft.TextStyle(size=20)) 双层嵌套 → TextStyle 被检测。"""
+        code = "t = ft.Text('x', style=ft.TextStyle(size=20))\n"
+        errs = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "size=20" in errs[0]
+        assert "TextStyle" in errs[0]
+
+
+# ============================================================================
+# R_no_bare_font_size_in_ui 集成测试 (当前代码库契约)
+# ============================================================================
+
+
+class TestRNoBareFontSizeIntegration:
+    """R_no_bare_font_size_in_ui 集成测试: 当前代码库契约守护。
+
+    验证当前 UI 层无 ft.Text/ft.TextStyle 硬编码字号数值 (必须用 AppStyles.FONT_SIZE_* token)。
+    """
+
+    def test_check_R_no_bare_font_size_in_ui_passes(self):
+        """R_no_bare_font_size_in_ui: 当前代码库无裸字号数值 (errors 为空)。"""
+        errors = check_R_no_bare_font_size_in_ui()
+        assert errors == [], "R_no_bare_font_size_in_ui violations:\n  " + "\n  ".join(errors)
+
+    def test_main_returns_zero_with_font_size_check(self):
+        """main() 包含 R_no_bare_font_size_in_ui 检查后仍应返回 0 (当前代码库合规)。"""
         assert main() == 0
