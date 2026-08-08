@@ -213,8 +213,8 @@ def _safe_show_toast(
         show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
 
 
-def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.dropdown.Option]:
-    """构建策略下拉框选项 (翻译策略名 + missing_apis 标记)。"""
+def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.dropdownm2.Option]:
+    """构建策略下拉框选项 (翻译策略名 + missing_apis 标记; M2: content 保证菜单项语义文本可被 E2E 匹配)。"""
     options = []
     for key, info in strategies_with_dep.items():
         strategy_obj = strategy_mgr.get_strategy(key)
@@ -224,7 +224,7 @@ def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.
             name = info["name"]
         if info.get("missing_apis"):
             name = f"{name} (!)"  # P2-7: 警告 emoji 改为文本符号, 避免 UI 依赖 emoji 字体
-        options.append(ft.dropdown.Option(key, name))
+        options.append(ft.dropdownm2.Option(key=key, text=name, content=ft.Text(name)))
     return options
 
 
@@ -406,7 +406,7 @@ def ScreenerView(
     # --- 事件 handler ---
 
     def _on_strategy_change(e: ft.ControlEvent) -> None:
-        new_val = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        new_val = get_control_value(e.control, ft.DropdownM2) if e and e.control else None
         UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
         # R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state
         # Task 3.2: run_disabled 改为派生 (state.loading or not state.selected_strategy)
@@ -1238,11 +1238,11 @@ def ScreenerView(
     # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
     strategy_dropdown = anchored(
         EIDS.SCREENER.STRATEGY_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("select_strategy"),
             options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
             value=state.selected_strategy,
-            on_select=safe_on_select(_on_strategy_change),
+            on_change=safe_on_change(_on_strategy_change),
             width=AppStyles.CONTROL_WIDTH_MD,
             text_size=AppStyles.FONT_SIZE_LG,
             bgcolor=AppColors.INPUT_BG,

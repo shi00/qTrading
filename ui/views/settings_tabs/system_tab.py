@@ -24,8 +24,8 @@ import flet as ft
 from ui.components.flet_type_helpers import (
     get_control_value,
     safe_icon_str,
+    safe_on_change,
     safe_on_click,
-    safe_on_select,
 )
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
@@ -69,28 +69,34 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _build_language_options() -> list[ft.dropdown.Option]:
-    """构建语言选项列表 (locale 变更时由组件重渲染自动刷新)。"""
-    return [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
-
-
-def _build_theme_options() -> list[ft.dropdown.Option]:
-    """构建主题选项列表。"""
+def _build_language_options() -> list[ft.dropdownm2.Option]:
+    """构建语言选项列表 (locale 变更时由组件重渲染自动刷新; M2: content 保证菜单项语义文本可被 E2E 匹配)。"""
     return [
-        ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
-        ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
-        ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),
-        ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),
+        ft.dropdownm2.Option(key=code, text=name, content=ft.Text(name)) for code, name in I18n.get_language_options()
     ]
 
 
-def _build_log_level_options() -> list[ft.dropdown.Option]:
-    """构建日志级别选项列表。"""
+def _build_theme_options() -> list[ft.dropdownm2.Option]:
+    """构建主题选项列表 (M2: content 保证菜单项语义文本可被 E2E 匹配)。"""
     return [
-        ft.dropdown.Option("DEBUG", I18n.get("sys_opt_debug")),
-        ft.dropdown.Option("INFO", I18n.get("sys_opt_info")),
-        ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
-        ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
+        ft.dropdownm2.Option(key=ThemeName.DARK, text=I18n.get("theme_dark"), content=ft.Text(I18n.get("theme_dark"))),
+        ft.dropdownm2.Option(
+            key=ThemeName.LIGHT, text=I18n.get("theme_light"), content=ft.Text(I18n.get("theme_light"))
+        ),
+        ft.dropdownm2.Option(key=ThemeName.NAVY, text=I18n.get("theme_navy"), content=ft.Text(I18n.get("theme_navy"))),
+        ft.dropdownm2.Option(
+            key=ThemeName.DRACULA, text=I18n.get("theme_dracula"), content=ft.Text(I18n.get("theme_dracula"))
+        ),
+    ]
+
+
+def _build_log_level_options() -> list[ft.dropdownm2.Option]:
+    """构建日志级别选项列表 (M2: content 保证菜单项语义文本可被 E2E 匹配)。"""
+    return [
+        ft.dropdownm2.Option(key="DEBUG", text=I18n.get("sys_opt_debug"), content=ft.Text(I18n.get("sys_opt_debug"))),
+        ft.dropdownm2.Option(key="INFO", text=I18n.get("sys_opt_info"), content=ft.Text(I18n.get("sys_opt_info"))),
+        ft.dropdownm2.Option(key="WARNING", text=I18n.get("sys_opt_warn"), content=ft.Text(I18n.get("sys_opt_warn"))),
+        ft.dropdownm2.Option(key="ERROR", text=I18n.get("sys_opt_error"), content=ft.Text(I18n.get("sys_opt_error"))),
     ]
 
 
@@ -332,7 +338,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_language_change(e: ft.ControlEvent) -> None:
-        new_locale = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        new_locale = get_control_value(e.control, ft.DropdownM2) if e and e.control else None
         if not new_locale:
             return
         settings_vm.set_language_value(new_locale)
@@ -342,7 +348,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_language_change, new_locale)
 
     def _on_theme_change(e: ft.ControlEvent) -> None:
-        new_theme = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        new_theme = get_control_value(e.control, ft.DropdownM2) if e and e.control else None
         if not new_theme:
             return
         settings_vm.set_theme_value(new_theme)
@@ -352,7 +358,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_theme_change, new_theme)
 
     def _on_log_level_change(e: ft.ControlEvent) -> None:
-        new_level = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        new_level = get_control_value(e.control, ft.DropdownM2) if e and e.control else None
         if not new_level:
             return
         settings_vm.set_log_level_value(new_level)
@@ -400,7 +406,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     language_dropdown = anchored(
         EIDS.SETTINGS.LANGUAGE_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get_language_label(),
             value=settings_state.language_value,
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -408,7 +414,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
             options=_build_language_options(),
-            on_select=safe_on_select(_on_language_change),
+            on_change=safe_on_change(_on_language_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
@@ -433,7 +439,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     theme_dropdown = anchored(
         EIDS.SETTINGS.THEME_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("settings_theme"),
             value=settings_state.theme_value,
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -441,7 +447,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
             options=_build_theme_options(),
-            on_select=safe_on_select(_on_theme_change),
+            on_change=safe_on_change(_on_theme_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
@@ -468,7 +474,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     log_level_dropdown = anchored(
         EIDS.SETTINGS.LOG_LEVEL_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("settings_log_level"),
             value=settings_state.log_level_value,
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -476,7 +482,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
             options=_build_log_level_options(),
-            on_select=safe_on_select(_on_log_level_change),
+            on_change=safe_on_change(_on_log_level_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,

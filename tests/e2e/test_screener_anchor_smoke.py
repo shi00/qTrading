@@ -2,7 +2,7 @@
 
 覆盖方案 §9 PR-1 Task 1.5b 的 DoD（anchor DOM 可定位 + click 触发内部回调）：
 - INTERACTIVE (run_button): aria-label 独立节点 + 内层 flt-tappable
-- COMPLEX (strategy_dropdown): textContent 前缀匹配 + click 展开 aria-expanded
+- COMPLEX (strategy_dropdown): textContent 前缀匹配 + click 展开（M2 语义：出现 role=menuitem 菜单项）
 
 不重复 test_run_screener_strategy 的完整业务流程，仅验证 anchor 基础设施可用.
 """
@@ -65,10 +65,11 @@ async def test_screener_anchor_click_strategy_dropdown_opens(e2e_page: FletPage)
     await ap.expect_visible(EIDS.SCREENER.STRATEGY_DROPDOWN, timeout_ms=15000)
     await ap.click(EIDS.SCREENER.STRATEGY_DROPDOWN)
 
-    # 点击后应出现 aria-expanded="true" 的 Dropdown 顶层节点
-    expanded = e2e_page.page.locator('flt-semantics[role="button"][aria-expanded="true"]')
-    await expanded.wait_for(state="visible", timeout=ap._tm(10000))
-    assert await expanded.count() >= 1, "Dropdown 点击后应展开 (aria-expanded=true)"
+    # 点击后应出现菜单项（M2 DropdownM2 展开语义为 role="menuitem"，
+    # 而非 M3 的 aria-expanded="true"；PR-472 起 strategy_dropdown 已迁移到 M2）
+    menu_item = e2e_page.page.locator('flt-semantics[role="menuitem"]')
+    await menu_item.first.wait_for(state="visible", timeout=ap._tm(10000))
+    assert await menu_item.count() >= 1, "Dropdown 点击后应展开 (出现 role=menuitem 菜单项)"
 
     # 关闭 Dropdown 面板（按 Escape，避免影响后续测试）
     await e2e_page.page.keyboard.press("Escape")

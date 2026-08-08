@@ -20,7 +20,7 @@ import logging
 import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
-from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
+from ui.components.flet_type_helpers import get_control_value, safe_on_change, safe_on_click
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.state_views import GITHUB_ISSUES_URL, ErrorState
 from ui.hooks import use_viewmodel
@@ -85,8 +85,8 @@ def BacktestView(active: bool = True) -> ft.Container:
 
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
-        UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
-        set_selected_strategy(get_control_value(e.control, ft.Dropdown))
+        UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.DropdownM2)}")
+        set_selected_strategy(get_control_value(e.control, ft.DropdownM2))
         set_no_strategy_error(False)
 
     def _on_run_backtest(config: dict) -> None:
@@ -179,11 +179,13 @@ def BacktestView(active: bool = True) -> ft.Container:
 
     strategy_dropdown = anchored(
         EIDS.BACKTEST.STRATEGY_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("backtest_select_strategy"),
-            options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
+            options=[
+                ft.dropdownm2.Option(key=key, text=name, content=ft.Text(name)) for key, name in strategies.items()
+            ],
             value=selected_strategy,
-            on_select=safe_on_select(_on_strategy_change),
+            on_change=safe_on_change(_on_strategy_change),
             width=AppStyles.CONTROL_WIDTH_LG,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,

@@ -90,7 +90,7 @@ class AnchorPage:
                     : 'flt-semantics';
                 const el = Array.from(document.querySelectorAll(q))
                     .find(e => {
-                        const t = (e.textContent || '').trim();
+                        const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                         if (exact) return t === label || t.startsWith(label + '\n');
                         // 前缀匹配: t === label, 或 t 以 label + "." / "\n" 开头
                         // ("." = EID 命名空间层级; "\n" = GD 合并节点 EID 与显示文本分隔)
@@ -289,7 +289,7 @@ class AnchorPage:
         current_dd_text = await self.page.evaluate(
             """(eid) => {
                 const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
-                    .find(e => (e.textContent || '').trim().startsWith(eid));
+                    .find(e => ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim()).startsWith(eid));
                 return el ? (el.textContent || '') : '';
             }""",
             eid_str,
@@ -314,7 +314,7 @@ class AnchorPage:
                     const els = rawEls.filter(e => {
                         const r = e.getBoundingClientRect();
                         if (r.width <= 0 || r.height <= 0) return false;
-                        const t = (e.textContent || '').trim();
+                        const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                         // 仅过滤当前 dropdown 的触发器
                         // if (t.includes('e2e.')) return false;  // 移除过于宽泛的过滤
                         if (dropdownEid && t.startsWith(dropdownEid + '\n')) return false;
@@ -327,19 +327,19 @@ class AnchorPage:
                     if (dropdownEid) {
                         const fullEid = dropdownEid + '.' + normText;
                         let found = els.find(e => {
-                            const t = (e.textContent || '').trim();
+                            const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                             return t.startsWith(fullEid + '\n') || t === fullEid;
                         });
                         if (found) return found;
                     }
 
                     // 1. 精确匹配
-                    let found = els.find(e => (e.textContent || '').trim() === normText);
+                    let found = els.find(e => ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim()) === normText);
                     if (found) return found;
 
                     // 2. 前缀/别名匹配 (e.g. "stock_basic (股票列表)" 或 "stock_basic (Stock Basic)")
                     found = els.find(e => {
-                        const t = (e.textContent || '').trim();
+                        const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                         return t.startsWith(normText + ' ')
                             || t.startsWith(normText + '(')
                             || t.startsWith(normText + '\n');
@@ -348,7 +348,7 @@ class AnchorPage:
 
                     // 3. 括号/包含匹配
                     found = els.find(e => {
-                        const t = (e.textContent || '').trim();
+                        const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                         return t.includes('(' + normText + ')') || t.includes(normText);
                     });
                     return found || null;
@@ -357,7 +357,11 @@ class AnchorPage:
             )
             return option_handle.as_element()
 
-        # 1. 优先探测选项是否已经在 DOM 中呈展开态
+        # 1. 展开菜单 (判断标准: role=menu 浮层出现, 而非目标项在手, 因目标可能被虚拟化裁剪)
+        async def _menu_open() -> bool:
+            menu = self.page.locator('flt-semantics[role="menu"]')
+            return await menu.count() > 0
+
         option_element = await _find_option_element()
         if not option_element:
             # 展开菜单：获取 Dropdown bbox
@@ -368,28 +372,37 @@ class AnchorPage:
             arrow_x = box["x"] + max(box["width"] - 15.0, box["width"] / 2)
             arrow_y = box["y"] + box["height"] / 2
             await self.page.mouse.click(arrow_x, arrow_y)
-
-            # 短轮询等待选项出现（最多等待 2s）
             quick_deadline = time.monotonic() + min(self._tm(timeout_ms) / 1000, 2.0)
-            while time.monotonic() < quick_deadline:
-                option_element = await _find_option_element()
-                if option_element:
-                    break
+            while time.monotonic() < quick_deadline and not await _menu_open():
                 await self.page.wait_for_timeout(100)
 
-            # 策略 B: 若未出现，点击中心并按 ArrowDown 强制唤起下拉
-            if not option_element:
+            # 策略 B: 若仍未展开，点击中心并按 ArrowDown 强制唤起下拉
+            if not await _menu_open():
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
                 await self.page.mouse.click(cx, cy)
                 await self.page.keyboard.press("ArrowDown")
-
                 expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
-                while time.monotonic() < expand_deadline:
-                    option_element = await _find_option_element()
-                    if option_element:
-                        break
+                while time.monotonic() < expand_deadline and not await _menu_open():
                     await self.page.wait_for_timeout(100)
+
+            # 菜单已展开, 此时查找目标 (可能在视口内, 也可能被虚拟化裁剪)
+            option_element = await _find_option_element()
+
+        # 1.5 键盘导航滚动查找视口外选项 (M2 DropdownM2 菜单虚拟化, 只渲染当前可见项)
+        # 目标选项可能在字母序靠前/靠后, 不在初始可见菜单内 (如 daily_quotes).
+        # 菜单无暴露 scrollable, 用方向键驱动 Flutter 原生滚动: 先 ArrowUp 到顶,
+        # 再 ArrowDown 逐项, 每次滚动后重新查找.
+        if not option_element:
+            for _ in range(60):
+                await self.page.keyboard.press("ArrowUp")
+                await self.page.wait_for_timeout(20)
+            for _ in range(80):
+                option_element = await _find_option_element()
+                if option_element:
+                    break
+                await self.page.keyboard.press("ArrowDown")
+                await self.page.wait_for_timeout(40)
 
         if not option_element:
             raise RuntimeError(
@@ -467,7 +480,7 @@ class AnchorPage:
                         : 'flt-semantics';
                     return Array.from(document.querySelectorAll(q))
                         .filter(e => {
-                            const t = (e.textContent || '').trim();
+                            const t = ((e.textContent || '').trim() || (e.getAttribute('aria-label') || '').trim());
                             if (args.exact) return t === args.label || t.startsWith(args.label + '\n');
                             // 前缀匹配同 _locate_by_text: "." 或 "\n" 分隔
                             return t === args.label

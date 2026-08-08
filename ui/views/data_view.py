@@ -32,7 +32,6 @@ from ui.components.flet_type_helpers import (
     safe_controls,
     safe_on_change,
     safe_on_click,
-    safe_on_select,
 )
 from ui.components.state_views import EmptyState, ErrorState
 from ui.components.toast_manager import open_export_folder
@@ -93,32 +92,29 @@ def _format_cell_value(val: object, col_name: str) -> str:
     return str(val)
 
 
-def _build_filter_op_options() -> list[ft.dropdown.Option]:
-    """构建过滤操作符选项。"""
+def _build_filter_op_options() -> list[ft.dropdownm2.Option]:
+    """构建过滤操作符选项 (M2: content 保证菜单项语义文本可被 E2E 匹配)。"""
     return [
-        ft.dropdown.Option("="),
-        ft.dropdown.Option("LIKE"),
-        ft.dropdown.Option(">"),
-        ft.dropdown.Option("<"),
-        ft.dropdown.Option(">="),
-        ft.dropdown.Option("<="),
-        ft.dropdown.Option("!="),
+        ft.dropdownm2.Option(key=op, text=op, content=ft.Text(op)) for op in ("=", "LIKE", ">", "<", ">=", "<=", "!=")
     ]
 
 
-def _build_table_selector_options(tables: tuple[str, ...], vm: DataExplorerViewModel) -> list[ft.dropdown.Option]:
+def _build_table_selector_options(tables: tuple[str, ...], vm: DataExplorerViewModel) -> list[ft.dropdownm2.Option]:
     """构建表选择器选项 (locale 变更时由组件重渲染自动刷新)。"""
-    return [ft.dropdown.Option(key=t, text=vm.get_table_alias(t)) for t in tables]
+    return [
+        ft.dropdownm2.Option(key=t, text=vm.get_table_alias(t), content=ft.Text(vm.get_table_alias(t))) for t in tables
+    ]
 
 
 def _build_filter_col_options(
     current_table: str, columns: tuple[str, ...], vm: DataExplorerViewModel
-) -> list[ft.dropdown.Option]:
+) -> list[ft.dropdownm2.Option]:
     """构建过滤列选项。"""
     return [
-        ft.dropdown.Option(
+        ft.dropdownm2.Option(
             key=col,
             text=vm.get_column_alias(current_table, col),
+            content=ft.Text(vm.get_column_alias(current_table, col)),
         )
         for col in columns
     ]
@@ -420,7 +416,7 @@ def TableViewerTab(
 
     # --- 同步事件 handler (调度 page.run_task) ---
     def _on_table_changed(e: ft.ControlEvent) -> None:
-        new_table = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        new_table = get_control_value(e.control, ft.DropdownM2) if e and e.control else None
         if not new_table:
             return
         page = _get_page()
@@ -494,11 +490,11 @@ def TableViewerTab(
     # --- 构建 UI ---
     table_selector = anchored(
         EIDS.DATA.TABLE_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             width=250,
             label=I18n.get("data_select_table"),
             value=state.current_table or None,
-            on_select=safe_on_select(_on_table_changed),
+            on_change=safe_on_change(_on_table_changed),
             disabled=is_loading or not state.tables_loaded,
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
@@ -513,11 +509,11 @@ def TableViewerTab(
 
     filter_col = anchored(
         EIDS.DATA.FILTER_COL_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("data_filter_col"),
             width=150,
             value=effective_filter_col,
-            on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
+            on_change=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
@@ -531,11 +527,11 @@ def TableViewerTab(
 
     filter_op = anchored(
         EIDS.DATA.FILTER_OP_DROPDOWN,
-        ft.Dropdown(
+        ft.DropdownM2(
             label=I18n.get("data_filter_op"),
             width=100,
             value=filter_op_value,
-            on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
+            on_change=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
             options=_build_filter_op_options(),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
