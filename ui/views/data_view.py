@@ -261,7 +261,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] load_schema error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] load_schema error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
@@ -274,7 +274,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] init_tables error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] init_tables error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
@@ -289,7 +289,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] initial load error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] initial load error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
@@ -319,7 +319,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] query error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] query error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     async def _do_refresh() -> None:
         ensure_correlation_id()
@@ -329,7 +329,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] refresh error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] refresh error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     async def _do_sort_query() -> None:
         try:
@@ -337,7 +337,7 @@ def TableViewerTab(
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
-            logger.error("[TableViewerTab] sort query error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] sort query error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     async def _do_prev_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_prev_page")
@@ -347,7 +347,7 @@ def TableViewerTab(
             except asyncio.CancelledError:
                 raise  # R2: 必须传播
             except Exception as e:
-                logger.error("[TableViewerTab] prev page error: %s", e, exc_info=True)
+                logger.error("[TableViewerTab] prev page error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     async def _do_next_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_next_page")
@@ -358,7 +358,7 @@ def TableViewerTab(
             except asyncio.CancelledError:
                 raise  # R2: 必须传播
             except Exception as e:
-                logger.error("[TableViewerTab] next page error: %s", e, exc_info=True)
+                logger.error("[TableViewerTab] next page error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     async def _export_data(format_: str, current_page: bool = True) -> None:
         scope = "current_page" if current_page else "all"
@@ -405,7 +405,7 @@ def TableViewerTab(
                                 page, I18n.get("data_export_truncated_warning"), "warning"
                             )  # pragma: no cover
                 except Exception as ex:
-                    logger.error("Export write failed: %s", ex, exc_info=True)
+                    logger.error("Export write failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
                     page = _get_page()
                     if page is not None:
                         _safe_show_toast(page, I18n.get("data_export_fail"), "error")

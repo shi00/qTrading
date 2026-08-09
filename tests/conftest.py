@@ -211,6 +211,22 @@ def isolate_config_file() -> Iterator[str]:
     yield _temp_config_file
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _restore_litellm_loaded_default() -> Iterator[None]:
+    """
+    R16: ai_service 将 litellm 改为惰性加载后，模块级 litellm 初始为 None。
+    旧测试默认依赖 "litellm 已加载"（conftest 已将 sys.modules["litellm"] 替换为 mock，
+    旧模块级 import 必然成功）。此 fixture 在会话开始时调用 _ensure_litellm_loaded()
+    恢复该默认语义：litellm = mock、acompletion = mock.acompletion、
+    _litellm_import_attempted = True、LITELLM_AVAILABLE = True。
+    之后 _ensure_litellm_loaded() 为 no-op，不会覆盖测试对 acompletion/litellm 的 patch。
+    """
+    import services.ai_service as ai_service
+
+    ai_service._ensure_litellm_loaded()
+    yield
+
+
 @pytest.fixture(autouse=True)
 def reset_config_cache() -> Iterator[None]:
     """

@@ -258,7 +258,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("[ScreenerVM] Background task failed: %s", exc, exc_info=exc)
+            logger.error("[ScreenerVM] Background task failed: %s", DataSanitizer.sanitize_error(exc), exc_info=exc)
 
     # --- Splitter width persistence (P1-1/P2-1: View 不再直接 import ConfigHandler) ---
 
@@ -288,7 +288,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.debug("[ScreenerVM] persist_splitter_width failed: %s", e, exc_info=True)
+                logger.debug(
+                    "[ScreenerVM] persist_splitter_width failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                )
 
         loop = self._get_loop_or_none()
         if loop is None:
@@ -466,7 +468,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("[ScreenerVM] Failed to load strategies: %s", e, exc_info=True)
+            logger.error("[ScreenerVM] Failed to load strategies: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._set_state(
                 status_message=Message("screener_load_failed", {}),
                 status_color="error",
@@ -522,7 +524,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("[ScreenerVM] update_strategy_desc failed: %s", e, exc_info=True)
+            logger.warning(
+                "[ScreenerVM] update_strategy_desc failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
             self._set_state(strategy_desc=None, strategy_desc_color="default")
 
     def set_history_viewing_status(
@@ -574,7 +578,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
                 return "sys_strategy_tier_hint"
         except Exception as e:
-            logger.debug("[ScreenerVM] tier hint check skipped: %s", e, exc_info=True)
+            logger.debug("[ScreenerVM] tier hint check skipped: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         return None
 
     async def run_strategy(
@@ -721,7 +725,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                             # 传播 (R2 红线).
                             logger.error(
                                 "[ScreenerVM] save_results failed (results retained in memory): %s",
-                                save_err,
+                                DataSanitizer.sanitize_error(save_err),
                                 exc_info=True,
                             )
                             save_failed_reason = DataSanitizer.sanitize_error(save_err) or save_err.__class__.__name__
@@ -778,7 +782,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except QualityGateError as e:
                 logger.warning(
                     "[ScreenerVM] Strategy execution blocked by Quality Gate: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 self._set_state(
@@ -792,7 +796,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
@@ -893,7 +897,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
 
         except Exception as e:
-            logger.error("Sort failed: %s", e, exc_info=True)
+            logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._set_state(
                 loading=False,
                 status_message=Message("screener_sort_failed"),
@@ -1152,7 +1156,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             self._last_ai_update = time.time()
 
         except Exception as e:
-            logger.error("Error flushing AI buffer: %s", e, exc_info=True)
+            logger.error("Error flushing AI buffer: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         finally:
             self._flush_pending = False
 

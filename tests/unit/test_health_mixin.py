@@ -5,6 +5,7 @@
 
 import pytest
 import datetime
+import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
@@ -131,6 +132,9 @@ class FakeProcessor(HealthCheckMixin):
 
     def clear_cancel(self):
         pass
+
+    def _get_cancel_event(self):
+        return asyncio.Event()
 
 
 class TestAssignBasicTier:

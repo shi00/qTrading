@@ -35,6 +35,7 @@ from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_cl
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.async_utils import gather_for_shutdown_cleanup
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +374,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             except asyncio.CancelledError:
                 raise  # R2: CancelledError 必须传播以配合优雅停机
             except Exception as exc:
-                logger.debug("[ToastManager] Auto-dismiss failed: %s", exc, exc_info=True)
+                logger.debug("[ToastManager] Auto-dismiss failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
         task = page.run_task(_run_timer)
         task_ref.current = typing.cast(typing.Any, task)
@@ -451,7 +452,9 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             try:
                 data.on_action()
             except Exception as exc:
-                logger.warning("[ToastManager] Action callback failed: %s", exc, exc_info=True)
+                logger.warning(
+                    "[ToastManager] Action callback failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True
+                )
         set_is_dismissing(True)
         on_dismiss(data.id)
 

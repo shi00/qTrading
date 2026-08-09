@@ -178,7 +178,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("[BacktestVM] Background task failed: %s", exc, exc_info=exc)
+            logger.error("[BacktestVM] Background task failed: %s", DataSanitizer.sanitize_error(exc), exc_info=exc)
 
     def get_splitter_width(self, config_key: str, default_width: int) -> int:
         """读取持久化的 splitter 宽度 (P1-1: 经 VM 读取, View 不再直接 import ConfigHandler).
@@ -207,7 +207,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.debug("[BacktestVM] persist_splitter_width failed: %s", e, exc_info=True)
+                logger.debug(
+                    "[BacktestVM] persist_splitter_width failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                )
 
         loop = self._get_loop_or_none()  # F3-13: 统一 loop 获取（disposed 后返回 None，避免孤儿 task）
         if loop is None:

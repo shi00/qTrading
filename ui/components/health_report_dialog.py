@@ -19,6 +19,7 @@ from ui.viewmodels.health_scan_view_model import (
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
     HealthScanViewModel,
 )
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +423,7 @@ def _log_report_summary(report: dict) -> None:
             r_lag,
         )
     except Exception as e:
-        logger.error("Error logging report summary: %s", e, exc_info=True)
+        logger.error("Error logging report summary: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
 
 def _build_health_content(report: dict, width: int, height: int) -> ft.Container:

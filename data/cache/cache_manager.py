@@ -639,8 +639,15 @@ class CacheManager:
         return await self.sync_dao.get_sync_status(table_name)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def check_comprehensive_health(self):
-        """Check coverage and freshness of all HEALTH_CHECK_TABLES."""
+    async def check_comprehensive_health(self, cancel_event: asyncio.Event | None = None):
+        """Check coverage and freshness of all HEALTH_CHECK_TABLES.
+
+        Args:
+            cancel_event: 可选取消信号（通常来自关停/取消请求）。传入时，
+                在每次 DB 操作后检查该事件，若已 set 立即 raise
+                ``asyncio.CancelledError`` 以及时响应关停（避免 monitored_tables
+                较多时整体检查 >30s 才响应取消）。未传时行为与现状一致（无回归）。
+        """
         await self.wait_for_maintenance()
         results = {}
 
@@ -705,6 +712,11 @@ class CacheManager:
             is_stock_table = table_type != "global"
             is_sparse = meta.get("quality_config", {}).get("sparse", False)
 
+            def _check_cancel() -> None:
+                # P3-M5: 关停/取消请求时及时中止健康检查，避免整体 >30s 才响应取消
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("cancel_event set during comprehensive health check")
+
             tbl = ModelsBase.metadata.tables.get(table)
             if tbl is None:
                 logger.warning("[CacheManager] Health | Unknown table: %s", table)
@@ -725,6 +737,7 @@ class CacheManager:
                         r = await conn.execute(
                             sa.select(sa.func.count()).select_from(tbl),
                         )
+                        _check_cancel()
                         cnt = r.scalar() or 0
                         ratio = 1.0 if cnt > 0 else 0.0
                         fresh_ratio = ratio
@@ -738,6 +751,7 @@ class CacheManager:
                                 sa.func.count(sa.distinct(sa.column(code_col))),
                             ).select_from(tbl),
                         )
+                        _check_cancel()
                         cnt = r.scalar() or 0
                         ratio = min(1.0, cnt / total_stocks) if total_stocks > 0 else 0
 
@@ -758,6 +772,7 @@ class CacheManager:
                                             sa.func.max(sa.column(dc)),
                                         ).select_from(tbl),
                                     )
+                                    _check_cancel()
                                     val = r2.scalar()
                                     if val:
                                         max_date = val
@@ -803,6 +818,7 @@ class CacheManager:
                             r_total = await conn.execute(
                                 sa.select(sa.func.count()).select_from(tbl),
                             )
+                            _check_cancel()
                             actual_rows = r_total.scalar() or 0
                             breadth_ratio = min(1.0, actual_rows / global_expected_rows)
                         except Exception as exc:
