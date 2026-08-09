@@ -22,9 +22,9 @@ classifiers = [
 #   * tushare: API methods and data formats vary between versions; client code is tightly coupled.
 #   * akshare: API methods, return types, and column names vary between versions; client code calls 5+ ak.stock_* methods and imports internal module stock_disclosure_cninfo.
 dependencies = [
-    "flet==0.86.3",
-    "flet-desktop==0.86.3",
-    "flet-charts==0.86.3",
+    "flet==0.86.5",
+    "flet-desktop==0.86.5",
+    "flet-charts==0.86.5",
     "tushare==1.4.29",
     "akshare==1.18.81",
     "requests>=2.34.0",
@@ -77,7 +77,7 @@ dev = [
     "syrupy>=4.0",
     "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
     "import-linter>=2.13",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
-    "flet-mcp==0.86.3",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
+    "flet-mcp==0.86.5",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
     "brotlicffi>=1.2.0.1",

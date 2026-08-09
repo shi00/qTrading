@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 # fake_sidecar.py 脚本 (自包含，通过 ``python -I`` 调用，不可 import 项目内模块)。
@@ -204,14 +205,15 @@ def create_fake_sidecar(tmp_path: Path) -> Path:
     if os.name == "nt":
         wrapper = tmp_path / "qtrading-pg-sidecar.bat"
         # %~dp0 是 .bat 所在目录 (含尾部 \\)；%* 透传所有参数
+        # 使用 sys.executable 绝对路径，避免 PATH 解析到 Microsoft Store 别名导致 exit 9009
         wrapper.write_text(
-            f'@python -I "{fake_sidecar_py}" %*\n',
+            f'@"{sys.executable}" -I "{fake_sidecar_py}" %*\n',
             encoding="utf-8",
         )
     else:
         wrapper = tmp_path / "qtrading-pg-sidecar.sh"
         wrapper.write_text(
-            f'#!/bin/sh\nexec python3 -I "{fake_sidecar_py}" "$@"\n',
+            f'#!/bin/sh\nexec "{sys.executable}" -I "{fake_sidecar_py}" "$@"\n',
             encoding="utf-8",
         )
         wrapper.chmod(0o755)

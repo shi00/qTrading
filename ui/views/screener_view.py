@@ -938,6 +938,12 @@ def ScreenerView(
         for group_name, title, controls in rendered_groups:
             if group_name == "advanced":
                 continue
+            # 根因防范 (PR #472 E2E 修复): Flutter CanvasKit 渲染引擎下，当 ft.Row(wrap=True) 包含
+            # 带有 expand=True (如 SliderInput 内部 Slider) 的控件时，Wrap 交叉轴 (高度) 测量由于缺乏
+            # 确定的最大高度限制而陷入无界递归 (Unbounded Height)，导致 control_card 膨胀至数千像素
+            # 填满视口，并将下方 table_card 高度压塌为 0 (致使 E2E 表格 DOM 语义节点无法生成)。
+            # 此处将每个参数控件封装在 height=60 的 Container 约束容器中，保证 Wrap 计算出确定高度。
+            wrapped_controls = [ft.Container(content=c, height=60) for c in controls]
             result.append(
                 ft.Container(
                     content=ft.Column(
@@ -949,7 +955,7 @@ def ScreenerView(
                                 color=AppColors.TEXT_PRIMARY,
                             ),
                             ft.Divider(height=1, color=AppColors.DIVIDER),
-                            ft.Row(controls, wrap=True, spacing=15),
+                            ft.Row(wrapped_controls, wrap=True, spacing=15),
                         ],
                         spacing=8,
                     ),
@@ -1242,7 +1248,7 @@ def ScreenerView(
         visible=is_realtime,
     )
 
-    left_controls = ft.Column([title_row, realtime_controls], spacing=10, expand=True)
+    left_controls = ft.Column([title_row, realtime_controls], spacing=10)
 
     status_row = ft.Row(
         [
@@ -1320,13 +1326,14 @@ def ScreenerView(
             # 独立成行只增加 right_controls 固有高度, 不改变宽度, 参数面板不换行。
             ft.Row([backtest_btn], alignment=ft.MainAxisAlignment.END),
         ],
-        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        alignment=ft.MainAxisAlignment.START,
+        spacing=8,
         horizontal_alignment=ft.CrossAxisAlignment.END,
     )
 
     control_card = ft.Container(
         content=ft.Row(
-            [left_controls, right_controls],
+            [ft.Container(content=left_controls, expand=True), right_controls],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
@@ -1383,15 +1390,18 @@ def ScreenerView(
     else:
         table_content = ft.Column(
             [
-                PaginatedTable(
-                    rows=formatted_rows,
-                    columns=vt_columns,
-                    sort_col=state.sort_column,
-                    sort_asc=state.sort_ascending,
-                    on_sort=_on_virtual_sort,
-                    on_row_click=_on_row_click,
-                    col_anchor=EIDS.SCREENER.column_header,
-                    row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
+                ft.Container(
+                    content=PaginatedTable(
+                        rows=formatted_rows,
+                        columns=vt_columns,
+                        sort_col=state.sort_column,
+                        sort_asc=state.sort_ascending,
+                        on_sort=_on_virtual_sort,
+                        on_row_click=_on_row_click,
+                        col_anchor=EIDS.SCREENER.column_header,
+                        row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
+                    ),
+                    expand=True,
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 pagination_row,
@@ -1487,7 +1497,7 @@ def ScreenerView(
             on_add_to_watchlist=_on_add_to_watchlist,
         )
 
-    content_controls = [control_card, main_body]
+    content_controls = [control_card, ft.Container(content=main_body, expand=True)]
     if dialog_control is not None:
         content_controls.append(dialog_control)
 

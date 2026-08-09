@@ -246,6 +246,7 @@ async def e2e_browser(e2e_playwright):
         headless=os.environ.get("E2E_HEADED", "0") != "1",
         args=[
             "--disable-web-security",
+            "--disable-gpu",
             "--disable-features=PrivateNetworkAccess,CrossOriginEmbedderPolicy",
         ],
     )
@@ -632,6 +633,19 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             )
         await context.close()
         raise
+
+    # [Flutter issue #190144 workaround] Slider 的 value-indicator OverlayPortal 会创建
+    # 全视口空语义节点（flt-semantic-node-*，pointer-events: auto），遮挡其上层按钮的点击
+    # （如 Screener 的 RUN_BUTTON），导致 E2E 点击不触发。该 bug 属 Flutter 渲染引擎层，
+    # Flet 升级（含 0.86.5）无法修复，故在此通过受版本控制的 fixture 注入 CSS 屏蔽
+    # 空节点的指针事件。选择器锁定：id 前缀 + pointer-events:auto + 无 role/aria-label（空节点特征）。
+    # 注意：不能改 .venv/site-packages/flet_web/web/index.html，那不在版本控制内，CI 无效。
+    await page.add_style_tag(
+        content=(
+            'flt-semantics-host [id^="flt-semantic-node-"][style*="pointer-events: auto"]'
+            ":empty:not([role]):not([aria-label]) { pointer-events: none !important; }"
+        )
+    )
 
     # Fail-fast: detect error UI (e.g. "数据库初始化失败") instead of
     # waiting for Playwright's 45s timeout on subsequent interactions.

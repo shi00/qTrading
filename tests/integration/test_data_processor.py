@@ -1079,8 +1079,14 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_api.get_index_daily = AsyncMock(return_value=mock_result_df)
         self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
 
-        # get_market_overview should work without errors
-        await self.processor.get_market_overview()
+        # Mock NewsFetcher.get_hot_concepts to avoid real network calls (akshare)
+        # that cause worker crash in CI Linux environment
+        with patch(
+            "data.data_processor.NewsFetcher.get_hot_concepts",
+            new=AsyncMock(return_value=[]),
+        ):
+            # get_market_overview should work without errors
+            await self.processor.get_market_overview()
 
     def test_get_market_overview_uses_memory_cache(self):
         asyncio.run(self.async_test_get_market_overview_uses_memory_cache())

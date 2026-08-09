@@ -60,7 +60,7 @@ async def test_sidecar_real_smoke_ready_migration_main_ui(embedded_real_flet_pag
     """
     # 1. 验证主界面渲染（导航栏可见）— 超时设为 NAV（slow marker 会自动倍率 2.5x）
     screener_label = I18n.get("nav_screener")
-    await embedded_real_flet_page.expect_text(screener_label, timeout_ms=TIMEOUTS.NAV)
+    await embedded_real_flet_page.expect_text(screener_label, timeout_ms=TIMEOUTS.SCREEN_RESULT)
 
     # 2. 验证 sidecar ready 事件被 Python _stdout_reader_task 解析
     log_content = _read_app_log()
