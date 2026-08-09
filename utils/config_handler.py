@@ -1089,10 +1089,6 @@ class ConfigHandler:
                 if isinstance(models_list, list):
                     custom_models[provider_id] = [str(m) for m in models_list]
 
-        # Issue #70: per-model context 覆盖（provider -> {model -> context}）。
-        # 深拷贝传递，运行时由 _get_model_context_window 优先采用。
-        custom_model_contexts = copy.deepcopy(config.get("llm_custom_model_contexts", {}))
-
         return {
             "provider": provider,
             "model": model,
@@ -1102,7 +1098,6 @@ class ConfigHandler:
             "azure_resource_name": azure_resource_name,
             "azure_deployment_name": azure_deployment_name,
             "custom_models": copy.deepcopy(custom_models),
-            "custom_model_contexts": custom_model_contexts,
         }
 
     @staticmethod
@@ -1546,6 +1541,11 @@ class ConfigHandler:
     @staticmethod
     def get_ai_max_candidates():
         return ConfigHandler.get_typed("ai_max_candidates", int, 30)
+
+    @staticmethod
+    def get_ai_free_text_max_len():
+        """UX-2.2: AI 自由文本最大长度（默认 1000，范围 100-10000）。"""
+        return ConfigHandler.get_typed("ai_free_text_max_len", int, 1000)
 
     @staticmethod
     def set_ai_max_candidates(val):

@@ -140,10 +140,6 @@ class AppConfig(BaseModel):
     llm_azure_resource_name: str = ""
     llm_azure_deployment_name: str = ""
     llm_custom_models: dict[str, list[str]] = {}
-    # Issue #70: 自定义/未知模型的可选 per-model context 覆盖。
-    # 结构: {provider_id: {model_id: context}}。运行时优先采用声明值，
-    # 未声明时回退到 LLM_PROVIDERS 内置模型信息，再回退 DEFAULT_CONTEXT_WINDOW。
-    llm_custom_model_contexts: dict[str, dict[str, int]] = {}
     llm_provider_extras: dict[str, Any] = {}
     llm_failover_models: list[str] = []
     ai_api_key: str = ""
@@ -197,6 +193,8 @@ class AppConfig(BaseModel):
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
+    # UX-2.2: AI 自由文本（summary/thinking/ai_reason/uncertainty_factors）最大长度，可配置
+    ai_free_text_max_len: int = Field(default=1000, ge=100, le=10000)
     news_poll_interval: int = Field(default=60, ge=10)
     market_data_poll_interval: int = Field(default=30, ge=10)
     init_history_years: int = Field(default=3, ge=1, le=5)
