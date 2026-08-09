@@ -35,6 +35,7 @@ from ui.components.flet_type_helpers import (
     safe_on_select,
 )
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.components.slider_input import SliderInput
 from ui.components.state_views import EmptyState
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.toast_manager import open_export_folder
@@ -676,8 +677,7 @@ def ScreenerView(
         params_ref.current = {**(params_ref.current or {}), name: value}
         bump_params(_params_version + 1)
 
-    def _on_slider_change(name: str, e: ft.ControlEvent) -> None:
-        val = get_control_value(e.control, ft.Slider) if e and e.control else 0
+    def _on_slider_value_change(name: str, val: float) -> None:
         _update_param(name, val)
         # R.2.6.2: 动态更新策略描述 (vm.update_strategy_desc 用当前 params 重算 desc+color)
         if state.selected_strategy:
@@ -759,7 +759,7 @@ def ScreenerView(
 
     # Task 3.2: 派生状态 (单源真相: state.loading / state.selected_strategy / state.total_items)
     progress_visible = state.loading
-    run_disabled = state.loading or not state.selected_strategy
+    run_disabled = state.loading or state.is_retrying or not state.selected_strategy
     # 导出按钮: 有数据时启用
     export_btn_disabled = total_items == 0
 
@@ -776,27 +776,18 @@ def ScreenerView(
             max_val = p.get("max", 100)
             default = p.get("default", min_val)
             step = p.get("step", 1)
-            divisions = int((max_val - min_val) / step) if step > 0 else 10
             current_val = (params_ref.current or {}).get(p_name, default)
-            init_display = int(current_val) if current_val == int(current_val) else round(current_val, 1)
-            return ft.Column(
-                [
-                    ft.Text(
-                        f"{label}: {init_display}", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
-                    ),
-                    ft.Slider(
-                        min=min_val,
-                        max=max_val,
-                        value=current_val,
-                        divisions=divisions,
-                        label="{value}",
-                        active_color=AppColors.PRIMARY,
-                        tooltip=str(init_display),
-                        on_change=safe_on_change(lambda e, n=p_name: _on_slider_change(n, e)),
-                    ),
-                ],
-                spacing=2,
-                width=200,
+            return SliderInput(
+                label=label,
+                value=float(current_val),
+                min_val=float(min_val),
+                max_val=float(max_val),
+                step=float(step),
+                on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
+                # 固定宽度: 参数面板 ft.Row(wrap=True) 需要可测量宽度的子控件才能正确换行布局。
+                # width=None + Slider(expand=True) 导致宽度不确定 → 控件独占一行 →
+                # 参数面板变高 → table_card 视口高度被挤压到 0 → 表格行不生成语义节点 (PR #373 回归)。
+                width=AppStyles.CONTROL_WIDTH_MD,
             )
 
         if p_type == "number":
@@ -984,9 +975,49 @@ def ScreenerView(
 
     # --- 构建流式卡片控件 ---
 
+    def _on_retry_click(name: str) -> None:
+        """UX-2.3: 重试按钮点击：调 vm.schedule_retry（同步签名，内部 loop.create_task）。
+
+        task 加入 VM._background_tasks 跟踪，dispose 时自动取消。
+        """
+        vm.schedule_retry(name)
+
     def _build_log_card(card: StreamCard) -> ft.Container:
         """构建单张流式/AI 占位卡 (state-driven, 从 vm.state.stream_cards 渲染)。"""
         name = card.name
+        # UX-2.3: 错误状态分支（含重试按钮）
+        if card.error:
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                                ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.FONT_SIZE_TITLE),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Text(
+                            card.error,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.ERROR,
+                            no_wrap=False,
+                        ),
+                        ft.TextButton(
+                            icon=ft.Icons.REFRESH,
+                            content=I18n.get("ai_card_retry"),
+                            tooltip=I18n.get("ai_card_retry"),
+                            on_click=safe_on_click(lambda e, n=name: _on_retry_click(n)),
+                        ),
+                    ],
+                    spacing=8,
+                ),
+                border=ft.Border.all(1, AppColors.ERROR),
+                border_radius=8,
+                padding=AppStyles.SPACING_LG,
+                bgcolor=AppColors.SURFACE,
+                margin=ft.Margin.only(bottom=10),
+            )
         if card.is_analyzing:
             return ft.Container(
                 content=ft.Column(
