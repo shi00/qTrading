@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.i18n import I18n
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 
 pytestmark = pytest.mark.unit
@@ -159,10 +160,16 @@ class TestRetrySingleStockNotFound:
 
 
 class TestRetrySingleSuccessPath:
-    """L746-780: 主路径（on_card_start / news_task 复用 / 成功调 on_result）。"""
+    """主路径（news_task 复用 / 成功调 on_result）。"""
 
     @pytest.mark.asyncio
-    async def test_on_card_start_called_with_name(self):
+    async def test_does_not_create_new_card(self):
+        """P1-1: retry_single 不调用 on_card_start（避免与调用方卡片复用叠加产生重复卡）。
+
+        卡片创建/复用由调用方（ScreenerViewModel.retry_single_stock）负责——它先把失败卡
+        复用为占位卡；retry_single 只复用缓存重新分析并更新已有卡，不应再触发 on_card_start
+        （start_stream_card 为追加语义，会新建一张同名卡）。
+        """
         s = ConcreteStrategy()
         s._last_candidates_df = _make_candidates_df()
         s._last_prefetched = _make_prefetched()
@@ -175,7 +182,7 @@ class TestRetrySingleSuccessPath:
         ):
             await s.retry_single("贵州茅台", context)
 
-        on_card_start.assert_called_once_with("贵州茅台")
+        on_card_start.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_success_calls_on_result_with_row(self):
@@ -195,6 +202,29 @@ class TestRetrySingleSuccessPath:
         row = on_result.call_args.args[0]
         assert row["name"] == "贵州茅台"
         assert row["ai_score"] == 75.0
+
+    @pytest.mark.asyncio
+    async def test_score_zero_terminates_placeholder_card(self):
+        """I-1: score==0（无信号）时 _build_result_row 返回 None → 调 on_card_error 终结占位卡。
+
+        调用方 retry_single_stock 已把失败卡转为 is_analyzing=True 占位卡；若此处不终结，
+        卡片会永久停留在"分析中"且无重试按钮。on_card_error 将占位卡复位为错误状态。
+        """
+        s = ConcreteStrategy()
+        s._last_candidates_df = _make_candidates_df()
+        s._last_prefetched = _make_prefetched()
+        on_result = MagicMock()
+        on_card_error = MagicMock()
+        context = {"on_result": on_result, "on_card_error": on_card_error, "data_processor": MagicMock()}
+
+        with (
+            patch("strategies.ai_mixin.AIService"),
+            patch.object(s, "_mixin_analyze_single", new=AsyncMock(return_value={"score": 0, "summary": "no signal"})),
+        ):
+            await s.retry_single("贵州茅台", context)
+
+        on_result.assert_not_called()
+        on_card_error.assert_called_once_with("贵州茅台", I18n.get("ai_card_analysis_failed"))
 
     @pytest.mark.asyncio
     async def test_no_on_result_callback_skips_call(self):
@@ -219,7 +249,7 @@ class TestRetrySingleNewsTaskReuse:
         """L754-757: news_task 已 cancelled + news_as_of 存在 → 重新拉取。"""
         s = ConcreteStrategy()
         s._last_candidates_df = _make_candidates_df()
-        cancelled_task = asyncio.get_event_loop().create_future()
+        cancelled_task = asyncio.get_running_loop().create_future()
         cancelled_task.cancel()
         s._last_prefetched = _make_prefetched(
             news_tasks={"600519.SH": cancelled_task},
@@ -243,7 +273,7 @@ class TestRetrySingleNewsTaskReuse:
         """L758-759: news_task cancelled + 无 news_as_of → news_list=[]。"""
         s = ConcreteStrategy()
         s._last_candidates_df = _make_candidates_df()
-        cancelled_task = asyncio.get_event_loop().create_future()
+        cancelled_task = asyncio.get_running_loop().create_future()
         cancelled_task.cancel()
         s._last_prefetched = _make_prefetched(
             news_tasks={"600519.SH": cancelled_task},

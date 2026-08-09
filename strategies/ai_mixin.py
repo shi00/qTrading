@@ -741,11 +741,12 @@ class AIStrategyMixin:
         prefetched = self._last_prefetched
         ai_client = AIService()
         dp = context.get("data_processor") or self._last_dp
-        on_card_start = context.get("on_card_start")
+        # P1-1: retry_single 不调用 on_card_start（避免重复建卡）。
+        # 调用方（ScreenerViewModel.retry_single_stock）已先将失败卡复用为占位卡；
+        # 重试语义是"更新已有卡"，此处再触发 on_card_start（start_stream_card 追加）
+        # 会造成同名股票出现两张卡。
         on_result = context.get("on_result") or context.get("on_stream_result")
         name_str = row_data.get("name", row_data.get("ts_code", "?"))
-        if on_card_start:
-            on_card_start(name_str)
         try:
             ts_code = row_data.get("ts_code")
             hist_df = prefetched.history.get(ts_code, pd.DataFrame())
@@ -779,6 +780,11 @@ class AIStrategyMixin:
             result_row = self._build_result_row(row_data, res)
             if result_row and on_result:
                 on_result(result_row)
+            elif on_card_error:
+                # I-1: score==0（模型判定无信号）时 _build_result_row 返回 None。
+                # 调用方 retry_single_stock 已把失败卡转为 is_analyzing=True 占位卡，
+                # 此处必须终结之，否则卡片永久停留在"分析中"且无重试按钮。
+                on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
         except asyncio.CancelledError:
             raise  # R2 合规
         except Exception as e:
