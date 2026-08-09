@@ -18,6 +18,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ def WatchlistView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[WatchlistView] Remove failed: %s", ex, exc_info=True)
+            logger.error("[WatchlistView] Remove failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("watchlist_remove_failed"), "error")

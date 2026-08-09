@@ -402,7 +402,9 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("[ScreenerView] Pending strategy execution failed: %s", e, exc_info=True)
+            logger.error(
+                "[ScreenerView] Pending strategy execution failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
 
     ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
 
@@ -438,7 +440,7 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("[ScreenerView] Run strategy failed: %s", exc, exc_info=True)
+            logger.error("[ScreenerView] Run strategy failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
     def _on_run_click_sync(e: ft.ControlEvent) -> None:
         page = _get_page()
@@ -465,7 +467,7 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("[ScreenerView] Sort failed: %s", e, exc_info=True)
+            logger.error("[ScreenerView] Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     def _on_virtual_sort(col_id: str, new_asc: bool) -> None:
         page = _get_page()
@@ -603,7 +605,7 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[ScreenerView] History tree load failed: %s", ex, exc_info=True)
+            logger.error("[ScreenerView] History tree load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
@@ -628,7 +630,9 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[ScreenerView] Load history for date failed: %s", ex, exc_info=True)
+            logger.error(
+                "[ScreenerView] Load history for date failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
@@ -660,7 +664,7 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[ScreenerView] Add to watchlist failed: %s", ex, exc_info=True)
+            logger.error("[ScreenerView] Add to watchlist failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
@@ -695,7 +699,9 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[ScreenerView] Restore default prompt failed: %s", ex, exc_info=True)
+            logger.error(
+                "[ScreenerView] Restore default prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+            )
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
@@ -723,7 +729,7 @@ def ScreenerView(
         except asyncio.CancelledError:
             raise
         except Exception as ex:
-            logger.error("[ScreenerView] Save prompt failed: %s", ex, exc_info=True)
+            logger.error("[ScreenerView] Save prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")

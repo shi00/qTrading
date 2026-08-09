@@ -10,6 +10,7 @@ import webbrowser
 from urllib.parse import urlparse
 
 from ui.i18n import I18n
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ def _is_allowed_domain(url: str) -> bool:
     try:
         hostname = urlparse(url).hostname
     except Exception as e:
-        logger.debug("[MarkdownSafe] urlparse failed: %s", e, exc_info=True)
+        logger.debug("[MarkdownSafe] urlparse failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         return False
     if not hostname:
         return False
@@ -73,7 +74,9 @@ def safe_open_url(e) -> None:
             try:
                 _show_blocked_toast(page)
             except Exception as exc:
-                logger.warning("[MarkdownSafe] Failed to show toast: %s", exc, exc_info=True)
+                logger.warning(
+                    "[MarkdownSafe] Failed to show toast: %s", DataSanitizer.sanitize_error(exc), exc_info=True
+                )
                 logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)
         else:
             logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)

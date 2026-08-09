@@ -111,7 +111,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("[WatchlistVM] is_in_watchlist error: %s", e, exc_info=True)
+            logger.warning("[WatchlistVM] is_in_watchlist error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             return False
 
 

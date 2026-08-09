@@ -926,6 +926,52 @@ class TestCacheManagerCheckComprehensiveHealth:
             with pytest.raises(EngineDisposedError, match="Engine disposed during check"):
                 await mgr.check_comprehensive_health()
 
+    @pytest.mark.asyncio
+    async def test_health_check_raises_cancelled_error_when_cancel_event_set(self):
+        """P3-M5: 传入 cancel_event 且在 DB 操作期间被 set 时，健康检查及时中止并抛 CancelledError。
+
+        场景：DB 操作（conn.execute）执行期间 cancel_event 被 set，随后的 _check_cancel()
+        检测到取消信号立即 raise asyncio.CancelledError，经 gather 封装重新抛出。
+        """
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        cancel_event = asyncio.Event()
+
+        async def _execute_that_set_cancel(*args, **kwargs):
+            cancel_event.set()
+            mock_result = MagicMock()
+            mock_result.scalar = MagicMock(return_value=50)
+            return mock_result
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(side_effect=_execute_that_set_cancel)
+
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "columns": {"ts_code": {}},
+                        "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
+                    },
+                },
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await mgr.check_comprehensive_health(cancel_event=cancel_event)
+            # P3-M5: 强断言——抛出的确为取消信号（CancelledError），而非其它异常被包装
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+
 
 class TestCacheManagerCheckTableHasData:
     @pytest.mark.asyncio

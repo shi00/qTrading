@@ -36,6 +36,7 @@ from data.constants import (
 )
 from data.data_processor import DataProcessor
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
         except asyncio.CancelledError:
             raise  # R2: CancelledError 必须传播以配合优雅停机
         except Exception as ex:
-            logger.error("[HealthScanVM] Scan failed: %s", ex, exc_info=True)
+            logger.error("[HealthScanVM] Scan failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             self._set_state(scan_state="error", error_key="db_err_format")
 
     def cancel_pending_futures(self) -> None:

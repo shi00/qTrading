@@ -315,7 +315,13 @@ class HealthCheckMixin:
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def check_data_health(self):
-        """Check data health status. Read-only diagnostic — immune to sync cancellation."""
+        """Check data health status. Read-only diagnostic — immune to sync cancellation.
+
+        Note: "immune to sync cancellation" 指**数据同步**的取消信号（``context.cancel_event``），
+        本方法不响应数据同步取消。但会将**关停/用户取消**信号（``self._get_cancel_event()``，
+        即 ``asyncio.Event``）传入 ``check_comprehensive_health``，使构造深度健康检查时能及时中止，
+        二者是不同信号源，语义互不影响。
+        """
         now = time.time()
         # 10s cache to prevent double-tap on startup
         if self._health_cache.get("data") and (now - self._health_cache.get("time", 0) < 10):
@@ -413,7 +419,7 @@ class HealthCheckMixin:
                 concept_count = 0
 
             # 2. Financial Health
-            deep_health = await self.cache.check_comprehensive_health()
+            deep_health = await self.cache.check_comprehensive_health(cancel_event=self._get_cancel_event())  # type: ignore[attr-defined]  # mixin 依赖宿主 DataProcessor 提供 _get_cancel_event
 
             # Scorecard construction
             status = "green"
@@ -640,7 +646,7 @@ class HealthCheckMixin:
             fin_fresh_ratio = 0.0
             missing_critical = False
             try:
-                deep_health = await self.cache.check_comprehensive_health()
+                deep_health = await self.cache.check_comprehensive_health(cancel_event=self._get_cancel_event())  # type: ignore[attr-defined]  # mixin 依赖宿主 DataProcessor 提供 _get_cancel_event
                 tables = deep_health.get("tables", {}) if isinstance(deep_health, dict) else {}
                 fin_fresh_ratio = tables.get("financial_reports", {}).get("ratio", 0.0)
                 critical_tables = [
