@@ -140,6 +140,10 @@ class AppConfig(BaseModel):
     llm_azure_resource_name: str = ""
     llm_azure_deployment_name: str = ""
     llm_custom_models: dict[str, list[str]] = {}
+    # Issue #70: 自定义/未知模型的可选 per-model context 覆盖。
+    # 结构: {provider_id: {model_id: context}}。运行时优先采用声明值，
+    # 未声明时回退到 LLM_PROVIDERS 内置模型信息，再回退 DEFAULT_CONTEXT_WINDOW。
+    llm_custom_model_contexts: dict[str, dict[str, int]] = {}
     llm_provider_extras: dict[str, Any] = {}
     llm_failover_models: list[str] = []
     ai_api_key: str = ""

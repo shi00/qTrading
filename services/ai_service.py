@@ -42,8 +42,134 @@ CONNECT_TIMEOUT = 5.0
 GLOBAL_CONTEXT_MAX_LEN = 2000
 HISTORY_CONTEXT_MAX_LEN = 3000
 NEWS_TEXT_MAX_LEN = 500
-# Token 上下文窗口预警阈值（估算 token 数）
-TOKEN_CONTEXT_WARNING_THRESHOLD = 80000
+# === Issue #70: 模型上下文感知的 Token 化全局预算 ===
+# 未知/自定义模型或无 provider 时的保守上下文窗口回退值。
+DEFAULT_CONTEXT_WINDOW = 128_000
+# 预算预留 token：覆盖 system_instruction + <strategy_rules> + 预期输出，并留安全余量。
+# 注意：不覆盖预算外的 <user_custom_instructions>（该块不受预算截断）。
+# 取值 8000：对常见 32k~128k 上下文模型，可为 user 内容保留足够余量。
+CONTEXT_RESERVE_TOKENS = 8000
+# 回退估算分母：无 tiktoken/离线时用 len(text)//1（保守，不低估 CJK）。
+CHAR_FALLBACK_TOKENS_DIV = 1
+
+_tiktoken_enc = None
+_tiktoken_enc_error = False
+
+
+def _reset_token_estimator() -> None:
+    """清除 tiktoken 模块缓存（测试隔离用，R7 合规）。"""
+    global _tiktoken_enc, _tiktoken_enc_error
+    _tiktoken_enc = None
+    _tiktoken_enc_error = False
+
+
+def _estimate_tokens(text) -> int:
+    """估算文本 token 数（Issue #70）。
+
+    - None/空文本 → 0
+    - 非 str（多模态 list content parts）递归求和其中 str 的 text 部分
+    - 惰性初始化 tiktoken cl100k_base；异常/离线回退 len(text)//CHAR_FALLBACK_TOKENS_DIV
+    """
+    global _tiktoken_enc, _tiktoken_enc_error
+    if text is None:
+        return 0
+    if isinstance(text, list):
+        return sum(_estimate_tokens(part.get("text")) for part in text if isinstance(part, dict))
+    if not isinstance(text, str):
+        return 0
+    if not text:
+        return 0
+    if not _tiktoken_enc_error:
+        try:
+            if _tiktoken_enc is None:
+                import tiktoken
+
+                _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
+            return len(_tiktoken_enc.encode(text))
+        except Exception:
+            _tiktoken_enc_error = True
+    return len(text) // CHAR_FALLBACK_TOKENS_DIV
+
+
+def _get_model_context_window(llm_config: dict, model_override: str | None = None) -> int:
+    """取生效模型的 context 窗口（Issue #70）。
+
+    解析优先级：
+    1. llm_config["custom_model_contexts"][provider][model]（per-model 覆盖，P2-2）
+    2. LLM_PROVIDERS 内置模型信息（get_model_info）
+    3. 回退 DEFAULT_CONTEXT_WINDOW（未知 / context<=0 / 自定义未声明）
+
+    处理 provider/model 前缀与 failover 生效模型（model_override 形如 "provider/model"）。
+    """
+    from utils.llm_providers import get_model_info
+
+    provider = llm_config.get("provider", "")
+    model = model_override or llm_config.get("model", "")
+    if "/" in model:
+        provider, model = model.split("/", 1)
+
+    # 1) per-model context 覆盖（P2-2）：自定义/未知模型可显式声明，运行时以此为准。
+    # 防御容错：provider 值若非 dict（如 list/str 等非法配置），忽略该覆盖不抛错。
+    override_map = llm_config.get("custom_model_contexts") or {}
+    provider_ctx = override_map.get(provider) or {}
+    override_ctx = provider_ctx.get(model) if isinstance(provider_ctx, dict) else None
+    if isinstance(override_ctx, int) and override_ctx > 0:
+        return override_ctx
+
+    # 2) 内置模型信息
+    context = get_model_info(provider, model).get("context", 0)
+    if isinstance(context, int) and context > 0:
+        return context
+
+    # 3) 保守回退
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[str, list[str]]:
+    """全局 Token 预算分配（Issue #70）。
+
+    sections: (name, priority, is_truncatable, text, max_chars, min_chars)
+        - priority: 越小越重要；截断时优先裁 priority 数字大的可截断 section。
+        - is_truncatable: 是否允许被预算迭代削减。
+        - max_chars: 初始字符上限（None=不预截断）。
+        - min_chars: 迭代削减下限（0=可整体丢弃）。
+    返回 (join 后的有序文本, 存活 section 名列表)。不重写 XML 标签。
+    有限终止：无可减少 section（全部达 min / 不可截断）时停并 logger.warning 接受超限。
+    """
+    cur: list[list] = []
+    for name, priority, truncatable, text, max_chars, min_chars in sections:
+        if not text:
+            continue
+        if max_chars is not None and len(text) > max_chars:
+            text = text[:max_chars]
+        cur.append([name, priority, truncatable, text, min_chars])
+
+    def _total(secs: list[list]) -> int:
+        return sum(_estimate_tokens(s[3]) for s in secs)
+
+    if _total(cur) <= budget_tokens:
+        return "\n\n".join(s[3] for s in cur), [s[0] for s in cur]
+
+    # 迭代削减：优先裁优先级最低（priority 数字最大）的可截断 section；
+    # 在同一优先级内再裁 token 最大的，避免大体积高优先级段被先掏空。
+    while True:
+        reducible = [s for s in cur if s[2] and len(s[3]) > s[4]]
+        if not reducible:
+            logger.warning(
+                "[AIService] Budget still exceeded: no reducible section below min (accepting overage, ~%d tokens)",
+                _total(cur),
+            )
+            break
+        target = max(reducible, key=lambda s: (s[1], _estimate_tokens(s[3])))
+        new_len = max(target[4], round(len(target[3]) * 0.5))
+        target[3] = target[3][:new_len]
+        if _total(cur) <= budget_tokens:
+            break
+
+    surviving = [s for s in cur if s[3]]
+    return "\n\n".join(s[3] for s in surviving), [s[0] for s in surviving]
+
+
 # 默认并发数
 DEFAULT_ANALYSIS_CONCURRENCY = 5
 DEFAULT_NEWS_CONCURRENCY = 1
@@ -797,6 +923,35 @@ class AIService:
             return text
         return text[:max_len] + "...(truncated)"
 
+    def _compute_analysis_budget(self) -> int:
+        """计算 user 内容 token 预算（Issue #70）。
+
+        budget = max(1, primary_context - CONTEXT_RESERVE_TOKENS)。
+        以主模型 context 为基准（P2-3 决策）：长上下文主模型不被短 fallback 拖小，
+        真正解决 Issue #70"长上下文模型被过度裁剪"的痛点。
+        注意：failover 切到更短 context 的 fallback 模型时，本预算不会重算，
+        `_chat_completion_litellm` 仅就实际生效模型 context 记录溢出告警，不重裁。
+        残余风险（已接受）：短 fallback 模型可能收到超窗 prompt，依 provider 行为处置。
+        """
+        try:
+            failover_config = ConfigHandler.get_failover_config()
+        except Exception as exc:
+            # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
+            logger.warning(
+                "[AIService] Failover config read failed, using default context budget: %s",
+                DataSanitizer.sanitize_error(exc),
+            )
+            failover_config = {"primary": "", "fallbacks": []}
+        primary = failover_config.get("primary", "")
+        # _litellm_config 可能未初始化（如测试以 AIService.__new__ 构造）：
+        # 预算计算不应因此阻塞分析，缺失时按默认窗口处理。
+        llm_config = getattr(self, "_litellm_config", None) or {}
+        if primary:
+            primary_context = _get_model_context_window(llm_config, model_override=primary)
+        else:
+            primary_context = DEFAULT_CONTEXT_WINDOW
+        return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
+
     async def reload_config(self):
         """Reload config when settings change"""
         self._setup_client()
@@ -836,13 +991,13 @@ class AIService:
             **kwargs,
         )
 
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        estimated_tokens = total_chars // 3
-        if estimated_tokens > TOKEN_CONTEXT_WARNING_THRESHOLD:
+        total_tokens = sum(_estimate_tokens(m.get("content")) for m in messages)
+        context_window = _get_model_context_window(llm_config, model_override)
+        if total_tokens > context_window:
             logger.warning(
-                "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (%d chars)",
-                estimated_tokens,
-                total_chars,
+                "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (window %d)",
+                total_tokens,
+                context_window,
             )
 
         # S1-4 fix: Real-time reasoning support check for model switching
@@ -1394,60 +1549,135 @@ class AIService:
 
         # 倒金字塔结构：核心策略指令置于最末尾，贴近生成区
         # 解决 "Lost in the Middle" 注意力衰减问题
-        user_prompt_parts = []
+        #
+        # Issue #70：构建全部真实 section 的 (name, priority, is_truncatable, text, max_chars, min_chars)。
+        # priority 越小越重要；可截断低优先级 section 在超预算时先被 token 化全局预算裁减，
+        # 顺序不变量与 XML 标签结构保持不变（由 _apply_context_budget 在 join 时保序）。
+        sections: list[tuple] = []
+        labels: list[str] = []
+        # label key -> 所属 section，用于预算后重派生 available_data（R-A3/R-B3）
+        _label_section: dict[str, str] = {}
 
         # 1. 基础信息 (Top - 锚定分析实体)
         # SEC-001: stock_info 含外部股票名/概念等不可信文本，入 Prompt 前中和
-        user_prompt_parts.append(f"<stock_info>\n{neutralize_external_text(stock_xml)}\n</stock_info>")
-
-        # 1.5 可用数据清单 (运行时注入，与各块同一入选条件派生)
-        labels: list[str] = []
+        # stock_info 恒 index0、不可截断
+        sections.append(
+            (
+                "stock_info",
+                0,
+                False,
+                f"<stock_info>\n{neutralize_external_text(stock_xml)}\n</stock_info>",
+                None,
+                None,
+            )
+        )
         if stock_xml:
             labels.append("ai_label_quote_snapshot")
+            _label_section["ai_label_quote_snapshot"] = "stock_info"
+
+        # 2. 技术指标 (重要参考, 不可截断)
+        sections.append(
+            (
+                "technical_indicators",
+                0,
+                False,
+                f"<technical_indicators>\n{json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}\n</technical_indicators>",
+                None,
+                None,
+            )
+        )
         if tech_info:
             labels.append("ai_label_tech")
-        if global_context and include_global_context:
-            labels.append("ai_label_global")
-        if news_text and news_text != "No recent news found.":
-            labels.append("ai_label_news")
+            _label_section["ai_label_tech"] = "technical_indicators"
 
-        # 2. 技术指标 (重要参考)
-        user_prompt_parts.append(
-            f"<technical_indicators>\n{json.dumps(tech_info, ensure_ascii=False, indent=2, default=str)}\n</technical_indicators>"
-        )
-
-        # 3. 外部辅助与噪音偏多的长文本 (Middle - 允许注意力分散)
+        # 3. 外部辅助与噪音偏多的长文本 (Middle - 允许注意力分散, 可截断低优先级)
         if global_context and include_global_context:
             # SEC-001: global_context 为不可信外部行情文本，中和后入 Prompt
-            user_prompt_parts.append(
-                f"<global_context>\n{neutralize_external_text(global_context, GLOBAL_CONTEXT_MAX_LEN)}\n</global_context>"
+            sections.append(
+                (
+                    "global_context",
+                    4,
+                    True,
+                    f"<global_context>\n{neutralize_external_text(global_context, GLOBAL_CONTEXT_MAX_LEN)}\n</global_context>",
+                    None,
+                    0,
+                )
             )
+            labels.append("ai_label_global")
+            _label_section["ai_label_global"] = "global_context"
         if news_text and news_text != "No recent news found.":
             # SEC-001: news_text 含外部新闻标题等不可信文本，中和后入 Prompt
-            user_prompt_parts.append(f"<recent_news>\n{neutralize_external_text(news_text)}\n</recent_news>")
+            sections.append(
+                (
+                    "recent_news",
+                    5,
+                    True,
+                    f"<recent_news>\n{neutralize_external_text(news_text)}\n</recent_news>",
+                    None,
+                    0,
+                )
+            )
+            labels.append("ai_label_news")
+            _label_section["ai_label_news"] = "recent_news"
         if financials_content and "Data not available" not in financials_content:
-            user_prompt_parts.append(f"<financials>\n{financials_content}\n</financials>")
-            labels.extend(financial_labels or [])
+            sections.append(("financials", 1, True, f"<financials>\n{financials_content}\n</financials>", None, 0))
+            for lbl in financial_labels or []:
+                labels.append(lbl)
+                _label_section[lbl] = "financials"
         if capital_flow_content and "Data not available" not in capital_flow_content:
-            user_prompt_parts.append(f"<capital_flow>\n{capital_flow_content}\n</capital_flow>")
-            labels.extend(capital_labels or [])
+            sections.append(
+                ("capital_flow", 2, True, f"<capital_flow>\n{capital_flow_content}\n</capital_flow>", None, 0)
+            )
+            for lbl in capital_labels or []:
+                labels.append(lbl)
+                _label_section[lbl] = "capital_flow"
 
-        # 4. 历史价格序列 (Bottom-Mid)
+        # 4. 历史价格序列 (Bottom-Mid, 可截断低优先级)
         if history_content:
-            user_prompt_parts.append(f"<recent_price_action>\n{history_content}</recent_price_action>")
-            labels.extend(history_labels or [])
+            sections.append(
+                (
+                    "recent_price_action",
+                    3,
+                    True,
+                    f"<recent_price_action>\n{history_content}</recent_price_action>",
+                    None,
+                    0,
+                )
+            )
+            for lbl in history_labels or []:
+                labels.append(lbl)
+                _label_section[lbl] = "recent_price_action"
 
-        # 5. Few-Shot 学习样例
+        # 5. Few-Shot 学习样例 (可截断低优先级, 保留 _safe_truncate HISTORY_CONTEXT_MAX_LEN 语义)
         if history_context and include_learning_context:
-            user_prompt_parts.append(self._safe_truncate(history_context, HISTORY_CONTEXT_MAX_LEN))
+            sections.append(
+                (
+                    "history_context",
+                    6,
+                    True,
+                    self._safe_truncate(history_context, HISTORY_CONTEXT_MAX_LEN),
+                    None,
+                    0,
+                )
+            )
             labels.append("ai_label_learning")
+            _label_section["ai_label_learning"] = "history_context"
 
-        # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)
+        # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考, 不可截断)
+        # strategy_context 保留 _safe_truncate STRATEGY_CONTEXT_MAX_LEN 语义，但预算不进一步裁减
         if strategy_context:
-            user_prompt_parts.append(
-                f"<strategy_context>\n{self._safe_truncate(strategy_context, STRATEGY_CONTEXT_MAX_LEN)}\n</strategy_context>"
+            sections.append(
+                (
+                    "strategy_context",
+                    0,
+                    False,
+                    f"<strategy_context>\n{self._safe_truncate(strategy_context, STRATEGY_CONTEXT_MAX_LEN)}\n</strategy_context>",
+                    None,
+                    None,
+                )
             )
             labels.append("ai_label_strategy_ctx")
+            _label_section["ai_label_strategy_ctx"] = "strategy_context"
 
         # Phase 2A.1 §4.1：在 build_available_data_block 之前按档位 + probe 双层过滤标签
         # 使 <available_data> 区块只列当前档位 + probe 双层验证通过的标签，
@@ -1480,15 +1710,24 @@ class AIService:
                 exc_info=True,
             )
 
-        available_data_block = build_available_data_block(labels)
-        if available_data_block:
-            # insert(1): stock_info is at position 0 and must remain first so
-            # the LLM anchors on the stock identity before reading the
-            # available-data manifest.  This is a deliberate deviation from
-            # issue #41 spec §2.2 (insert(0)) — insert(1) is more logical.
-            user_prompt_parts.insert(1, available_data_block)
+        # Issue #70：全局 token 预算分配（primary context - reserve，下限 1；P2-3 决策）。
+        # available_data 不参与预算：它只是存活 section 的"清单"，不承载判断数据，
+        # 预算后按其存活 section 重派生并以 index1 插入（P1-2 修复，避免全量计入预算
+        # 导致紧预算下过度裁剪真实数据段）。
+        budget_tokens = self._compute_analysis_budget()
+        user_prompt, surviving_names = _apply_context_budget(sections, budget_tokens)
 
-        user_prompt = "\n\n".join(user_prompt_parts)
+        # 预算后按存活 section 重派生 labels/available_data（R-A3/R-B3）：
+        # = 已过 filter_available_labels 的集合 ∩ 存活 section，防 manifest 声称已被裁掉的段
+        final_labels = [lbl for lbl in labels if _label_section.get(lbl) in surviving_names]
+        final_available = build_available_data_block(final_labels)
+        if final_available:
+            # 插入 index1（stock_info 恒 index0 在首位），清单不参与 token 预算
+            first_break = user_prompt.find("\n\n")
+            if first_break == -1:
+                user_prompt = final_available + "\n\n" + user_prompt
+            else:
+                user_prompt = user_prompt[:first_break] + "\n\n" + final_available + user_prompt[first_break:]
 
         system_instruction = (
             _UNIVERSAL_RULES
