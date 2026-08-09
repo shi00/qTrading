@@ -5,4 +5,4 @@
 [env]
 # 精确 pin（等号前缀）：caret 语义会解析为 16 系列最新归档，
 # 见 pg_plan §7.1 "POSTGRESQL_VERSION 语义陷阱"。
-POSTGRESQL_VERSION = "16.14.0"
+POSTGRESQL_VERSION = "=16.14.0"
