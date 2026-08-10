@@ -5,10 +5,11 @@
 也可在 TextField 中键入精确数值。
 
 契约 (CLAUDE.md §3.2 MVVM + §3.3 声明式 UI):
-- ``@ft.component`` 函数组件，无 class 子类
+- 普通工厂函数（非 ``@ft.component``），返回 ``ft.Column``，无 class 子类
 - 受控组件：``value`` prop 由父级驱动，``on_change`` 上抛新值
-- 局部 ``use_state`` 仅缓存 TextField 输入中文本（避免每次按键触发父级 re-render）
-- ``use_effect`` 监听 ``value`` prop 变化时同步 TextField 文本
+- 局部 TextField 光标输入中文本不即时上抛（blur/submit 时 _commit_text 提交），
+  避免每次按键触发父级 re-render；父级 ``value`` prop 变化依赖 View 整体
+  re-render（工厂函数重建）时同步 TextField 文本
 - 颜色全部使用 ``AppColors`` 语义 token，订阅 ``AppColors.get_observable_state`` 自动重渲染
 """
 

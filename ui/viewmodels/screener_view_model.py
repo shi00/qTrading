@@ -185,6 +185,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._last_ai_context: dict | None = None
         self._last_strategy_key: str | None = None
         self._retrying = False
+        # 当前重试的股票名与重试前的错误文案（P1-1: select_strategy 取消重试时终结占位卡用）
+        self._retrying_name: str | None = None
+        self._retrying_prev_error: str | None = None
         # 当前重试 task 引用（schedule_retry 记录，select_strategy 仅取消它，避免误cancel其它后台任务）
         self._retry_task: asyncio.Task | None = None
 
@@ -251,6 +254,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._last_ai_context = None
         self._last_strategy_key = None
         self._retrying = False
+        self._retrying_name = None
+        self._retrying_prev_error = None
         self._retry_task = None
 
         self._full_results = None
@@ -468,6 +473,13 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 self._retry_task.cancel()
             self._retry_task = None
             self._retrying = False
+            # P1-1: 取消重试后终结占位卡（否则 is_analyzing=True 卡永久停留在"分析中"旋转假死）。
+            # 仅当确有重试中的占位卡名时还原为错误态，后续 on_result/on_card_error 均不会再来。
+            # 还原重试前的原始错误文案（VM 不感知 locale，§3.2），不调用 I18n。
+            if self._retrying_name:
+                self._on_card_error(self._retrying_name, self._retrying_prev_error or "AI 分析未完成")
+            self._retrying_name = None
+            self._retrying_prev_error = None
             # 清空重试上下文（防止 retry_single 完成后回调污染新策略）
             self._last_ai_context = None
             self._last_strategy_key = None
@@ -1078,6 +1090,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             return  # 卡片保持 error 状态，用户可切换策略或重试
         # UX-2.3 v4 P0-1: 将失败卡转为重试中占位卡（不删除，避免 on_card_error 找不到目标卡片）
         # 重试成功由 on_result 自然终结；重试失败由 on_card_error 重新标记 error
+        # P1-1: 记录重试前的原始错误文案，供 select_strategy 取消重试时还原（VM 不感知 locale, §3.2）
+        self._retrying_prev_error = next(
+            (c.error for c in self._state.stream_cards if c.name == name and c.error), None
+        )
         new_cards = tuple(
             replace(c, error=None, is_analyzing=True) if c.name == name and c.error else c
             for c in self._state.stream_cards
@@ -1085,6 +1101,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # UX-2.3: is_retrying 进 state，View 派生 run_disabled 禁用主运行按钮
         self._set_state(stream_cards=new_cards, is_retrying=True)
         self._retrying = True
+        self._retrying_name = name  # P1-1: 记录重试中的占位卡名，供 select_strategy 取消时终结
         # 4. 构建新 context（替换 _task_id 和 on_progress，避免污染原批次）
         retry_context = dict(self._last_ai_context)
         retry_context["_task_id"] = None  # 不关联 TaskManager
@@ -1095,7 +1112,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         try:
             await strategy.retry_single(name, retry_context)
         except asyncio.CancelledError:
-            raise  # R2 合规
+            raise  # R2 合规（占位卡终结由 select_strategy 取消路径处理）
         except Exception as e:
             logger.error("[ScreenerVM] retry_single_stock failed: %s", e, exc_info=True)
             # A-1: retry_single 抛异常时（含 try 块之前的异常）恢复卡片为 error 状态避免假死
@@ -1107,6 +1124,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
         finally:
             self._retrying = False
+            self._retrying_name = None
             self._set_state(is_retrying=False)
 
     def schedule_retry(self, name: str) -> None:

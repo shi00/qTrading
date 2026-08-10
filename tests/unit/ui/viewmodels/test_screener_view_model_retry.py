@@ -338,6 +338,31 @@ class TestSelectStrategyDuringRetry:
         assert vm.state.is_retrying is False
         assert vm.state.selected_strategy == "new_strategy"
 
+    def test_strategy_switch_cancels_retry_terminates_placeholder_card(self, vm):
+        """P1-1: 重试中切换策略取消重试 task 后，占位卡被终结为 error 态（否则 is_analyzing 假死）。"""
+        vm._retrying = True
+        vm._retrying_name = "贵州茅台"
+        vm._retrying_prev_error = "原始错误"
+        vm._last_ai_context = {"on_result": lambda r: None}
+        vm._last_strategy_key = "old_strategy"
+
+        retry_task = MagicMock(spec=asyncio.Task)
+        retry_task.done.return_value = False
+        vm._retry_task = retry_task
+
+        # 占位卡处于 is_analyzing=True（重试中）
+        vm._set_state(stream_cards=(_make_analyzing_card("贵州茅台"),))
+
+        vm.select_strategy("new_strategy")
+
+        retry_task.cancel.assert_called_once()  # noqa: weak-assertion cancel() 无参数，确认被精确调用一次即可
+        card = vm.state.stream_cards[0]
+        assert card.name == "贵州茅台"
+        assert card.is_analyzing is False  # 不再假死
+        assert card.error == "原始错误"  # 还原为原始错误文案（VM 不感知 locale）
+        assert vm._retrying_name is None
+        assert vm.state.selected_strategy == "new_strategy"
+
     def test_only_cancels_retry_task_not_other_background_tasks(self, vm):
         """_retrying=True 时切换策略 → 不触碰其它后台任务（P0-2 范围收敛）。"""
         vm._retrying = True

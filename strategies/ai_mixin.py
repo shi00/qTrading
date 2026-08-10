@@ -320,6 +320,13 @@ class AIStrategyMixin:
         on_progress = context.get("on_progress")
         on_result = context.get("on_stream_result") or context.get("on_result")
 
+        # P1-2: 新批次开始时清空 retry 复用缓存，避免预取失败时 retry_single
+        # 跨"代"复用上一批次的 _last_candidates_df/_last_prefetched（状态错配）。
+        # 仅批量预取完成后才重新赋值，保证 _last_ai_context 与数据同源。
+        self._last_candidates_df = None
+        self._last_prefetched = None
+        self._last_dp = None
+
         # Extract UI real-time prompt override (handles users clicking Run before blurring Flet textarea)
         ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
 
@@ -731,7 +738,7 @@ class AIStrategyMixin:
             return
         df = self._last_candidates_df
         mask = (df["name"] == stock_name) | (df["ts_code"] == stock_name)
-        single_records = df[mask].to_dict("records")
+        single_records = df.loc[mask].to_dict("records")
         if not single_records:
             logger.warning("[AIStrategyMixin] retry_single: stock %s not found", stock_name)
             if on_card_error:
