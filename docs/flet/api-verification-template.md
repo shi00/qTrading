@@ -15,7 +15,7 @@
 | **锁定版本** | 核验时的 Flet 锁定版本（从 [`pyproject.toml`](../../pyproject.toml) 读取，不写补丁号漂移；写小版本+日期） |
 | **核验来源** | 官方文档链接 / Flet issue / 项目运行期验证 / 项目单元测试 |
 | **项目结论** | 在项目中的契约判定（继续使用 / 调整契约 / 暂禁用 / 待评估） |
-| **需更新文件** | 核验结果波及的文件清单（`v1-api-constraints.md` / `project-differences.md` / `upgrade-checklist.md` / `ui/hooks.py` / `tests/unit/ui/*_contract.py` 等） |
+| **需更新文件** | 核验结果波及的文件清单（`v1-api-constraints.md` / `project-differences.md` / `upgrade-checklist.md` / `ui/hooks.py` / `tests/unit/ui/*_contract.py` 等）。仅当新增、删除或改变专题职责时更新 [docs/flet/README.md](./README.md)。 |
 | **核验日期** | YYYY-MM-DD |
 | **核验人** | 核验执行者（GitHub 用户名或团队角色） |
 

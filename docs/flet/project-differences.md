@@ -3,6 +3,9 @@
 > 来源：从 man/flet-best-practices.md 迁移（原文件改为薄 stub 指向 docs/flet/）
 
 > 面向 AStockScreener 工程团队的项目 Flet 集成差异指南
+>
+> 文档入口：[Flet 开发文档入口](./README.md)
+> 本文只记录项目相对官方的分叉与实际验证过的高风险行为。
 
 > Owner: UI 维护者
 > 复核触发器: Flet 依赖版本变化（pyproject.toml）、关键 API 变化、架构红线/边界变化或 ADR 决策（见 [../adr/](../adr/)）

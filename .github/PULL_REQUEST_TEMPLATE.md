@@ -48,12 +48,11 @@ Relates to #XXX
 - [ ] CLAUDE.md 架构、单例、策略规范同步对齐
 - [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
 - [ ] SECURITY.md 支持版本、依赖CVE更新
-- [ ] docs/flet/ 子文档（v1-api-constraints / project-differences / upgrade-checklist / api-verification-template / accessibility-baseline）与 man/ 其他专题（database-account-separation / table-partitioning-strategy）按变更同步
-- [ ] 依赖版本变化时，docs/flet/ 等专项文档已复核（Owner/复核触发器见文档头部；man/flet-best-practices.md 已改为 stub 指向 docs/flet/）
+- [ ] docs/flet/ 子文档与 man/ 其他专题按 [docs/flet/README.md](../docs/flet/README.md) 任务路由同步（Owner/复核触发器见文档头部；man/flet-best-practices.md 已改为 stub 指向 docs/flet/）
 - [ ] CHANGELOG.md 由release-please自动生成，无手动修改
 
 ## ✅ 提交前自检清单（强制全部核对）
-- [ ] 代码符合 [CLAUDE.md 架构红线 R1-R18](./CLAUDE.md#31--绝对禁止)、分层规范、单例约束
+- [ ] 代码符合 [CLAUDE.md 架构红线 R1-R18](../CLAUDE.md#31--绝对禁止)、分层规范、单例约束
 - [ ] 无硬编码密钥、数据库密码、Token、隐私信息
 - [ ] 无废弃死代码、注释掉的临时调试代码
 - [ ] 所有新增分支、边界逻辑配套对应测试用例
