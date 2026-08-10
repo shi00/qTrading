@@ -227,12 +227,14 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
 
-            # TushareClient.set_token 内部仅重建 pro_api 引用与限流器（不写 ~/tk.csv），仍需 offload
-            def _init_client_sync() -> tuple[TushareClient, bool]:
-                client = TushareClient()
-                return client, client.set_token(token)
-
-            client, needs_probe = await ThreadPoolManager().run_async(TaskType.IO, _init_client_sync)
+            # TushareClient 必须在 async 上下文（事件循环线程）实例化，经 _capture_loop 捕获
+            # 事件循环引用；set_token 使用异步 API set_token_async。同步包装器 set_token 依赖
+            # _loop 已被捕获，若在工作线程构造（旧 _init_client_sync 反模式）则 _loop=None，
+            # set_token 会抛 RuntimeError("set_token() requires a running event loop")。
+            # set_token_async 内部仅重建 pro_api 引用与限流器（无网络 IO，不违反 R16），
+            # 与 bootstrap 的 _warmup_tushare_capabilities 同模式。
+            client = TushareClient()
+            needs_probe = await client.set_token_async(token)
 
             if needs_probe:
                 try:

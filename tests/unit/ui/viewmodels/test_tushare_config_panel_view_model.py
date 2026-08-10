@@ -337,7 +337,7 @@ class TestVerifyToken:
     async def test_verify_token_success_no_probe(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = False  # needs_probe = False
+        mock_client.set_token_async = AsyncMock(return_value=False)  # needs_probe = False
 
         with (
             patch("tushare.set_token") as mock_ts_set_token,
@@ -353,7 +353,10 @@ class TestVerifyToken:
         mock_ts_set_token.assert_not_called()
         mock_pro.trade_cal.assert_called_once()
         mock_config_handler.save_token.assert_called_once_with("valid_token")
-        mock_client.set_token.assert_called_once_with("valid_token")
+        # 回归：verify_token 必须用异步 set_token_async（同步包装器 set_token 在工作线程
+        # _loop 未捕获时会抛 RuntimeError），不得调用客户端同步 set_token。
+        mock_client.set_token_async.assert_awaited_once_with("valid_token")
+        mock_client.set_token.assert_not_called()
         assert vm.state.status_type == "success"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "tushare_verify_success"
@@ -368,7 +371,7 @@ class TestVerifyToken:
         """
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = False
+        mock_client.set_token_async = AsyncMock(return_value=False)
 
         # 用 mock 模块替换 tushare，捕获所有属性访问
         mock_tushare = MagicMock()
@@ -395,7 +398,7 @@ class TestVerifyToken:
     async def test_verify_token_success_with_on_verify_success(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = False
+        mock_client.set_token_async = AsyncMock(return_value=False)
         on_verify_success = MagicMock()
 
         with (
@@ -413,7 +416,7 @@ class TestVerifyToken:
     async def test_verify_token_probe_available_apis(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = True  # needs_probe = True
+        mock_client.set_token_async = AsyncMock(return_value=True)  # needs_probe = True
         mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True, "moneyflow": True})
         mock_strategy_manager = MagicMock()
 
@@ -438,7 +441,7 @@ class TestVerifyToken:
     async def test_verify_token_probe_unavailable_apis(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = True
+        mock_client.set_token_async = AsyncMock(return_value=True)
         mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True, "top_list": False})
         mock_strategy_manager = MagicMock()
 
@@ -461,7 +464,7 @@ class TestVerifyToken:
     async def test_verify_token_probe_empty_results(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = True
+        mock_client.set_token_async = AsyncMock(return_value=True)
         mock_client.probe_api_capabilities = AsyncMock(return_value={})
         mock_strategy_manager = MagicMock()
 
@@ -484,7 +487,7 @@ class TestVerifyToken:
     async def test_verify_token_probe_exception_non_fatal(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = True
+        mock_client.set_token_async = AsyncMock(return_value=True)
         mock_client.probe_api_capabilities = AsyncMock(side_effect=RuntimeError("probe failed"))
 
         with (
@@ -525,7 +528,7 @@ class TestVerifyToken:
     async def test_verify_token_triggers_on_loading_change(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = False
+        mock_client.set_token_async = AsyncMock(return_value=False)
         on_loading_change = MagicMock()
 
         with (
@@ -550,7 +553,7 @@ class TestVerifyToken:
     ):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()
-        mock_client.set_token.return_value = False
+        mock_client.set_token_async = AsyncMock(return_value=False)
         on_loading_change = MagicMock()
 
         with (

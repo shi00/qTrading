@@ -836,6 +836,9 @@ class TestDataSourceViewModelSaveToken:
             patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
             patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
         ):
+            mock_tc.return_value.set_token_async = AsyncMock(return_value=True)
+            mock_tc.return_value.probe_api_capabilities = AsyncMock()
+
             # ThreadPoolManager.run_async 直接调用 func (不经线程池, 便于同步验证)
             async def _fake_run_async(task_type, func, *args, **kwargs):
                 return func(*args, **kwargs)
@@ -843,7 +846,13 @@ class TestDataSourceViewModelSaveToken:
             mock_tpm.return_value.run_async = _fake_run_async
             await bound_vm.save_tushare_token("abc123")
             mock_tc.assert_called_once_with()
-            mock_tc.return_value.set_token.assert_called_with("abc123")
+            # 回归：save_tushare_token 必须 await 异步 set_token_async（同步 set_token 在
+            # 工作线程 _loop 未捕获时会抛 RuntimeError），不得调用同步 set_token。
+            mock_tc.return_value.set_token_async.assert_awaited_with("abc123")
+            mock_tc.return_value.set_token.assert_not_called()
+            # set_token_async 返回 True（token 变更、cache 清空）时需重建 capability cache，
+            # 与 verify_token 对齐契约，避免 tier 预筛基于空 cache 降级。
+            mock_tc.return_value.probe_api_capabilities.assert_awaited_once()
 
     async def test_skips_empty_token(self, bound_vm):
         await bound_vm.save_tushare_token("  ")
