@@ -901,26 +901,43 @@ def ScreenerView(
             if group not in group_labels:
                 group_labels[group] = p.get("group_label_key")
 
+        # 参数面板改用 ResponsiveRow (12 列栅格) 承载控件, 避免 ft.Slider 置于
+        # ft.Row(wrap=True) (Flutter Wrap) 触发 Flet Web 端 Dart 类型错误
+        # (TypeError: ... is not a subtype of ...)。textarea 多行文本占满整行,
+        # 其余小控件(滑块/数字/下拉)按断点多列排布。
+        _PARAM_COL = {"sm": 12, "md": 6, "lg": 4}
+        _PARAM_COL_TEXTAREA = 12
+
+        def _build_controls(params: list[dict]) -> list[ft.Control]:
+            controls: list[ft.Control] = []
+            for p in params:
+                ctrl = _build_param_control(p)
+                if ctrl is None:
+                    continue
+                ctrl.col = _PARAM_COL_TEXTAREA if p.get("type") == "textarea" else _PARAM_COL
+                controls.append(ctrl)
+            return controls
+
         rendered_groups: list[tuple[str, str, list[ft.Control]]] = []
 
         for group_name in PARAM_GROUP_ORDER:
             if group_name == "default":
                 continue
             if groups[group_name]:
-                controls = [c for c in (_build_param_control(p) for p in groups[group_name]) if c is not None]
+                controls = _build_controls(groups[group_name])
                 if controls:
                     title = _resolve_group_title(group_name, group_labels.get(group_name))
                     rendered_groups.append((group_name, title, controls))
 
         if groups["default"]:
-            controls = [c for c in (_build_param_control(p) for p in groups["default"]) if c is not None]
+            controls = _build_controls(groups["default"])
             if controls:
                 title = _resolve_group_title("default", group_labels.get("default"))
                 rendered_groups.append(("default", title, controls))
 
         for group_name in custom_groups:
             if groups[group_name]:
-                controls = [c for c in (_build_param_control(p) for p in groups[group_name]) if c is not None]
+                controls = _build_controls(groups[group_name])
                 if controls:
                     title = _resolve_group_title(group_name, custom_groups[group_name])
                     rendered_groups.append((group_name, title, controls))
@@ -940,7 +957,7 @@ def ScreenerView(
                                 color=AppColors.TEXT_PRIMARY,
                             ),
                             ft.Divider(height=1, color=AppColors.DIVIDER),
-                            ft.Row(controls, wrap=True, spacing=15),
+                            ft.ResponsiveRow(controls, spacing=15, run_spacing=15),
                         ],
                         spacing=8,
                     ),
@@ -952,7 +969,7 @@ def ScreenerView(
             )
 
         if groups["advanced"]:
-            controls = [c for c in (_build_param_control(p) for p in groups["advanced"]) if c is not None]
+            controls = _build_controls(groups["advanced"])
             if controls:
                 result.append(
                     ft.ExpansionTile(
@@ -1273,7 +1290,7 @@ def ScreenerView(
         visible=is_realtime,
     )
 
-    left_controls = ft.Column([title_row, realtime_controls], spacing=10, expand=True)
+    left_controls = ft.Column([title_row, realtime_controls], spacing=10)
 
     status_row = ft.Row(
         [
@@ -1346,9 +1363,9 @@ def ScreenerView(
             status_row,
             ft.Row([export_btn, export_excel_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
             # backtest_btn 独立一行右对齐：与导出/执行按钮同行会加宽 right_controls ~109px,
-            # 压缩左侧 left_controls 使参数面板 Row(wrap=True) 换行 (+78px 高度),
-            # 表体视口被压到 0 → 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
-            # 独立成行只增加 right_controls 固有高度, 不改变宽度, 参数面板不换行。
+            # 压缩左侧 left_controls 使参数面板宽度受控, 表体视口被压到 0 →
+            # 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
+            # 独立成行只增加 right_controls 固有高度, 不改变宽度。
             ft.Row([backtest_btn], alignment=ft.MainAxisAlignment.END),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1357,7 +1374,7 @@ def ScreenerView(
 
     control_card = ft.Container(
         content=ft.Row(
-            [left_controls, right_controls],
+            [ft.Container(content=left_controls, expand=True), right_controls],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),

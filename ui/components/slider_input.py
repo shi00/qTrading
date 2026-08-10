@@ -48,7 +48,6 @@ def _default_fmt(value: float) -> str:
     return f"{value:.10f}".rstrip("0").rstrip(".")
 
 
-@ft.component
 def SliderInput(
     value: float = 0.0,
     min_val: float = 0.0,
@@ -77,61 +76,23 @@ def SliderInput(
         label: 标签文案（已翻译字符串，由父级传入）；None 时不渲染顶部 Text（嵌入场景）。
         expand: 是否在父容器中扩展填充（``Column(expand=True)``）。
     """
-    ft.use_state(AppColors.get_observable_state)
-
     formatter = fmt or _default_fmt
-    text_value, set_text_value = ft.use_state(formatter(value))
-
-    # value prop 变化时同步 TextField 文本（如父级重置参数、程序化设值）。
-    # 仅当格式化后文本与当前不同时更新，避免 slider 拖动后 effect 冗余覆盖。
-    def _sync_text_effect() -> None:
-        new_text = formatter(value)
-        if new_text != text_value:
-            set_text_value(new_text)
-
-    ft.use_effect(_sync_text_effect, dependencies=[value])
+    text_val = formatter(value)
 
     if divisions is None:
         divisions = int(round((max_val - min_val) / step)) if step > 0 else None
 
-    def _on_slider_change(e: ft.ControlEvent) -> None:
-        raw = get_control_value(e.control, ft.Slider) if e and e.control else value
-        try:
-            new_val = _snap_to_step(float(raw), min_val, max_val, step)
-        except (TypeError, ValueError):
-            return
-        set_text_value(formatter(new_val))
-        if on_change is not None:
-            on_change(new_val)
-
-    def _commit_text() -> None:
-        """解析 TextField 文本，clamp + snap 后上抛 on_change。
-
-        空输入或非法输入时恢复为当前 ``value`` prop 的格式化值（不调用 on_change）。
-        """
-        raw = text_value.strip()
-        if not raw:
-            set_text_value(formatter(value))
-            return
-        try:
-            parsed = float(raw)
-        except ValueError:
-            set_text_value(formatter(value))
-            return
-        new_val = _snap_to_step(parsed, min_val, max_val, step)
-        set_text_value(formatter(new_val))
-        if new_val != value and on_change is not None:
-            on_change(new_val)
-
-    def _on_text_submit(_e: ft.ControlEvent) -> None:
-        _commit_text()
-
-    def _on_text_blur(_e: ft.ControlEvent) -> None:
-        _commit_text()
-
-    def _on_text_change(e: ft.ControlEvent) -> None:
-        raw = get_control_value(e.control, ft.TextField) if e and e.control else ""
-        set_text_value(raw)
+    text_field = ft.TextField(
+        value=text_val,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        dense=True,
+        border_color=AppColors.DIVIDER,
+        focused_border_color=AppColors.PRIMARY,
+        text_size=AppStyles.FONT_SIZE_BODY,
+        content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+        width=70,
+        disabled=disabled,
+    )
 
     slider = ft.Slider(
         min=min_val,
@@ -142,23 +103,61 @@ def SliderInput(
         active_color=AppColors.PRIMARY,
         expand=True,
         disabled=disabled,
-        on_change=safe_on_change(_on_slider_change),
     )
 
-    text_field = ft.TextField(
-        value=text_value,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        dense=True,
-        border_color=AppColors.DIVIDER,
-        focused_border_color=AppColors.PRIMARY,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
-        width=70,
-        disabled=disabled,
-        on_change=safe_on_change(_on_text_change),
-        on_blur=safe_on_change(_on_text_blur),
-        on_submit=safe_on_change(_on_text_submit),
-    )
+    def _on_slider_change(e: ft.ControlEvent) -> None:
+        raw = get_control_value(e.control, ft.Slider) if e and e.control else value
+        try:
+            new_val = _snap_to_step(float(raw), min_val, max_val, step)
+        except (TypeError, ValueError):
+            return
+        formatted = formatter(new_val)
+        if text_field.value != formatted:
+            text_field.value = formatted
+            if text_field.page:
+                text_field.update()
+        if on_change is not None:
+            on_change(new_val)
+
+    def _commit_text() -> None:
+        """解析 TextField 文本，clamp + snap 后上抛 on_change。
+
+        空输入或非法输入时恢复为当前 ``value`` prop 的格式化值（不调用 on_change）。
+        """
+        raw = (text_field.value or "").strip()
+        if not raw:
+            text_field.value = formatter(value)
+            if text_field.page:
+                text_field.update()
+            return
+        try:
+            parsed = float(raw)
+        except ValueError:
+            text_field.value = formatter(value)
+            if text_field.page:
+                text_field.update()
+            return
+        new_val = _snap_to_step(parsed, min_val, max_val, step)
+        formatted = formatter(new_val)
+        text_field.value = formatted
+        if slider.value != new_val:
+            slider.value = new_val
+            if slider.page:
+                slider.update()
+        if text_field.page:
+            text_field.update()
+        if new_val != value and on_change is not None:
+            on_change(new_val)
+
+    def _on_text_submit(_e: ft.ControlEvent) -> None:
+        _commit_text()
+
+    def _on_text_blur(_e: ft.ControlEvent) -> None:
+        _commit_text()
+
+    slider.on_change = safe_on_change(_on_slider_change)
+    text_field.on_submit = safe_on_change(_on_text_submit)
+    text_field.on_blur = safe_on_change(_on_text_blur)
 
     column_controls: list = []
     if label is not None:
@@ -169,9 +168,8 @@ def SliderInput(
                 color=AppColors.TEXT_SECONDARY,
             )
         )
-    # 根因防范 (PR #472 E2E 修复): 将包含 Slider(expand=True) 的水平 Row 包裹在固定 height=38
-    # 的 Container 约束中，在 SliderInput 内部提供明确的垂直高度界限，防止 Expand 组件在外部
-    # 无限高父元素 (如无约束 Row/Wrap) 中向上传导 Unbounded Height 导致整个控制视图膨胀崩溃。
+    # 根因防范: 将包含 Slider(expand=True) 的水平 Row 包裹在固定 height=38
+    # 的 Container 约束中，在 SliderInput 内部提供明确的垂直高度界限。
     column_controls.append(
         ft.Container(
             content=ft.Row(

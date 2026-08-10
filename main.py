@@ -39,7 +39,7 @@ from app.window_lifecycle import (
 from data.cache.cache_manager import CacheManager
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.toast_manager import ToastManager, ToastManagerView
-from ui.i18n import I18n, get_observable_state
+from ui.i18n import I18n
 from ui.startup_views import StartupView, _StartupBridge
 from ui.theme import apply_page_theme
 from utils.config_handler import ConfigHandler
@@ -252,17 +252,19 @@ def _resolve_embedded_pg_log_dir_hint() -> str | None:
         return None
 
 
-@ft.component
 def CloseConfirmDialog(
     on_cancel: Callable[[ft.ControlEvent], None],
     on_confirm: Callable[[ft.ControlEvent], None],
 ) -> ft.AlertDialog:
-    """窗口关闭确认对话框 (声明式, i18n state 驱动自动重渲染).
+    """窗口关闭确认对话框 (普通工厂, 返回 ft.AlertDialog).
 
-    CLAUDE.md §3.2 MVVM: i18n 通过 ``ft.use_state(get_observable_state)``
-    订阅, locale 切换时自动重渲染, 无需手动刷新控件。
+    注意: 本函数是普通工厂而非 ``@ft.component``。窗口关闭事件
+    (``window.on_event``) 运行于 Flet session 事件分发, 不在任何
+    ``Renderer`` 上下文内, 无法实例化 hook 组件 (``ft.use_state`` 会抛
+    ``No current renderer is set``)。该对话框为临时 (transient) 对话框,
+    每次关闭时点按才重建, 通过 ``I18n.get(...)`` 在构建时解析的文案即为
+    当前语言, 无需 ``ft.use_state`` 的 locale 实时重渲染订阅。
     """
-    ft.use_state(get_observable_state)
     return ft.AlertDialog(
         modal=True,
         title=ft.Text(I18n.get("exit_confirm_title")),

@@ -4,10 +4,7 @@
 1. 渲染契约：label 有值/None、expand、disabled
 2. fmt 格式化：默认与自定义
 3. divisions 自动计算
-4. 事件交互：slider on_change (snap+clamp)、text on_change/blur/submit
-5. value prop 变化时同步 TextField
-
-测试范式参考 test_screener_view_spike.py (make_component + render_once).
+4. 事件交互：slider on_change (snap+clamp)、text on_blur/submit
 """
 
 from __future__ import annotations
@@ -17,31 +14,10 @@ from unittest.mock import MagicMock
 
 import flet as ft
 import pytest
-from flet.components.component import Component
 
-from tests.unit.ui.component_renderer import (
-    make_component,
-    render_once,
-    run_mount_effects,
-    run_render_effects,
-)
-from ui.components.slider_input import SliderInput
+from ui.components.slider_input import SliderInput, _default_fmt, _snap_to_step
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture(autouse=True)
-def _mock_schedule_update(monkeypatch: pytest.MonkeyPatch) -> None:
-    """静默 ``Component._schedule_update``，避免 ``context.page`` RuntimeError。
-
-    ``set_text_value`` 内部触发 ``_schedule_update``，后者调用
-    ``context.page.session.schedule_update(self)``。``make_component + render_once``
-    路径不绑定 FakePage（``_context_page`` 为 None），导致 RuntimeError。
-
-    本 fixture 作用域限本文件，不影响 ``test_resizable_splitter_body.py`` 等
-    依赖 ``page.session.scheduled_updates`` 断言的测试。
-    """
-    monkeypatch.setattr(Component, "_schedule_update", lambda self: None)
 
 
 def _find_control(root: Any, ctrl_type: type) -> Any | None:
@@ -57,7 +33,9 @@ def _find_control(root: Any, ctrl_type: type) -> Any | None:
                     if found is not None:
                         return found
             elif children is not None:
-                return _find_control(children, ctrl_type)
+                found = _find_control(children, ctrl_type)
+                if found is not None:
+                    return found
     return None
 
 
@@ -77,17 +55,9 @@ def _find_all(root: Any, ctrl_type: type) -> list:
     return found
 
 
-def _setup(kwargs: dict) -> tuple[Any, Any]:
-    """创建 SliderInput Component，注入 FakePage 并渲染，返回 (result, component)。
-
-    用 run_mount_effects (内部 attach_fake_page + render_once + _run_mount_effects)
-    保持 _context_page 在事件处理器调用时仍有效（参考 test_screener_view_runtime.py
-    screener_view_env fixture 模式）。
-    """
-    component = make_component(SliderInput, **kwargs)
-    run_mount_effects(component)
-    result = render_once(component)
-    return result, component
+def _setup(kwargs: dict) -> tuple[ft.Column, None]:
+    result = SliderInput(**kwargs)
+    return result, None
 
 
 class TestSliderInputRender:
@@ -146,8 +116,6 @@ class TestSliderInputRender:
 
         slider = _find_control(result, ft.Slider)
         text_field = _find_control(result, ft.TextField)
-        assert slider is not None  # noqa: weak-assertion null-check before asserting disabled property
-        assert text_field is not None  # noqa: weak-assertion null-check before asserting disabled property
         assert slider.disabled is True
         assert text_field.disabled is True
 
@@ -192,12 +160,10 @@ class TestSliderInputFormat:
         mock_app_colors_state,
     ) -> None:
         """自定义 fmt：按 fmt 函数格式化。"""
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=3.0,
             fmt=lambda v: f"{v:.1f}%",
         )
-        result = render_once(component)
 
         text_field = _find_control(result, ft.TextField)
         assert text_field.value == "3.0%"
@@ -217,13 +183,8 @@ class TestSliderInputFormat:
         mock_app_colors_state,
     ) -> None:
         """默认 fmt：去除无意义尾随 0（契约：值已由 _snap_to_step round 到 10 位）。"""
-        from ui.components.slider_input import _default_fmt
-
-        # 3.5 经 _snap_to_step round 后为 3.5，_default_fmt 输出 "3.5"
         assert _default_fmt(3.5) == "3.5"
-        # 尾随 0 场景：0.0350 → "0.035"
         assert _default_fmt(0.0350) == "0.035"
-        # 整数分支
         assert _default_fmt(5.0) == "5"
 
 
@@ -235,15 +196,13 @@ class TestSliderInputDivisions:
         mock_app_colors_state,
     ) -> None:
         """divisions 显式传入 → 直接使用。"""
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=5.0,
             min_val=0,
             max_val=100,
             step=1.0,
             divisions=10,
         )
-        result = render_once(component)
 
         slider = _find_control(result, ft.Slider)
         assert slider.divisions == 10
@@ -253,18 +212,16 @@ class TestSliderInputDivisions:
         mock_app_colors_state,
     ) -> None:
         """divisions=None → 由 (max-min)/step 自动计算。"""
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=5.0,
             min_val=0,
             max_val=100,
             step=10.0,
             divisions=None,
         )
-        result = render_once(component)
 
         slider = _find_control(result, ft.Slider)
-        assert slider.divisions == 10  # (100-0)/10 = 10
+        assert slider.divisions == 10
 
 
 class TestSliderInputOnChange:
@@ -276,23 +233,20 @@ class TestSliderInputOnChange:
     ) -> None:
         """slider 拖动 → on_change 被调用（snap 后的值）。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=0.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         slider = _find_control(result, ft.Slider)
 
-        # 模拟 slider 拖动到 55
         e = MagicMock()
         e.control.value = 55.0
         slider.on_change(e)
 
-        callback.assert_called_once_with(60.0)  # snap 到最近的 10 的倍数
+        callback.assert_called_once_with(60.0)
 
     def test_slider_on_change_clamped_to_max(
         self,
@@ -300,15 +254,13 @@ class TestSliderInputOnChange:
     ) -> None:
         """slider 值超过 max → clamp 到 max。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=0.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         slider = _find_control(result, ft.Slider)
 
         e = MagicMock()
@@ -323,15 +275,13 @@ class TestSliderInputOnChange:
     ) -> None:
         """slider 值低于 min → clamp 到 min。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=50.0,
             min_val=10,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         slider = _find_control(result, ft.Slider)
 
         e = MagicMock()
@@ -345,20 +295,17 @@ class TestSliderInputOnChange:
         mock_app_colors_state,
     ) -> None:
         """on_change=None → 不抛异常。"""
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=50.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=None,
         )
-        result = render_once(component)
         slider = _find_control(result, ft.Slider)
 
         e = MagicMock()
         e.control.value = 55.0
-        # 不应抛异常
         slider.on_change(e)
 
 
@@ -371,32 +318,20 @@ class TestSliderInputTextInput:
     ) -> None:
         """textfield submit → 解析 + snap + on_change。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=0.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         text_field = _find_control(result, ft.TextField)
+        text_field.value = "55"
 
-        # 模拟用户输入 "55"：on_change 调用 set_text_value("55")
-        e_change = MagicMock()
-        e_change.control.value = "55"
-        text_field.on_change(e_change)
-
-        # 声明式范式：set_text_value 后需 re-render 让闭包 text_value 更新为新值，
-        # 否则 _commit_text 读到的 text_value 仍是旧值 "0"，导致 new_val == value 不触发回调
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-
-        # submit 触发 _commit_text：从已更新的 text_value="55" 解析 → snap 到 60
         e_submit = MagicMock()
         text_field.on_submit(e_submit)
 
-        callback.assert_called_once_with(60.0)  # snap 到 60
+        callback.assert_called_once_with(60.0)
 
     def test_text_blur_triggers_on_change(
         self,
@@ -404,31 +339,20 @@ class TestSliderInputTextInput:
     ) -> None:
         """textfield blur → 解析 + snap + on_change。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=0.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         text_field = _find_control(result, ft.TextField)
+        text_field.value = "26"
 
-        e_change = MagicMock()
-        e_change.control.value = "26"
-        text_field.on_change(e_change)
-
-        # re-render 让闭包 text_value 更新为 "26"（同上）
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-
-        # blur 触发 _commit_text：从 text_value="26" 解析 → snap 到 30
-        # (注: 不用 25 是因 Python round() 用 banker's rounding, round(2.5)=2 → snap 到 20)
         e_blur = MagicMock()
         text_field.on_blur(e_blur)
 
-        callback.assert_called_once_with(30.0)  # snap 到 30
+        callback.assert_called_once_with(30.0)
 
     def test_invalid_text_input_restores_value(
         self,
@@ -436,30 +360,21 @@ class TestSliderInputTextInput:
     ) -> None:
         """非法输入 → 不触发 on_change，恢复为当前 value。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=50.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         text_field = _find_control(result, ft.TextField)
-
-        # 输入非法值 "abc"
-        e_change = MagicMock()
-        e_change.control.value = "abc"
-        text_field.on_change(e_change)
-
-        # re-render 让闭包 text_value 更新为 "abc"
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
+        text_field.value = "abc"
 
         e_blur = MagicMock()
         text_field.on_blur(e_blur)
 
         callback.assert_not_called()
+        assert text_field.value == "50"
 
     def test_empty_text_input_restores_value(
         self,
@@ -467,123 +382,42 @@ class TestSliderInputTextInput:
     ) -> None:
         """空输入 → 不触发 on_change，恢复为当前 value。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=50.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         text_field = _find_control(result, ft.TextField)
-
-        e_change = MagicMock()
-        e_change.control.value = ""
-        text_field.on_change(e_change)
-
-        # re-render 让闭包 text_value 更新为 ""
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
+        text_field.value = ""
 
         e_blur = MagicMock()
         text_field.on_blur(e_blur)
 
         callback.assert_not_called()
+        assert text_field.value == "50"
 
     def test_text_input_same_value_no_callback(
         self,
         mock_app_colors_state,
     ) -> None:
-        """输入与当前 value 相同 → 不触发 on_change（避免冗余回调）。"""
+        """输入与当前 value 相同 → 不触发 on_change。"""
         callback = MagicMock()
-        component = make_component(
-            SliderInput,
+        result = SliderInput(
             value=50.0,
             min_val=0,
             max_val=100,
             step=10.0,
             on_change=callback,
         )
-        result = render_once(component)
         text_field = _find_control(result, ft.TextField)
-
-        e_change = MagicMock()
-        e_change.control.value = "50"
-        text_field.on_change(e_change)
-
-        # re-render 让闭包 text_value 更新为 "50"
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
+        text_field.value = "50"
 
         e_blur = MagicMock()
         text_field.on_blur(e_blur)
 
-        callback.assert_not_called()  # 值未变化，不回调
-
-
-class TestValuePropSync:
-    """value prop 变化时 TextField 文本同步（_sync_text_effect use_effect）。"""
-
-    def test_value_prop_change_syncs_text_field(
-        self,
-        mock_app_colors_state,
-    ) -> None:
-        """父级更新 value prop → TextField 文本同步更新为新格式化值。"""
-        component = make_component(SliderInput, value=5.0)
-        run_mount_effects(component)
-
-        # 初始渲染：TextField 显示 "5"
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "5"
-
-        # 模拟父级更新 value prop → 触发 re-render + effect deps 检测
-        component.kwargs["value"] = 7.0
-        run_render_effects(component)
-
-        # effect _sync_text_effect 已 set_text_value("7")，重新渲染读取新值
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "7"
-
-    def test_value_prop_same_value_effect_noop(
-        self,
-        mock_app_colors_state,
-    ) -> None:
-        """value 未变化 → effect 不覆盖 TextField 文本（避免 slider 拖动后冗余覆盖）。"""
-        component = make_component(SliderInput, value=5.0)
-        run_mount_effects(component)
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "5"
-
-        # value 保持不变，重新 render + effects → 文本仍为 "5"
-        run_render_effects(component)
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "5"
-
-    def test_value_prop_sync_uses_custom_fmt(
-        self,
-        mock_app_colors_state,
-    ) -> None:
-        """自定义 fmt 下 value 变化 → 用 fmt 格式化同步。"""
-        component = make_component(
-            SliderInput,
-            value=3.0,
-            fmt=lambda v: f"{v:.1f}%",
-        )
-        run_mount_effects(component)
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "3.0%"
-
-        component.kwargs["value"] = 8.0
-        run_render_effects(component)
-        result = render_once(component)
-        text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "8.0%"
+        callback.assert_not_called()
 
 
 class TestSnapToStepEdgeCases:
@@ -591,7 +425,6 @@ class TestSnapToStepEdgeCases:
 
     def test_step_zero_returns_clamped_value(self):
         """step<=0 → 返回 clamp 后的值（不做 snap）。"""
-        from ui.components.slider_input import _snap_to_step
 
         # step=0 → 不 snap，仅 clamp
         assert _snap_to_step(55, 0, 100, 0) == 55

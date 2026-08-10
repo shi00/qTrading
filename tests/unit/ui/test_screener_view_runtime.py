@@ -216,12 +216,15 @@ def _get_sliders(env: dict) -> list[ft.Slider]:
     return sliders
 
 
-def _get_slider_inputs(env: dict) -> list[Component]:
-    """返回渲染树中所有 SliderInput Component 实例 (UX 3.2)."""
-    inputs: list[Component] = []
+def _get_slider_inputs(env: dict) -> list[ft.Column]:
+    """返回渲染树中所有 SliderInput Column 实例 (UX 3.2)."""
+    inputs: list[ft.Column] = []
     for ctrl in _walk_all_controls(env["result"]):
-        if isinstance(ctrl, Component) and getattr(ctrl.fn, "__name__", "") == "SliderInput":
-            inputs.append(ctrl)
+        if isinstance(ctrl, ft.Column):
+            has_slider = any(isinstance(c, ft.Slider) for c in _walk_all_controls(ctrl))
+            has_textfield = any(isinstance(c, ft.TextField) for c in _walk_all_controls(ctrl))
+            if has_slider and has_textfield:
+                inputs.append(ctrl)
     return inputs
 
 
@@ -2035,9 +2038,10 @@ class TestBuildParamControl:
         env = screener_view_with_params_env
         slider_inputs = _get_slider_inputs(env)
         assert len(slider_inputs) >= 1
-        kwargs = slider_inputs[0].kwargs
-        assert kwargs.get("min_val") == 0
-        assert kwargs.get("max_val") == 100
+        sliders = [c for c in _walk_all_controls(slider_inputs[0]) if isinstance(c, ft.Slider)]
+        assert len(sliders) == 1
+        assert sliders[0].min == 0
+        assert sliders[0].max == 100
 
     def test_number_param_rendered(self, screener_view_with_params_env) -> None:
         """type=number → ft.TextField 渲染 (keyboard_type=NUMBER)."""
