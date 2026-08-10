@@ -1548,6 +1548,11 @@ class ConfigHandler:
         return ConfigHandler.get_typed("ai_max_candidates", int, 30)
 
     @staticmethod
+    def get_ai_free_text_max_len():
+        """UX-2.2: AI 自由文本最大长度（默认 1000，范围 100-10000）。"""
+        return ConfigHandler.get_typed("ai_free_text_max_len", int, 1000)
+
+    @staticmethod
     def set_ai_max_candidates(val):
         return ConfigHandler.set_typed("ai_max_candidates", int(val))
 

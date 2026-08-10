@@ -460,6 +460,66 @@ class TestValidateAiAnalysisResponseFreeText:
         assert len(result["ai_reason"]) == _FREE_TEXT_MAX_LEN
         assert result["uncertainty_factors"] == "D"
 
+    def test_configurable_max_len_via_appconfig(self, monkeypatch):
+        """UX-2.2: max_len 可通过 AppConfig 配置。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 4000),
+        )
+        long_text = "X" * 4500
+        result = validate_ai_analysis_response({"summary": long_text, "score": 50})
+        assert len(result["summary"]) == 4000
+        assert result["summary"] == "X" * 4000
+
+    def test_configurable_max_len_boundary_low(self, monkeypatch):
+        """UX-2.2: 边界值 100（最小值）。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 100),
+        )
+        long_text = "Y" * 200
+        result = validate_ai_analysis_response({"summary": long_text, "score": 50})
+        assert len(result["summary"]) == 100
+
+    def test_configurable_max_len_boundary_high(self, monkeypatch):
+        """UX-2.2: 边界值 10000（最大值）。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 10000),
+        )
+        text = "Z" * 5000
+        result = validate_ai_analysis_response({"summary": text, "score": 50})
+        assert len(result["summary"]) == 5000
+
+    def test_sanitize_free_text_explicit_max_len(self):
+        """UX-2.2: _sanitize_free_text 直接传 max_len 参数。"""
+        from services.ai_service import _sanitize_free_text
+
+        result = _sanitize_free_text("ABCDEF", max_len=3)
+        assert result == "ABC"
+
+    def test_sanitize_free_text_default_reads_config(self, monkeypatch):
+        """UX-2.2: max_len=None 时读 ConfigHandler。"""
+        from services.ai_service import _sanitize_free_text
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 5),
+        )
+        result = _sanitize_free_text("ABCDEFGHIJ")
+        assert result == "ABCDE"
+
 
 class TestAIServiceIsCloudAvailable:
     @patch("services.ai_service.ConfigHandler")

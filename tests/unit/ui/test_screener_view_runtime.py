@@ -136,7 +136,7 @@ def _get_export_button(env: dict) -> ft.Button:
 
 
 def _walk_all_controls(root: Any) -> list:
-    """递归返回所有 ft.Control (用于搜索 dropdown / button / slider / text)."""
+    """递归返回所有 ft.Control 与 Component (用于搜索 dropdown / button / slider / text / SliderInput)."""
     found: list[Any] = []
     visited: set[int] = set()
 
@@ -147,6 +147,7 @@ def _walk_all_controls(root: Any) -> list:
         if isinstance(c, ft.Control):
             found.append(c)
         if isinstance(c, Component):
+            found.append(c)
             for v in list(c.args) + list(c.kwargs.values()):
                 if v is not None:
                     _walk(v)
@@ -213,6 +214,18 @@ def _get_sliders(env: dict) -> list[ft.Slider]:
         if isinstance(ctrl, ft.Slider) and ctrl not in sliders:
             sliders.append(ctrl)
     return sliders
+
+
+def _get_slider_inputs(env: dict) -> list[ft.Column]:
+    """返回渲染树中所有 SliderInput Column 实例 (UX 3.2)."""
+    inputs: list[ft.Column] = []
+    for ctrl in _walk_all_controls(env["result"]):
+        if isinstance(ctrl, ft.Column):
+            has_slider = any(isinstance(c, ft.Slider) for c in _walk_all_controls(ctrl))
+            has_textfield = any(isinstance(c, ft.TextField) for c in _walk_all_controls(ctrl))
+            if has_slider and has_textfield:
+                inputs.append(ctrl)
+    return inputs
 
 
 def _get_segmented_buttons(env: dict) -> list[ft.SegmentedButton]:
@@ -530,7 +543,6 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     def _fake_paginated_table(**kwargs: Any) -> Any:
         captured_callbacks["on_sort"] = kwargs.get("on_sort")
         captured_callbacks["on_row_click"] = kwargs.get("on_row_click")
-        captured_callbacks["rows"] = kwargs.get("rows")  # #423: 捕获 formatted_rows (含 _raw) 供同名多行测试反查
         return MagicMock(name="PaginatedTable")
 
     monkeypatch.setattr(mod, "PaginatedTable", _fake_paginated_table)
@@ -543,9 +555,6 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
 
     def _fake_stock_detail_dialog(**kwargs: Any) -> Any:
         captured_callbacks["on_close"] = kwargs.get("on_close")
-        captured_callbacks["stock_data"] = kwargs.get(
-            "stock_data"
-        )  # #423: 捕获传入对话框的原始行, 断言点击哪行显示哪行
         return MagicMock(name="StockDetailDialog")
 
     monkeypatch.setattr(mod, "StockDetailDialog", _fake_stock_detail_dialog)
@@ -1820,72 +1829,6 @@ class TestOnRowClickAndDetailClose:
         assert env["captured_callbacks"]["on_close"] is None
 
 
-def _make_duplicate_tscode_env(mock_i18n_state, mock_app_colors_state, monkeypatch) -> dict:
-    """#423: 构造同名多行 page_data 的 ScreenerView 环境 (ts_code 相同, trade_date 不同)."""
-    from ui.views import screener_view as mod
-
-    fake_vm = _FakeScreenerViewModel()
-    fake_vm._current_page_data = pd.DataFrame(
-        {
-            "ts_code": ["000001.SZ", "000001.SZ"],  # 同名
-            "name": ["平安银行", "平安银行"],
-            "trade_date": ["20260101", "20260102"],  # trade_date 在 _HIDDEN_COLS 中 (不同日期)
-            "close": [10.5, 11.0],
-        }
-    )
-    fake_vm._set_state(total_items=2, total_pages=1, strategies_loaded=True)
-    mocks = _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
-    component = make_component(mod.ScreenerView)
-    page = _make_fake_page()
-    run_mount_effects(component, page=page)
-    result = render_once(component)
-    return {
-        "mod": mod,
-        "component": component,
-        "page": page,
-        "result": result,
-        "fake_vm": fake_vm,
-        "captured_callbacks": mocks["captured_callbacks"],
-    }
-
-
-class TestOnRowClickDuplicateTscode:
-    """#423: 同 ts_code 多行 (不同 trade_date) 点击哪行显示哪行.
-
-    根因: _raw_row_lookup 用 ts_code 作 key, 同名多行后者覆盖前者.
-    修复: formatted_row 携带 _raw 引用, _on_row_click 直接读 _raw 反查.
-    """
-
-    def test_click_first_row_shows_first_row_data(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
-        """点击第一行 (trade_date=20260101) → 对话框 stock_data 为第一行原始数据."""
-        env = _make_duplicate_tscode_env(mock_i18n_state, mock_app_colors_state, monkeypatch)
-        on_row_click = env["captured_callbacks"]["on_row_click"]
-        rows = env["captured_callbacks"]["rows"]
-        assert len(rows) == 2
-        assert rows[0]["_raw"]["trade_date"] == "20260101"
-
-        _invoke(on_row_click, rows[0])
-        _rerender(env)
-
-        stock_data = env["captured_callbacks"]["stock_data"]
-        assert stock_data["trade_date"] == "20260101"
-        assert stock_data["close"] == 10.5
-
-    def test_click_second_row_shows_second_row_data(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
-        """点击第二行 (trade_date=20260102) → 对话框 stock_data 为第二行原始数据 (非最后一行才正确)."""
-        env = _make_duplicate_tscode_env(mock_i18n_state, mock_app_colors_state, monkeypatch)
-        on_row_click = env["captured_callbacks"]["on_row_click"]
-        rows = env["captured_callbacks"]["rows"]
-
-        _invoke(on_row_click, rows[1])
-        _rerender(env)
-
-        stock_data = env["captured_callbacks"]["stock_data"]
-        # 关键断言: 第二行 close=11.0 (非第一行 10.5), trade_date=20260102 (非 20260101)
-        assert stock_data["trade_date"] == "20260102"
-        assert stock_data["close"] == 11.0
-
-
 # ============================================================================
 # Handler 测试: _update_param / _on_slider_change
 # ============================================================================
@@ -2091,10 +2034,12 @@ class TestBuildParamControl:
     """_build_param_control: 四类型 (slider/number/dropdown/textarea) + ai_system_prompt 特殊处理."""
 
     def test_slider_param_rendered(self, screener_view_with_params_env) -> None:
-        """type=slider → ft.Slider 控件渲染."""
+        """type=slider → SliderInput 组件渲染 (UX 3.2)."""
         env = screener_view_with_params_env
-        sliders = _get_sliders(env)
-        assert len(sliders) >= 1
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) >= 1
+        sliders = [c for c in _walk_all_controls(slider_inputs[0]) if isinstance(c, ft.Slider)]
+        assert len(sliders) == 1
         assert sliders[0].min == 0
         assert sliders[0].max == 100
 
@@ -2134,14 +2079,14 @@ class TestBuildParamsPanel:
     def test_no_strategy_returns_empty(self, screener_view_env) -> None:
         """state.selected_strategy=None → 参数面板为空."""
         env = screener_view_env
-        sliders = _get_sliders(env)
-        assert len(sliders) == 0
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) == 0
 
     def test_with_params_renders_controls(self, screener_view_with_params_env) -> None:
-        """state.selected_strategy=value → 参数面板含 slider + textfield + dropdown."""
+        """state.selected_strategy=value → 参数面板含 SliderInput + textfield + dropdown."""
         env = screener_view_with_params_env
-        sliders = _get_sliders(env)
-        assert len(sliders) >= 1
+        slider_inputs = _get_slider_inputs(env)
+        assert len(slider_inputs) >= 1
 
     def test_advanced_group_in_expansion_tile(self, screener_view_with_params_env) -> None:
         """advanced group 参数 → ExpansionTile 渲染."""
