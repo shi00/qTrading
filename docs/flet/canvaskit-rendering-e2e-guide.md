@@ -1,5 +1,6 @@
 # Flutter Web CanvasKit 渲染行为与 E2E 定位指南
 
+> 文档入口：[Flet 开发文档入口](./README.md)
 > **核心地位**：记录本项目绑定的 Flutter Web CanvasKit 渲染引擎特性、HTML 语义树生成规则、版本依赖锁定机制以及 E2E 测试定位与交互坑点。
 > **适用版本**：Flet V1（版本以 [`pyproject.toml`](../../pyproject.toml) 锁定为准；Flutter Web Engine Revision 从 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision` 读取，查询命令见 [upgrade-checklist.md §3.4](./upgrade-checklist.md#34-canvaskit-版本验证)）。
 > **相关文档**：

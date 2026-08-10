@@ -1,6 +1,7 @@
 # Flet V1 升级检查清单
 
 > 来源：从 man/flet-best-practices.md 迁移
+> 文档入口：[Flet 开发文档入口](./README.md)
 
 > Owner: UI 维护者
 > 复核触发器: Flet 依赖版本变化（pyproject.toml）、关键 API 变化、架构红线/边界变化或 ADR 决策（见 [../adr/](../adr/)）

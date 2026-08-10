@@ -442,15 +442,8 @@ man/              ← 架构专题文档 (数据库账号分离、表分区策�
 
 ## Flet V1 API 关键约束
 
-> 本节已迁移到 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)。本节作为 CONTRIBUTING.md 入口索引保留，详细 API 约束、声明式组件契约、V1 声明式 UI 开发规范、兼容垫片使用规则、升级协同机制、例外清单等均位于 docs/flet/ 下子文档。
-
-**docs/flet/ 子文档清单**：
-
-- [v1-api-constraints.md](./docs/flet/v1-api-constraints.md) — Flet V1 API 关键约束（V0→V1 迁移 API 表、声明式组件内 API 契约、V1 声明式 UI 开发规范、兼容垫片使用规则、升级协同机制、例外清单）
-- [project-differences.md](./docs/flet/project-differences.md) — 项目相对 Flet 官方默认的分叉点与项目验证过的高风险 API（含 R16 UI 阻塞红线）
-- [upgrade-checklist.md](./docs/flet/upgrade-checklist.md) — Flet 版本升级时的验证步骤与文档同步要求
-- [api-verification-template.md](./docs/flet/api-verification-template.md) — Flet API 核验记录模板（P1-4 整改新增）
-- [accessibility-baseline.md](./docs/flet/accessibility-baseline.md) — UI 可访问性最低标准（P2-4 整改新增）
+> Flet 页面设计、声明式 API、无障碍、项目差异、MCP 核验和升级流程统一从
+> [docs/flet/README.md](./docs/flet/README.md) 进入。
 
 > 相关：[CLAUDE.md §2](./CLAUDE.md#2-项目概览) 技术栈表、[CLAUDE.md §3.1 R16](./CLAUDE.md#31--绝对禁止)（V1 单线程 async 模型对 UI 阻塞更敏感）。Flet 锁定版本见 [`pyproject.toml`](./pyproject.toml)。
 
@@ -623,13 +616,9 @@ except Exception as e:
 - [config-quality-perf.md](./docs/patterns/config-quality-perf.md) — 配置管理、质量门控、性能监控
 - [mvvm.md](./docs/patterns/mvvm.md) — MVVM 表现层
 
-### docs/flet/ — Flet V1 项目差异与升级清单
+### docs/flet/ — Flet 开发专项
 
-- [v1-api-constraints.md](./docs/flet/v1-api-constraints.md) — Flet V1 API 关键约束（迁移 API 表 / 声明式组件契约 / V1 声明式 UI 开发规范 / 兼容垫片 / 升级协同 / 例外清单）
-- [project-differences.md](./docs/flet/project-differences.md) — 项目相对 Flet 官方默认的分叉点与高风险 API（含 R16 UI 阻塞红线）
-- [upgrade-checklist.md](./docs/flet/upgrade-checklist.md) — Flet 版本升级时的验证步骤与文档同步要求
-- [api-verification-template.md](./docs/flet/api-verification-template.md) — Flet API 核验记录模板
-- [accessibility-baseline.md](./docs/flet/accessibility-baseline.md) — UI 可访问性最低标准
+- [README.md](./docs/flet/README.md) — Flet 开发文档总入口与任务路由（UI/UX 设计 / V1 API / 无障碍 / 项目差异 / MCP 核验 / 升级 / CanvasKit E2E 避坑）
 
 ### docs/debt/ — 已知架构技术债
 
