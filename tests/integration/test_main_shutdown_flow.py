@@ -193,8 +193,8 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     # G.1 重写后 main.py 用声明式 @ft.component StartupView 替代 OnboardingWizard;
     # 测试目标是 shutdown flow, 不验证 StartupView 渲染, mock 为 MagicMock 避免 renderer 上下文依赖
     monkeypatch.setattr(app_main, "StartupView", lambda *_args, **_kwargs: MagicMock())
-    # CloseConfirmDialog 同为 @ft.component, mock 为返回 _FakeAlertDialog 的工厂,
-    # 保留 actions[0/1].on_click 回调绑定以验证 cancel/confirm 按钮行为
+    # CloseConfirmDialog 为普通工厂（返回 ft.AlertDialog，非 @ft.component）,
+    # mock 为返回 _FakeAlertDialog 的工厂, 保留 actions[0/1].on_click 回调绑定以验证 cancel/confirm 按钮行为
     monkeypatch.setattr(
         app_main,
         "CloseConfirmDialog",
