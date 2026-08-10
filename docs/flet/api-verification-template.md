@@ -1,6 +1,8 @@
 # Flet API 核验记录模板
 
 > 用途：每次 Flet 版本升级或新增/变更 API 使用时，按本模板沉淀核验记录，作为升级证据。配合 [upgrade-checklist.md](./upgrade-checklist.md) 使用。
+>
+> 文档入口：[Flet 开发文档入口](./README.md)
 
 > Owner: UI 维护者
 > 复核触发器: Flet 版本升级、新增高风险 API 使用、API 行为异常排查

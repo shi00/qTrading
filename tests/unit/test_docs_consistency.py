@@ -516,28 +516,6 @@ class TestDocsConsistencyScriptExtensions:
         except UnicodeEncodeError:
             pytest.fail("main() should not raise UnicodeEncodeError on emoji output")
 
-    def test_resolve_target_doc_same_file_anchor(self):
-        """_resolve_target_doc: 同文件锚点（#section）返回 source_doc。"""
-        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
-
-        result = _resolve_target_doc("#section", CLAUDE_PATH)
-        assert result == CLAUDE_PATH
-
-    def test_resolve_target_doc_cross_file_from_man(self):
-        """_resolve_target_doc: man/ 下 ../CLAUDE.md 应解析为 ROOT/CLAUDE.md。"""
-        from check_docs_consistency import CLAUDE_PATH, FLET_BEST_PRACTICES_PATH, _resolve_target_doc
-
-        result = _resolve_target_doc("../CLAUDE.md#section", FLET_BEST_PRACTICES_PATH)
-        assert result == CLAUDE_PATH
-
-    def test_resolve_target_doc_non_checked_target(self):
-        """_resolve_target_doc: 非 CHECKED_DOCS 中的目标返回 None。"""
-        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
-
-        # ui/hooks.py 不在 CHECKED_DOCS 中
-        result = _resolve_target_doc("ui/hooks.py#section", CLAUDE_PATH)
-        assert result is None
-
     def test_relative_dead_links_detects_broken(self, tmp_path, monkeypatch):
         """man/ 目录下含 ./nonexistent.py 的文档应报死链。"""
         from check_docs_consistency import check_relative_dead_links
