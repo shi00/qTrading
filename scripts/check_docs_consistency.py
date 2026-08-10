@@ -133,32 +133,6 @@ def extract_headings(content: str) -> set[str]:
     return anchors
 
 
-def _resolve_target_doc(link_url: str, source_doc: Path) -> Path | None:
-    """解析 markdown 链接 url 的目标文件路径。
-
-    返回 None 表示非受检文件（外部链接或不在 CHECKED_DOCS 中的目标）。
-
-    解析规则：
-    - 同文件锚点（`#anchor`）：返回 source_doc
-    - 跨文件链接：从 source_doc 所在目录解析相对路径，若指向 CHECKED_DOCS 中的文件则返回该文件。
-      例如 man/flet-best-practices.md 中的 `../CLAUDE.md` 解析为 ROOT/CLAUDE.md。
-    """
-    if "#" in link_url:
-        target_path_part = link_url.split("#", 1)[0]
-    else:
-        target_path_part = link_url
-
-    # 同文件锚点
-    if not target_path_part:
-        return source_doc
-
-    # 跨文件链接：从 source_doc 所在目录解析相对路径
-    target_doc = (source_doc.parent / target_path_part).resolve()
-    if target_doc in CHECKED_DOCS:
-        return target_doc
-    return None
-
-
 def check_anchor_dead_links() -> list[str]:
     """检查项 1：markdown 锚点死链。
 
