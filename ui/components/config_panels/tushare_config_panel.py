@@ -175,11 +175,13 @@ def TushareConfigPanel(
         color=AppColors.TEXT_SECONDARY,
     )
 
+    tier_label = I18n.get("sys_tier_label_in_token_panel")
+    tier_options = _build_tier_options(state.tier_options)
     tier_dropdown = ft.Dropdown(
-        label=I18n.get("sys_tier_label_in_token_panel"),
+        label=tier_label,
         value=state.tier,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        options=_build_tier_options(state.tier_options),
+        width=AppStyles.calc_dropdown_width(tier_options, label=tier_label),
+        options=tier_options,
         on_select=safe_on_select(_on_tier_change_factory(vm)),
         hint_text=I18n.get("sys_tier_hint_in_token_panel"),
         disabled=state.is_verifying,

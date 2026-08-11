@@ -158,6 +158,7 @@ def mock_app_styles():
     m.secondary_button = MagicMock(return_value=ft.ButtonStyle())
     m.dashboard_card = MagicMock(return_value={"padding": 10})
     m.card = MagicMock(return_value={"padding": 10})
+    m.calc_dropdown_width = MagicMock(side_effect=AppStyles.calc_dropdown_width)
     m.data_table_row = MagicMock(return_value="#1E1E1E")
     m.price_change_color = MagicMock(return_value="#4CAF50")
     return m

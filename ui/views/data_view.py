@@ -492,11 +492,13 @@ def TableViewerTab(
     rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
 
     # --- 构建 UI ---
+    table_label = I18n.get("data_select_table")
+    table_options = _build_table_selector_options(state.tables_list, vm)
     table_selector = anchored(
         EIDS.DATA.TABLE_DROPDOWN,
         ft.Dropdown(
-            width=250,
-            label=I18n.get("data_select_table"),
+            width=AppStyles.calc_dropdown_width(table_options, label=table_label, min_width=250.0),
+            label=table_label,
             value=state.current_table or None,
             on_select=safe_on_select(_on_table_changed),
             disabled=is_loading or not state.tables_loaded,
@@ -504,25 +506,29 @@ def TableViewerTab(
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
             text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-            options=_build_table_selector_options(state.tables_list, vm),
+            options=table_options,
             height=36,
             text_size=AppStyles.FONT_SIZE_BODY,
             content_padding=AppStyles.SPACING_SM,
         ),
     )
 
+    filter_col_label = I18n.get("data_filter_col")
+    filter_col_options = _build_filter_col_options(state.current_table, state.table_columns, vm)
     filter_col = anchored(
         EIDS.DATA.FILTER_COL_DROPDOWN,
         ft.Dropdown(
-            label=I18n.get("data_filter_col"),
-            width=150,
+            label=filter_col_label,
+            width=AppStyles.calc_dropdown_width(
+                filter_col_options, label=filter_col_label, min_width=150.0, max_width=360.0
+            ),
             value=effective_filter_col,
             on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
             text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-            options=_build_filter_col_options(state.current_table, state.table_columns, vm),
+            options=filter_col_options,
             height=36,
             text_size=AppStyles.FONT_SIZE_BODY,
             content_padding=AppStyles.SPACING_SM,
