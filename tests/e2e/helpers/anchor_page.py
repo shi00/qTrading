@@ -7,8 +7,10 @@ CanvasKit 双轨语义映射（PoC 实证, reviews/poc/EVIDENCE.md）：
 click 一律用 `page.mouse.click(bbox_center)`，因为 CanvasKit 不响应合成 DOM 事件。
 """
 
+import asyncio
 import time
 from typing import Any
+from collections.abc import Awaitable, Callable
 
 from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -16,6 +18,37 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.testing.e2e_ids import AnchorKind, Eid
+
+
+async def retry_until_triggered(
+    interact: Callable[[], Awaitable[None]],
+    confirm: Callable[[], Awaitable[bool]],
+    attempts: int = TIMEOUTS.RETRY_ATTEMPTS,
+    interval_ms: int = TIMEOUTS.RETRY_INTERVAL_MS,
+) -> None:
+    """步骤级"确认触发 + N 次重试"兜底，抗 headless CanvasKit 渲染吞点击。
+
+    CI 高负载 → headless Chromium 无 GPU + CanvasKit 软件渲染 → 帧率不稳 →
+    偶发物理鼠标点击落在渲染中间帧被吞（交互未触发）。本函数每次交互后调用
+    ``confirm`` 判断是否真正触发，未触发则休眠 ``interval_ms`` 后重试。
+
+    纯 asyncio 逻辑，不依赖 Playwright/Page，可独立单测（无需真实浏览器）。
+    """
+    last_exc: Exception | None = None
+    for idx in range(attempts):
+        try:
+            await interact()
+            if await confirm():
+                return
+        except Exception as exc:  # noqa: BLE001  # 记录末次异常，尝试耗尽后统一抛 RuntimeError
+            last_exc = exc
+        if idx < attempts - 1:
+            await asyncio.sleep(interval_ms / 1000)
+    if last_exc is not None:
+        raise RuntimeError(
+            f"retry_until_triggered: interaction not confirmed after {attempts} attempts. Last error: {last_exc!r}"
+        ) from last_exc
+    raise RuntimeError(f"retry_until_triggered: interaction not triggered after {attempts} attempts")
 
 
 class AnchorPage:

@@ -14,10 +14,13 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 方法（click_text / click_button / fill_textbox / expect_text / has_text）。
 """
 
+import asyncio
 import logging
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from core.i18n import I18n
-from tests.e2e.helpers.anchor_page import AnchorPage
+from tests.e2e.helpers.anchor_page import AnchorPage, retry_until_triggered
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
@@ -79,8 +82,31 @@ class ScreenerPage:
         await self.ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
 
     async def run(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
-        """点击执行选股按钮。"""
-        await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
+        """点击执行选股按钮，带"确认触发"重试兜底。
+
+        PR-4 Task 4.1: 用 retry_until_triggered 包裹点击，抗 headless CanvasKit
+        渲染吞点击（CI 高负载下偶发物理鼠标点击落在中间帧被吞）。点击后确认
+        RUN_BUTTON 消失作为触发指标：state.loading=True 时按钮被替换为 STOP，
+        anchor 消失即代表 loading 已开始。
+
+        评审 F1: _confirm 改为短轮询等待 RUN_BUTTON 消失（expect_hidden 2s），
+        区分两种场景——点击成功但异步 loading 渲染延迟（按钮数帧内消失 → 返回
+        True，不重复点击）与点击被吞（RUN_BUTTON 持续可见 → 轮询至超时返回
+        False → 触发重试）。避免旧 count 即时判定把渲染延迟误判为"未触发"而
+        重复点击导致 30s+ 超时误报。
+        """
+
+        async def _interact() -> None:
+            await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
+
+        async def _confirm() -> bool:
+            try:
+                await self.ap.expect_hidden(EIDS.SCREENER.RUN_BUTTON, timeout_ms=2000)
+                return True
+            except PlaywrightTimeoutError:
+                return False
+
+        await retry_until_triggered(_interact, _confirm)
 
     async def expect_result(self, text: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
         """等待选股结果文本出现。"""
@@ -228,13 +254,29 @@ class DataPage:
         ``TABLE_READY`` EID 先消失（reset_table_state 清空 table_columns）
         再出现（load_table_schema 重新填充 table_columns）来确认切表完成.
         只等待可见会误命中上一张表遗留的 ready 状态，必须先消失再出现.
+
+        PR-4 Task 4.2: 整体重试（N=3）抗 CI 高负载下 headless CanvasKit 渲染
+        抖动导致的下拉展开/选项渲染抖动（option not found）或 TABLE_READY 未按时
+        出现. 重试粒度 = 整个 select_table（含 select_option + TABLE_READY 等待），
+        每次失败休眠 RETRY_INTERVAL_MS，RETRY_ATTEMPTS 次耗尽抛最后一次的原始异常.
         """
-        await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
-        try:
-            await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
-        except Exception:
-            pass
-        await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+        last_exc: Exception | None = None
+        for idx in range(TIMEOUTS.RETRY_ATTEMPTS):
+            try:
+                await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
+                try:
+                    await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
+                except Exception:
+                    pass
+                await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+                return
+            except Exception as exc:  # noqa: BLE001  # 记录末次异常，耗尽后抛原始异常
+                last_exc = exc
+                if idx < TIMEOUTS.RETRY_ATTEMPTS - 1:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
+                    await asyncio.sleep(TIMEOUTS.RETRY_INTERVAL_MS / 1000)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("select_table: exhausted retries without recorded failure")  # 逻辑上不可达
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""

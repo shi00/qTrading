@@ -27,3 +27,7 @@ class TIMEOUTS:
     BACKTEST = 60000
     # 引导向导 token 校验
     WIZARD_TOKEN = 20000
+    # 交互确认重试次数（retry_until_triggered / select_table 整体重试）
+    RETRY_ATTEMPTS = 3
+    # 重试间隔（毫秒）
+    RETRY_INTERVAL_MS = 500
