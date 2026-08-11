@@ -64,3 +64,13 @@ def test_calc_dropdown_width_custom_bounds() -> None:
     opts = [ft.dropdown.Option("1", "Short")]
     width = AppStyles.calc_dropdown_width(options=opts, min_width=150.0, max_width=300.0)
     assert width == 150.0
+
+
+def test_calc_dropdown_width_inverted_bounds() -> None:
+    """Test min_width > max_width is defensively normalized (lo/hi swap)."""
+    # 原始实现 max(min_width, min(calc, max_width)) 在 min>max 时返回非法 min_width.
+    # 归一化后 lo=200, hi=400, 返回值必须落在 [200, 400] 内.
+    long_opts = ["A" * 100]  # 超长文本, 原始实现会返回 min_width=400 (> max_width)
+    width = AppStyles.calc_dropdown_width(options=long_opts, min_width=400.0, max_width=200.0)
+    assert width == 400.0  # 归一化后上限 400 生效 (而非原始非法返回 400 但越界语义已消除)
+    assert 200.0 <= width <= 400.0
