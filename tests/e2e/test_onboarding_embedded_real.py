@@ -50,7 +50,7 @@ async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_w
     5. 进入后续步骤 (Token/AI 等)
     """
     # 1. 验证欢迎页
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_real_wizard_page.expect_text(welcome_guide, timeout_ms=TIMEOUTS.PAGE_OPEN)
 
     # 2. 点击 "开始使用" 进入 database step
@@ -82,7 +82,7 @@ async def test_embedded_real_wizard_forward_then_back(embedded_real_wizard_page)
     验证真实 sidecar 启动后，导航回退逻辑不受影响。
     """
     # 1. 验证欢迎页
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_real_wizard_page.expect_text(welcome_guide)
 
     # 2. 点击 "开始使用" 进入 database step
@@ -138,7 +138,7 @@ async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None
     注意 2：onboarding 模式下 ``TaskManager.init_db`` 不会执行（数据库初始化
     在 onboarding 完成后才进行），因此不验证 ``[TaskManager] init_db`` 日志。
     """
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_real_wizard_page.expect_text(welcome_guide)
 
     log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"

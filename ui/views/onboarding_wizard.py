@@ -599,37 +599,6 @@ def OnboardingWizard(
             on_select=safe_on_select(_on_language_select),
         )
 
-        rocket_container = ft.Container(
-            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=AppStyles.ICON_SIZE_HERO, color=AppColors.PRIMARY),
-            width=88,
-            height=88,
-            border_radius=44,
-            bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
-            alignment=ft.Alignment.CENTER,
-            shadow=ft.BoxShadow(
-                spread_radius=2,
-                blur_radius=24,
-                color=ft.Colors.with_opacity(0.35, AppColors.PRIMARY),
-                offset=ft.Offset(0, 4),
-            ),
-        )
-
-        gradient_guide_text = ft.Text(
-            I18n.get("wizard_welcome_guide"),
-            size=AppStyles.FONT_SIZE_HEADLINE,
-            weight=ft.FontWeight.W_600,
-            text_align=ft.TextAlign.CENTER,
-        )
-        gradient_title = ft.ShaderMask(
-            content=gradient_guide_text,
-            shader=ft.LinearGradient(
-                begin=ft.Alignment.CENTER_LEFT,
-                end=ft.Alignment.CENTER_RIGHT,
-                colors=[AppColors.PRIMARY, AppColors.ACCENT],
-            ),
-            blend_mode=ft.BlendMode.SRC_IN,
-        )
-
         overview_cards_data = [
             (ft.Icons.STORAGE, AppColors.PRIMARY, "wizard_overview_db_title", "wizard_overview_db_desc", True, 0),
             (ft.Icons.KEY, AppColors.PRIMARY, "wizard_overview_token_title", "wizard_overview_token_desc", True, 1),
@@ -675,10 +644,6 @@ def OnboardingWizard(
                         content=language_dropdown,
                         alignment=ft.Alignment.CENTER,
                     ),
-                    ft.Container(height=8),
-                    rocket_container,
-                    ft.Container(height=8),
-                    gradient_title,
                     ft.Container(height=12),
                     ft.ResponsiveRow(
                         safe_controls(
