@@ -50,6 +50,7 @@ class _DummyWindow:
         self.min_height = 0
         self.width: int | None = None
         self.height: int | None = None
+        self.maximized = False
         self.destroy_calls = 0
         self.center_calls = 0
         self.center_exc: Exception | None = None
@@ -190,40 +191,25 @@ class TestBuildLocaleConfiguration:
 
 class TestSetupWindowGeometry:
     @pytest.mark.asyncio
-    async def test_normal_path_sets_min_dimensions_and_centers(self) -> None:
+    async def test_desktop_maximizes_with_min_dimensions(self) -> None:
+        """桌面模式：设置 min 下限并将窗口最大化以实现自适应。"""
         page = _make_page()
         await setup_window_geometry(page, is_web_mode=False)
         assert page.window.min_width == 1280
         assert page.window.min_height == 720
-        assert page.window.center_calls == 1
+        assert page.window.maximized is True
+        assert page.window.center_calls == 0
 
     @pytest.mark.asyncio
-    async def test_normal_path_sets_width_when_none(self) -> None:
-        page = _make_page()
-        page.window.width = None
-        page.window.height = None
-        await setup_window_geometry(page, is_web_mode=False)
-        assert page.window.width == 1280
-        assert page.window.height == 800
-
-    @pytest.mark.asyncio
-    async def test_normal_path_sets_width_when_below_minimum(self) -> None:
-        page = _make_page()
-        page.window.width = 800
-        page.window.height = 600
-        await setup_window_geometry(page, is_web_mode=False)
-        assert page.window.width == 1280
-        assert page.window.height == 800
-
-    @pytest.mark.asyncio
-    async def test_existing_valid_width_preserved(self) -> None:
-        """width >= 1280 时保留用户设置的尺寸."""
+    async def test_desktop_does_not_force_pixel_dimensions(self) -> None:
+        """桌面模式：不再强制写入固定 width/height，由最大化接管尺寸。"""
         page = _make_page()
         page.window.width = 1920
         page.window.height = 1080
         await setup_window_geometry(page, is_web_mode=False)
         assert page.window.width == 1920
         assert page.window.height == 1080
+        assert page.window.maximized is True
 
     @pytest.mark.asyncio
     async def test_web_mode_skips_geometry_setup(self) -> None:
@@ -231,19 +217,8 @@ class TestSetupWindowGeometry:
         await setup_window_geometry(page, is_web_mode=True)
         assert page.window.min_width == 0
         assert page.window.min_height == 0
+        assert page.window.maximized is False
         assert page.window.center_calls == 0
-
-    @pytest.mark.asyncio
-    async def test_center_failure_logs_via_log_exception_with_severity(self) -> None:
-        page = _make_page()
-        page.window.center_exc = RuntimeError("center boom")
-        with patch("app.window_lifecycle.log_exception_with_severity") as mock_log:
-            await setup_window_geometry(page, is_web_mode=False)
-            mock_log.assert_called_once_with(
-                page.window.center_exc,
-                context="general",
-                operation_label="Main window center failed",
-            )
 
 
 # ============================================================================

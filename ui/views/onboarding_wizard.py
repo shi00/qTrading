@@ -259,7 +259,7 @@ def _create_overview_card(
         )
 
     card_content = ft.Container(
-        padding=AppStyles.SPACING_XL,
+        padding=AppStyles.SPACING_LG,
         border_radius=16,
         bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
         border=border,
@@ -267,7 +267,7 @@ def _create_overview_card(
         content=ft.Column(
             [
                 icon_with_badge,
-                ft.Container(height=16),
+                ft.Container(height=10),
                 ft.Text(
                     I18n.get(title_key),
                     size=AppStyles.FONT_SIZE_TITLE,
@@ -275,7 +275,7 @@ def _create_overview_card(
                     color=AppColors.TEXT_PRIMARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=6),
+                ft.Container(height=4),
                 ft.Text(
                     I18n.get(desc_key),
                     size=AppStyles.FONT_SIZE_BODY,
@@ -601,9 +601,9 @@ def OnboardingWizard(
 
         rocket_container = ft.Container(
             content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=AppStyles.ICON_SIZE_HERO, color=AppColors.PRIMARY),
-            width=120,
-            height=120,
-            border_radius=60,
+            width=88,
+            height=88,
+            border_radius=44,
             bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
             alignment=ft.Alignment.CENTER,
             shadow=ft.BoxShadow(
@@ -670,16 +670,16 @@ def OnboardingWizard(
         step_content = ft.Column(
             safe_controls(
                 [
-                    ft.Container(height=20),
+                    ft.Container(height=10),
                     ft.Container(
                         content=language_dropdown,
                         alignment=ft.Alignment.CENTER,
                     ),
-                    ft.Container(height=16),
+                    ft.Container(height=8),
                     rocket_container,
-                    ft.Container(height=16),
+                    ft.Container(height=8),
                     gradient_title,
-                    ft.Container(height=20),
+                    ft.Container(height=12),
                     ft.ResponsiveRow(
                         safe_controls(
                             [
