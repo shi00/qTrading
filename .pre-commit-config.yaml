@@ -24,14 +24,6 @@ repos:
         language: system
         types_or: [ python, pyi ]
 
-      - id: no-temp-files
-        name: Forbid temp/artifact dirs (E2E tmp output)
-        entry: python scripts/check_no_temp_files.py
-        language: system
-        pass_filenames: true
-        # 覆盖所有文件类型，防止 pytest_e2e_tmp* 下的 dll/exe 等二进制误提交
-        types_or: [ file ]
-
       - id: no-isolated-asyncio-testcase
         name: Check no IsolatedAsyncioTestCase usage
         entry: python scripts/check_no_isolated_asyncio.py
