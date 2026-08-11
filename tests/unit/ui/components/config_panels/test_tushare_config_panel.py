@@ -513,6 +513,7 @@ def _render_panel(
         from ui.theme import AppStyles as _RealAppStyles
 
         mock_styles.FONT_SIZE_BODY_SM = _RealAppStyles.FONT_SIZE_BODY_SM
+        mock_styles.calc_dropdown_width.side_effect = _RealAppStyles.calc_dropdown_width
 
         component = make_component(
             TushareConfigPanel,

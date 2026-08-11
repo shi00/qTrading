@@ -10,6 +10,8 @@ A-Share Quantitative Screener - Unified Theme Configuration
 """
 
 import logging
+import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -497,6 +499,51 @@ class AppStyles:
     COL_THIRD = {"xs": 12, "sm": 6, "md": 4}
     COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
+
+    @staticmethod
+    def calc_dropdown_width(
+        options: Sequence[ft.dropdown.Option | str] | None = None,
+        label: str | None = None,
+        min_width: float = CONTROL_WIDTH_MD,
+        max_width: float = CONTROL_WIDTH_LG,
+        char_width: float = 9.5,
+        padding: float = 75.0,
+    ) -> float:
+        """根据下拉选项文本和 Label 动态计算最佳宽度（自适应防文本截断）.
+
+        :param options: 下拉框选项列表 (ft.dropdown.Option 或字符串序列)
+        :param label: 下拉框浮动标签/提示文字
+        :param min_width: 宽度下限 (默认 CONTROL_WIDTH_MD = 200)
+        :param max_width: 宽度上限 (默认 CONTROL_WIDTH_LG = 400)
+        :param char_width: 每个基础 ASCII 字符预估像素宽度 (默认 9.5)
+        :param padding: 内边距 + 下拉箭头 + 清除按钮固定像素保留 (默认 75.0)
+        :return: 视觉自适应计算宽度 (包含在 min_width 和 max_width 范围间)
+        """
+
+        def _visual_len(text: str) -> float:
+            length = 0.0
+            for ch in text:
+                w = unicodedata.east_asian_width(ch)
+                if w in ("F", "W", "A") or ord(ch) > 0x2E80:
+                    length += 1.75
+                else:
+                    length += 1.0
+            return length
+
+        max_len = 0.0
+        if label:
+            max_len = max(max_len, _visual_len(label))
+
+        if options:
+            for opt in options:
+                if isinstance(opt, ft.dropdown.Option):
+                    opt_text = opt.text if opt.text is not None else str(opt.key if opt.key is not None else "")
+                else:
+                    opt_text = str(opt)
+                max_len = max(max_len, _visual_len(opt_text))
+
+        calculated = max_len * char_width + padding
+        return float(max(min_width, min(calculated, max_width)))
 
     @staticmethod
     def card(

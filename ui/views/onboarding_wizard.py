@@ -586,16 +586,17 @@ def OnboardingWizard(
     step = state.current_step
 
     if step == 0:
-        # Welcome step
+        lang_label = I18n.get_language_label()
+        lang_options = [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
         language_dropdown = ft.Dropdown(
-            label=I18n.get_language_label(),
-            tooltip=I18n.get_language_label(),
+            label=lang_label,
+            tooltip=lang_label,
             value=language_value,
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(lang_options, label=lang_label),
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
-            options=[ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
+            options=lang_options,
             on_select=safe_on_select(_on_language_select),
         )
 
