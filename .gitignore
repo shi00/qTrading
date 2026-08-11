@@ -136,6 +136,9 @@ ruff_diff.txt
 
 # 5. E2E test diagnostics
 e2e-artifacts/
+# 5.1 Embedded PostgreSQL sidecar runtime binaries (E2E 测试运行产物，非源码)
+pytest_e2e_tmp2/
+**/embedded_pg_data_ro0/
 
 # 6. Worktrees
 .worktrees/
