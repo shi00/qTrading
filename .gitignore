@@ -137,6 +137,10 @@ ruff_diff.txt
 # 5. E2E test diagnostics
 e2e-artifacts/
 
+# 5.1 E2E 测试运行时临时产物（pytest-xdist 工作目录，含 embedded-postgres 解压的 dll/exe，禁止入库）
+pytest_e2e_tmp*/
+pytest_e2e_tmp*.zip
+
 # 6. Worktrees
 .worktrees/
 
