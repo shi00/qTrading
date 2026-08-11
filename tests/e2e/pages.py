@@ -14,6 +14,7 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 方法（click_text / click_button / fill_textbox / expect_text / has_text）。
 """
 
+import asyncio
 import logging
 
 from core.i18n import I18n
@@ -242,13 +243,28 @@ class DataPage:
         ``TABLE_READY`` EID 先消失（reset_table_state 清空 table_columns）
         再出现（load_table_schema 重新填充 table_columns）来确认切表完成.
         只等待可见会误命中上一张表遗留的 ready 状态，必须先消失再出现.
+
+        PR-4 Task 4.2: 整体重试（N=3）抗 CI 高负载下 headless CanvasKit 渲染
+        抖动导致的下拉展开/选项渲染抖动（option not found）或 TABLE_READY 未按时
+        出现. 重试粒度 = 整个 select_table（含 select_option + TABLE_READY 等待），
+        每次失败休眠 500ms，3 次耗尽抛最后一次的原始异常（保留 cause 链）.
         """
-        await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
-        try:
-            await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
-        except Exception:
-            pass
-        await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+        last_exc: Exception | None = None
+        for idx in range(3):
+            try:
+                await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
+                try:
+                    await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
+                except Exception:
+                    pass
+                await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+                return
+            except Exception as exc:  # noqa: BLE001  # 记录末次异常，耗尽后抛原始异常
+                last_exc = exc
+                if idx < 2:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
+                    await asyncio.sleep(0.5)
+        assert last_exc is not None
+        raise last_exc
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""
