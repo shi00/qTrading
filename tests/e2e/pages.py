@@ -17,7 +17,7 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 import logging
 
 from core.i18n import I18n
-from tests.e2e.helpers.anchor_page import AnchorPage
+from tests.e2e.helpers.anchor_page import AnchorPage, retry_until_triggered
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.labels import strategy_label
 from tests.e2e.timeouts import TIMEOUTS
@@ -79,8 +79,22 @@ class ScreenerPage:
         await self.ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
 
     async def run(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
-        """点击执行选股按钮。"""
-        await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
+        """点击执行选股按钮，带"确认触发"重试兜底。
+
+        PR-4 Task 4.1: 用 retry_until_triggered 包裹点击，抗 headless CanvasKit
+        渲染吞点击（CI 高负载下偶发物理鼠标点击落在中间帧被吞）。点击后确认
+        RUN_BUTTON 消失作为触发指标：state.loading=True 时按钮被替换为 STOP，
+        anchor 消失即代表 loading 已开始。RUN_BUTTON 是 INTERACTIVE kind，
+        count 用 aria locator 计数（返回 int，可作 bool 谓词）。
+        """
+
+        async def _interact() -> None:
+            await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
+
+        async def _confirm() -> bool:
+            return await self.ap.count(EIDS.SCREENER.RUN_BUTTON) == 0
+
+        await retry_until_triggered(_interact, _confirm, attempts=3, interval_ms=500)
 
     async def expect_result(self, text: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
         """等待选股结果文本出现。"""
