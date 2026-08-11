@@ -48,11 +48,10 @@ def build_locale_configuration(locale_str: str) -> ft.LocaleConfiguration:
 
 
 async def setup_window_geometry(page: ft.Page, *, is_web_mode: bool) -> None:
-    """设置窗口几何属性并居中.
+    """设置窗口几何属性：启动即最大化以适配当前设备屏幕.
 
-    非 web_mode 时设置 min_width/min_height/width/height 并调用 page.window.center()。
-    center 失败时通过 log_exception_with_severity 记录，不传播异常。
-    web_mode 时跳过所有窗口几何设置（浏览器模式由 Flet 自动管理）。
+    非 web_mode 时设置 min_width/min_height 作为下限，并将窗口最大化铺满当前屏幕工作区，
+    保证任何分辨率/设备下内容自适应。web_mode 时跳过所有窗口几何设置（浏览器模式由 Flet 自动管理）。
 
     Args:
         page: Flet Page 实例
@@ -62,17 +61,7 @@ async def setup_window_geometry(page: ft.Page, *, is_web_mode: bool) -> None:
         return
     page.window.min_width = 1280
     page.window.min_height = 720
-    if not page.window.width or page.window.width < 1280:
-        page.window.width = 1280
-        page.window.height = 800
-    try:
-        await page.window.center()
-    except Exception as e:
-        log_exception_with_severity(
-            e,
-            context="general",
-            operation_label="Main window center failed",
-        )
+    page.window.maximized = True
 
 
 class WindowDialogManager:
