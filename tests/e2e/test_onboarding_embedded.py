@@ -35,7 +35,7 @@ async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page
     5. 进入后续步骤 (Token/AI 等)
     """
     # 1. 验证欢迎页
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_wizard_page.expect_text(welcome_guide)
 
     # 2. 点击 "开始使用" 进入 database step
@@ -69,7 +69,7 @@ async def test_embedded_wizard_forward_then_back(embedded_wizard_page) -> None:
     2. 点击 "上一步" → 返回欢迎页
     """
     # 1. 验证欢迎页
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_wizard_page.expect_text(welcome_guide)
 
     # 2. 点击 "开始使用" 进入 database step

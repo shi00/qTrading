@@ -649,7 +649,7 @@ class TestOnboardingWizardComponentBody:
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 0 (Welcome)：渲染语言下拉 + rocket 图标 + 6 张 overview 卡片。"""
+        """step 0 (Welcome)：渲染语言下拉 + 6 张 overview 卡片。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         component = make_component(OnboardingWizard)
@@ -661,8 +661,6 @@ class TestOnboardingWizardComponentBody:
         all_controls = _collect_controls(result)
         # 语言下拉
         assert any(isinstance(c, ft.Dropdown) for c in all_controls)
-        # Rocket icon
-        assert len(_find_icons(result, ft.Icons.ROCKET_LAUNCH)) >= 1
         # 6 张 overview 卡片 (ResponsiveRow)
         assert any(isinstance(c, ft.ResponsiveRow) for c in all_controls)
 
