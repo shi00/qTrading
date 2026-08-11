@@ -39,7 +39,7 @@ def _parse_db_url(url: str) -> dict[str, str]:
 
 async def test_wizard_renders_welcome(wizard_page):
     """测试：向导启动后停在欢迎页。"""
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await wizard_page.expect_text(welcome_guide, timeout_ms=TIMEOUTS.PAGE_OPEN)
 
     db_title = I18n.get("wizard_overview_db_title")
@@ -56,7 +56,7 @@ async def test_wizard_language_switch(wizard_page):
     lang_label = I18n.get("settings_language")
     lang_en = I18n.get("settings_lang_en")
     lang_zh = I18n.get("settings_lang_zh")
-    welcome_guide_zh = I18n.get("wizard_welcome_guide")
+    welcome_guide_zh = I18n.get("wizard_welcome_desc_with_time")
 
     try:
         await wizard_page.select_dropdown(lang_label, lang_en)
@@ -99,7 +99,7 @@ async def test_wizard_forward_then_back(wizard_page):
     # PR-3: prev 按钮已 anchor 化，用 WizardPage.click_prev 定位
     await wp.click_prev()
 
-    welcome_guide = I18n.get("wizard_welcome_guide")
+    welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await wizard_page.expect_text(welcome_guide)
 
 

@@ -1258,14 +1258,16 @@ def ScreenerView(
     )
 
     # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
+    strategy_label = I18n.get("select_strategy")
+    strategy_options = _build_strategy_options(state.strategies_with_dep, vm.strategy_mgr)
     strategy_dropdown = anchored(
         EIDS.SCREENER.STRATEGY_DROPDOWN,
         ft.Dropdown(
-            label=I18n.get("select_strategy"),
-            options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
+            label=strategy_label,
+            options=strategy_options,
             value=state.selected_strategy,
             on_select=safe_on_select(_on_strategy_change),
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(strategy_options, label=strategy_label),
             text_size=AppStyles.FONT_SIZE_LG,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,

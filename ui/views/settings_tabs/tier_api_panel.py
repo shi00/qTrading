@@ -358,15 +358,16 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         except RuntimeError:
             logger.debug("[TierApiPanel] page not available for run_probe")
 
-    # --- 构建控件（状态驱动）---
+    tier_label = I18n.get("sys_label_point_tier")
+    tier_options = _build_tier_options(vm)
     tier_dropdown = ft.Dropdown(
-        label=I18n.get("sys_label_point_tier"),
+        label=tier_label,
         value=selected_tier,
-        width=AppStyles.CONTROL_WIDTH_MD,
+        width=AppStyles.calc_dropdown_width(tier_options, label=tier_label),
         text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
         content_padding=AppStyles.SPACING_SM,
-        options=_build_tier_options(vm),
+        options=tier_options,
         on_select=safe_on_select(_on_tier_change),
         disabled=probe_in_progress,
     )

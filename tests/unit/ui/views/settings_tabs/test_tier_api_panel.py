@@ -604,10 +604,16 @@ def _collect_controls(root: Any) -> list[Any]:
 
 def _make_tier_panel_patches(mock_client: MagicMock) -> list:
     """创建 TierApiPanel 渲染所需的 patch 列表。"""
+    # P2-1: 与 tushare 测试一致，注入真实 calc_dropdown_width (宽度需为真实 float,
+    # 避免渲染时得到 MagicMock 导致档位宽度断言不稳定)。
+    from ui.theme import AppStyles as _RealAppStyles
+
+    mock_styles = MagicMock()
+    mock_styles.calc_dropdown_width.side_effect = _RealAppStyles.calc_dropdown_width
     return [
         patch("ui.views.settings_tabs.tier_api_panel.I18n"),
         patch("ui.views.settings_tabs.tier_api_panel.AppColors"),
-        patch("ui.views.settings_tabs.tier_api_panel.AppStyles"),
+        patch("ui.views.settings_tabs.tier_api_panel.AppStyles", mock_styles),
         patch("data.external.tushare_client.TushareClient", return_value=mock_client),
     ]
 

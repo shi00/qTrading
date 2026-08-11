@@ -10,6 +10,8 @@ A-Share Quantitative Screener - Unified Theme Configuration
 """
 
 import logging
+import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -497,6 +499,60 @@ class AppStyles:
     COL_THIRD = {"xs": 12, "sm": 6, "md": 4}
     COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
+
+    # --- Dropdown 自适应宽度估算参数 (消除魔术数字) ---
+    # 基于 FONT_SIZE_BODY(13)/FONT_SIZE_LG(14) 下中文字符约 2 倍半角宽、半角约
+    # 9.5px 的经验估算; 若日后统一更换字体/字号需同步校准。
+    DROPDOWN_CHAR_WIDTH = 9.5  # 半角 ASCII 字符平均预估像素宽
+    DROPDOWN_SELECTOR_PADDING = 75.0  # 内边距 + 下拉箭头 + 清除按钮固定像素保留
+    DROPDOWN_FULLWIDTH_WEIGHT = 1.75  # 全角/宽字符视觉宽度权重 (半角为 1.0)
+
+    @staticmethod
+    def calc_dropdown_width(
+        options: Sequence[ft.dropdown.Option | str] | None = None,
+        label: str | None = None,
+        min_width: float = CONTROL_WIDTH_MD,
+        max_width: float = CONTROL_WIDTH_LG,
+        char_width: float = DROPDOWN_CHAR_WIDTH,
+        padding: float = DROPDOWN_SELECTOR_PADDING,
+    ) -> float:
+        """根据下拉选项文本和 Label 动态计算最佳宽度（自适应防文本截断）.
+
+        :param options: 下拉框选项列表 (ft.dropdown.Option 或字符串序列)
+        :param label: 下拉框浮动标签/提示文字
+        :param min_width: 宽度下限 (默认 CONTROL_WIDTH_MD = 200)
+        :param max_width: 宽度上限 (默认 CONTROL_WIDTH_LG = 400)
+        :param char_width: 每个基础 ASCII 字符预估像素宽度
+        :param padding: 内边距 + 下拉箭头 + 清除按钮固定像素保留
+        :return: 视觉自适应计算宽度 (包含在 min_width 和 max_width 范围间)
+        """
+        lo = min(min_width, max_width)
+        hi = max(min_width, max_width)
+
+        def _visual_len(text: str) -> float:
+            length = 0.0
+            for ch in text:
+                w = unicodedata.east_asian_width(ch)
+                if w in ("F", "W", "A"):
+                    length += AppStyles.DROPDOWN_FULLWIDTH_WEIGHT
+                else:
+                    length += 1.0
+            return length
+
+        max_len = 0.0
+        if label:
+            max_len = max(max_len, _visual_len(label))
+
+        if options:
+            for opt in options:
+                if isinstance(opt, ft.dropdown.Option):
+                    opt_text = opt.text if opt.text is not None else str(opt.key if opt.key is not None else "")
+                else:
+                    opt_text = str(opt)
+                max_len = max(max_len, _visual_len(opt_text))
+
+        calculated = max_len * char_width + padding
+        return float(max(lo, min(calculated, hi)))
 
     @staticmethod
     def card(

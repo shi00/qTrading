@@ -586,48 +586,18 @@ def OnboardingWizard(
     step = state.current_step
 
     if step == 0:
-        # Welcome step
+        lang_label = I18n.get_language_label()
+        lang_options = [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
         language_dropdown = ft.Dropdown(
-            label=I18n.get_language_label(),
-            tooltip=I18n.get_language_label(),
+            label=lang_label,
+            tooltip=lang_label,
             value=language_value,
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(lang_options, label=lang_label),
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
-            options=[ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
+            options=lang_options,
             on_select=safe_on_select(_on_language_select),
-        )
-
-        rocket_container = ft.Container(
-            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=AppStyles.ICON_SIZE_HERO, color=AppColors.PRIMARY),
-            width=88,
-            height=88,
-            border_radius=44,
-            bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
-            alignment=ft.Alignment.CENTER,
-            shadow=ft.BoxShadow(
-                spread_radius=2,
-                blur_radius=24,
-                color=ft.Colors.with_opacity(0.35, AppColors.PRIMARY),
-                offset=ft.Offset(0, 4),
-            ),
-        )
-
-        gradient_guide_text = ft.Text(
-            I18n.get("wizard_welcome_guide"),
-            size=AppStyles.FONT_SIZE_HEADLINE,
-            weight=ft.FontWeight.W_600,
-            text_align=ft.TextAlign.CENTER,
-        )
-        gradient_title = ft.ShaderMask(
-            content=gradient_guide_text,
-            shader=ft.LinearGradient(
-                begin=ft.Alignment.CENTER_LEFT,
-                end=ft.Alignment.CENTER_RIGHT,
-                colors=[AppColors.PRIMARY, AppColors.ACCENT],
-            ),
-            blend_mode=ft.BlendMode.SRC_IN,
         )
 
         overview_cards_data = [
@@ -675,10 +645,6 @@ def OnboardingWizard(
                         content=language_dropdown,
                         alignment=ft.Alignment.CENTER,
                     ),
-                    ft.Container(height=8),
-                    rocket_container,
-                    ft.Container(height=8),
-                    gradient_title,
                     ft.Container(height=12),
                     ft.ResponsiveRow(
                         safe_controls(

@@ -398,16 +398,18 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     section_header = SectionHeader(I18n.get("sys_core_config"), title_key="sys_core_config")
 
+    lang_opts = _build_language_options()
+    lang_lbl = I18n.get_language_label()
     language_dropdown = anchored(
         EIDS.SETTINGS.LANGUAGE_DROPDOWN,
         ft.Dropdown(
-            label=I18n.get_language_label(),
+            label=lang_lbl,
             value=settings_state.language_value,
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(lang_opts, label=lang_lbl),
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
-            options=_build_language_options(),
+            options=lang_opts,
             on_select=safe_on_select(_on_language_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
@@ -431,16 +433,18 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
+    theme_opts = _build_theme_options()
+    theme_lbl = I18n.get("settings_theme")
     theme_dropdown = anchored(
         EIDS.SETTINGS.THEME_DROPDOWN,
         ft.Dropdown(
-            label=I18n.get("settings_theme"),
+            label=theme_lbl,
             value=settings_state.theme_value,
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(theme_opts, label=theme_lbl),
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
-            options=_build_theme_options(),
+            options=theme_opts,
             on_select=safe_on_select(_on_theme_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
@@ -466,16 +470,18 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_color=AppColors.INPUT_BORDER,
     )
 
+    log_opts = _build_log_level_options()
+    log_lbl = I18n.get("settings_log_level")
     log_level_dropdown = anchored(
         EIDS.SETTINGS.LOG_LEVEL_DROPDOWN,
         ft.Dropdown(
-            label=I18n.get("settings_log_level"),
+            label=log_lbl,
             value=settings_state.log_level_value,
-            width=AppStyles.CONTROL_WIDTH_MD,
+            width=AppStyles.calc_dropdown_width(log_opts, label=log_lbl),
             text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=AppStyles.SPACING_SM,
-            options=_build_log_level_options(),
+            options=log_opts,
             on_select=safe_on_select(_on_log_level_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
