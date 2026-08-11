@@ -17,6 +17,8 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 import asyncio
 import logging
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from core.i18n import I18n
 from tests.e2e.helpers.anchor_page import AnchorPage, retry_until_triggered
 from tests.e2e.helpers.flet_page import FletPage
@@ -85,17 +87,26 @@ class ScreenerPage:
         PR-4 Task 4.1: 用 retry_until_triggered 包裹点击，抗 headless CanvasKit
         渲染吞点击（CI 高负载下偶发物理鼠标点击落在中间帧被吞）。点击后确认
         RUN_BUTTON 消失作为触发指标：state.loading=True 时按钮被替换为 STOP，
-        anchor 消失即代表 loading 已开始。RUN_BUTTON 是 INTERACTIVE kind，
-        count 用 aria locator 计数（返回 int，可作 bool 谓词）。
+        anchor 消失即代表 loading 已开始。
+
+        评审 F1: _confirm 改为短轮询等待 RUN_BUTTON 消失（expect_hidden 2s），
+        区分两种场景——点击成功但异步 loading 渲染延迟（按钮数帧内消失 → 返回
+        True，不重复点击）与点击被吞（RUN_BUTTON 持续可见 → 轮询至超时返回
+        False → 触发重试）。避免旧 count 即时判定把渲染延迟误判为"未触发"而
+        重复点击导致 30s+ 超时误报。
         """
 
         async def _interact() -> None:
             await self.ap.click(EIDS.SCREENER.RUN_BUTTON, timeout_ms=timeout_ms)
 
         async def _confirm() -> bool:
-            return await self.ap.count(EIDS.SCREENER.RUN_BUTTON) == 0
+            try:
+                await self.ap.expect_hidden(EIDS.SCREENER.RUN_BUTTON, timeout_ms=2000)
+                return True
+            except PlaywrightTimeoutError:
+                return False
 
-        await retry_until_triggered(_interact, _confirm, attempts=3, interval_ms=500)
+        await retry_until_triggered(_interact, _confirm)
 
     async def expect_result(self, text: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
         """等待选股结果文本出现。"""
@@ -247,10 +258,10 @@ class DataPage:
         PR-4 Task 4.2: 整体重试（N=3）抗 CI 高负载下 headless CanvasKit 渲染
         抖动导致的下拉展开/选项渲染抖动（option not found）或 TABLE_READY 未按时
         出现. 重试粒度 = 整个 select_table（含 select_option + TABLE_READY 等待），
-        每次失败休眠 500ms，3 次耗尽抛最后一次的原始异常（保留 cause 链）.
+        每次失败休眠 RETRY_INTERVAL_MS，RETRY_ATTEMPTS 次耗尽抛最后一次的原始异常.
         """
         last_exc: Exception | None = None
-        for idx in range(3):
+        for idx in range(TIMEOUTS.RETRY_ATTEMPTS):
             try:
                 await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
                 try:
@@ -261,10 +272,11 @@ class DataPage:
                 return
             except Exception as exc:  # noqa: BLE001  # 记录末次异常，耗尽后抛原始异常
                 last_exc = exc
-                if idx < 2:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
-                    await asyncio.sleep(0.5)
-        assert last_exc is not None
-        raise last_exc
+                if idx < TIMEOUTS.RETRY_ATTEMPTS - 1:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
+                    await asyncio.sleep(TIMEOUTS.RETRY_INTERVAL_MS / 1000)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("select_table: exhausted retries without recorded failure")  # 逻辑上不可达
 
     async def select_filter_col(self, col_label: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """选择过滤列（通过 anchor，``col_label`` 为本地化列名如 ``代码``）。"""

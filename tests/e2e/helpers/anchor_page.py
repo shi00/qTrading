@@ -23,8 +23,8 @@ from ui.testing.e2e_ids import AnchorKind, Eid
 async def retry_until_triggered(
     interact: Callable[[], Awaitable[None]],
     confirm: Callable[[], Awaitable[bool]],
-    attempts: int = 3,
-    interval_ms: int = 500,
+    attempts: int = TIMEOUTS.RETRY_ATTEMPTS,
+    interval_ms: int = TIMEOUTS.RETRY_INTERVAL_MS,
 ) -> None:
     """步骤级"确认触发 + N 次重试"兜底，抗 headless CanvasKit 渲染吞点击。
 
