@@ -4,12 +4,8 @@
 
 > 相关：[CLAUDE.md §2](../../CLAUDE.md#2-项目概览) 技术栈表、[CLAUDE.md §3.1 R16](../../CLAUDE.md#31--绝对禁止)（V1 单线程 async 模型对 UI 阻塞更敏感）。Flet 锁定版本见 [`pyproject.toml`](../../pyproject.toml)。
 
-> 配套文档：
-> - [项目差异与高风险 API](./project-differences.md) — 项目相对 Flet 官方默认的分叉点与项目验证过的高风险 API
-> - [升级检查清单](./upgrade-checklist.md) — Flet 版本升级时的验证步骤与文档同步要求
-> - [Flet API 核验记录模板](./api-verification-template.md) — 新增/变更 API 的核验记录模板
-> - [可访问性最低标准](./accessibility-baseline.md) — UI 可访问性基线要求
-> - [Flet MCP 使用规范](./mcp-usage.md) — AI 通过 flet-mcp 验证 Flet API 的操作指南
+> 配套文档：通过 [docs/flet/README.md](./README.md) 进入。
+> 直接相关：[项目差异与高风险 API](./project-differences.md)（V0→V1 迁移表中标注的静默回归项）。
 
 ## 演进方向
 
@@ -218,7 +214,7 @@ def ScreenerView():
 
 - `CLAUDE.md` 不记录具体 Flet API 细节，只记录升级时必须遵守的验证原则、红线与架构边界。
 - `CONTRIBUTING.md` 是 Flet API 约束、UI 开发范式、兼容垫片与测试模板的入口索引，必须随 `pyproject.toml` 中锁定的 Flet 版本同步更新。
-- `docs/flet/` 下子文档是 Flet API 约束的详细实现细则源（v1-api-constraints.md / project-differences.md / upgrade-checklist.md / api-verification-template.md / accessibility-baseline.md）。
+- `docs/flet/` 下子文档是 Flet API 约束的详细实现细则源（完整清单见 [README.md](./README.md)「文档职责清单」）。
 - 每次升级 Flet 小版本或大版本，必须完成：
   1. 核对官方 breaking changes / deprecations；
   2. 运行最小 UI 验证：启动、窗口关闭、dialog、resize、i18n 热重载、一个 V1 控件样例；

@@ -1,6 +1,9 @@
 # UI 可访问性最低标准
 
 > 来源：P2-4 整改新增章节。本文定义 AStockScreener UI 可访问性最低标准，所有新增 UI 控件必须满足。
+>
+> 文档入口：[Flet 开发文档入口](./README.md)
+> 本文是 UI 无障碍可执行条款的唯一事实源；一般 UX 设计原则见 [ui-ux-best-practices.md](./ui-ux-best-practices.md)。
 
 > Owner: UI 维护者
 > 复核触发器: 新增交互控件 / Dialog / 表单 / 响应式断点调整 / 键盘路径相关变更

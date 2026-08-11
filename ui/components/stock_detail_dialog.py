@@ -29,6 +29,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -726,7 +727,7 @@ async def _load_chart_async(
     except Exception as e:
         from utils.error_classifier import classify_error, get_error_message
 
-        logger.error("Error loading chart: %s", e, exc_info=True)
+        logger.error("Error loading chart: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         error_info = classify_error(e, context="chart")
         set_chart_content(
             ft.Text(

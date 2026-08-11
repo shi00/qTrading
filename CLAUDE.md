@@ -79,7 +79,7 @@
 | 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 docs/guides/how-to.md「3. 新增一个策略」 |
 | 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 docs/guides/how-to.md「1. 新增一张数据表」/「2. 新增一个 DAO」 |
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
-| 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10）；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
+| 新增/修改 UI 视图 | 先读 [docs/flet/README.md](./docs/flet/README.md)「新增或修改 UI 视图」；必读 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)「V1 声明式 UI 开发规范」、[docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)、[docs/patterns/mvvm.md](./docs/patterns/mvvm.md)、`ui/app_layout.py` 和对应 ViewModel；不熟悉的 API 按 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) 核验（通过 flet-mcp 落实 §1.10）；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile）；项目红线见 §3、架构边界见 §4 |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md)（核心协议 + 稳定规则 ID + review-profiles 按需加载）；项目红线见 §3、架构边界见 §4 |
@@ -87,9 +87,9 @@
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`、[docs/guides/ci-cd.md](./docs/guides/ci-cd.md)、[docs/guides/dependency-management.md](./docs/guides/dependency-management.md)；Flet 升级见 [docs/flet/upgrade-checklist.md](./docs/flet/upgrade-checklist.md) |
 | 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 docs/guides/how-to.md「7. 新增回测配置」 |
-| 修改 UI 布局/响应式 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
-| 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
-| 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
+| 修改 UI 布局/响应式 | 先读 [docs/flet/README.md](./docs/flet/README.md)「修改布局或响应式」；必读 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)「布局与响应式」、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)、[docs/flet/project-differences.md](./docs/flet/project-differences.md)、`ui/theme.py` (`AppStyles`) 和 `ui/app_layout.py`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
+| 新增/修改 ViewModel | 先读 [docs/flet/README.md](./docs/flet/README.md)「新增或修改 ViewModel」；必读 [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md) 和对应 View/ViewModel；纯 ViewModel 任务无需加载完整 UI/UX 文档；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
+| 修改 i18n 文案 | 先读 [docs/flet/README.md](./docs/flet/README.md) 对应路径；必读 `core/i18n.py`、`locales/`、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 新增/修改 E2E 测试 | docs/flet/canvaskit-rendering-e2e-guide.md（CanvasKit 渲染坑点 + EIDS 分类速查表）、docs/guides/testing.md、`tests/e2e/helpers/anchor_page.py`；E2E 定位优先用 anchor-based（`AnchorPage`），禁止依赖文本模糊匹配；Flet 控件坑点（ListView 视口为 0、Container.on_click 无 flt-tappable、expand 传递断裂等）见 docs/flet/project-differences.md §4.5-4.9 |
@@ -163,7 +163,7 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装，除非能证明该封装带来实质性价值。
-- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。
+- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。界面设计遵守 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)；无障碍遵守 [docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)；Flet API 与声明式实现遵守 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
@@ -220,10 +220,9 @@ app → 编排所有层，仅被 main.py 调用
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
-| Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 项目差异 / 升级协同机制 | [v1-api-constraints.md](./docs/flet/v1-api-constraints.md)、[project-differences.md](./docs/flet/project-differences.md) |
-| Flet 升级检查清单 / API 核验记录模板 / 无障碍基线 | [upgrade-checklist.md](./docs/flet/upgrade-checklist.md)、[api-verification-template.md](./docs/flet/api-verification-template.md)、[accessibility-baseline.md](./docs/flet/accessibility-baseline.md) |
-| 测试规范与 CanvasKit E2E 避坑指南（双轨语义树映射 + 5 坑点 + EIDS 分类速查表） | [docs/guides/testing.md](./docs/guides/testing.md)、[docs/flet/canvaskit-rendering-e2e-guide.md](./docs/flet/canvaskit-rendering-e2e-guide.md) |
-| Flet MCP 使用规范（AI 验证 Flet API 的操作指南） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
+| Flet UI 开发、设计、API、无障碍、项目差异、升级与 CanvasKit E2E 避坑 | [docs/flet/README.md](./docs/flet/README.md) |
+| Flet MCP 使用规范（AI 验证 Flet API 的操作指南，对应 §1.10 反幻觉红线） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
+| 测试规范 | [docs/guides/testing.md](./docs/guides/testing.md) |
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |

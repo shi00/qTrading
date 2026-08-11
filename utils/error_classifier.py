@@ -68,29 +68,50 @@ try:
 except ImportError:  # pragma: no cover -- httpx 是项目直接依赖，import 失败仅限可选环境
     _HTTPX_AVAILABLE = False
 
-try:
-    from litellm.exceptions import (  # type: ignore[import-untyped]
-        APIConnectionError as LiteLLMAPIConnectionError,
-        AuthenticationError as LiteLLMAuthenticationError,
-        ContentPolicyViolationError,
-        InternalServerError as LiteLLMInternalServerError,
-        NotFoundError as LiteLLMNotFoundError,
-        PermissionDeniedError,
-        RateLimitError,
-        ServiceUnavailableError,
-    )
+# R16: litellm 是重库（首次 import 可达 18s+）。将模块级 `from litellm.exceptions import`
+# 改为惰性加载，避免 error_classifier 被 services.ai_service 等模块导入时同步触发
+# litellm 加载，阻塞 UI 启动链。异常类仅在 classify_error(context="llm") 时才需要。
+_LITELLM_IMPORT_ATTEMPTED = False
+_LITELLM_AVAILABLE = False
+LiteLLMAuthenticationError = None  # type: ignore[misc,assignment]
+ContentPolicyViolationError = None  # type: ignore[misc,assignment]
+PermissionDeniedError = None  # type: ignore[misc,assignment]
+LiteLLMNotFoundError = None  # type: ignore[misc,assignment]
+RateLimitError = None  # type: ignore[misc,assignment]
+ServiceUnavailableError = None  # type: ignore[misc,assignment]
+LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
+LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
 
-    _LITELLM_AVAILABLE = True
-except ImportError:  # pragma: no cover -- litellm 是项目直接依赖，import 失败仅限可选环境
-    _LITELLM_AVAILABLE = False
-    LiteLLMAuthenticationError = None  # type: ignore[misc,assignment]
-    ContentPolicyViolationError = None  # type: ignore[misc,assignment]
-    PermissionDeniedError = None  # type: ignore[misc,assignment]
-    LiteLLMNotFoundError = None  # type: ignore[misc,assignment]
-    RateLimitError = None  # type: ignore[misc,assignment]
-    ServiceUnavailableError = None  # type: ignore[misc,assignment]
-    LiteLLMInternalServerError = None  # type: ignore[misc,assignment]
-    LiteLLMAPIConnectionError = None  # type: ignore[misc,assignment]
+
+def _load_litellm_exceptions() -> bool:
+    """惰性加载 litellm 异常类并返回是否可用（R16）。
+
+    仅当 classify_error(context="llm") 需要 isinstance 判定时才触发 import。
+    加载失败后以 _LITELLM_IMPORT_ATTEMPTED 阻止重复 import。
+    """
+    global _LITELLM_AVAILABLE, _LITELLM_IMPORT_ATTEMPTED
+    global LiteLLMAuthenticationError, ContentPolicyViolationError, PermissionDeniedError
+    global LiteLLMNotFoundError, RateLimitError, ServiceUnavailableError
+    global LiteLLMInternalServerError, LiteLLMAPIConnectionError
+    if _LITELLM_IMPORT_ATTEMPTED:
+        return _LITELLM_AVAILABLE
+    _LITELLM_IMPORT_ATTEMPTED = True
+    try:
+        from litellm.exceptions import (  # type: ignore[import-untyped]
+            APIConnectionError as LiteLLMAPIConnectionError,
+            AuthenticationError as LiteLLMAuthenticationError,
+            ContentPolicyViolationError,
+            InternalServerError as LiteLLMInternalServerError,
+            NotFoundError as LiteLLMNotFoundError,
+            PermissionDeniedError,
+            RateLimitError,
+            ServiceUnavailableError,
+        )
+
+        _LITELLM_AVAILABLE = True
+    except ImportError:  # pragma: no cover -- litellm 是项目直接依赖，import 失败仅限可选环境
+        _LITELLM_AVAILABLE = False
+    return _LITELLM_AVAILABLE
 
 
 def classify_severity(e: Exception, context: str = "general") -> str:
@@ -157,7 +178,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
 
     if context == "llm":
-        if _LITELLM_AVAILABLE:
+        if _load_litellm_exceptions():
             if LiteLLMAuthenticationError is not None and isinstance(e, LiteLLMAuthenticationError):
                 return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
             if ContentPolicyViolationError is not None and isinstance(e, ContentPolicyViolationError):

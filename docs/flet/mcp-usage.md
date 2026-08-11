@@ -2,6 +2,8 @@
 
 > 来源：AI 编程时使用 flet-mcp 验证 Flet API 的操作指南
 > 配套：[CLAUDE.md §1.10 反幻觉护栏](../../CLAUDE.md#110-反幻觉护栏-ai-特有红线)、[v1-api-constraints.md](./v1-api-constraints.md)、[api-verification-template.md](./api-verification-template.md)
+> 文档入口：[Flet 开发文档入口](./README.md)
+> 触发条件：使用不熟悉的 Flet API / API 是否存在不确定 / V0→V1 迁移 / 版本升级 / 静默回归排查。
 > Owner: UI 维护者
 > 复核触发器: flet-mcp 包版本变化、Flet 依赖版本变化、MCP 配置变化
 

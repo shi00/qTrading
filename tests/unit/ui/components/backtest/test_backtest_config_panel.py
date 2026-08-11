@@ -26,6 +26,8 @@ from unittest.mock import MagicMock
 import flet as ft
 import pytest
 
+from flet.components.component import Component
+
 from tests.unit.ui.component_renderer import (
     FakePage,
     make_component,
@@ -64,11 +66,12 @@ def _make_event(value: Any = None) -> MagicMock:
 
 
 def _walk_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树 (含 controls/items/content)。
-
-    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归)。
-    """
-    if root is None or not isinstance(root, ft.Control):
+    if root is None:
+        return []
+    if isinstance(root, Component):
+        rendered = render_once(root)
+        return _walk_controls(rendered)
+    if not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -77,9 +80,9 @@ def _walk_controls(root: Any) -> list[Any]:
             for child in children:
                 if child is not None:
                     result.extend(_walk_controls(child))
-    content = getattr(root, "content", None)
-    if isinstance(content, ft.Control):
-        result.extend(_walk_controls(content))
+    content_attr = getattr(root, "content", None)
+    if isinstance(content_attr, (ft.Control, Component)):
+        result.extend(_walk_controls(content_attr))
     return result
 
 

@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -22,7 +23,15 @@ from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
-LITELLM_AVAILABLE = True
+# R16: LiteLLM 是重库（首次 import 可达 18s+），改为惰性加载，避免 import ai_service
+# 时同步阻塞 UI 主循环。模块级符号 (litellm/acompletion/LITELLM_AVAILABLE) 保留以兼容
+# 现有测试的 patch 与调用点。__init__ 链（_configure_litellm/_setup_client）不得触发
+# import，仅首个真正需要 litellm 的调用点经 _ensure_litellm_loaded() 触发。
+LITELLM_AVAILABLE = False
+litellm: Any = None
+acompletion: Any = None
+# 独立 import 重试哨兵：避免以 litellm=False 作哨兵与 `litellm is not None` 判空冲突。
+_litellm_import_attempted = False
 
 VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
 STRATEGY_CONTEXT_MAX_LEN = 1600
@@ -470,18 +479,26 @@ class AIServiceUnavailableError(Exception):
     pass
 
 
-def _sanitize_free_text(value: str) -> str:
-    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output."""
+def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
+    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output.
+
+    UX-2.2: max_len 可配置。None 时读 ConfigHandler.get_ai_free_text_max_len()。
+    """
     if not isinstance(value, str):
         return value
+    if max_len is None:
+        # 延迟导入避免循环依赖
+        from utils.config_handler import ConfigHandler
+
+        max_len = ConfigHandler.get_ai_free_text_max_len()
     cleaned = _CONTROL_CHARS_RE.sub("", value)
-    if len(cleaned) > _FREE_TEXT_MAX_LEN:
+    if len(cleaned) > max_len:
         logger.warning(
             "[AIService] Output validation: free-text field truncated from %d to %d chars",
             len(cleaned),
-            _FREE_TEXT_MAX_LEN,
+            max_len,
         )
-        cleaned = cleaned[:_FREE_TEXT_MAX_LEN]
+        cleaned = cleaned[:max_len]
     return cleaned
 
 
@@ -511,64 +528,97 @@ def validate_ai_analysis_response(response: dict) -> dict:
             response["recommendation"] = rec_lower
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
+    # UX-2.2: 读一次配置避免每字段重复读
+    from utils.config_handler import ConfigHandler
+
+    free_text_max_len = ConfigHandler.get_ai_free_text_max_len()
     for field in _FREE_TEXT_FIELDS:
         val = response.get(field)
         if isinstance(val, str):
-            response[field] = _sanitize_free_text(val)
+            response[field] = _sanitize_free_text(val, max_len=free_text_max_len)
 
     return response
 
 
-try:
-    import litellm  # type: ignore[import-untyped]
-    from litellm import acompletion  # type: ignore[import-untyped]
+def _ensure_litellm_loaded() -> bool:
+    """惰性加载 litellm 并返回是否可用（R16）。
 
-    litellm.suppress_debug_info = True
-    litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
+    仅当真正需要调用 litellm（acompletion 调用点）时才触发 import，
+    避免 import ai_service 或 AIService.__init__ 链同步阻塞 UI 主循环。
+    加载失败后以 _litellm_import_attempted 阻止重复 import，litellm 保持 None，
+    不破坏 `litellm is None` 判空 guard。
+    首次成功加载时完成 LiteLLM 全局参数配置（原模块顶层 import 块的职责）。
+    """
+    global litellm, acompletion, LITELLM_AVAILABLE, _litellm_import_attempted
+    if _litellm_import_attempted:
+        return LITELLM_AVAILABLE
+    _litellm_import_attempted = True
+    try:
+        import litellm as _lt  # type: ignore[import-untyped]
+        from litellm import acompletion as _ac  # type: ignore[import-untyped]
 
-    LITELLM_AVAILABLE = True
-except ImportError:
-    LITELLM_AVAILABLE = False
-    logger.warning("[AIService] LiteLLM not installed, cloud LLM features disabled")
+        _lt.suppress_debug_info = True
+        _lt.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
+        _lt.drop_params = True
+        _lt.set_timeout = LITELLM_SET_TIMEOUT  # type: ignore[attr-defined]
+        _lt.max_retries = LITELLM_MAX_RETRIES  # type: ignore[attr-defined]
+        _lt.success_callback = []
+        _lt.failure_callback = []
+        _lt.modify_params = True
+        litellm, acompletion = _lt, _ac
+        LITELLM_AVAILABLE = True
+        return True
+    except Exception:
+        # 兼容不同 litellm 版本：import 或全局参数配置（如某版本缺失某属性抛
+        # AttributeError）失败均视为"不可用"，优雅降级而非向上传播。
+        # 注意 except Exception 不捕获 asyncio.CancelledError / KeyboardInterrupt (R2)。
+        LITELLM_AVAILABLE = False
+        logger.warning("[AIService] LiteLLM not available, cloud LLM features disabled")
+        return False
 
 
 def _check_reasoning_support(model: str) -> bool:
-    """检查模型是否支持推理增强 (reasoning_content)"""
-    if not LITELLM_AVAILABLE:
-        return False
-    try:
-        return litellm.utils.supports_reasoning(model=model)
-    except Exception as exc:
-        error_info = classify_error(exc, context="general")
-        severity = classify_severity(exc, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
-            "[AIService] supports_reasoning check failed (%s) for %s: %s, using LLM_PROVIDERS fallback",
-            error_info["code"],
-            model,
-            DataSanitizer.sanitize_error(exc),
-            exc_info=True,
-        )
-        from utils.llm_providers import LLM_PROVIDERS
+    """检查模型是否支持推理增强 (reasoning_content)
 
-        # Derive reasoning model IDs from LLM_PROVIDERS tags
-        for provider_config in LLM_PROVIDERS.values():
-            for m in provider_config.get("models", []):
-                tag = m.get("tag", "")
-                tags = tag if isinstance(tag, list) else [tag]
-                if "reasoning" in tags:
-                    # F4-S-4: Exact match (conservative: avoid false-positive reasoning
-                    # support detection for variant model names like "qwen3.6-max-no-reasoning")
-                    model_lower = model.lower()
-                    model_id_lower = m["id"].lower()
-                    if model_lower == model_id_lower:
-                        return True
-        return False
+    R16: litellm 惰性加载后，__init__ 链不得触发 import。此处仅当 litellm 已加载
+    （模块级符号非 None）时才用 litellm.utils.supports_reasoning；未加载时直接走
+    LLM_PROVIDERS fallback 判定，不触发 _ensure_litellm_loaded()。
+    """
+    if litellm is not None:
+        try:
+            return litellm.utils.supports_reasoning(model=model)
+        except Exception as exc:
+            error_info = classify_error(exc, context="general")
+            severity = classify_severity(exc, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] supports_reasoning check failed (%s) for %s: %s, using LLM_PROVIDERS fallback",
+                error_info["code"],
+                model,
+                DataSanitizer.sanitize_error(exc),
+                exc_info=True,
+            )
+
+    from utils.llm_providers import LLM_PROVIDERS
+
+    # Derive reasoning model IDs from LLM_PROVIDERS tags
+    for provider_config in LLM_PROVIDERS.values():
+        for m in provider_config.get("models", []):
+            tag = m.get("tag", "")
+            tags = tag if isinstance(tag, list) else [tag]
+            if "reasoning" in tags:
+                # F4-S-4: Exact match (conservative: avoid false-positive reasoning
+                # support detection for variant model names like "qwen3.6-max-no-reasoning")
+                model_lower = model.lower()
+                model_id_lower = m["id"].lower()
+                if model_lower == model_id_lower:
+                    return True
+    return False
 
 
 def _classify_api_error(e: Exception) -> dict:
@@ -684,8 +734,12 @@ class AIService:
             )
 
     def _configure_litellm(self):
-        """配置 LiteLLM 全局参数 (1.82+ 优化)"""
-        if not LITELLM_AVAILABLE:
+        """配置 LiteLLM 全局参数 (1.82+ 优化)
+
+        R16: 惰性加载后 __init__ 链不得触发 import。litellm 未加载（None）时跳过，
+        全局参数配置交由首次 _ensure_litellm_loaded() 完成。
+        """
+        if litellm is None:
             return
 
         litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
@@ -704,8 +758,11 @@ class AIService:
 
         重要: LiteLLM 是函数式调用，没有持久化的 Client 实例
         这里缓存配置供后续调用使用
+
+        R16: 惰性加载后 __init__ 链不得触发 import。litellm 未加载（None）时按
+        "云端未配置" 降级，不阻塞 UI。
         """
-        if not LITELLM_AVAILABLE:
+        if litellm is None:
             logger.warning("[AIService] Config | ⚠️ LiteLLM not available. Cloud features disabled.")
             self._is_cloud_configured = False
             return
@@ -989,6 +1046,13 @@ class AIService:
             )
 
         # S1-4 fix: Real-time reasoning support check for model switching
+        # （须在 _ensure_litellm_loaded 之后，litellm 已加载时才能用精确 supports_reasoning 判定）
+        from utils.proxy_manager import ProxyManager
+
+        # R16: 首个真正需要 litellm 的调用点才触发惰性加载（用户主动 AI 调用）。
+        if not _ensure_litellm_loaded():
+            raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
+
         if model_override:
             effective_model = model_override
         else:
@@ -996,8 +1060,6 @@ class AIService:
             _model_id = llm_config.get("model", "")
             effective_model = f"{_provider}/{_model_id}" if _provider else _model_id
         supports_reasoning = _check_reasoning_support(effective_model)
-
-        from utils.proxy_manager import ProxyManager
 
         stream = kwargs.get("stream", False) or on_chunk is not None
 
@@ -2159,7 +2221,7 @@ class AIService:
         if not model:
             return {"success": False, "message": "llm_test_need_model"}
 
-        if not LITELLM_AVAILABLE:
+        if not _ensure_litellm_loaded():
             return {"success": False, "message": "llm_err_litellm_not_installed"}
 
         try:

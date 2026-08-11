@@ -54,6 +54,7 @@ class StreamCard:
     reasoning: str = ""
     content: str = ""
     is_analyzing: bool = False
+    error: str | None = None  # UX-2.3: 失败时终结为错误状态（含重试按钮）
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,8 @@ class ScreenerState:
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
     # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
+    # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
+    is_retrying: bool = False
 
 
 class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
@@ -178,6 +181,15 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # TaskManager subscription state
         self._strategy_submitted = False
         self._active_task_id: str | None = None  # Task 3.2: 保存运行中 task_id 供 cancel_strategy
+        # UX-2.3: 单株重试状态（实例属性，不进 state）
+        self._last_ai_context: dict | None = None
+        self._last_strategy_key: str | None = None
+        self._retrying = False
+        # 当前重试的股票名与重试前的错误文案（P1-1: select_strategy 取消重试时终结占位卡用）
+        self._retrying_name: str | None = None
+        self._retrying_prev_error: str | None = None
+        # 当前重试 task 引用（schedule_retry 记录，select_strategy 仅取消它，避免误cancel其它后台任务）
+        self._retry_task: asyncio.Task | None = None
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
@@ -238,6 +250,14 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # 确认支持 async, 本任务范围内不引入以保持微创修改; app-shutdown 由
         # ShutdownCoordinator._step0_cancel_tasks 的 asyncio.wait 覆盖).
 
+        # UX-2.3 v4 P2-2: 清空 retry 相关字段，避免 disposed 后残留状态
+        self._last_ai_context = None
+        self._last_strategy_key = None
+        self._retrying = False
+        self._retrying_name = None
+        self._retrying_prev_error = None
+        self._retry_task = None
+
         self._full_results = None
         self._ai_buffer = []
         self._realtime_snapshot = None
@@ -258,7 +278,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("[ScreenerVM] Background task failed: %s", exc, exc_info=exc)
+            logger.error("[ScreenerVM] Background task failed: %s", DataSanitizer.sanitize_error(exc), exc_info=exc)
 
     # --- Splitter width persistence (P1-1/P2-1: View 不再直接 import ConfigHandler) ---
 
@@ -288,7 +308,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.debug("[ScreenerVM] persist_splitter_width failed: %s", e, exc_info=True)
+                logger.debug(
+                    "[ScreenerVM] persist_splitter_width failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                )
 
         loop = self._get_loop_or_none()
         if loop is None:
@@ -447,8 +469,24 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         Args:
             key: 策略 key, None 表示清空选择
         """
+        # UX-2.3 v4 P0-2: 重试中切换策略 → 只取消重试 task（不取消 persist_splitter_width / _flush_ai_buffer 等其它后台任务）
+        if self._retrying:
+            if self._retry_task is not None and not self._retry_task.done():
+                self._retry_task.cancel()
+            self._retry_task = None
+            self._retrying = False
+            # P1-1: 取消重试后终结占位卡（否则 is_analyzing=True 卡永久停留在"分析中"旋转假死）。
+            # 仅当确有重试中的占位卡名时还原为错误态，后续 on_result/on_card_error 均不会再来。
+            # 还原重试前的原始错误文案（VM 不感知 locale，§3.2），不调用 I18n。
+            if self._retrying_name:
+                self._on_card_error(self._retrying_name, self._retrying_prev_error or "AI 分析未完成")
+            self._retrying_name = None
+            self._retrying_prev_error = None
+            # 清空重试上下文（防止 retry_single 完成后回调污染新策略）
+            self._last_ai_context = None
+            self._last_strategy_key = None
         tier_hint = self._compute_tier_hint(key)
-        self._set_state(selected_strategy=key, tier_hint=tier_hint)
+        self._set_state(selected_strategy=key, tier_hint=tier_hint, is_retrying=False)
 
     def load_strategies(self) -> None:
         """加载策略列表到 state (R.2.6.1: 业务状态迁入 VM).
@@ -466,7 +504,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error("[ScreenerVM] Failed to load strategies: %s", e, exc_info=True)
+            logger.error("[ScreenerVM] Failed to load strategies: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._set_state(
                 status_message=Message("screener_load_failed", {}),
                 status_color="error",
@@ -522,7 +560,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("[ScreenerVM] update_strategy_desc failed: %s", e, exc_info=True)
+            logger.warning(
+                "[ScreenerVM] update_strategy_desc failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
             self._set_state(strategy_desc=None, strategy_desc_color="default")
 
     def set_history_viewing_status(
@@ -574,7 +614,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
                 return "sys_strategy_tier_hint"
         except Exception as e:
-            logger.debug("[ScreenerVM] tier hint check skipped: %s", e, exc_info=True)
+            logger.debug("[ScreenerVM] tier hint check skipped: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         return None
 
     async def run_strategy(
@@ -662,6 +702,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 context["on_result"] = self._on_ai_result_stream
                 context["on_stream_start"] = self._on_stream_start_adapter
                 context["on_card_start"] = self._on_card_start_adapter
+                # UX-2.3: 单股失败回调 + 策略 key 透传给 mixin
+                context["on_card_error"] = self._on_card_error
+                context["strategy_key"] = strategy_key
+                self._last_ai_context = context
+                self._last_strategy_key = strategy_key
 
                 # We inject the task_id into context so deep AI tasks can check cancellation
                 context["_task_id"] = task_id
@@ -721,7 +766,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                             # 传播 (R2 红线).
                             logger.error(
                                 "[ScreenerVM] save_results failed (results retained in memory): %s",
-                                save_err,
+                                DataSanitizer.sanitize_error(save_err),
                                 exc_info=True,
                             )
                             save_failed_reason = DataSanitizer.sanitize_error(save_err) or save_err.__class__.__name__
@@ -778,7 +823,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except QualityGateError as e:
                 logger.warning(
                     "[ScreenerVM] Strategy execution blocked by Quality Gate: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 self._set_state(
@@ -792,7 +837,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
@@ -893,7 +938,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
 
         except Exception as e:
-            logger.error("Sort failed: %s", e, exc_info=True)
+            logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._set_state(
                 loading=False,
                 status_message=Message("screener_sort_failed"),
@@ -1012,6 +1057,95 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     def _on_card_start_adapter(self, name: str) -> None:
         """Adapter for strategy's on_card_start contract."""
         self.start_stream_card(name, is_analyzing=True)
+
+    def _on_card_error(self, name: str, error: str) -> None:
+        """UX-2.3: 单股 AI 分析失败时终结占位卡为错误状态。"""
+        new_cards = tuple(
+            replace(c, error=error, is_analyzing=False) if c.name == name and c.is_analyzing else c
+            for c in self._state.stream_cards
+        )
+        self._set_state(stream_cards=new_cards)
+
+    async def retry_single_stock(self, name: str) -> None:
+        """UX-2.3: 重试单股 AI 分析。
+
+        流程：防抖检查 → 策略一致性检查 → 移除失败卡片 → 构建新 context → 调用策略 retry_single。
+        """
+        # 1. 防抖：重试中拒绝再次触发
+        if self._retrying:
+            logger.debug("[ScreenerVM] retry_single_stock: already retrying, skip")
+            return
+        # 2. 策略一致性检查：策略切换后 _last_candidates_df 已失效
+        if self._last_strategy_key != self._state.selected_strategy:
+            self._set_state(
+                status_message=Message("ai_retry_strategy_changed"),
+                status_color="warning",
+            )
+            return
+        if not self._last_ai_context:
+            return
+        # R1-6: 策略能力检查前移到卡片转换之前，避免无 retry_single 时卡片卡在 is_analyzing
+        strategy = self.strategy_mgr.get_strategy(self._state.selected_strategy)
+        if not strategy or not hasattr(strategy, "retry_single"):
+            logger.warning(
+                "[ScreenerVM] retry_single_stock: strategy %s has no retry_single",
+                self._state.selected_strategy,
+            )
+            return  # 卡片保持 error 状态，用户可切换策略或重试
+        # UX-2.3 v4 P0-1: 将失败卡转为重试中占位卡（不删除，避免 on_card_error 找不到目标卡片）
+        # 重试成功由 on_result 自然终结；重试失败由 on_card_error 重新标记 error
+        # P1-1: 记录重试前的原始错误文案，供 select_strategy 取消重试时还原（VM 不感知 locale, §3.2）
+        self._retrying_prev_error = next(
+            (c.error for c in self._state.stream_cards if c.name == name and c.error), None
+        )
+        new_cards = tuple(
+            replace(c, error=None, is_analyzing=True) if c.name == name and c.error else c
+            for c in self._state.stream_cards
+        )
+        # UX-2.3: is_retrying 进 state，View 派生 run_disabled 禁用主运行按钮
+        self._set_state(stream_cards=new_cards, is_retrying=True)
+        self._retrying = True
+        self._retrying_name = name  # P1-1: 记录重试中的占位卡名，供 select_strategy 取消时终结
+        # 4. 构建新 context（替换 _task_id 和 on_progress，避免污染原批次）
+        retry_context = dict(self._last_ai_context)
+        retry_context["_task_id"] = None  # 不关联 TaskManager
+        retry_context["on_progress"] = lambda c, t, m: None  # noop，不更新进度
+        retry_context["strategy_key"] = self._last_strategy_key  # 透传给 retry_single
+        # on_result / on_card_start / on_card_error 保持原回调（更新 StreamCard）
+        # 5. 调用策略重试
+        try:
+            await strategy.retry_single(name, retry_context)
+        except asyncio.CancelledError:
+            raise  # R2 合规（占位卡终结由 select_strategy 取消路径处理）
+        except Exception as e:
+            logger.error("[ScreenerVM] retry_single_stock failed: %s", e, exc_info=True)
+            # A-1: retry_single 抛异常时（含 try 块之前的异常）恢复卡片为 error 状态避免假死
+            # _on_card_error 仅更新 is_analyzing=True 的卡片，成功路径不受影响
+            self._on_card_error(name, DataSanitizer.sanitize_error(e))
+            self._set_state(
+                status_message=Message("ai_retry_failed"),
+                status_color="error",
+            )
+        finally:
+            self._retrying = False
+            self._retrying_name = None
+            self._set_state(is_retrying=False)
+
+    def schedule_retry(self, name: str) -> None:
+        """UX-2.3: 调度单股重试，task 加入 _background_tasks 跟踪（VM dispose 时自动取消）。
+
+        同步签名以满足 Flet on_click 回调契约；内部经 loop.create_task 提交，
+        task 加入 _background_tasks + _on_background_task_done 跟踪生命周期。
+        """
+        if self._retrying:
+            return
+        loop = self._get_loop_or_none()
+        if loop is None:
+            return  # 无事件循环（测试环境/已 disposed），静默跳过
+        task = loop.create_task(self.retry_single_stock(name))
+        self._retry_task = task
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
 
     # --- AI Streaming Handlers ---
 
@@ -1152,7 +1286,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             self._last_ai_update = time.time()
 
         except Exception as e:
-            logger.error("Error flushing AI buffer: %s", e, exc_info=True)
+            logger.error("Error flushing AI buffer: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         finally:
             self._flush_pending = False
 

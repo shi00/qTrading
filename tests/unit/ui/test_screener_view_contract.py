@@ -526,9 +526,10 @@ class TestScreenerViewContract:
             f"禁止 set_run_disabled 调用 (派生 state.loading+selected_strategy, Task 3.2): {set_matches}"
         )
 
-        # 必须: 从 state.loading + state.selected_strategy 派生 run_disabled
-        assert "run_disabled = state.loading or not state.selected_strategy" in code, (
-            "必须从 state.loading + state.selected_strategy 派生 run_disabled (Task 3.2)"
+        # 必须: 从 state.loading + state.is_retrying + state.selected_strategy 派生 run_disabled
+        # UX-2.3: is_retrying 加入派生条件 (重试中禁用主运行按钮)
+        assert "run_disabled = state.loading or state.is_retrying or not state.selected_strategy" in code, (
+            "必须从 state.loading + state.is_retrying + state.selected_strategy 派生 run_disabled (Task 3.2 + UX-2.3)"
         )
 
     def test_no_export_disabled_use_state(self):

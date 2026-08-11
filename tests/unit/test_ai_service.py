@@ -100,6 +100,80 @@ class TestAIServiceConstants:
         assert isinstance(LITELLM_AVAILABLE, bool)
 
 
+class TestLiteLLMLazyLoading:
+    """R16: litellm 惰性加载行为验证。
+
+    注意：conftest 的 autouse session fixture `_restore_litellm_loaded_default`
+    会在会话开始时调用一次 `_ensure_litellm_loaded()`（恢复旧默认"已加载"语义），
+    故本类用例均显式用 monkeypatch 重置模块级状态后再验证，避免依赖会话全局状态。
+    """
+
+    def test_ensure_loads_and_configures_globals(self, monkeypatch):
+        import services.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "_litellm_import_attempted", False)
+        monkeypatch.setattr(ai_service, "litellm", None)
+        monkeypatch.setattr(ai_service, "acompletion", None)
+        monkeypatch.setattr(ai_service, "LITELLM_AVAILABLE", False)
+
+        assert ai_service._ensure_litellm_loaded() is True
+        assert ai_service.LITELLM_AVAILABLE is True
+        assert ai_service.litellm is not None
+        assert ai_service.acompletion is not None
+        # 首次加载完成全局参数配置（原模块顶层 import 块的职责）
+        assert ai_service.litellm.drop_params is True
+        assert ai_service.litellm.max_retries == 2
+        assert ai_service.litellm.modify_params is True
+
+    def test_ensure_is_idempotent_after_attempt(self, monkeypatch):
+        import services.ai_service as ai_service
+
+        # 已尝试过且失败：不重复 import（builtins.__import__ 抛错亦不触发），
+        # 直接返回当前可用标志，litellm 保持 None。
+        monkeypatch.setattr(ai_service, "_litellm_import_attempted", True)
+        monkeypatch.setattr(ai_service, "litellm", None)
+        monkeypatch.setattr(ai_service, "LITELLM_AVAILABLE", False)
+        with patch("builtins.__import__", side_effect=ImportError("must not import")):
+            # 若内部误触发 import，会在此抛 ImportError；不抛即证明为 no-op。
+            assert ai_service._ensure_litellm_loaded() is False
+        assert ai_service.litellm is None
+
+    def test_ensure_import_failure_keeps_none(self, monkeypatch):
+        import services.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "_litellm_import_attempted", False)
+        monkeypatch.setattr(ai_service, "litellm", None)
+        monkeypatch.setattr(ai_service, "acompletion", None)
+        monkeypatch.setattr(ai_service, "LITELLM_AVAILABLE", False)
+
+        with patch("builtins.__import__", side_effect=ImportError("no litellm")):
+            assert ai_service._ensure_litellm_loaded() is False
+        assert ai_service.litellm is None
+        assert ai_service.LITELLM_AVAILABLE is False
+
+    def test_check_reasoning_support_fallback_when_not_loaded(self, monkeypatch):
+        import builtins
+
+        import services.ai_service as ai_service
+
+        # litellm 未加载（None）时，_check_reasoning_support 走 LLM_PROVIDERS fallback，
+        # 不触发 litellm import。仅拦截 litellm 的 import（保留 utils.llm_providers 等
+        # fallback 路径所需的正常 import），从而验证 fallback 分支不依赖 litellm。
+        monkeypatch.setattr(ai_service, "litellm", None)
+        monkeypatch.setattr(ai_service, "_litellm_import_attempted", False)
+        real_import = builtins.__import__
+
+        def _block_litellm_import(name, *args, **kwargs):
+            if name == "litellm":
+                raise ImportError("must not import litellm")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_block_litellm_import):
+            result = ai_service._check_reasoning_support("deepseek-reasoner")
+        # 深层 fallback 依赖 LLM_PROVIDERS 中是否存在该 reasoning 模型；此处仅验证不抛错。
+        assert isinstance(result, bool)
+
+
 class TestAIServiceSafeTruncate:
     @patch("services.ai_service.ConfigHandler")
     @patch("services.ai_service.LITELLM_AVAILABLE", False)
@@ -129,9 +203,15 @@ class TestAIServiceSafeTruncate:
 
 
 class TestCheckReasoningSupport:
-    def test_no_litellm(self):
-        with patch("services.ai_service.LITELLM_AVAILABLE", False):
-            assert _check_reasoning_support("deepseek-v4-pro") is False
+    def test_no_litellm(self, monkeypatch):
+        # litellm 未加载（None）时走 LLM_PROVIDERS fallback，不报错且返回 bool。
+        # 注意：须显式置 litellm=None（而非仅 LITELLM_AVAILABLE=False），否则 session
+        # fixture 已加载态下该 patch 无法控制分支，断言失真。
+        import services.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "litellm", None)
+        result = _check_reasoning_support("deepseek-v4-pro")
+        assert isinstance(result, bool)
 
 
 class TestClassifyApiError:
@@ -379,6 +459,66 @@ class TestValidateAiAnalysisResponseFreeText:
         assert result["thinking"] == "B"
         assert len(result["ai_reason"]) == _FREE_TEXT_MAX_LEN
         assert result["uncertainty_factors"] == "D"
+
+    def test_configurable_max_len_via_appconfig(self, monkeypatch):
+        """UX-2.2: max_len 可通过 AppConfig 配置。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 4000),
+        )
+        long_text = "X" * 4500
+        result = validate_ai_analysis_response({"summary": long_text, "score": 50})
+        assert len(result["summary"]) == 4000
+        assert result["summary"] == "X" * 4000
+
+    def test_configurable_max_len_boundary_low(self, monkeypatch):
+        """UX-2.2: 边界值 100（最小值）。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 100),
+        )
+        long_text = "Y" * 200
+        result = validate_ai_analysis_response({"summary": long_text, "score": 50})
+        assert len(result["summary"]) == 100
+
+    def test_configurable_max_len_boundary_high(self, monkeypatch):
+        """UX-2.2: 边界值 10000（最大值）。"""
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 10000),
+        )
+        text = "Z" * 5000
+        result = validate_ai_analysis_response({"summary": text, "score": 50})
+        assert len(result["summary"]) == 5000
+
+    def test_sanitize_free_text_explicit_max_len(self):
+        """UX-2.2: _sanitize_free_text 直接传 max_len 参数。"""
+        from services.ai_service import _sanitize_free_text
+
+        result = _sanitize_free_text("ABCDEF", max_len=3)
+        assert result == "ABC"
+
+    def test_sanitize_free_text_default_reads_config(self, monkeypatch):
+        """UX-2.2: max_len=None 时读 ConfigHandler。"""
+        from services.ai_service import _sanitize_free_text
+        from utils.config_handler import ConfigHandler
+
+        monkeypatch.setattr(
+            ConfigHandler,
+            "get_ai_free_text_max_len",
+            staticmethod(lambda: 5),
+        )
+        result = _sanitize_free_text("ABCDEFGHIJ")
+        assert result == "ABCDE"
 
 
 class TestAIServiceIsCloudAvailable:

@@ -1,5 +1,6 @@
 # Flutter Web CanvasKit 渲染行为与 E2E 定位指南
 
+> 文档入口：[Flet 开发文档入口](./README.md)
 > **核心地位**：记录本项目绑定的 Flutter Web CanvasKit 渲染引擎特性、HTML 语义树生成规则、版本依赖锁定机制以及 E2E 测试定位与交互坑点。
 > **适用版本**：Flet V1（版本以 [`pyproject.toml`](../../pyproject.toml) 锁定为准；Flutter Web Engine Revision 从 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision` 读取，查询命令见 [upgrade-checklist.md §3.4](./upgrade-checklist.md#34-canvaskit-版本验证)）。
 > **相关文档**：
@@ -111,6 +112,13 @@ CanvasKit 并非渲染 HTML 原生控件，而是在 `<canvas>` 上绘图，并�
   ```bash
   pytest tests/e2e/ -o addopts="" -p no:xdist -p no:randomly
   ```
+
+### 坑点 6：CI 高负载下交互时序脆弱 → 步骤级"确认触发 + 重试"（PR 500 修复）
+- **根因**：CI 共享 runner 高负载/性能波动 → headless Chromium 无 GPU、CanvasKit 走 SwiftShader 软件渲染 → 帧率不稳（日志 `GL Driver Message (...) GPU stall due to ReadPixels`）→ 偶发时刻物理鼠标点击落在渲染中间帧被吞（交互未触发），或 `<flt-semantics>` 更新延迟导致断言超时。锚点（anchor）只能解决"定位"，不能解决"CI 时序抖动吞事件"，故需在交互层做健壮化。
+- **规程**：步骤级"确认触发 + N=3 重试"（间隔 500ms），以可靠"确认指标"判断交互是否真正触发，确认不到才重试，3 次仍失败抛真错误（不静默吞）。通用实现 `tests/e2e/helpers/anchor_page.py::retry_until_triggered(interact, confirm, attempts, interval_ms)`；`confirm` 为可注入 async 谓词，便于单测注入模拟"前 N-1 次失败"。
+  - **确认指标必须是"短轮询等待状态迁移"而非"点击后立即查询"**：`ScreenerPage.run` 点击 RUN_BUTTON 后，异步 loading 状态可能延迟数帧才反映到 DOM，立即 `count==0` 会误判"未触发"→ 重复点击已消失按钮 → 等满超时误报失败（恰与抗抖动目标相悖）。应改为 `expect_hidden(RUN_BUTTON, timeout_ms=2000)` 短轮询，区分"点击被吞（按钮持续可见→重试）"与"渲染延迟（按钮数帧内消失→成功）"。
+  - **重试粒度**：步骤级（交互方法内部），优于用例级 flaky（flaky 重跑整个用例含 DB seeding/页面加载，CI 成本高且不精准）。`DataPage.select_table` 整体重试（含 `select_option` + `TABLE_READY` 先 hidden 再 visible）。
+  - 本地无法复现 CI 偶发，最终验收依赖 CI 连续多次运行时验证。
 
 ---
 

@@ -516,28 +516,6 @@ class TestDocsConsistencyScriptExtensions:
         except UnicodeEncodeError:
             pytest.fail("main() should not raise UnicodeEncodeError on emoji output")
 
-    def test_resolve_target_doc_same_file_anchor(self):
-        """_resolve_target_doc: 同文件锚点（#section）返回 source_doc。"""
-        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
-
-        result = _resolve_target_doc("#section", CLAUDE_PATH)
-        assert result == CLAUDE_PATH
-
-    def test_resolve_target_doc_cross_file_from_man(self):
-        """_resolve_target_doc: man/ 下 ../CLAUDE.md 应解析为 ROOT/CLAUDE.md。"""
-        from check_docs_consistency import CLAUDE_PATH, FLET_BEST_PRACTICES_PATH, _resolve_target_doc
-
-        result = _resolve_target_doc("../CLAUDE.md#section", FLET_BEST_PRACTICES_PATH)
-        assert result == CLAUDE_PATH
-
-    def test_resolve_target_doc_non_checked_target(self):
-        """_resolve_target_doc: 非 CHECKED_DOCS 中的目标返回 None。"""
-        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
-
-        # ui/hooks.py 不在 CHECKED_DOCS 中
-        result = _resolve_target_doc("ui/hooks.py#section", CLAUDE_PATH)
-        assert result is None
-
     def test_relative_dead_links_detects_broken(self, tmp_path, monkeypatch):
         """man/ 目录下含 ./nonexistent.py 的文档应报死链。"""
         from check_docs_consistency import check_relative_dead_links
@@ -1697,3 +1675,218 @@ jobs:
 
         errors = check_enforcement_mapping()
         assert any("N5" in e for e in errors), f"应检测到 pytest 缺失, got: {errors}"
+
+
+class TestFletHubCompleteness:
+    """Flet 入口完整性检查（spec §11.1 + §11.2 + §11.3 + §11.4）。
+
+    验证 docs/flet/README.md 作为唯一导航入口的完整性：
+    - 动态发现 docs/flet/*.md 全部纳入 CHECKED_DOCS
+    - README 覆盖全部专题文档（无遗漏）
+    - README 不引用不存在的专题（无幽灵链接）
+    - 带锚点的缺失 Markdown 文件会被报告（§11.3 修复验证）
+    - man/flet-best-practices.md 只指向 README（不含子文档深链接）
+    - Flet 四包版本一致（flet / flet-desktop / flet-charts / flet-mcp）
+    """
+
+    def test_flet_readme_in_checked_docs(self):
+        """docs/flet/README.md 应在 CHECKED_DOCS 中（通过 FLET_DOCS_PATHS 动态发现）。"""
+        from check_docs_consistency import CHECKED_DOCS, FLET_HUB_PATH
+
+        assert FLET_HUB_PATH in CHECKED_DOCS, (
+            f"FLET_HUB_PATH {FLET_HUB_PATH} not in CHECKED_DOCS, "
+            f"FLET_DOCS_PATHS should dynamically discover docs/flet/README.md"
+        )
+
+    def test_mcp_usage_in_checked_docs(self):
+        """docs/flet/mcp-usage.md 应在 CHECKED_DOCS 中（通过 FLET_DOCS_PATHS 动态发现）。"""
+        from check_docs_consistency import CHECKED_DOCS
+
+        mcp_usage_path = ROOT / "docs" / "flet" / "mcp-usage.md"
+        assert mcp_usage_path in CHECKED_DOCS, (
+            "docs/flet/mcp-usage.md not in CHECKED_DOCS, FLET_DOCS_PATHS should dynamically discover all docs/flet/*.md"
+        )
+
+    def test_ui_ux_best_practices_in_checked_docs(self):
+        """docs/flet/ui-ux-best-practices.md 应在 CHECKED_DOCS 中（新增专题自动纳入门禁）。"""
+        from check_docs_consistency import CHECKED_DOCS
+
+        ui_ux_path = ROOT / "docs" / "flet" / "ui-ux-best-practices.md"
+        assert ui_ux_path in CHECKED_DOCS, (
+            "docs/flet/ui-ux-best-practices.md not in CHECKED_DOCS, "
+            "FLET_DOCS_PATHS should dynamically discover all docs/flet/*.md"
+        )
+
+    def test_canvaskit_e2e_guide_in_checked_docs(self):
+        """docs/flet/canvaskit-rendering-e2e-guide.md 应在 CHECKED_DOCS 中。"""
+        from check_docs_consistency import CHECKED_DOCS
+
+        canvaskit_path = ROOT / "docs" / "flet" / "canvaskit-rendering-e2e-guide.md"
+        assert canvaskit_path in CHECKED_DOCS, (
+            "docs/flet/canvaskit-rendering-e2e-guide.md not in CHECKED_DOCS, "
+            "FLET_DOCS_PATHS should dynamically discover all docs/flet/*.md"
+        )
+
+    def test_flet_docs_paths_matches_glob(self):
+        """FLET_DOCS_PATHS 应与 sorted(docs/flet/*.md) 实际集合一致（动态发现验证）。"""
+        from check_docs_consistency import FLET_DOCS_DIR, FLET_DOCS_PATHS
+
+        expected = sorted(FLET_DOCS_DIR.glob("*.md"))
+        assert expected == FLET_DOCS_PATHS, (
+            f"FLET_DOCS_PATHS does not match sorted(FLET_DOCS_DIR.glob('*.md')):\n"
+            f"  FLET_DOCS_PATHS: {FLET_DOCS_PATHS}\n"
+            f"  expected: {expected}"
+        )
+
+    def test_readme_covers_all_flet_docs(self):
+        """README 应覆盖全部 docs/flet/*.md 专题文档（除 README.md 自身）。"""
+        from check_docs_consistency import check_flet_hub_completeness
+
+        errors = check_flet_hub_completeness()
+        missing_errors = [e for e in errors if "未链接专题文档" in e]
+        assert missing_errors == [], "docs/flet/README.md 未覆盖全部专题文档:\n  " + "\n  ".join(missing_errors)
+
+    def test_readme_no_phantom_links(self):
+        """README 不应引用不存在的专题文档（防止幽灵链接）。"""
+        from check_docs_consistency import check_flet_hub_completeness
+
+        errors = check_flet_hub_completeness()
+        phantom_errors = [e for e in errors if "引用了不存在的专题文档" in e]
+        assert phantom_errors == [], "docs/flet/README.md 引用了不存在的专题文档:\n  " + "\n  ".join(phantom_errors)
+
+    def test_check_flet_hub_completeness_passes(self):
+        """check_flet_hub_completeness() 在当前项目状态下应返回空列表（全部通过）。"""
+        from check_docs_consistency import check_flet_hub_completeness
+
+        errors = check_flet_hub_completeness()
+        assert errors == [], "check_flet_hub_completeness() should pass:\n  " + "\n  ".join(errors)
+
+    def test_flet_hub_completeness_detects_missing_registration(self, tmp_path, monkeypatch):
+        """新增 docs/flet/xxx.md 未登记到 README 时应报错（fail closed）。"""
+        from check_docs_consistency import check_flet_hub_completeness
+
+        # 构造临时 docs/flet/ 目录
+        flet_dir = tmp_path / "docs" / "flet"
+        flet_dir.mkdir(parents=True)
+        # README 只链接 a.md
+        (flet_dir / "README.md").write_text("# Flet Hub\n\n[a](./a.md)\n", encoding="utf-8")
+        (flet_dir / "a.md").write_text("# A\n", encoding="utf-8")
+        # b.md 未在 README 中登记
+        (flet_dir / "b.md").write_text("# B\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.FLET_HUB_PATH", flet_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.FLET_DOCS_DIR", flet_dir)
+        monkeypatch.setattr(
+            "check_docs_consistency.FLET_DOCS_PATHS",
+            sorted(flet_dir.glob("*.md")),
+        )
+
+        errors = check_flet_hub_completeness()
+        assert any("b.md" in e and "未链接" in e for e in errors), f"应检测到 b.md 未登记到 README, got: {errors}"
+
+    def test_flet_hub_completeness_detects_phantom_link(self, tmp_path, monkeypatch):
+        """README 引用不存在的专题文件时应报错（防止幽灵链接）。"""
+        from check_docs_consistency import check_flet_hub_completeness
+
+        # 构造临时 docs/flet/ 目录
+        flet_dir = tmp_path / "docs" / "flet"
+        flet_dir.mkdir(parents=True)
+        # README 引用了不存在的 phantom.md
+        (flet_dir / "README.md").write_text("# Flet Hub\n\n[phantom](./phantom.md)\n[a](./a.md)\n", encoding="utf-8")
+        (flet_dir / "a.md").write_text("# A\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.FLET_HUB_PATH", flet_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.FLET_DOCS_DIR", flet_dir)
+        monkeypatch.setattr(
+            "check_docs_consistency.FLET_DOCS_PATHS",
+            sorted(flet_dir.glob("*.md")),
+        )
+
+        errors = check_flet_hub_completeness()
+        assert any("phantom.md" in e and "引用了不存在" in e for e in errors), (
+            f"应检测到 phantom.md 幽灵链接, got: {errors}"
+        )
+
+    def test_anchor_dead_link_to_missing_file_detected(self, tmp_path, monkeypatch):
+        """带锚点的链接指向不存在的 Markdown 文件时应被报告（spec §11.3 修复验证）。"""
+        from check_docs_consistency import check_anchor_dead_links
+
+        # 构造临时文档，含指向不存在文件的带锚点链接
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n[link](./nonexistent.md#section)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [tmp_doc])
+
+        errors = check_anchor_dead_links()
+        assert len(errors) == 1, f"Should detect 1 dead link to missing file, got {errors}"
+        assert "nonexistent.md" in errors[0]
+        assert "不存在" in errors[0]
+
+    def test_anchor_dead_link_to_existing_non_checked_file_skips_anchor_check(self, tmp_path, monkeypatch):
+        """带锚点的链接指向存在但不在 CHECKED_DOCS 中的文件时，跳过锚点校验（不误报）。"""
+        from check_docs_consistency import check_anchor_dead_links
+
+        # 构造临时文档，含指向存在但不在 CHECKED_DOCS 中的文件的带锚点链接
+        tmp_doc = tmp_path / "test_doc.md"
+        # 创建目标文件（存在但不在 CHECKED_DOCS 中）
+        target_file = tmp_path / "target.md"
+        target_file.write_text("# Target\n", encoding="utf-8")
+        tmp_doc.write_text("# Test\n\n[link](./target.md#nonexistent-anchor)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [tmp_doc])
+
+        errors = check_anchor_dead_links()
+        # 目标文件存在但不在 CHECKED_DOCS 中 → 跳过锚点校验，不报错
+        assert errors == [], f"Should not flag anchor for existing non-CHECKED_DOCS file, got: {errors}"
+
+    def test_man_flet_best_practices_only_links_readme(self):
+        """man/flet-best-practices.md 应只指向 README，不含子文档深链接。
+
+        spec §9 要求 man/flet-best-practices.md 缩减为最小 stub，只链接 docs/flet/README.md。
+        """
+        from check_docs_consistency import FLET_BEST_PRACTICES_PATH
+
+        content = FLET_BEST_PRACTICES_PATH.read_text(encoding="utf-8")
+        # 应包含指向 docs/flet/README.md 的链接
+        assert "../docs/flet/README.md" in content or "docs/flet/README.md" in content, (
+            "man/flet-best-practices.md should link to docs/flet/README.md"
+        )
+        # 不应包含 docs/flet/ 子文档深链接（如 v1-api-constraints.md / project-differences.md 等）
+        # 排除 README.md 自身（允许链接 README.md）
+        sub_doc_pattern = re.compile(r"\(\.\./docs/flet/(?!README\.md)[^)]+\.md[^)]*\)")
+        deep_links = sub_doc_pattern.findall(content)
+        assert deep_links == [], (
+            f"man/flet-best-practices.md should not contain deep links to docs/flet/ sub-documents "
+            f"(only README.md allowed), found: {deep_links}"
+        )
+
+    def test_flet_four_packages_version_consistent(self):
+        """Flet 四包（flet / flet-desktop / flet-charts / flet-mcp）版本应一致。"""
+        from check_docs_consistency import _get_flet_locked_versions
+
+        versions = _get_flet_locked_versions()
+        assert len(versions) == 1, (
+            f"Flet 四包版本不一致 (应全部锁定同一版本): {versions}. "
+            f"检查 pyproject.toml [project.dependencies] 和 [project.optional-dependencies].dev"
+        )
+
+    def test_flet_packages_includes_flet_mcp(self):
+        """_FLET_PACKAGES 应包含 flet-mcp（spec §11.4 四包版本一致性）。"""
+        from check_docs_consistency import _FLET_PACKAGES
+
+        assert "flet-mcp" in _FLET_PACKAGES, (
+            f"_FLET_PACKAGES should include 'flet-mcp' for 4-package version consistency, got: {_FLET_PACKAGES}"
+        )
+
+    def test_flet_version_drift_check_passes(self):
+        """check_flet_version_drift() 在当前项目状态下应返回空列表（无版本漂移）。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        errors = check_flet_version_drift()
+        assert errors == [], "check_flet_version_drift() should pass:\n  " + "\n  ".join(errors)
+
+    def test_main_returns_zero_with_flet_hub_check(self):
+        """脚本 main() 包含 Flet 入口完整性检查后仍应返回 0（全部通过）。"""
+        from check_docs_consistency import main
+
+        assert main() == 0, (
+            "check_docs_consistency.py main() should return 0 when all checks pass (including Flet hub completeness)"
+        )

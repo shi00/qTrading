@@ -657,13 +657,17 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         token = token.strip()
         if not token:
             return
-        await ThreadPoolManager().run_async(TaskType.IO, self._save_tushare_token_sync, token)
-
-    def _save_tushare_token_sync(self, token: str) -> None:
-        """同步写入 token (供 ThreadPoolManager 调度, R16 IO offload)."""
-        ConfigHandler.save_token(token)
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
+        # TushareClient 在事件循环线程构造并 await set_token_async：同步包装器 set_token
+        # 依赖已捕获的 _loop，若在工作线程构造（_loop=None）会抛 RuntimeError。
+        # set_token_async 仅重建 pro_api/限流器（无网络 IO），不违反 R16。
         client = TushareClient()
-        client.set_token(token)
+        needs_probe = await client.set_token_async(token)
+        # 与 verify_token 对齐 set_token_async 契约：返回 True 表示 capability cache 已清空，
+        # 需重建 cache，避免 tier 预筛基于空 cache 降级。probe 内部自带异常回滚，不会因 API
+        # 探测失败使保存流程中断。
+        if needs_probe:
+            await client.probe_api_capabilities()
 
     async def set_history_years(self, years: int) -> None:
         """异步保存历史年限配置 (R16: IO offload via ThreadPoolManager).

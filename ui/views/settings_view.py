@@ -31,6 +31,7 @@ from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTa
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 from ui.views.settings_tabs.database_tab import DatabaseTab
 from ui.views.settings_tabs.system_tab import SystemTab
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def SettingsView(active: bool = True) -> ft.Container:
             logger.warning(
                 "[SettingsView] Invalid tab index data: %s, error: %s",
                 e.control.data,
-                exc,
+                DataSanitizer.sanitize_error(exc),
                 exc_info=True,
             )
             return

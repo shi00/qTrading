@@ -1,8 +1,8 @@
-"""文档一致性检查（C5 第一阶段 + 第二阶段 3a + 3b + 3c）。
+"""文档一致性检查（C5 第一阶段 + 第二阶段 3a + 3b + 3c + Flet 入口完整性）。
 
 检查项：
 1. Markdown 锚点死链校验：扫描 CHECKED_DOCS 全部受检文件中带 `#anchor` 的 markdown 链接,
-   确认目标标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
+   确认目标文件存在且标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
 2. CLAUDE.md 顶部版本与 pyproject.toml `[project].version` 一致。
 3. 文档中"项目使用 N 个 pre-commit hook"的数量与 `.pre-commit-config.yaml` 本地 hook 数量一致。
 4. NOTE(lazy) 三要素格式检查：扫描所有 .py 文件中的 `NOTE(lazy):` 标记,
@@ -14,6 +14,8 @@
    （R 编号 append-only / 连续 / 条目数匹配，见 ADR-0003）。
 8. enforcement 字段映射一致性检查（3c）：校验 redlines.yml `enforcement` 字段中声称的守护机制
    实际配置存在且粗粒度可达（9 个不变量 N1~N9，见 ADR-0005）。
+9. Flet 入口完整性检查：校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档，
+   且不引用不存在的专题文件。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -21,6 +23,7 @@
 - 3a NOTE(lazy) 三要素检查（已实现：check_note_lazy_format()）。
 - 3b 红线 R1~R18 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
+- Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
 """
 
 from __future__ import annotations
@@ -47,12 +50,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
-FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"  # 现为 stub，链接到 docs/flet/
-FLET_V1_API_CONSTRAINTS_PATH = ROOT / "docs" / "flet" / "v1-api-constraints.md"
-FLET_PROJECT_DIFFERENCES_PATH = ROOT / "docs" / "flet" / "project-differences.md"
-FLET_UPGRADE_CHECKLIST_PATH = ROOT / "docs" / "flet" / "upgrade-checklist.md"
-FLET_API_VERIFICATION_TEMPLATE_PATH = ROOT / "docs" / "flet" / "api-verification-template.md"
-FLET_ACCESSIBILITY_BASELINE_PATH = ROOT / "docs" / "flet" / "accessibility-baseline.md"
+# man/flet-best-practices.md 现为 stub，指向 docs/flet/README.md（保留历史路径兼容）
+FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
 KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
 REDLINES_YAML_PATH = ROOT / "docs" / "governance" / "redlines.yml"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
@@ -63,24 +62,25 @@ CI_WORKFLOW_DIR = ROOT / ".github" / "workflows"
 CHECK_REDLINES_SCRIPT_PATH = ROOT / "scripts" / "check_redlines.py"
 GITLEAKS_CONFIG_PATH = ROOT / ".gitleaks.toml"
 
-# docs/flet/ 子文档清单（Phase 2.5 迁移后 Flet 内容分散于此）
-FLET_DOCS_PATHS: list[Path] = [
-    FLET_BEST_PRACTICES_PATH,
-    FLET_V1_API_CONSTRAINTS_PATH,
-    FLET_PROJECT_DIFFERENCES_PATH,
-    FLET_UPGRADE_CHECKLIST_PATH,
-    FLET_API_VERIFICATION_TEMPLATE_PATH,
-    FLET_ACCESSIBILITY_BASELINE_PATH,
-]
+# docs/flet/ 目录与导航入口
+FLET_DOCS_DIR = ROOT / "docs" / "flet"
+FLET_HUB_PATH = FLET_DOCS_DIR / "README.md"
+
+# 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
+# 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
+FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P3-7 修复：纳入 docs/guides/、docs/patterns/、docs/architecture/、docs/README.md 全部 markdown，
 # 防止从 CONTRIBUTING.md 迁移后的 `./` 死链逃逸门禁
 # docs-quality-review 扩展：纳入 root README/CHANGELOG/SECURITY、PR 模板、ADR 全部、man/ 全部
+# Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md（含 README.md/ui-ux-best-practices.md/
+# canvaskit-rendering-e2e-guide.md/mcp-usage.md 等），新增专题自动纳入门禁
 CHECKED_DOCS: list[Path] = [
     CLAUDE_PATH,
     CONTRIBUTING_PATH,
     *FLET_DOCS_PATHS,
+    FLET_BEST_PRACTICES_PATH,  # man/flet-best-practices.md stub（保留历史路径兼容）
     KNOWN_TECHNICAL_DEBT_PATH,
     *(ROOT / "docs" / "guides").glob("*.md"),
     *(ROOT / "docs" / "patterns").glob("*.md"),
@@ -100,7 +100,9 @@ CHECKED_DOCS: list[Path] = [
 FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
-_FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts")
+# flet/flet-desktop/flet-charts 在 [project.dependencies]，
+# flet-mcp 在 [project.optional-dependencies].dev（开发期 MCP 包，与主包版本对齐，见 CLAUDE.md §1.10）
+_FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-mcp")
 
 # Flet 关键词附近版本号扫描窗口（前后字符数，spec 要求 50）
 _FLET_KEYWORD_WINDOW = 50
@@ -131,34 +133,15 @@ def extract_headings(content: str) -> set[str]:
     return anchors
 
 
-def _resolve_target_doc(link_url: str, source_doc: Path) -> Path | None:
-    """解析 markdown 链接 url 的目标文件路径。
-
-    返回 None 表示非受检文件（外部链接或不在 CHECKED_DOCS 中的目标）。
-
-    解析规则：
-    - 同文件锚点（`#anchor`）：返回 source_doc
-    - 跨文件链接：从 source_doc 所在目录解析相对路径，若指向 CHECKED_DOCS 中的文件则返回该文件。
-      例如 man/flet-best-practices.md 中的 `../CLAUDE.md` 解析为 ROOT/CLAUDE.md。
-    """
-    if "#" in link_url:
-        target_path_part = link_url.split("#", 1)[0]
-    else:
-        target_path_part = link_url
-
-    # 同文件锚点
-    if not target_path_part:
-        return source_doc
-
-    # 跨文件链接：从 source_doc 所在目录解析相对路径
-    target_doc = (source_doc.parent / target_path_part).resolve()
-    if target_doc in CHECKED_DOCS:
-        return target_doc
-    return None
-
-
 def check_anchor_dead_links() -> list[str]:
     """检查项 1：markdown 锚点死链。
+
+    校验逻辑（spec §11.3 修复锚点逃逸）：
+    1. 同文件锚点（`#anchor`）：直接校验锚点存在性。
+    2. 跨文件链接（`./file.md#anchor`）：
+       a. 先判断目标文件是否存在，不存在立即报错（不跳过）。
+       b. 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）。
+       c. 文件存在且在 CHECKED_DOCS 中：校验锚点存在性。
 
     跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
     """
@@ -194,14 +177,31 @@ def check_anchor_dead_links() -> list[str]:
                 if not anchor:
                     continue
 
-                target_doc = _resolve_target_doc(url, doc)
-                if target_doc is None:
-                    # 目标不在受检范围（如 README.md、pyproject.toml 等），跳过
+                # 提取目标文件路径部分（锚点前的部分）
+                target_path_part = url.split("#", 1)[0]
+
+                # 同文件锚点：直接校验锚点存在性
+                if not target_path_part:
+                    if anchor not in doc_headings.get(doc, set()):
+                        errors.append(
+                            f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)"
+                        )
                     continue
 
-                if anchor not in doc_headings.get(target_doc, set()):
+                # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
+                target_path = (doc.parent / target_path_part).resolve()
+                if not target_path.exists():
+                    errors.append(f"{doc.name}:{line_no}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
+                    continue
+
+                # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
+                if target_path not in CHECKED_DOCS:
+                    continue
+
+                # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
+                if anchor not in doc_headings.get(target_path, set()):
                     errors.append(
-                        f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_doc.name} 中不存在)"
+                        f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
                     )
     return errors
 
@@ -399,14 +399,21 @@ def check_note_lazy_format() -> list[str]:
 
 
 def _get_flet_locked_versions() -> set[str]:
-    """从 pyproject.toml `[project.dependencies]` 读取 flet/flet-desktop/flet-charts 锁定版本。
+    """从 pyproject.toml 读取 flet/flet-desktop/flet-charts/flet-mcp 锁定版本。
 
-    返回版本号集合（三包通常锁定同一版本，如 {"0.86.0"}）。
+    flet/flet-desktop/flet-charts 在 `[project.dependencies]`，
+    flet-mcp 在 `[project.optional-dependencies].dev`（开发期 MCP 包，与主包版本对齐）。
+
+    返回版本号集合（四包通常锁定同一版本，如 {"0.86.3"}）。
     """
     with open(PYPROJECT_PATH, "rb") as f:
         cfg = tomllib.load(f)
     versions: set[str] = set()
-    for dep in cfg["project"]["dependencies"]:
+    # 合并运行时依赖与全部可选依赖组（dev/optional 等），覆盖 flet-mcp 在 dev 中的场景
+    deps: list[str] = list(cfg["project"]["dependencies"])
+    for extra_group in cfg.get("project", {}).get("optional-dependencies", {}).values():
+        deps.extend(extra_group)
+    for dep in deps:
         for pkg in _FLET_PACKAGES:
             m = re.match(rf"{re.escape(pkg)}==(\d+\.\d+\.\d+)", dep.strip())
             if m:
@@ -444,6 +451,90 @@ def check_flet_version_drift() -> list[str]:
                     errors.append(
                         f"{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}"
                     )
+    return errors
+
+
+# =============================================================================
+# Flet 入口完整性检查（spec §11.2）
+#
+# 校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档（除 README.md 自身），
+# 且不引用不存在的专题文件。新增 docs/flet/*.md 未登记到 README 时 fail closed。
+# =============================================================================
+
+# markdown 链接正则：[text](url)，url 为相对路径（含 ./ 前缀或纯文件名）
+_MD_LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+
+
+def check_flet_hub_completeness() -> list[str]:
+    """检查项 9：Flet 入口完整性（spec §11.2）。
+
+    校验 docs/flet/README.md 是否覆盖全部 docs/flet/*.md 专题文档：
+    1. 枚举 docs/flet/*.md（排除 README.md 自身）。
+    2. 检查 README 是否链接每个专题文件（通过文件名在 markdown 链接 url 中出现）。
+    3. 检查 README 是否引用不存在的专题文件（防止幽灵链接）。
+    4. 文件名大小写必须一致。
+
+    仅检查指向 docs/flet/ 目录内 .md 文件的链接，忽略指向外部目录的链接
+    （如 ../../CLAUDE.md、../patterns/mvvm.md 等）。
+
+    返回错误列表（空列表表示通过）。
+    """
+    errors: list[str] = []
+
+    if not FLET_HUB_PATH.exists():
+        errors.append(f"Flet 入口文件不存在: {FLET_HUB_PATH}")
+        return errors
+
+    readme_content = FLET_HUB_PATH.read_text(encoding="utf-8")
+
+    # 枚举 docs/flet/*.md 实际文件（排除 README.md 自身）
+    actual_files: set[str] = set()
+    for flet_doc in FLET_DOCS_PATHS:
+        if flet_doc.name == "README.md":
+            continue
+        actual_files.add(flet_doc.name)
+
+    # 提取 README 中所有 markdown 链接的 url，筛选指向 docs/flet/ 目录内 .md 文件的链接
+    # 链接 url 形态：./xxx.md / xxx.md / ./subdir/xxx.md 等（相对 FLET_HUB_PATH 所在目录）
+    referenced_files: set[str] = set()
+    in_code_block = False
+    for line in readme_content.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        for m in _MD_LINK_PATTERN.finditer(line):
+            url = m.group(2).strip()
+            # 忽略外部链接
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            # 提取文件名部分（去掉锚点和查询参数）
+            url_path = url.split("#", 1)[0].split("?", 1)[0]
+            if not url_path:
+                continue
+            # 解析目标文件路径（相对 FLET_HUB_PATH 所在目录）
+            target_path = (FLET_HUB_PATH.parent / url_path).resolve()
+            # 只检查解析后仍在 FLET_DOCS_DIR 目录内的链接（排除 ../CLAUDE.md 等外部链接）
+            try:
+                target_path.relative_to(FLET_DOCS_DIR)
+            except ValueError:
+                # 目标在 docs/flet/ 目录外，跳过（不属于 Flet 专题文档）
+                continue
+            url_basename = target_path.name
+            if url_basename.endswith(".md") and url_basename != "README.md":
+                referenced_files.add(url_basename)
+
+    # 检查 1：README 是否覆盖全部专题文件
+    missing_in_readme = actual_files - referenced_files
+    for fname in sorted(missing_in_readme):
+        errors.append(f"Flet 入口完整性：{FLET_HUB_PATH.name} 未链接专题文档 '{fname}'")
+
+    # 检查 2：README 是否引用不存在的专题文件（幽灵链接）
+    phantom_files = referenced_files - actual_files
+    for fname in sorted(phantom_files):
+        errors.append(f"Flet 入口完整性：{FLET_HUB_PATH.name} 引用了不存在的专题文档 '{fname}'")
+
     return errors
 
 
@@ -901,6 +992,8 @@ def main() -> int:
     # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
     # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
     all_errors.extend(check_enforcement_mapping())
+    # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
+    all_errors.extend(check_flet_hub_completeness())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -911,7 +1004,7 @@ def main() -> int:
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "enforcement 字段映射一致性）"
+        "enforcement 字段映射一致性 / Flet 入口完整性）"
     )
     return 0
 

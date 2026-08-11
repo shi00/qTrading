@@ -197,6 +197,8 @@ class AppConfig(BaseModel):
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
+    # UX-2.2: AI 自由文本（summary/thinking/ai_reason/uncertainty_factors）最大长度，可配置
+    ai_free_text_max_len: int = Field(default=1000, ge=100, le=10000)
     news_poll_interval: int = Field(default=60, ge=10)
     market_data_poll_interval: int = Field(default=30, ge=10)
     init_history_years: int = Field(default=3, ge=1, le=5)
