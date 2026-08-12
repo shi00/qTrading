@@ -347,8 +347,8 @@ def LocalModelConfigPanel(
     )
 
     # --- Header / desc ---
+    # SectionHeader 为 frozen Component，不能在构建后改 visible，compact 模式下通过条件渲染隐藏。
     header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")
-    header_text.visible = not compact
 
     desc_text = ft.Text(
         value=I18n.get("settings_local_ai_desc"),
@@ -368,7 +368,7 @@ def LocalModelConfigPanel(
 
     form_content = ft.Column(
         controls=[
-            header_text,
+            *([] if compact else [header_text]),
             desc_text,
             ft.Container(height=10) if not compact else ft.Container(height=5),
             ft.Row(

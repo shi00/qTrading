@@ -891,13 +891,13 @@ class TestLLMConfigPanelLayout:
         assert section_header.visible is True
 
     def test_section_header_hidden_when_compact(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """compact 模式 SectionHeader.visible=False。"""
+        """compact 模式 SectionHeader 不加入控件树（条件渲染，而非 visible=False）。"""
         _, _, result, _ = _render_panel(compact=True)
         assert isinstance(result, ft.Container)
         form_content = result.content
         assert isinstance(form_content, ft.Column)
-        section_header = form_content.controls[0]
-        assert section_header.visible is False
+        # SectionHeader 被 mock 为 ft.Container，compact 模式下不应出现在 controls 中
+        assert not any(isinstance(c, ft.Container) for c in form_content.controls)
 
     def test_save_button_visible_when_show_save_true(self, mock_i18n_state, mock_app_colors_state) -> None:
         """show_save_button=True 时保存按钮可见。"""

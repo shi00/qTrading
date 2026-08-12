@@ -443,8 +443,9 @@ def LLMConfigPanel(
     links_row = _build_links_row(state.provider, compact)
     links_row.visible = show_register_link
 
+    # SectionHeader 是 @ft.component，返回的 Component 为 frozen，不能直接改 .visible，
+    # 因此在 compact 模式下通过条件渲染（不加入 form_content）实现隐藏。
     section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
-    section_header.visible = not compact
 
     # Task 2.2: AI 外发知情说明 + 确认 checkbox
     ai_disclosure_text = ft.Text(
@@ -458,9 +459,13 @@ def LLMConfigPanel(
         on_change=safe_on_change(_on_acknowledgment_change_factory(vm)),
     )
 
-    form_content = ft.Column(
-        controls=[
-            section_header,
+    # compact 模式下隐藏区块标题：SectionHeader 为 frozen Component，无法在构建后改 visible，
+    # 故通过条件渲染决定是否加入 controls。
+    content_controls: list[ft.Control] = []
+    if not compact:
+        content_controls.append(section_header)
+    content_controls.extend(
+        [
             ft.Row(
                 [provider_dropdown],
                 alignment=ft.MainAxisAlignment.START,
@@ -478,7 +483,11 @@ def LLMConfigPanel(
                 spacing=5,
             ),
             links_row,
-        ],
+        ]
+    )
+
+    form_content = ft.Column(
+        controls=content_controls,
         spacing=10 if not compact else 6,
         horizontal_alignment=ft.CrossAxisAlignment.START,
     )
