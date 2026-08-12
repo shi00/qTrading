@@ -108,6 +108,18 @@ def _find_text_field(root: Any, label: str) -> ft.TextField:
     raise AssertionError(f"TextField with label={label} not found")
 
 
+def _find_acknowledgment_label_clickable(root: Any) -> ft.GestureDetector:
+    """通过 label 文本查找 AI 外发知情确认标签的 GestureDetector (on_tap 触发切换)。"""
+    key = "ai_external_acknowledgment_checkbox"
+    for ctrl in _walk_controls(root):
+        if not isinstance(ctrl, ft.GestureDetector):
+            continue
+        content = getattr(ctrl, "content", None)
+        if isinstance(content, ft.Text) and getattr(content, "value", None) == key:
+            return ctrl
+    raise AssertionError("acknowledgment label GestureDetector not found")
+
+
 def _page_run_task(page: FakePage) -> MagicMock:
     """获取 page.run_task mock (动态注入, pyright safe)。
 
@@ -792,6 +804,7 @@ class _FakeLLMConfigPanelVM:
         self.update_azure_resource = MagicMock()
         self.update_azure_deployment = MagicMock()
         self.update_azure_version = MagicMock()
+        self.update_ai_external_acknowledged = MagicMock()
 
     @property
     def state(self) -> LLMConfigState:
@@ -1223,6 +1236,35 @@ class TestLLMConfigPanelEventHandlers:
         run_task = _page_run_task(page)
         run_task.reset_mock()
         _invoke(provider_dd.on_select, _make_event(""))
+        run_task.assert_not_called()
+
+    def test_acknowledgment_label_click_calls_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """acknowledgment label GestureDetector on_tap → page.run_task(vm.update_ai_external_acknowledged, True)。
+
+        Task 2.2 覆盖 L458-L466: 默认 ai_external_acknowledged=False,
+        点击 label 取反为 True 并调 page.run_task(vm.update_ai_external_acknowledged, True)。
+        """
+        vm, page, result, _ = _render_panel()
+        label_clickable = _find_acknowledgment_label_clickable(result)
+
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(label_clickable.on_tap, _make_event())
+        run_task.assert_called_once_with(vm.update_ai_external_acknowledged, True)
+
+    def test_acknowledgment_label_click_runtime_error_swallowed(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """acknowledgment label on_tap: ft.context.page 抛 RuntimeError → 静默处理不抛异常。
+
+        Task 2.2 覆盖 L465-L466: except RuntimeError 分支, logger.debug 记录, 不调 run_task。
+        """
+        _, page, result, _ = _render_panel()
+        label_clickable = _find_acknowledgment_label_clickable(result)
+
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no page")))
+            _invoke(label_clickable.on_tap, _make_event())
         run_task.assert_not_called()
 
 
