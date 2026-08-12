@@ -669,13 +669,13 @@ class TestLocalModelConfigPanelLayout:
         assert section_header.visible is True
 
     def test_section_header_hidden_when_compact(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """compact 模式 SectionHeader.visible=False。"""
+        """compact 模式 SectionHeader 不加入控件树，controls[0] 直接是 desc_text。"""
         _, _, result, _ = _render_panel(compact=True)
         assert isinstance(result, ft.Container)
         form_content = result.content
         assert isinstance(form_content, ft.Column)
-        section_header = form_content.controls[0]
-        assert section_header.visible is False
+        # 原行为 SectionHeader(Container) 在 controls[0]；条件渲染后 header 被移除，controls[0] 为 desc_text
+        assert not isinstance(form_content.controls[0], ft.Container)
 
     def test_desc_text_visible_when_not_compact(self, mock_i18n_state, mock_app_colors_state) -> None:
         """非 compact 模式 desc_text.visible=True。"""
@@ -690,7 +690,8 @@ class TestLocalModelConfigPanelLayout:
         _, _, result, _ = _render_panel(compact=True)
         form_content = result.content
         assert isinstance(form_content, ft.Column)
-        desc_text = form_content.controls[1]
+        # header 被移除后，desc_text 是 controls[0]
+        desc_text = form_content.controls[0]
         assert desc_text.visible is False
 
     def test_save_button_hidden_when_show_save_false(self, mock_i18n_state, mock_app_colors_state) -> None:
