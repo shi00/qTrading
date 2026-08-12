@@ -447,13 +447,6 @@ def LLMConfigPanel(
     # 因此在 compact 模式下通过条件渲染（不加入 form_content）实现隐藏。
     section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
 
-    # Task 2.2: AI 外发知情说明 + 确认 checkbox
-    ai_disclosure_text = ft.Text(
-        I18n.get("ai_external_disclosure"),
-        size=AppStyles.FONT_SIZE_BODY_SM,
-        color=AppColors.WARNING,
-    )
-
     # Task 2.2: 确认 checkbox。长 label 在窄容器内无法换行会被截断，
     # 故用无 label 的 Checkbox + 可 expand 的独立 Text 组合展示。
     def _on_acknowledgment_label_click(e: ft.ControlEvent) -> None:
@@ -495,7 +488,6 @@ def LLMConfigPanel(
             base_url_input,
             api_key_input,
             azure_row,
-            ai_disclosure_text,
             ft.Row(
                 controls=[
                     ai_acknowledgment_checkbox,
