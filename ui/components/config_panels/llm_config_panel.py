@@ -452,10 +452,31 @@ def LLMConfigPanel(
         size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.WARNING,
     )
+
+    # Task 2.2: 确认 checkbox。长 label 在窄容器内无法换行会被截断，
+    # 故用无 label 的 Checkbox + 可 expand 的独立 Text 组合展示。
+    def _on_acknowledgment_label_click(e: ft.ControlEvent) -> None:
+        # 点击 label 等价于切换 checkbox（取反当前确认状态）
+        checked = not state.ai_external_acknowledged
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.update_ai_external_acknowledged, checked)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for update_ai_external_acknowledged")
+
     ai_acknowledgment_checkbox = ft.Checkbox(
-        label=I18n.get("ai_external_acknowledgment_checkbox"),
         value=state.ai_external_acknowledged,
         on_change=safe_on_change(_on_acknowledgment_change_factory(vm)),
+    )
+    ai_acknowledgment_label_clickable = ft.GestureDetector(
+        content=ft.Text(
+            I18n.get("ai_external_acknowledgment_checkbox"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        ),
+        on_tap=safe_on_click(_on_acknowledgment_label_click),
+        expand=True,
     )
 
     form_content = ft.Column(
@@ -470,7 +491,13 @@ def LLMConfigPanel(
             api_key_input,
             azure_row,
             ai_disclosure_text,
-            ai_acknowledgment_checkbox,
+            ft.Row(
+                controls=[
+                    ai_acknowledgment_checkbox,
+                    ai_acknowledgment_label_clickable,
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
             action_buttons,
             ft.Row(
                 [status_icon, status_text_ctrl],
