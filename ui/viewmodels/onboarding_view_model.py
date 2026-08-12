@@ -453,9 +453,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         try:
 
             def progress_callback(current, total, message):
-                # NOTE(lazy): message 是 service 层(DataProcessor)传入的已翻译字符串,作为 key 透传.
-                #   ceiling: service 层产出 i18n key + params. upgrade: DataProcessor.progress_callback 重构.
-                self._set_state(sync_progress=current / 100, sync_progress_message=Message(key=message))
+                # DataProcessor 传入的 message 为 service 层已翻译字符串，不能作为 i18n key 透传，
+                # 否则产生 missing-translation 噪音。统一使用固定 key，进度百分比仍实时更新。
+                self._set_state(sync_progress=current / 100, sync_progress_message=Message("wizard_status_syncing"))
 
             result = await self.data_processor.initialize_system(
                 progress_callback=progress_callback,
