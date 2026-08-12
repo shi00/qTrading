@@ -657,7 +657,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         token = token.strip()
         if not token:
             return
-        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
+        # keyring.set_password + save_config 均为同步 IO，15s 兜底防 keyring 后端卡死
+        await asyncio.wait_for(
+            ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
+            timeout=15,
+        )
         # TushareClient 在事件循环线程构造并 await set_token_async：同步包装器 set_token
         # 依赖已捕获的 _loop，若在工作线程构造（_loop=None）会抛 RuntimeError。
         # set_token_async 仅重建 pro_api/限流器（无网络 IO），不违反 R16。
