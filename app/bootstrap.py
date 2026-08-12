@@ -467,7 +467,9 @@ async def prepare_database_runtime() -> str | None:
             "从源头消除冲突。"
         )
 
-    service = EmbeddedPostgresService.from_config(config)
+    # R16: from_config 内含 resolve_pg_major_version（同步子进程），在 async 层卸载到线程池，
+    #      避免阻塞事件循环。单例构造用 RLock 保护，线程安全（与 service.start 的 to_thread 一致）。
+    service = await asyncio.to_thread(EmbeddedPostgresService.from_config, config)
     # H3: start 失败时清理单例，避免后续 CacheManager 误用残留状态
     try:
         info = await service.start()

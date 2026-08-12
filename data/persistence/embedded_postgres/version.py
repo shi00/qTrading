@@ -16,7 +16,8 @@ import subprocess
 from functools import cache
 from pathlib import Path
 
-_VERSION_TIMEOUT_S = 10
+_VERSION_TIMEOUT_S = 10  # sidecar version --json 应近即时返回，10s 兜底防挂起
+_VERSION_SCHEMA = "qtrading.embedded_postgres.version.v1"
 
 
 @cache
@@ -28,8 +29,8 @@ def resolve_pg_major_version(sidecar_binary: Path) -> str:
 
     Raises:
         FileNotFoundError: sidecar_binary 不存在。
-        RuntimeError: 子进程超时 / 非零退出 / stdout 非 JSON / 缺 postgres_version 字段 /
-            主版本解析失败。
+        RuntimeError: 子进程超时 / 非零退出 / stdout 非 JSON / schema 不符 /
+            缺 postgres_version 字段 / 主版本解析失败。
     """
     if not sidecar_binary.is_file():
         raise FileNotFoundError(f"sidecar binary not found: {sidecar_binary}")
@@ -38,6 +39,8 @@ def resolve_pg_major_version(sidecar_binary: Path) -> str:
             [str(sidecar_binary), "version", "--json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_VERSION_TIMEOUT_S,
             check=False,
         )
@@ -49,9 +52,11 @@ def resolve_pg_major_version(sidecar_binary: Path) -> str:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"sidecar version --json produced non-JSON stdout: {proc.stdout!r}") from exc
+    if data.get("schema") != _VERSION_SCHEMA:
+        raise RuntimeError(
+            f"sidecar version --json unexpected schema: {data.get('schema')!r}; expected {_VERSION_SCHEMA!r}"
+        )
     postgres_version = data.get("postgres_version")
-    if "postgres_version" not in data:
-        raise RuntimeError(f"sidecar version --json missing postgres_version field: {data!r}")
     if not isinstance(postgres_version, str) or not postgres_version:
         raise RuntimeError(f"sidecar version --json postgres_version must be a non-empty string: {postgres_version!r}")
     major = postgres_version.split(".", 1)[0]

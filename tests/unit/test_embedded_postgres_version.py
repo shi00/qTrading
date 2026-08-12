@@ -15,6 +15,14 @@ import pytest
 
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 
+_SCHEMA = "qtrading.embedded_postgres.version.v1"
+
+
+def _payload(**overrides: object) -> str:
+    """构造带标准 schema 的 sidecar version --json 输出。"""
+    data = {"schema": _SCHEMA, "postgres_version": "16.14.0", **overrides}
+    return json.dumps(data)
+
 
 @pytest.fixture(autouse=True)
 def _clear_cache() -> Iterator[None]:
@@ -41,7 +49,7 @@ def test_resolves_major_version(sidecar_binary: Path, monkeypatch: pytest.Monkey
     """正常解析 "16.14.0" → "16"。"""
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.version.subprocess.run",
-        lambda *_a, **_k: _mock_run(json.dumps({"postgres_version": "16.14.0"})),
+        lambda *_a, **_k: _mock_run(_payload()),
     )
     assert resolve_pg_major_version(sidecar_binary) == "16"
 
@@ -85,12 +93,22 @@ def test_non_json_stdout_raises_runtime_error(sidecar_binary: Path, monkeypatch:
 
 
 def test_missing_postgres_version_field_raises(sidecar_binary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """缺 postgres_version 字段 → RuntimeError。"""
+    """schema 正确但缺 postgres_version 字段 → RuntimeError。"""
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.version.subprocess.run",
-        lambda *_a, **_k: _mock_run(stdout=json.dumps({"schema": "qtrading.embedded_postgres.version.v1"})),
+        lambda *_a, **_k: _mock_run(_payload(postgres_version=None)),
     )
-    with pytest.raises(RuntimeError, match="postgres_version"):
+    with pytest.raises(RuntimeError, match="must be a non-empty string"):
+        resolve_pg_major_version(sidecar_binary)
+
+
+def test_unexpected_schema_raises(sidecar_binary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """schema 与契约不符 → RuntimeError。"""
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.version.subprocess.run",
+        lambda *_a, **_k: _mock_run(_payload(schema="qtrading.embedded_postgres.version.v2")),
+    )
+    with pytest.raises(RuntimeError, match="unexpected schema"):
         resolve_pg_major_version(sidecar_binary)
 
 
@@ -98,7 +116,7 @@ def test_invalid_major_version_raises(sidecar_binary: Path, monkeypatch: pytest.
     """postgres_version 主版本非法（非数字）→ RuntimeError。"""
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.version.subprocess.run",
-        lambda *_a, **_k: _mock_run(stdout=json.dumps({"postgres_version": "abc.1.0"})),
+        lambda *_a, **_k: _mock_run(_payload(postgres_version="abc.1.0")),
     )
     with pytest.raises(RuntimeError, match="invalid postgres_version"):
         resolve_pg_major_version(sidecar_binary)
@@ -108,7 +126,7 @@ def test_postgres_version_not_str_raises(sidecar_binary: Path, monkeypatch: pyte
     """postgres_version 非字符串（如 int）→ RuntimeError。"""
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.version.subprocess.run",
-        lambda *_a, **_k: _mock_run(stdout=json.dumps({"postgres_version": 16})),
+        lambda *_a, **_k: _mock_run(_payload(postgres_version=16)),
     )
     with pytest.raises(RuntimeError, match="must be a non-empty string"):
         resolve_pg_major_version(sidecar_binary)
@@ -118,7 +136,7 @@ def test_postgres_version_no_dot_parses(sidecar_binary: Path, monkeypatch: pytes
     """postgres_version 无点号（如 "16"）→ 主版本仍为 "16"。"""
     monkeypatch.setattr(
         "data.persistence.embedded_postgres.version.subprocess.run",
-        lambda *_a, **_k: _mock_run(stdout=json.dumps({"postgres_version": "16"})),
+        lambda *_a, **_k: _mock_run(_payload(postgres_version="16")),
     )
     assert resolve_pg_major_version(sidecar_binary) == "16"
 
@@ -129,7 +147,7 @@ def test_cache_calls_subprocess_once(sidecar_binary: Path, monkeypatch: pytest.M
 
     def _run(*args: object, **_k: object) -> subprocess.CompletedProcess[str]:
         calls.append(args[0])
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps({"postgres_version": "16.14.0"}))
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=_payload())
 
     monkeypatch.setattr("data.persistence.embedded_postgres.version.subprocess.run", _run)
     assert resolve_pg_major_version(sidecar_binary) == "16"

@@ -124,8 +124,8 @@ def fake_paths(tmp_path: Path) -> dict[str, Path]:
 
     return {
         "sidecar_binary": sidecar,
-        "data_dir": tmp_path / "postgres" / "17" / "data",
-        "install_dir": tmp_path / "postgres" / "17" / "install",
+        "data_dir": tmp_path / "postgres" / "16" / "data",
+        "install_dir": tmp_path / "postgres" / "16" / "install",
     }
 
 
