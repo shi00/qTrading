@@ -421,6 +421,37 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         data_dir_idx = argv.index("--data-dir") + 1
         assert argv[data_dir_idx].endswith("data")
 
+    def test_build_doctor_argv_resolves_major_when_data_root_empty(self, tmp_path: Path) -> None:
+        """data_root 为空时，经 resolve_pg_major_version 动态解析 PG 主版本生成 data_dir。"""
+        mock_config = {
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": "/fake/sidecar",
+            "embedded_pg_data_root": "",
+            "embedded_pg_install_root": "/fake/install_root",
+            "embedded_pg_log_dir": "/fake/log_dir",
+        }
+        app_data = tmp_path / "app_data"
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+                return_value=mock_config,
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.resolve_pg_major_version",
+                return_value="16",
+            ),
+            patch("platformdirs.user_data_dir", return_value=str(app_data)),
+        ):
+            from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
+
+            svc = EmbeddedPgMaintenanceService()
+            argv = svc._build_doctor_argv()
+
+        assert argv[0] == "/fake/sidecar"
+        assert argv[1] == "doctor"
+        data_dir_idx = argv.index("--data-dir") + 1
+        assert argv[data_dir_idx] == str(app_data / "postgres" / "16" / "data")
+
     def test_build_dump_argv(self, maintenance_service, tmp_path: Path) -> None:
         """_build_dump_argv 含 dump + --data-dir + --output。"""
         output_path = tmp_path / "backup.dump"

@@ -1,19 +1,20 @@
 """resolve_pg_major_version 单元测试（嵌入 PostgreSQL 版本去硬编码）。
 
 通过 monkeypatch 替换 version 模块的 subprocess.run，避免发起真实子进程。
-测试间清理 functools.cache 缓存避免污染（R7 精神：状态隔离）。
+测试间清理模块级版本缓存避免污染（R7 精神：状态隔离）。
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from data.persistence.embedded_postgres.version import resolve_pg_major_version
+from data.persistence.embedded_postgres.version import clear_pg_version_cache, resolve_pg_major_version
 
 _SCHEMA = "qtrading.embedded_postgres.version.v1"
 
@@ -26,10 +27,10 @@ def _payload(**overrides: object) -> str:
 
 @pytest.fixture(autouse=True)
 def _clear_cache() -> Iterator[None]:
-    """每个测试前后清理 functools.cache，避免缓存跨测试污染。"""
-    resolve_pg_major_version.cache_clear()
+    """每个测试前后清理模块级版本缓存，避免缓存跨测试污染。"""
+    clear_pg_version_cache()
     yield
-    resolve_pg_major_version.cache_clear()
+    clear_pg_version_cache()
 
 
 @pytest.fixture
@@ -142,7 +143,7 @@ def test_postgres_version_no_dot_parses(sidecar_binary: Path, monkeypatch: pytes
 
 
 def test_cache_calls_subprocess_once(sidecar_binary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """functools.cache：多次调用 resolve_pg_major_version，subprocess.run 只被调用一次。"""
+    """模块级缓存：多次调用 resolve_pg_major_version，subprocess.run 只被调用一次。"""
     calls: list[object] = []
 
     def _run(*args: object, **_k: object) -> subprocess.CompletedProcess[str]:
@@ -153,3 +154,51 @@ def test_cache_calls_subprocess_once(sidecar_binary: Path, monkeypatch: pytest.M
     assert resolve_pg_major_version(sidecar_binary) == "16"
     assert resolve_pg_major_version(sidecar_binary) == "16"
     assert len(calls) == 1
+
+
+def test_clear_cache_triggers_reparse(sidecar_binary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """clear_pg_version_cache 后重新解析，subprocess.run 再次被调用。"""
+    calls: list[object] = []
+
+    def _run(*args: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args[0])
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=_payload())
+
+    monkeypatch.setattr("data.persistence.embedded_postgres.version.subprocess.run", _run)
+    assert resolve_pg_major_version(sidecar_binary) == "16"
+    assert len(calls) == 1
+    clear_pg_version_cache()
+    assert resolve_pg_major_version(sidecar_binary) == "16"
+    assert len(calls) == 2
+
+
+def test_concurrent_calls_execute_subprocess_once(sidecar_binary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """并发调用且缓存冷时，锁保护临界区，subprocess.run 仅执行一次。"""
+    calls: list[object] = []
+    calls_lock = threading.Lock()
+
+    def _run(*args: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        with calls_lock:
+            calls.append(args[0])
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=_payload())
+
+    monkeypatch.setattr("data.persistence.embedded_postgres.version.subprocess.run", _run)
+
+    barrier = threading.Barrier(4)
+    results: list[str] = []
+    results_lock = threading.Lock()
+
+    def _worker() -> None:
+        barrier.wait()
+        value = resolve_pg_major_version(sidecar_binary)
+        with results_lock:
+            results.append(value)
+
+    threads = [threading.Thread(target=_worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(calls) == 1
+    assert results == ["16", "16", "16", "16"]
