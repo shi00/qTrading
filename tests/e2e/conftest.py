@@ -246,7 +246,6 @@ async def e2e_browser(e2e_playwright):
         headless=os.environ.get("E2E_HEADED", "0") != "1",
         args=[
             "--disable-web-security",
-            "--disable-gpu",
             "--disable-features=PrivateNetworkAccess,CrossOriginEmbedderPolicy",
         ],
     )
