@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import hashlib
 import html
 import inspect
@@ -429,13 +430,29 @@ class NewsSubscriptionService:
             try:
                 sig = inspect.signature(listener)
                 param_count = len(sig.parameters)
-                if inspect.iscoroutinefunction(listener):
+                # Unwrap functools.partial so coroutine classification is accurate
+                # (partial-wrapped callables otherwise misdetected by iscoroutinefunction).
+                raw = listener
+                while isinstance(raw, functools.partial):
+                    raw = raw.func
+                is_async = inspect.iscoroutinefunction(raw) or getattr(raw, "is_async", False)
+                if is_async:
                     if param_count >= 2:
-                        await asyncio.wait_for(listener(update_type, data), timeout=5.0)
+                        result = listener(update_type, data)
                     elif param_count == 1:
-                        await asyncio.wait_for(listener(update_type), timeout=5.0)
+                        result = listener(update_type)
                     else:
-                        await asyncio.wait_for(listener(), timeout=5.0)
+                        result = listener()
+                    if inspect.isawaitable(result):
+                        await asyncio.wait_for(result, timeout=5.0)
+                    else:
+                        # Defensive: marked async but returned non-awaitable (e.g. sync fn
+                        # with is_async attr). Log and skip -- do NOT re-run to avoid double
+                        # side-effects; never pass non-awaitable to wait_for.
+                        logger.error(
+                            "[NewsService] Listener %s marked async but returned non-awaitable; skipping.",
+                            listener,
+                        )
                 else:
                     if param_count >= 2:
                         _l, _ut, _d = listener, update_type, data
@@ -592,8 +609,18 @@ class NewsSubscriptionService:
                         if enable_alerts:
                             for listener in list(self._alert_listeners):
                                 try:
-                                    if inspect.iscoroutinefunction(listener) or getattr(listener, "is_async", False):
-                                        await asyncio.wait_for(listener(display_msg), timeout=3.0)
+                                    raw = listener
+                                    while isinstance(raw, functools.partial):
+                                        raw = raw.func
+                                    if inspect.iscoroutinefunction(raw) or getattr(raw, "is_async", False):
+                                        result = listener(display_msg)
+                                        if inspect.isawaitable(result):
+                                            await asyncio.wait_for(result, timeout=3.0)
+                                        else:
+                                            logger.error(
+                                                "[NewsService] Alert listener %s marked async but returned non-awaitable; skipping.",
+                                                listener,
+                                            )
                                     else:
                                         _l, _msg = listener, display_msg
                                         await asyncio.wait_for(

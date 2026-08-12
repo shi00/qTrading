@@ -897,6 +897,12 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # Clear any previous cancel state
         self.clear_cancel()
 
+        # Ensure schema exists before any sync step writes to it.
+        # Onboarding path skips bootstrap.initialize_services (StartupController NEED_ONBOARDING
+        # short-circuit), so init_db() must be called here. Idempotent (guarded by
+        # _schema_initialized + _init_lock); DatabaseMigrationNeeded propagates to caller.
+        await self.cache.init_db()
+
         # Step weights (must sum to 100)
         # Optimized based on user feedback (Steps 1 & 2 represent 2% total)
         # Added Step 5 (AI Data) -> 10%

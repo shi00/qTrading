@@ -24,6 +24,8 @@ def _make_dp():
     ):
         mock_ch.get_token.return_value = "test_token"
         dp = DataProcessor()
+        # LOG-1.1: initialize_system 起始新增 await cache.init_db()，测试默认 mock 为 awaitable
+        dp.cache.init_db = AsyncMock()
     return dp
 
 
@@ -1080,6 +1082,39 @@ class TestDataProcessorInitializeSystem:
             mock_ch.get_init_history_years.return_value = 1
             with pytest.raises(RuntimeError, match="unexpected"):
                 await dp.initialize_system()
+
+    @pytest.mark.asyncio
+    async def test_init_db_called_before_sync_stock_basic(self):
+        """P1 时序修复：initialize_system 须在 sync_stock_basic 之前 await cache.init_db()。"""
+        dp = _make_dp()
+        call_order = []
+
+        def _idb():
+            call_order.append("init_db")
+
+        def _ssb():
+            call_order.append("sync_stock_basic")
+            return 5
+
+        dp.cache.init_db = AsyncMock(side_effect=_idb)
+        dp.sync_stock_basic = AsyncMock(side_effect=_ssb)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+            assert result is not None
+        assert call_order.index("init_db") < call_order.index("sync_stock_basic")
 
 
 class TestDataProcessorCancelControl:

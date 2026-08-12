@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import functools
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -615,6 +616,59 @@ class TestNotifyListeners:
         await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data=None)  # fail
         await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data=None)  # success
         assert svc._listener_errors.get(flaky_listener, 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_partial_wrapped_async_listener(self, svc):
+        """partial 包装的 async listener 应被正确 await。"""
+        received = []
+
+        async def listener(update_type, data):
+            received.append((update_type, data))
+
+        partial_listener = functools.partial(listener)
+        svc._listeners.add(partial_listener)
+        await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data={"key": "val"})
+        assert received == [(NewsUpdateType.NEW_ITEM, {"key": "val"})]
+
+    @pytest.mark.asyncio
+    async def test_partial_wrapped_sync_listener_thread_pool(self, svc):
+        """partial 包装的 sync listener 应走线程池，返回 None 不再抛 TypeError。"""
+
+        def listener(update_type, data):
+            return None
+
+        partial_listener = functools.partial(listener)
+        svc._listeners.add(partial_listener)
+        with patch("services.news_subscription_service.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = AsyncMock(return_value=None)
+            # 不应抛 TypeError
+            await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data={"key": "val"})
+        mock_tpm.return_value.run_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mislabeled_async_listener_skipped_no_typeerror(self, svc, caplog):
+        """sync listener 被误标 is_async=True 时，返回非 awaitable 应记录并跳过，不抛 TypeError 也不重跑。"""
+        import logging
+
+        calls = []
+
+        class _SyncListener:
+            is_async = True
+
+            def __init__(self, sink):
+                self.sink = sink
+
+            def __call__(self, update_type, data):
+                self.sink.append((update_type, data))
+                return None
+
+        listener = _SyncListener(calls)
+        svc._listeners.add(listener)
+        with caplog.at_level(logging.ERROR, logger="services.news_subscription_service"):
+            await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data={"key": "val"})
+        # 只在 async 分支被调用一次，未重跑
+        assert calls == [(NewsUpdateType.NEW_ITEM, {"key": "val"})]
+        assert any("non-awaitable" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

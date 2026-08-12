@@ -545,7 +545,7 @@ class TestOnboardingVMSync:
         assert any(
             s.sync_progress == 0.75
             and s.sync_progress_message is not None
-            and s.sync_progress_message.key == "Three quarters"
+            and s.sync_progress_message.key == "wizard_status_syncing"
             for s in snapshots
         )
 
