@@ -32,6 +32,14 @@ repos:
         pass_filenames: true
         exclude: ^scripts/check_no_isolated_asyncio\.py$
 
+      - id: no-temp-files
+        name: Block compiled/binary artifact files
+        entry: python scripts/check_no_temp_files.py
+        language: system
+        pass_filenames: true
+        # 不设置 types/types_or，确保所有文件类型都被检查。
+        # 无扩展名文件不被拦截（见 scripts/check_no_temp_files.py 边界说明）。
+
       - id: pyright-changed
         name: Pyright Type Check (staged files)
         entry: python scripts/run_pyright_changed.py
