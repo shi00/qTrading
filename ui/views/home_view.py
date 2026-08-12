@@ -271,7 +271,7 @@ def HomeView(
     return ft.Container(
         content=ft.Column(
             safe_controls(content_controls),
-            scroll=None,
+            scroll=ft.ScrollMode.AUTO,
             expand=True,
         ),
         expand=True,
