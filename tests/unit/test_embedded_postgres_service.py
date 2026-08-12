@@ -958,6 +958,14 @@ class TestEmbeddedPostgresServiceSingleton:
 # TestEmbeddedPostgresServiceFromConfig: 1 TDD 测试
 # =============================================================================
 class TestEmbeddedPostgresServiceFromConfig:
+    @pytest.fixture(autouse=True)
+    def _mock_pg_major_version(self, monkeypatch) -> None:
+        """mock resolve_pg_major_version，避免 from_config 默认 sidecar 路径触发真实子进程。"""
+        monkeypatch.setattr(
+            "data.persistence.embedded_postgres.service.resolve_pg_major_version",
+            lambda _path: "16",
+        )
+
     @pytest.mark.asyncio(loop_scope="function")
     async def test_from_config_constructs_service(self, fake_paths) -> None:
         """TDD 红灯翻绿：from_config 构造单例，二次调用返回同实例。"""
@@ -975,7 +983,8 @@ class TestEmbeddedPostgresServiceFromConfig:
 
         验证：
         1. embedded_pg_sidecar_path 为空 → 默认 sidecars/qtrading-pg-sidecar[.exe]
-        2. embedded_pg_data_root 为空 → 默认 <app_data>/postgres/16/data
+        2. embedded_pg_data_root 为空 → 默认 <app_data>/postgres/<pg_major>/data
+           （<pg_major> 由 mock 的 resolve_pg_major_version 返回 "16"）
         3. embedded_pg_install_root 为空 → 默认 <data_root>/install
         4. embedded_pg_log_dir 为空 → 默认从 data_dir 推导（<root>/postgres-logs）
         """
@@ -1000,13 +1009,13 @@ class TestEmbeddedPostgresServiceFromConfig:
         assert service._sidecar_binary == Path("sidecars") / f"qtrading-pg-sidecar{expected_suffix}", (
             f"sidecar_binary 默认值错误，实际：{service._sidecar_binary}"
         )
-        # 断言 2: data_dir 默认 <app_data>/postgres/16/data
-        expected_data_dir = tmp_path / "app_data" / "postgres" / "17" / "data"
+        # 断言 2: data_dir 默认 <app_data>/postgres/16/data（pg_major 由 mock 返回 "16"）
+        expected_data_dir = tmp_path / "app_data" / "postgres" / "16" / "data"
         assert service._data_dir == expected_data_dir, (
             f"data_dir 默认值错误，实际：{service._data_dir}，期望：{expected_data_dir}"
         )
         # 断言 3: install_dir 默认 <data_root>/install
-        expected_install_dir = tmp_path / "app_data" / "postgres" / "17" / "install"
+        expected_install_dir = tmp_path / "app_data" / "postgres" / "16" / "install"
         assert service._install_dir == expected_install_dir, (
             f"install_dir 默认值错误，实际：{service._install_dir}，期望：{expected_install_dir}"
         )

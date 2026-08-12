@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.config_handler import ConfigHandler
 from utils.config_models import AppConfig
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -150,7 +152,9 @@ class EmbeddedPgMaintenanceService:
             EmbeddedPgMaintenanceError: sidecar 非 0 退出（exit 20 除外）或 JSON 解析失败
             asyncio.CancelledError: R2 透传（由 ThreadPoolManager.run_async 传播）
         """
-        argv = self._build_doctor_argv()
+        # R16: argv 构建含动态版本解析（resolve_pg_major_version 运行阻塞子进程），
+        # 经 to_thread 卸载避免阻塞事件循环。
+        argv = await asyncio.to_thread(self._build_doctor_argv)
         exit_code, stdout, stderr = await self._run_sidecar(argv)
         # exit 20 (PG 未运行) 容忍为成功：doctor 是只读诊断，PG 未运行时仍可输出 JSON
         if exit_code != 0 and exit_code != 20:
@@ -174,7 +178,7 @@ class EmbeddedPgMaintenanceService:
             EmbeddedPgMaintenanceError: dump 失败（exit != 0）
             asyncio.CancelledError: R2 透传
         """
-        argv = self._build_dump_argv(output_path)
+        argv = await asyncio.to_thread(self._build_dump_argv, output_path)
         exit_code, stdout, stderr = await self._run_sidecar(argv)
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "dump")
@@ -197,7 +201,7 @@ class EmbeddedPgMaintenanceService:
             EmbeddedPgMaintenanceError: restore 失败（exit != 0）
             asyncio.CancelledError: R2 透传
         """
-        argv = self._build_restore_argv(input_path, target_data_dir)
+        argv = await asyncio.to_thread(self._build_restore_argv, input_path, target_data_dir)
         exit_code, stdout, stderr = await self._run_sidecar(argv)
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "restore")
@@ -216,7 +220,7 @@ class EmbeddedPgMaintenanceService:
             EmbeddedPgMaintenanceError: 维护实例启动失败（exit != 0）或 JSON 解析失败
             asyncio.CancelledError: R2 透传
         """
-        argv = self._build_maintenance_shell_argv()
+        argv = await asyncio.to_thread(self._build_maintenance_shell_argv)
         exit_code, stdout, stderr = await self._run_sidecar(argv)
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "maintenance-shell")
@@ -241,7 +245,9 @@ class EmbeddedPgMaintenanceService:
 
         与 ``EmbeddedPostgresService.from_config`` 一致的默认搜索逻辑：
         - sidecar_path 为空时按平台默认搜索 ``sidecars/qtrading-pg-sidecar[.exe]``
-        - data_root 为空时用 platformdirs 默认 ``<app data>/postgres/16``
+        - data_root 为空时用 platformdirs 默认 ``<app data>/postgres/<pg_major>``，
+          其中 <pg_major> 由 ``resolve_pg_major_version(Path(sidecar_path))`` 动态解析
+          （以 sidecar 二进制为权威来源，见 version.py）
         """
         config = AppConfig.model_validate(ConfigHandler.load_config())
         sidecar_path = config.embedded_pg_sidecar_path
@@ -254,7 +260,7 @@ class EmbeddedPgMaintenanceService:
             import platformdirs
 
             app_data = Path(platformdirs.user_data_dir("qTrading"))
-            data_root = app_data / "postgres" / "17"
+            data_root = app_data / "postgres" / resolve_pg_major_version(Path(sidecar_path))
         data_dir = data_root / "data"
         return sidecar_path, str(data_dir)
 
