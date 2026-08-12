@@ -16,6 +16,7 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 - token 不经 tushare SDK 全局状态（~/tk.csv）传递，全程显式传参 ts.pro_api(token=...)
 """
 
+import asyncio
 import logging
 import webbrowser
 from collections.abc import Callable
@@ -211,21 +212,34 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         try:
             import tushare as ts
 
+            from data.external.tushare_client import _ASYNC_TIMEOUT_MULTIPLIER, TushareClient
+
             # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
             timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
+            # get_tushare_timeout 无最小值钳制，配置异常（<=0）时兜底为 1s，
+            # 避免 wait_for(timeout<=0) 未真正网络调用前即失败。
+            timeout_val = max(timeout_val, 1)
             temp_pro = ts.pro_api(token=token, timeout=timeout_val)
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                temp_pro.trade_cal,
-                exchange="SSE",
-                start_date="20250101",
-                end_date="20250101",
+            # asyncio.wait_for 兜底：requests.post 的 timeout 不覆盖 DNS 解析挂起等场景，
+            # 与 _handle_api_call 的 timeout=self.timeout*_ASYNC_TIMEOUT_MULTIPLIER 同模式。
+            await asyncio.wait_for(
+                ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    temp_pro.trade_cal,
+                    exchange="SSE",
+                    start_date="20250101",
+                    end_date="20250101",
+                ),
+                timeout=timeout_val * _ASYNC_TIMEOUT_MULTIPLIER,
             )
 
-            from data.external.tushare_client import TushareClient
             from strategies.all_strategies import StrategyManager
 
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
+            # keyring.set_password + save_config 均为同步 IO，15s 兜底防 keyring 后端卡死
+            await asyncio.wait_for(
+                ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
+                timeout=15,
+            )
 
             # TushareClient 必须在 async 上下文（事件循环线程）实例化，经 _capture_loop 捕获
             # 事件循环引用；set_token 使用异步 API set_token_async。同步包装器 set_token 依赖

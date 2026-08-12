@@ -573,6 +573,25 @@ class TestVerifyToken:
         on_loading_change.assert_any_call(True)
         on_loading_change.assert_any_call(False)
 
+    @pytest.mark.asyncio
+    async def test_verify_token_wait_for_timeout_resets_verifying_flag(self, mock_config_handler, mock_thread_pool):
+        """回归：wait_for 超时（TimeoutError）后 is_verifying 必须复位为 False，避免 UI 无限转圈。"""
+        mock_pro = _make_mock_pro_api()
+        with (
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch(
+                "ui.viewmodels.tushare_config_panel_view_model.asyncio.wait_for",
+                side_effect=TimeoutError("probe timed out"),
+            ),
+        ):
+            vm = _make_vm(mock_config_handler)
+            vm.update_token("valid_token")
+            result = await vm.verify_token()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.is_verifying is False
+
 
 # --- Status helpers ---
 

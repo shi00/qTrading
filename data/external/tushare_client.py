@@ -127,6 +127,12 @@ TOKEN_INVALID_KEYWORDS = ("您的token不对",)
 from utils.singleton_registry import register_singleton
 
 
+# 模块级常量：asyncio 侧对同步网络调用施加的 wait_for 超时倍率（requests.post 的
+# timeout 不覆盖 DNS 解析挂起等场景）。提升为模块级以让 UI 层 ViewModel 复用，
+# 避免魔法数字 1.5 与 _handle_api_call 的 timeout 计算脱节。
+_ASYNC_TIMEOUT_MULTIPLIER = 1.5
+
+
 @register_singleton
 class TushareClient:
     """
@@ -140,8 +146,6 @@ class TushareClient:
     _instance = None
     _initialized = False
     _lock = threading.Lock()
-
-    _ASYNC_TIMEOUT_MULTIPLIER = 1.5
 
     # Phase 2B §3.2.5：probe 专用桶配额（50/min 独立配额，避免被同步任务挤压）
     _PROBE_RATE_LIMIT_RPM = 50
@@ -1178,7 +1182,7 @@ class TushareClient:
                     ThreadPoolManager().io_pool,
                     lambda ctx=ctx: ctx.run(functools.partial(func, **formatted_kwargs)),
                 ),
-                timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
+                timeout=self.timeout * _ASYNC_TIMEOUT_MULTIPLIER,
             )
         except Exception as e:
             error_msg = str(e)
@@ -1354,7 +1358,7 @@ class TushareClient:
                         ThreadPoolManager().io_pool,
                         lambda ctx=ctx: ctx.run(functools.partial(func, **kwargs)),
                     ),
-                    timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
+                    timeout=self.timeout * _ASYNC_TIMEOUT_MULTIPLIER,
                 )
 
                 if result is not None and api_name in self._COLUMN_RENAMES:
