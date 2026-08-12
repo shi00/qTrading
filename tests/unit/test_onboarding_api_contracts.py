@@ -176,6 +176,8 @@ class TestQuickParameterFunctionality:
             mock_ch_init.get_token.return_value = "test_token"
             dp = DataProcessor()
 
+        # LOG-1.1: initialize_system 起始新增 await cache.init_db()，测试需 mock 为 awaitable
+        dp.cache.init_db = AsyncMock()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock()
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
