@@ -557,6 +557,25 @@ class TestNotifyListeners:
         assert received == [(NewsUpdateType.NEW_ITEM, {"key": "val"})]
 
     @pytest.mark.asyncio
+    async def test_async_listener_awaited_on_event_loop_not_io_thread(self, svc):
+        """async 监听必须在事件循环线程被 await，禁止经 ThreadPoolManager 分发到 IO 线程。
+
+        R16 跨线程修复: 若 async 监听被误经 run_async 分发, 变更 Flet observable 状态会在
+        IO 线程执行, 触发跨线程 asyncio TypeError。本断言锁定服务端对 async 监听走 await 分支。
+        """
+        called_on_loop_thread = asyncio.Event()
+
+        async def listener(update_type, data):
+            # 记录是否在事件循环线程执行 (asyncio.Event.set 要求运行中的事件循环)
+            called_on_loop_thread.set()
+
+        svc._listeners.add(listener)
+        with patch("services.news_subscription_service.ThreadPoolManager") as mock_tpm:
+            await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM, data={"key": "val"})
+        assert called_on_loop_thread.is_set(), "async 监听应在事件循环线程被 await"
+        assert mock_tpm.mock_calls == [], "async 监听不应经 ThreadPoolManager 分发到 IO 线程"
+
+    @pytest.mark.asyncio
     async def test_sync_listener_two_params(self, svc):
         """同步 listener 应通过 ThreadPoolManager.run_async 提交执行。"""
         called_with = []
@@ -831,6 +850,44 @@ class TestFetchAndNotify:
         ):
             await svc._fetch_and_notify()
         assert alert_called.is_set()
+
+    @pytest.mark.asyncio
+    async def test_alert_async_listener_awaited_on_event_loop_not_io_thread(self, svc):
+        """async alert 监听必须在事件循环线程被 await，禁止经 ThreadPoolManager 分发到 IO 线程。
+
+        R16 跨线程修复 (on_news_alert): startup_views.on_news_alert 注册为 is_alert=True 的
+        async 监听, 在 _fetch_and_notify 的 alert 分发循环中被 await。若被误经 run_async 分发,
+        变更 Flet observable 状态会在 IO 线程执行, 触发跨线程 asyncio TypeError。本断言锁定
+        alert 分发路径对 async 监听走 await 分支且不触碰 ThreadPoolManager。
+        """
+        svc._last_news_time = "2024-01-01T09:00:00"
+        svc._last_news_content = "old"
+        news_items = [{"content": "async alert", "time": "2024-01-01T10:00:00"}]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+
+        called_on_loop_thread = asyncio.Event()
+
+        async def alert_listener(msg):
+            # 记录是否在事件循环线程执行 (asyncio.Event.set 要求运行中的事件循环)
+            called_on_loop_thread.set()
+
+        svc._alert_listeners.add(alert_listener)
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch("services.news_subscription_service.CacheManager.normalize_news_item", return_value={}),
+            patch.object(svc.cache, "save_market_news", AsyncMock()),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            patch("services.news_subscription_service.ThreadPoolManager") as mock_tpm,
+        ):
+            await svc._fetch_and_notify()
+        assert called_on_loop_thread.is_set(), "async alert 监听应在事件循环线程被 await"
+        assert mock_tpm.mock_calls == [], "async alert 监听不应经 ThreadPoolManager 分发到 IO 线程"
 
     @pytest.mark.asyncio
     async def test_alert_disabled(self, svc):
