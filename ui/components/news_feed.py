@@ -333,9 +333,8 @@ def NewsFeed(
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 alignment=ft.Alignment.CENTER,
-                expand=True,
+                padding=ft.Padding.symmetric(vertical=32),
             ),
-            expand=True,
             bgcolor=style.get("bgcolor"),
             border_radius=style.get("border_radius"),
             border=style.get("border"),
@@ -371,14 +370,10 @@ def NewsFeed(
 
     # --- News list ---
     return ft.Container(
-        content=ft.ListView(
+        content=ft.Column(
             controls=controls,
             spacing=10,
-            padding=10,
-            auto_scroll=False,
-            expand=True,
         ),
-        expand=True,
         bgcolor=style.get("bgcolor"),
         border_radius=style.get("border_radius"),
         border=style.get("border"),
