@@ -14,7 +14,7 @@ akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
 akshare==1.18.81
     # via astockscreener (pyproject.toml)
-alembic==1.18.5
+alembic==1.19.1
     # via astockscreener (pyproject.toml)
 annotated-types==0.7.0
     # via pydantic
@@ -180,7 +180,7 @@ httpx-sse==0.4.3
     # via mcp
 huggingface-hub==1.23.0
     # via tokenizers
-hypothesis==6.156.6
+hypothesis==6.165.5
     # via astockscreener (pyproject.toml)
 idna==3.18
     # via
@@ -253,7 +253,7 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   mako
-matplotlib==3.11.0
+matplotlib==3.11.1
     # via
     #   astockscreener (pyproject.toml)
     #   mplfinance
@@ -280,7 +280,7 @@ multidict==6.7.1
     #   yarl
 nodeenv==1.10.0
     # via pyright
-numpy==2.5.1
+numpy==2.5.2
     # via
     #   astockscreener (pyproject.toml)
     #   contourpy
@@ -312,7 +312,7 @@ packaging==26.2
     #   pip-requirements-parser
     #   pytest
     #   pytest-rerunfailures
-pandas==3.0.3
+pandas==3.0.5
     # via
     #   astockscreener (pyproject.toml)
     #   akshare
@@ -322,7 +322,7 @@ pandas==3.0.3
     #   tushare
 pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
-pandas-stubs==3.0.3.260530
+pandas-stubs==3.0.5.260730
     # via astockscreener (pyproject.toml)
 pathable==0.6.0
     # via jsonschema-path
@@ -504,7 +504,7 @@ sortedcontainers==2.4.0
     #   hypothesis
 soupsieve==2.8.4
     # via beautifulsoup4
-sqlalchemy==2.0.51
+sqlalchemy==2.0.52
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
@@ -577,7 +577,7 @@ urllib3==2.7.0
     #   astockscreener (pyproject.toml)
     #   akshare
     #   requests
-uv==0.11.29
+uv==0.12.3
     # via astockscreener (pyproject.toml)
 uvicorn==0.51.0
     # via
