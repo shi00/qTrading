@@ -229,6 +229,7 @@ python main.py
 
 | 改动范围 | 至少运行 |
 |---------|----------|
+| 仅 Markdown/治理文档 | `python scripts/check_docs_consistency.py` + 相关文档契约测试（`tests/unit/test_docs_consistency.py`）；若修改 redlines/schema/policy，再运行对应治理测试；无需无差别运行 pyright、业务单测和 E2E |
 | 仅 `ui/` | ruff + pyright + `tests/unit/ui/` |
 | `data/` DAO/模型 | 上述 + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
 | `strategies/` | ruff + pyright + `tests/unit/` 对应策略用例 |

@@ -14,7 +14,7 @@
 ## 项目特定（AStockScreener）
 
 - schema 变更必须生成 Alembic 迁移，验证 `upgrade head` + `alembic check`（CI 验证 `downgrade base` → `upgrade head`）
-- R8 批量写入必须用 `_save_upsert()`，禁止 `_write_db(is_many=True)`
+- R8 批量写入必须用 `_save_upsert()`，`_write_db` 不提供批量参数
 - R12 新增表必须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`
 - R17 禁止 SQL 保留字作字段名，必须用 ORM `name=` 映射
 - R4 asyncpg 原生查询必须用 `$1, $2, ...` 占位符，禁止 `%s`

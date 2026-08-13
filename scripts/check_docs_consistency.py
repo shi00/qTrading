@@ -540,12 +540,77 @@ def check_flet_hub_completeness() -> list[str]:
 
 # redlines.yml 字段完整性校验常量
 REDLINE_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {"id", "title", "description", "enforcement", "human_review_required"}
+    {"id", "title", "description", "enforcement", "automation_coverage", "human_review_required"}
 )
+# automation_coverage 合法值（ADR-0005 N6/N8 一致性校验基础）
+AUTOMATION_COVERAGE_VALUES: frozenset[str] = frozenset({"full", "partial", "none"})
 # R 编号格式正则: R1 ~ R999 (append-only, 不复用废弃编号)
 REDLINE_ID_PATTERN = re.compile(r"^R(\d+)$")
 # CLAUDE.md §3.1 红线表行匹配: 以 `| R\d+ |` 开头的 markdown 表格行
 CLAUDE_REDLINE_TABLE_ROW_PATTERN = re.compile(r"^\|\s*R\d+\s*\|")
+
+
+def _normalize_for_comparison(text: str) -> str:
+    """标准化文本用于 CLAUDE.md 与 YAML 字段语义比较。
+
+    规范化步骤：
+    1. 反转义 markdown 表格中的 ``\\|`` 为 ``|``（CLAUDE.md 表格转义管道符）
+    2. 移除 markdown 粗体标记 ``**``（CLAUDE.md 标题列使用 ``**title**``）
+    3. 移除 markdown 行内代码标记 `` ` ``（CLAUDE.md 描述列使用 `` `code` ``）
+    4. 移除两端引号（YAML 字符串可能带 ``"`` 或 ``'``）
+    5. strip 首尾空白
+
+    纯函数，便于单元测试。
+    """
+    # 1. 反转义 markdown 表格转义管道符
+    s = text.replace("\\|", "|")
+    # 2. 移除粗体标记
+    s = s.replace("**", "")
+    # 3. 移除行内代码标记
+    s = s.replace("`", "")
+    # 4. 移除两端引号（循环处理嵌套引号场景，如 "'value'"）
+    while len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+        s = s[1:-1]
+    # 5. strip 首尾空白
+    return s.strip()
+
+
+def _parse_claude_redline_table(claude_content: str) -> dict[str, dict[str, str]]:
+    """解析 CLAUDE.md §3.1 红线表，返回 {id: {title, description, enforcement}} 映射。
+
+    表格行格式: ``| R1 | **title** | description | enforcement |``
+    列之间用 ``|`` 分隔，描述列可能含转义管道符 ``\\|``（如 R6 的 ``X \\| Y``）。
+
+    解析策略:
+    1. 匹配以 ``| R\\d+ |`` 开头的行
+    2. 按 ``(?<!\\\\)\\|`` 分割（不分割转义管道符）
+    3. 预期 6 段（首尾空 + id + title + description + enforcement）
+    4. 对每个字段做 ``_normalize_for_comparison()`` 标准化
+
+    纯函数，便于单元测试。
+    """
+    result: dict[str, dict[str, str]] = {}
+    for line in claude_content.splitlines():
+        if not CLAUDE_REDLINE_TABLE_ROW_PATTERN.match(line):
+            continue
+        # 按非转义管道符分割
+        parts = re.split(r"(?<!\\)\|", line)
+        if len(parts) < 6:
+            continue
+        # parts[0] 和 parts[-1] 为首尾空串，中间 4 列为 id/title/description/enforcement
+        rid = _normalize_for_comparison(parts[1])
+        title = _normalize_for_comparison(parts[2])
+        description = _normalize_for_comparison(parts[3])
+        enforcement = _normalize_for_comparison(parts[4])
+        id_match = REDLINE_ID_PATTERN.match(rid)
+        if not id_match:
+            continue
+        result[rid] = {
+            "title": title,
+            "description": description,
+            "enforcement": enforcement,
+        }
+    return result
 
 
 def check_redlines_yaml_consistency() -> list[str]:
@@ -553,9 +618,15 @@ def check_redlines_yaml_consistency() -> list[str]:
 
     校验:
     1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
-    2. 每条红线含 5 字段: id/title/description/enforcement/human_review_required
+    2. 每条红线含 6 字段: id/title/description/enforcement/automation_coverage/human_review_required
     3. id 格式为 R\\d+, 连续 append-only (R1, R2, ..., R_N, 无缺号/重号/跳号)
     4. CLAUDE.md §3.1 红线表行数 (以 ``| R\\d+ |`` 开头的行) = yml 条目数
+    5. automation_coverage 值校验: 必须为 full/partial/none 之一
+    6. automation_coverage 与 human_review_required 一致性:
+       automation_coverage != full ⇒ human_review_required == true
+       automation_coverage == full ⇒ human_review_required == false
+    7. CLAUDE.md §3.1 表格与 YAML 字段语义一致: id/title/description/enforcement 四字段
+       标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
 
     退出码: 0 通过, 1 失败 (返回非空 errors 列表)。
     """
@@ -599,6 +670,25 @@ def check_redlines_yaml_consistency() -> list[str]:
         if missing:
             errors.append(f"redlines[{i}] 缺字段: {sorted(missing)}")
 
+    # 校验 2b: automation_coverage 值校验 + 与 human_review_required 一致性
+    for i, entry in enumerate(redlines):
+        if not isinstance(entry, dict):
+            continue
+        automation_coverage = entry.get("automation_coverage")
+        if automation_coverage is None:
+            continue  # 字段缺失由校验 2 守护
+        rid = str(entry.get("id", f"redlines[{i}]"))
+        if automation_coverage not in AUTOMATION_COVERAGE_VALUES:
+            errors.append(f"{rid}: automation_coverage 值非法: {automation_coverage} (应为 full/partial/none)")
+            continue
+        human_review = entry.get("human_review_required")
+        if human_review is None:
+            continue  # 字段缺失由校验 2 守护
+        if automation_coverage != "full" and not human_review:
+            errors.append(f"{rid}: automation_coverage='{automation_coverage}' 但 human_review_required=false")
+        if automation_coverage == "full" and human_review:
+            errors.append(f"{rid}: automation_coverage='full' 但 human_review_required=true")
+
     # 校验 3: id 格式 + 连续 append-only
     parsed_nums: list[int] = []
     for i, entry in enumerate(redlines):
@@ -635,6 +725,23 @@ def check_redlines_yaml_consistency() -> list[str]:
     if len(r_lines) != len(redlines):
         errors.append(f"CLAUDE.md §3.1 表格行数 {len(r_lines)} != redlines.yml 条目数 {len(redlines)}")
 
+    # 校验 5: CLAUDE.md §3.1 表格与 YAML 字段语义一致
+    # 解析 CLAUDE.md 红线表，提取 id/title/description/enforcement 四字段
+    # 与 YAML 中对应条目的同名字段做标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
+    claude_table = _parse_claude_redline_table(claude_content)
+    for entry in redlines:
+        if not isinstance(entry, dict):
+            continue
+        rid = str(entry.get("id", "?"))
+        if rid not in claude_table:
+            continue  # 行数不匹配已由校验 4 报告
+        claude_entry = claude_table[rid]
+        for field in ("title", "description", "enforcement"):
+            yaml_value = _normalize_for_comparison(str(entry.get(field, "")))
+            claude_value = claude_entry[field]
+            if yaml_value != claude_value:
+                errors.append(f"{rid}: CLAUDE.md 与 redlines.yml 字段 '{field}' 不一致")
+
     return errors
 
 
@@ -659,7 +766,9 @@ ENFORCEMENT_KEYWORD_CHECK_REDLINES = "check_redlines.py"
 ENFORCEMENT_KEYWORD_IMPORT_LINTER = "import-linter"
 ENFORCEMENT_KEYWORD_SECURITY_SCAN = "安全扫描"
 ENFORCEMENT_KEYWORD_CI_TEST = "CI-test"
-ENFORCEMENT_KEYWORD_HUMAN_REVIEW = "仅人工评审"
+ENFORCEMENT_KEYWORD_HUMAN_REVIEW = (
+    "仅人工评审"  # 保留用于 keywords 提取；N6/N8 演进后不再被不变量消费（见 ADR-0005 Errata 2026-08-13）
+)
 ENFORCEMENT_KEYWORD_PENDING: tuple[str, ...] = ("待实现", "暂缓")  # R16 特例
 
 # ruff 关键词使用 word boundary 匹配，避免误匹配 'scruffian' 等
@@ -809,20 +918,22 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
 def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironment) -> list[str]:
     """纯函数：对已解析的 redlines 列表与配置快照校验 8 个不变量，返回错误列表。
 
-    不变量清单（v3，8 项；原 N9 在实施后检视中删除——与 N6 触发条件等价仅操作数顺序不同）：
+    不变量清单（v4，8 项；原 N9 在实施后检视中删除——与 N6 触发条件等价仅操作数顺序不同）：
     - N1: enforcement 含 'check_redlines.py' ⇒ redline-check hook 存在 + entry 含 check_redlines.py + 脚本文件存在
     - N2: enforcement 含 'import-linter' ⇒ lint-imports hook 存在 + entry 含 lint-imports + 契约数量一致
     - N3: enforcement 含 'ruff' ⇒ ruff-check hook 存在 + entry 含 ruff
     - N4: enforcement 含 '安全扫描' ⇒ Gitleaks workflow + .gitleaks.toml 同时存在
     - N5: enforcement 含 'CI-test' ⇒ workflow run: 命令块含 pytest 命令
-    - N6: enforcement 含 '仅人工评审' ⇒ human_review_required == true
-    - N7: enforcement 含 '待实现'/'暂缓' ⇒ human_review_required == false（R16 特化守护，与 N8 子集关系见 ADR-0005）
-    - N8: human_review_required == true ⇒ enforcement 含 '仅人工评审'
+    - N6: automation_coverage != full ⇒ human_review_required == true
+    - N7: enforcement 含 '待实现'/'暂缓' ⇒ automation_coverage == none 且 human_review_required == true（R16 特化守护）
+    - N8: human_review_required == true ⇒ automation_coverage != full
 
-    N6 + N8 共同构成 `human_review_required == true ⇔ enforcement 含「仅人工评审」` 双向一致性。
-    N7 是 N8 的 R16 特化版（含 pending 关键词时 N8 也会触发，但 N7 报错更精确指向 R16 误标）。
+    N6 + N8 共同构成 `automation_coverage != full ⇔ human_review_required == true` 双向一致性。
+    N7 仍然检查 enforcement 文本中的 '待实现'/'暂缓' 关键词，但现在要求 automation_coverage == none
+    且 human_review_required == true（与 N8 的 automation_coverage != full 要求一致）。
 
-    使用 .get() 防御性访问 human_review_required 字段；字段缺失时跳过 N6~N8（由 3b 守护字段完整性）。
+    使用 .get() 防御性访问 human_review_required / automation_coverage 字段；字段缺失时跳过 N6~N8
+    （由 3b 守护字段完整性）。
     """
     errors: list[str] = []
     for entry in redlines:
@@ -884,18 +995,22 @@ def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironm
             if not pytest_ok:
                 errors.append(f"{rid}: N5 enforcement 含 'CI-test' 但 workflow run: 命令块未检测到 pytest 命令")
 
-        # N6~N8: human_review_required 一致性校验
+        # N6~N8: automation_coverage 与 human_review_required 一致性校验
         # 字段缺失时跳过（由 3b check_redlines_yaml_consistency() 守护字段完整性）
-        if human_review is not None:
-            # N6: 仅人工评审 ⇒ human_review_required == true
-            if ENFORCEMENT_KEYWORD_HUMAN_REVIEW in keywords and not human_review:
-                errors.append(f"{rid}: N6 enforcement 含 '仅人工评审' 但 human_review_required=false")
-            # N7: 待实现/暂缓 ⇒ human_review_required == false（R16 特化守护）
-            if any(p in keywords for p in ENFORCEMENT_KEYWORD_PENDING) and human_review:
-                errors.append(f"{rid}: N7 enforcement 含 '待实现/暂缓' 但 human_review_required=true")
-            # N8: human_review_required == true ⇒ enforcement 含 '仅人工评审'
-            if human_review and ENFORCEMENT_KEYWORD_HUMAN_REVIEW not in keywords:
-                errors.append(f"{rid}: N8 human_review_required=true 但 enforcement 不含 '仅人工评审'")
+        automation_coverage = entry.get("automation_coverage")
+        if human_review is not None and automation_coverage is not None:
+            # N6: automation_coverage != full ⇒ human_review_required == true
+            if automation_coverage != "full" and not human_review:
+                errors.append(f"{rid}: N6 automation_coverage='{automation_coverage}' 但 human_review_required=false")
+            # N7: 待实现/暂缓 ⇒ automation_coverage == none 且 human_review_required == true（R16 特化守护）
+            if any(p in keywords for p in ENFORCEMENT_KEYWORD_PENDING):
+                if automation_coverage != "none" or not human_review:
+                    errors.append(
+                        f"{rid}: N7 enforcement 含 '待实现/暂缓' 但 automation_coverage!='none' 或 human_review_required!=true"
+                    )
+            # N8: human_review_required == true ⇒ automation_coverage != full
+            if human_review and automation_coverage == "full":
+                errors.append(f"{rid}: N8 human_review_required=true 但 automation_coverage='full'")
 
     return errors
 

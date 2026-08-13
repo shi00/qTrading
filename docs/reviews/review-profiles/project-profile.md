@@ -19,7 +19,7 @@
 | R5 僵尸引擎操作 | 在 disposed 引擎上执行数据库操作 |
 | R6 过时类型注解 | 使用 `Union[X, Y]` / `Optional[X]` 而非 `X \| Y` |
 | R7 测试状态污染 | 单例未隔离 |
-| R8 废弃 API | 使用 `_write_db(is_many=True)` 而非 `_save_upsert()` |
+| R8 废弃 API | 批量写入未用 `_save_upsert()` |
 | R9 敏感信息泄露 | 日志/异常直接打印明文 Token/API Key/密码 |
 | R10 硬编码密钥 | 代码或测试中硬编码 API Key/DB 密码 |
 | R11 跨循环复用同步原语 | 直接将 `asyncio.Event/Lock` 作为类属性 |
