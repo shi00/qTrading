@@ -655,22 +655,14 @@ class TestRedlinesYamlConsistency:
         assert len(data["redlines"]) > 0, "'redlines' 不应为空"
 
     def test_redline_fields_complete(self):
-        """每条红线含 6 个必填字段: id/title/description/enforcement/automation_coverage/human_review_required."""
+        """每条红线含全部必填字段 (由 REDLINE_REQUIRED_FIELDS 常量统一维护)."""
         import yaml
 
-        from check_docs_consistency import REDLINES_YAML_PATH
+        from check_docs_consistency import REDLINES_YAML_PATH, REDLINE_REQUIRED_FIELDS
 
         data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
-        required_fields = {
-            "id",
-            "title",
-            "description",
-            "enforcement",
-            "automation_coverage",
-            "human_review_required",
-        }
         for i, entry in enumerate(data["redlines"]):
-            missing = required_fields - set(entry.keys())
+            missing = REDLINE_REQUIRED_FIELDS - set(entry.keys())
             assert not missing, f"redlines[{i}] 缺字段: {missing}, 实际字段: {set(entry.keys())}"
 
     def test_redline_ids_are_sequential_append_only(self):
@@ -2588,3 +2580,34 @@ class TestCanonicalTopicsYamlConsistency:
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
         errors = check_canonical_topics_consistency()
         assert any("workflow 路径不存在" in e for e in errors), f"应报 workflow 路径不存在, got: {errors}"
+
+    def test_canonical_topics_align_with_claude_decision_tree(self):
+        """§1.8 决策树表引用的路径应存在于 canonical-topics.yml 的 canonical 集合中 (P2-12 镜像一致性).
+
+        §1.8 是 canonical-topics.yml 的人类可读摘要，有意合并相关主题（如 UI 视图/布局/ViewModel/i18n
+        合并为一行）。因此不校验标题一一对应，而是校验 §1.8 表中引用的每个 .md 路径
+        都在 canonical-topics.yml 中注册，防止新增 §1.8 行时遗漏 canonical-topics.yml 同步。
+        """
+        import re
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, CLAUDE_PATH
+
+        claude_text = CLAUDE_PATH.read_text(encoding="utf-8")
+        # 提取 §1.8 决策树表格内容（从「### 1.8」到下一个「###」或「##」）
+        m = re.search(r"### 1\.8.*?\n(\|.*?\|.*?\n(?:\|[-:| ]+\n)?(?:\|.*?\|.*?\n)+)", claude_text, re.DOTALL)
+        assert m, "CLAUDE.md §1.8 决策树表格未找到"
+        table_text = m.group(1)
+
+        # 提取表中引用的 .md 路径（markdown 链接目标或裸路径），统一去掉 ./ 前缀
+        all_paths_raw = re.findall(r"[\w/\-.]+\.md", table_text)
+        all_paths = {p.lstrip("./") for p in all_paths_raw}
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        canonical_set = {entry["canonical"] for entry in data["topics"]}
+
+        for path in all_paths:
+            assert path in canonical_set, (
+                f"CLAUDE.md §1.8 引用的路径 '{path}' 未在 canonical-topics.yml 中注册，"
+                f"可能存在单边漂移（新增 §1.8 行时未同步 canonical-topics.yml）"
+            )

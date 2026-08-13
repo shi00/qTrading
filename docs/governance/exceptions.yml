@@ -28,7 +28,7 @@ exceptions:
     rule_id: R1
     paths:
       - ui/startup_views.py
-    reason: "startup_views.py 由 main.py 直接装配 (main.py:18), 属于启动流程的延伸, 不是 ui 层的正常业务导入"
+    reason: "startup_views.py 由 main.py 启动装配序列直接导入, 属于启动流程的延伸, 不是 ui 层的正常业务导入"
     owner: "app/bootstrap"
     approved_by: "架构评审 2026-07"
     removal_trigger: "startup_views.py 重构为独立装配模块, 或移除对 app 层的导入后移除"

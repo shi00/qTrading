@@ -35,10 +35,8 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
 }
 
 
-# 已知例外：main.py 入口流程的特殊装配
-# startup_views.py 由 main.py 直接装配（main.py:18），属于启动流程的延伸，
-# 不是 ui 层的正常业务导入。此处显式记录，避免阻塞边界门禁。
 # P1-01: 例外统一由 docs/governance/exceptions.yml 注册表管理，此处仅读取，不再各自维护。
+# 例外原因与审批记录见 exceptions.yml EX-0001。
 def _load_known_exceptions() -> set[str]:
     """从例外注册表加载架构边界例外路径 (rule_id=R1 的 paths)。
 
@@ -80,7 +78,7 @@ def test_no_forbidden_cross_layer_imports(layer: str, forbidden: list[str]):
     ``if TYPE_CHECKING:`` 块内的导入（仅类型检查用，非运行时依赖）和
     函数体内的延迟导入（lazy import）不视为架构违规。
 
-    已知例外见 ``KNOWN_EXCEPTIONS``，需在注释中说明原因。
+    已知例外见 ``docs/governance/exceptions.yml``（rule_id=R1 的 paths）。
     """
     layer_dir = PROJECT_ROOT / layer
     if not layer_dir.exists():
@@ -114,6 +112,6 @@ def test_known_exceptions_are_valid():
     for except_path in KNOWN_EXCEPTIONS:
         full_path = PROJECT_ROOT / except_path
         assert full_path.exists(), (
-            f"KNOWN_EXCEPTIONS contains non-existent file: {except_path}. "
-            "Remove it from KNOWN_EXCEPTIONS if the file was deleted or renamed."
+            f"exceptions.yml contains non-existent file: {except_path}. "
+            "Remove it from docs/governance/exceptions.yml if the file was deleted or renamed."
         )

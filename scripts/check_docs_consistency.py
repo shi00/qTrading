@@ -780,7 +780,7 @@ def check_redlines_yaml_consistency() -> list[str]:
 # =============================================================================
 # 3c: enforcement 字段与实际 hook/CI job 映射一致性检查（ADR-0005）
 #
-# 9 个不变量 N1~N9 守护 enforcement 字段声称的守护机制配置存在且粗粒度可达。
+# 8 个不变量 N1~N8 守护 enforcement 字段声称的守护机制配置存在且粗粒度可达。
 # 核心校验 _check_enforcement_invariants() 为纯函数，接受 redlines 列表与
 # EnforcementEnvironment 配置快照，不读文件，便于单元测试构造正例/反例。
 # 实际文件读取集中在 _collect_enforcement_environment()。
@@ -1170,8 +1170,6 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     # 收集 redlines.yml 中已注册的 rule_id (用于校验 rule_id 存在性)
     try:
-        import yaml  # noqa: F811  (局部重复 import, 保持函数内自包含)
-
         redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         redlines_data = None
