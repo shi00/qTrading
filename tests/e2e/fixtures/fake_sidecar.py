@@ -7,7 +7,7 @@
 设计要点:
 - 复用 ``tests/unit/test_embedded_postgres_service.py::_MOCK_SIDECAR_PY`` 的跨平台包装器模式
   (Windows ``.bat`` / Unix ``.sh``，包装器调用 ``python -I`` 执行 Python 脚本)
-- 支持子命令分发: run/status/stop/doctor/dump/restore/maintenance-shell
+- 支持子命令分发: run/status/stop/doctor/dump/restore/maintenance-shell/version
 - 环境变量控制失败注入: ``FAKE_SIDECAR_EXIT_CODE`` / ``FAKE_SIDECAR_READY_JSON``
   / ``FAKE_SIDECAR_TIMEZONE`` / ``FAKE_SIDECAR_RESTORE_FAIL``
 - ``run`` 子命令模拟 sidecar 长驻进程 (输出 ready JSON 后等 stdin EOF 退出)
@@ -115,6 +115,22 @@ def cmd_doctor(args):
     sys.exit(0)
 
 
+def cmd_version(args):
+    # 对齐真实 sidecar 输出 schema：qtrading.embedded_postgres.version.v1（见 version.py）
+    info = {
+        "schema": "qtrading.embedded_postgres.version.v1",
+        "sidecar_version": "0.0.0-fake",
+        "postgres_version": "16.14.0",
+    }
+    if args.json:
+        sys.stdout.write(json.dumps(info) + "\\n")
+    else:
+        sys.stdout.write("qtrading-pg-sidecar 0.0.0-fake\\n")
+        sys.stdout.write(f"postgres: {info['postgres_version']}\\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
 def cmd_dump(args):
     if args.output:
         path = Path(args.output)
@@ -154,6 +170,7 @@ _DISPATCH = {
     "status": cmd_status,
     "stop": cmd_stop,
     "doctor": cmd_doctor,
+    "version": cmd_version,
     "dump": cmd_dump,
     "restore": cmd_restore,
     "maintenance-shell": cmd_maintenance_shell,
@@ -175,6 +192,7 @@ def main():
     parser.add_argument("--output")
     parser.add_argument("--input")
     parser.add_argument("--target-data-dir")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
     _override_exit_code()

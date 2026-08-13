@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
+from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
@@ -109,7 +110,7 @@ class EmbeddedPostgresService:
             self._sidecar_binary = Path(sidecar_binary)
             self._data_dir = Path(data_dir)
             self._install_dir = Path(install_dir)
-            # log_dir 默认从 data_dir 推导：data_dir = <root>/postgres/16/data
+            # log_dir 默认从 data_dir 推导：data_dir = <root>/postgres/<pg_major>/data
             # root = data_dir.parent.parent.parent（对应 paths.rs Layout::from_data_dir）
             if log_dir is None:
                 root = self._data_dir.parent.parent.parent
@@ -138,7 +139,9 @@ class EmbeddedPostgresService:
           - PyInstaller frozen 模式（``sys.frozen``）：``sys._MEIPASS / sidecars / qtrading-pg-sidecar[.exe]``
             （pg_plan §16.2，installer embedded variant 安装到 ``<app>/_internal/sidecars/``）
           - 开发模式：``Path("sidecars") / qtrading-pg-sidecar[.exe]``（cwd-relative）
-        - data_dir：embedded_pg_data_root 为空时用 platformdirs 默认 <app data>/postgres/16/data
+        - data_dir：embedded_pg_data_root 为空时用 platformdirs 默认 <app data>/postgres/
+          <pg_major>/data，其中 <pg_major> 由 ``resolve_pg_major_version(sidecar_binary)``
+          动态解析（以 sidecar 二进制为权威来源，见 version.py）
         - install_dir：默认 <data_root>/install
         - log_dir：默认 <app data>/postgres-logs
         """
@@ -163,7 +166,7 @@ class EmbeddedPostgresService:
             import platformdirs
 
             app_data = Path(platformdirs.user_data_dir("qTrading"))
-            data_root = app_data / "postgres" / "17"
+            data_root = app_data / "postgres" / resolve_pg_major_version(sidecar_binary)
         data_dir = data_root / "data"
 
         if config.embedded_pg_install_root:

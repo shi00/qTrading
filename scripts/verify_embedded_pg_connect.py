@@ -5,7 +5,8 @@
 2. Alembic upgrade head 落在空 embedded cluster
 3. pg_dump/pg_restore roundtrip（sidecar 安装目录内 bundled 工具）
 
-约束：不 import data/cache（project_memory scripts/ 红线）；仅用 stdlib + DB 驱动 + alembic。
+约束：仅 import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）；
+其余仅用 stdlib + DB 驱动 + alembic。
 用法：python scripts/verify_embedded_pg_connect.py --sidecar <sidecar.exe> --work-dir <tmp_dir>
 退出码：0 全部通过；1 任一步骤失败。
 """
@@ -21,6 +22,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+# 使仓库根可 import：脚本经 `python scripts/verify_embedded_pg_connect.py` 直接运行时
+# sys.path[0] 指向 scripts/，data 包不在可导入路径上
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from data.persistence.embedded_postgres.version import resolve_pg_major_version
 
 READY_TIMEOUT_S = 180  # 首次 setup 需解压 bundled PostgreSQL 归档 + initdb，给足余量
 STOP_TIMEOUT_S = 60
@@ -140,8 +149,9 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parent.parent
     work = args.work_dir.resolve()
-    data_dir = work / "17" / "data"
-    install_dir = work / "17" / "install"
+    ver = resolve_pg_major_version(args.sidecar)
+    data_dir = work / ver / "data"
+    install_dir = work / ver / "install"
     password_file = work / "qtrading.pgpass"
     stderr_log = work / "sidecar.stderr.log"
     data_dir.mkdir(parents=True, exist_ok=True)

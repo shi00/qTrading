@@ -351,7 +351,9 @@ async def main(page: ft.Page):
 
     config_for_detect = AppConfig.model_validate(ConfigHandler.load_config())
     try:
-        scenario = detect_embedded_pg_startup_scenario(config_for_detect)
+        # R16: detect 内部 from_config 会触发 resolve_pg_major_version 阻塞子进程，
+        #      在事件循环内调用会阻塞 UI；经 to_thread 卸载到线程池（与 prepare_database_runtime 一致）。
+        scenario = await asyncio.to_thread(detect_embedded_pg_startup_scenario, config_for_detect)
     except Exception as e:
         # detect 为 UX 增强函数，失败不应阻塞启动；降级为 UNKNOWN 让 LoadingView 仍渲染
         # （detect 抛异常仅在 embedded 模式下，external 模式第一行即返回 None 不抛异常）
