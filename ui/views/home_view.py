@@ -164,7 +164,7 @@ def HomeView(
             vm.set_loading(False)
             return
         try:
-            vm.init()  # 添加 service listener (use_viewmodel cleanup 时 vm.dispose() 移除)
+            vm.init()  # 添加 service listener (active 失活时经下方 effect cleanup 调 vm.stop() 退订)
             await vm.init_data()
             await _load_data()
         except asyncio.CancelledError:
@@ -198,8 +198,25 @@ def HomeView(
 
     ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
 
-    # --- 初始加载 (mount 时执行一次) ---
-    ft.use_effect(_init_and_load, dependencies=[active])
+    # --- 初始加载 (mount 时执行一次; active 失活经 cleanup 调 vm.stop() 退订) ---
+
+    def _cleanup_service_listeners() -> None:
+        """active 失活时退订 service listener (与 _init_and_load 的 vm.init() 配对).
+
+        HomeView 常驻 app_layout 的 ft.Stack (永不卸载), listener 仅随 dispose()
+        移除会导致失活后仍被新闻/行情 push 反复重渲染。本 cleanup 在 deps
+        (active) 变化 (True→False 失活 / False→True 重激活) 与卸载时执行,
+        调 vm.stop() 退订 (幂等; 重激活时 cleanup 先于 setup 执行, stop 为
+        空操作, 随后 setup 中 init() 重新注册 listener)。
+        E2E 早返: 对称 _init_and_load 顶部守卫。E2E 下未早返时将实例化
+        NewsSubscriptionService → AIService → litellm import (同步阻塞 MainThread),
+        造成 E2E 回归。
+        """
+        if os.environ.get("E2E_TESTING") == "true":
+            return
+        vm.stop()
+
+    ft.use_effect(_init_and_load, dependencies=[active], cleanup=_cleanup_service_listeners)
 
     # --- 渲染 (直接从 state 读取, 无 dual-track) ---
 

@@ -138,6 +138,27 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         NewsSubscriptionService().add_listener(self._on_news_service_update)
         MarketDataService().add_listener(self._on_market_service_update)
 
+    def stop(self) -> None:
+        """Stop subscriptions (视图失活时经 use_effect cleanup 调用, 与 init() 配对).
+
+        仅移除 News/MarketData service listener (保留 state/subscribers, 便于切回
+        active 时经 init() 重新注册恢复)。幂等: News/MarketData 的 remove_listener
+        均基于 set.remove + try/except KeyError, 重复调用安全 (无需额外订阅状态字段)。
+
+        不替代 dispose(): dispose() 为组件真正卸载时调用, 额外清订阅者; stop() 仅退订
+        service listener。HomeView 常驻 app_layout 的 ft.Stack 永不卸载, 失活时必须
+        经本方法退订, 否则被新闻/行情 push 反复重渲染 (详见 Plans.md 根因)。
+        """
+        try:
+            NewsSubscriptionService().remove_listener(self._on_news_service_update)
+            MarketDataService().remove_listener(self._on_market_service_update)
+        except Exception as e:
+            logger.warning(
+                "[HomeVM] Stop error: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
+
     def dispose(self) -> None:
         """覆盖 dispose: 移除 service listener, 再清订阅者。"""
         try:
