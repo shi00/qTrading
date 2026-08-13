@@ -1,6 +1,7 @@
 # 单例模式实现模板
 
 > 来源：从 CONTRIBUTING.md 迁移
+> canonical_for: 单例注册清单与生命周期（P3-02 链接语义正本）
 
 > 对应 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)。
 

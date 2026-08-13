@@ -1,6 +1,7 @@
 # Flet V1 API 关键约束
 
 > 来源：从 CONTRIBUTING.md §Flet V1 API 关键约束迁移
+> canonical_for: Flet 声明式渲染与 V1 API 约束（P3-02 链接语义正本）
 
 > 相关：[CLAUDE.md §2](../../CLAUDE.md#2-项目概览) 技术栈表、[CLAUDE.md §3.1 R16](../../CLAUDE.md#31--绝对禁止)（V1 单线程 async 模型对 UI 阻塞更敏感）。Flet 锁定版本见 [`pyproject.toml`](../../pyproject.toml)。
 
@@ -71,7 +72,7 @@ V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止�
 
 ## V1 声明式 UI 开发规范
 
-> 宪法 [CLAUDE.md §3.2 UI 模型（强制）](../../CLAUDE.md#32--强制要求) 的唯一实现细则。
+> Flet 声明式渲染与 API 正本（MVVM 架构与 ViewModel 生命周期 SSOT 见 [MVVM 表现层](../patterns/mvvm.md)）。
 > 命令式存量（`class X(ft.Container)` + `did_mount`/`will_unmount` + 手动 `self.update()`）已重写为声明式范式（新代码禁止新增命令式控件，当前受契约测试守护，见 [MVVM 表现层](../patterns/mvvm.md) 与 `tests/unit/ui/*_contract.py`；下方「关注点对照」列出当前允许/禁止形态）。
 
 切到 Flet V1 后，新增 View/Panel/Component 必须采用声明式 `@ft.component` + 官方 hooks 写法。API 签名见 [下方](#3-use_state--use_effect-api) 与 [项目差异与高风险 API](./project-differences.md)。
@@ -87,7 +88,7 @@ V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止�
 | 下拉刷新 | ~~`refresh_dropdown_options` 两步 update 绕过~~（已删除） | 状态驱动重建 options，自动绕过 |
 | 响应式 | `handle_resize` 鸭子分发 + 断点手算 | `ResponsiveRow` + `AppStyles.COL_*` 预置配置，客户端断点驱动布局 |
 | page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片已删除 |
-| ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, commands)`，View 只读 state + 调 commands（见 [MVVM 表现层](../patterns/mvvm.md)） |
+| ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, vm)`，View 只读 state + 调 vm（vm 即 commands，见 [MVVM 表现层](../patterns/mvvm.md)） |
 
 ### 2. `@ft.component` 标准模板
 
@@ -141,7 +142,7 @@ def MetricCard(label: str):
 
 ### 5. ViewModel 消费（MVVM 桥接）
 
-View 消费 ViewModel 必须经 `use_viewmodel(factory) -> (state, commands)` hook，**不得**直接 `vm = SomeViewModel()` 实例化或注入回调。完整契约与形态见 [MVVM 表现层](../patterns/mvvm.md)。
+View 消费 ViewModel 必须经 `use_viewmodel(factory) -> (state, vm)` hook，**不得**直接 `vm = SomeViewModel()` 实例化或注入回调。完整契约与形态见 [MVVM 表现层](../patterns/mvvm.md)。
 
 ```python
 import flet as ft
@@ -234,11 +235,11 @@ def ScreenerView():
 
 项目规范的 Flet 知识聚焦于**项目专属约束**（V0→V1 迁移 API 表、声明式组件内 API 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [Flet 官方文档](https://docs.flet.dev/)，本项目不再复制，避免与上游漂移。
 
-**优先级（冲突时前者覆盖后者）**：
+**文档权威（按主题正本，P1-05）**：文档权威不按目录层级全局覆盖，而按主题确定正本（见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）：
 
-1. [CLAUDE.md](../../CLAUDE.md)（红线 R1~R18、架构边界、交互准则）
-2. [CONTRIBUTING.md](../../CONTRIBUTING.md)（项目实现规范入口索引）
-3. [`docs/flet/`](./) 子文档（项目 Flet 差异与升级清单详细实现）
+1. 红线 R1~R18、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
+2. 项目实现规范入口索引 → [CONTRIBUTING.md](../../CONTRIBUTING.md)
+3. Flet 项目约束与 API → 本文件（`v1-api-constraints.md` 为 Flet 声明式渲染与 V1 API 约束正本）
 
 **项目专属约束覆盖通用手册的 8 处分叉**（查阅通用手册时须以下表项目规范为准）：
 

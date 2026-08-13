@@ -16,11 +16,19 @@
 #     none: 无自动化检查，完全依赖人工评审
 #   human_review_required: 是否需要人工评审
 #     automation_coverage != full 时一律为 true (ADR-0005 N6)
+#   rule_type: 规则类型 (P2-11, 见 CLAUDE.md §3.1)
+#     INVARIANT: 不可豁免的无条件安全不变量
+#     DEFAULT: 无反证时采用
+#     NEW_CODE: 只限制新增/修改代码
+#     MIGRATION_TARGET: 存量允许、不得扩散
+#     WORKFLOW: 在对应任务触发
+#     EXCEPTIONABLE: 只能通过例外注册表豁免 (docs/governance/exceptions.yml)
 #
 # 修改规则:
 #   - 新增 R19+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
 #   - 禁止删除或复用已废弃编号 (append-only)
 #   - 字段变更 (如新增字段) 需同步更新契约测试
+#   - EXCEPTIONABLE 规则被例外注册表引用时, 例外 rule_id 必须指向 EXCEPTIONABLE 规则
 
 redlines:
   - id: R1
@@ -29,6 +37,7 @@ redlines:
     enforcement: "pre-commit（import-linter 4 条契约）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: EXCEPTIONABLE
 
   - id: R2
     title: 异常吞没
@@ -36,6 +45,7 @@ redlines:
     enforcement: "CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R3
     title: 模糊压制
@@ -43,6 +53,7 @@ redlines:
     enforcement: "pre-commit"
     automation_coverage: full
     human_review_required: false
+    rule_type: INVARIANT
 
   - id: R4
     title: SQL 注入
@@ -50,6 +61,7 @@ redlines:
     enforcement: "pre-commit（check_redlines.py）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R5
     title: 僵尸引擎操作
@@ -57,6 +69,7 @@ redlines:
     enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R6
     title: 过时类型注解
@@ -64,6 +77,7 @@ redlines:
     enforcement: "ruff"
     automation_coverage: full
     human_review_required: false
+    rule_type: NEW_CODE
 
   - id: R7
     title: 测试状态污染
@@ -71,6 +85,7 @@ redlines:
     enforcement: "CI-test（全量，conftest.py autouse fixture）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R8
     title: 废弃 API
@@ -78,6 +93,7 @@ redlines:
     enforcement: "CI-test（结构性签名强制 + filterwarnings error::DeprecationWarning 通用辅助门禁）"
     automation_coverage: full
     human_review_required: false
+    rule_type: NEW_CODE
 
   - id: R9
     title: 敏感信息泄露
@@ -85,6 +101,7 @@ redlines:
     enforcement: "安全扫描 + 仅人工评审"
     automation_coverage: partial
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R10
     title: 硬编码密钥
@@ -92,6 +109,7 @@ redlines:
     enforcement: "CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审"
     automation_coverage: partial
     human_review_required: true
+    rule_type: INVARIANT
 
   - id: R11
     title: 跨循环复用同步原语
@@ -99,6 +117,7 @@ redlines:
     enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R12
     title: 未注册数据表
@@ -106,6 +125,7 @@ redlines:
     enforcement: "pre-commit（check_redlines.py）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R13
     title: 未注册 DAO
@@ -113,6 +133,7 @@ redlines:
     enforcement: "pre-commit（check_redlines.py，部分覆盖：__init__ 注册已检查，_create_engine engine 引用更新未自动检查）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R14
     title: 未注册策略
@@ -120,6 +141,7 @@ redlines:
     enforcement: "pre-commit（check_redlines.py）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R15
     title: 未注册单例
@@ -127,6 +149,7 @@ redlines:
     enforcement: "pre-commit（check_redlines.py）"
     automation_coverage: partial
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R16
     title: UI 阻塞主循环
@@ -134,6 +157,7 @@ redlines:
     enforcement: "可自动化待实现（AST 检查，暂缓：误报风险高）"
     automation_coverage: none
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R17
     title: 保留字作字段
@@ -141,6 +165,7 @@ redlines:
     enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
+    rule_type: NEW_CODE
 
   - id: R18
     title: 未隔离开发
@@ -148,3 +173,4 @@ redlines:
     enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
+    rule_type: WORKFLOW

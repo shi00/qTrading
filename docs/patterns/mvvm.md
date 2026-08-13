@@ -1,6 +1,7 @@
 # MVVM 表现层
 
 > 来源：从 CONTRIBUTING.md 迁移
+> canonical_for: MVVM 架构与 ViewModel 生命周期（P3-02 链接语义正本）
 
 > 对应 [CLAUDE.md §3.2 UI 模型（强制）](../../CLAUDE.md#32--强制要求)；声明式渲染细则见 [V1 声明式 UI 开发规范](../flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。
 

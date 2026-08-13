@@ -12,10 +12,14 @@ import ast
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# 例外注册表路径 (P1-01: 集中例外治理, 见 docs/governance/exceptions.yml)
+EXCEPTIONS_YAML_PATH = PROJECT_ROOT / "docs" / "governance" / "exceptions.yml"
 
 # R1 + §4.2 禁止的跨层导入方向
 # key: 源层; value: 该层禁止导入的目标层列表
@@ -30,12 +34,26 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
     "utils": ["ui", "strategies", "services", "app", "data"],
 }
 
+
 # 已知例外：main.py 入口流程的特殊装配
 # startup_views.py 由 main.py 直接装配（main.py:18），属于启动流程的延伸，
 # 不是 ui 层的正常业务导入。此处显式记录，避免阻塞边界门禁。
-KNOWN_EXCEPTIONS: set[str] = {
-    "ui/startup_views.py",  # imports app.bootstrap, app.startup_controller (main.py 装配延伸)
-}
+# P1-01: 例外统一由 docs/governance/exceptions.yml 注册表管理，此处仅读取，不再各自维护。
+def _load_known_exceptions() -> set[str]:
+    """从例外注册表加载架构边界例外路径 (rule_id=R1 的 paths)。
+
+    例外治理集中化 (P1-01)：KNOWN_EXCEPTIONS 不再硬编码于测试文件，
+    而是从 docs/governance/exceptions.yml 读取，避免多源漂移。
+    """
+    data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    paths: set[str] = set()
+    for entry in data.get("exceptions", []):
+        if entry.get("rule_id") == "R1":
+            paths.update(entry.get("paths", []))
+    return paths
+
+
+KNOWN_EXCEPTIONS: set[str] = _load_known_exceptions()
 
 
 def _get_imported_modules(node: ast.AST) -> list[str]:

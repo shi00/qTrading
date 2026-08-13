@@ -3,7 +3,14 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0，最后校对：2026-07-15
+> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-08-13
+> **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
+> - owner: 架构维护者
+> - ruleset_version: 1.1.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-08-13
+> - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
+> - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
+> - supersedes: 无
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 
 ---
@@ -12,7 +19,19 @@
 
 作为项目的高级工程师和架构师，请在所有回复中遵循以下原则：
 
-> **文档权威性**：红线（§3）与架构边界（§4）以 `CLAUDE.md` 为唯一权威；实现细节与模板以 `CONTRIBUTING.md` 为准。两者冲突时，红线/边界看宪法、细节看手册；发现文档不一致时，按修改范围决定：若不一致直接阻碍当前修改正确性则同步修正，否则记录为独立任务。长期文档引用用符号锚点（函数/类/常量名 + 相对描述），不用硬编码行号。
+> **文档权威性（按主题正本）**：文档权威不按目录层级（`CLAUDE.md > CONTRIBUTING.md > docs/ > man/`）全局覆盖，而按主题确定正本。冲突时先按主题确定正本，再以正本裁决：
+>
+> | 主题 | 权威来源 |
+> |------|----------|
+> | 红线（§3）、架构不变量（§4）、AI 行为 | `CLAUDE.md` |
+> | 人类贡献流程、最小命令入口 | `CONTRIBUTING.md` |
+> | MVVM | `docs/patterns/mvvm.md` |
+> | Flet 项目约束 | `docs/flet/v1-api-constraints.md` |
+> | Flet API 存在性和签名 | 锁定版本源码 / flet-mcp / 官方文档 |
+> | CI 实际行为 | workflow、pre-commit、pyproject 配置 |
+> | 技术债状态 | `docs/debt/known-technical-debt.md` |
+>
+> 发现文档不一致时，按修改范围决定：若不一致直接阻碍当前修改正确性则同步修正，否则记录为独立任务。长期文档引用用符号锚点（函数/类/常量名 + 相对描述），不用硬编码行号。
 
 ### 1.0 全局安全与授权边界
 
@@ -82,31 +101,28 @@
 
 ### 1.8 任务类型 → 必读文件 (决策树)
 
-| 任务类型 | 必读章节 / 文件 |
-|---------|----------------|
-| 新增/修改策略 | [docs/patterns/strategy-template.md](./docs/patterns/strategy-template.md)、`strategies/base_strategy.py`；工作流见 docs/guides/how-to.md「3. 新增一个策略」 |
-| 新增/修改 DAO 或数据表 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md)、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 docs/guides/how-to.md「1. 新增一张数据表」/「2. 新增一个 DAO」 |
-| 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md)、`data/sync/base.py` |
-| 新增/修改 UI 视图 | 先读 [docs/flet/README.md](./docs/flet/README.md)「新增或修改 UI 视图」；必读 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)「V1 声明式 UI 开发规范」、[docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)、[docs/patterns/mvvm.md](./docs/patterns/mvvm.md)、`ui/app_layout.py` 和对应 ViewModel；不熟悉的 API 按 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) 核验（通过 flet-mcp 落实 §1.10）；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
-| 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
-| 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile）；项目红线见 §3、架构边界见 §4 |
-| AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md)（核心协议 + 稳定规则 ID + review-profiles 按需加载）；项目红线见 §3、架构边界见 §4 |
-| 修改单例 / 资源生命周期 | §4.3、[docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)、`utils/singleton_registry.py`、`utils/shutdown.py` |
-| 性能优化 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md)、`utils/log_decorators.py` |
-| 调整 CI / 依赖 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md)、`pyproject.toml`、`.github/workflows/ci_cd.yml`、[docs/guides/dependency-management.md](./docs/guides/dependency-management.md)；Flet 升级见 [docs/flet/upgrade-checklist.md](./docs/flet/upgrade-checklist.md) |
-| 新增/修改回测 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md)、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 docs/guides/how-to.md「7. 新增回测配置」 |
-| 修改 UI 布局/响应式 | 先读 [docs/flet/README.md](./docs/flet/README.md)「修改布局或响应式」；必读 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)「布局与响应式」、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)、[docs/flet/project-differences.md](./docs/flet/project-differences.md)、`ui/theme.py` (`AppStyles`) 和 `ui/app_layout.py`；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
-| 新增/修改 ViewModel | 先读 [docs/flet/README.md](./docs/flet/README.md)「新增或修改 ViewModel」；必读 [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md) 和对应 View/ViewModel；纯 ViewModel 任务无需加载完整 UI/UX 文档；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
-| 修改 i18n 文案 | 先读 [docs/flet/README.md](./docs/flet/README.md) 对应路径；必读 `core/i18n.py`、`locales/`、[docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则；**Flet API 验证见 docs/flet/mcp-usage.md**（通过 flet-mcp 落实 §1.10） |
-| 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
-| 新增测试 | [docs/guides/testing.md](./docs/guides/testing.md)、`tests/unit/conftest.py` |
-| 新增/修改 E2E 测试 | docs/flet/canvaskit-rendering-e2e-guide.md（CanvasKit 渲染坑点 + EIDS 分类速查表）、docs/guides/testing.md、`tests/e2e/helpers/anchor_page.py`；E2E 定位优先用 anchor-based（`AnchorPage`），禁止依赖文本模糊匹配；Flet 控件坑点（ListView 视口为 0、Container.on_click 无 flt-tappable、expand 传递断裂等）见 docs/flet/project-differences.md §4.5-4.9 |
-| 依赖安全审计 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md)、`scripts/run_pip_audit.py` |
-| 性能阈值调整 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md)、`utils/log_decorators.py` |
-| Git 操作 / 分支 / worktree | §3 R18、[docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「Worktree 强制使用」「标准工作流」；新特性/重构任务使用 git worktree 隔离开发，确保主工作区整洁 |
-| 创建 PR / 提交代码 | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」、`.github/PULL_REQUEST_TEMPLATE.md`；禁止手写简化 PR body，必须用 `gh pr create --template` 加载模板 |
-| 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)「AI 助手创建 Issue 标准流程（强制）」、`.github/ISSUE_TEMPLATE/`；禁止手写简化 issue body 或创建空白 issue，必须用 `gh issue create --template "模板名称"` 加载对应表单 |
-| 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（sidecar CLI 诊断/备份/恢复，涉及数据目录与 PGDATA 锁）；操作前确认应用已完全退出 |
+完整路由表见 [docs/governance/canonical-topics.yml](./docs/governance/canonical-topics.yml)（主题 → canonical 正本映射，P2-12）。每类任务只列一个 canonical 入口，条件路由由该入口文档负责；此处仅保留高风险任务与最小入口，不复制二级必读清单。
+
+| 任务类型 | 必读入口 |
+|---------|---------|
+| 新增/修改策略 | [docs/patterns/strategy-template.md](./docs/patterns/strategy-template.md) |
+| 新增/修改 DAO 或数据表 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md) |
+| 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) |
+| 新增/修改 UI 视图 / 布局 / ViewModel / i18n | [docs/flet/README.md](./docs/flet/README.md)（条件路由到各专题） |
+| 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」 |
+| 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile） |
+| AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
+| 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) |
+| 性能优化 / 阈值调整 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
+| 调整 CI / 依赖 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
+| 新增/修改回测 | docs/guides/how-to.md「7. 新增回测配置」 |
+| 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
+| 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) |
+| Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)（PR/Issue 必须用模板，禁止手写简化 body） |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（操作前确认应用已完全退出） |
+| 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md)；存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR（P2-17） |
+
+> 红线（§3）与架构边界（§4）为所有任务的通用约束，任何任务均须遵守；高风险任务（红线、架构边界、数据丢失风险）经确认后再编码。
 
 ### 1.9 关键验证命令
 
@@ -116,6 +132,8 @@
 - **变更相关门禁**（提交/PR/跨层修改时）：`ruff check .` → `ruff format --check .` → `pre-commit run --all-files` → `pyright` → `python -m pytest tests/unit/ -v --tb=short`，与 `.github/workflows/ci_cd.yml` 顺序一致。
 - **CI 全量门禁**（CI 自动执行，本地一般不跑）：完整 CI 流水线，含 `downgrade base` → `upgrade head` 迁移回归等。
 - **不得声称未运行项已通过**；无法运行的验证需说明原因，不得跳过不报。
+
+**跨平台命令策略（P2-16）**：项目支持 Windows 与 Linux。文档只描述命令目的，不绑定具体 shell（如 `grep`/`source`）；命令手册按 PowerShell / POSIX 分栏（见 CONTRIBUTING.md「常用开发与测试命令」）。AI 优先使用 IDE 搜索工具或跨平台 Python 脚本，而非机械执行 POSIX 命令；路径引用统一用仓库相对 POSIX 形式，执行时按当前 shell 转换。
 
 ### 1.10 反幻觉护栏 (AI 特有红线)
 
@@ -161,6 +179,21 @@
 
 > **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 4 条契约守护（pre-commit `import-linter` hook）；R4/R12/R13/R14/R15 已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R16 UI 阻塞暂缓（AST 扫描误报风险高，需更精确的事件处理器识别逻辑）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
+> **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
+> - `INVARIANT`：不可豁免的无条件安全不变量；
+> - `DEFAULT`：无反证时采用；
+> - `NEW_CODE`：只限制新增/修改代码（存量允许、不得扩散）；
+> - `MIGRATION_TARGET`：存量允许、不得扩散；
+> - `WORKFLOW`：在对应任务触发；
+> - `EXCEPTIONABLE`：只能通过 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml) 例外注册表豁免。
+> 判定规则时先看 `rule_type`：`NEW_CODE`/`MIGRATION_TARGET` 不约束存量，`EXCEPTIONABLE` 只能经注册表豁免，`INVARIANT` 不可豁免。
+
+**R18 执行决策树（P2-13，先识别对象再判定隔离）：**
+1. 先确认实际修改对象与文件数量（是单文件文档、单行修复，还是跨多文件特性/重构）；
+2. 命中豁免（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）则直接执行；
+3. 非 Git 环境（下载 ZIP/归档、`.git` 丢失、shallow clone 无基线、只读文件系统、IDE 映射目录）的跨文件任务：停止并让用户选择有效 clone/worktree 或显式一次性例外，不得自行猜测；
+4. 禁止 AI 自行 `git init` 冒充项目历史。
+
 ### 3.2 ✅ 强制要求
 
 - 运行在事件循环线程上、可能超过明确阈值或调用不可控同步依赖、位于 UI 事件/长生命周期异步任务/并发敏感路径的同步阻塞 CPU/IO 段必须通过 `ThreadPoolManager` 提交到对应线程池 (`TaskType.IO` / `TaskType.CPU`)。
@@ -171,13 +204,13 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。预期异常、控制流异常和直接传播边界不强制分类；外部 IO 失败在转译、降级、记录或跨层传播时才要求分类。涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装，除非能证明该封装带来实质性价值。
-- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。界面设计遵守 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)；无障碍遵守 [docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)；Flet API 与声明式实现遵守 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)。
+- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, vm)` hook 消费 ViewModel，`vm` 即 commands（MVVM 架构与 ViewModel 生命周期 SSOT 见 [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)，Flet 声明式渲染与 API 正本见 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。界面设计遵守 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)；无障碍遵守 [docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)；Flet API 与声明式实现遵守 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
 当前 CLAUDE.md/CONTRIBUTING.md 规范条目中无未解决的规范缺口；代码层面的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
 
-> **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
+> **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用代码搜索工具（IDE 搜索或跨平台脚本）汇集 `NOTE(lazy):` 标记。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
 ---
 
@@ -200,6 +233,12 @@ app → 编排所有层，仅被 main.py 调用
 
 **绝对禁止反向依赖：** `core` 导入 `data`/`services`/`strategies`/`ui`/`utils`/`app` 中的任何模块；`data` 导入 `ui`/`services`/`strategies`；`services` 导入 `ui`；`strategies` 导入 `ui`。
 
+**架构守护范围（P2-03）：**
+- **import-linter（pre-commit）** 守护 R1 表内方向：`core` 禁入 `data/services/strategies/ui/utils/app`；`data` 禁入 `services/strategies/ui`；`services` 禁入 `strategies/ui`；`strategies` 禁入 `ui`。
+- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`。
+- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）与函数体内 lazy import（显式解耦手段）不视为架构违规；仅模块级 import 受检。
+- **例外唯一注册入口**：架构边界例外统一登记于 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml)（rule_id=R1），测试仅从注册表读取，不各自维护。
+
 > **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
 
 ### 4.2 core 层隔离原则
@@ -208,7 +247,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager/EmbeddedPostgresService/EmbeddedPgMaintenanceService）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)。
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含注册/非注册单例、非单例服务）见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)（完整注册清单的唯一正本，新增单例只更新该文件）。
 
 ---
 

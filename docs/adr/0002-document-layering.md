@@ -34,7 +34,7 @@ AStockScreener 项目文档在 Phase 2 渐进式披露拆分前存在以下漂�
 - CONTRIBUTING.md 不重复 CLAUDE.md 的红线与架构边界；只保留入口索引 + 人类贡献者命令 + 简短规范。
 - docs/ 各子目录按类别归类，跨目录交叉引用用相对路径 + 锚点。
 - man/ 不再承载 Flet 内容（改为 stub），其他 man/ 专题保留。
-- precedence: CLAUDE.md > CONTRIBUTING.md > docs/ > man/（冲突时前者覆盖后者）。
+- 文档权威按主题确定正本，而非按目录层级全局覆盖（P1-05 修订，见 CLAUDE.md §1「文档权威性（按主题正本）」）；冲突时先按主题确定正本，再以正本裁决。
 
 ## Consequences
 

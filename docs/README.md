@@ -16,12 +16,14 @@
 
 ## 文档层次
 
-1. CLAUDE.md — 项目宪法（AI 自动加载，含红线/架构边界/交互准则）
+文档权威按主题确定正本，而非按目录层级全局覆盖。目录仅作组织用途：
+
+1. CLAUDE.md — 项目宪法（AI 自动加载，红线/架构边界/交互准则）
 2. CONTRIBUTING.md — 入口索引 + 最小命令 + PR 流程
 3. docs/ — 专项深入文档（本目录）
 4. man/ — 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub）
 
-precedence: CLAUDE.md > CONTRIBUTING.md > docs/ > man/
+按主题权威正本见 [CLAUDE.md](../CLAUDE.md) §1「文档权威性（按主题正本）」；冲突时先按主题确定正本，再以正本裁决。
 
 ## Tushare 文档索引
 

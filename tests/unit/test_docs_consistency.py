@@ -821,6 +821,60 @@ class TestRedlinesYamlConsistency:
         errors = check_redlines_yaml_consistency()
         assert any("R1" in e and "不一致" in e for e in errors), f"应报 CLAUDE.md 与 YAML 字段不一致, got: {errors}"
 
+    def test_redline_rule_type_valid(self):
+        """每条红线 rule_type 应为合法值 (P2-11)."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, RULE_TYPE_VALUES
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["redlines"]:
+            rule_type = entry.get("rule_type")
+            assert rule_type in RULE_TYPE_VALUES, (
+                f"redlines[{entry.get('id')}] rule_type 非法: {rule_type} (应为 {sorted(RULE_TYPE_VALUES)})"
+            )
+
+    def test_detects_invalid_rule_type(self, tmp_path, monkeypatch):
+        """rule_type 值非法 (非 6 种合法类型) → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data["redlines"][0]["rule_type"] = "INVALID_TYPE"
+        tmp_yml = tmp_path / "redlines_bad_rule_type.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("rule_type" in e and "非法" in e for e in errors), f"应报 rule_type 值非法, got: {errors}"
+
+    def test_detects_exceptionable_linkage_violation(self, tmp_path, monkeypatch):
+        """例外注册表引用的 rule_id 不是 EXCEPTIONABLE 规则 → 报错."""
+        import yaml
+
+        from check_docs_consistency import (
+            EXCEPTIONS_YAML_PATH,
+            REDLINES_YAML_PATH,
+            check_redlines_yaml_consistency,
+        )
+
+        # 将 R1 改为 INVARIANT (非 EXCEPTIONABLE), 但 exceptions.yml 仍引用 R1
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["redlines"]:
+            if entry["id"] == "R1":
+                entry["rule_type"] = "INVARIANT"
+        tmp_yml = tmp_path / "redlines_non_exceptionable.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+        # 确保 exceptions.yml 存在 (真实文件)
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", EXCEPTIONS_YAML_PATH)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("不是 EXCEPTIONABLE 规则" in e for e in errors), f"应报例外引用非 EXCEPTIONABLE 规则, got: {errors}"
+
     # === _normalize_for_comparison 纯函数测试 ===
 
     def test_normalize_removes_bold_markers(self):
@@ -2212,3 +2266,325 @@ class TestFletHubCompleteness:
         assert main() == 0, (
             "check_docs_consistency.py main() should return 0 when all checks pass (including Flet hub completeness)"
         )
+
+
+class TestExceptionsYamlConsistency:
+    """例外注册表一致性校验 (P1-01: 集中例外治理).
+
+    校验 docs/governance/exceptions.yml 的 schema、rule_id 存在性、路径存在性。
+    """
+
+    def test_exceptions_yaml_file_exists(self):
+        """exceptions.yml 应存在于 docs/governance/ 下."""
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        assert EXCEPTIONS_YAML_PATH.exists(), f"exceptions.yml should exist at {EXCEPTIONS_YAML_PATH}"
+
+    def test_exceptions_yaml_parses_successfully(self):
+        """exceptions.yml 应可被 yaml.safe_load 解析."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+        assert "exceptions" in data
+        assert isinstance(data["exceptions"], list)
+
+    def test_exception_fields_complete(self):
+        """每条例外必填字段齐全, 且 expires_at/removal_trigger 二选一."""
+        import yaml
+
+        from check_docs_consistency import (
+            EXCEPTIONS_YAML_PATH,
+            EXCEPTION_EXPIRY_FIELDS,
+            EXCEPTION_REQUIRED_FIELDS,
+        )
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["exceptions"]:
+            missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
+            assert not missing, f"例外 {entry.get('id')} 缺少必填字段: {sorted(missing)}"
+            assert EXCEPTION_EXPIRY_FIELDS & entry.keys(), f"例外 {entry.get('id')} 缺少 expires_at 或 removal_trigger"
+
+    def test_exception_ids_unique(self):
+        """例外 id 应唯一且格式为 EX-XXXX."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        ids = [e["id"] for e in data["exceptions"]]
+        assert len(ids) == len(set(ids)), f"例外 id 重复: {ids}"
+        for exc_id in ids:
+            assert exc_id.startswith("EX-"), f"例外 id 格式应为 EX-XXXX: {exc_id}"
+
+    def test_exception_rule_id_exists_in_redlines(self):
+        """例外 rule_id 必须存在于 redlines.yml."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH, REDLINES_YAML_PATH
+
+        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        red_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        registered = {e["id"] for e in red_data["redlines"]}
+        for entry in exc_data["exceptions"]:
+            assert entry["rule_id"] in registered, (
+                f"例外 {entry['id']} 的 rule_id '{entry['rule_id']}' 不存在于 redlines.yml"
+            )
+
+    def test_exception_paths_exist(self):
+        """例外 paths 指向的仓库路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["exceptions"]:
+            for p in entry["paths"]:
+                assert (ROOT / p).exists(), f"例外 {entry['id']} 的路径不存在: {p}"
+
+    def test_check_exceptions_yaml_consistency_passes(self):
+        """当前项目配置下 check_exceptions_yaml_consistency() 应返回空错误列表."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        errors = check_exceptions_yaml_consistency()
+        assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_missing_required_field(self, tmp_path, monkeypatch):
+        """缺少必填字段时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n  - id: EX-0001\n    rule_id: R1\n    paths: [ui/startup_views.py]\n    reason: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("缺少必填字段" in e for e in errors), f"应报缺少必填字段, got: {errors}"
+
+    def test_detects_missing_expiry_field(self, tmp_path, monkeypatch):
+        """缺少 expires_at/removal_trigger 二选一字段时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("expires_at 或 removal_trigger" in e for e in errors), f"应报缺少二选一字段, got: {errors}"
+
+    def test_detects_duplicate_id(self, tmp_path, monkeypatch):
+        """例外 id 重复时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("id 重复" in e for e in errors), f"应报 id 重复, got: {errors}"
+
+    def test_detects_invalid_rule_id(self, tmp_path, monkeypatch):
+        """rule_id 不存在于 redlines.yml 时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R999\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("rule_id" in e and "不存在于 redlines.yml" in e for e in errors), (
+            f"应报 rule_id 不存在, got: {errors}"
+        )
+
+    def test_detects_missing_path(self, tmp_path, monkeypatch):
+        """paths 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [nonexistent/file.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("路径不存在" in e for e in errors), f"应报路径不存在, got: {errors}"
+
+
+class TestCanonicalTopicsYamlConsistency:
+    """主题 → canonical 正本映射一致性校验 (P2-12).
+
+    校验 docs/governance/canonical-topics.yml 的 schema、id 唯一性、路径存在性。
+    """
+
+    def test_canonical_topics_yaml_file_exists(self):
+        """canonical-topics.yml 应存在于 docs/governance/ 下."""
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        assert CANONICAL_TOPICS_YAML_PATH.exists(), f"canonical-topics.yml should exist at {CANONICAL_TOPICS_YAML_PATH}"
+
+    def test_canonical_topics_yaml_parses_successfully(self):
+        """canonical-topics.yml 应可被 yaml.safe_load 解析."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+        assert "topics" in data
+        assert isinstance(data["topics"], list)
+
+    def test_topic_fields_complete(self):
+        """每个主题必填 id/title/canonical."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            missing = {"id", "title", "canonical"} - entry.keys()
+            assert not missing, f"主题 {entry.get('id')} 缺少必填字段: {sorted(missing)}"
+
+    def test_topic_ids_unique(self):
+        """主题 id 应唯一."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        ids = [t["id"] for t in data["topics"]]
+        assert len(ids) == len(set(ids)), f"主题 id 重复: {ids}"
+
+    def test_topic_canonical_paths_exist(self):
+        """canonical 指向的文档路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            assert (ROOT / entry["canonical"]).exists(), (
+                f"主题 {entry['id']} 的 canonical 路径不存在: {entry['canonical']}"
+            )
+
+    def test_topic_workflow_paths_exist(self):
+        """workflow（若存在）指向的文档路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            workflow = entry.get("workflow")
+            if workflow is not None:
+                assert (ROOT / workflow).exists(), f"主题 {entry['id']} 的 workflow 路径不存在: {workflow}"
+
+    def test_check_canonical_topics_consistency_passes(self):
+        """当前项目配置下 check_canonical_topics_consistency() 应返回空错误列表."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        errors = check_canonical_topics_consistency()
+        assert errors == [], "当前项目配置应通过 canonical-topics.yml 校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_missing_required_field(self, tmp_path, monkeypatch):
+        """缺少必填字段时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: 新增/修改策略\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("缺少必填字段" in e for e in errors), f"应报缺少必填字段, got: {errors}"
+
+    def test_detects_duplicate_id(self, tmp_path, monkeypatch):
+        """主题 id 重复时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: strategy\n    title: A\n    canonical: docs/patterns/strategy-template.md\n"
+            "  - id: strategy\n    title: B\n    canonical: docs/patterns/dao-pattern.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("id 重复" in e for e in errors), f"应报 id 重复, got: {errors}"
+
+    def test_detects_missing_canonical_path(self, tmp_path, monkeypatch):
+        """canonical 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("canonical 路径不存在" in e for e in errors), f"应报 canonical 路径不存在, got: {errors}"
+
+    def test_detects_missing_workflow_path(self, tmp_path, monkeypatch):
+        """workflow 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: strategy\n    title: A\n    canonical: docs/patterns/strategy-template.md\n"
+            "    workflow: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("workflow 路径不存在" in e for e in errors), f"应报 workflow 路径不存在, got: {errors}"
