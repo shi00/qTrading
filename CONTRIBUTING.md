@@ -4,7 +4,14 @@
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
-> **对应版本**：0.9.0，最后校对：2026-07-15（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
+> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-08-13（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
+> **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
+> - owner: 架构维护者
+> - ruleset_version: 1.1.0（与 CLAUDE.md 同步，规则集版本变更时递增）
+> - last_reviewed: 2026-08-13
+> - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
+> - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
+> - supersedes: 无
 
 ## 目录
 
@@ -229,6 +236,7 @@ python main.py
 
 | 改动范围 | 至少运行 |
 |---------|----------|
+| 仅 Markdown/治理文档 | `python scripts/check_docs_consistency.py` + 相关文档契约测试（`tests/unit/test_docs_consistency.py`）；若修改 redlines/schema/policy，再运行对应治理测试；无需无差别运行 pyright、业务单测和 E2E |
 | 仅 `ui/` | ruff + pyright + `tests/unit/ui/` |
 | `data/` DAO/模型 | 上述 + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
 | `strategies/` | ruff + pyright + `tests/unit/` 对应策略用例 |

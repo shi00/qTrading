@@ -4,9 +4,9 @@
 - 必须包含 "error::DeprecationWarning" 以将 DeprecationWarning 转为异常
 - 必须保留 "ignore::DeprecationWarning:pytest_asyncio.plugin" 以豁免 pytest_asyncio 内部警告
 
-R8 红线：使用 _write_db(is_many=True) 进行批量写入（必须用 _save_upsert()）。
-enforcement 通过删除 _write_db 的 is_many 参数彻底阻止违规调用，filterwarnings
-error::DeprecationWarning 作为通用 DeprecationWarning 防护网保留。
+R8 红线：批量写入必须使用 _save_upsert()，_write_db 不提供批量参数。
+enforcement 通过结构性签名强制（_write_db 无 is_many 参数）彻底阻止违规调用，
+filterwarnings error::DeprecationWarning 作为通用 DeprecationWarning 防护网保留。
 """
 
 import warnings

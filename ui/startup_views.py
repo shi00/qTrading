@@ -24,7 +24,7 @@ import flet as ft
 
 # 架构例外 (§4.1): app 层应仅被 main.py 调用。此处的导入属于 main.py 启动流程
 # 的延伸 (main.py 装配 StartupView/LoadingView), 不是 ui 层的正常业务导入。
-# 已在 tests/unit/test_architecture_boundaries.py 的 KNOWN_EXCEPTIONS 中记录。
+# 已在 docs/governance/exceptions.yml (EX-0001) 集中登记。
 from app.bootstrap import EmbeddedPgStartupScenario
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click

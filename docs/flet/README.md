@@ -5,14 +5,14 @@
 > Owner: UI 维护者
 > 复核触发器: 新增/删除/改名 docs/flet/*.md 专题、Flet 依赖版本变化、架构红线/边界变化或 ADR 决策（见 [../adr/](../adr/)）
 
-## 1. 文档优先级
+## 1. 文档权威（按主题正本）
 
-冲突时前者覆盖后者：
+文档权威按主题确定正本，而非按目录层级全局覆盖（见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）。Flet 相关主题正本如下：
 
-1. [CLAUDE.md](../../CLAUDE.md)：红线 R1~R18、架构边界、交互准则
-2. [CONTRIBUTING.md](../../CONTRIBUTING.md)：实现与交付规范
-3. `docs/flet/`：Flet 专项规范（本目录各专题）
-4. Flet 官方文档及 [flet-mcp](./mcp-usage.md)：版本特定 API 依据
+1. 红线 R1~R18、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
+2. 实现与交付规范 → [CONTRIBUTING.md](../../CONTRIBUTING.md)
+3. Flet 项目约束 → 本目录各专题（`v1-api-constraints.md` 为声明式 API 约束正本）
+4. Flet API 存在性和签名 → 锁定版本源码 / [flet-mcp](./mcp-usage.md) / Flet 官方文档
 
 ## 2. AI 任务路由
 
@@ -51,6 +51,13 @@
 3. 对应 View 和 ViewModel
 
 仅修改纯业务状态时，不强制加载完整 UI/UX 文档。不熟悉的 API 按 [mcp-usage.md](./mcp-usage.md) 核验。
+
+### 修改 i18n 文案
+
+必读：
+
+1. [v1-api-constraints.md](./v1-api-constraints.md)「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则
+2. `core/i18n.py` 与 `locales/`（VM 只产出 i18n key，View 按当前 locale 渲染）
 
 ### 使用不熟悉的 Flet API
 

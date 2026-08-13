@@ -1,0 +1,35 @@
+# 例外注册表 (CLAUDE.md §3.1 硬规则的集中例外清单)
+#
+# 来源决策: 文档体系检视 P1-01 (宪法绝对规则与已批准例外并存)
+# 校验脚本: scripts/check_docs_consistency.py::check_exceptions_yaml_consistency()
+# 契约测试: tests/unit/test_docs_consistency.py::TestExceptionsYamlConsistency
+#
+# 目的: 集中管理所有对硬规则 (红线 R1~R18 / §4 架构边界) 的已批准例外,
+#       消除 KNOWN_EXCEPTIONS、技术债表、宪法各自维护独立例外的漂移风险。
+#       (P1-01: KNOWN_EXCEPTIONS、技术债与宪法不得各自维护独立例外)
+#
+# 字段说明:
+#   id: 例外稳定 ID (append-only, 格式 EX-XXXX, 不复用废弃编号)
+#   rule_id: 被豁免的硬规则编号 (必须存在于 docs/governance/redlines.yml)
+#   paths: 适用路径 (仓库相对路径, 必须真实存在)
+#   reason: 例外原因 (为何允许偏离硬规则)
+#   owner: 例外归属方 (负责维护该例外的团队/模块)
+#   approved_by: 批准人/评审记录
+#   expires_at | removal_trigger: 二选一, 例外到期时间或移除触发条件
+#   verification: 如何验证该例外仍然成立 (自动检查或人工检查)
+#
+# 修改规则:
+#   - 新增例外必须填写全部必填字段, 且 rule_id 必须存在于 redlines.yml
+#   - 禁止删除或复用已废弃例外编号 (append-only)
+#   - 例外到期或触发移除条件后, 必须从本文件移除并同步清理引用
+
+exceptions:
+  - id: EX-0001
+    rule_id: R1
+    paths:
+      - ui/startup_views.py
+    reason: "startup_views.py 由 main.py 启动装配序列直接导入, 属于启动流程的延伸, 不是 ui 层的正常业务导入"
+    owner: "app/bootstrap"
+    approved_by: "架构评审 2026-07"
+    removal_trigger: "startup_views.py 重构为独立装配模块, 或移除对 app 层的导入后移除"
+    verification: "tests/unit/test_architecture_boundaries.py::test_known_exceptions_are_valid 校验路径存在"

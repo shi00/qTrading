@@ -628,9 +628,11 @@ class TestRedlinesYamlConsistency:
 
     校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
     - YAML 解析成功 + 含 redlines key
-    - 每条红线含 5 字段 (id/title/description/enforcement/human_review_required)
+    - 每条红线含 6 字段 (id/title/description/enforcement/automation_coverage/human_review_required)
     - R 编号连续 append-only (R1~R18, 无缺号/重号/跳号)
     - CLAUDE.md §3.1 表格行数 = yml 条目数
+    - automation_coverage 值合法 (full/partial/none) 且与 human_review_required 一致
+    - CLAUDE.md §3.1 表格与 YAML 字段语义一致 (id/title/description/enforcement)
     - 构造缺 R15 的 yml 验证检测
     """
 
@@ -653,15 +655,14 @@ class TestRedlinesYamlConsistency:
         assert len(data["redlines"]) > 0, "'redlines' 不应为空"
 
     def test_redline_fields_complete(self):
-        """每条红线含 5 个必填字段: id/title/description/enforcement/human_review_required."""
+        """每条红线含全部必填字段 (由 REDLINE_REQUIRED_FIELDS 常量统一维护)."""
         import yaml
 
-        from check_docs_consistency import REDLINES_YAML_PATH
+        from check_docs_consistency import REDLINES_YAML_PATH, REDLINE_REQUIRED_FIELDS
 
         data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
-        required_fields = {"id", "title", "description", "enforcement", "human_review_required"}
         for i, entry in enumerate(data["redlines"]):
-            missing = required_fields - set(entry.keys())
+            missing = REDLINE_REQUIRED_FIELDS - set(entry.keys())
             assert not missing, f"redlines[{i}] 缺字段: {missing}, 实际字段: {set(entry.keys())}"
 
     def test_redline_ids_are_sequential_append_only(self):
@@ -733,6 +734,199 @@ class TestRedlinesYamlConsistency:
         assert len(errors) > 0, "Should detect missing R15, got no errors"
         assert any("R15" in e for e in errors), f"Errors should mention R15, got: {errors}"
 
+    def test_detects_invalid_automation_coverage_value(self, tmp_path, monkeypatch):
+        """automation_coverage 值非法 (非 full/partial/none) → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data["redlines"][0]["automation_coverage"] = "invalid_value"
+        tmp_yml = tmp_path / "redlines_bad_coverage.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("automation_coverage" in e and "非法" in e for e in errors), (
+            f"应报 automation_coverage 值非法, got: {errors}"
+        )
+
+    def test_detects_partial_coverage_but_human_review_false(self, tmp_path, monkeypatch):
+        """automation_coverage=partial 但 human_review_required=false → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        # R5: automation_coverage=none, human_review_required=true → 改为矛盾
+        for entry in data["redlines"]:
+            if entry["id"] == "R5":
+                entry["automation_coverage"] = "partial"
+                entry["human_review_required"] = False
+        tmp_yml = tmp_path / "redlines_mismatch.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("R5" in e and "human_review_required=false" in e for e in errors), (
+            f"应报 partial+false 矛盾, got: {errors}"
+        )
+
+    def test_detects_full_coverage_but_human_review_true(self, tmp_path, monkeypatch):
+        """automation_coverage=full 但 human_review_required=true → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        # R3: automation_coverage=full, human_review_required=false → 改为矛盾
+        for entry in data["redlines"]:
+            if entry["id"] == "R3":
+                entry["automation_coverage"] = "full"
+                entry["human_review_required"] = True
+        tmp_yml = tmp_path / "redlines_mismatch.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("R3" in e and "human_review_required=true" in e for e in errors), (
+            f"应报 full+true 矛盾, got: {errors}"
+        )
+
+    def test_detects_claude_yaml_semantic_mismatch(self, tmp_path, monkeypatch):
+        """CLAUDE.md 与 YAML 字段语义不一致 → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        # 篡改 R1 title 使其与 CLAUDE.md 不一致
+        data["redlines"][0]["title"] = "篡改的标题"
+        tmp_yml = tmp_path / "redlines_semantic_mismatch.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("R1" in e and "不一致" in e for e in errors), f"应报 CLAUDE.md 与 YAML 字段不一致, got: {errors}"
+
+    def test_redline_rule_type_valid(self):
+        """每条红线 rule_type 应为合法值 (P2-11)."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, RULE_TYPE_VALUES
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["redlines"]:
+            rule_type = entry.get("rule_type")
+            assert rule_type in RULE_TYPE_VALUES, (
+                f"redlines[{entry.get('id')}] rule_type 非法: {rule_type} (应为 {sorted(RULE_TYPE_VALUES)})"
+            )
+
+    def test_detects_invalid_rule_type(self, tmp_path, monkeypatch):
+        """rule_type 值非法 (非 6 种合法类型) → 报错."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH, check_redlines_yaml_consistency
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data["redlines"][0]["rule_type"] = "INVALID_TYPE"
+        tmp_yml = tmp_path / "redlines_bad_rule_type.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("rule_type" in e and "非法" in e for e in errors), f"应报 rule_type 值非法, got: {errors}"
+
+    def test_detects_exceptionable_linkage_violation(self, tmp_path, monkeypatch):
+        """例外注册表引用的 rule_id 不是 EXCEPTIONABLE 规则 → 报错."""
+        import yaml
+
+        from check_docs_consistency import (
+            EXCEPTIONS_YAML_PATH,
+            REDLINES_YAML_PATH,
+            check_redlines_yaml_consistency,
+        )
+
+        # 将 R1 改为 INVARIANT (非 EXCEPTIONABLE), 但 exceptions.yml 仍引用 R1
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["redlines"]:
+            if entry["id"] == "R1":
+                entry["rule_type"] = "INVARIANT"
+        tmp_yml = tmp_path / "redlines_non_exceptionable.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+        # 确保 exceptions.yml 存在 (真实文件)
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", EXCEPTIONS_YAML_PATH)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("不是 EXCEPTIONABLE 规则" in e for e in errors), f"应报例外引用非 EXCEPTIONABLE 规则, got: {errors}"
+
+    # === _normalize_for_comparison 纯函数测试 ===
+
+    def test_normalize_removes_bold_markers(self):
+        """`**title**` → `title` (移除 markdown 粗体标记)."""
+        from check_docs_consistency import _normalize_for_comparison
+
+        assert _normalize_for_comparison("**title**") == "title"
+
+    def test_normalize_removes_code_marks(self):
+        """`` `code` `` → `code` (移除 markdown 行内代码标记)."""
+        from check_docs_consistency import _normalize_for_comparison
+
+        assert _normalize_for_comparison("`code`") == "code"
+
+    def test_normalize_reverses_escaped_pipes(self):
+        """`X \\| Y` → `X | Y` (反转义 markdown 表格转义管道符)."""
+        from check_docs_consistency import _normalize_for_comparison
+
+        assert _normalize_for_comparison("X \\| Y") == "X | Y"
+
+    def test_normalize_removes_quotes(self):
+        """`"value"` → `value`, `'value'` → `value` (移除两端引号)."""
+        from check_docs_consistency import _normalize_for_comparison
+
+        assert _normalize_for_comparison('"value"') == "value"
+        assert _normalize_for_comparison("'value'") == "value"
+
+    def test_normalize_strips_whitespace(self):
+        """`  text  ` → `text` (strip 首尾空白)."""
+        from check_docs_consistency import _normalize_for_comparison
+
+        assert _normalize_for_comparison("  text  ") == "text"
+
+    # === _parse_claude_redline_table 纯函数测试 ===
+
+    def test_parse_typical_redline_row(self):
+        """解析标准红线行, 验证 id/title/description/enforcement 正确提取."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R1 | **架构越界** | `core/` 导入任何其他层模块 | pre-commit（import-linter 4 条契约） |\n"
+        result = _parse_claude_redline_table(claude_content)
+        assert "R1" in result
+        assert result["R1"]["title"] == "架构越界"
+        assert result["R1"]["description"] == "core/ 导入任何其他层模块"
+        assert result["R1"]["enforcement"] == "pre-commit（import-linter 4 条契约）"
+
+    def test_parse_escaped_pipe_in_description(self):
+        """解析 R6 描述中的 `X \\| Y`, 验证转义管道符正确处理 (不分割字段)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = (
+            "| R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` "
+            "(必须使用 `X \\| Y` / `X \\| None`) | ruff |\n"
+        )
+        result = _parse_claude_redline_table(claude_content)
+        assert "R6" in result
+        assert result["R6"]["title"] == "过时类型注解"
+        assert result["R6"]["description"] == "使用 Union[X, Y] / Optional[X] (必须使用 X | Y / X | None)"
+        assert result["R6"]["enforcement"] == "ruff"
+
 
 class TestEnforcementMapping:
     """C5 第二阶段 3c: enforcement 字段与实际 hook/CI job 映射一致性校验 (ADR-0005).
@@ -797,7 +991,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R4",
+                "enforcement": "pre-commit（check_redlines.py）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R4" in e and "N1" in e for e in errors), f"应报 N1 错误, got: {errors}"
 
@@ -823,7 +1024,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R4",
+                "enforcement": "pre-commit（check_redlines.py）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R4" in e and "N1" in e for e in errors), f"应报 N1 entry 错误, got: {errors}"
 
@@ -849,7 +1057,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R4",
+                "enforcement": "pre-commit（check_redlines.py）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N1 正例不应报错, got: {errors}"
 
@@ -875,7 +1090,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=False,  # 脚本文件不存在
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R4",
+                "enforcement": "pre-commit（check_redlines.py）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R4" in e and "N1" in e and "文件不存在" in e for e in errors), f"应报 N1 脚本缺失, got: {errors}"
 
@@ -895,7 +1117,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R1",
+                "enforcement": "pre-commit（import-linter 4 条契约）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R1" in e and "N2" in e for e in errors), f"应报 N2 错误, got: {errors}"
 
@@ -921,7 +1150,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R1",
+                "enforcement": "pre-commit（import-linter 4 条契约）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R1" in e and "N2" in e for e in errors), f"应报 N2 entry 错误, got: {errors}"
 
@@ -948,7 +1184,14 @@ class TestEnforcementMapping:
             gitleaks_config_exists=True,
         )
         # enforcement 不含 "N 条契约" → 跳过数量校验
-        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R1",
+                "enforcement": "pre-commit（import-linter）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"无契约数量描述时不应报 N2 数量错误, got: {errors}"
 
@@ -975,7 +1218,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R1",
+                "enforcement": "pre-commit（import-linter 4 条契约）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R1" in e and "N2" in e and "4" in e and "3" in e for e in errors), (
             f"应报 N2 数量不匹配, got: {errors}"
@@ -1004,7 +1254,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R1",
+                "enforcement": "pre-commit（import-linter 4 条契约）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N2 正例不应报错, got: {errors}"
 
@@ -1024,7 +1281,7 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        redlines = [{"id": "R6", "enforcement": "ruff", "automation_coverage": "full", "human_review_required": False}]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R6" in e and "N3" in e for e in errors), f"应报 N3 错误, got: {errors}"
 
@@ -1050,7 +1307,7 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        redlines = [{"id": "R6", "enforcement": "ruff", "automation_coverage": "full", "human_review_required": False}]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R6" in e and "N3" in e for e in errors), f"应报 N3 entry 错误, got: {errors}"
 
@@ -1076,7 +1333,7 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        redlines = [{"id": "R6", "enforcement": "ruff", "automation_coverage": "full", "human_review_required": False}]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N3 正例不应报错, got: {errors}"
 
@@ -1097,7 +1354,14 @@ class TestEnforcementMapping:
             check_redlines_script_exists=True,
             gitleaks_config_exists=False,
         )
-        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        redlines = [
+            {
+                "id": "R9",
+                "enforcement": "安全扫描 + 仅人工评审",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R9" in e and "N4" in e for e in errors), f"应报 N4 错误, got: {errors}"
 
@@ -1124,7 +1388,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        redlines = [
+            {
+                "id": "R9",
+                "enforcement": "安全扫描 + 仅人工评审",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R9" in e and "N4" in e for e in errors), f"pip-audit 不应满足 N4, got: {errors}"
 
@@ -1148,7 +1419,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=False,  # config 缺失
         )
-        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        redlines = [
+            {
+                "id": "R9",
+                "enforcement": "安全扫描 + 仅人工评审",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R9" in e and "N4" in e for e in errors), f"半配置应报 N4, got: {errors}"
 
@@ -1166,7 +1444,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,  # config 存在
         )
-        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        redlines = [
+            {
+                "id": "R9",
+                "enforcement": "安全扫描 + 仅人工评审",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R9" in e and "N4" in e for e in errors), f"半配置应报 N4, got: {errors}"
 
@@ -1194,7 +1479,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R2",
+                "enforcement": "CI-test（全量，asyncio 相关测试）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N5 正例不应报错, got: {errors}"
 
@@ -1235,7 +1527,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R2",
+                "enforcement": "CI-test（全量，asyncio 相关测试）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R2" in e and "N5" in e for e in errors), f"step name 中的 pytest 不应满足 N5, got: {errors}"
 
@@ -1265,14 +1564,21 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R2",
+                "enforcement": "CI-test（全量，asyncio 相关测试）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R2" in e and "N5" in e for e in errors), f"pip install pytest 不应满足 N5, got: {errors}"
 
     # === N6~N9: human_review_required 一致性测试 ===
 
     def test_n6_human_review_keyword_mismatch(self):
-        """N6: enforcement 含 '仅人工评审' 但 human_review_required=false → 报错."""
+        """N6: automation_coverage != full 但 human_review_required=false → 报错."""
         from check_docs_consistency import (
             EnforcementEnvironment,
             _check_enforcement_invariants,
@@ -1285,12 +1591,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R5", "enforcement": "仅人工评审", "human_review_required": False}]  # 矛盾
+        redlines = [
+            {"id": "R5", "enforcement": "仅人工评审", "automation_coverage": "partial", "human_review_required": False}
+        ]  # 矛盾
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R5" in e and "N6" in e for e in errors), f"应报 N6 错误, got: {errors}"
 
     def test_n7_pending_keyword_mismatch(self):
-        """N7: enforcement 含 '待实现' 但 human_review_required=true → 报错."""
+        """N7: enforcement 含 '待实现' 但 automation_coverage != none → 报错."""
         from check_docs_consistency import (
             EnforcementEnvironment,
             _check_enforcement_invariants,
@@ -1303,12 +1611,48 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R16", "enforcement": "可自动化待实现", "human_review_required": True}]  # 矛盾
+        redlines = [
+            {
+                "id": "R16",
+                "enforcement": "可自动化待实现",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]  # 矛盾
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R16" in e and "N7" in e for e in errors), f"应报 N7 错误, got: {errors}"
+
+    def test_n7_pending_keyword_with_human_review_false(self):
+        """N7: enforcement 含 '待实现', automation_coverage=none 但 human_review_required=false → 报错.
+
+        R16 特化守护: 待实现关键词要求 automation_coverage=none 且 human_review_required=true,
+        human_review_required=false 违反 N7 (同时也违反 N6).
+        """
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [
+            {
+                "id": "R16",
+                "enforcement": "可自动化待实现",
+                "automation_coverage": "none",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R16" in e and "N7" in e for e in errors), f"应报 N7 错误, got: {errors}"
 
     def test_n8_reverse_invariant_violation(self):
-        """N8: human_review_required=true 但 enforcement 不含 '仅人工评审' → 报错."""
+        """N8: human_review_required=true 但 automation_coverage=full → 报错."""
         from check_docs_consistency import (
             EnforcementEnvironment,
             _check_enforcement_invariants,
@@ -1321,7 +1665,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R5", "enforcement": "pre-commit（some-hook）", "human_review_required": True}]  # 矛盾
+        redlines = [
+            {
+                "id": "R5",
+                "enforcement": "pre-commit（some-hook）",
+                "automation_coverage": "full",
+                "human_review_required": True,
+            }
+        ]  # 矛盾
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R5" in e and "N8" in e for e in errors), f"应报 N8 错误, got: {errors}"
 
@@ -1339,9 +1690,11 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R5", "enforcement": "仅人工评审", "human_review_required": False}]  # 矛盾
+        redlines = [
+            {"id": "R5", "enforcement": "仅人工评审", "automation_coverage": "partial", "human_review_required": False}
+        ]  # 矛盾
         errors = _check_enforcement_invariants(redlines, env)
-        # N6 应报错（enforcement 含「仅人工评审」但 human_review_required=false）
+        # N6 应报错（automation_coverage='partial' != full 但 human_review_required=false）
         assert any("R5" in e and "N6" in e for e in errors), f"应报 N6 错误, got: {errors}"
         # N9 已删除，不应出现 N9 错误
         assert not any("N9" in e for e in errors), f"N9 已删除不应报错, got: {errors}"
@@ -1385,15 +1738,22 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        redlines = [
+            {
+                "id": "R9",
+                "enforcement": "安全扫描 + 仅人工评审",
+                "automation_coverage": "partial",
+                "human_review_required": True,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert any("R9" in e and "N4" in e for e in errors), f"应报 N4, got: {errors}"
-        # N6 应通过 (human_review_required=true 与 '仅人工评审' 一致)
+        # N6 应通过 (automation_coverage='partial' != full, human_review_required=true 一致)
         assert not any("R9" in e and "N6" in e for e in errors), f"不应报 N6, got: {errors}"
 
     def test_r16_dual_pending_keywords_passes_n7(self):
         """R16 enforcement='可自动化待实现（AST 检查，暂缓：误报风险高）'
-        同时含 '待实现' 和 '暂缓', human_review_required=false → N7 通过 (不报错).
+        同时含 '待实现' 和 '暂缓', automation_coverage=none, human_review_required=true → N7 通过 (不报错).
         """
         from check_docs_consistency import (
             EnforcementEnvironment,
@@ -1411,7 +1771,8 @@ jobs:
             {
                 "id": "R16",
                 "enforcement": "可自动化待实现（AST 检查，暂缓：误报风险高）",
-                "human_review_required": False,
+                "automation_coverage": "none",
+                "human_review_required": True,
             }
         ]
         errors = _check_enforcement_invariants(redlines, env)
@@ -1518,7 +1879,14 @@ jobs:
             check_redlines_script_exists=True,
             gitleaks_config_exists=True,
         )
-        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        redlines = [
+            {
+                "id": "R2",
+                "enforcement": "CI-test（全量，asyncio 相关测试）",
+                "automation_coverage": "full",
+                "human_review_required": False,
+            }
+        ]
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"4 种 YAML 风格都含 pytest，N5 不应报错, got: {errors}"
 
@@ -1890,3 +2258,356 @@ class TestFletHubCompleteness:
         assert main() == 0, (
             "check_docs_consistency.py main() should return 0 when all checks pass (including Flet hub completeness)"
         )
+
+
+class TestExceptionsYamlConsistency:
+    """例外注册表一致性校验 (P1-01: 集中例外治理).
+
+    校验 docs/governance/exceptions.yml 的 schema、rule_id 存在性、路径存在性。
+    """
+
+    def test_exceptions_yaml_file_exists(self):
+        """exceptions.yml 应存在于 docs/governance/ 下."""
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        assert EXCEPTIONS_YAML_PATH.exists(), f"exceptions.yml should exist at {EXCEPTIONS_YAML_PATH}"
+
+    def test_exceptions_yaml_parses_successfully(self):
+        """exceptions.yml 应可被 yaml.safe_load 解析."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+        assert "exceptions" in data
+        assert isinstance(data["exceptions"], list)
+
+    def test_exception_fields_complete(self):
+        """每条例外必填字段齐全, 且 expires_at/removal_trigger 二选一."""
+        import yaml
+
+        from check_docs_consistency import (
+            EXCEPTIONS_YAML_PATH,
+            EXCEPTION_EXPIRY_FIELDS,
+            EXCEPTION_REQUIRED_FIELDS,
+        )
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["exceptions"]:
+            missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
+            assert not missing, f"例外 {entry.get('id')} 缺少必填字段: {sorted(missing)}"
+            assert EXCEPTION_EXPIRY_FIELDS & entry.keys(), f"例外 {entry.get('id')} 缺少 expires_at 或 removal_trigger"
+
+    def test_exception_ids_unique(self):
+        """例外 id 应唯一且格式为 EX-XXXX."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        ids = [e["id"] for e in data["exceptions"]]
+        assert len(ids) == len(set(ids)), f"例外 id 重复: {ids}"
+        for exc_id in ids:
+            assert exc_id.startswith("EX-"), f"例外 id 格式应为 EX-XXXX: {exc_id}"
+
+    def test_exception_rule_id_exists_in_redlines(self):
+        """例外 rule_id 必须存在于 redlines.yml."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH, REDLINES_YAML_PATH
+
+        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        red_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        registered = {e["id"] for e in red_data["redlines"]}
+        for entry in exc_data["exceptions"]:
+            assert entry["rule_id"] in registered, (
+                f"例外 {entry['id']} 的 rule_id '{entry['rule_id']}' 不存在于 redlines.yml"
+            )
+
+    def test_exception_paths_exist(self):
+        """例外 paths 指向的仓库路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import EXCEPTIONS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["exceptions"]:
+            for p in entry["paths"]:
+                assert (ROOT / p).exists(), f"例外 {entry['id']} 的路径不存在: {p}"
+
+    def test_check_exceptions_yaml_consistency_passes(self):
+        """当前项目配置下 check_exceptions_yaml_consistency() 应返回空错误列表."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        errors = check_exceptions_yaml_consistency()
+        assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_missing_required_field(self, tmp_path, monkeypatch):
+        """缺少必填字段时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n  - id: EX-0001\n    rule_id: R1\n    paths: [ui/startup_views.py]\n    reason: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("缺少必填字段" in e for e in errors), f"应报缺少必填字段, got: {errors}"
+
+    def test_detects_missing_expiry_field(self, tmp_path, monkeypatch):
+        """缺少 expires_at/removal_trigger 二选一字段时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("expires_at 或 removal_trigger" in e for e in errors), f"应报缺少二选一字段, got: {errors}"
+
+    def test_detects_duplicate_id(self, tmp_path, monkeypatch):
+        """例外 id 重复时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("id 重复" in e for e in errors), f"应报 id 重复, got: {errors}"
+
+    def test_detects_invalid_rule_id(self, tmp_path, monkeypatch):
+        """rule_id 不存在于 redlines.yml 时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R999\n"
+            "    paths: [ui/startup_views.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("rule_id" in e and "不存在于 redlines.yml" in e for e in errors), (
+            f"应报 rule_id 不存在, got: {errors}"
+        )
+
+    def test_detects_missing_path(self, tmp_path, monkeypatch):
+        """paths 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        tmp_yml = tmp_path / "exceptions.yml"
+        tmp_yml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            "    paths: [nonexistent/file.py]\n"
+            "    reason: test\n"
+            "    owner: test\n"
+            "    approved_by: test\n"
+            "    verification: test\n"
+            "    removal_trigger: test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_yml)
+        errors = check_exceptions_yaml_consistency()
+        assert any("路径不存在" in e for e in errors), f"应报路径不存在, got: {errors}"
+
+
+class TestCanonicalTopicsYamlConsistency:
+    """主题 → canonical 正本映射一致性校验 (P2-12).
+
+    校验 docs/governance/canonical-topics.yml 的 schema、id 唯一性、路径存在性。
+    """
+
+    def test_canonical_topics_yaml_file_exists(self):
+        """canonical-topics.yml 应存在于 docs/governance/ 下."""
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        assert CANONICAL_TOPICS_YAML_PATH.exists(), f"canonical-topics.yml should exist at {CANONICAL_TOPICS_YAML_PATH}"
+
+    def test_canonical_topics_yaml_parses_successfully(self):
+        """canonical-topics.yml 应可被 yaml.safe_load 解析."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+        assert "topics" in data
+        assert isinstance(data["topics"], list)
+
+    def test_topic_fields_complete(self):
+        """每个主题必填 id/title/canonical."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            missing = {"id", "title", "canonical"} - entry.keys()
+            assert not missing, f"主题 {entry.get('id')} 缺少必填字段: {sorted(missing)}"
+
+    def test_topic_ids_unique(self):
+        """主题 id 应唯一."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        ids = [t["id"] for t in data["topics"]]
+        assert len(ids) == len(set(ids)), f"主题 id 重复: {ids}"
+
+    def test_topic_canonical_paths_exist(self):
+        """canonical 指向的文档路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            assert (ROOT / entry["canonical"]).exists(), (
+                f"主题 {entry['id']} 的 canonical 路径不存在: {entry['canonical']}"
+            )
+
+    def test_topic_workflow_paths_exist(self):
+        """workflow（若存在）指向的文档路径必须真实存在."""
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, ROOT
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["topics"]:
+            workflow = entry.get("workflow")
+            if workflow is not None:
+                assert (ROOT / workflow).exists(), f"主题 {entry['id']} 的 workflow 路径不存在: {workflow}"
+
+    def test_check_canonical_topics_consistency_passes(self):
+        """当前项目配置下 check_canonical_topics_consistency() 应返回空错误列表."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        errors = check_canonical_topics_consistency()
+        assert errors == [], "当前项目配置应通过 canonical-topics.yml 校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_missing_required_field(self, tmp_path, monkeypatch):
+        """缺少必填字段时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: 新增/修改策略\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("缺少必填字段" in e for e in errors), f"应报缺少必填字段, got: {errors}"
+
+    def test_detects_duplicate_id(self, tmp_path, monkeypatch):
+        """主题 id 重复时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: strategy\n    title: A\n    canonical: docs/patterns/strategy-template.md\n"
+            "  - id: strategy\n    title: B\n    canonical: docs/patterns/dao-pattern.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("id 重复" in e for e in errors), f"应报 id 重复, got: {errors}"
+
+    def test_detects_missing_canonical_path(self, tmp_path, monkeypatch):
+        """canonical 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("canonical 路径不存在" in e for e in errors), f"应报 canonical 路径不存在, got: {errors}"
+
+    def test_detects_missing_workflow_path(self, tmp_path, monkeypatch):
+        """workflow 指向不存在的文件时应报错."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: strategy\n    title: A\n    canonical: docs/patterns/strategy-template.md\n"
+            "    workflow: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("workflow 路径不存在" in e for e in errors), f"应报 workflow 路径不存在, got: {errors}"
+
+    def test_canonical_topics_align_with_claude_decision_tree(self):
+        """§1.8 决策树表引用的路径应存在于 canonical-topics.yml 的 canonical 集合中 (P2-12 镜像一致性).
+
+        §1.8 是 canonical-topics.yml 的人类可读摘要，有意合并相关主题（如 UI 视图/布局/ViewModel/i18n
+        合并为一行）。因此不校验标题一一对应，而是校验 §1.8 表中引用的每个 .md 路径
+        都在 canonical-topics.yml 中注册，防止新增 §1.8 行时遗漏 canonical-topics.yml 同步。
+        """
+        import re
+        import yaml
+
+        from check_docs_consistency import CANONICAL_TOPICS_YAML_PATH, CLAUDE_PATH
+
+        claude_text = CLAUDE_PATH.read_text(encoding="utf-8")
+        # 提取 §1.8 决策树表格内容（从「### 1.8」到下一个「###」或「##」）
+        m = re.search(r"### 1\.8.*?\n(\|.*?\|.*?\n(?:\|[-:| ]+\n)?(?:\|.*?\|.*?\n)+)", claude_text, re.DOTALL)
+        assert m, "CLAUDE.md §1.8 决策树表格未找到"
+        table_text = m.group(1)
+
+        # 提取表中引用的 .md 路径（markdown 链接目标或裸路径），统一去掉 ./ 前缀
+        all_paths_raw = re.findall(r"[\w/\-.]+\.md", table_text)
+        all_paths = {p.lstrip("./") for p in all_paths_raw}
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        canonical_set = {entry["canonical"] for entry in data["topics"]}
+
+        for path in all_paths:
+            assert path in canonical_set, (
+                f"CLAUDE.md §1.8 引用的路径 '{path}' 未在 canonical-topics.yml 中注册，"
+                f"可能存在单边漂移（新增 §1.8 行时未同步 canonical-topics.yml）"
+            )

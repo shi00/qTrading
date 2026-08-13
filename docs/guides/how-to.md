@@ -39,7 +39,7 @@
 7. i18n 文案由 VM 输出 key + params，View 按当前 locale 渲染；locale 变化作为 View 层声明式状态源触发重渲染（见 [V1 声明式 UI 开发规范](../flet/v1-api-constraints.md#v1-声明式-ui-开发规范) 中的 i18n 状态驱动规则）。
 8. 响应式布局优先使用声明式 state / props / `ResponsiveRow`，禁止新增 `handle_resize` 鸭子分发式命令式代码。
 9. 若需注册新标签页，再修改 `ui/app_layout.py`。
-10. UI 事件中的同步 IO/CPU 密集任务必须通过 `ThreadPoolManager.run_async()` 或 `TaskManager.submit_task()` 提交，避免阻塞 Flet 主循环（对应 CLAUDE.md §3.1 R16）。
+10. UI 事件中的同步 IO/CPU 密集任务必须通过 `ThreadPoolManager.run_async()` 提交，避免阻塞 Flet 主循环（对应 CLAUDE.md §3.1 R16）；`TaskManager.submit_task()` 是异步任务编排层，不替代线程池提交，协程内部的同步阻塞仍须经 `ThreadPoolManager.run_async()`。
 11. UI 事件回调使用 `@log_ui_action` 装饰器埋点。
 12. 按 [变更类型 → 最小验证子集](../../CONTRIBUTING.md#变更类型--最小验证子集) 运行 UI 相关验证。
 

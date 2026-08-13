@@ -13,9 +13,13 @@
 7. redlines.yml 一致性检查：校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致
    （R 编号 append-only / 连续 / 条目数匹配，见 ADR-0003）。
 8. enforcement 字段映射一致性检查（3c）：校验 redlines.yml `enforcement` 字段中声称的守护机制
-   实际配置存在且粗粒度可达（9 个不变量 N1~N9，见 ADR-0005）。
+   实际配置存在且粗粒度可达（不变量 N1~N8，见 ADR-0005）。
 9. Flet 入口完整性检查：校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档，
    且不引用不存在的专题文件。
+10. exceptions.yml 例外注册表一致性检查（P1-01）：校验 docs/governance/exceptions.yml 必填字段、
+   id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
+11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
+   必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -24,6 +28,8 @@
 - 3b 红线 R1~R18 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
 - Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
+- exceptions.yml 例外注册表一致性检查（已实现：check_exceptions_yaml_consistency()，P1-01）。
+- canonical-topics.yml 主题映射一致性检查（已实现：check_canonical_topics_consistency()，P2-12）。
 """
 
 from __future__ import annotations
@@ -54,6 +60,8 @@ CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
 KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
 REDLINES_YAML_PATH = ROOT / "docs" / "governance" / "redlines.yml"
+EXCEPTIONS_YAML_PATH = ROOT / "docs" / "governance" / "exceptions.yml"
+CANONICAL_TOPICS_YAML_PATH = ROOT / "docs" / "governance" / "canonical-topics.yml"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 
@@ -71,30 +79,21 @@ FLET_HUB_PATH = FLET_DOCS_DIR / "README.md"
 FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
-# P3-7 修复：纳入 docs/guides/、docs/patterns/、docs/architecture/、docs/README.md 全部 markdown，
-# 防止从 CONTRIBUTING.md 迁移后的 `./` 死链逃逸门禁
-# docs-quality-review 扩展：纳入 root README/CHANGELOG/SECURITY、PR 模板、ADR 全部、man/ 全部
-# Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md（含 README.md/ui-ux-best-practices.md/
-# canvaskit-rendering-e2e-guide.md/mcp-usage.md 等），新增专题自动纳入门禁
-CHECKED_DOCS: list[Path] = [
-    CLAUDE_PATH,
-    CONTRIBUTING_PATH,
-    *FLET_DOCS_PATHS,
-    FLET_BEST_PRACTICES_PATH,  # man/flet-best-practices.md stub（保留历史路径兼容）
-    KNOWN_TECHNICAL_DEBT_PATH,
-    *(ROOT / "docs" / "guides").glob("*.md"),
-    *(ROOT / "docs" / "patterns").glob("*.md"),
-    *(ROOT / "docs" / "architecture").glob("*.md"),
-    *(ROOT / "docs" / "adr").glob("*.md"),
-    *(ROOT / "docs" / "reviews").glob("*.md"),
-    ROOT / "docs" / "README.md",
-    ROOT / "README.md",
-    ROOT / "CHANGELOG.md",
-    ROOT / "SECURITY.md",
-    ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
-    ROOT / "man" / "database-account-separation.md",
-    ROOT / "man" / "table-partitioning-strategy.md",
-]
+# P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
+# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、PR 模板；排除项必须带原因（_DOC_EXCLUDES）。
+# Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
+_DOC_EXCLUDES: dict[Path, str] = {
+    # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
+}
+CHECKED_DOCS: list[Path] = sorted(
+    {
+        *ROOT.glob("*.md"),
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "man").rglob("*.md"),
+        ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
+    }
+    - set(_DOC_EXCLUDES)
+)
 
 # Flet 版本漂移检查范围（治理文档）
 FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
@@ -540,7 +539,13 @@ def check_flet_hub_completeness() -> list[str]:
 
 # redlines.yml 字段完整性校验常量
 REDLINE_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {"id", "title", "description", "enforcement", "human_review_required"}
+    {"id", "title", "description", "enforcement", "automation_coverage", "human_review_required", "rule_type"}
+)
+# automation_coverage 合法值（ADR-0005 N6/N8 一致性校验基础）
+AUTOMATION_COVERAGE_VALUES: frozenset[str] = frozenset({"full", "partial", "none"})
+# rule_type 合法值（P2-11 规则类型标记）
+RULE_TYPE_VALUES: frozenset[str] = frozenset(
+    {"INVARIANT", "DEFAULT", "NEW_CODE", "MIGRATION_TARGET", "WORKFLOW", "EXCEPTIONABLE"}
 )
 # R 编号格式正则: R1 ~ R999 (append-only, 不复用废弃编号)
 REDLINE_ID_PATTERN = re.compile(r"^R(\d+)$")
@@ -548,14 +553,83 @@ REDLINE_ID_PATTERN = re.compile(r"^R(\d+)$")
 CLAUDE_REDLINE_TABLE_ROW_PATTERN = re.compile(r"^\|\s*R\d+\s*\|")
 
 
+def _normalize_for_comparison(text: str) -> str:
+    """标准化文本用于 CLAUDE.md 与 YAML 字段语义比较。
+
+    规范化步骤：
+    1. 反转义 markdown 表格中的 ``\\|`` 为 ``|``（CLAUDE.md 表格转义管道符）
+    2. 移除 markdown 粗体标记 ``**``（CLAUDE.md 标题列使用 ``**title**``）
+    3. 移除 markdown 行内代码标记 `` ` ``（CLAUDE.md 描述列使用 `` `code` ``）
+    4. 移除两端引号（YAML 字符串可能带 ``"`` 或 ``'``）
+    5. strip 首尾空白
+
+    纯函数，便于单元测试。
+    """
+    # 1. 反转义 markdown 表格转义管道符
+    s = text.replace("\\|", "|")
+    # 2. 移除粗体标记
+    s = s.replace("**", "")
+    # 3. 移除行内代码标记
+    s = s.replace("`", "")
+    # 4. 移除两端引号（循环处理嵌套引号场景，如 "'value'"）
+    while len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+        s = s[1:-1]
+    # 5. strip 首尾空白
+    return s.strip()
+
+
+def _parse_claude_redline_table(claude_content: str) -> dict[str, dict[str, str]]:
+    """解析 CLAUDE.md §3.1 红线表，返回 {id: {title, description, enforcement}} 映射。
+
+    表格行格式: ``| R1 | **title** | description | enforcement |``
+    列之间用 ``|`` 分隔，描述列可能含转义管道符 ``\\|``（如 R6 的 ``X \\| Y``）。
+
+    解析策略:
+    1. 匹配以 ``| R\\d+ |`` 开头的行
+    2. 按 ``(?<!\\\\)\\|`` 分割（不分割转义管道符）
+    3. 预期 6 段（首尾空 + id + title + description + enforcement）
+    4. 对每个字段做 ``_normalize_for_comparison()`` 标准化
+
+    纯函数，便于单元测试。
+    """
+    result: dict[str, dict[str, str]] = {}
+    for line in claude_content.splitlines():
+        if not CLAUDE_REDLINE_TABLE_ROW_PATTERN.match(line):
+            continue
+        # 按非转义管道符分割
+        parts = re.split(r"(?<!\\)\|", line)
+        if len(parts) < 6:
+            continue
+        # parts[0] 和 parts[-1] 为首尾空串，中间 4 列为 id/title/description/enforcement
+        rid = _normalize_for_comparison(parts[1])
+        title = _normalize_for_comparison(parts[2])
+        description = _normalize_for_comparison(parts[3])
+        enforcement = _normalize_for_comparison(parts[4])
+        id_match = REDLINE_ID_PATTERN.match(rid)
+        if not id_match:
+            continue
+        result[rid] = {
+            "title": title,
+            "description": description,
+            "enforcement": enforcement,
+        }
+    return result
+
+
 def check_redlines_yaml_consistency() -> list[str]:
     """检查项 7：redlines.yml 与 CLAUDE.md §3.1 红线表一致性（ADR-0003 决策落地）。
 
     校验:
     1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
-    2. 每条红线含 5 字段: id/title/description/enforcement/human_review_required
+    2. 每条红线含 7 字段: id/title/description/enforcement/automation_coverage/human_review_required/rule_type
     3. id 格式为 R\\d+, 连续 append-only (R1, R2, ..., R_N, 无缺号/重号/跳号)
     4. CLAUDE.md §3.1 红线表行数 (以 ``| R\\d+ |`` 开头的行) = yml 条目数
+    5. automation_coverage 值校验: 必须为 full/partial/none 之一
+    6. automation_coverage 与 human_review_required 一致性:
+       automation_coverage != full ⇒ human_review_required == true
+       automation_coverage == full ⇒ human_review_required == false
+    7. CLAUDE.md §3.1 表格与 YAML 字段语义一致: id/title/description/enforcement 四字段
+       标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
 
     退出码: 0 通过, 1 失败 (返回非空 errors 列表)。
     """
@@ -599,6 +673,54 @@ def check_redlines_yaml_consistency() -> list[str]:
         if missing:
             errors.append(f"redlines[{i}] 缺字段: {sorted(missing)}")
 
+    # 校验 2b: automation_coverage 值校验 + 与 human_review_required 一致性
+    for i, entry in enumerate(redlines):
+        if not isinstance(entry, dict):
+            continue
+        automation_coverage = entry.get("automation_coverage")
+        if automation_coverage is None:
+            continue  # 字段缺失由校验 2 守护
+        rid = str(entry.get("id", f"redlines[{i}]"))
+        if automation_coverage not in AUTOMATION_COVERAGE_VALUES:
+            errors.append(f"{rid}: automation_coverage 值非法: {automation_coverage} (应为 full/partial/none)")
+            continue
+        human_review = entry.get("human_review_required")
+        if human_review is None:
+            continue  # 字段缺失由校验 2 守护
+        if automation_coverage != "full" and not human_review:
+            errors.append(f"{rid}: automation_coverage='{automation_coverage}' 但 human_review_required=false")
+        if automation_coverage == "full" and human_review:
+            errors.append(f"{rid}: automation_coverage='full' 但 human_review_required=true")
+
+    # 校验 2c: rule_type 值合法性 + EXCEPTIONABLE 与例外注册表联动 (P2-11)
+    for i, entry in enumerate(redlines):
+        if not isinstance(entry, dict):
+            continue
+        rule_type = entry.get("rule_type")
+        rid = str(entry.get("id", f"redlines[{i}]"))
+        if rule_type is None:
+            continue  # 字段缺失由校验 2 守护
+        if rule_type not in RULE_TYPE_VALUES:
+            errors.append(f"{rid}: rule_type 值非法: {rule_type} (应为 {sorted(RULE_TYPE_VALUES)})")
+
+    # EXCEPTIONABLE 联动: 例外注册表中引用的 rule_id 必须为 EXCEPTIONABLE 规则
+    exceptionable_ids = {
+        str(e.get("id")) for e in redlines if isinstance(e, dict) and e.get("rule_type") == "EXCEPTIONABLE"
+    }
+    try:
+        import yaml  # noqa: F811
+
+        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        exc_data = None
+    if isinstance(exc_data, dict) and isinstance(exc_data.get("exceptions"), list):
+        for entry in exc_data["exceptions"]:
+            if not isinstance(entry, dict):
+                continue
+            rule_id = entry.get("rule_id")
+            if rule_id is not None and rule_id not in exceptionable_ids:
+                errors.append(f"例外 {entry.get('id')} 引用的 rule_id '{rule_id}' 不是 EXCEPTIONABLE 规则")
+
     # 校验 3: id 格式 + 连续 append-only
     parsed_nums: list[int] = []
     for i, entry in enumerate(redlines):
@@ -635,13 +757,30 @@ def check_redlines_yaml_consistency() -> list[str]:
     if len(r_lines) != len(redlines):
         errors.append(f"CLAUDE.md §3.1 表格行数 {len(r_lines)} != redlines.yml 条目数 {len(redlines)}")
 
+    # 校验 5: CLAUDE.md §3.1 表格与 YAML 字段语义一致
+    # 解析 CLAUDE.md 红线表，提取 id/title/description/enforcement 四字段
+    # 与 YAML 中对应条目的同名字段做标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
+    claude_table = _parse_claude_redline_table(claude_content)
+    for entry in redlines:
+        if not isinstance(entry, dict):
+            continue
+        rid = str(entry.get("id", "?"))
+        if rid not in claude_table:
+            continue  # 行数不匹配已由校验 4 报告
+        claude_entry = claude_table[rid]
+        for field in ("title", "description", "enforcement"):
+            yaml_value = _normalize_for_comparison(str(entry.get(field, "")))
+            claude_value = claude_entry[field]
+            if yaml_value != claude_value:
+                errors.append(f"{rid}: CLAUDE.md 与 redlines.yml 字段 '{field}' 不一致")
+
     return errors
 
 
 # =============================================================================
 # 3c: enforcement 字段与实际 hook/CI job 映射一致性检查（ADR-0005）
 #
-# 9 个不变量 N1~N9 守护 enforcement 字段声称的守护机制配置存在且粗粒度可达。
+# 8 个不变量 N1~N8 守护 enforcement 字段声称的守护机制配置存在且粗粒度可达。
 # 核心校验 _check_enforcement_invariants() 为纯函数，接受 redlines 列表与
 # EnforcementEnvironment 配置快照，不读文件，便于单元测试构造正例/反例。
 # 实际文件读取集中在 _collect_enforcement_environment()。
@@ -659,7 +798,9 @@ ENFORCEMENT_KEYWORD_CHECK_REDLINES = "check_redlines.py"
 ENFORCEMENT_KEYWORD_IMPORT_LINTER = "import-linter"
 ENFORCEMENT_KEYWORD_SECURITY_SCAN = "安全扫描"
 ENFORCEMENT_KEYWORD_CI_TEST = "CI-test"
-ENFORCEMENT_KEYWORD_HUMAN_REVIEW = "仅人工评审"
+ENFORCEMENT_KEYWORD_HUMAN_REVIEW = (
+    "仅人工评审"  # 保留用于 keywords 提取；N6/N8 演进后不再被不变量消费（见 ADR-0005 Errata 2026-08-13）
+)
 ENFORCEMENT_KEYWORD_PENDING: tuple[str, ...] = ("待实现", "暂缓")  # R16 特例
 
 # ruff 关键词使用 word boundary 匹配，避免误匹配 'scruffian' 等
@@ -809,20 +950,22 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
 def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironment) -> list[str]:
     """纯函数：对已解析的 redlines 列表与配置快照校验 8 个不变量，返回错误列表。
 
-    不变量清单（v3，8 项；原 N9 在实施后检视中删除——与 N6 触发条件等价仅操作数顺序不同）：
+    不变量清单（v4，8 项；原 N9 在实施后检视中删除——与 N6 触发条件等价仅操作数顺序不同）：
     - N1: enforcement 含 'check_redlines.py' ⇒ redline-check hook 存在 + entry 含 check_redlines.py + 脚本文件存在
     - N2: enforcement 含 'import-linter' ⇒ lint-imports hook 存在 + entry 含 lint-imports + 契约数量一致
     - N3: enforcement 含 'ruff' ⇒ ruff-check hook 存在 + entry 含 ruff
     - N4: enforcement 含 '安全扫描' ⇒ Gitleaks workflow + .gitleaks.toml 同时存在
     - N5: enforcement 含 'CI-test' ⇒ workflow run: 命令块含 pytest 命令
-    - N6: enforcement 含 '仅人工评审' ⇒ human_review_required == true
-    - N7: enforcement 含 '待实现'/'暂缓' ⇒ human_review_required == false（R16 特化守护，与 N8 子集关系见 ADR-0005）
-    - N8: human_review_required == true ⇒ enforcement 含 '仅人工评审'
+    - N6: automation_coverage != full ⇒ human_review_required == true
+    - N7: enforcement 含 '待实现'/'暂缓' ⇒ automation_coverage == none 且 human_review_required == true（R16 特化守护）
+    - N8: human_review_required == true ⇒ automation_coverage != full
 
-    N6 + N8 共同构成 `human_review_required == true ⇔ enforcement 含「仅人工评审」` 双向一致性。
-    N7 是 N8 的 R16 特化版（含 pending 关键词时 N8 也会触发，但 N7 报错更精确指向 R16 误标）。
+    N6 + N8 共同构成 `automation_coverage != full ⇔ human_review_required == true` 双向一致性。
+    N7 仍然检查 enforcement 文本中的 '待实现'/'暂缓' 关键词，但现在要求 automation_coverage == none
+    且 human_review_required == true（与 N8 的 automation_coverage != full 要求一致）。
 
-    使用 .get() 防御性访问 human_review_required 字段；字段缺失时跳过 N6~N8（由 3b 守护字段完整性）。
+    使用 .get() 防御性访问 human_review_required / automation_coverage 字段；字段缺失时跳过 N6~N8
+    （由 3b 守护字段完整性）。
     """
     errors: list[str] = []
     for entry in redlines:
@@ -884,18 +1027,22 @@ def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironm
             if not pytest_ok:
                 errors.append(f"{rid}: N5 enforcement 含 'CI-test' 但 workflow run: 命令块未检测到 pytest 命令")
 
-        # N6~N8: human_review_required 一致性校验
+        # N6~N8: automation_coverage 与 human_review_required 一致性校验
         # 字段缺失时跳过（由 3b check_redlines_yaml_consistency() 守护字段完整性）
-        if human_review is not None:
-            # N6: 仅人工评审 ⇒ human_review_required == true
-            if ENFORCEMENT_KEYWORD_HUMAN_REVIEW in keywords and not human_review:
-                errors.append(f"{rid}: N6 enforcement 含 '仅人工评审' 但 human_review_required=false")
-            # N7: 待实现/暂缓 ⇒ human_review_required == false（R16 特化守护）
-            if any(p in keywords for p in ENFORCEMENT_KEYWORD_PENDING) and human_review:
-                errors.append(f"{rid}: N7 enforcement 含 '待实现/暂缓' 但 human_review_required=true")
-            # N8: human_review_required == true ⇒ enforcement 含 '仅人工评审'
-            if human_review and ENFORCEMENT_KEYWORD_HUMAN_REVIEW not in keywords:
-                errors.append(f"{rid}: N8 human_review_required=true 但 enforcement 不含 '仅人工评审'")
+        automation_coverage = entry.get("automation_coverage")
+        if human_review is not None and automation_coverage is not None:
+            # N6: automation_coverage != full ⇒ human_review_required == true
+            if automation_coverage != "full" and not human_review:
+                errors.append(f"{rid}: N6 automation_coverage='{automation_coverage}' 但 human_review_required=false")
+            # N7: 待实现/暂缓 ⇒ automation_coverage == none 且 human_review_required == true（R16 特化守护）
+            if any(p in keywords for p in ENFORCEMENT_KEYWORD_PENDING):
+                if automation_coverage != "none" or not human_review:
+                    errors.append(
+                        f"{rid}: N7 enforcement 含 '待实现/暂缓' 但 automation_coverage!='none' 或 human_review_required!=true"
+                    )
+            # N8: human_review_required == true ⇒ automation_coverage != full
+            if human_review and automation_coverage == "full":
+                errors.append(f"{rid}: N8 human_review_required=true 但 automation_coverage='full'")
 
     return errors
 
@@ -979,6 +1126,174 @@ def check_enforcement_mapping() -> list[str]:
     return errors
 
 
+# 例外注册表必填字段 (P1-01: 集中例外治理, 见 docs/governance/exceptions.yml)
+EXCEPTION_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"id", "rule_id", "paths", "reason", "owner", "approved_by", "verification"}
+)
+# expires_at 与 removal_trigger 二选一必填
+EXCEPTION_EXPIRY_FIELDS: frozenset[str] = frozenset({"expires_at", "removal_trigger"})
+
+
+def check_exceptions_yaml_consistency() -> list[str]:
+    """例外注册表一致性检查 (P1-01)。
+
+    校验 docs/governance/exceptions.yml：
+    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
+    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification)。
+    3. expires_at 与 removal_trigger 二选一必填。
+    4. id 唯一且格式为 EX-XXXX。
+    5. rule_id 必须存在于 docs/governance/redlines.yml。
+    6. paths 必须为 list 且每个路径在仓库中真实存在。
+    """
+    errors: list[str] = []
+
+    if not EXCEPTIONS_YAML_PATH.exists():
+        errors.append(f"exceptions.yml 不存在: {EXCEPTIONS_YAML_PATH}")
+        return errors
+
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        errors.append(f"exceptions.yml YAML 解析失败: {e}")
+        return errors
+
+    if not isinstance(data, dict) or "exceptions" not in data:
+        errors.append("exceptions.yml 顶层应为 dict 且含 'exceptions' key")
+        return errors
+
+    exceptions = data["exceptions"]
+    if not isinstance(exceptions, list):
+        errors.append(f"'exceptions' 应为 list, 实际 {type(exceptions).__name__}")
+        return errors
+
+    # 收集 redlines.yml 中已注册的 rule_id (用于校验 rule_id 存在性)
+    try:
+        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        redlines_data = None
+    registered_rule_ids: set[str] = set()
+    if isinstance(redlines_data, dict) and isinstance(redlines_data.get("redlines"), list):
+        registered_rule_ids = {
+            str(entry.get("id")) for entry in redlines_data["redlines"] if isinstance(entry, dict) and entry.get("id")
+        }
+
+    seen_ids: set[str] = set()
+    for idx, entry in enumerate(exceptions, 1):
+        if not isinstance(entry, dict):
+            errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
+            continue
+
+        # 必填字段
+        missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
+        if missing:
+            errors.append(f"exceptions[{idx}] 缺少必填字段: {sorted(missing)}")
+        # 二选一字段
+        if not (EXCEPTION_EXPIRY_FIELDS & entry.keys()):
+            errors.append(f"exceptions[{idx}] 缺少 expires_at 或 removal_trigger (二选一必填)")
+
+        # id 唯一性与格式
+        exc_id = entry.get("id")
+        if exc_id is not None:
+            if not isinstance(exc_id, str) or not exc_id.startswith("EX-"):
+                errors.append(f"exceptions[{idx}] id 格式应为 EX-XXXX, 实际 {exc_id!r}")
+            elif exc_id in seen_ids:
+                errors.append(f"exceptions[{idx}] id 重复: {exc_id}")
+            else:
+                seen_ids.add(exc_id)
+
+        # rule_id 存在性
+        rule_id = entry.get("rule_id")
+        if rule_id is not None and registered_rule_ids and rule_id not in registered_rule_ids:
+            errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
+
+        # paths 存在性
+        paths = entry.get("paths")
+        if isinstance(paths, list):
+            for p in paths:
+                if not isinstance(p, str):
+                    errors.append(f"exceptions[{idx}] paths 元素应为 str, 实际 {type(p).__name__}")
+                    continue
+                if not (ROOT / p).exists():
+                    errors.append(f"exceptions[{idx}] 路径不存在: {p}")
+        elif paths is not None:
+            errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
+
+    return errors
+
+
+def check_canonical_topics_consistency() -> list[str]:
+    """主题 → canonical 正本映射一致性检查 (P2-12)。
+
+    校验 docs/governance/canonical-topics.yml：
+    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (list)。
+    2. 每个主题必填 id/title/canonical。
+    3. id 唯一。
+    4. canonical 路径在仓库中真实存在。
+    5. workflow 路径（若存在）在仓库中真实存在。
+    """
+    errors: list[str] = []
+
+    if not CANONICAL_TOPICS_YAML_PATH.exists():
+        errors.append(f"canonical-topics.yml 不存在: {CANONICAL_TOPICS_YAML_PATH}")
+        return errors
+
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        errors.append(f"canonical-topics.yml YAML 解析失败: {e}")
+        return errors
+
+    if not isinstance(data, dict) or "topics" not in data:
+        errors.append("canonical-topics.yml 顶层应为 dict 且含 'topics' key")
+        return errors
+
+    topics = data["topics"]
+    if not isinstance(topics, list):
+        errors.append(f"'topics' 应为 list, 实际 {type(topics).__name__}")
+        return errors
+
+    seen_ids: set[str] = set()
+    for idx, entry in enumerate(topics, 1):
+        if not isinstance(entry, dict):
+            errors.append(f"topics[{idx}] 应为 dict, 实际 {type(entry).__name__}")
+            continue
+
+        # 必填字段
+        missing = {"id", "title", "canonical"} - entry.keys()
+        if missing:
+            errors.append(f"topics[{idx}] 缺少必填字段: {sorted(missing)}")
+
+        # id 唯一性
+        topic_id = entry.get("id")
+        if isinstance(topic_id, str):
+            if topic_id in seen_ids:
+                errors.append(f"topics[{idx}] id 重复: {topic_id}")
+            else:
+                seen_ids.add(topic_id)
+
+        # canonical 路径存在性
+        canonical = entry.get("canonical")
+        if isinstance(canonical, str):
+            if not (ROOT / canonical).exists():
+                errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
+        elif canonical is not None:
+            errors.append(f"topics[{idx}] canonical 应为 str, 实际 {type(canonical).__name__}")
+
+        # workflow 路径存在性（可选）
+        workflow = entry.get("workflow")
+        if isinstance(workflow, str):
+            if not (ROOT / workflow).exists():
+                errors.append(f"topics[{idx}] workflow 路径不存在: {workflow}")
+        elif workflow is not None:
+            errors.append(f"topics[{idx}] workflow 应为 str, 实际 {type(workflow).__name__}")
+
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -992,6 +1307,10 @@ def main() -> int:
     # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
     # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
     all_errors.extend(check_enforcement_mapping())
+    # 例外注册表一致性：紧随红线一致性之后，守护集中例外治理 (P1-01)
+    all_errors.extend(check_exceptions_yaml_consistency())
+    # 主题 → canonical 正本映射一致性：守护决策树机器可读镜像的路径有效性 (P2-12)
+    all_errors.extend(check_canonical_topics_consistency())
     # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
     all_errors.extend(check_flet_hub_completeness())
 
@@ -1004,7 +1323,8 @@ def main() -> int:
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "enforcement 字段映射一致性 / Flet 入口完整性）"
+        "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
+        "Flet 入口完整性）"
     )
     return 0
 

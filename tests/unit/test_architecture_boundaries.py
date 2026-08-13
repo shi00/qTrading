@@ -12,10 +12,14 @@ import ast
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# 例外注册表路径 (P1-01: 集中例外治理, 见 docs/governance/exceptions.yml)
+EXCEPTIONS_YAML_PATH = PROJECT_ROOT / "docs" / "governance" / "exceptions.yml"
 
 # R1 + §4.2 禁止的跨层导入方向
 # key: 源层; value: 该层禁止导入的目标层列表
@@ -30,12 +34,24 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
     "utils": ["ui", "strategies", "services", "app", "data"],
 }
 
-# 已知例外：main.py 入口流程的特殊装配
-# startup_views.py 由 main.py 直接装配（main.py:18），属于启动流程的延伸，
-# 不是 ui 层的正常业务导入。此处显式记录，避免阻塞边界门禁。
-KNOWN_EXCEPTIONS: set[str] = {
-    "ui/startup_views.py",  # imports app.bootstrap, app.startup_controller (main.py 装配延伸)
-}
+
+# P1-01: 例外统一由 docs/governance/exceptions.yml 注册表管理，此处仅读取，不再各自维护。
+# 例外原因与审批记录见 exceptions.yml EX-0001。
+def _load_known_exceptions() -> set[str]:
+    """从例外注册表加载架构边界例外路径 (rule_id=R1 的 paths)。
+
+    例外治理集中化 (P1-01)：KNOWN_EXCEPTIONS 不再硬编码于测试文件，
+    而是从 docs/governance/exceptions.yml 读取，避免多源漂移。
+    """
+    data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    paths: set[str] = set()
+    for entry in data.get("exceptions", []):
+        if entry.get("rule_id") == "R1":
+            paths.update(entry.get("paths", []))
+    return paths
+
+
+KNOWN_EXCEPTIONS: set[str] = _load_known_exceptions()
 
 
 def _get_imported_modules(node: ast.AST) -> list[str]:
@@ -62,7 +78,7 @@ def test_no_forbidden_cross_layer_imports(layer: str, forbidden: list[str]):
     ``if TYPE_CHECKING:`` 块内的导入（仅类型检查用，非运行时依赖）和
     函数体内的延迟导入（lazy import）不视为架构违规。
 
-    已知例外见 ``KNOWN_EXCEPTIONS``，需在注释中说明原因。
+    已知例外见 ``docs/governance/exceptions.yml``（rule_id=R1 的 paths）。
     """
     layer_dir = PROJECT_ROOT / layer
     if not layer_dir.exists():
@@ -96,6 +112,6 @@ def test_known_exceptions_are_valid():
     for except_path in KNOWN_EXCEPTIONS:
         full_path = PROJECT_ROOT / except_path
         assert full_path.exists(), (
-            f"KNOWN_EXCEPTIONS contains non-existent file: {except_path}. "
-            "Remove it from KNOWN_EXCEPTIONS if the file was deleted or renamed."
+            f"exceptions.yml contains non-existent file: {except_path}. "
+            "Remove it from docs/governance/exceptions.yml if the file was deleted or renamed."
         )

@@ -42,6 +42,8 @@ ADR-0005 Date 与 ADR-0003 同为 2026-07-17。同日推翻理由：
 
 ### 8 个不变量概览
 
+> **注**: N6-N8 规则已于 2026-08-13 演进（引入 `automation_coverage` 字段），当前实现见下方 Errata。以下表格保留原始决策记录。
+
 | 不变量 | 校验对象 | 检测的漂移场景 |
 |--------|---------|---------------|
 | N1 | `check_redlines.py` 关键词 | `redline-check` hook 被删除 / entry 被篡改 / 脚本文件丢失 |
@@ -86,3 +88,13 @@ Context「触发来源扩展」段落（L24）中"技术债表 P3 原触发条�
 因此上述"同步更新"动作实际未生效（目标条目已不存在，无 upgrade 触发条件可更新）。读者如需理解本 ADR 触发条件的演进逻辑，请直接阅读本 ADR Context 与 ADR-0003 Decision 3 的历史记录，无需在 `known-technical-debt.md` 中查找。
 
 本勘误仅说明引用失效与动作未生效原因，不修改原文（遵守 ADR append-only 不可变性原则）。
+
+> 2026-08-13 追加
+
+N6~N8 不变量规则演进：引入 `automation_coverage: full|partial|none` 字段后，N6/N8 从基于 enforcement 文本关键词 `仅人工评审` 的双向校验改为基于 `automation_coverage` 字段的双向一致性校验。N7 保留 enforcement 文本关键词检查（`待实现`/`暂缓`）但增加 `automation_coverage == none` 约束。
+
+变更原因：① `仅人工评审` 无法区分"部分覆盖+人工兜底"（如 R1/R4/R7/R9/R10/R12-R15）与"完全无自动化"（如 R5/R11/R16-R18）；② enforcement 文本变更时需同步不变量常量，维护负担高；③ 原 R2/R7/R8 因 enforcement 不含 `仅人工评审` 关键词而无法被 N6/N8 校验（弱校验），引入 `automation_coverage` 后所有红线均可被校验。
+
+本次变更同步更新了 `_check_enforcement_invariants()` 函数实现（上方不变量概览表保留原始决策记录，当前实现以本 Errata 为准）。契约测试 `TestEnforcementMapping` 已同步更新覆盖新规则。
+
+**已知设计冗余**：N6/N8 演进后与 `check_redlines_yaml_consistency()` 的 check 2b（`automation_coverage` 与 `human_review_required` 一致性校验）执行相同检查，构成 defense-in-depth 冗余。N7 仍保留独特价值（检查 enforcement 文本中的 `待实现`/`暂缓` 关键词与 `automation_coverage` 的一致性）。接受此冗余以降低单点移除风险。

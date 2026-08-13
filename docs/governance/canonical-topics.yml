@@ -1,0 +1,103 @@
+# 主题 → canonical 正本映射 (CLAUDE.md §1.8 决策树的机器可读镜像)
+#
+# 来源决策: P2-12 (AI 任务路由中转加载与上下文放大) + P2-17 (设计类任务缺少 ADR/契约路由)
+# 用途: 每类任务只列一个 canonical 入口，入口文档负责条件路由；
+#       CLAUDE.md §1.8 只保留高风险任务与最小入口，不复制二级必读清单。
+#
+# 字段说明:
+#   id: 主题标识 (稳定, 供文档与脚本引用)
+#   title: 任务类型标题 (对应 CLAUDE.md §1.8 决策树「任务类型」列)
+#   canonical: 该主题的唯一正本入口 (条件路由由该文档负责)
+#   workflow: 可选, 工作流入口 (how-to 等)
+#   note: 可选, 补充说明 (如高风险任务、不可逆决策等)
+#
+# 修改规则:
+#   - 新增任务类型时同步更新 CLAUDE.md §1.8 决策树
+#   - canonical 必须是真实存在的文档路径
+#   - 每个主题只保留一个 canonical 入口, 不复制二级必读清单
+
+topics:
+  - id: strategy
+    title: 新增/修改策略
+    canonical: docs/patterns/strategy-template.md
+    workflow: docs/guides/how-to.md
+
+  - id: dao
+    title: 新增/修改 DAO 或数据表
+    canonical: docs/patterns/dao-pattern.md
+    workflow: docs/guides/how-to.md
+
+  - id: data-sync
+    title: 新增/修改数据同步
+    canonical: docs/patterns/data-sync.md
+
+  - id: ui-view
+    title: 新增/修改 UI 视图
+    canonical: docs/flet/README.md
+    workflow: docs/guides/how-to.md
+
+  - id: ui-layout
+    title: 修改 UI 布局/响应式
+    canonical: docs/flet/README.md
+
+  - id: viewmodel
+    title: 新增/修改 ViewModel
+    canonical: docs/patterns/mvvm.md
+
+  - id: i18n
+    title: 修改 i18n 文案
+    canonical: docs/flet/README.md
+
+  - id: exception-handling
+    title: 修改异常处理
+    canonical: CONTRIBUTING.md
+
+  - id: bug-fix
+    title: 修复 bug / 排查问题
+    canonical: docs/bug-fix/core-protocol.md
+
+  - id: code-review
+    title: AI 代码检视 / PR review
+    canonical: docs/reviews/ai-review.md
+
+  - id: singleton
+    title: 修改单例 / 资源生命周期
+    canonical: docs/architecture/singleton-lifecycle.md
+
+  - id: performance
+    title: 性能优化 / 性能阈值调整
+    canonical: docs/patterns/config-quality-perf.md
+
+  - id: ci-deps
+    title: 调整 CI / 依赖
+    canonical: docs/guides/ci-cd.md
+
+  - id: backtest
+    title: 新增/修改回测
+    canonical: docs/guides/how-to.md
+    note: 见 how-to.md「7. 新增回测配置」（无独立回测正本，配置流程承载于 how-to）
+
+  - id: config
+    title: 修改配置项
+    canonical: docs/patterns/config-quality-perf.md
+
+  - id: testing
+    title: 新增测试
+    canonical: docs/guides/testing.md
+
+  - id: e2e-testing
+    title: 新增/修改 E2E 测试
+    canonical: docs/guides/testing.md
+
+  - id: git
+    title: Git 操作 / 分支 / worktree / 创建 PR / 创建 Issue
+    canonical: docs/guides/git-workflow.md
+
+  - id: embedded-pg
+    title: 内置 PostgreSQL 离线维护 / 数据恢复
+    canonical: docs/guides/how-to.md
+
+  - id: architecture-design
+    title: 架构设计 / 公共契约 / 跨层范式
+    canonical: docs/adr/0001-record-architecture-decisions.md
+    note: 存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR (P2-17)
