@@ -118,9 +118,13 @@ def _format_task_stack(context: dict) -> str:
                 exc = obj.exception()
                 sanitized = DataSanitizer.sanitize_error(exc)  # type: ignore[arg-type]
                 lines.append(f"\n  Task exception: {type(exc).__name__}: {sanitized}")
+            except asyncio.CancelledError:
+                # 观察的任务在 cancelled() 检查后被取消, exception() 抛 CancelledError。
+                # 仅读取他人任务取消状态, 非本钩子操作被取消, 不违反 R2; 忽略并继续取栈帧。
+                pass
             except Exception:
-                # 任务仍在运行/未完成时 exception() 抛 InvalidStateError, 忽略并继续取栈帧
-                exc = None
+                # 任务仍在运行/未完成时 exception() 抛 InvalidStateError, 忽略并继续取栈帧。
+                pass
     if hasattr(obj, "get_stack"):
         for frame in obj.get_stack():
             fname = frame.f_code.co_filename

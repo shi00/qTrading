@@ -276,6 +276,27 @@ class TestFormatTaskStack:
 
         asyncio.run(_run())
 
+    def test_cancelled_error_from_exception_does_not_escape(self) -> None:
+        """obj.exception() 抛 CancelledError 时不应逃逸钩子 (防护竞态窗口).
+
+        真实竞态: cancelled() 预判返回 False 后、exception() 调用前任务被取消,
+        exception() 抛 CancelledError (BaseException, 不被 except Exception 捕获)。
+        本用例用假对象直接触发该分支, 锁定新加的
+        `except asyncio.CancelledError` 兜底。"""
+
+        class _FakeTask:
+            def cancelled(self) -> bool:
+                return False  # 模拟竞态窗口内预判为未取消
+
+            def exception(self):
+                raise asyncio.CancelledError()
+
+            def get_stack(self):
+                return []
+
+        hint = _format_task_stack({"task": _FakeTask()})
+        assert hint == ""  # 无异常行、无栈帧, 且不抛异常
+
 
 class TestSanitization:
     """测试脱敏功能"""
