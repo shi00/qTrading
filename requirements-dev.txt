@@ -346,9 +346,9 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-polars==1.42.1
+polars==1.43.2
     # via astockscreener (pyproject.toml)
-polars-runtime-32==1.42.1
+polars-runtime-32==1.43.2
     # via polars
 propcache==0.5.2
     # via
