@@ -40,6 +40,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 
@@ -272,12 +273,17 @@ class _FakeHomeViewModel:
 
     def dispose(self) -> None:
         self.dispose_called = True
+        self.method_calls.append("dispose")
         self._subscribers.clear()
 
     # --- HomeView 调用的 VM 方法 ---
 
     def init(self) -> None:
         self.method_calls.append("init")
+
+    def stop(self) -> None:
+        """Task 1: Mock stop (active 失活经 effect cleanup 调 vm.stop() 退订)."""
+        self.method_calls.append("stop")
 
     async def init_data(self) -> None:
         self.method_calls.append("init_data")
@@ -732,6 +738,114 @@ class TestHomeViewActiveProp:
         run_mount_effects(component, page=page)
 
         page.pubsub.subscribe_topic.assert_not_called()
+
+
+# ============================================================================
+# Task 1: active 失活/重激活的 service listener 退订/重订
+# ============================================================================
+
+
+class TestHomeViewActiveDeactivation:
+    """Task 1: HomeView active 失活/重激活的 service listener 退订/重订.
+
+    HomeView 常驻 app_layout ft.Stack 永不卸载, 失活时须经 _cleanup_service_listeners
+    (use_effect cleanup) 调 vm.stop() 退订, 否则被新闻/行情 push 反复重渲染。
+
+    驱动方式: 改 component.kwargs["active"] + run_render_effects() 触发 deps 变化
+    (component_renderer._run_render_effects 先 cleanup 后 setup)。
+    """
+
+    def test_active_false_triggers_stop_not_dispose(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """active True→False: vm.stop() 被调用, vm.dispose() 未被调用 (非卸载)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=True)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        assert "init" in mock_home_vm.method_calls
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+
+        assert "stop" in mock_home_vm.method_calls
+        assert not mock_home_vm.dispose_called
+
+    def test_reactivation_triggers_init_again(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """active True→False→True: vm.init() 被再次调用 (listener 重新注册)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=True)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+        mock_home_vm.method_calls.clear()
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert "init" in mock_home_vm.method_calls
+
+    def test_unchanged_active_no_listener_churn(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """active 不变的无关注册重渲染不触发 stop()/init() (防 listener 抖动).
+
+        覆盖 i18n/theme 等无关 state 触发重渲染时, deps=[active] 未变化,
+        不应退订/重订 service listener。
+        """
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=True)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        mock_home_vm.method_calls.clear()
+        run_render_effects(component)  # active 不变
+
+        assert "stop" not in mock_home_vm.method_calls
+        assert "init" not in mock_home_vm.method_calls
+
+    def test_unmount_order_dispose_before_stop(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """unmount: dispose 先于 stop.
+
+        use_viewmodel 内部 use_effect(setup, [], cleanup=dispose) 注册于
+        _init_and_load effect 之前, _run_unmount_effects 按注册顺序执行 cleanup。
+        """
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=True)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        mock_home_vm.method_calls.clear()
+
+        run_unmount_effects(component)
+
+        assert "dispose" in mock_home_vm.method_calls
+        assert "stop" in mock_home_vm.method_calls
+        assert mock_home_vm.method_calls.index("dispose") < mock_home_vm.method_calls.index("stop")
+
+    def test_e2e_mode_cleanup_does_not_stop(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """E2E_TESTING=true: active True→False cleanup 不调 vm.stop() (E2E 守卫).
+
+        对称 _init_and_load 顶部守卫。E2E 下未早返将实例化 NewsSubscriptionService
+        → AIService → litellm import (同步阻塞 MainThread), 造成 E2E 回归。
+        """
+        from ui.views.home_view import HomeView
+
+        monkeypatch.setenv("E2E_TESTING", "true")
+        try:
+            component = make_component(HomeView, active=True)
+            page = _make_fake_page()
+            run_mount_effects(component, page=page)
+
+            component.kwargs["active"] = False
+            run_render_effects(component)
+
+            assert "stop" not in mock_home_vm.method_calls
+        finally:
+            monkeypatch.delenv("E2E_TESTING", raising=False)
 
 
 # ============================================================================
