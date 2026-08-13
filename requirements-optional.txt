@@ -228,7 +228,7 @@ pillow==12.3.0
     # via
     #   astockscreener (pyproject.toml)
     #   matplotlib
-playwright==1.61.0
+playwright==1.62.0
     # via astockscreener (pyproject.toml)
 polars==1.43.2
     # via astockscreener (pyproject.toml)
