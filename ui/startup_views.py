@@ -600,7 +600,10 @@ def StartupView(
             return
         from ui.viewmodels.home_view_model import HomeViewModel
 
-        def on_news_alert(msg: str) -> None:
+        # NOTE(lazy): 必须保持 async 定义, 否则 news 服务会经 ThreadPoolManager 在 IO 线程
+        # 分发并变更 Flet observable 状态, 触发跨线程 asyncio TypeError (R16 跨线程 UI 变更).
+        # ceiling: 服务端告警分发对 async 监听在事件循环线程 await. upgrade: 若服务端改为统一线程封送时移除.
+        async def on_news_alert(msg: str) -> None:
             try:
                 page = ft.context.page
                 if page is not None and hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]

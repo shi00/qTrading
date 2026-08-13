@@ -873,3 +873,31 @@ def test_startup_view_does_not_directly_call_news_subscription_service():
     assert "HomeViewModel().unregister_news_alert_listener" not in source, (
         "禁止临时实例化 HomeViewModel 仅用于转发命令 (P2-2), 应改为静态调用"
     )
+
+
+def test_news_alert_listener_is_async_definition():
+    """on_news_alert 必须为 async 函数 (R16 跨线程修复)。
+
+    news 服务对 async 告警监听在事件循环线程 await, 对同步监听经 ThreadPoolManager
+    在 IO 线程分发; 若 on_news_alert 回退为同步函数, page.toast.show() 将在 IO 线程
+    变更 Flet observable 状态, 触发跨线程 asyncio TypeError. 用 AST 级断言锁定签名。
+    """
+    import ast
+    import textwrap
+    from pathlib import Path
+
+    import ui.startup_views as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    funcs = {node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    listener = funcs.get("on_news_alert")
+    # 存在性守卫: funcs.get() 键缺失时返回 None, is not None 仅确认函数存在,
+    # 紧接下行的 isinstance(AsyncFunctionDef) 才是类型强断言, 二者配合构成完整校验.
+    assert listener is not None, "必须存在 on_news_alert 函数"  # noqa: weak-assertion 存在性守卫, funcs.get() 键缺失返回 None, 由下行 isinstance 强断言兜底
+    assert isinstance(listener, ast.AsyncFunctionDef), textwrap.dedent(
+        """\
+        on_news_alert 必须定义为 async 函数 (R16 跨线程修复).
+        否则 news 服务会经 ThreadPoolManager 在 IO 线程执行并变更 Flet observable 状态,
+        触发跨线程 asyncio TypeError (An asyncio.Future, a coroutine or an awaitable is required).
+        """
+    )

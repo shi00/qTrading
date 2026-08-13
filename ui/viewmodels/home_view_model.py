@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -152,7 +152,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         super().dispose()
 
     @staticmethod
-    def register_news_alert_listener(callback: Callable[[str], None]) -> None:
+    def register_news_alert_listener(callback: Callable[[str], Awaitable[None]]) -> None:
         """注册新闻告警监听 (View 通过 VM 命令转发, 不直调 NewsSubscriptionService).
 
         参照 ``init`` 范例 (CLAUDE.md §3.2 MVVM): View 持有需要 page 访问的 toast 回调,
@@ -160,11 +160,12 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         P2-2: 改为 staticmethod 避免调用方临时实例化 HomeViewModel (startup_views.py
         启动期无业务状态需求, 仅需转发到 NewsSubscriptionService 单例)。
+        callback 必须为 async, 服务端在事件循环线程 await 执行 UI 变更 (R16 跨线程修复)。
         """
         NewsSubscriptionService().add_listener(callback, is_alert=True)
 
     @staticmethod
-    def unregister_news_alert_listener(callback: Callable[[str], None]) -> None:
+    def unregister_news_alert_listener(callback: Callable[[str], Awaitable[None]]) -> None:
         """退订新闻告警监听 (与 register_news_alert_listener 配对)。"""
         NewsSubscriptionService().remove_listener(callback, is_alert=True)
 

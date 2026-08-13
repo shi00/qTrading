@@ -98,6 +98,43 @@ def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
         )
 
 
+def _format_task_stack(context: dict) -> str:
+    """从 asyncio 异常处理器的 context 中提取任务/未来的异常与栈帧，构造可读调用栈。
+
+    asyncio 异常处理器回调时 sys.exc_info() 为空 (exc_info=True 无法记录真实 traceback)，
+    故从 context["task"]/context["future"] 提取。返回形如 ``\\n  File "...", line N, in ...``
+    的字符串；无可用帧时返回空串。
+    """
+    lines: list[str] = []
+    obj = context.get("task") or context.get("future")
+    if obj is None:
+        return ""
+    # 仅当 context 未携带 exception 时才从任务补取, 避免与调用方已打印的主消息重复。
+    # 已取消任务 exception() 会抛 CancelledError (R2 禁止吞没), 故先经 cancelled() 预判跳过,
+    # 不触碰取消路径; 未完成任务 exception() 抛 InvalidStateError, except 仅回退到纯栈帧。
+    if "exception" not in context and hasattr(obj, "exception"):
+        if not getattr(obj, "cancelled", lambda: False)():
+            try:
+                exc = obj.exception()
+                sanitized = DataSanitizer.sanitize_error(exc)  # type: ignore[arg-type]
+                lines.append(f"\n  Task exception: {type(exc).__name__}: {sanitized}")
+            except asyncio.CancelledError:
+                # 观察的任务在 cancelled() 检查后被取消, exception() 抛 CancelledError。
+                # 仅读取他人任务取消状态, 非本钩子操作被取消, 不违反 R2; 忽略并继续取栈帧。
+                # R2_ALLOWED: 读取他人任务取消状态, 非本钩子请求的取消, 不传播。
+                pass
+            except Exception:  # R2_ALLOWED: 仅兜底 InvalidStateError, except Exception 不捕获 CancelledError
+                # 任务仍在运行/未完成时 exception() 抛 InvalidStateError, 忽略并继续取栈帧。
+                pass
+    if hasattr(obj, "get_stack"):
+        for frame in obj.get_stack():
+            fname = frame.f_code.co_filename
+            lineno = frame.f_lineno
+            qualname = frame.f_code.co_qualname
+            lines.append(f'  File "{fname}", line {lineno}, in {qualname}')
+    return "".join(lines)
+
+
 def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
     """
     asyncio 事件循环异常处理器
@@ -136,11 +173,12 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
 
         if exception is not None:
             sanitized_msg = DataSanitizer.sanitize_error(exception)  # type: ignore[arg-type]
+            stack_hint = _format_task_stack(context)
             logger.critical(
-                "[AsyncioHandler] Unhandled exception in event loop: %s: %s",
+                "[AsyncioHandler] Unhandled exception in event loop: %s: %s%s",
                 type(exception).__name__,
                 sanitized_msg,
-                exc_info=True,
+                stack_hint,
             )
         else:
             logger.critical("[AsyncioHandler] Event loop error (no exception): %s", message)
