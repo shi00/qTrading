@@ -230,9 +230,9 @@ pillow==12.3.0
     #   matplotlib
 playwright==1.61.0
     # via astockscreener (pyproject.toml)
-polars==1.42.1
+polars==1.43.2
     # via astockscreener (pyproject.toml)
-polars-runtime-32==1.42.1
+polars-runtime-32==1.43.2
     # via polars
 propcache==0.5.2
     # via
