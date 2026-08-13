@@ -5,6 +5,7 @@
 ```python
 import flet as ft
 
+
 def build_greeting(user_input: str):
     # user_input 来自不可信前端
     return ft.Text(user_input)

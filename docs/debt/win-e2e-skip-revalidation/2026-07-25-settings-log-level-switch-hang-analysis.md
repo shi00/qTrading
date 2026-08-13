@@ -19,9 +19,9 @@ async def test_settings_log_level_switch(e2e_page):
     await e2e_page.expect_text(log_level_label, timeout_ms=10000)
     # 准备 i18n 字符串
     log_level_debug = I18n.get("sys_opt_debug")  # "DEBUG"
-    log_level_info = I18n.get("sys_opt_info")    # "INFO"
+    log_level_info = I18n.get("sys_opt_info")  # "INFO"
     log_level_error = I18n.get("sys_opt_error")  # "ERROR"
-    snack_prefix = I18n.get("sys_log_label")     # "控制系统日志详细程度"
+    snack_prefix = I18n.get("sys_log_label")  # "控制系统日志详细程度"
     try:
         # 先切到 ERROR（确定状态），再切到 DEBUG（目标状态）
         await e2e_page.select_dropdown(log_level_label, log_level_error, timeout_ms=10000)

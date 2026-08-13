@@ -77,7 +77,7 @@
 
 **新 reason 文本**：
 ```python
-reason="Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)"
+reason = "Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)"
 ```
 
 **upgrade 触发条件**（写入债务表）：
@@ -100,7 +100,7 @@ reason="Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstati
 
 **新 reason 文本**：
 ```python
-reason="Windows Flet/Playwright CanvasKit 下 select_dropdown 暴力搜索引发 Chromium 渲染线程死锁（match_keys 缺少 '日志/log' 扩展分支致触发器定位失败）+ snackbar 浮层文本在 CanvasKit 下渲染机制不明致 expect_text 不命中，单次测试 30+ 分钟耗时 (P3-WinE2E-Skip)"
+reason = "Windows Flet/Playwright CanvasKit 下 select_dropdown 暴力搜索引发 Chromium 渲染线程死锁（match_keys 缺少 '日志/log' 扩展分支致触发器定位失败）+ snackbar 浮层文本在 CanvasKit 下渲染机制不明致 expect_text 不命中，单次测试 30+ 分钟耗时 (P3-WinE2E-Skip)"
 ```
 
 **upgrade 触发条件**（写入债务表）：
