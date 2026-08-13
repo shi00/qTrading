@@ -12,6 +12,7 @@
 - test_status_command_outputs_running_json
 - test_stop_command_exits_zero
 - test_doctor_command_outputs_valid_json
+- test_version_command_outputs_valid_json
 - test_dump_command_writes_output_file
 - test_restore_command_succeeds_without_env
 - test_restore_command_outputs_target_data_dir_with_explicit
@@ -121,6 +122,21 @@ def test_doctor_command_outputs_valid_json(tmp_path: Path) -> None:
     assert doctor["initialized"] is True
     assert doctor["postgres_alive"] is True
     assert doctor["timezone"] == "Asia/Shanghai"
+
+
+def test_version_command_outputs_valid_json(tmp_path: Path) -> None:
+    """version 子命令: 输出合法 JSON + schema 契约（resolve_pg_major_version 依赖）。"""
+    wrapper = create_fake_sidecar(tmp_path)
+    result = _run_sidecar(wrapper, "version")
+    assert result.returncode == 0, f"version 失败: {result.stderr}"
+    assert "qtrading-pg-sidecar" in result.stdout, f"无 --json 时应输出纯文本: {result.stdout}"
+    # resolve_pg_major_version 以 `version --json` 调用（version.py），须输出合法 JSON
+    result_json = _run_sidecar(wrapper, "version", "--json")
+    assert result_json.returncode == 0, f"version --json 失败: {result_json.stderr}"
+    info = json.loads(result_json.stdout.strip())
+    assert info["schema"] == "qtrading.embedded_postgres.version.v1"
+    # resolve_pg_major_version 按 postgres_version 主版本解析（version.py），须为 "16"
+    assert info["postgres_version"].split(".", 1)[0].isdigit()
 
 
 def test_dump_command_writes_output_file(tmp_path: Path) -> None:
