@@ -10,7 +10,7 @@ aiosignal==1.4.0
     # via aiohttp
 akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
-akshare==1.18.81
+akshare==1.18.84
     # via astockscreener (pyproject.toml)
 alembic==1.18.5
     # via astockscreener (pyproject.toml)

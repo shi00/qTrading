@@ -26,7 +26,7 @@ dependencies = [
     "flet-desktop==0.86.3",
     "flet-charts==0.86.3",
     "tushare==1.4.29",
-    "akshare==1.18.81",
+    "akshare==1.18.84",
     "requests>=2.34.0",
     "httpx>=0.28.0",
     "urllib3>=2.7.0",
