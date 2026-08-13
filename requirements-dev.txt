@@ -362,7 +362,7 @@ py-mini-racer==0.6.0 ; sys_platform == 'linux'
     # via akshare
 py-serializable==2.1.0
     # via cyclonedx-python-lib
-pyarrow==25.0.0
+pyarrow==25.0.1
     # via astockscreener (pyproject.toml)
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
