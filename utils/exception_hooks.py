@@ -121,8 +121,9 @@ def _format_task_stack(context: dict) -> str:
             except asyncio.CancelledError:
                 # 观察的任务在 cancelled() 检查后被取消, exception() 抛 CancelledError。
                 # 仅读取他人任务取消状态, 非本钩子操作被取消, 不违反 R2; 忽略并继续取栈帧。
+                # R2_ALLOWED: 读取他人任务取消状态, 非本钩子请求的取消, 不传播。
                 pass
-            except Exception:
+            except Exception:  # R2_ALLOWED: 仅兜底 InvalidStateError, except Exception 不捕获 CancelledError
                 # 任务仍在运行/未完成时 exception() 抛 InvalidStateError, 忽略并继续取栈帧。
                 pass
     if hasattr(obj, "get_stack"):
