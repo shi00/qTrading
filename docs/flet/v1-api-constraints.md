@@ -94,6 +94,7 @@ V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止�
 ```python
 import flet as ft
 
+
 @ft.component
 def MetricCard(label: str):
     # 声明式状态：值变更自动重渲染，无需手动 update()
@@ -109,10 +110,12 @@ def MetricCard(label: str):
     ft.use_effect(setup, dependencies=[label], cleanup=cleanup)
 
     return ft.Container(
-        content=ft.Column([
-            ft.Text(label),
-            ft.Text(str(value)),
-        ]),
+        content=ft.Column(
+            [
+                ft.Text(label),
+                ft.Text(str(value)),
+            ]
+        ),
     )
 ```
 
@@ -143,21 +146,24 @@ View 消费 ViewModel 必须经 `use_viewmodel(factory) -> (state, commands)` ho
 ```python
 import flet as ft
 from core.i18n import I18n
-from ui.hooks import use_viewmodel          # 已实现，见 ui/hooks.py
+from ui.hooks import use_viewmodel  # 已实现，见 ui/hooks.py
 from ui.viewmodels.screener_view_model import ScreenerViewModel
+
 
 @ft.component
 def ScreenerView():
-    state, vm = use_viewmodel(ScreenerViewModel)   # state 不可变 snapshot；vm 即 commands
+    state, vm = use_viewmodel(ScreenerViewModel)  # state 不可变 snapshot；vm 即 commands
 
     async def on_run(e):
-        await vm.run()    # command -> _notify -> state 更新 -> 自动重渲染
+        await vm.run()  # command -> _notify -> state 更新 -> 自动重渲染
 
     # View 只做两件事：读 state 渲染、事件调 commands
-    return ft.Column([
-        ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
-        ft.Button(I18n.get("run"), on_click=on_run),
-    ])
+    return ft.Column(
+        [
+            ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+            ft.Button(I18n.get("run"), on_click=on_run),
+        ]
+    )
 ```
 
 要点：

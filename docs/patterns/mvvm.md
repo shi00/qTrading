@@ -22,31 +22,37 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+
 @dataclass(frozen=True)
 class Message:
     """带参数的 i18n 消息：VM 产出 (key, params)，View 按当前 locale 渲染。"""
+
     key: str
     params: dict[str, object] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class Row:
     """行数据 frozen dataclass；tuple[Row, ...] 保证 state 不可变。"""
+
     code: str
     name: str
     score: float
 
+
 @dataclass(frozen=True)
 class ScreenerState:
-    rows: tuple[Row, ...]       # 不可变；DataFrame 转 tuple[Row, ...]，禁止 tuple[dict, ...]
-    status: Message             # 带 params 的 i18n 消息
+    rows: tuple[Row, ...]  # 不可变；DataFrame 转 tuple[Row, ...]，禁止 tuple[dict, ...]
+    status: Message  # 带 params 的 i18n 消息
     loading: bool
+
 
 class ScreenerViewModel:
     @property
     def state(self) -> ScreenerState:
         return ScreenerState(rows=tuple(...), status=Message(...), loading=...)
 
-    async def run(self) -> None: ...                  # command（异步）
+    async def run(self) -> None: ...  # command（异步）
     def select_strategy(self, key: str) -> None: ...  # command（同步）
 
     def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
@@ -57,7 +63,7 @@ class ScreenerViewModel:
         """内部状态变更后调用；遍历订阅者 callback(self.state)。不持有 View 引用。"""
         ...
 
-    def dispose(self) -> None: ...   # 可选：卸载时清理资源
+    def dispose(self) -> None: ...  # 可选：卸载时清理资源
 ```
 
 - `state` 必须不可变（frozen dataclass / NamedTuple / tuple）；内部状态变更后返回新 snapshot
@@ -73,21 +79,24 @@ View 通过 `use_viewmodel(factory=...)` 或 `use_viewmodel(vm=...)` 消费 View
 ```python
 import flet as ft
 from core.i18n import I18n
-from ui.hooks import use_viewmodel          # 已实现，见 ui/hooks.py
+from ui.hooks import use_viewmodel  # 已实现，见 ui/hooks.py
 from ui.viewmodels.screener_view_model import ScreenerViewModel
+
 
 @ft.component
 def ScreenerView():
     # factory= 模式：hook 实例化 VM，卸载时退订 + dispose
-    state, vm = use_viewmodel(ScreenerViewModel)   # 首次渲染实例化 + 订阅 _notify
+    state, vm = use_viewmodel(ScreenerViewModel)  # 首次渲染实例化 + 订阅 _notify
 
     async def on_run(e):
-        await vm.run()    # command -> _notify -> state 更新 -> 自动重渲染
+        await vm.run()  # command -> _notify -> state 更新 -> 自动重渲染
 
-    return ft.Column([
-        ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
-        ft.Button(I18n.get("run"), on_click=on_run),
-    ])
+    return ft.Column(
+        [
+            ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+            ft.Button(I18n.get("run"), on_click=on_run),
+        ]
+    )
 ```
 
 `use_viewmodel` 契约（已实现，见 [ui/hooks.py](../../ui/hooks.py)，签名 `use_viewmodel(factory=None, *, vm=None, dispose_on_unmount=True) -> (state, vm)`）：

@@ -118,10 +118,12 @@ python scripts/sync_e2e_fonts.py --force
 **解决方案**：[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `e2e_browser` fixture 在 `chromium.launch()` 中传入启动参数：
 
 ```python
-args=[
-    "--disable-web-security",
-    "--disable-features=PrivateNetworkAccess,CrossOriginEmbedderPolicy",
-],
+args = (
+    [
+        "--disable-web-security",
+        "--disable-features=PrivateNetworkAccess,CrossOriginEmbedderPolicy",
+    ],
+)
 ```
 
 **升级 Flet 时需验证**：

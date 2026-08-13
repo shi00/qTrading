@@ -161,7 +161,7 @@ def wizard_app(tmp_path_factory):
 ### 建议新 reason 文本
 
 ```python
-reason="Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)"
+reason = "Windows CI 环境 CanvasKit 中文字体（NotoSansSC）从 fonts.gstatic.com 网络加载失败（net::ERR_FAILED），textbox a11y 节点未渲染到 DOM，fill_textbox 在 wait_for(state='attached') 阶段超时 (P3-WinE2E-Skip)"
 ```
 
 ## 5. 诊断步骤（已完成）
