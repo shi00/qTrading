@@ -22,7 +22,7 @@
 
 Windows skipif：
 - P3-WinE2E-Skip 复验通过 (CI run 30138544395 + 30145028141, 11/11 通过率 100%)
-- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif (详见 docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md)
+- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif (详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip)
 """
 
 import pytest
