@@ -142,8 +142,7 @@ async def test_wizard_db_validation_failure(wizard_page):
 
 # Tech debt: P3-WinE2E-Skip — Windows CI 环境 CanvasKit 中文字体网络加载失败致 textbox a11y 节点未渲染。
 # 复验证据：CI run 30145028141 no-sidecar matrix FAILED，fill_textbox 在 wait_for(state='attached') 阶段超时。
-# 根因分析：docs/debt/win-e2e-skip-revalidation/2026-07-25-wizard-db-validation-failure-analysis.md
-# 决策记录：docs/debt/win-e2e-skip-revalidation/2026-07-25-decisions.md
+# 根因分析：见 docs/debt/known-technical-debt.md P3-WinE2E-Skip 条目（归档文档已随 docs 清理删除）
 # 替代覆盖：tests/integration/test_onboarding_wizard_integration.py
 # 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 # embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard

@@ -8,6 +8,7 @@
 from strategies.base_strategy import BaseStrategy, register_strategy
 from strategies.utils import StrategyContext
 
+
 @register_strategy("my_strategy")
 class MyStrategy(BaseStrategy):
     required_context_keys: tuple[str, ...] = ("screening_data",)

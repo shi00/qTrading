@@ -585,9 +585,10 @@ auxiliary_data = await cache.prefetch_auxiliary_data(ts_codes)
 from utils.shutdown import ShutdownCoordinator
 
 coordinator = ShutdownCoordinator(page)
-coordinator.start_watchdog(10)                        # 10 秒看门狗
+coordinator.start_watchdog(10)  # 10 秒看门狗
 cleanup_ok = await coordinator.do_cleanup(
-    timeout_s=8.0, step_timeout_s=3.0                 # 分步超时熔断
+    timeout_s=8.0,
+    step_timeout_s=3.0,  # 分步超时熔断
 )
 ```
 
@@ -628,7 +629,7 @@ config = BacktestConfig(
     end_date="2024-01-01",
     initial_capital=1_000_000,
     commission_rate=0.0003,  # 万三佣金
-    slippage=0.001,          # 千一滑点
+    slippage=0.001,  # 千一滑点
 )
 
 # 运行回测

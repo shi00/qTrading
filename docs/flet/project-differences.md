@@ -132,10 +132,12 @@ ft.Dropdown(
 def setup() -> None:
     unsub_ref.current = vm.subscribe(lambda s: set_state(s))
 
+
 def cleanup() -> None:
     if unsub_ref.current is not None:
         unsub_ref.current()
         unsub_ref.current = None
+
 
 ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 ```

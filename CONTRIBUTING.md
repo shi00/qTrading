@@ -534,8 +534,8 @@ except EngineDisposedError:
     logger.warning("[Module] Engine disposed, skipping operation.")
     return  # 优雅降级
 except Exception as e:
-    error_info = classify_error(e, context="general")     # 返回 dict: code / message_key [/ format_args / should_retry]
-    severity = classify_severity(e, context="general")    # 返回: system / recoverable / operational
+    error_info = classify_error(e, context="general")  # 返回 dict: code / message_key [/ format_args / should_retry]
+    severity = classify_severity(e, context="general")  # 返回: system / recoverable / operational
     if severity == "system":
         logger.critical(f"[Module] SYSTEM-LEVEL failure: {e}", exc_info=True)
         raise  # 系统级错误必须上抛

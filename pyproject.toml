@@ -32,8 +32,8 @@ dependencies = [
     "urllib3>=2.7.0",
     "numpy>=2.5.2",
     "pandas>=3.0.5",
-    "polars>=1.42.1",
-    "pyarrow>=24.0.0",
+    "polars>=1.43.2",
+    "pyarrow>=25.0.1",
     "pandas_market_calendars>=5.3.2",
     "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
     "asyncpg>=0.31.0",
@@ -68,7 +68,7 @@ dev = [
     "pytest-randomly>=3.15.0",
     "pytest-timeout>=2.3.0",  # Diagnose CI integration test hang (xdist worker deadlock)
     "pytest-json-report>=1.5.0",  # JSON report for scripts/detect_flaky.py
-    "ruff>=0.15.20,<0.16",  # UP-4.3 延后：ruff 0.16 为 minor 升级（规则/格式变更全库 diff），UP-1 批次保持 0.15.x 低风险
+    "ruff>=0.16.2",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
     "pyright>=1.1.411",
     "pandas-stubs>=3.0.5.260730",
     "uv>=0.12.3",
@@ -81,7 +81,7 @@ dev = [
 ]
 optional = [
     "brotlicffi>=1.2.0.1",
-    "playwright>=1.61.0",  # E2E browser automation for Flet desktop tests
+    "playwright>=1.62.0",  # E2E browser automation for Flet desktop tests
 ]
 
 [tool.ruff]

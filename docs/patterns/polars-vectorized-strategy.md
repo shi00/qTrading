@@ -11,6 +11,7 @@
 from strategies.polars_base import PolarsBaseStrategy
 from data.persistence.quality_gate import QualityTier
 
+
 class MyPolarsStrategy(PolarsBaseStrategy):
     # 注：如需覆盖默认质量等级，应在类属性中定义 required_quality_tier = QualityTier.GOLD，而非在方法上加装饰器。
     required_quality_tier = QualityTier.SILVER
