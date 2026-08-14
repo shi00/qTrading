@@ -695,8 +695,8 @@ class TestPaginatedTableRowsColumnConfig:
         _, result2 = _render(_make_component(rows=rows2))
         vscroll1 = _structure(result1)[5]
         vscroll2 = _structure(result2)[5]
-        assert vscroll1.key is not None
-        assert vscroll2.key is not None
+        assert vscroll1.key == f"vt_{id(rows1)}"
+        assert vscroll2.key == f"vt_{id(rows2)}"
         assert vscroll1.key != vscroll2.key
 
     def test_body_clip_clip_behavior_hard_edge(self, mock_i18n_state, mock_app_colors_state):
@@ -725,7 +725,8 @@ class TestPaginatedTableRowsChangeEffect:
         result = render_once(component)
         vscroll = _structure(result)[5]
         assert isinstance(vscroll, ft.Column)
-        assert vscroll.key is not None
+        assert vscroll.key is not None  # 首次 mount 后 rows 引用存在，key 应为 vt_<id>
+        assert vscroll.key.startswith("vt_")
 
 
 # ---------------------------------------------------------------------------
