@@ -24,6 +24,7 @@ import time
 import typing
 
 import flet as ft
+import flet_code_editor as fce
 import pandas as pd
 
 from ui.components.flet_type_helpers import (
@@ -55,6 +56,82 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Module-level pure helpers
 # ============================================================================
+
+
+# SQL 控制台 CodeEditor 自动补全词表（SQL 常用关键字，覆盖 SELECT/WHERE/JOIN 等高频语法）。
+_SQL_KEYWORDS: list[str] = [
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IN",
+    "EXISTS",
+    "BETWEEN",
+    "LIKE",
+    "ILIKE",
+    "IS",
+    "AS",
+    "DISTINCT",
+    "ORDER",
+    "BY",
+    "GROUP",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "UNION",
+    "ALL",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "INDEX",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "CAST",
+    "COALESCE",
+    "NULLIF",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "ASC",
+    "DESC",
+    "DEFAULT",
+    "UNIQUE",
+    "CHECK",
+    "CONSTRAINT",
+    "TRUNCATE",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+]
 
 
 def _get_page() -> ft.Page | None:
@@ -880,24 +957,43 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     is_executing = state.sql_is_executing
 
     # --- 构建 UI ---
-    sql_editor = ft.TextField(
-        multiline=True,
-        min_lines=5,
-        max_lines=20,
-        text_size=AppStyles.FONT_SIZE_LG,
-        label=I18n.get("data_sql_label"),
-        hint_text=I18n.get("data_sql_hint"),
+    # 安全提示：SQL 控制台仅允许 SELECT 查询（数据层有三层纵深防御：sqlparse 非 SELECT 拒绝 +
+    # 危险关键词正则 + SET TRANSACTION READ ONLY 只读事务）。
+    # 代码编辑器主题跟随应用主题（浅色→ATOM_ONE_LIGHT，深色→ATOM_ONE_DARK），
+    # 使 text_style/gutter 颜色（AppColors.INPUT_TEXT/TEXT_HINT 随主题切换）与编辑器背景对比度始终可读。
+    _is_light_theme = AppColors.get_current_theme_mode() == ft.ThemeMode.LIGHT
+    sql_editor = fce.CodeEditor(
+        language=fce.CodeLanguage.SQL,
+        code_theme=fce.CodeTheme.ATOM_ONE_LIGHT if _is_light_theme else fce.CodeTheme.ATOM_ONE_DARK,
         value=sql_text,
-        on_change=lambda e: set_sql_text(e.control.value if e and e.control else ""),
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
-        cursor_color=AppColors.PRIMARY,
-        hint_style=ft.TextStyle(color=AppColors.TEXT_HINT),
+        height=200,
+        autofocus=False,
+        autocomplete=True,
+        autocomplete_words=_SQL_KEYWORDS,
         text_style=ft.TextStyle(
             font_family="Consolas, monospace",
             color=AppColors.INPUT_TEXT,
+            size=AppStyles.FONT_SIZE_LG,
         ),
+        gutter_style=fce.GutterStyle(
+            show_line_numbers=True,
+            show_folding_handles=True,
+            width=48,
+            text_style=ft.TextStyle(
+                font_family="Consolas, monospace",
+                color=AppColors.TEXT_HINT,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            ),
+        ),
+        on_change=lambda e: set_sql_text(e.data if e.data is not None else ""),
+    )
+
+    # 只读安全提示标签（替代原 TextField label/hint_text，明确告知用户仅允许 SELECT 查询）。
+    sql_security_label = ft.Text(
+        I18n.get("data_sql_hint"),
+        size=AppStyles.FONT_SIZE_CAPTION,
+        color=AppColors.TEXT_HINT,
+        italic=True,
     )
 
     btn_run = ft.Button(
@@ -945,6 +1041,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
             ft.Container(
                 content=ft.Column(
                     [
+                        sql_security_label,
                         sql_editor,
                         ft.Row(
                             [
