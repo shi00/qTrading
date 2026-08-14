@@ -170,7 +170,9 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
             visible=current_tab == NavTabs.WATCHLIST,
         ),
     ]
-    return ft.Stack(safe_controls(pages), expand=True)
+    # 根因防范 (PR #472 E2E 修复): 显式 fit=StackFit.EXPAND。默认 LOOSE 会按子项 Intrinsic
+    # Preferred Height 自底向上塌缩，含 expand=True 弹性空间的子视图会被挤压至 0 高度。
+    return ft.Stack(safe_controls(pages), expand=True, fit=ft.StackFit.EXPAND)
 
 
 def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDestination]:
