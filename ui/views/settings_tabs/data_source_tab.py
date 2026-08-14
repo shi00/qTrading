@@ -23,7 +23,6 @@
 
 import asyncio
 import logging
-import typing
 from collections.abc import Callable
 
 import flet as ft
@@ -976,53 +975,30 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
-    # --- Confirm dialog (条件渲染 + use_state) ---
-    if confirm_dialog_config:
-        title_key = confirm_dialog_config.get("title_key", "")
-        content_key = confirm_dialog_config.get("content_key", "")
-        confirm_btn_key = confirm_dialog_config.get("confirm_btn_key", "")
-        is_destructive = confirm_dialog_config.get("is_destructive", False)
-        btn_style = ft.ButtonStyle(color=AppColors.ERROR) if is_destructive else ft.ButtonStyle(color=AppColors.PRIMARY)
-        confirm_dialog = ft.AlertDialog(
+    # --- Confirm dialog (use_dialog 无条件调用, 以 None/AlertDialog 切换显隐) ---
+    # Flet hook 顺序必须跨渲染稳定: 禁止把 use_dialog 放进 if 块条件调用, 否则破坏
+    # hook 状态导致 dialog 关闭无响应。
+    confirm_dialog = (
+        ft.AlertDialog(
             modal=True,
-            title=ft.Text(I18n.get(title_key)),
-            content=ft.Text(I18n.get(content_key)),
+            title=ft.Text(I18n.get(confirm_dialog_config.get("title_key", ""))),
+            content=ft.Text(I18n.get(confirm_dialog_config.get("content_key", ""))),
             actions=[
                 ft.TextButton(I18n.get("common_cancel"), on_click=lambda e: _on_confirm_dialog_close()),
                 ft.TextButton(
-                    I18n.get(confirm_btn_key),
+                    I18n.get(confirm_dialog_config.get("confirm_btn_key", "")),
                     on_click=lambda e: _on_confirm_dialog_confirm(),
-                    style=btn_style,
+                    style=ft.ButtonStyle(color=AppColors.ERROR)
+                    if confirm_dialog_config.get("is_destructive", False)
+                    else ft.ButtonStyle(color=AppColors.PRIMARY),
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        ft.use_dialog(confirm_dialog)
-
-    # --- Health report dialog (条件渲染) ---
-    if health_report_open and health_report_data:
-        page = _get_page()
-        health_report_dialog_ctrl = HealthReportDialog(
-            report=health_report_data,
-            page=page,
-            open_state=True,
-            on_close=_on_health_report_close,
-            on_deep_scan=_on_deep_scan,
-            on_sync_now=_on_sync_now_from_health_report,
-        )
-        ft.use_dialog(typing.cast("ft.DialogControl | None", health_report_dialog_ctrl))
-
-    # --- Health scan dialog (条件渲染) ---
-    if scan_dialog_open:
-        page = _get_page()
-        scan_dialog_ctrl = HealthScanDialog(
-            data_processor=vm.get_data_processor(),
-            page=page,
-            open_state=True,
-            on_close=_on_scan_close,
-            on_init_data=_on_init_data_from_scan,
-        )
-        ft.use_dialog(typing.cast("ft.DialogControl | None", scan_dialog_ctrl))
+        if confirm_dialog_config
+        else None
+    )
+    ft.use_dialog(confirm_dialog)
 
     return ft.Container(
         content=ft.ListView(
@@ -1032,6 +1008,35 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                 connection_card,
                 historical_card,
                 data_flow_card,
+                # 组件型 dialog 内部 use_dialog 无条件自挂载, 条件加入 controls 列表不影响
+                # 父组件 hook 顺序; 仅在打开时实例化, 关闭即卸载 (open_state=True 每次推送)。
+                *(
+                    [
+                        HealthReportDialog(
+                            report=health_report_data,
+                            page=_get_page(),
+                            open_state=True,
+                            on_close=_on_health_report_close,
+                            on_deep_scan=_on_deep_scan,
+                            on_sync_now=_on_sync_now_from_health_report,
+                        )
+                    ]
+                    if (health_report_open and health_report_data)
+                    else []
+                ),
+                *(
+                    [
+                        HealthScanDialog(
+                            data_processor=vm.get_data_processor(),
+                            page=_get_page(),
+                            open_state=True,
+                            on_close=_on_scan_close,
+                            on_init_data=_on_init_data_from_scan,
+                        )
+                    ]
+                    if scan_dialog_open
+                    else []
+                ),
             ],
             spacing=15,
             padding=ft.Padding.only(bottom=50),
