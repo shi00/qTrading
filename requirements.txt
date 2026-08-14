@@ -85,8 +85,11 @@ flet==0.86.5
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
+    #   flet-code-editor
     #   flet-desktop
 flet-charts==0.86.5
+    # via astockscreener (pyproject.toml)
+flet-code-editor==0.86.5
     # via astockscreener (pyproject.toml)
 flet-desktop==0.86.5
     # via astockscreener (pyproject.toml)

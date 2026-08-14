@@ -8,7 +8,7 @@ Checks:
 5. SECURITY.md supported version matches pyproject.toml major.minor
 6. No empty markdown links ]() in README.md
 7. CLAUDE.md reference-style pointers (见 `xxx.py`) target existing files
-8. Flet 三包（flet / flet-desktop / flet-charts）版本一致性
+8. Flet 四包（flet / flet-desktop / flet-charts / flet-code-editor）版本一致性
 9. Sidecar 版本一致性：Cargo.toml [package].version / pyproject.toml [tool.qtrading.sidecar] /
    src/protocol.rs PROTOCOL_VERSION 三方对齐（pg_plan §15.5 AI-12）；
    可选 ``--check-sidecar-binary`` 启用四方校验（调用 sidecar version --json）。
@@ -183,10 +183,11 @@ def check_claude_references() -> list[str]:
 
 
 def check_flet_version_consistency() -> list[str]:
-    """Check 8: flet / flet-desktop / flet-charts 三包版本一致。
+    """Check 8: flet / flet-desktop / flet-charts / flet-code-editor 四包版本一致。
 
-    pyproject.toml [project.dependencies] 中三包格式为 "flet==X.Y.Z" 等。
-    三包必须锁定同一版本（flet-charts 自 V1 拆包后需与 flet 主包同步升级）。
+    pyproject.toml [project.dependencies] 中四包格式为 "flet==X.Y.Z" 等。
+    四包必须锁定同一版本（flet-charts 自 V1 拆包后需与 flet 主包同步升级，
+    flet-code-editor 为代码编辑器控件包，同样须与 flet 主包同步升级）。
     """
     errors: list[str] = []
     with open(PYPROJECT_PATH, "rb") as f:
@@ -194,11 +195,11 @@ def check_flet_version_consistency() -> list[str]:
     deps = cfg.get("project", {}).get("dependencies", [])
     versions: dict[str, str] = {}
     for entry in deps:
-        for pkg in ("flet", "flet-desktop", "flet-charts"):
+        for pkg in ("flet", "flet-desktop", "flet-charts", "flet-code-editor"):
             m = re.match(rf"^{re.escape(pkg)}==(\S+)$", entry.strip())
             if m:
                 versions[pkg] = m.group(1)
-    missing = [pkg for pkg in ("flet", "flet-desktop", "flet-charts") if pkg not in versions]
+    missing = [pkg for pkg in ("flet", "flet-desktop", "flet-charts", "flet-code-editor") if pkg not in versions]
     if missing:
         errors.append(f"pyproject.toml missing flet packages: {', '.join(missing)}")
         return errors

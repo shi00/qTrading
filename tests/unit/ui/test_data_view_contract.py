@@ -23,6 +23,7 @@ from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import flet as ft
+import flet_code_editor as fce
 import pandas as pd
 import pytest
 
@@ -981,15 +982,16 @@ class TestSQLConsoleTabComponentBody:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """SQL 编辑器 TextField 存在。"""
+        """SQL 编辑器 CodeEditor 存在。"""
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
         component = make_component(SQLConsoleTab, vm=vm)
         result, _ = _mount(component)
 
-        text_fields = _find_by_type(result, ft.TextField)
-        assert any(getattr(tf, "multiline", False) for tf in text_fields)
+        code_editors = _find_by_type(result, fce.CodeEditor)
+        assert len(code_editors) == 1
+        assert code_editors[0].language == fce.CodeLanguage.SQL
 
     def test_template_buttons_present(
         self,

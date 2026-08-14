@@ -99,9 +99,9 @@ CHECKED_DOCS: list[Path] = sorted(
 FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
-# flet/flet-desktop/flet-charts 在 [project.dependencies]，
+# flet/flet-desktop/flet-charts/flet-code-editor 在 [project.dependencies]，
 # flet-mcp 在 [project.optional-dependencies].dev（开发期 MCP 包，与主包版本对齐，见 CLAUDE.md §1.10）
-_FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-mcp")
+_FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "flet-mcp")
 
 # Flet 关键词附近版本号扫描窗口（前后字符数，spec 要求 50）
 _FLET_KEYWORD_WINDOW = 50
@@ -398,12 +398,12 @@ def check_note_lazy_format() -> list[str]:
 
 
 def _get_flet_locked_versions() -> set[str]:
-    """从 pyproject.toml 读取 flet/flet-desktop/flet-charts/flet-mcp 锁定版本。
+    """从 pyproject.toml 读取 flet/flet-desktop/flet-charts/flet-code-editor/flet-mcp 锁定版本。
 
-    flet/flet-desktop/flet-charts 在 `[project.dependencies]`，
+    flet/flet-desktop/flet-charts/flet-code-editor 在 `[project.dependencies]`，
     flet-mcp 在 `[project.optional-dependencies].dev`（开发期 MCP 包，与主包版本对齐）。
 
-    返回版本号集合（四包通常锁定同一版本，如 {"0.86.3"}）。
+    返回版本号集合（五包通常锁定同一版本，如 {"0.86.3"}）。
     """
     with open(PYPROJECT_PATH, "rb") as f:
         cfg = tomllib.load(f)

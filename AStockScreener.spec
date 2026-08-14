@@ -16,6 +16,9 @@ datas = [
 # flet 包内 icons.json（material/cupertino）通过 PEP 562 __getattr__ 懒加载，
 # PyInstaller 静态分析无法发现，需显式收集。flet 包数据文件仅 5 个（2 json + 2 pyi + 1 typed），全收集无副作用。
 datas += collect_data_files("flet")
+# flet_code_editor 包内 Flutter 资源文件（语法高亮配置、CodeMirror 基础主题等），
+# PyInstaller 静态分析无法发现，需显式收集。
+datas += collect_data_files("flet_code_editor")
 # akshare 包内数据文件（calendar.json 交易日历 + 5 个加密/解密 .js + 1 个 .zip + 1 个 .json），
 # 运行时通过 cons.get_calendar() 等函数读取，PyInstaller 静态分析无法发现，全收集（8 文件）。
 datas += collect_data_files("akshare")
@@ -28,6 +31,7 @@ hiddenimports = [
     "flet",
     "flet_desktop",
     "flet_charts",
+    "flet_code_editor",
     "pandas",
     "polars",
     "pyarrow",

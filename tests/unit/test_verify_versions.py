@@ -23,7 +23,7 @@ def setup_test_files(
 ):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n\n[tool.qtrading.sidecar]\nversion = "0.1.0"\nprotocol_version = "v1"\npostgresql_version = "16.14.0"\ncrate_version = "0.21.0"\n',
+        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}", "flet-code-editor=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n\n[tool.qtrading.sidecar]\nversion = "0.1.0"\nprotocol_version = "v1"\npostgresql_version = "16.14.0"\ncrate_version = "0.21.0"\n',
         encoding="utf-8",
     )
 
@@ -418,7 +418,7 @@ def test_verify_versions_flet_mismatch(tmp_path):
     ) = setup_test_files(tmp_path)
     # Overwrite pyproject with mismatched flet versions
     pyproject.write_text(
-        '[project]\nversion = "0.6.9"\ndependencies = ["flet==0.86.0", "flet-desktop==0.86.0", "flet-charts==0.85.3"]\n\n[project.optional-dependencies]\ndev = ["pyright>=1.1.300"]\n',
+        '[project]\nversion = "0.6.9"\ndependencies = ["flet==0.86.0", "flet-desktop==0.86.0", "flet-charts==0.85.3", "flet-code-editor==0.86.0"]\n\n[project.optional-dependencies]\ndev = ["pyright>=1.1.300"]\n',
         encoding="utf-8",
     )
     patches = _patch_all_paths(
