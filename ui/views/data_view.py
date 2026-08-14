@@ -883,7 +883,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     sql_editor = ft.TextField(
         multiline=True,
         min_lines=5,
-        max_lines=10,
+        max_lines=20,
         text_size=AppStyles.FONT_SIZE_LG,
         label=I18n.get("data_sql_label"),
         hint_text=I18n.get("data_sql_hint"),
@@ -970,6 +970,9 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     ],
+                    # 关键: 内层 Column 必须 STRETCH, 否则 sql_editor 只取固有宽度 (~300px),
+                    # 导致 SQL 输入框与程序窗口不成比例 (长 SQL 频繁换行).
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 ),
                 padding=AppStyles.SPACING_SM,
                 bgcolor=AppColors.SURFACE,
