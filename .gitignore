@@ -140,6 +140,8 @@ e2e-artifacts/
 # 5.1 E2E 测试运行时临时产物（pytest-xdist 工作目录，含 embedded-postgres 解压的 dll/exe，禁止入库）
 pytest_e2e_tmp*/
 pytest_e2e_tmp*.zip
+# 5.2 Embedded PostgreSQL 只读数据目录（E2E sidecar 运行产物，含二进制 dll/exe）
+**/embedded_pg_data_ro0/
 
 # 6. Worktrees
 .worktrees/
