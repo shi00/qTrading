@@ -1185,6 +1185,28 @@ class TestHealthScanDialogComponent:
         # open_=False 时 effect 早返回，run_quality_scan 未被调用
         data_processor.run_quality_scan.assert_not_called()
 
+    def test_remount_after_unmount_triggers_fresh_scan(self, health_scan_dialog_factory):
+        """条件挂载/卸载后重挂载必须触发全新扫描 (fresh VM)。
+
+        对抗性检视跟进: DataSourceTab 深链扫描流程中 report (index 5) 关闭后 scan
+        自 index 6 平移到 index 5, Flet 因组件函数不同不迁移 hook 状态, 按新组件
+        全新挂载。本测试守护该不变量: 每次独立挂载的 HealthScanDialog 实例都应在
+        全新 ViewModel 上重新触发 run_quality_scan, 而非复用旧状态导致扫描不执行。
+        """
+        data_processor = MagicMock()
+        data_processor.run_quality_scan = AsyncMock(return_value={"score": 90})
+
+        # 第一次挂载 → 触发扫描
+        component1, _page1, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
+        assert data_processor.run_quality_scan.await_count == 1
+
+        # 卸载 (模拟条件 controls 移除)
+        run_unmount_effects(component1)
+
+        # 重新挂载全新实例 → 全新 VM 上再次触发扫描
+        _component2, _page2, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
+        assert data_processor.run_quality_scan.await_count == 2
+
     @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_init_data_handler_invokes_on_init_data(self, mock_i18n_state, monkeypatch):
         """L873-877: HealthScanDialog _init_data handler 调用 on_close + on_init_data。

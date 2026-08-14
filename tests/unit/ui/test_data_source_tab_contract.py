@@ -67,6 +67,50 @@ def _raw_source() -> str:
     return Path(mod.__file__).read_text(encoding="utf-8")
 
 
+def _use_dialog_calls_in_conditional() -> list[int]:
+    """返回源码中位于条件/循环分支 (if/if 表达式/while/for) 内的 ``use_dialog`` 调用行号。
+
+    Flet hook 顺序必须跨渲染稳定，条件/循环内调用会破坏 ``use_ref`` 状态，
+    导致 dialog 关闭无响应。此函数用 AST 精确检测，避免字符串匹配误判。
+
+    覆盖三种调用形态（防止未来改成其他导入写法时静默失效）:
+    - ``ft.use_dialog`` / ``f.use_dialog`` / ``<模块>.use_dialog`` (Attribute)
+    - ``use_dialog`` (Name, 如 ``from flet import use_dialog``)
+    """
+    import ast
+
+    import ui.views.settings_tabs.data_source_tab as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    parent_map: dict[ast.AST, ast.AST] = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+
+    def _is_use_dialog_call(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == "use_dialog"
+        if isinstance(func, ast.Name):
+            return func.id == "use_dialog"
+        return False
+
+    def _unstable_branch(node: ast.AST) -> bool:
+        cur = parent_map.get(node)
+        while cur is not None:
+            if isinstance(cur, (ast.If, ast.IfExp, ast.While, ast.For)):
+                return True
+            cur = parent_map.get(cur)
+        return False
+
+    bad: list[int] = []
+    for node in ast.walk(tree):
+        if _is_use_dialog_call(node) and _unstable_branch(node):
+            bad.append(node.lineno)
+    return bad
+
+
 # ============================================================================
 # 契约守护：声明式范式 (DataSourceTab)
 # ============================================================================
@@ -205,6 +249,16 @@ class TestDataSourceTabContract:
     def test_uses_use_dialog(self):
         """DoD: 必须使用 ft.use_dialog() 声明式挂载 dialog。"""
         assert "ft.use_dialog" in _code_source(), "必须使用 ft.use_dialog() 声明式挂载 dialog"
+
+    def test_use_dialog_not_conditional(self):
+        """DoD: ft.use_dialog 必须无条件调用，禁止放进 if 分支。
+
+        回归: 截图对话框"取消"无响应 bug — 条件调用 use_dialog 使 Flet hook
+        顺序跨渲染错位，use_ref 状态损坏导致 dialog 关闭无响应。
+        正确形态: ``dialog = (X if cond else None); ft.use_dialog(dialog)``。
+        """
+        bad = _use_dialog_calls_in_conditional()
+        assert bad == [], f"ft.use_dialog 不得在条件分支内调用 (Flet hook 顺序需跨渲染稳定)。违规行号: {bad}"
 
     def test_uses_use_effect_for_transient_signals(self):
         """DoD: 必须使用 use_effect 处理瞬态信号 (snack.seq + cache_cleared_version)。
