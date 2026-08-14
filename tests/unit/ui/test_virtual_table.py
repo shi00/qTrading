@@ -292,6 +292,15 @@ class TestComponentContract:
         """AC-10: 滚动用 AUTO (内容溢出才显示滚动条), 不再用 ALWAYS。"""
         assert "ft.ScrollMode.ALWAYS" not in _code_source()
 
+    def test_use_state_initializer_is_dict_instance(self):
+        """col_widths 初始值必须是 dict 实例 (dict[str, int]()), 禁止传类型 dict[str, int]。
+
+        类型 dict[str, int] 是 types.GenericAlias, 虽因 `in` 返回 False 而"碰巧"不崩,
+        但语义错误且脆弱 (任何 col_widths[col_id] / .get 直接访问都会炸)。
+        """
+        assert "use_state(dict[str, int]())" in _code_source()
+        assert "use_state(dict[str, int])" not in _code_source()
+
     def test_hscroll_row_stretch_declared(self):
         """AC-12: HScroll Row 使用 vertical_alignment=CrossAxisAlignment.STRETCH。"""
         assert "vertical_alignment=ft.CrossAxisAlignment.STRETCH" in _code_source()

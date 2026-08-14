@@ -431,7 +431,9 @@ def PaginatedTable(
 
     # 列宽拖拽: col_widths 顶层 use_state (触发 Header+Body width prop diff),
     # col_widths_ref 用 _ColWidthsCache 缓存拖拽即时值 (不触发 re-render) (§5.3/§6.2)
-    col_widths, set_col_widths = ft.use_state(dict[str, int])
+    # 初始值必须传 dict 实例 (dict[str, int]()) 而非类型 dict[str, int]:
+    # 后者是 types.GenericAlias, 虽因 `in` 返回 False 而"碰巧"不崩, 但语义错误且脆弱
+    col_widths, set_col_widths = ft.use_state(dict[str, int]())
     col_cache = ft.use_ref(_ColWidthsCache)
     cache = col_cache.current
     assert cache is not None
