@@ -458,7 +458,8 @@ class TestVerifyToken:
         assert result is True
         assert vm.state.status_type == "warning"
         assert vm.state.status_message is not None
-        assert "top_list" in vm.state.status_message.params["default"]
+        assert "top_list" in vm.state.status_message.params["apis"]
+        assert vm.state.status_message.key == "tushare_verify_restricted"
 
     @pytest.mark.asyncio
     async def test_verify_token_probe_empty_results(self, mock_config_handler, mock_thread_pool):
@@ -481,7 +482,7 @@ class TestVerifyToken:
         assert result is True
         assert vm.state.status_type == "warning"
         assert vm.state.status_message is not None
-        assert "unknown" in vm.state.status_message.params["default"].lower()
+        assert vm.state.status_message.key == "tushare_verify_unknown_status"
 
     @pytest.mark.asyncio
     async def test_verify_token_probe_exception_non_fatal(self, mock_config_handler, mock_thread_pool):
@@ -503,7 +504,7 @@ class TestVerifyToken:
         assert result is True
         assert vm.state.status_type == "success"
         assert vm.state.status_message is not None
-        assert "unknown" in vm.state.status_message.params["default"].lower()
+        assert vm.state.status_message.key == "tushare_verify_unknown_status"
 
     @pytest.mark.asyncio
     async def test_verify_token_api_failure_returns_false(self, mock_config_handler, mock_thread_pool):
