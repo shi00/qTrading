@@ -82,6 +82,11 @@ jobs:
   ci-checks:
     name: Code Quality & Tests (Linux, Python ${{ matrix.python-version }})
     needs: lint-fast
+    # Dependabot 发起的 PR 不被注入仓库 secrets（GitHub Actions 平台安全限制，仅提供只读 GITHUB_TOKEN）。
+    # 本 job 依赖 CI_PG_PASSWORD（postgres 服务容器 + integration 测试）与 CODECOV_TOKEN，
+    # secret 为空会导致 postgres 容器启动失败（见 run 31780083379），且 R10 禁止硬编码 fallback 密码，
+    # 故对 Dependabot 触发跳过本 job（actions 依赖升级与业务测试无关）。
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -1197,7 +1202,9 @@ jobs:
   update-requirements:
     name: Update requirements*.txt
     needs: requirements-drift
-    if: needs.requirements-drift.outputs.drift == 'true'
+    # Dependabot 发起的 PR 不被注入 PAT_FOR_CI secret（GitHub Actions 平台安全限制），
+    # 若检测到 drift 会因 token 为空导致 create-pull-request 失败，故对 Dependabot 触发跳过。
+    if: needs.requirements-drift.outputs.drift == 'true' && github.actor != 'dependabot[bot]'
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
@@ -1255,14 +1262,24 @@ jobs:
       attestations: write
     strategy:
       fail-fast: false
+      # 4 个发布变体：cpu / cuda 为独立安装包（外置 PostgreSQL 模式），embedded-cpu / embedded-cuda
+      # 额外内置 sidecar PostgreSQL。llama-cpp-python 是编译型原生扩展，CPU/CUDA 后端在构建期
+      # 通过不同 wheel 绑定（AStockScreener.spec 以 collect_dynamic_libs 打包对应原生库），
+      # 因此每个 EXE 只能运行单一后端，需按后端拆分发行。embedded 标记供 if: 条件区分内嵌。
       matrix:
         include:
           - variant: cpu
             llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cpu
+            embedded: "false"
           - variant: cuda
             llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cu121
-          - variant: embedded
-            llama_index_url: ""  # embedded variant 不安装 llama-cpp-python（聚焦数据库，本地模型可选）
+            embedded: "false"
+          - variant: embedded-cpu
+            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cpu
+            embedded: "true"
+          - variant: embedded-cuda
+            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cu121
+            embedded: "true"
 
     steps:
       - name: Checkout Code
@@ -1284,21 +1301,17 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
-          # embedded variant 不安装 llama-cpp-python（聚焦数据库，本地模型可选）
-          if ($env:VARIANT -ne "embedded") {
-            uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
-          }
+          # 所有变体（cpu / cuda / embedded-cpu / embedded-cuda）都安装对应后端的
+          # llama-cpp-python（CPU/CUDA 原生库在构建期绑定；embedded-* 额外内置侧车数据库）。
+          uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           pip install pyinstaller
-        env:
-          VARIANT: ${{ matrix.variant }}
 
-      - name: Download sidecar binary (embedded variant only, Phase 5)
-        if: matrix.variant == 'embedded'
+      - name: Download sidecar binary (embedded variants only, Phase 5)
+        if: matrix.embedded == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VARIANT: ${{ matrix.variant }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1369,7 +1382,7 @@ jobs:
         run: pyinstaller AStockScreener.spec
 
       - name: "Smoke Test - Run EXE (standard variants: --help)"
-        if: matrix.variant != 'embedded'
+        if: matrix.embedded != 'true'
         shell: pwsh
         run: |
           $exePath = "dist\AStockScreener\AStockScreener.exe"
@@ -1420,18 +1433,18 @@ jobs:
             exit 1
           }
 
-      - name: Smoke Test - Cold Start (embedded variant, Phase 5)
-        if: matrix.variant == 'embedded'
+      - name: Smoke Test - Cold Start (embedded variants, Phase 5)
+        if: matrix.embedded == 'true'
         shell: pwsh
         run: |
-          # Phase 5 DoD §17.5: embedded variant 冷启动 smoke test
+          # Phase 5 DoD §17.5: embedded variants 冷启动 smoke test
           # 启动 EXE，轮询 60s 检查 sidecar 进程是否启动，然后优雅关闭
           $exePath = "dist\AStockScreener\AStockScreener.exe"
           if (-not (Test-Path $exePath)) {
             Write-Error "EXE not found at $exePath"
             exit 1
           }
-          Write-Host "Starting embedded variant EXE for cold start smoke test..."
+          Write-Host "Starting embedded variants EXE for cold start smoke test..."
           $proc = Start-Process -FilePath $exePath -PassThru
           try {
             # 轮询 60s 检查 sidecar 进程
@@ -1491,11 +1504,11 @@ jobs:
             exit 1
           }
 
-      - name: Smoke Test - Installer Scripts (embedded variant, release tags only, P1-12)
+      - name: Smoke Test - Installer Scripts (embedded variants, release tags only, P1-12)
         # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%,
         # 仅在 release tag 时执行避免常规 PR/push 污染 CI 环境.
         # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
-        if: matrix.variant == 'embedded' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.embedded == 'true' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $installerPath = "Output\AStockScreener-Setup-${{ matrix.variant }}.exe"
@@ -1524,7 +1537,7 @@ jobs:
           upload-release-assets: false
 
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
 
@@ -1573,7 +1586,8 @@ jobs:
           files: |
             release-assets/release-assets-cpu/*
             release-assets/release-assets-cuda/*
-            release-assets/release-assets-embedded/*
+            release-assets/release-assets-embedded-cpu/*
+            release-assets/release-assets-embedded-cuda/*
           generate_release_notes: true
 
   installer-smoke:

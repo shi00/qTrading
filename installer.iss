@@ -34,15 +34,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-; common: 递归收集 PyInstaller 产物，排除 sidecar binary（仅 embedded variant 收集）。
+; common: 递归收集 PyInstaller 产物，排除 sidecar binary（仅 embedded variants 收集）。
 ; maintenance 脚本位于 resources/ 不在 dist/AStockScreener/ 下，无需 Excludes。
 Source: "dist\AStockScreener\*"; DestDir: "{app}"; Excludes: "\_internal\sidecars\"; Flags: ignoreversion recursesubdirs createallsubdirs
-#if TargetVariant == "embedded"
-; embedded variant: 收集 sidecar binary（PyInstaller 产物中存在时，避免无 sidecar 构建时 iscc 报错）
+#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
+; embedded variants: 收集 sidecar binary（PyInstaller 产物中存在时，避免无 sidecar 构建时 iscc 报错）
 #ifexist "dist\AStockScreener\_internal\sidecars\qtrading-pg-sidecar.exe"
 Source: "dist\AStockScreener\_internal\sidecars\*"; DestDir: "{app}\_internal\sidecars"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
-; embedded variant: 收集离线维护脚本（pg_plan §16.2）
+; embedded variants: 收集离线维护脚本（pg_plan §16.2）
 Source: "resources\maintenance\*"; DestDir: "{app}\resources\maintenance"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif
 
@@ -53,14 +53,14 @@ Name: "{autodesktop}\AStockScreener"; Filename: "{app}\AStockScreener.exe"; Task
 [Run]
 Filename: "{app}\AStockScreener.exe"; Description: "启动 AStockScreener"; Flags: nowait postinstall skipifsilent
 
-#if TargetVariant == "embedded"
+#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
 [UninstallRun]
 ; Phase 5 失败注入 #32 配套：卸载前先 stop sidecar（防止文件占用）；Check 确保开发环境无 sidecar binary 时不报错
 ; --data-dir 路径与 resources/maintenance/README-maintenance.md 一致（platformdirs 默认）
 Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop --data-dir ""{localappdata}\qTrading\postgres\16\data"""; Flags: runhidden; RunOnceId: "StopSidecar"; Check: SidecarExists
 #endif
 
-#if TargetVariant == "embedded"
+#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
 [Code]
 // Phase 5 失败注入 #32 + P1-11：qTrading 主进程或 sidecar 运行中启动安装器被拒绝
 // 使用 tasklist + find（Windows 原生，无需 PowerShell，Inno Setup Exec 调用 cmd 更稳定）
@@ -97,7 +97,7 @@ begin
 end;
 
 // Check 函数：sidecar binary 存在时才执行 [UninstallRun] 中的 stop 命令
-// 开发环境或 standard variant 升级到 embedded（无 sidecar binary）时不报错
+// 开发环境或 standard variant 升级到 embedded variants（无 sidecar binary）时不报错
 function SidecarExists(): Boolean;
 begin
   Result := FileExists(ExpandConstant('{app}\_internal\sidecars\qtrading-pg-sidecar.exe'));
