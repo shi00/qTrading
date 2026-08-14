@@ -261,21 +261,20 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
                     unavailable_apis = [api for api, status in probe_results.items() if status is False]
 
                     if unavailable_apis:
-                        warning_text = f"Token verified — Restricted APIs: {', '.join(unavailable_apis)}"
-                        self._show_warning(self._raw_message(warning_text))
+                        self._show_warning(Message("tushare_verify_restricted", {"apis": ", ".join(unavailable_apis)}))
                         logger.warning("[TushareConfigVM] Restricted APIs: %s", unavailable_apis)
                     elif available_apis:
                         self._show_success(Message("tushare_verify_success"))
                         logger.info("[TushareConfigVM] All probed APIs available: %s", len(available_apis))
                     else:
-                        self._show_warning(self._raw_message("Token verified — Some API status unknown"))
+                        self._show_warning(Message("tushare_verify_unknown_status"))
                 except Exception as probe_exc:
                     logger.warning(
                         "[TushareConfigVM] Capability probe failed (non-critical): %s",
                         DataSanitizer.sanitize_error(probe_exc),
                         exc_info=True,
                     )
-                    self._show_success(self._raw_message("Token verified — Some API status unknown"))
+                    self._show_success(Message("tushare_verify_unknown_status"))
             else:
                 self._show_success(Message("tushare_verify_success"))
 
