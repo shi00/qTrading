@@ -1,9 +1,10 @@
 """virtual_table 契约守护测试 — Phase B.3 声明式重写 (方案 D: ListView 原生虚拟化)。
 
 覆盖:
-- 纯函数: next_sort_state / _total_width
+- 纯函数: next_sort_state / _total_width / _col_width / _clamp_width / _ColWidthsCache
 - 组件契约: @ft.component 装饰标记、参数签名、返回类型注解、禁止命令式 API (源码检查)
-- ListView 原生虚拟化配置契约 (build_controls_on_demand / item_extent / cache_extent / key)
+- 方案 D-v3 布局契约: 水平滚动 HScroll Row / sticky header / Inner Column 不设 expand /
+  VScroll AUTO / 顶层不再持有 hovered_idx / 列宽拖拽常量
 
 声明式组件组合 (@ft.component + use_state) 是有状态的, 在无 renderer
 环境下会抛 RuntimeError, 由集成测试 (flet_test_page fixture) 覆盖, 不在本单元测试范围
@@ -12,6 +13,12 @@
 变更要点 (方案 D):
 - 删除自实现虚拟化 (compute_window / window_capacity / _ScrollCache / DEFAULT_VIEWPORT_ROWS / RERENDER_THRESHOLD)
 - 改用 ListView 原生 build_controls_on_demand + item_extent + cache_extent + key
+变更要点 (方案 D-v3):
+- 外层 HScroll Row(scroll=AUTO, expand=True, vertical_alignment=STRETCH) 承载水平滚动
+- Header 抽到 Inner Column 第一行 (sticky), VScroll 内不含 Header
+- Inner Column 不设 expand=True, 仅设 width=total_w
+- VScroll Column(scroll=AUTO, expand=True, key) 承载垂直滚动
+- 顶层 hovered_idx 下沉到 TableRow 行内 use_state
 """
 
 import inspect
@@ -21,8 +28,13 @@ import flet as ft
 import pytest
 
 from ui.components.virtual_table import (
+    MAX_COL_WIDTH,
+    MIN_COL_WIDTH,
     MIN_TABLE_WIDTH,
     PaginatedTable,
+    _ColWidthsCache,
+    _clamp_width,
+    _col_width,
     _total_width,
     next_sort_state,
 )
@@ -98,7 +110,7 @@ class TestNextSortState:
         assert new_asc is True
 
 
-# --- 2. _total_width ---
+# --- 2. _total_width / _col_width / _clamp_width / _ColWidthsCache ---
 
 
 class TestTotalWidth:
@@ -118,6 +130,53 @@ class TestTotalWidth:
 
     def test_empty_columns_returns_min(self):
         assert _total_width([]) == MIN_TABLE_WIDTH
+
+    def test_col_widths_override(self):
+        """col_widths 覆盖列定义宽度 (拖拽后 total_w 随之变化)。"""
+        # 默认 400+400=800 (=MIN_TABLE_WIDTH); 覆盖 a→500 后 900 (> MIN_TABLE_WIDTH, 不被 clamp)
+        cols = [{"id": "a", "width": 400}, {"id": "b", "width": 400}]
+        assert _total_width(cols, {"a": 500}) == 900
+
+
+class TestColWidth:
+    def test_uses_dragged_width_when_present(self):
+        assert _col_width({"a": 250}, {"id": "a", "width": 100}) == 250
+
+    def test_falls_back_to_column_default(self):
+        assert _col_width(None, {"id": "a", "width": 120}) == 120
+
+    def test_falls_back_to_100_when_missing(self):
+        assert _col_width(None, {"id": "a"}) == 100
+
+    def test_empty_col_widths_uses_default(self):
+        assert _col_width({}, {"id": "a", "width": 150}) == 150
+
+
+class TestClampWidth:
+    def test_clamps_to_min(self):
+        assert _clamp_width(10, MIN_COL_WIDTH, MAX_COL_WIDTH) == MIN_COL_WIDTH
+
+    def test_clamps_to_max(self):
+        assert _clamp_width(1000, MIN_COL_WIDTH, MAX_COL_WIDTH) == MAX_COL_WIDTH
+
+    def test_keeps_float_truncated_in_range(self):
+        assert _clamp_width(200.7, MIN_COL_WIDTH, MAX_COL_WIDTH) == 200
+
+    def test_constants_values(self):
+        assert MIN_COL_WIDTH == 60
+        assert MAX_COL_WIDTH == 600
+
+
+class TestColWidthsCache:
+    def test_slots_contract(self):
+        """_ColWidthsCache 必须用 __slots__ = (widths, active_col, last_time) (对齐 _DragCache)。"""
+        assert _ColWidthsCache.__slots__ == ("widths", "active_col", "last_time")
+
+    def test_initial_state(self):
+        cache = _ColWidthsCache()
+        assert cache.widths == {}
+        assert cache.active_col is None
+        assert cache.last_time == 0.0
 
 
 # --- 3. 组件契约 (声明式标记 + 签名 + 禁止命令式 API) ---
@@ -143,7 +202,7 @@ class TestComponentContract:
         assert sig.return_annotation is ft.Column
 
     def test_signature_defaults(self):
-        """参数默认值契约。"""
+        """参数默认值契约 (方案 §8.3: 不新增 props)。"""
         sig = inspect.signature(PaginatedTable)
         params = sig.parameters
         assert params["rows"].default is None
@@ -152,6 +211,8 @@ class TestComponentContract:
         assert params["sort_asc"].default is True
         assert params["on_sort"].default is None
         assert params["on_row_click"].default is None
+        assert params["col_anchor"].default is None
+        assert params["row_anchor"].default is None
 
     def test_no_set_rows(self):
         assert "set_rows" not in _code_source()
@@ -187,6 +248,11 @@ class TestComponentContract:
         """DoD: 必须用 @ft.component 装饰。"""
         assert "@ft.component" in _raw_source()
 
+    def test_table_row_is_component(self):
+        """DoD (方案 §5.2): TableRow 是独立 @ft.component。"""
+        assert "@ft.component" in _raw_source()
+        assert "def TableRow(" in _raw_source()
+
     def test_no_self_implemented_virtualization(self):
         """DoD (方案 D): 自实现虚拟化已删除 (compute_window / window_capacity / _ScrollCache)。"""
         assert "def compute_window" not in _raw_source()
@@ -204,10 +270,7 @@ class TestComponentContract:
         assert "set_viewport_h" not in src
 
     def test_no_rerender_threshold_constant(self):
-        """DoD (方案 D): RERENDER_THRESHOLD / DEFAULT_VIEWPORT_ROWS 常量已删除。
-
-        用 _code_source() (去除 docstring) 检查, 因模块 docstring 会提及已删除的符号名作为变更说明。
-        """
+        """DoD (方案 D): RERENDER_THRESHOLD / DEFAULT_VIEWPORT_ROWS 常量已删除。"""
         src = _code_source()
         assert "RERENDER_THRESHOLD" not in src
         assert "DEFAULT_VIEWPORT_ROWS" not in src
@@ -219,37 +282,65 @@ class TestComponentContract:
         assert not hasattr(mod, "PageRefMixin")
         assert "PageRefMixin" not in dir(mod)
 
+    def test_no_top_level_hovered_state(self):
+        """AC-9: 顶层不再声明 hovered_idx / set_hovered_idx (hover 下沉到 TableRow 行内)。"""
+        src = _code_source()
+        assert "hovered_idx" not in src
+        assert "set_hovered_idx" not in src
 
-# --- 4. Column(scroll=ALWAYS) 配置契约 (方案 D-v2, E2E 修复) ---
+    def test_no_scroll_mode_always(self):
+        """AC-10: 滚动用 AUTO (内容溢出才显示滚动条), 不再用 ALWAYS。"""
+        assert "ft.ScrollMode.ALWAYS" not in _code_source()
+
+    def test_use_state_initializer_is_dict_instance(self):
+        """col_widths 初始值必须是 dict 实例 (dict[str, int]()), 禁止传类型 dict[str, int]。
+
+        类型 dict[str, int] 是 types.GenericAlias, 虽因 `in` 返回 False 而"碰巧"不崩,
+        但语义错误且脆弱 (任何 col_widths[col_id] / .get 直接访问都会炸)。
+        """
+        assert "use_state(dict[str, int]())" in _code_source()
+        assert "use_state(dict[str, int])" not in _code_source()
+
+    def test_hscroll_row_stretch_declared(self):
+        """AC-12: HScroll Row 使用 vertical_alignment=CrossAxisAlignment.STRETCH。"""
+        assert "vertical_alignment=ft.CrossAxisAlignment.STRETCH" in _code_source()
+
+    def test_inner_column_no_expand(self):
+        """AC-12: Inner Column 不设 expand=True (仅 width=total_w)。源码断言保护 v1.2 expand 主轴回归。
+
+        渲染树级断言 (inner.expand is not True) 由 test_virtual_table_body.py 覆盖;
+        此处仅做源码级正向契约 (width=total_w 必现)。
+        """
+        src = _code_source()
+        assert "width=total_w" in src
 
 
-class TestRowsColumnConfig:
-    """验证 PaginatedTable 使用 ft.Column(scroll=ALWAYS) 承载行 (方案 D-v2, E2E 修复)。
+# --- 4. 方案 D-v3 布局契约 (源码级) ---
 
-    方案 D-v2 变更背景:
-    - 原方案 D 使用 ListView + build_controls_on_demand=False, 但 ListView 视口高度为 0
-      (E2E 父容器布局未稳定) 时, Flutter 仍可能跳过子控件语义节点生成, 导致
-      Playwright 无法定位行文本或点击行 (PR 373 & PR 392 均复现).
-    - 改为 ft.Column(scroll=ALWAYS): Column 不做窗口化, 所有行立即布局并生成
-      flt-semantics 语义节点; scroll=ALWAYS 保留纵向滚动能力.
-    - 单页 ≤100 行规模下, Column 全量布局性能与 ListView(非虚拟化模式) 无显著差异.
 
-    这些属性是方案 D-v2 的核心契约: 删除 ListView 视口虚拟化后, 由 Column 直接
-    承载全部行, 确保语义节点稳定生成.
-    """
+class TestScrollConfig:
+    """验证 PaginatedTable 使用 HScroll Row(scroll=AUTO) + VScroll Column(scroll=AUTO) (方案 D-v3, G1/G7)。"""
 
     def test_no_listview_used(self):
         """DoD: 不再使用 ft.ListView (避免 ListView 视口高度为 0 时的语义节点丢失)。"""
         assert "ft.ListView" not in _code_source()
         assert "ListView(" not in _code_source()
 
-    def test_column_scroll_always_declared(self):
-        """DoD: 行容器 Column 显式声明 scroll=ft.ScrollMode.ALWAYS (保留纵向滚动)。"""
-        assert "scroll=ft.ScrollMode.ALWAYS" in _code_source()
+    def test_hscroll_row_scroll_auto_declared(self):
+        """G1/AC-10: 外层 HScroll Row 声明 scroll=ft.ScrollMode.AUTO。"""
+        assert "scroll=ft.ScrollMode.AUTO" in _code_source()
 
-    def test_column_key_declared(self):
-        """DoD: Column.key 显式设置 (rows 变化时重建以重置滚动位置)。"""
+    def test_hscroll_row_expand_declared(self):
+        """§5.5c 关键点1: HScroll Row expand=True (撑满视口高度)。"""
+        assert "expand=True" in _code_source()
+
+    def test_vscroll_key_declared(self):
+        """VScroll Column.key 显式设置 (rows 变化时重建以重置滚动位置)。"""
         assert "key=" in _code_source()
+
+    def test_inner_column_has_width(self):
+        """§5.1/§5.4: Inner Column 显式 width=total_w。"""
+        assert "width=total_w" in _code_source()
 
     def test_no_stack_canvas_layer(self):
         """DoD (方案 D-v2): 不再使用 ft.Stack 作为虚拟化画布层。"""
@@ -272,7 +363,7 @@ class TestRendererRequirement:
     def test_calling_without_renderer_raises(self):
         """无 renderer 环境下调用 PaginatedTable 抛 RuntimeError。
 
-        这是有状态声明式组件的预期行为 (含 use_state/use_effect/use_ref), 验证组件确实
+        这是有状态声明式组件的预期行为 (含 use_state/use_ref), 验证组件确实
         依赖 renderer 上下文, 而非静默返回错误结果。集成测试用 flet_test_page 覆盖。
         """
         with pytest.raises(RuntimeError):

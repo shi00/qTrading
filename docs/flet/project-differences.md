@@ -267,6 +267,25 @@ return ft.Column(
 
 **诊断要点**：7 次试错均使用了 DOM dump 但误读 `text=''` 为语义合并缺陷，实际是 0px 视口导致文本不渲染；应用日志"策略执行成功"是误导性证据（UI 渲染与业务逻辑独立）。该试错模式违反 [core-protocol.md §5](../bug-fix/core-protocol.md#5-反模式快速自查)「试错式补丁」反模式。同类边缘状态风险排查见 [known-technical-debt.md](../debt/known-technical-debt.md) `P3-PR373-Viewport-Collapse-Audit`。
 
+### 4.10 `Column.scroll_to` 对 Column 无效（PaginatedTable 用 key 重建重置滚动位置）
+
+**背景**：分页表升级（方案 D）需在 rows 变化时重置垂直滚动到顶部。原命令式实现通过数据推送触发；声明式下尝试 `scroll_to`。
+
+**flet-mcp 验证结论**：`ft.Column.scroll_to` 对 `scroll=ScrollMode.AUTO` 的 Column **ineffective**（`scroll_to` 依赖 ScrollController 显式 attach，声明式 Column 不保证）。改用 **`key` 重建**：`rows_column = ft.Column(..., key=f"vt_{id(rows)}")`，rows 引用变化时 Flet reconciliation 按 key 判定为不同实例 → 整仓重建 → 滚动位置自然归零。`id(rows)` 作为 token 在 E2E 下稳定（rows 列表对象引用变化即重建）。
+
+**要点**：`Column` 的 `key` 由外层组件渲染时传入，reconciliation 比对 key 决定复用/重建；此机制与 ListView 虚拟化无关，单页 ≤100 行构建成本可接受（`# NOTE(lazy):` 记录）。
+
+### 4.11 嵌套滚动布局链：外层 `Row(scroll=AUTO)` + `vertical_alignment=STRETCH`
+
+**背景**：分页表需同时支持水平滚动（宽表）与垂直滚动（长表），方案采用「外层 `Row(scroll=AUTO)` 承载水平滚动 + 内层 `Column(scroll=AUTO)` 承载垂直滚动」嵌套结构。
+
+**关键约束（三项缺一不可，否则布局链断裂）**：
+1. 外层 `Row` 必须 `expand=True`（撑满父分配的视口高度）+ `vertical_alignment=ft.CrossAxisAlignment.STRETCH`（让 Inner Column 沿交叉轴被拉伸而非撑开 Row，保证 Row 高度 = 视口高度，水平 Scrollbar 位置稳定在视口底部）；
+2. 内层 `Inner Column` **不设** `expand=True`，仅设 `width=total_w`（expand 沿主轴=水平方向 flex 分配，会覆盖 width，导致单列被视口挤压——即 PR #392 移除水平滚动的根因）；
+3. 垂直滚动 `Column` 必须同时 `scroll=AUTO + expand=True`（expand 接受父 BodyClip 分配的 tight height，scroll=AUTO 让溢出转内部滚动，不撑开外层链）。
+
+**已验证**：方案 D 在项目锁定 Flet 版本下 E2E 回归全绿（`test_screener_flow` / `test_data_explorer` / `test_screener_to_backtest`）。反例（v1.2 曾出现）为 Inner Column 误加 `expand=True` 导致主轴/交叉轴混淆，见 §4.8。
+
 ---
 
 ## 5. R16 UI 阻塞红线
