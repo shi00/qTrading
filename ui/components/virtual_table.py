@@ -1,29 +1,28 @@
-"""virtual_table — 声明式分页表格 (方案 D-v2: Column + scroll, 移除 ListView 视口虚拟化).
+"""virtual_table — 声明式分页表格 (方案 D-v3: 水平滚动 + sticky header + 列宽拖拽 + hover 局部化).
 
 从命令式容器子类重写为 ``@ft.component def PaginatedTable(...) -> ft.Column``
 (CLAUDE.md §3.2 MVVM, §3.3).
 
-变更要点 (方案 D-v2, E2E 修复):
-- 删除 ListView 及其视口虚拟化 (build_controls_on_demand / item_extent / cache_extent)
-- 改用 ft.Column(scroll=ALWAYS) 承载行: Column 不做窗口化, 所有行立即布局并生成语义节点
-- 保留 rows 变化时通过 key 重建以重置滚动位置
-- 保留 ink=True 确保行 Container 生成 flt-tappable 语义属性
-
-背景:
-- ListView + build_controls_on_demand=False 时, 若 ListView 视口高度在布局计算时为 0
-  (E2E 环境中父容器布局尚未稳定), Flutter 引擎仍可能跳过子控件语义节点生成,
-  导致 Playwright get_by_text 找不到行内文本 (PR 373 & PR 392 均复现).
-- 所有调用点单页 ≤100 行, Column 全量布局性能可忽略.
+变更要点 (方案 D-v3, 分页表实现方案.md §5/§6):
+- 恢复水平滚动: 外层 ``Row(scroll=ScrollMode.AUTO, expand=True, vertical_alignment=STRETCH)`` 承载
+  Inner Column (``width=total_w``, 不设 expand=True), 表头与表体同在一个水平滚动 Row 内, 横滑时列对齐 (G1/G3)
+- Sticky header: Header Container 抽到 Inner Column 第一行, 不在垂直滚动区 VScroll 内, 垂直滚动时位置不变 (G2)
+- 滚动条自适应: 水平/垂直均用 ``ScrollMode.AUTO``, 内容溢出才显示滚动条 (G7)
+- 列宽拖拽: 复用 resizable_splitter.py 的 R13 拖拽契约 (on_horizontal_drag_* + primary_delta +
+  _ColWidthsCache use_ref 缓存 + 节流), 每列 header 右边缘 6px 拖拽把手 (G4)
+- Hover 局部化: hover state 下沉到独立 ``TableRow`` ``@ft.component`` 行内 use_state, 不再触发全表重建 (G5)
+- 表体列/行仍用 Column 全量渲染 (不做窗口化), 确保 E2E 语义节点稳定 (方案 D-v2 保留)
 
 保留:
 - @ft.component 函数组件形态 (MVVM 强制)
 - next_sort_state / _total_width 纯函数
 - _build_header / _build_cells / _build_row 单元构建 (theme-dependent)
-- hover 高亮 / 列头排序 / 行点击 / trend 色 / code TextSpan
+- 行点击 / trend 色 / code TextSpan
 - theme 自动重渲染: ``ft.use_state(AppColors.get_observable_state)`` 订阅 Layer 2 表格色
 """
 
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -39,6 +38,9 @@ logger = logging.getLogger(__name__)
 ROW_HEIGHT = 30
 HEADER_HEIGHT = 35
 MIN_TABLE_WIDTH = 800
+MIN_COL_WIDTH = 60
+MAX_COL_WIDTH = 600
+DRAG_INTERVAL = 16
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
 
@@ -60,8 +62,45 @@ def next_sort_state(
     return clicked_col, True
 
 
-def _total_width(columns: list[dict[str, Any]]) -> int:
-    return max(sum(int(col.get("width", 100)) for col in columns), MIN_TABLE_WIDTH)
+def _col_width(
+    col_widths: dict[str, int] | None,
+    col: dict[str, Any],
+) -> int:
+    """取单列有效宽度: 优先 col_widths 拖拽值, 回退列定义默认值 (缺省 100)。"""
+    if col_widths:
+        col_id = str(col.get("id"))
+        if col_id in col_widths:
+            return int(col_widths[col_id])
+    return int(col.get("width", 100))
+
+
+def _total_width(
+    columns: list[dict[str, Any]],
+    col_widths: dict[str, int] | None = None,
+) -> int:
+    return max(sum(_col_width(col_widths, col) for col in columns), MIN_TABLE_WIDTH)
+
+
+def _clamp_width(width: float, min_width: int, max_width: int) -> int:
+    """将宽度 clamp 到 ``[min_width, max_width]``。"""
+    return max(min_width, min(max_width, int(width)))
+
+
+class _ColWidthsCache:
+    """列宽拖拽状态缓存 (use_ref 承载, 避免 use_state 触发全表 re-render)。
+
+    与 resizable_splitter.py 的 _DragCache 结构对齐 (R13 契约):
+    - 拖拽中的即时宽度记录在 widths[col_id]
+    - active_col 记录当前拖拽列
+    - last_time 用于 Python 级节流兜底
+    """
+
+    __slots__ = ("widths", "active_col", "last_time")
+
+    def __init__(self) -> None:
+        self.widths: dict[str, int] = {}
+        self.active_col: str | None = None
+        self.last_time: float = 0.0
 
 
 # --- 事件 handler 工厂 (避免闭包晚绑定 + 收窄非 None 回调) ---
@@ -99,18 +138,45 @@ def _make_row_click_handler(
 # --- 单元构建 (theme-dependent, 随 Observable 重渲染) ---
 
 
+def _build_drag_handle(
+    on_start: Callable[..., None],
+    on_update: Callable[..., None],
+    on_end: Callable[..., None],
+) -> ft.GestureDetector:
+    """构建列宽拖拽把手 (R13 契约: on_horizontal_drag_* + RESIZE_LEFT_RIGHT + drag_interval=16).
+
+    exclude_from_semantics=True 强制 (方案 §6.1/§11a C5): 防止 15 个拖拽把手生成额外
+    semantic node 污染 E2E ``flt-tappable`` selector。
+    """
+    return ft.GestureDetector(
+        content=ft.Container(width=6, height=HEADER_HEIGHT),
+        mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
+        on_horizontal_drag_start=on_start,
+        on_horizontal_drag_update=on_update,
+        on_horizontal_drag_end=on_end,
+        drag_interval=DRAG_INTERVAL,
+        exclude_from_semantics=True,
+    )
+
+
 def _build_header(
     columns: list[dict[str, Any]],
     sort_col: str | None,
     sort_asc: bool,
     on_sort: Callable[[str, bool], None] | None,
     col_anchor: Callable[[str], Eid] | None = None,
+    col_widths: dict[str, int] | None = None,
+    drag_handlers: (dict[str, tuple[Callable[..., None], Callable[..., None], Callable[..., None]]] | None) = None,
 ) -> list[ft.Control]:
     """构建表头单元格 (theme-dependent)。
 
     on_sort 非空时用 GestureDetector(on_tap) 包裹（与行一致），生成 flt-tappable
     语义属性。Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
     导致列头文本从语义树消失 + anchor 不可定位。
+
+    drag_handlers 非空时, 每个 header 单元格右缘叠加 6px 拖拽把手 (G4), 用
+    ``Row([sort_area(expand), handle], spacing=0)`` 布局 (方案 §6.4: 把手宽度独立于列宽,
+    避免与排序 on_click 的 hit-testing 冲突)。
 
     col_anchor 非空时用 anchored() 包裹 GestureDetector，加 E2E anchor。
     """
@@ -142,12 +208,31 @@ def _build_header(
             control: ft.Control = gesture
         else:
             control = content
-        width = int(col.get("width", 100))
-        controls.append(ft.Container(control, width=width))
+        width = _col_width(col_widths, col)
+        if drag_handlers is not None:
+            start, update, end = drag_handlers[col_id]
+            controls.append(
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Container(content=control, expand=True),
+                            _build_drag_handle(start, update, end),
+                        ],
+                        spacing=0,
+                    ),
+                    width=width,
+                )
+            )
+        else:
+            controls.append(ft.Container(control, width=width))
     return controls
 
 
-def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> list[ft.Container]:
+def _build_cells(
+    row_data: dict[str, Any],
+    columns: list[dict[str, Any]],
+    col_widths: dict[str, int] | None = None,
+) -> list[ft.Container]:
     """构建一行单元格 (theme-dependent)。"""
     cells: list[ft.Container] = []
     for col in columns:
@@ -212,8 +297,11 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
             alignment=alignment,
             padding=ft.Padding.only(left=8, right=8),
         )
-        width = col.get("width")
-        cells.append(ft.Container(content, width=int(width)) if width else ft.Container(content, expand=1))
+        if col_widths is not None:
+            cells.append(ft.Container(content, width=_col_width(col_widths, col)))
+        else:
+            width = col.get("width")
+            cells.append(ft.Container(content, width=int(width)) if width else ft.Container(content, expand=1))
     return cells
 
 
@@ -226,13 +314,15 @@ def _build_row(
     is_hovered: bool = False,
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    col_widths: dict[str, int] | None = None,
 ) -> ft.Control:
     """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
     Args:
         abs_idx: 行绝对索引 (用于 bgcolor 奇偶交替)。
         is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
-        on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
+        on_hover: hover 事件回调 (P2-8: 由 TableRow 传入 set_hovered 触发当前行重渲染)。
+        col_widths: 列宽拖拽覆盖 (None 时回退列定义默认宽度)。
 
     Note:
         on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
@@ -250,7 +340,7 @@ def _build_row(
         width=total_w,
         ink=True,
         bgcolor=AppStyles.data_table_row(abs_idx, is_hovered=is_hovered),
-        content=ft.Row(safe_controls(_build_cells(row_data, columns)), spacing=0),
+        content=ft.Row(safe_controls(_build_cells(row_data, columns, col_widths)), spacing=0),
         on_hover=on_hover,
     )
     if on_row_click is None:
@@ -267,6 +357,40 @@ def _build_row(
 
 
 @ft.component
+def TableRow(
+    abs_idx: int,
+    row_data: dict[str, Any],
+    columns: list[dict[str, Any]],
+    col_widths: dict[str, int],
+    on_row_click: Callable[[dict[str, Any]], None] | None,
+    row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+) -> ft.Control:
+    """独立行组件 (方案 §5.2/§5.3): hover state 下沉到行内 use_state (G5, ~100× 性能)。
+
+    不设置显式 key, 让 Flet reconciliation 按列表位置复用实例 (列宽变化/主题切换时
+    hovered state 保留)。翻页/排序时 VScroll key 变化 → 整行重建, hover 丢失为预期行为。
+    """
+    hovered, set_hovered = ft.use_state(False)
+
+    def _on_hover(e) -> None:
+        # e.data == "true" 表示进入; "false" 表示离开
+        set_hovered(str(e.data) == "true")
+
+    total_w = _total_width(columns, col_widths)
+    return _build_row(
+        abs_idx,
+        row_data,
+        columns,
+        total_w,
+        on_row_click,
+        is_hovered=hovered,
+        on_hover=_on_hover,
+        row_anchor=row_anchor,
+        col_widths=col_widths,
+    )
+
+
+@ft.component
 def PaginatedTable(
     rows: list[dict[str, Any]] | None = None,
     columns: list[dict[str, Any]] | None = None,
@@ -277,7 +401,7 @@ def PaginatedTable(
     col_anchor: Callable[[str], Eid] | None = None,
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
 ) -> ft.Column:
-    """声明式分页表格 (方案 D-v2: Column + scroll, 移除 ListView 视口虚拟化).
+    """声明式分页表格 (方案 D-v3: 水平滚动 + sticky header + 列宽拖拽 + hover 局部化).
 
     Args:
         rows: 当页全量行数据 (dict 列表); Column 直接渲染全部行.
@@ -287,13 +411,17 @@ def PaginatedTable(
         on_sort: 列头点击回调 (col_id, new_asc); 由消费方更新 sort_col/sort_asc props。
         on_row_click: 行点击回调 (row_data)。
 
-    E2E 修复 (方案 D-v2):
-    - 用 ft.Column(scroll=ALWAYS) 替换 ListView: ListView 的视口高度为 0 时, 即使
-      build_controls_on_demand=False, Flutter 也可能跳过子控件语义节点生成, 导致
-      Playwright 无法定位行文本或点击行 (PR 373 & PR 392 均复现).
-    - Column 不做窗口化, 所有行立即参与布局并生成语义节点.
-    - 单页 ≤100 行规模下, Column 全量布局性能与 ListView(非虚拟化模式) 无显著差异.
-    - rows 变化时通过 key 重建 Column 重置滚动位置 (对齐原命令式数据推送行为).
+    布局树 (方案 §5.1):
+        Outer(Column, expand=True)
+          └─ HScroll(Row, scroll=AUTO, expand=True, vertical_alignment=STRETCH)
+               └─ Inner(Column, spacing=0, width=total_w)  # 不设 expand=True
+                    ├─ Header(Container, width=total_w, height=HEADER_HEIGHT)  # sticky
+                    └─ BodyClip(Container, expand=True, clip=HARD_EDGE)
+                         └─ VScroll(Column, scroll=AUTO, spacing=0, expand=True, key=vt_<id(rows)>)
+                              └─ TableRow × N  # 各自独立 hover state
+
+    E2E 修复 (方案 D-v2 保留): Column 不做窗口化, 所有行立即布局并生成语义节点;
+    rows 变化时通过 VScroll key 重建重置滚动位置.
     """
     # theme 订阅 (Layer 2 表格色随主题自动重渲染)
     ft.use_state(AppColors.get_observable_state)
@@ -301,60 +429,108 @@ def PaginatedTable(
     rows_list = rows or []
     cols_list = columns or []
 
-    # P2-8 MAJ-2 (review fix): hover 触发链路落地 — hovered_idx=-1 表示无 hover
-    hovered_idx, set_hovered_idx = ft.use_state(-1)
+    # 列宽拖拽: col_widths 顶层 use_state (触发 Header+Body width prop diff),
+    # col_widths_ref 用 _ColWidthsCache 缓存拖拽即时值 (不触发 re-render) (§5.3/§6.2)
+    col_widths, set_col_widths = ft.use_state(dict[str, int])
+    col_cache = ft.use_ref(_ColWidthsCache)
+    cache = col_cache.current
+    assert cache is not None
 
     # rows 变化时通过 key 重建 Column 重置滚动位置 (对齐原命令式数据推送行为)
     # scroll_to 对 Column "ineffective" (flet-mcp 验证), 故用 key 重建
     rows_token = id(rows) if rows is not None else 0
     list_view_key = f"vt_{rows_token}"
 
-    total_w = _total_width(cols_list)
+    # --- 列宽拖拽 handler 工厂 (R13 契约, §6.2) ---
+    def _make_drag_start_handler(col_id: str, current_width: int) -> Callable[..., None]:
+        def _on_drag_start(e) -> None:
+            cache.active_col = col_id
+            cache.widths.setdefault(col_id, current_width)
+
+        return _on_drag_start
+
+    def _make_drag_update_handler(col_id: str) -> Callable[..., None]:
+        def _on_drag_update(e) -> None:
+            active_col = cache.active_col
+            if active_col is None:
+                return
+            # R13: V1 DragUpdateEvent 用 primary_delta (水平拖拽 x 增量);
+            # local_delta.x 作为回退 (兼容边界场景)
+            delta_x = getattr(e, "primary_delta", None)
+            if delta_x is None:
+                local_delta = getattr(e, "local_delta", None)
+                delta_x = getattr(local_delta, "x", 0) if local_delta else 0
+            current = cache.widths[active_col]
+            new_w = _clamp_width(current + delta_x, MIN_COL_WIDTH, MAX_COL_WIDTH)
+            if new_w == current:
+                return
+            cache.widths[active_col] = new_w
+
+            # Python 级节流兜底: 仅节流 set_col_widths, 防止 reconcile 过频
+            current_time = time.time()
+            if current_time - cache.last_time < (DRAG_INTERVAL / 1000.0):
+                return
+            cache.last_time = current_time
+            set_col_widths(dict(cache.widths))
+
+        return _on_drag_update
+
+    def _make_drag_end_handler(col_id: str) -> Callable[..., None]:
+        def _on_drag_end(e) -> None:
+            if cache.active_col is None:
+                return
+            set_col_widths(dict(cache.widths))
+            cache.active_col = None
+
+        return _on_drag_end
+
+    # per-column 拖拽 handler (避免闭包晚绑定, 对齐 _make_sort_handler 模式)
+    drag_handlers: dict[str, tuple[Callable[..., None], Callable[..., None], Callable[..., None]]] = {}
+    for col in cols_list:
+        col_id = str(col["id"])
+        w = _col_width(col_widths, col)
+        drag_handlers[col_id] = (
+            _make_drag_start_handler(col_id, w),
+            _make_drag_update_handler(col_id),
+            _make_drag_end_handler(col_id),
+        )
+
+    total_w = _total_width(cols_list, col_widths)
     row_count = len(rows_list)
 
-    header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor)
-
-    def _make_row_hover(abs_idx: int) -> Callable[[ft.HoverEvent], None]:
-        """P2-8 MAJ-2: 构造单行 hover 回调, 切换 hovered_idx 触发重渲染。"""
-
-        def _on_hover(e: ft.HoverEvent) -> None:
-            # e.data == "true" 表示进入; "false" 表示离开
-            set_hovered_idx(abs_idx if str(e.data) == "true" else -1)
-
-        return _on_hover
+    header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor, col_widths, drag_handlers)
 
     all_rows = [
-        _build_row(
-            abs_idx,
-            rows_list[abs_idx],
-            cols_list,
-            total_w,
-            on_row_click,
-            is_hovered=(abs_idx == hovered_idx),
-            on_hover=_make_row_hover(abs_idx),
+        TableRow(
+            abs_idx=abs_idx,
+            row_data=rows_list[abs_idx],
+            columns=cols_list,
+            col_widths=col_widths,
+            on_row_click=on_row_click,
             row_anchor=row_anchor,
         )
-        # NOTE(lazy): Python 端构建全量行控件, Column(scroll=ALWAYS) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
+        # NOTE(lazy): Python 端构建全量行控件, VScroll(Column, scroll=AUTO) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)
     ]
 
+    # VScroll: 垂直滚动区 (scroll=AUTO 内容溢出才显示滚动条, G7)
+    # NOTE(guard): §5.5c 关键点3 — VScroll 必须同时 scroll=AUTO + expand=True:
+    # expand 接受父 BodyClip 分配的 tight height 约束, scroll=AUTO 让 rows 溢出转为
+    # 内部滚动而不撑开 VScroll/链, 从而保证 HScroll 高度稳定 = 视口高度 (水平 Scrollbar 位置)。
     rows_column = ft.Column(
         controls=safe_controls(all_rows),
         expand=True,
         spacing=0,
-        # E2E 修复: Column + scroll=ALWAYS 替代 ListView
-        # 原因: ListView 视口高度为 0 (E2E 父容器布局未稳定) 时, 即使 build_controls_on_demand=False,
-        # Flutter 引擎也可能跳过子控件语义节点生成. Column 不做窗口化, 所有行立即布局并生成 flt-semantics.
-        # scroll=ALWAYS 保留纵向滚动能力 (与原 ListView 行为一致).
-        scroll=ft.ScrollMode.ALWAYS,
+        scroll=ft.ScrollMode.AUTO,
         key=list_view_key,  # rows 变化时重建以重置滚动位置
     )
-    # Column 不支持 clip_behavior, 用 Container 包裹以保持原 ListView 的 HARD_EDGE 裁剪行为
-    rows_clip_container = ft.Container(
+    # BodyClip: 裁剪溢出行内容 (对应原 ListView HARD_EDGE 行为)
+    body_clip = ft.Container(
         content=rows_column,
         expand=True,
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
     )
+    # Header: 抽到 Inner Column 第一行 (sticky header, 不在 VScroll 内, 垂直滚动时位置不变)
     header_container = ft.Container(
         content=ft.Row(safe_controls(header_controls), spacing=0),
         bgcolor=AppColors.TABLE_HEADER_BG,
@@ -362,15 +538,26 @@ def PaginatedTable(
         width=total_w,
         border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.TABLE_BORDER)),
     )
-    # 布局修复: 移除外层 Column > Row(STRETCH, scroll=ALWAYS) > inner_column 嵌套
-    # 原因: inner_column 无 expand=True, rows_clip_container 的 expand=True 无效 (父级无固定高度),
-    # 行区域按内容高度撑开 (100*30=3000px), 超出视口被裁剪, 只有表头可见.
-    # 修复: 直接用 Column 承载 header + rows_clip_container, expand=True 让 rows_clip_container 垂直填充.
-    # 水平滚动由 rows_clip_container 内的 rows_column(scroll=ALWAYS) 不需要, 表格列宽固定.
-    # NOTE(lazy): 移除水平滚动能力. ceiling: total_w > 视口宽度时表格列会被压缩. upgrade: 单页列总宽度 > 1200px 时, 评估改用 Row(scroll=ALWAYS) 包裹并修复 inner_column expand=True.
-    return ft.Column(
-        controls=[header_container, rows_clip_container],
-        expand=True,
+    # Inner Column: 不设 expand=True (expand 沿主轴即水平方向 flex 分配, 会覆盖 width=total_w),
+    # 高度由 HScroll.vertical_alignment=STRETCH 沿交叉轴撑满 (§5.1/§5.4/§5.5)
+    inner_column = ft.Column(
+        controls=[header_container, body_clip],
         spacing=0,
         width=total_w,
+    )
+    # HScroll: 水平滚动容器 (scroll=AUTO 内容溢出才显示滚动条, G7)
+    # NOTE(guard): §5.5c 关键点1+2 — HScroll 必须 expand=True (撑满 Outer 分配高度=视口) +
+    # vertical_alignment=STRETCH (让 Inner 被拉伸而非撑开 Row, 保持 Row 高度 = 视口高度,
+    # 水平 Scrollbar orientation=BOTTOM 位置 = 视口底部)。
+    h_scroll_row = ft.Row(
+        controls=[inner_column],
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
+        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    # NOTE(lazy): 列宽仅存活于 PaginatedTable 实例生命周期 (use_state), 关闭 tab/切视图/重启后重置为 columns 定义默认值. ceiling: 适用于用户偶发拖拽 (<5次/会话) 与列数量固定的场景, 每次进入视图重新拖 5 列 = 5 秒操作代价, 用户可容忍. upgrade: 用户反馈"每次都要重拖太烦"、或拖拽频率 profiling 显示 >20 次/会话、或产品新增"保存视图布局"需求时, 升级为 ConfigHandler 持久化 column_widths_by_view.
+    return ft.Column(
+        controls=[h_scroll_row],
+        expand=True,
+        spacing=0,
     )
