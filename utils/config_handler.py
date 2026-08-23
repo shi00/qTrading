@@ -47,6 +47,20 @@ class ConfigHandler:
     # in ThreadPoolManager.run_async(), so Alembic migrations running in the IO
     # thread pool see the override while concurrent calls from other threads do not.
     _db_url_override: contextvars.ContextVar[str | None] = contextvars.ContextVar("_db_url_override", default=None)
+    # Priority 1.5 (embedded): 模块级完整 URL override，跨 asyncio task / 线程一致可见。
+    # ContextVar(P0) 只能在传播了 context 的线程读到；DataExplorer 同步引擎在线程池线程
+    # 建连时 P0 失效，会回退到残留 db_host/db_port(P2)。模块级覆盖根治该场景。None 表示未启用。
+    _embedded_db_url: str | None = None
+
+    @classmethod
+    def set_embedded_db_url(cls, url: str) -> None:
+        """启用 embedded 运行时模块级完整 URL override（跨 task/线程可靠，非 ContextVar）。"""
+        cls._embedded_db_url = url
+
+    @classmethod
+    def clear_embedded_db_url(cls) -> None:
+        """停用 embedded 模块级 override（embedded 会话结束/测试隔离时调用）。"""
+        cls._embedded_db_url = None
 
     DEFAULT_CONFIG = get_default_config()
 
@@ -675,6 +689,11 @@ class ConfigHandler:
            migrations run from within the application). Highest priority.
         1. ``DATABASE_URL`` environment variable — always wins when set, so
            deployments can override the persisted config without editing JSON.
+        1.5 ``_embedded_db_url`` module-level override — set by
+           ``set_embedded_db_url()`` during embedded mode; visible across async
+           tasks / threads where the priority-0 ``ContextVar`` is not available
+           (e.g. DataExplorer's sync engine built on a thread-pool thread).
+           ``None`` in external mode, so behavior is unchanged.
         2. Rebuild from stored host/port/user/database + password via
            ``DatabaseConfigService.build_url()``, which properly URL-encodes
            credentials. Used once the user completes onboarding and ``db_host``
@@ -691,6 +710,12 @@ class ConfigHandler:
         env_url = os.environ.get("DATABASE_URL")
         if env_url:
             return env_url
+
+        # Priority 1.5 (embedded): 模块级完整 URL override，优先于残留 db_host/db_port(P2)，
+        # 且不依赖 ContextVar，跨 async task / 线程一致可见（根治 DataExplorer 连 5432）。
+        embedded_url = ConfigHandler._embedded_db_url
+        if embedded_url:
+            return embedded_url
 
         # Priority 2: reconstruct from components
         host = ConfigHandler.get_typed("db_host", str, "")
