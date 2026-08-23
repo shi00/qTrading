@@ -219,6 +219,8 @@ class TestInitTables:
         await vm.init_tables()
         assert vm.state.current_table == ""
         assert vm.state.tables_list == ()
+        # 空表/连接失败时不进入"已加载"状态，避免下游误用已加载表进行后续操作
+        assert vm.state.tables_loaded is False
 
 
 class TestInitTablesErrors:

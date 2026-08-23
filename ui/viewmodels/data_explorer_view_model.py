@@ -174,10 +174,11 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             return []
         try:
             tables = await self._tp.run_async(TaskType.CPU, self._db.get_all_tables)
-            if tables:
-                current_table = "stock_basic" if "stock_basic" in tables else tables[0]
-            else:
-                current_table = ""
+            if not tables:
+                logger.warning("[DataExplorerVM] DB 无可用表或连接失败，不进入已加载态")
+                self._set_state(tables_list=(), tables_loaded=False, current_table="")
+                return ()
+            current_table = "stock_basic" if "stock_basic" in tables else tables[0]
             self._set_state(
                 tables_list=tuple(tables),
                 tables_loaded=True,
