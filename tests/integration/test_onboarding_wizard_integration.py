@@ -161,7 +161,7 @@ class TestOnboardingDBIntegration:
             database="testdb",
         )
         assert onboarding_vm.current_step == 2  # token step
-        assert onboarding_vm.step_validated["database"] is True
+        assert onboarding_vm.is_step_validated("database") is True
         # DatabaseConfigPanelViewModel 显示保存成功状态
         assert db_vm.state.is_saving is False
         assert db_vm.state.status_type == "success"
@@ -206,7 +206,7 @@ class TestOnboardingDBIntegration:
         # P1-9: 失败路径不应保存配置
         mock_save_db_config.assert_not_called()
         assert onboarding_vm.current_step == 1  # stays at database
-        assert not onboarding_vm.step_validated.get("database", False)
+        assert not onboarding_vm.is_step_validated("database")
         # DatabaseConfigPanelViewModel 显示错误状态
         assert db_vm.state.status_type == "error"
         assert db_vm.state.is_saving is False
@@ -234,7 +234,7 @@ class TestOnboardingDBIntegration:
             await onboarding_vm.next_step()
 
         assert onboarding_vm.current_step == 1  # stays at database
-        assert not onboarding_vm.step_validated.get("database", False)
+        assert not onboarding_vm.is_step_validated("database")
         assert db_vm.state.status_type == "error"
 
     @pytest.mark.asyncio
@@ -258,7 +258,7 @@ class TestOnboardingDBIntegration:
             await onboarding_vm.next_step()
 
         assert onboarding_vm.current_step == 1  # stays at database
-        assert not onboarding_vm.step_validated.get("database", False)
+        assert not onboarding_vm.is_step_validated("database")
         # DatabaseConfigPanelViewModel 捕获异常并显示错误
         assert db_vm.state.status_type == "error"
         assert db_vm.state.is_saving is False  # finally resets
