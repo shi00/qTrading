@@ -730,6 +730,44 @@ class TestInitializeServicesStartFailures:
             mock_ns.return_value.stop_async.assert_awaited_once()
             mock_ss.return_value.stop.assert_called_once_with()
 
+    @pytest.mark.asyncio
+    async def test_all_services_start_success_no_cleanup_stop_called(self):
+        """TD-P2 反向回归：全量启动成功 → 三个服务的 stop 均不被调用（清理仅在失败路径触发）。"""
+        import os
+
+        cm = self._make_cm()
+        saved = os.environ.pop("E2E_TESTING", None)
+        try:
+            with (
+                patch("app.bootstrap.MetaDataManager"),
+                patch("app.bootstrap.TaskManager") as mock_tm,
+                patch("app.bootstrap.SchedulerService") as mock_ss,
+                patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+                patch("app.bootstrap.MarketDataService") as mock_mds,
+                patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
+                patch("app.bootstrap._validate_failover_credentials"),
+                patch("app.bootstrap._validate_strategy_tier_coverage"),
+                patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
+            ):
+                mock_tm.return_value.init_db = AsyncMock()
+                mock_ss.return_value.start = MagicMock()
+                mock_ss.return_value.stop = MagicMock()
+                mock_ns.return_value.start = AsyncMock()
+                mock_ns.return_value.stop_async = AsyncMock()
+                mock_mds.return_value.start = AsyncMock()
+                mock_mds.return_value.stop_async = AsyncMock()
+                await initialize_services(cm)
+                # 成功路径：三个 start 均已调用，且未触发任何清理 stop
+                mock_ss.return_value.start.assert_called_once_with()
+                mock_ns.return_value.start.assert_awaited_once()
+                mock_mds.return_value.start.assert_awaited_once()
+                mock_ss.return_value.stop.assert_not_called()
+                mock_ns.return_value.stop_async.assert_not_awaited()
+                mock_mds.return_value.stop_async.assert_not_awaited()
+        finally:
+            if saved is not None:
+                os.environ["E2E_TESTING"] = saved
+
 
 class TestInitializeServicesCancelledError:
     """R2 守卫：CancelledError 在 initialize_services 内部必须原样传播，不被 except Exception 吞没。
