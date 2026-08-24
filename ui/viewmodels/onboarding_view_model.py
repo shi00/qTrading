@@ -232,8 +232,14 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         return self._state.normalized_schedule_time
 
     def is_step_validated(self, step_id: str) -> bool:
-        """只读查询：步骤当前是否已验证。返回原子 bool，不暴露内部可变字典（MVVM 契约：
-        VM 不得向 View 暴露可变状态；step_validated 仅为验证短路缓存，非响应式 UI 状态）。"""
+        """只读查询：步骤当前是否已验证。返回原子 bool，不暴露内部可变字典。
+
+        MVVM 契约：VM 不得向 View 暴露可变状态。_step_validated 仅为验证短路缓存
+        （非响应式 UI 状态），故以只读方法替代迁入 frozen OnboardingState：生产 View
+        从未消费该状态，迁入需跨多文件重构且收益有限（§1.3 极简设计）。取舍落档：
+        若日后需要响应式订阅该字段，再将其迁入 OnboardingState（原债务条目
+        P3-M12 已在 known-technical-debt.md 移除存档）。
+        """
         return self._step_validated.get(step_id, False)
 
     # ------------------------------------------------------------------
