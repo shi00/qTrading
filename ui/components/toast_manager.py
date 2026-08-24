@@ -21,11 +21,11 @@
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import platform
 import threading
-import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -110,18 +110,22 @@ def get_global_state() -> ToastManagerState:
 
 
 # 全局任务追踪（供 stop_all 取消所有活动任务）
-_active_tasks: set[asyncio.Task | asyncio.Future] = set()
+# page.run_task 返回的是 concurrent.futures.Future，因此类型需覆盖三类任务句柄，
+# 否则会把 toast 定时任务误当"非法类型"拒绝，使其成为关机孤儿（P0-1 同根因）。
+_active_tasks: set[asyncio.Task | asyncio.Future | concurrent.futures.Future] = set()
 _active_tasks_lock = threading.Lock()
 
 
-def _register_task(task: asyncio.Task | asyncio.Future | None) -> None:
+def _register_task(
+    task: asyncio.Task | asyncio.Future | concurrent.futures.Future | None,
+) -> None:
     """注册任务到全局追踪集合（线程安全，自动清理）。"""
-    if not isinstance(task, (asyncio.Task, asyncio.Future)):
+    if not isinstance(task, (asyncio.Task, asyncio.Future, concurrent.futures.Future)):
         return
     with _active_tasks_lock:
         _active_tasks.add(task)
 
-    def on_done(t: asyncio.Task | asyncio.Future) -> None:
+    def on_done(t: asyncio.Task | asyncio.Future | concurrent.futures.Future) -> None:
         with _active_tasks_lock:
             _active_tasks.discard(t)
 
@@ -271,13 +275,17 @@ class ToastManager:
         with _active_tasks_lock:
             tasks_snapshot = list(_active_tasks)
 
-        valid_tasks = [t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future))]
+        valid_tasks = [
+            t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future, concurrent.futures.Future))
+        ]
         for task in valid_tasks:
             if not task.done():
                 task.cancel()
 
         if valid_tasks:
-            await gather_for_shutdown_cleanup(*valid_tasks)
+            # concurrent.futures.Future 需桥接为 asyncio.Future 才可被 gather 收集
+            watchers = [asyncio.wrap_future(t) if isinstance(t, concurrent.futures.Future) else t for t in valid_tasks]
+            await gather_for_shutdown_cleanup(*watchers)
 
         with self._lock:
             state = get_global_state()
@@ -377,8 +385,8 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                 logger.debug("[ToastManager] Auto-dismiss failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
         task = page.run_task(_run_timer)
-        task_ref.current = typing.cast(typing.Any, task)
-        _register_task(typing.cast(typing.Any, task))
+        task_ref.current = task
+        _register_task(task)
 
     async def cleanup() -> None:
         """卸载时取消任务并等待清理完成（R2 兼容）。
@@ -391,9 +399,12 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             return
         if not task.done():
             task.cancel()
+        # page.run_task 返回 concurrent.futures.Future，asyncio.gather 仅接受
+        # asyncio awaitable，须桥接为 asyncio.Future（P0-1 根因）。
+        watcher = asyncio.wrap_future(task) if isinstance(task, concurrent.futures.Future) else task
         # gather_for_shutdown_cleanup 内部 return_exceptions=True，
         # CancelledError 不重新抛出（关机清理场景专用）
-        await gather_for_shutdown_cleanup(task)
+        await gather_for_shutdown_cleanup(watcher)
 
     ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 

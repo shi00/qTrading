@@ -17,7 +17,9 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import concurrent.futures
 import inspect
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -391,6 +393,20 @@ class TestStopAll:
 
         assert manager._is_stopping is True
 
+    @pytest.mark.asyncio
+    async def test_stop_all_cancels_awaits_concurrent_future(self):
+        """stop_all 应取消并等待被追踪的 concurrent.futures.Future（关机不再遗留孤儿）。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+
+        fut = concurrent.futures.Future()
+        tm_module._register_task(fut)
+        assert fut in tm_module._active_tasks
+
+        await manager.stop_all()  # 不应抛出
+
+        assert fut.done() and fut.cancelled()
+
 
 # ============================================================================
 # 7. _register_task 任务追踪
@@ -423,6 +439,25 @@ class TestRegisterTask:
         await asyncio.sleep(0.01)
 
         assert task not in tm_module._active_tasks
+
+    def test_register_task_accepts_concurrent_future(self):
+        """_register_task 应接受并追踪真实 concurrent.futures.Future，完成后自动移除。
+
+        呼应 P0-1 同根因修复：toast 定时任务（page.run_task 返回的 concurrent future）
+        必须被追踪（此前被 isinstance 检查拒绝成孤儿）。
+        """
+        fut = concurrent.futures.Future()
+        tm_module._register_task(fut)
+
+        assert fut in tm_module._active_tasks
+
+        fut.set_result(None)
+        # concurrent future 的 done 回调在线程池线程触发，带超时轮询等待移除
+        for _ in range(100):
+            if fut not in tm_module._active_tasks:
+                break
+            time.sleep(0.01)
+        assert fut not in tm_module._active_tasks
 
 
 # ============================================================================
@@ -838,6 +873,38 @@ class TestToastCardCleanup:
         with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", new_callable=AsyncMock) as mock_gather:
             run_unmount_effects(component)
             mock_gather.assert_called_once_with(mock_task)
+
+    def test_cleanup_with_real_concurrent_future_no_crash(self):
+        """P0-1 回归：cleanup 收到真实 concurrent.futures.Future 时不得崩溃。
+
+        旧实现把 ``page.run_task`` 返回的 ``concurrent.futures.Future`` 直接传给
+        ``asyncio.gather``（经 ``gather_for_shutdown_cleanup``），抛 TypeError：
+        "An asyncio.Future, a coroutine or an awaitable is required"。
+        修复后通过 ``asyncio.wrap_future`` 桥接为 asyncio Future，卸载不再崩溃。
+        """
+        page = _make_fake_page()
+        done_future = concurrent.futures.Future()
+        done_future.set_result(None)
+        page.run_task = MagicMock(return_value=done_future)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        # 不 mock gather_for_shutdown_cleanup：必须走真实 asyncio.gather 路径
+        run_unmount_effects(component)  # 不应抛出 TypeError
+
+    def test_cleanup_cancels_pending_concurrent_future(self):
+        """cleanup 需取消并桥接未启动的 concurrent future，不崩溃且真正取消。"""
+        page = _make_fake_page()
+        pending = concurrent.futures.Future()
+        page.run_task = MagicMock(return_value=pending)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        run_unmount_effects(component)  # 不应抛出
+
+        assert pending.done() and pending.cancelled()
 
 
 # ============================================================================
