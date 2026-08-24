@@ -650,6 +650,86 @@ class TestInitializeServicesStartFailures:
             with pytest.raises(RuntimeError, match="market failed"):
                 await initialize_services(cm)
 
+    @pytest.mark.asyncio
+    async def test_news_start_failure_stops_previously_started_scheduler(self):
+        """TD-P2：NewsSubscriptionService.start 抛异常 → 已启动的 SchedulerService 被逆序停掉（防资源泄漏）。"""
+        cm = self._make_cm()
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager") as mock_tm,
+            patch("app.bootstrap.SchedulerService") as mock_ss,
+            patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+            patch("app.bootstrap.MarketDataService") as mock_mds,
+            patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
+            patch("app.bootstrap._validate_failover_credentials"),
+            patch("app.bootstrap._validate_strategy_tier_coverage"),
+            patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
+        ):
+            mock_tm.return_value.init_db = AsyncMock()
+            mock_ss.return_value.start = MagicMock()
+            mock_ss.return_value.stop = MagicMock()
+            mock_ns.return_value.start = AsyncMock(side_effect=RuntimeError("news failed"))
+            mock_mds.return_value.start = AsyncMock()
+            with pytest.raises(RuntimeError, match="news failed"):
+                await initialize_services(cm)
+            # news 失败后应回滚已启动的 scheduler（资源清理）
+            mock_ss.return_value.stop.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_market_start_failure_stops_previously_started_services(self):
+        """TD-P2：MarketDataService.start 抛异常 → 已启动的 news 与 scheduler 均被逆序停止（防资源泄漏）。"""
+        cm = self._make_cm()
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager") as mock_tm,
+            patch("app.bootstrap.SchedulerService") as mock_ss,
+            patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+            patch("app.bootstrap.MarketDataService") as mock_mds,
+            patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
+            patch("app.bootstrap._validate_failover_credentials"),
+            patch("app.bootstrap._validate_strategy_tier_coverage"),
+            patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
+        ):
+            mock_tm.return_value.init_db = AsyncMock()
+            mock_ss.return_value.start = MagicMock()
+            mock_ss.return_value.stop = MagicMock()
+            mock_ns.return_value.start = AsyncMock()
+            mock_ns.return_value.stop_async = AsyncMock()
+            mock_mds.return_value.start = AsyncMock(side_effect=RuntimeError("market failed"))
+            with pytest.raises(RuntimeError, match="market failed"):
+                await initialize_services(cm)
+            # 逆序清理：news 先停（待 job），scheduler 后停
+            mock_ns.return_value.stop_async.assert_awaited_once()
+            mock_ss.return_value.stop.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_market_start_failure_cleanup_partial_failure_continues(self):
+        """TD-P2：清理阶段某服务 stop_async 抛异常 → 仍继续停止其余已启动服务（不中断清理）。"""
+        cm = self._make_cm()
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager") as mock_tm,
+            patch("app.bootstrap.SchedulerService") as mock_ss,
+            patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+            patch("app.bootstrap.MarketDataService") as mock_mds,
+            patch("app.bootstrap._warmup_tushare_capabilities", new_callable=AsyncMock),
+            patch("app.bootstrap._validate_failover_credentials"),
+            patch("app.bootstrap._validate_strategy_tier_coverage"),
+            patch("app.bootstrap._maybe_auto_probe_on_startup", new_callable=AsyncMock),
+        ):
+            mock_tm.return_value.init_db = AsyncMock()
+            mock_ss.return_value.start = MagicMock()
+            mock_ns.return_value.start = AsyncMock()
+            # news#stop_async 清理失败（模拟 drain 超时异常），不应阻断 scheduler 清理
+            mock_ns.return_value.stop_async = AsyncMock(side_effect=TimeoutError("drain timeout"))
+            mock_ss.return_value.stop = MagicMock()
+            mock_mds.return_value.start = AsyncMock(side_effect=RuntimeError("market failed"))
+            with pytest.raises(RuntimeError, match="market failed"):
+                await initialize_services(cm)
+            # 单个清理失败记录 warning（断言不 raise），其余仍被停止
+            mock_ns.return_value.stop_async.assert_awaited_once()
+            mock_ss.return_value.stop.assert_called_once_with()
+
 
 class TestInitializeServicesCancelledError:
     """R2 守卫：CancelledError 在 initialize_services 内部必须原样传播，不被 except Exception 吞没。

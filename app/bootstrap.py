@@ -177,9 +177,19 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             logger.warning("[Bootstrap] E2E warmup: AIService pre-init failed: %s", exc, exc_info=True)
         auto_probe_task = None
     else:
-        SchedulerService().start()
-        await NewsSubscriptionService().start()
-        await MarketDataService().start()
+        started: list[str] = []
+        try:
+            SchedulerService().start()
+            started.append("scheduler")
+            await NewsSubscriptionService().start()
+            started.append("news")
+            await MarketDataService().start()
+            started.append("market_data")
+        except BaseException:
+            # TD-P2：启动阶段部分服务成功即后续失败 → 逆序停止已启动服务防资源泄漏。
+            # BaseException 覆盖 CancelledError（R2）与系统级异常；清理后 re-raise 原始异常。
+            await _stop_started_services(started)
+            raise
 
         await _warmup_tushare_capabilities()
 
@@ -212,6 +222,30 @@ def reset_services_initialized() -> None:
     """
     global _services_initialized
     _services_initialized = False
+
+
+async def _stop_started_services(started: list[str]) -> None:
+    """TD-P2：启动阶段部分服务已启动即后续失败时，逆序停止已启动服务防资源泄漏。
+
+    started 保存按启动顺序登记的已成功启动服务名；逆序遍历停止，保证无论哪个
+    位置失败都能清理其前的所有服务。单个服务停止失败仅记 warning 不中断清理，
+    以免一个清理异常阻断后续服务释放；清理阶段的 CancelledError 同样记为 warning
+    不再传播（原始启动失败异常才是需要传播的对象）。
+    """
+    for name in reversed(started):
+        try:
+            if name == "scheduler":
+                SchedulerService().stop()
+            elif name == "news":
+                await NewsSubscriptionService().stop_async()
+            elif name == "market_data":
+                await MarketDataService().stop_async()
+        except BaseException as e:  # noqa: BLE001  # [reason: 清理阶段防御性捕获全部异常（含取消）以保证后续服务仍被释放]
+            logger.warning(
+                "[Bootstrap] failed to stop startup service %s after startup failure: %s",
+                name,
+                DataSanitizer.sanitize_error(e),
+            )
 
 
 async def _warmup_tushare_capabilities() -> None:
