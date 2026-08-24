@@ -5,11 +5,13 @@ ignored_vulnerabilities:
       diskcache <= 5.6.3 uses pickle for serialization by default.
       An attacker who can write to the cache directory can achieve arbitrary code execution
       when the program reads the cache. This is a known vulnerability but diskcache has not
-      released a fixed version yet.
-      
+      released a fixed version yet (upstream PR #364 open, no release as of 2026-08-23).
+
       Mitigation: The application does not expose the cache directory to untrusted users.
-      The cache is only used internally for performance optimization.
+      diskcache is a transitive dependency (of llama_cpp_python) — the app source has
+      no `import diskcache` and never deserializes untrusted input, so the risk stays
+      MEDIUM (requires local write access to the cache dir).
     reviewer: louis2sin@gmail.com
     added: 2026-05-22
-    reevaluate_at: 2026-08-22
-    upstream_issue: https://github.com/grantjenks/python-diskcache/issues/286
+    reevaluate_at: 2026-11-23
+    upstream_issue: https://github.com/grantjenks/python-diskcache/issues/357
