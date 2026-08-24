@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 import flet as ft
 import flet_charts as fch
-import mplfinance as mpf
 import pandas as pd
 from matplotlib.figure import Figure
 
@@ -27,6 +26,8 @@ _FALL_COLOR = "#26A69A"  # Green for fall
 
 def _build_market_colors(is_dark: bool):
     """Build mplfinance MarketColors matching the app theme."""
+    import mplfinance as mpf  # M12-026: 惰性加载重型依赖
+
     return mpf.make_marketcolors(
         up=_RISE_COLOR,
         down=_FALL_COLOR,
@@ -39,6 +40,8 @@ def _build_market_colors(is_dark: bool):
 
 def _build_style(is_dark: bool):
     """Build a full mplfinance style dict."""
+    import mplfinance as mpf  # M12-026: 惰性加载重型依赖
+
     mc = _build_market_colors(is_dark)
     base = "nightclouds" if is_dark else "charles"
     return mpf.make_mpf_style(
@@ -86,6 +89,8 @@ def generate_kline_figure(
         必须通过 ``ThreadPoolManager().run_async(TaskType.CPU, generate_kline_figure, ...)``
         offload，否则违反 R16（UI 阻塞主循环）。
     """
+    import mplfinance as mpf  # M12-026: 惰性加载重型依赖
+
     if df is None or df.empty:
         raise ValueError("Empty DataFrame — cannot render chart")
 
