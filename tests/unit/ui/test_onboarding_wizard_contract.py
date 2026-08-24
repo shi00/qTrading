@@ -981,6 +981,7 @@ class TestOnboardingWizardComponentBody:
         mock_onboarding_vms,
     ):
         """不同 step 的导航按钮可见性（step 0 无 prev, step 4 有 prev+skip+next）。"""
+        from ui.theme import AppColors
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
@@ -993,6 +994,8 @@ class TestOnboardingWizardComponentBody:
         result0 = render_once(comp0)
         main_col0 = result0.content.controls[0]  # type: ignore[union-attr]
         nav_container0 = main_col0.controls[-1]  # type: ignore[union-attr]
+        # 契约: 底部导航条底色必须与向导页面背景一致 (background), 否则出现"灰色长方形"断层
+        assert getattr(nav_container0, "bgcolor", None) == AppColors.BACKGROUND
         nav_row0 = nav_container0.content  # type: ignore[union-attr]
         # Step 0: show_prev=False → first is ft.Container (placeholder)
         assert isinstance(nav_row0.controls[0], ft.Container)

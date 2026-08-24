@@ -1024,7 +1024,7 @@ def OnboardingWizard(
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         padding=ft.Padding.symmetric(horizontal=20, vertical=10),
-        bgcolor=AppColors.SURFACE,
+        bgcolor=AppColors.BACKGROUND,
         border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
     )
 
