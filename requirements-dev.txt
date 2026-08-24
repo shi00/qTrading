@@ -511,7 +511,7 @@ sqlalchemy==2.0.52
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
-sqlparse==0.5.5
+sqlparse==0.6.0
     # via astockscreener (pyproject.toml)
 sse-starlette==3.4.6
     # via mcp
