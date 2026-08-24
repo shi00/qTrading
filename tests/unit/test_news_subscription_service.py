@@ -16,6 +16,7 @@
 
 import asyncio
 import functools
+import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -415,6 +416,14 @@ class TestGenerateTags:
         with patch("services.news_subscription_service.I18n.get", return_value="📊 Data"):
             await svc._generate_tags("  spaced content  ")
         svc.ai_client.classify_news.assert_called_once_with("spaced content")
+
+    @pytest.mark.asyncio
+    async def test_ai_exception_logs_classify_error_code(self, svc, caplog):
+        """M9: AI 失败日志应含 classify_error 的结构化 code 字段。"""
+        svc.ai_client.classify_news = AsyncMock(side_effect=RuntimeError("connection timeout"))
+        with caplog.at_level(logging.WARNING, logger="services.news_subscription_service"):
+            await svc._generate_tags("普通新闻无关键词")
+        assert any("code=timeout" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

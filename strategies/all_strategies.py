@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 _strategies_imported = False
 
+# M10-004: 首次真实导入后的策略注册表快照。Python import 幂等，清空注册表后
+# 重新 import 不会重新触发 @register_strategy，因此必须以快照方式保留真实策略，
+# 供 _reset_strategy_registry 恢复，同时保证类身份不变（isinstance 不失配）。
+_real_strategy_snapshot: dict[str, type] | None = None
+
 
 def _import_all_strategies():
     """Import all strategy modules to trigger @register_strategy.
@@ -26,7 +31,7 @@ def _import_all_strategies():
     This is called lazily by StrategyManager.__init__ to avoid
     import-time side effects.
     """
-    global _strategies_imported
+    global _strategies_imported, _real_strategy_snapshot
     if _strategies_imported:
         return
     _strategies_imported = True
@@ -35,6 +40,12 @@ def _import_all_strategies():
     import strategies.fundamental  # noqa: E402
     import strategies.market  # noqa: E402
     import strategies.oversold_strategy  # noqa: E402, F401
+
+    # 仅首次导入时缓存真实策略快照，之后不再更新（恢复目标固定为真实策略集合）。
+    # 守卫保证快照只捕获一次：即使某测试在注入 mock 后触发真实导入，也不会把
+    # mock 吸入全局快照，避免持久污染后续测试的恢复目标。
+    if _real_strategy_snapshot is None:
+        _real_strategy_snapshot = get_strategy_registry()
 
 
 @register_singleton
@@ -61,22 +72,35 @@ class StrategyManager:
         return cls._instance
 
     @classmethod
+    def _reset_strategy_registry(cls):
+        """Restore _STRATEGY_REGISTRY to the real-strategy snapshot (R7 / M10-004).
+
+        测试隔离：_reset_singleton 后注册表恢复到首次导入时的真实策略快照，清除
+        测试期间直接写入注册表的 mock 策略，同时复用真实策略类对象（类身份不变，
+        isinstance 不失配）。快照未建立（从未真实导入）时不做任何事，幂等安全。
+        """
+        from strategies.base_strategy import _STRATEGY_REGISTRY, _REGISTRY_LOCK
+
+        if _real_strategy_snapshot is None:
+            return
+        with _REGISTRY_LOCK:
+            _STRATEGY_REGISTRY.clear()
+            _STRATEGY_REGISTRY.update(_real_strategy_snapshot)
+
+    @classmethod
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production.
 
         R7 合规：除重置 _instance/_initialized 外，同时重置模块级 _strategies_imported
-        标志，确保下次实例化时重新触发 _import_all_strategies()。
-
-        注意：_STRATEGY_REGISTRY 不在此重置。Python import 是幂等的，清空 registry 后
-        重新执行 _import_all_strategies() 不会重新触发 @register_strategy 装饰器，
-        会导致真实策略丢失。测试中如需隔离策略注册，应使用 patch("...get_strategy_registry")
-        或使用独特 key 的 mock 策略（不与真实策略 key 冲突）。
+        标志，并恢复策略注册表到真实策略快照（清除测试期间 mock 策略），确保下次
+        实例化时重新触发 _import_all_strategies() 且真实策略完整保留。
         """
         global _strategies_imported
         with cls._lock:
             cls._instance = None
             cls._initialized = False
             _strategies_imported = False
+        cls._reset_strategy_registry()
 
     @classmethod
     def _atexit_cleanup(cls):
