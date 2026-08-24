@@ -34,6 +34,45 @@ logger = logging.getLogger(__name__)
 from utils.singleton_registry import register_singleton
 
 
+async def _await_cancel_aware(awaitable, cancel_check):
+    """将 awaitable 与取消轮询竞速，使 cancel_event flag 协作式取消能打断长 await。
+
+    sync_concepts 的 fetch_one 在 await Tushare API 期间（TokenBucket 限速 sleep /
+    网络 run_in_executor）仅靠前后 is_cancelled() 检查无法及时中断，取消响应可能
+    超过 2s 红线（project_memory 硬约束「check cancel_event every 2s」）。本辅助以
+    0.25s 轮询 cancel_check；未取消则无限等待底层任务，不施加固定时长上限，从而保持
+    「TokenBucket 唯一限速真相源」语义（不使用 wait_for(timeout=N)）。检测到取消时
+    cancel 内层任务并 raise CancelledError（R2：不吞没）。
+    注：取消作用于事件循环层；底层 run_in_executor 线程仍按 _handle_api_call 的
+    wait_for 超时排空，不影响 ≤2s 的编排层取消响应。
+    """
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=0.25)
+            if task in done:
+                return task.result()
+            if cancel_check():
+                task.cancel()
+                raise asyncio.CancelledError()
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        elif not task.cancelled():
+            # 竞态窗口：内层任务以真实异常完成，同时外层 wait 收到取消而进入本分支，
+            # return task.result() 不会执行 → 异常将被静默丢弃。补记日志防数据丢失无痕。
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "[SyncConcepts] inner API task failed within cancel window, result not consumed: %s",
+                    safe_error(exc),
+                )
+
+
 @register_singleton
 class DataProcessor(HealthCheckMixin, CalendarMixin):
     """
@@ -652,7 +691,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     # Double check inside semaphore
                     if self.is_cancelled():
                         return None
-                    result = await self.api.get_concept_detail_by_id(c)
+                    result = await _await_cancel_aware(
+                        self.api.get_concept_detail_by_id(c),
+                        self.is_cancelled,
+                    )
                     # Post-API cancel check: is_cancelled() 是 O(1) flag 读取，
                     # 无等待语义；cancel_event 被 set 后立即返回 True。
                     if self.is_cancelled():

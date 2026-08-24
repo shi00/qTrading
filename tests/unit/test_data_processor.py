@@ -416,6 +416,41 @@ class TestDataProcessorSyncConcepts:
         dp.cache.overwrite_concepts.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_sync_concepts_cancel_within_2s_during_blocked_api_call(self):
+        """P3-SyncConcepts-Cancel-Response-2s DoD: get_concept_detail_by_id 阻塞
+        （模拟 TokenBucket 限速 sleep / 网络等待）时，cancel_event.set() 后
+        sync_concepts 应在约 2s 内 raise CancelledError。
+
+        修复前 fetch_one 全靠 API await 前后的 is_cancelled() 轮询，阻塞期内
+        无法中断，取消响应可能超 2s；_await_cancel_aware 以 0.25s 轮询打断阻塞
+        await，保证 ≤2s 取消响应（project_memory 硬约束）。"""
+        dp = _make_dp()
+        df_c = pd.DataFrame({"code": ["TS1"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+
+        # 用信号同步取代固定 sleep，消除「task 尚未进入阻塞 await 即触发取消」
+        # 的时序竞态（该竞态会让 fetch_one 预检短路 return，测试误报失败）
+        _entered_block = asyncio.Event()
+
+        # 阻塞的 API：永不返回，直到其所在 task 被取消
+        async def _blocking_detail(c):
+            _entered_block.set()
+            await asyncio.Event().wait()
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_blocking_detail)
+        dp.cache.overwrite_concepts = AsyncMock()
+        dp.clear_cancel()
+
+        task = asyncio.create_task(dp.sync_concepts())
+        await _entered_block.wait()  # 确保已进入阻塞的 API await
+        await dp.request_cancel()  # 触发 cancel_event
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion weak_raises_only  # [reason: body 内无法插入 assert（期望异常会提前终止 body）；已在 with 后补强断言验证取消后未落库]
+            await asyncio.wait_for(task, timeout=2.0)
+        # 强断言：取消后 sync_concepts 未走到落库（overwrite_concepts 未被调用）
+        dp.cache.overwrite_concepts.assert_not_called()
+        assert dp.is_cancelled()
+
+    @pytest.mark.asyncio
     async def test_sync_concepts_no_concept_delay_literal(self):
         """P3-SyncConcepts-Dual-RateLimit DoD ①: CONCEPT_DELAY = 3.0 字面值赋值
         从 data_processor.py 移除（grep 验证）。注释中提及 CONCEPT_DELAY 是允许的
