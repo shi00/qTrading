@@ -257,6 +257,7 @@ def HomeView(
                 retry_text=I18n.get("common_retry"),
                 on_cta=_navigate_to_data_source,
                 cta_text=I18n.get("home_goto_data_source"),
+                cta_icon=ft.Icons.SETTINGS,  # UX-03 (P2-09): 前往设置页数据源, 显式传入保持语义
             )
         )
     elif state.is_loading:

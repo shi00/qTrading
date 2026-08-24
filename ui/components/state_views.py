@@ -29,6 +29,7 @@ def EmptyState(
     message: str = "",
     on_cta: Callable[[], None] | None = None,
     cta_text: str | None = None,
+    cta_icon: str | None = None,
 ) -> ft.Container:
     """空态占位组件 (P1-3).
 
@@ -38,6 +39,8 @@ def EmptyState(
         message: 描述文案 (已翻译字符串)。
         on_cta: 主操作回调 (可选); None 时不渲染 CTA 按钮。
         cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta`` 非空时必填。
+        cta_icon: CTA 按钮图标 (可选, UX-03 P2-09); None 时不显示图标,
+            传入时渲染该图标 — 由消费方按动作语义提供, 避免固定图标误导。
     """
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -74,7 +77,7 @@ def EmptyState(
         column_controls.append(
             ft.TextButton(
                 content=cta_text,
-                icon=ft.Icons.REFRESH,
+                icon=cta_icon,  # UX-03 (P2-09): None → 无图标; 传入 → 按动作语义渲染
                 on_click=safe_on_click(_on_click),
                 style=ft.ButtonStyle(color=AppColors.PRIMARY),
             ),
@@ -103,6 +106,7 @@ def ErrorState(
     retry_text: str | None = None,
     on_cta: Callable[[], None] | None = None,
     cta_text: str | None = None,
+    cta_icon: str | None = None,
 ) -> ft.Container:
     """错误态占位组件 (P1-3).
 
@@ -116,6 +120,8 @@ def ErrorState(
         retry_text: 重试按钮文案 (已翻译字符串); ``on_retry`` 非空时必填。
         on_cta: 次操作回调 (可选, 如反馈问题/导航到设置页); None 时不渲染 CTA 按钮。
         cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta`` 非空时必填。
+        cta_icon: 次 CTA 按钮图标 (可选, UX-03 P2-09); None 时不显示图标,
+            传入时渲染该图标 — 由消费方按动作语义提供, 避免固定图标误导。
     """
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -169,7 +175,7 @@ def ErrorState(
         column_controls.append(
             ft.TextButton(
                 content=cta_text,
-                icon=ft.Icons.SETTINGS,
+                icon=cta_icon,  # UX-03 (P2-09): None → 无图标; 传入 → 按动作语义渲染
                 on_click=safe_on_click(_on_cta_click),
                 style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
             ),
