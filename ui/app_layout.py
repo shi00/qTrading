@@ -40,7 +40,7 @@ from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
-from ui.views.settings_view import SettingsView
+from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
 from ui.views.task_center_view import TaskCenterView
 from ui.views.watchlist_view import WatchlistView
 from utils.log_decorators import UILogger
@@ -82,8 +82,28 @@ def _get_page() -> ft.Page | None:
         return None
 
 
+def _parse_navigate_message(message: str) -> tuple[str, str | None]:
+    """解析 TOPIC_NAVIGATE 消息 "<tab>" / "<tab>:<subtab>" (UX-01 导航深链协议).
+
+    Args:
+        message: 协议消息。tab 段保持原样 (后续 upper 查 NavTabs),
+            subtab 段归一为小写。
+
+    Returns:
+        ``(tab_name, subtab | None)``; 格式非法 (多段 / 空 tab / 空 subtab)
+        返回 ``("", None)``。
+    """
+    parts = message.split(":")
+    if not parts[0] or len(parts) > 2 or (len(parts) == 2 and not parts[1]):
+        return ("", None)
+    return (parts[0], parts[1].lower() if len(parts) == 2 else None)
+
+
 @ft.component
-def _build_pages_stack(current_tab: int) -> ft.Stack:
+def _build_pages_stack(
+    current_tab: int,
+    settings_subtab_request: tuple[str, int] | None = None,
+) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
     项目内存硬约束 #34: state-driven rendering (ft.Stack + visible prop)
@@ -102,6 +122,8 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
 
     Args:
         current_tab: 当前激活的 NavTabs 值, 控制 visible prop。
+        settings_subtab_request: UX-01 导航深链的 settings 子页请求
+            ``(subtab_key, seq)``, 透传给 SettingsView。
     """
     is_e2e = os.environ.get("E2E_TESTING") == "true"
 
@@ -155,7 +177,10 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
         ),
         ft.Container(
             content=_make_content(
-                lambda: SettingsView(active=current_tab == NavTabs.SETTINGS),
+                lambda: SettingsView(
+                    active=current_tab == NavTabs.SETTINGS,
+                    target_subtab=settings_subtab_request,
+                ),
                 current_tab == NavTabs.SETTINGS,
             ),
             expand=True,
@@ -278,6 +303,9 @@ def AppLayout() -> ft.Container:
     # --- Pure UI state ---
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
+    # UX-01 导航深链: settings 子页请求 (subtab_key, seq), seq 递增使重复深链可重触发
+    settings_subtab_request: tuple[str, int] | None = None
+    settings_subtab_request, set_settings_subtab_request = ft.use_state(settings_subtab_request)
 
     # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
     async def _do_tab_switch(new_tab: int) -> None:
@@ -304,15 +332,40 @@ def AppLayout() -> ft.Container:
     # --- PubSub 导航订阅 (P1-3 批次 2 #55): home_view ErrorState CTA 通过 TOPIC_NAVIGATE 广播 ---
 
     def _on_navigate(topic: str, message: str) -> None:
-        """TOPIC_NAVIGATE 事件处理: 切换 NavigationRail selected_index."""
+        """TOPIC_NAVIGATE 事件处理: 切换 NavigationRail selected_index (UX-01 深链协议).
+
+        消息格式: "<tab>" 或 "<tab>:<subtab>" (目前仅 settings 定义子页 key)。
+        未知子页降级为切主 tab, 不吞导航; 格式非法整体忽略。
+
+        Note:
+            本 handler 是订阅时闭包 (use_effect(dependencies=[]) 只执行一次),
+            捕获的 state 值读取是 stale 的 → 内部禁止读取 state 当前值做逻辑判断,
+            state 写入必须用函数式更新。
+        """
         if topic != TOPIC_NAVIGATE:
             return
+        tab_name, subtab = _parse_navigate_message(message)
+        if not tab_name:
+            logger.warning("[AppLayout] Invalid navigation message format: %s", message)
+            return
         try:
-            target_tab = NavTabs[message.upper()]
+            target_tab = NavTabs[tab_name.upper()]
         except KeyError:
             logger.warning("[AppLayout] Unknown navigation target: %s", message)
             return
+        # UX-01: 深链子页仅 settings 定义; 未知/越页子页降级为切主 tab (不吞导航)
+        if subtab is not None and (int(target_tab) != int(NavTabs.SETTINGS) or subtab not in SETTINGS_SUBTAB_INDEX):
+            logger.warning(
+                "[AppLayout] Unknown subtab %r for tab %s, fallback to main tab",
+                subtab,
+                tab_name,
+            )
+            subtab = None
+        if subtab is not None:
+            # 函数式更新: 读取 hook.value 动态值递增 seq, 防订阅时闭包 stale 快照
+            set_settings_subtab_request(lambda old: (subtab, (old[1] + 1) if old else 1))
         if int(target_tab) == int(current_tab):
+            # stale 快照下几乎不命中; 命中时子页请求已先行 set, 深链不被吞
             return
         page = _get_page()
         if page is not None:
@@ -382,7 +435,7 @@ def AppLayout() -> ft.Container:
 
     logger.info("[AppLayout] building pages stack")
     body = ft.Container(
-        content=_build_pages_stack(int(current_tab)),
+        content=_build_pages_stack(int(current_tab), settings_subtab_request),
         expand=True,
         padding=AppStyles.SPACING_XL,
         bgcolor=AppColors.BACKGROUND,

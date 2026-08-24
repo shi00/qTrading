@@ -97,15 +97,17 @@ def HomeView(
         _refresh_clicked(typing.cast(ft.ControlEvent, None))
 
     def _navigate_to_data_source() -> None:
-        """ErrorState CTA: PubSub 广播导航到 data_source 设置页 (P1-3 批次 2 #55).
+        """ErrorState CTA: PubSub 广播深链导航到 data_source 设置子页 (UX-01).
 
-        home_view 无 page.go() 路由, 通过 PubSub TOPIC_NAVIGATE 广播,
-        app_layout 订阅后切换 NavigationRail selected_index。
+        home_view 无 page.go() 路由, 通过 PubSub TOPIC_NAVIGATE 广播
+        "<tab>:<subtab>" 深链消息 (UX-01 协议), app_layout 订阅后切换
+        NavigationRail selected_index 并激活 settings 的 data 子页,
+        一次点击直达目标子页 (非设置壳)。
         """
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings")
+                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
         except RuntimeError:
             logger.debug("[HomeView] page not available for navigation")
 

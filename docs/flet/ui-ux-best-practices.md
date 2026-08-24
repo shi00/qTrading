@@ -135,6 +135,23 @@ Flet 使用 Flutter 渲染，但 Flet Python API 不等同于 Flutter Widget API
 - **[建议]** Tabs 只用于同一上下文中的并列内容，不作为任意深度路由系统。
 - **[建议]** 用户能从标题、选中状态或路径信息判断当前位置。
 
+#### 导航深链协议（TOPIC_NAVIGATE，UX-01）
+
+跨视图导航统一走 PubSub `TOPIC_NAVIGATE` 单通道，消息格式为 `"<tab>"` 或 `"<tab>:<subtab>"`：
+
+| 消息 | 行为 |
+|------|------|
+| `"settings"` | 切换到 settings 主 tab（向后兼容） |
+| `"settings:data"` | 切换到 settings 主 tab 并激活 data 子页（深链） |
+| `"settings:<未知子页>"` | warning + 降级为仅切主 tab（不吞导航） |
+| `"<非 settings tab>:<subtab>"` | warning + 子页段忽略（目前仅 settings 定义子页） |
+| `"a:b:c"` / 空段 | warning + 整体忽略 |
+
+- 合法子页 key：`data` / `database` / `ai` / `tasks` / `notify` / `system`（单一事实源：`ui/views/settings_view.py` 的 `SETTINGS_SUBTAB_INDEX`，从 `_TAB_CONFIG` 派生，与 `EIDS.SETTINGS.tab` role 对齐）。
+- 发送方示例：`page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")`（见 `home_view._navigate_to_data_source`）。
+- 实现约束（Flet hooks 语义）：订阅 handler 是订阅时闭包，内部 state 读取是 stale 的——`AppLayout._on_navigate` 内禁止读取 state 当前值做逻辑判断，state 写入必须用函数式更新（seq 递增防重复深链失效）；子页激活经 `SettingsView` 的 `target_subtab=(key, seq)` prop + `use_effect(dependencies=[target_subtab])` 应用。
+- 扩展新页面子页时：以同一协议扩展（key 表与消费方 prop 同步新增），不新增 PubSub topic。
+
 ### 4.4 反馈组件
 
 - **[必须] 字段错误**：紧邻字段显示，说明如何修正。

@@ -775,3 +775,178 @@ class TestSettingsViewComponentBody:
         show_snack_closure = self.mock_data.call_args[0][0]
         # 不抛异常即可
         show_snack_closure("msg")
+
+
+# ---------------------------------------------------------------------------
+# UX-01: target_subtab 导航深链激活子页
+# ---------------------------------------------------------------------------
+
+
+def _selected_tab_index(result: object) -> int:
+    """返回当前 selected 状态的 tab button 索引 (bgcolor=PRIMARY)."""
+    buttons = _find_buttons(result)
+    assert len(buttons) == 6, f"应有 6 个 tab button, 实际 {len(buttons)}"
+    for i, btn in enumerate(buttons):
+        bgcolor = getattr(btn.style, "bgcolor", None)
+        if bgcolor is None and isinstance(btn.style, dict):
+            bgcolor = btn.style.get("bgcolor")
+        if bgcolor == AppColors.PRIMARY or bgcolor == {ft.ControlState.DEFAULT: AppColors.PRIMARY}:
+            return i
+    raise AssertionError("未找到 selected 状态的 tab button")
+
+
+class TestSettingsViewTargetSubtab:
+    """UX-01: SettingsView target_subtab prop 深链激活子页.
+
+    协议: target_subtab = (subtab_key, seq), seq 为发送方递增序号,
+    使重复同 key 深链 (用户手动切走后再点同 CTA) 可再次触发 effect。
+
+    覆盖:
+    - 首挂 target_subtab 非空 → effect 应用 (AppLayout E2E 分支构造时序)
+    - props 变更 (seq 递增) → effect 重触发切页
+    - 重复同 key 深链 → 重新切回目标子页
+    - target_subtab=None → 默认 tab 0
+    - 非法 key → warning + 不切换
+    - 首次深链子页加入 visited_tabs (惰性构造)
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_all_tabs(self):
+        """Patch 6 个 tabs 避免真实实例化。"""
+        with (
+            patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
+            patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
+            patch("ui.views.settings_view.AIBrainTab") as self.mock_ai,
+            patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
+            patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
+            patch("ui.views.settings_view.SystemTab") as self.mock_system,
+        ):
+            self.mock_data.return_value = MagicMock(name="DataSourceTab")
+            self.mock_db.return_value = MagicMock(name="DatabaseTab")
+            self.mock_ai.return_value = MagicMock(name="AIBrainTab")
+            self.mock_auto.return_value = MagicMock(name="AutomationTab")
+            self.mock_notify.return_value = MagicMock(name="NotificationsTab")
+            self.mock_system.return_value = MagicMock(name="SystemTab")
+            yield
+
+    def _mount(self, target_subtab: object):
+        """挂载 SettingsView (含首挂 effect) 并返回首次渲染结果树."""
+        from tests.unit.ui.component_renderer import (
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+        from ui.views.settings_view import SettingsView
+
+        component = make_component(SettingsView, target_subtab=target_subtab)
+        run_mount_effects(component)
+        # run_mount_effects 内部 render_once 在 effect 之前, 需再渲染一次
+        # 让 effect 的 set_current_tab 反映到控件树
+        return component, render_once(component)
+
+    def _rerender(self, component, target_subtab: object):
+        """更新 target_subtab prop 并驱动 re-render effects, 返回新渲染树."""
+        from tests.unit.ui.component_renderer import (
+            render_once,
+            run_render_effects,
+        )
+
+        component.kwargs["target_subtab"] = target_subtab
+        run_render_effects(component)
+        return render_once(component)
+
+    def test_initial_target_subtab_activates_tab(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """首挂 target_subtab=("ai",1) → ai 子页 (index 2) 为选中态."""
+        _, result = self._mount(("ai", 1))
+        assert _selected_tab_index(result) == 2, "深链 ai 子页应被激活"
+
+    def test_target_subtab_change_switches_tab(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """target_subtab ("data",1) → ("system",2) 变更 → 切到 system 子页 (index 5)."""
+        component, _ = self._mount(("data", 1))
+        result = self._rerender(component, ("system", 2))
+        assert _selected_tab_index(result) == 5, "深链变更应切到 system 子页"
+
+    def test_repeated_deep_link_same_key_retriggers(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """手动切走后再发同 key 深链 (seq 递增) → 重新切回目标子页."""
+        from tests.unit.ui.component_renderer import render_once
+
+        component, result = self._mount(("ai", 1))
+        assert _selected_tab_index(result) == 2
+
+        # 模拟用户手动切到 system 子页 (index 5)
+        buttons = _find_buttons(result)
+        _trigger_callback(buttons[5].on_click, _make_tab_event("5"))
+        result = render_once(component)
+        assert _selected_tab_index(result) == 5
+
+        # 同 key 深链再次到达 (seq 2) → 重新切回 ai 子页
+        result = self._rerender(component, ("ai", 2))
+        assert _selected_tab_index(result) == 2, "重复深链应重新激活 ai 子页"
+
+    def test_target_subtab_none_keeps_default(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """target_subtab=None → 默认 tab 0, 无异常."""
+        _, result = self._mount(None)
+        assert _selected_tab_index(result) == 0
+
+    def test_invalid_key_warns_and_keeps_tab(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """非法 key ("bad",1) → logger.warning + 保持默认 tab 0."""
+        with patch("ui.views.settings_view.logger") as mock_logger:
+            _, result = self._mount(("bad", 1))
+            mock_logger.warning.assert_called_once()
+        assert _selected_tab_index(result) == 0, "非法 key 不应切换子页"
+
+    def test_deep_link_adds_to_visited_tabs(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ):
+        """首挂深链 ("ai",1) → ai 子页首次访问即加入 visited_tabs (被构造)."""
+        _, result = self._mount(("ai", 1))
+        # 首挂只构造 tab 0; effect 应用后 ai (index 2) 加入 visited → 被构造
+        assert self.mock_ai.call_count >= 1, "深链目标子页应被构造 (visited_tabs 累积)"
+        # 深链目标子页可见
+        stacks = [c for c in _collect_controls(result) if isinstance(c, ft.Stack)]
+        assert len(stacks) >= 1
+        # 未深链的 system tab (index 5) 未被构造
+        self.mock_system.assert_not_called()
+        # 渲染树: visited 的 tab content 非 None (ai), 未访问 tab content None (system)
+        tab_body_stack = stacks[-1]
+        assert tab_body_stack.controls[2].content is not None, "深链 ai 子页应被构造"
+        assert tab_body_stack.controls[5].content is None, "未访问 system 子页不应被构造"
+
+
+class TestSettingsSubtabIndex:
+    """UX-01: SETTINGS_SUBTAB_INDEX 常量从 _TAB_CONFIG 派生 (单一事实源)."""
+
+    def test_index_maps_keys_to_positions(self):
+        """子页 key → 索引映射与 _TAB_CONFIG 顺序一致."""
+        from ui.views.settings_view import SETTINGS_SUBTAB_INDEX
+
+        assert SETTINGS_SUBTAB_INDEX == {
+            "data": 0,
+            "database": 1,
+            "ai": 2,
+            "tasks": 3,
+            "notify": 4,
+            "system": 5,
+        }
