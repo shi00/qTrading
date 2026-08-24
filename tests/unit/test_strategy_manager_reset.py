@@ -4,13 +4,10 @@ Verifies M10-003 fix: _reset_singleton now resets the module-level
 _strategies_imported flag (in addition to _instance/_initialized) so that
 the next StrategyManager() instantiation re-triggers _import_all_strategies().
 
-Scope note:
-    _STRATEGY_REGISTRY is intentionally NOT cleared by _reset_singleton.
-    Python import is idempotent — clearing the registry would prevent real
-    strategies from being re-registered (the @register_strategy decorator
-    only fires on first import). Tests needing isolated strategy registration
-    should patch get_strategy_registry or use unique mock keys that don't
-    collide with real strategy keys.
+Verifies M10-004 fix: _reset_singleton additionally restores _STRATEGY_REGISTRY
+to the real-strategy snapshot captured at first import, so mock strategies
+registered during a test are cleared while real strategy class identity is
+preserved (isinstance does not mismatch).
 
 These tests validate the contract documented in
 strategies/all_strategies.py:StrategyManager._reset_singleton docstring.
@@ -114,3 +111,52 @@ class TestStrategyManagerResetModuleState:
                 StrategyManager()
 
         assert all_strategies._strategies_imported is True
+
+    def test_reset_singleton_restores_registry_to_real_snapshot(self):
+        """M10-004: reset 后注册表恢复到真实策略快照，mock 策略被清除且类身份不变。
+
+        单测中直接写入注册表的 mock 策略在 _reset_singleton 后消失；真实策略
+        集合与类对象均与快照一致（类身份复用，isinstance 不失配）。
+        """
+        from strategies import all_strategies, base_strategy
+        from strategies.all_strategies import StrategyManager
+
+        # 建立快照：触发一次真实导入（不 patch _import_all_strategies / get_strategy_registry）
+        StrategyManager._reset_singleton()
+        with patch.object(StrategyManager, "_validate_i18n"):
+            StrategyManager()
+        assert all_strategies._real_strategy_snapshot is not None
+        real_keys = set(all_strategies._real_strategy_snapshot.keys())
+        assert real_keys, "真实策略快照不应为空"
+
+        # 模拟测试期间的 mock 策略注册
+        class _MockStrategy:
+            pass
+
+        with base_strategy._REGISTRY_LOCK:
+            base_strategy._STRATEGY_REGISTRY["_test_mock_strategy"] = _MockStrategy
+        assert "_test_mock_strategy" in base_strategy._STRATEGY_REGISTRY
+
+        StrategyManager._reset_singleton()
+
+        restored = dict(base_strategy._STRATEGY_REGISTRY)
+        assert "_test_mock_strategy" not in restored, "mock 策略应被清除"
+        assert set(restored.keys()) == real_keys, "真实策略集合应完整保留"
+        for k in real_keys:
+            assert restored[k] is all_strategies._real_strategy_snapshot[k], (
+                f"策略 '{k}' 类身份应与快照一致（isinstance 不失配）"
+            )
+
+    def test_reset_strategy_registry_noop_without_snapshot(self):
+        """快照未建立时 _reset_strategy_registry 幂等安全，不做任何修改。"""
+        from strategies import all_strategies, base_strategy
+        from strategies.all_strategies import StrategyManager
+
+        original_snapshot = all_strategies._real_strategy_snapshot
+        try:
+            all_strategies._real_strategy_snapshot = None
+            before = dict(base_strategy._STRATEGY_REGISTRY)
+            StrategyManager._reset_singleton()
+            assert dict(base_strategy._STRATEGY_REGISTRY) == before, "快照为 None 时注册表不应被修改"
+        finally:
+            all_strategies._real_strategy_snapshot = original_snapshot
