@@ -43,7 +43,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df, title="Test Chart")
 
@@ -62,7 +62,7 @@ class TestChartUtils:
         dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
         df = pd.DataFrame(data, index=dates)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df)
 
@@ -92,7 +92,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df)
 
@@ -109,7 +109,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df)
 
@@ -126,7 +126,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df, theme_mode="dark")
 
@@ -143,7 +143,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             result = generate_kline_figure(df, theme_mode="light")
 
@@ -161,7 +161,7 @@ class TestChartUtils:
         }
         df = pd.DataFrame(data)
 
-        with patch("ui.components.chart_utils.mpf.plot") as mock_plot:
+        with patch("mplfinance.plot") as mock_plot:
             mock_plot.return_value = (Figure(), [])
             generate_kline_figure(df)
 
@@ -169,3 +169,20 @@ class TestChartUtils:
         assert mock_plot.called
         plotted_df = mock_plot.call_args[0][0]
         assert list(plotted_df.index) == sorted(plotted_df.index)
+
+    def test_module_import_does_not_load_mplfinance(self, monkeypatch):
+        """M12: chart_utils 模块级 import 不应加载 mplfinance（惰性加载验证）。
+
+        从 sys.modules 移除 mplfinance 与 chart_utils 后干净重新导入，断言
+        mplfinance 未被 chart_utils 的模块级 import 拉入，且模块无 mpf 属性。
+        """
+        import sys
+
+        for mod in [m for m in list(sys.modules) if m == "mplfinance" or m.startswith("mplfinance.")]:
+            monkeypatch.delitem(sys.modules, mod)
+        monkeypatch.delitem(sys.modules, "ui.components.chart_utils", raising=False)
+
+        import ui.components.chart_utils
+
+        assert "mplfinance" not in sys.modules, "模块级 import 不应加载 mplfinance"
+        assert not hasattr(ui.components.chart_utils, "mpf"), "模块级不应存在 mpf 属性"
