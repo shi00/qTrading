@@ -122,7 +122,7 @@ class TestOnboardingVMInit:
         assert vm.current_step == 0
 
     def test_default_step_validated_empty(self, vm):
-        assert vm.step_validated == {}
+        assert not vm.is_step_validated("database")
 
     def test_default_sync_in_progress_false(self, vm):
         assert vm.sync_in_progress is False
@@ -242,9 +242,9 @@ class TestOnboardingVMNavigation:
 
     async def test_prev_step_resets_validation(self, bound_vm):
         bound_vm.current_step = 1  # database step validates_before_next
-        bound_vm.step_validated["database"] = True
+        bound_vm._step_validated["database"] = True
         await bound_vm.prev_step()
-        assert bound_vm.step_validated["database"] is False
+        assert not bound_vm.is_step_validated("database")
 
     async def test_skip_step_advances(self, bound_vm, snapshots):
         bound_vm.current_step = 4  # local_model step
@@ -267,9 +267,9 @@ class TestOnboardingVMNavigation:
         assert bound_vm.current_step == 7
 
     def test_invalidate_step(self, bound_vm):
-        bound_vm.step_validated["database"] = True
+        bound_vm._step_validated["database"] = True
         bound_vm.invalidate_step("database")
-        assert bound_vm.step_validated["database"] is False
+        assert not bound_vm.is_step_validated("database")
 
 
 # =====================================================================
@@ -280,7 +280,7 @@ class TestOnboardingVMNavigation:
 class TestOnboardingVMValidation:
     async def test_validate_skips_if_already_validated(self, bound_vm):
         bound_vm.current_step = 1
-        bound_vm.step_validated["database"] = True
+        bound_vm._step_validated["database"] = True
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         bound_vm.fn_validate_database.assert_not_awaited()
@@ -295,35 +295,35 @@ class TestOnboardingVMValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         bound_vm.fn_validate_database.assert_awaited_once()
-        assert bound_vm.step_validated["database"] is True
+        assert bound_vm.is_step_validated("database") is True
 
     async def test_validate_calls_token_fn(self, bound_vm):
         bound_vm.current_step = 2
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         bound_vm.fn_validate_token.assert_awaited_once()
-        assert bound_vm.step_validated["token"] is True
+        assert bound_vm.is_step_validated("token") is True
 
     async def test_validate_calls_cloud_ai_fn(self, bound_vm):
         bound_vm.current_step = 3
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         bound_vm.fn_validate_cloud_ai.assert_awaited_once()
-        assert bound_vm.step_validated["cloud_ai"] is True
+        assert bound_vm.is_step_validated("cloud_ai") is True
 
     async def test_validate_calls_local_model_fn(self, bound_vm):
         bound_vm.current_step = 4
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         bound_vm.fn_validate_local_model.assert_awaited_once()
-        assert bound_vm.step_validated["local_model"] is True
+        assert bound_vm.is_step_validated("local_model") is True
 
     async def test_validate_database_failure(self, bound_vm):
         bound_vm.fn_validate_database = AsyncMock(return_value=False)
         bound_vm.current_step = 1
         result = await bound_vm.validate_and_persist_current_step()
         assert result is False
-        assert bound_vm.step_validated.get("database") is not True
+        assert not bound_vm.is_step_validated("database")
 
     async def test_validation_sets_validation_in_progress(self, bound_vm, snapshots):
         bound_vm.current_step = 1
@@ -362,7 +362,7 @@ class TestOnboardingVMScheduleValidation:
         self._setup_schedule_vm(bound_vm, mock_config_handler)
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
-        assert bound_vm.step_validated["schedule"] is True
+        assert bound_vm.is_step_validated("schedule") is True
         assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_invalid_time_defaults(self, bound_vm, mock_config_handler):
@@ -428,7 +428,7 @@ class TestOnboardingVMScheduleValidation:
         mock_config_handler.save_config = MagicMock(side_effect=RuntimeError("disk full"))
         result = await bound_vm.validate_and_persist_current_step()
         assert result is False
-        assert not bound_vm.step_validated.get("schedule", False)
+        assert not bound_vm.is_step_validated("schedule")
 
 
 # =====================================================================

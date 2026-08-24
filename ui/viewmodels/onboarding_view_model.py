@@ -228,12 +228,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self._set_state(validation_in_progress=value)
 
     @property
-    def step_validated(self) -> dict[str, bool]:
-        return self._step_validated
-
-    @property
     def normalized_schedule_time(self) -> str:
         return self._state.normalized_schedule_time
+
+    def is_step_validated(self, step_id: str) -> bool:
+        """只读查询：步骤当前是否已验证。返回原子 bool，不暴露内部可变字典（MVVM 契约：
+        VM 不得向 View 暴露可变状态；step_validated 仅为验证短路缓存，非响应式 UI 状态）。"""
+        return self._step_validated.get(step_id, False)
 
     # ------------------------------------------------------------------
     # Config loading (参照 SystemSettingsViewModel._load_config_to_state 范式)
@@ -293,6 +294,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self.fn_push_schedule_state = None
         self.on_complete = None
         self._subscribers.clear()
+        self._step_validated.clear()
         self._state = OnboardingState()
 
     # ------------------------------------------------------------------
