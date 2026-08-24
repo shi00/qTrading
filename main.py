@@ -390,10 +390,14 @@ async def main(page: ft.Page):
         config.DB_URL = embedded_db_url
 
         ConfigHandler._db_url_override.set(embedded_db_url)
-
-        # P3 根因修复：embedded 模式下 pop 掉残留的 DATABASE_URL env var，
-        # 消除 ContextVar(Priority 0) 在 Flet 调度边界外失效时 env var(Priority 1)
-        # 兜底返回错误 URL 的隐患。子进程（如 DataExplorer 同步调用链）不再读到错误 URL。
+        # P1.5 embedded 模块级 override：ContextVar(P0) 只在传播了 context 的线程/任务可见，
+        # DataExplorer 同步引擎在线程池线程建连时读不到 P0；模块级覆盖确保其命中 embedded URL
+        # 而非残留 db_host/db_port，根治 embedded 模式连接错误端口(5432)。
+        ConfigHandler.set_embedded_db_url(embedded_db_url)
+        # ConfigHandler.get_db_url() 中 P1.5(embedded 模块级) 位于 P1(DATABASE_URL) 之前，
+        # 故 embedded URL 恒胜过残留 env var，已由优先级顺序保证。以下 pop 为防御性冗余，
+        # 消除子进程/第三方代码绕过 get_db_url() 直接读 os.environ["DATABASE_URL"] 时误用
+        # 废弃主机 URL 的隐患；即使将来去掉 pop，embedded URL 优先级契约不依赖它。
         removed = os.environ.pop("DATABASE_URL", None)
         if removed:
             logger.info(

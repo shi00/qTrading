@@ -47,6 +47,28 @@ class ConfigHandler:
     # in ThreadPoolManager.run_async(), so Alembic migrations running in the IO
     # thread pool see the override while concurrent calls from other threads do not.
     _db_url_override: contextvars.ContextVar[str | None] = contextvars.ContextVar("_db_url_override", default=None)
+    # Priority 1.5 (embedded): 模块级完整 URL override，跨 asyncio task / 线程一致可见。
+    # ContextVar(P0) 只能在传播了 context 的线程读到；DataExplorer 同步引擎在线程池线程
+    # 建连时 P0 失效，会回退到残留 db_host/db_port(P2)。模块级覆盖根治该场景。None 表示未启用。
+    _embedded_db_url: str | None = None
+
+    @classmethod
+    def set_embedded_db_url(cls, url: str) -> None:
+        """启用 embedded 运行时模块级完整 URL override（跨 task/线程可靠，非 ContextVar）。
+
+        进程级生命周期：应用启动时由 main.py embedded 分支设置一次，存续整个进程，
+        不随 asyncio task / 会话回收。Flet 多 session 仅在有独立 embedded 启动路径时
+        set 一次，故不会跨 session 泄漏（embedded UID 依赖 keyring-like 运行时注入）。
+        """
+        cls._embedded_db_url = url
+
+    @classmethod
+    def clear_embedded_db_url(cls) -> None:
+        """停用 embedded 模块级 override（进程运行期显式停用/测试隔离时调用）。
+
+        生产路径通常不调用——embedded 运行时进程级注入一次即存续；本方法主要服务于
+        单测 R7 隔离（见 tests/unit/conftest.py 的 autouse reset fixture）。"""
+        cls._embedded_db_url = None
 
     DEFAULT_CONFIG = get_default_config()
 
@@ -675,6 +697,15 @@ class ConfigHandler:
            migrations run from within the application). Highest priority.
         1. ``DATABASE_URL`` environment variable — always wins when set, so
            deployments can override the persisted config without editing JSON.
+           (In embedded mode ``_embedded_db_url`` at priority 1.5 takes
+           precedence, so the embedded DB URL always wins over a stale
+           ``DATABASE_URL`` env var even on threads/tasks where the priority-0
+           ``ContextVar`` is invisible.)
+        1.5 ``_embedded_db_url`` module-level override — set by
+           ``set_embedded_db_url()`` during embedded mode; visible across async
+           tasks / threads where the priority-0 ``ContextVar`` is not available
+           (e.g. DataExplorer's sync engine built on a thread-pool thread).
+           ``None`` in external mode, so behavior is unchanged.
         2. Rebuild from stored host/port/user/database + password via
            ``DatabaseConfigService.build_url()``, which properly URL-encodes
            credentials. Used once the user completes onboarding and ``db_host``
@@ -686,6 +717,14 @@ class ConfigHandler:
         override = ConfigHandler._db_url_override.get()
         if override is not None:
             return override
+
+        # Priority 1.5 (embedded): 模块级完整 URL override，跨 async task / 线程一致可见。
+        # 置于 Priority 1 (DATABASE_URL) 之前，使 embedded URL 恒胜过残留 env var——
+        # 与 ContextVar(P0) 「即使 env var 存在 embedded 也胜出」的意图一致，且不依赖
+        # main.py 对 DATABASE_URL 的 pop（清除同跳耦合）。external 模式恒 None，不受影响。
+        embedded_url = ConfigHandler._embedded_db_url
+        if embedded_url:
+            return embedded_url
 
         # Priority 1: DATABASE_URL environment variable
         env_url = os.environ.get("DATABASE_URL")

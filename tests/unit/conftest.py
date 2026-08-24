@@ -53,6 +53,22 @@ def _reset_data_explorer_shared_engine():
 
 
 @pytest.fixture(autouse=True)
+def _reset_embedded_db_url():
+    """Reset ConfigHandler._embedded_db_url before and after each unit test.
+
+    ConfigHandler._embedded_db_url is a module/class-level mutable override NOT
+    managed by singleton_registry nor any existing reset fixture. Leaving it set
+    would leak to later tests and shadow get_db_url()'s P2/P0 priority assertions
+    (CLAUDE.md R7 测试状态污染).
+    """
+    from utils.config_handler import ConfigHandler
+
+    ConfigHandler.clear_embedded_db_url()
+    yield
+    ConfigHandler.clear_embedded_db_url()
+
+
+@pytest.fixture(autouse=True)
 def _reset_metadata_manager_cache():
     """Reset MetaDataManager._alias_cache before and after each unit test.
 

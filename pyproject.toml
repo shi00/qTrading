@@ -41,7 +41,7 @@ dependencies = [
     "psycopg2-binary>=2.9.12",
     "sqlalchemy>=2.0.52",
     "alembic>=1.19.1",
-    "sqlparse>=0.5.5",
+    "sqlparse>=0.6.0",
     "litellm>=1.95.0",  # Upgrade to 1.95.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
     "llama-cpp-python>=0.3.33",
     "mplfinance>=0.12.10b0",
