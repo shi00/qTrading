@@ -11,7 +11,7 @@ import logging
 import threading
 import typing
 
-from strategies.base_strategy import get_strategy_registry
+from strategies.base_strategy import _REGISTRY_LOCK, _STRATEGY_REGISTRY, get_strategy_registry
 from core.i18n import I18n
 from utils.singleton_registry import register_singleton
 
@@ -44,8 +44,14 @@ def _import_all_strategies():
     # 仅首次导入时缓存真实策略快照，之后不再更新（恢复目标固定为真实策略集合）。
     # 守卫保证快照只捕获一次：即使某测试在注入 mock 后触发真实导入，也不会把
     # mock 吸入全局快照，避免持久污染后续测试的恢复目标。
+    # M10 回归修复：快照捕获直接读 _STRATEGY_REGISTRY 内部状态，绕过可被 mock 的
+    # get_strategy_registry()（经公开函数捕获时，测试 patch 可注入空 dict，导致空快照
+    # 被吸入全局快照，后续 _reset_strategy_registry 用空快照清空真实注册表）。
+    # 加非空校验兜底：空注册表时保持快照为 None，_reset_strategy_registry 走 noop。
     if _real_strategy_snapshot is None:
-        _real_strategy_snapshot = get_strategy_registry()
+        with _REGISTRY_LOCK:
+            if _STRATEGY_REGISTRY:
+                _real_strategy_snapshot = dict(_STRATEGY_REGISTRY)
 
 
 @register_singleton

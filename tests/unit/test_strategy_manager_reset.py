@@ -160,3 +160,48 @@ class TestStrategyManagerResetModuleState:
             assert dict(base_strategy._STRATEGY_REGISTRY) == before, "快照为 None 时注册表不应被修改"
         finally:
             all_strategies._real_strategy_snapshot = original_snapshot
+
+    def test_real_snapshot_not_polluted_by_mocked_registry(self):
+        """M10 回归契约：快照捕获直接读内部 _STRATEGY_REGISTRY，不受 mock 污染。
+
+        复现 #542 CI 失败场景：get_strategy_registry 被测试 patch 返回空 dict 时，
+        若 _real_strategy_snapshot 经该公开函数捕获会吸入空快照，导致
+        _reset_strategy_registry 用空快照清空真实注册表（Python import 幂等，
+        模块已缓存无法重新触发 @register_strategy，注册表永久为空）。
+        修复后必须直接读内部注册表，且仅在非空时捕获。
+        """
+        from strategies import all_strategies, base_strategy
+        from strategies.all_strategies import StrategyManager
+
+        # 确保真实策略模块已导入、注册表非空（幂等：已导入则无副作用）
+        import strategies.ai_strategy  # noqa: F401
+        import strategies.fundamental  # noqa: F401
+        import strategies.market  # noqa: F401
+        import strategies.oversold_strategy  # noqa: F401
+
+        with base_strategy._REGISTRY_LOCK:
+            assert base_strategy._STRATEGY_REGISTRY, "真实策略注册表不应为空"
+
+        # 重置到「首次导入」状态：快照未建立 + 导入标志复位
+        StrategyManager._reset_singleton()
+        with base_strategy._REGISTRY_LOCK:
+            all_strategies._real_strategy_snapshot = None
+
+        # 模拟 M10 回归场景：get_strategy_registry 被 mock 返回空 dict
+        with patch("strategies.all_strategies.get_strategy_registry") as mock_get_reg:
+            mock_get_reg.return_value = {}
+            with patch.object(StrategyManager, "_validate_i18n"):
+                StrategyManager()  # 触发真实导入（_import_all_strategies 未 patch）
+
+        # 快照必须捕获内部真实注册表，而非被 mock 的空 dict
+        assert all_strategies._real_strategy_snapshot is not None, "注册表非空时应捕获快照"
+        assert all_strategies._real_strategy_snapshot, "快照不应为空 dict（不应被 mock 污染）"
+        assert "value" in all_strategies._real_strategy_snapshot, "快照应包含真实策略 'value'"
+
+        # 重置链验证：清空注册表后 reset 应能从真实快照完整恢复（R7 契约）
+        with base_strategy._REGISTRY_LOCK:
+            base_strategy._STRATEGY_REGISTRY.clear()
+        StrategyManager._reset_singleton()
+        with base_strategy._REGISTRY_LOCK:
+            restored = dict(base_strategy._STRATEGY_REGISTRY)
+        assert restored == all_strategies._real_strategy_snapshot, "注册表应恢复到真实快照"
