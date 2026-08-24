@@ -1203,14 +1203,17 @@ class TestNavigateToDataSource:
 
     覆盖:
     - L110-111: try: page = ft.context.page
-    - L112-113: if page is not None: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings")
+    - L112-113: if page is not None: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
     - L114-115: except RuntimeError: logger.debug
+
+    UX-01: 消息从 "settings" 升级为深链 "settings:data",
+    一次点击直达数据源子页 (非设置壳)。
     """
 
     def test_navigate_to_data_source_broadcasts_navigate_to_settings(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
     ) -> None:
-        """L112-113: load_error 状态 + page 可用 → ErrorState CTA 广播导航到 settings."""
+        """L112-113: load_error 状态 + page 可用 → ErrorState CTA 广播深链 "settings:data"."""
         import ui.views.home_view as home_view_module
         from ui.views.home_view import TOPIC_NAVIGATE, HomeView
 
@@ -1238,8 +1241,8 @@ class TestNavigateToDataSource:
         page.pubsub.send_all_on_topic.reset_mock()
         on_cta()
 
-        # 验证: pubsub 广播导航到 settings tab
-        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings")
+        # 验证: pubsub 广播深链导航到 settings 的 data 子页
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings:data")
 
     def test_navigate_to_data_source_page_none_logs_debug(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch

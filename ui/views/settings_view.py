@@ -46,6 +46,11 @@ _TAB_CONFIG = [
     ("settings_tab_system", ft.Icons.TUNE),
 ]
 
+# UX-01 导航深链协议: 子页 key → 索引 (从 _TAB_CONFIG 派生, 单一事实源, 不手工维护顺序)
+SETTINGS_SUBTAB_INDEX: dict[str, int] = {
+    key.replace("settings_tab_", ""): idx for idx, (key, _icon) in enumerate(_TAB_CONFIG)
+}
+
 
 def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     """Centralized tab button style factory."""
@@ -137,7 +142,10 @@ def _show_snack_impl(
 
 
 @ft.component
-def SettingsView(active: bool = True) -> ft.Container:
+def SettingsView(
+    active: bool = True,
+    target_subtab: tuple[str, int] | None = None,
+) -> ft.Container:
     """Settings view — declarative shell container.
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
@@ -149,12 +157,33 @@ def SettingsView(active: bool = True) -> ft.Container:
     Issue #438: ``visited_tabs`` 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
     (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``AppLayout`` 模式一致)。
 
+    UX-01 导航深链: ``target_subtab`` 为 AppLayout 转发的外部导航意图
+    ``(subtab_key, seq)``; seq 递增使重复同 key 深链可再次触发 effect。
+    非法 key warning 忽略, 不吞主 tab 切换。
+
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
+        target_subtab: 深链子页请求 ``(subtab_key, seq)`` 或 None。
     """
     current_tab, set_current_tab = ft.use_state(0)
     visited_tabs, set_visited_tabs = ft.use_state({0})
     ft.use_state(get_observable_state)
+
+    # --- UX-01: 应用外部导航深链的子页激活请求 ---
+    def _apply_target_subtab() -> None:
+        if target_subtab is None:
+            return
+        subtab_key, _seq = target_subtab
+        idx = SETTINGS_SUBTAB_INDEX.get(subtab_key)
+        if idx is None:
+            logger.warning("[SettingsView] Unknown target subtab: %s", subtab_key)
+            return
+        # Issue #438: 首次访问的子页加入 visited_tabs (不可变更新, 触发重渲染构造该 Tab)
+        if idx not in visited_tabs:
+            set_visited_tabs(visited_tabs | {idx})
+        set_current_tab(idx)
+
+    ft.use_effect(_apply_target_subtab, dependencies=[target_subtab])
 
     # --- Capture page at render time for _show_snack closure ---
     # ft.context.page 在 page.run_task 回调中不可用 (Renderer 上下文未跨 run_task 传播),

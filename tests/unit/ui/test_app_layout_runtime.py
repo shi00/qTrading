@@ -556,6 +556,139 @@ class TestCleanupNavigate:
 
 
 # ============================================================================
+# UX-01: _parse_navigate_message 纯函数测试 (导航深链协议 "<tab>[:<subtab>]")
+# ============================================================================
+
+
+class TestParseNavigateMessage:
+    """UX-01: _parse_navigate_message 解析 "<tab>[:<subtab>]" 协议."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("screener", ("screener", None)),
+            ("settings:data", ("settings", "data")),
+            ("Settings:DATA", ("Settings", "data")),  # tab 段原样 (upper 查 NavTabs) / subtab 段 lower
+            ("a:b:c", ("", None)),  # 多段非法
+            (":data", ("", None)),  # 空 tab 非法
+            ("settings:", ("", None)),  # 空 subtab 非法
+            ("", ("", None)),  # 空消息非法
+        ],
+    )
+    def test_parse(self, message: str, expected: tuple[str, str | None]) -> None:
+        """合法/非法消息格式解析."""
+        from ui.app_layout import _parse_navigate_message
+
+        assert _parse_navigate_message(message) == expected
+
+
+# ============================================================================
+# UX-01: _on_navigate 深链协议处理测试
+# ============================================================================
+
+
+class TestOnNavigateDeepLink:
+    """UX-01: _on_navigate 深链 "<tab>:<subtab>" 协议处理测试.
+
+    覆盖:
+    - 深链切页: run_task(target) + SettingsView 收到 target_subtab
+    - 重复深链: seq 递增 (函数式更新防 stale closure)
+    - 未知子页: 降级切主 tab + target_subtab 保持 None
+    - 格式非法: warning + 不 run_task
+    - 非设置页带子页: 子页段忽略 + 正常切主 tab
+    """
+
+    def _render_pages_stack(self, env: dict) -> MagicMock:
+        """重渲染 AppLayout 并渲染 _build_pages_stack 子组件.
+
+        render_once 不递归渲染子 Component, 需手动渲染 _build_pages_stack
+        才会调用 SettingsView mock (携带最新 settings_subtab_request)。
+        """
+        result = render_once(env["component"])
+        env["result"] = result
+        body = result.content.controls[2]  # Row([nav_rail, VerticalDivider, body])
+        stack_component = body.content
+        render_once(stack_component)
+        settings_mock = env["mod"].SettingsView
+        assert "active" in settings_mock.call_args.kwargs, "SettingsView 应被 _build_pages_stack 构造 (含 active prop)"
+        return settings_mock
+
+    def test_deep_link_switches_tab_and_passes_subtab(self, app_layout_env) -> None:
+        """MARKET → "settings:data": run_task(SETTINGS) + SettingsView 收到 target_subtab=("data",1)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
+        _, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SETTINGS),), "深链应切换到 SETTINGS 主 tab"
+
+        settings_mock = self._render_pages_stack(env)
+        assert settings_mock.call_args.kwargs.get("target_subtab") == ("data", 1)
+
+    def test_repeated_deep_link_increments_seq(self, app_layout_env) -> None:
+        """两次 "settings:data" → seq 递增为 2 (函数式更新防 stale closure)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        env["mod"].SettingsView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
+        handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
+        settings_mock = self._render_pages_stack(env)
+        assert settings_mock.call_args.kwargs.get("target_subtab") == ("data", 2)
+
+    def test_unknown_subtab_falls_back_to_main_tab(self, app_layout_env) -> None:
+        """ "settings:nonexistent" → warning + 仍切 settings + target_subtab 保持 None."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+
+        with patch.object(env["mod"].logger, "warning") as mock_warn:
+            handler(env["mod"].TOPIC_NAVIGATE, "settings:nonexistent")
+            assert mock_warn.call_count == 1, "未知子页应记录 warning"
+        _, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SETTINGS),), "未知子页应降级切主 tab"
+
+        settings_mock = self._render_pages_stack(env)
+        assert settings_mock.call_args.kwargs.get("target_subtab") is None
+
+    def test_invalid_format_message_ignored(self, app_layout_env) -> None:
+        """ "settings:data:extra" → warning (含原消息) + 不 run_task."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        with patch.object(env["mod"].logger, "warning") as mock_warn:
+            handler(env["mod"].TOPIC_NAVIGATE, "settings:data:extra")
+            mock_warn.assert_called_once_with(
+                "[AppLayout] Invalid navigation message format: %s", "settings:data:extra"
+            )
+        assert not page.run_task.called, "格式非法消息不应调用 run_task"
+
+    def test_non_settings_tab_with_subtab_ignores_subtab(self, app_layout_env) -> None:
+        """ "screener:data" → warning + 正常切 screener 主 tab + target_subtab=None."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+
+        with patch.object(env["mod"].logger, "warning") as mock_warn:
+            handler(env["mod"].TOPIC_NAVIGATE, "screener:data")
+            assert mock_warn.call_count == 1, "非设置页带子页应记录 warning"
+        _, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SCREENER),), "应正常切换到 SCREENER 主 tab"
+
+        settings_mock = self._render_pages_stack(env)
+        assert settings_mock.call_args.kwargs.get("target_subtab") is None
+
+
+# ============================================================================
 # _build_nav_destinations(running_count > 0) 测试: nav_tasks 角标分支
 # ============================================================================
 
