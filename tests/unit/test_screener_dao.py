@@ -17,7 +17,7 @@ class TestScreenerDaoGetScreeningHistory:
     @pytest.mark.asyncio
     async def test_with_strategy(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_screening_history("test_strategy", limit=10)
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
@@ -25,7 +25,7 @@ class TestScreenerDaoGetScreeningHistory:
     @pytest.mark.asyncio
     async def test_without_strategy(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_screening_history(None, limit=10)
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
@@ -55,7 +55,7 @@ class TestScreenerDaoGetHistoryRecords:
     @pytest.mark.asyncio
     async def test_with_run_id(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date=None, run_id="r1")
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
@@ -63,7 +63,7 @@ class TestScreenerDaoGetHistoryRecords:
     @pytest.mark.asyncio
     async def test_with_trade_date(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date="20240615")
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
@@ -71,7 +71,7 @@ class TestScreenerDaoGetHistoryRecords:
     @pytest.mark.asyncio
     async def test_with_strategy_name(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
         result = await dao.get_history_records(trade_date="20240615", strategy_name="test")
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
@@ -81,7 +81,7 @@ class TestScreenerDaoGetPendingReviews:
     @pytest.mark.asyncio
     async def test_with_data(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(
+        dao._read_db_select = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "id": [1],
@@ -96,7 +96,7 @@ class TestScreenerDaoGetPendingReviews:
     @pytest.mark.asyncio
     async def test_empty(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         result = await dao.get_pending_reviews()
         assert result == []
 
@@ -105,7 +105,7 @@ class TestScreenerDaoGetLearningExamples:
     @pytest.mark.asyncio
     async def test_basic(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(
+        dao._read_db_select = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
