@@ -334,6 +334,14 @@ def ScreenerView(
     params_ref = ft.use_ref(lambda: {})
     _params_version, bump_params = ft.use_state(0)
 
+    # B12: 表格渲染 memo (memo_key, vt_columns, formatted_rows)。
+    # AI 流式更新触发高频 re-render 时, 数据/分页未变则跳过 _build_table_data 重算。
+    # use_ref(lambda: None) 会推断为 MutableRef[None] 无法持 tuple, 故 helper 显式返回 tuple | None。
+    def _init_table_memo() -> tuple | None:
+        return None
+
+    table_memo_ref = ft.use_ref(_init_table_memo)
+
     # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
@@ -750,13 +758,28 @@ def ScreenerView(
     status_text_value = _render_status_message(state.status_message)
     status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
 
-    # 表格数据: 从 VM 读取当前页
+    # 表格数据: 从 VM 读取当前页 (B12 memo: data_version + page_no + page_size + locale
+    # 均未变时复用已格式化结果, 避免 AI 流式更新高频 re-render 时重复执行 to_dict/全列格式化。
+    # 分页维度必须入 key: get_current_page_data() 按 (page_no-1)*page_size 切片,
+    # 翻页/改页大小后 data_version 不变, 纯 data_version key 会返回旧分页数据。
+    # locale 必须入 key: _format_cell_value 输出 unit_yi/unit_wan 等 locale 相关字符串,
+    # 切换语言后纯数据 key 会返回旧 locale 单位。
+    # df 空态前置判定 + memo=None 失效: 新 run 重置/无结果路径不改 data_version, 防止
+    # 陈旧命中 (memo key 需依赖 VM 侧 data_version 与内容变更原子递增, 见 screener_view_model
+    # _flush_ai_buffer / switch_to_realtime / load_history_data 的顺序修正))
     df = vm.get_current_page_data()
+    memo_key = (state.data_version, state.page_no, state.page_size, get_observable_state().locale)
+    memo = table_memo_ref.current
     if df is not None and not df.empty:
-        vt_columns, formatted_rows = _build_table_data(df, vm)
+        if memo is not None and memo[0] == memo_key:
+            vt_columns, formatted_rows = memo[1], memo[2]
+        else:
+            vt_columns, formatted_rows = _build_table_data(df, vm)
+            table_memo_ref.current = (memo_key, vt_columns, formatted_rows)
     else:
         vt_columns = []
         formatted_rows = []
+        table_memo_ref.current = None
 
     # 分页信息
     page_no = state.page_no
