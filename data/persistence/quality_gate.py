@@ -5,6 +5,8 @@ import os
 import typing
 from enum import IntEnum
 
+from utils.app_env import is_e2e_mode
+
 logger = logging.getLogger(__name__)
 
 _STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "true").lower() in ("true", "1", "yes")
@@ -56,7 +58,7 @@ def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
 
 def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
     """Shared logic to verify quality tier."""
-    if os.environ.get("E2E_TESTING") == "true":
+    if is_e2e_mode():
         logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
 
