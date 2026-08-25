@@ -1300,8 +1300,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 cols.insert(insert_idx + 1, "ai_reason")
 
                 self._full_results = self._full_results[cols]  # type: ignore[untyped]
-            self._update_pagination()
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(data_version=self._state.data_version + 1)
+            self._update_pagination()
 
             self._last_ai_update = time.time()
 
@@ -1363,7 +1365,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 self._ai_buffer.extend(self._discarded_buffer)
                 logger.debug("[ScreenerVM] Merged %s discarded items back to ai_buffer", len(self._discarded_buffer))
                 self._discarded_buffer = []
-            self._update_pagination(page_no=pn)
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(
                 mode="REALTIME",
                 page_no=pn,
@@ -1372,6 +1375,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 stream_cards=stream_cards,
                 data_version=self._state.data_version + 1,
             )
+            self._update_pagination(page_no=pn)
         else:
             self._set_state(mode="REALTIME")
         logger.info("[ScreenerVM] Switched to REALTIME mode")
@@ -1478,7 +1482,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 sort_column = "ai_score"
             else:
                 sort_column = None
-            self._update_pagination(page_no=1)
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(
                 page_no=1,
                 loading=False,
@@ -1486,6 +1491,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 sort_ascending=False,
                 data_version=self._state.data_version + 1,
             )
+            self._update_pagination(page_no=1)
         except asyncio.CancelledError:
             self._set_state(loading=False)
             raise
