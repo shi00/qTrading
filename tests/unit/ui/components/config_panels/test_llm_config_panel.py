@@ -35,7 +35,6 @@ from ui.components.config_panels.llm_config_panel import (
     _build_links_row,
     _build_model_options,
     _build_provider_options,
-    _get_provider_name,
     _on_acknowledgment_change_factory,
     _on_provider_change_factory,
     _on_refresh_click_factory,
@@ -215,6 +214,18 @@ class TestRenderMessageR9Guard:
         mock_i18n.get.assert_called_once_with("llm_switch_provider_hint", provider="DeepSeek")
         assert result == "已切换到 DeepSeek"
 
+    def test_render_message_translates_provider_key(self) -> None:
+        """D8: *_key 后缀 params 翻译为当前 locale 显示名，再渲染 hint 模板。"""
+        msg = Message("llm_switch_provider_hint", {"provider_key": "llm_provider_zhipu"})
+        with patch.object(panel_module, "I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **kw: (
+                "Zhipu AI" if key == "llm_provider_zhipu" else "已切换到 Zhipu AI"
+            )
+            result = _render_message(msg)
+        mock_i18n.get.assert_any_call("llm_provider_zhipu")
+        mock_i18n.get.assert_any_call("llm_switch_provider_hint", provider="Zhipu AI")
+        assert result == "已切换到 Zhipu AI"
+
     def test_render_message_function_body_has_no_api_key_reference(self) -> None:
         """R9: _render_message 函数源码不应直接引用 api_key 字段。
 
@@ -239,55 +250,6 @@ class TestRenderMessageR9Guard:
                 )
                 return
         raise AssertionError("_render_message 函数未找到")
-
-
-# ============================================================================
-# 模块级纯函数: _get_provider_name
-# ============================================================================
-
-
-class TestGetProviderName:
-    """_get_provider_name: 获取供应商显示名称 (locale 感知)。"""
-
-    def test_zh_cn_returns_name(self) -> None:
-        """zh_CN locale 返回 provider['name']。"""
-        provider = {"name": "智谱 AI", "name_en": "Zhipu AI"}
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.current_locale.return_value = "zh_CN"
-            result = _get_provider_name(provider, "zhipu")
-        assert result == "智谱 AI"
-
-    def test_non_zh_cn_returns_name_en(self) -> None:
-        """非 zh_CN locale 返回 provider['name_en']。"""
-        provider = {"name": "智谱 AI", "name_en": "Zhipu AI"}
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.current_locale.return_value = "en_US"
-            result = _get_provider_name(provider, "zhipu")
-        assert result == "Zhipu AI"
-
-    def test_non_zh_cn_falls_back_to_name_when_name_en_missing(self) -> None:
-        """非 zh_CN locale 但 name_en 缺失时 fallback 到 name。"""
-        provider = {"name": "智谱 AI"}
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.current_locale.return_value = "en_US"
-            result = _get_provider_name(provider, "zhipu")
-        assert result == "智谱 AI"
-
-    def test_zh_cn_name_missing_falls_back_to_provider_id(self) -> None:
-        """zh_CN locale 但 name 缺失时 fallback 到 provider_id。"""
-        provider: dict[str, str] = {}
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.current_locale.return_value = "zh_CN"
-            result = _get_provider_name(provider, "unknown")
-        assert result == "unknown"
-
-    def test_non_zh_cn_name_en_and_name_both_missing_falls_back_to_provider_id(self) -> None:
-        """非 zh_CN locale 但 name_en 和 name 都缺失时 fallback 到 provider_id。"""
-        provider: dict[str, str] = {}
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.current_locale.return_value = "en_US"
-            result = _get_provider_name(provider, "unknown")
-        assert result == "unknown"
 
 
 # ============================================================================
