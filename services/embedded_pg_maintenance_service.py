@@ -28,6 +28,7 @@ from typing import Any
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.config_handler import ConfigHandler
 from utils.config_models import AppConfig
+from utils.error_classifier import classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
@@ -307,8 +308,21 @@ class EmbeddedPgMaintenanceService:
         """
 
         def _run() -> tuple[int, str, str]:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
-            return proc.returncode, proc.stdout, proc.stderr
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
+                return proc.returncode, proc.stdout, proc.stderr
+            except subprocess.TimeoutExpired as exc:
+                # review03-C19: 超时经业务异常包装，用户看到可操作提示而非原始 subprocess 异常
+                severity = classify_severity(exc, "general")
+                logger.log(
+                    logging.WARNING if severity == "recoverable" else logging.ERROR,
+                    "[embedded_pg_maintenance] sidecar command timed out (severity=%s): %s",
+                    severity,
+                    DataSanitizer.sanitize_error(str(argv[:2])),
+                )
+                raise EmbeddedPgMaintenanceError(
+                    f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
+                ) from exc
 
         return await ThreadPoolManager().run_async(TaskType.IO, _run)
 
