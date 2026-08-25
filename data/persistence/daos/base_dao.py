@@ -11,6 +11,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from data.persistence import engine_provider
 from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
@@ -60,9 +61,9 @@ class BaseDao:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
             )
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
+        # review03-C11 Step2: disposed 状态查询从 CacheManager._instance 迁移到
+        # engine_provider（解除 data/persistence → data/cache 反向运行时查询）。
+        if engine_provider.is_disposed():
             suffix = f", {context} rejected." if context else "."
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed{suffix} Call CacheManager.init_db() to reinitialize."

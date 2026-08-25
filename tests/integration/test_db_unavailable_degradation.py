@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import text
 
 from data.cache.cache_manager import CacheManager
+from data.persistence import engine_provider
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import SyncResult, SyncStatus
 from tests._helpers import create_test_engine
@@ -93,14 +94,18 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         """DB disposed 时 save_daily_quotes 抛 EngineDisposedError（R5 守卫）。"""
         # 模拟 disposed 中间态：_disposed=True 但 engine 引用仍存在
         # (CacheManager.close() 会同时置 engine=None，此处仅模拟 disposed 标志)
+        # review03-C11: DAO 侧 R5 守卫读 engine_provider，测试同步置位保证生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
         df = _make_daily_quotes_df()
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
             await self.cache.save_daily_quotes(df)
 
     async def test_save_stock_basic_raises_when_disposed(self):
         """DB disposed 时 save_stock_basic 抛 EngineDisposedError（覆盖另一写路径）。"""
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
             await self.cache.save_stock_basic(_make_stock_basic_df())
 
@@ -110,7 +115,9 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         镜像 ``data/sync/historical.py`` 中 ``except EngineDisposedError`` 块的 raise 行为：
         EngineDisposedError 必须传播到调用方，不被吞没。
         """
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
 
         with caplog.at_level(logging.WARNING, logger=__name__):
             with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：raises 后续 caplog.text 已验证日志，scanner 跨 with 块识别受限
@@ -126,7 +133,9 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         - success + failed → failed（任一子任务 failed 即视整体 failed，传播生效）
         - failed + failed → failed（双重失败保持 failed，强化传播语义）
         """
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
 
         # 触发 EngineDisposedError，构造子任务 failed result
         sub_result = SyncResult()
@@ -157,7 +166,9 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         """DB disposed 时读操作抛 EngineDisposedError（R5 守卫）。"""
         await self.cache.save_stock_basic(_make_stock_basic_df())
         # 模拟 DB 断开
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
             await self.cache.get_stock_basic()
 
@@ -165,7 +176,9 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         """DB disposed 时 get_screening_data 抛 EngineDisposedError（覆盖 screening 读路径）。"""
         await self.cache.save_stock_basic(_make_stock_basic_df())
         await self.cache.save_daily_quotes(_make_daily_quotes_df())
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：验证 disposed 时读路径抛 EngineDisposedError，raises 本身即充分断言
             await self.cache.get_screening_data(trade_date=_RECENT.strftime("%Y%m%d"))
 
@@ -178,7 +191,9 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         - 返回空 DataFrame + degraded=True 标志
         """
         await self.cache.save_stock_basic(_make_stock_basic_df())
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
 
         async def _ui_get_stock_basic_with_degradation() -> tuple[pd.DataFrame, bool]:
             try:
@@ -204,7 +219,9 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         # 通过 CacheManager 写入数据
         await self.cache.save_stock_basic(_make_stock_basic_df(ts_code="600519.SH"))
         # 模拟 DB 不可用
+        # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
+        engine_provider.mark_disposed(True)
 
         # CacheManager 读会抛 EngineDisposedError
         with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：raises 后续 independent_engine 已验证缓存命中，scanner 跨块识别受限

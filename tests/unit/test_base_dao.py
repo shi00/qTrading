@@ -566,9 +566,8 @@ class TestBaseDaoWriteDbExtended:
     async def test_write_disposed_engine(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 await dao._write_db("INSERT INTO t VALUES ($1)")
 
@@ -1522,9 +1521,8 @@ class TestBaseDaoReadDbExtended:
     async def test_read_disposed_engine(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 await dao._read_db("SELECT 1")
 
@@ -1695,9 +1693,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_write_db_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, write rejected"):
                 await dao._write_db("INSERT INTO t VALUES ($1)")
 
@@ -1705,9 +1702,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_read_db_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
                 await dao._read_db("SELECT 1")
 
@@ -1715,9 +1711,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_read_db_select_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
                 await dao._read_db_select(sa.select(1))
 
@@ -1725,9 +1720,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_save_upsert_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, upsert rejected"):
                 await dao._save_upsert(
                     pd.DataFrame({"a": [1]}),
@@ -1754,9 +1748,8 @@ class TestEngineDisposedErrorDBP01:
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
         caught = False
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             try:
                 await dao._write_db("INSERT INTO t VALUES ($1)")
             except EngineDisposedError:
@@ -1768,9 +1761,8 @@ class TestEngineDisposedErrorDBP01:
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
         caught = False
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             try:
                 await dao._read_db("SELECT 1")
             except RuntimeError:
@@ -2098,13 +2090,12 @@ class TestGuardedBegin:
 
     @pytest.mark.asyncio
     async def test_cache_manager_disposed_raises_engine_disposed_error(self):
-        """Path 4: _check_engine raises EngineDisposedError when CacheManager is disposed."""
+        """Path 4: _check_engine raises EngineDisposedError when engine is disposed."""
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
 
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 async with dao._guarded_begin():
                     pass
@@ -2219,9 +2210,8 @@ class TestBaseDaoReadDbSelect:
     async def test_select_engine_disposed_raises(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError):
                 await dao._read_db_select(sa.select(1))
 
