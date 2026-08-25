@@ -12,7 +12,8 @@
 - 移除命令式生命周期回调 / 手动 locale 刷新 / 窗口尺寸回调 / 重新实例化推送 / 手动重绘
 - BacktestConfigPanel/BacktestResultPanel 作为子组件函数直接调用，props 从 VM state 推送
 - page 访问改用 ``ft.context.page``（try/except 守卫）
-- selected_strategy/no_strategy_error 为 UI 局部状态（use_state）
+- 回测状态下沉 VM（D2）：可用策略/选中策略/上次提交经 VM state（available_strategies / selected_strategy_key / last_run_summary）+ commands（select_strategy / record_last_run）受控管理
+- no_strategy_error 为纯 UI 校验态（use_state）
 """
 
 import logging
@@ -62,12 +63,10 @@ def BacktestView(active: bool = True) -> ft.Container:
     ft.use_state(AppColors.get_observable_state)
 
     # --- UI local state ---
-    # D16: vm 返回 (key, name_key) 对; name_key 为 i18n key, 下拉渲染时逐次翻译
-    strategies = ft.use_state(lambda: vm.get_available_strategies())[0]
-    selected_strategy, set_selected_strategy = ft.use_state(lambda: next((k for k, _ in strategies), None))
+    # D2: strategies/selected_strategy/last_run 业务状态已下沉 VM state
+    # (available_strategies / selected_strategy_key / last_run_summary);
+    # View 仅保留纯 UI 校验态 no_strategy_error.
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
-    # Task 11.3: 存储上次回测提交 (strategy_key, backtest_config) 供 ErrorState on_retry 复用
-    last_run, set_last_run = ft.use_state(lambda: None)  # type: ignore[assignment]  [reason: ft.use_state 无泛型支持, pyright 推断为 Never, 运行时正确]
 
     # Task 8.3: 选股→回测参数透传 — mount 时消费 pending prefill (strategy_key + params)
     # params 经 ref 透传到 run_backtest, 避免不必要的重渲染 (params 仅在 run 时读取)
@@ -78,21 +77,24 @@ def BacktestView(active: bool = True) -> ft.Container:
         if prefill is None:
             return
         strategy_key = prefill.get("strategy_key")
-        if strategy_key and any(k == strategy_key for k, _ in strategies):
-            set_selected_strategy(strategy_key)
+        # D2: 从 VM state 读取 available_strategies; 命中则 vm.select_strategy 受控更新
+        # isinstance 收窄为 str (prefill value 为 dict[str, object])
+        if isinstance(strategy_key, str) and any(k == strategy_key for k, _ in state.available_strategies):
+            vm.select_strategy(strategy_key)
         _prefilled_params.current = prefill.get("params")
 
-    ft.use_effect(_consume_prefill, dependencies=[strategies])
+    ft.use_effect(_consume_prefill, dependencies=[])
 
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
-        set_selected_strategy(get_control_value(e.control, ft.Dropdown))
+        # D2: 受控更新 — vm.select_strategy 下沉选中状态到 VM state
+        vm.select_strategy(get_control_value(e.control, ft.Dropdown))
         set_no_strategy_error(False)
 
     def _on_run_backtest(config: dict) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_run_backtest")
-        if not selected_strategy:
+        if not state.selected_strategy_key:
             set_no_strategy_error(True)
             return
         backtest_config = vm.create_config(
@@ -108,11 +110,9 @@ def BacktestView(active: bool = True) -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
-                # Task 11.3: 存储 last_run 供 ErrorState on_retry 复用 (须在 page 可用时调用,
-                # set_last_run 触发 _schedule_update 需访问 context.page)
-                set_last_run((selected_strategy, backtest_config))
-                # Task 8.3: 透传选股页 params (若有), 否则 None 用策略默认参数
-                page.run_task(vm.run_backtest, selected_strategy, backtest_config, _prefilled_params.current)
+                # D2: last_run 下沉 VM (vm.record_last_run), retry 时从 state.last_run_summary 读取
+                vm.record_last_run(state.selected_strategy_key, backtest_config)
+                page.run_task(vm.run_backtest, state.selected_strategy_key, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
 
@@ -120,10 +120,11 @@ def BacktestView(active: bool = True) -> ft.Container:
         """Task 11.3: ErrorState on_retry — 重新提交上次回测配置 (R16: page.run_task 调度).
 
         透传 _prefilled_params.current 与首次提交保持一致 (Task 8.3).
+        D2: last_run 从 state.last_run_summary 读取 (已下沉 VM).
         """
-        if last_run is None:
+        if state.last_run_summary is None:
             return
-        strategy, backtest_config = last_run  # type: ignore[reportGeneralTypeIssues]  [reason: ft.use_state 无泛型支持, pyright 推断 last_run 为 Never, 运行时为 tuple[str, BacktestConfig] | None]
+        strategy, backtest_config = state.last_run_summary
         try:
             page = ft.context.page
             if page is not None:
@@ -183,8 +184,9 @@ def BacktestView(active: bool = True) -> ft.Container:
         ft.Dropdown(
             label=I18n.get("backtest_select_strategy"),
             # D16: 渲染时按当前 locale 翻译 name_key（组件已订阅 locale，切换自动重渲染）
-            options=[ft.dropdown.Option(key, I18n.get(name_key)) for key, name_key in strategies],
-            value=selected_strategy,
+            # D2: options/value 从 VM state 读取 (available_strategies / selected_strategy_key)
+            options=[ft.dropdown.Option(key, I18n.get(name_key)) for key, name_key in state.available_strategies],
+            value=state.selected_strategy_key,
             on_select=safe_on_select(_on_strategy_change),
             width=AppStyles.CONTROL_WIDTH_LG,
             bgcolor=AppColors.INPUT_BG,

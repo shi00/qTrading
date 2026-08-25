@@ -116,7 +116,15 @@ class BacktestState:
     D11: result (BacktestResult 领域对象, 含 pl.DataFrame/pl.Series) 拆解为
     渲染就绪字段, 全部 frozen + 可哈希 → 使用 dataclass 默认 __eq__/__hash__
     (Flet use_state setter 同值跳过安全).
+    D2: strategies/selected_strategy/last_run 业务状态下沉 VM (对齐 Screener R.2.2),
+    View 不再持 use_state 业务状态.
     """
+
+    # D2: 可用策略 (key, name_key) 序列 + 选中策略 key (VM 初始化时装配, 不感知 locale)
+    available_strategies: tuple[tuple[str, str], ...] = ()
+    selected_strategy_key: str | None = None
+    # D2: 上次回测提交 (strategy_key, config), 供 ErrorState on_retry 复用
+    last_run_summary: tuple[str, BacktestConfig] | None = None
 
     is_running: bool = False
     progress: float = 0.0
@@ -174,7 +182,13 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self.service = service
 
         self._task_id: str | None = None
-        self._state: BacktestState = BacktestState()
+        # D2: 初始化时从 StrategyManager 装配可用策略 + 默认选中首个策略
+        # (View 不再持 use_state 业务状态; 装配是内存读, 非 IO, 可同步在 __init__).
+        _strategies = self._load_strategies()
+        self._state: BacktestState = BacktestState(
+            available_strategies=_strategies,
+            selected_strategy_key=next((k for k, _ in _strategies), None),
+        )
         self._subscribers: list[Callable[[BacktestState], None]] = []
         # P2-1: 跟踪 fire-and-forget task 生命周期，dispose 时取消避免孤儿 (对齐 ScreenerViewModel)
         self._background_tasks: set = set()
@@ -248,15 +262,26 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
 
-    def get_available_strategies(self) -> tuple[tuple[str, str], ...]:
-        """获取可用策略列表 (D16: 返回 (key, name_key) 对, 不感知 locale).
+    def _load_strategies(self) -> tuple[tuple[str, str], ...]:
+        """内部加载可用策略 (D2: 装配进 state, 不感知 locale).
 
-        VM 不调 I18n.get：name_key 是策略 i18n key, View 每次渲染按当前 locale
-        翻译, 避免 lazy initializer 固化 stale 翻译 (报告 04 D16).
+        name_key 是策略 i18n key (raw), View 每次渲染按当前 locale 翻译
+        (D16: VM 不调 I18n.get, 避免 stale 翻译).
         """
         from strategies.all_strategies import StrategyManager
 
         return tuple((key, getattr(s, "name_key", key) or key) for key, s in StrategyManager().strategies.items())
+
+    def select_strategy(self, key: str | None) -> None:
+        """选择策略 command (D2: 选中策略关键状态下沉 VM, 对齐 Screener R.2.2)."""
+        self._set_state(selected_strategy_key=key)
+
+    def record_last_run(self, strategy_key: str, config: BacktestConfig) -> None:
+        """记录上次回测提交, 供 ErrorState on_retry 复用 (D2: last_run 下沉 VM).
+
+        由 View 提交回测时调用 (_on_run_backtest), 与既有一致 (提交即记录, retry 复用).
+        """
+        self._set_state(last_run_summary=(strategy_key, config))
 
     def create_config(
         self,
