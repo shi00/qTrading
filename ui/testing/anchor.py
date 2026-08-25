@@ -9,10 +9,11 @@ CanvasKit 对 Semantics label 的双轨映射（PoC EVIDENCE.md）：
 定位策略由 `AnchorPage` 依 `EIDS` 携带的 `AnchorKind` 分派，本模块只负责生成。
 """
 
-import os
 from functools import cache
 
 import flet as ft
+
+from utils.app_env import is_e2e_mode
 
 from ui.testing.e2e_ids import AnchorKind, Eid
 
@@ -28,7 +29,7 @@ def _e2e_enabled() -> bool:
     `_e2e_enabled.cache_clear()` 主动清理（tests/unit/ui/test_anchor.py
     TestE2EEnabledCache 已覆盖此契约）.
     """
-    return os.environ.get("E2E_TESTING") == "true"
+    return is_e2e_mode()
 
 
 def anchored(eid: Eid, control: ft.Control) -> ft.Control:
