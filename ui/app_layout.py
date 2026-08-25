@@ -18,7 +18,6 @@
 
 import asyncio
 import logging
-import os
 from enum import IntEnum
 
 import flet as ft
@@ -43,6 +42,7 @@ from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
 from ui.views.task_center_view import TaskCenterView
 from ui.views.watchlist_view import WatchlistView
+from utils.app_env import is_e2e_mode
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ def _build_pages_stack(
         settings_subtab_request: UX-01 导航深链的 settings 子页请求
             ``(subtab_key, seq)``, 透传给 SettingsView。
     """
-    is_e2e = os.environ.get("E2E_TESTING") == "true"
+    is_e2e = is_e2e_mode()
 
     def _make_content(view_factory, is_active: bool) -> ft.Control:
         # E2E 模式下非激活视图返回空 Container, 避免调用 view_factory() 触发 VM 构造链
