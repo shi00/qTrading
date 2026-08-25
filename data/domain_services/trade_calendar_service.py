@@ -16,7 +16,7 @@ import asyncio
 import datetime
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -33,6 +33,82 @@ if TYPE_CHECKING:
     from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
+
+
+class TradeDateUnavailableError(RuntimeError):
+    """无法从任何可用数据源确定有效交易日（review03-C14）。
+
+    同步流程收到该异常后应显式失败（可重试），而非猜测本地日历日。
+    """
+
+
+async def get_effective_trade_date(processor: Any) -> datetime.date:
+    """确定性交易日锚点（review03-C14 回退链，替代"回退到本地日历日"）。
+
+    优先级：
+      1. ``processor.trade_calendar.get_latest_trade_date()``
+         （内部已按 DB trade_cal → Tushare API → 离线日历 依次兜底）；
+      2. 已同步数据最大交易日：``processor.cache.get_latest_trade_date()``
+         （daily_quotes.MAX(trade_date)，一定是真实交易日）；
+      3. 全部不可得 → 抛 ``TradeDateUnavailableError``（可操作提示），
+         绝不回退到 ``get_now().date()``（避免时区/非交易日导致的错误同步窗口）。
+
+    异常契约：``asyncio.CancelledError``（R2）与 ``EngineDisposedError``（R5）
+    直接传播；其余数据源异常按严重度记录后进入下一级回退。
+    """
+    from data.persistence.daos.base_dao import EngineDisposedError  # lazy import：避免模块级加载 DAO 基类
+
+    trade_calendar = getattr(processor, "trade_calendar", None)
+    if trade_calendar is not None:
+        try:
+            trade_date = await trade_calendar.get_latest_trade_date()
+            if trade_date is not None:
+                if isinstance(trade_date, datetime.datetime):
+                    return trade_date.date()
+                if isinstance(trade_date, datetime.date):
+                    return trade_date
+                return parse_date(str(trade_date))
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[TradeCalendar] Effective trade date | SYSTEM-LEVEL failure: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                raise
+            logger.warning(
+                "[TradeCalendar] Effective trade date fallback (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+            )
+
+    cache = getattr(processor, "cache", None)
+    if cache is not None:
+        try:
+            latest = await cache.get_latest_trade_date()  # quote_dao: daily_quotes.MAX(trade_date)
+            if latest is not None:
+                if isinstance(latest, datetime.date):
+                    return latest
+                return parse_date(str(latest))
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            logger.warning(
+                "[TradeCalendar] Synced trade date fallback failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+            )
+
+    raise TradeDateUnavailableError("无法确定有效交易日：交易日历与已同步行情均无可用数据，请检查网络后重试同步")
 
 
 class TradeCalendarService:

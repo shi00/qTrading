@@ -374,20 +374,26 @@ class TestHistoricalSyncGetEffectiveTradeDate:
         assert isinstance(result, datetime.date)
 
     @pytest.mark.asyncio
-    async def test_exception_fallback(self):
+    async def test_exception_fallback_to_synced_data(self):
+        """review03-C14: L1 日历服务异常 → 回退到已同步行情最大日期。"""
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
-    async def test_returns_none_falls_back_to_today(self):
+    async def test_all_sources_unavailable_raises(self):
+        """review03-C14: 日历与已同步行情均不可用 → 抛 TradeDateUnavailableError（不猜本地日期）。"""
+        from data.domain_services.trade_calendar_service import TradeDateUnavailableError
+
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=None)
         strategy = HistoricalSyncStrategy(ctx)
-        result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
+            await strategy._get_effective_trade_date()
 
 
 class TestHistoricalSyncRunExtended:
