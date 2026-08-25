@@ -80,11 +80,24 @@ def _build_history_years_options() -> list[ft.dropdown.Option]:
     ]
 
 
-def _render_message(msg: Message | None) -> str:
-    """渲染 Message 到本地化文本。"""
+def _render_message(msg: Message | str | None) -> str:
+    """渲染 Message / str 到本地化文本 (str 直显, 兼容 E1 暂留的 report_step 路径).
+
+    嵌套 key 约定 (与 task_center_view._render_task_field / screener_view
+    ._render_status_message 一致): params 中以 ``_key`` 结尾的字符串参数会先
+    翻译再填入主模板 (去掉 ``_key`` 后缀), 使 data 层可传 ``stock_key`` 这类
+    i18n key 而无需感知 locale.
+    """
     if msg is None:
         return ""
-    return I18n.get(msg.key, **msg.params)
+    if isinstance(msg, str):
+        return msg
+    params = dict(msg.params)
+    for k in list(params):
+        if k.endswith("_key") and isinstance(params[k], str):
+            params[k[:-4]] = I18n.get(params[k])
+            del params[k]
+    return I18n.get(msg.key, **params)
 
 
 def _resolve_snack_color(color_name: str) -> str:

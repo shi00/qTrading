@@ -114,9 +114,10 @@ class TestAISelectionStrategyFilter:
         assert len(result) == 1
         assert result.iloc[0]["ts_code"] == "000001.SZ"
         # on_progress 提示 "ai_not_configured" (出现在任意一次调用中)
-        from ui.i18n import I18n
+        # D7: progress_callback 透传 Message(key) 而非已翻译字符串, 断言 Message 对象
+        from ui.viewmodels import Message
 
-        expected_msg = I18n.get("ai_not_configured")
+        expected_msg = Message("ai_not_configured")
         messages = [
             (c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "")) for c in on_progress.call_args_list
         ]

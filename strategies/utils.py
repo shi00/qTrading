@@ -5,6 +5,8 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from core.i18n import Message
+
 
 def safe_float(val, default=0.0):
     if val is None:
@@ -36,7 +38,7 @@ class StrategyContext(TypedDict, total=False):
     data: pd.DataFrame | None
     data_processor: Any
     params: dict[str, Any]
-    on_progress: Callable[[int, int, str], None]
+    on_progress: Callable[[int, int, Message], None]
     on_result: Callable
     on_stream_result: Callable
     on_stream_start: Callable
