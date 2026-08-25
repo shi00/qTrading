@@ -206,9 +206,10 @@ def BacktestView(active: bool = True) -> ft.Container:
         ),
     )
 
-    # Task 11.3: 回测执行失败 (status_color=="error" 且 result is None) → ErrorState 替换结果面板;
-    # no_strategy_error 是 View 本地 state, result 为 None 但 status_color 非 error, 不触发 ErrorState
-    has_backtest_error = state.status_color == "error" and state.result is None
+    # Task 11.3: 回测执行失败 (status_color=="error" 且无结果) → ErrorState 替换结果面板;
+    # no_strategy_error 是 View 本地 state, 无结果但 status_color 非 error, 不触发 ErrorState
+    # D11: result 拆解为渲染字段, 以 metrics/trades 空判断"无结果"
+    has_backtest_error = state.status_color == "error" and not state.metrics and not state.trades
     if has_backtest_error:
         right_content = ErrorState(
             icon=ft.Icons.ERROR_OUTLINE,
@@ -221,7 +222,13 @@ def BacktestView(active: bool = True) -> ft.Container:
             cta_text=I18n.get("error_state_contact_support"),
         )
     else:
-        right_content = BacktestResultPanel(result=state.result)
+        right_content = BacktestResultPanel(
+            metrics=state.metrics,
+            trades=state.trades,
+            nav_curve=state.nav_curve,
+            ic_series=state.ic_series,
+            period_stats=state.period_stats,
+        )
 
     return ft.Container(
         content=ft.Column(

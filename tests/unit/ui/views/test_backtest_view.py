@@ -88,7 +88,11 @@ class _FakeBacktestViewModel:
             progress_message: Any = None
             status_message: Any = None
             status_color: str = ""
-            result: Any = None
+            metrics: Any = ()
+            trades: Any = ()
+            nav_curve: Any = ()
+            ic_series: Any = ()
+            period_stats: Any = ()
             error_detail: Any = None
 
         self._state = _State()
@@ -593,14 +597,21 @@ class TestStatusRendering:
         assert bars[0].value == 0.5
 
     def test_result_passed_to_result_panel(self, backtest_view_env) -> None:
-        """state.result → BacktestResultPanel(result=state.result)."""
+        """state 渲染字段 → BacktestResultPanel 五 props (D11 拆解)."""
         env = backtest_view_env
         fake_vm = env["fake_vm"]
-        fake_result = MagicMock(name="test_result")
-        fake_vm._set_state(result=fake_result)
+        fake_metrics = (("sharpe_ratio", 1.2),)
+        trade_mock = MagicMock(name="trade")
+        fake_vm._set_state(metrics=fake_metrics, trades=(trade_mock,), nav_curve=(1.0,), ic_series=(0.1,))
         _rerender(env)
 
-        env["mod"].BacktestResultPanel.assert_called_with(result=fake_result)
+        env["mod"].BacktestResultPanel.assert_called_with(
+            metrics=fake_metrics,
+            trades=(trade_mock,),
+            nav_curve=(1.0,),
+            ic_series=(0.1,),
+            period_stats=(),
+        )
 
     def test_status_color_mapping_error(self, backtest_view_env) -> None:
         """status_color="error" → status_text.color = _STATUS_COLOR_MAP["error"] = AppColors.ERROR."""
@@ -782,16 +793,18 @@ class TestBacktestViewErrorState:
         fake_vm._set_state(
             status_message=Message("backtest_failed", {}),
             status_color="error",
-            result=None,
+            metrics=(),
+            trades=(),
         )
         _rerender(env)
 
-        # 再设为 success (有 result)
-        fake_result = MagicMock(name="success_result")
+        # 再设为 success (有渲染字段)
+        trade_mock = MagicMock(name="trade")
         fake_vm._set_state(
             status_message=Message("backtest_completed", {}),
             status_color="success",
-            result=fake_result,
+            metrics=(("total_return", 0.1),),
+            trades=(trade_mock,),
         )
         _rerender(env)
 
@@ -799,7 +812,13 @@ class TestBacktestViewErrorState:
         right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
         # right_content 应为 BacktestResultPanel mock (非 ErrorState Component)
         assert not isinstance(right_content, Component)
-        mod.BacktestResultPanel.assert_called_with(result=fake_result)
+        mod.BacktestResultPanel.assert_called_with(
+            metrics=(("total_return", 0.1),),
+            trades=(trade_mock,),
+            nav_curve=(),
+            ic_series=(),
+            period_stats=(),
+        )
 
     def test_no_strategy_error_does_not_trigger_error_state(self, backtest_view_empty_env) -> None:
         """no_strategy_error=True 时 result=None 但 status_color 非 error → 不触发 ErrorState.

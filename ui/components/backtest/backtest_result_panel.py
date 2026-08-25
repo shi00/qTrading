@@ -7,10 +7,10 @@
 - IC 序列图表
 - 月度统计表格
 
-变更要点（Phase 3.2.6）：
-- 旧命令式 Container 子类 → ``@ft.component def BacktestResultPanel(result)``
-- 纯展示组件（接收 result props），按 project_memory 责任分层原则
-  用 ``use_state`` 管理 trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
+变更要点（Phase 3.2.6 + D11）：
+- 旧命令式 Container 子类 → ``@ft.component def BacktestResultPanel(metrics, trades, nav_curve, ic_series, period_stats)``
+- 纯展示组件（接收渲染就绪 props，D11 不再接收 BacktestResult 领域对象），按 project_memory
+  责任分层原则用 ``use_state`` 管理 trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新、set_result 方法
 - 消费方 BacktestView 通过重新实例化推送 props（过渡期，Task 3.6.3 BacktestView 声明式
@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import flet as ft
 import flet_charts as fch
@@ -31,9 +30,7 @@ import flet_charts as fch
 from ui.components.flet_type_helpers import safe_controls
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-
-if TYPE_CHECKING:
-    from strategies.backtest.config import BacktestResult
+from ui.viewmodels.backtest_view_model import TradeRow
 
 logger = logging.getLogger(__name__)
 
@@ -215,18 +212,17 @@ def _build_empty_content() -> ft.Column:
     )
 
 
-def _build_nav_chart(result: BacktestResult | None) -> ft.Container:
-    if not result or result.nav_curve.is_empty():
+def _build_nav_chart(nav_curve: tuple[float, ...]) -> ft.Container:
+    if not nav_curve:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_nav_data"), color=AppColors.TEXT_SECONDARY),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-    nav_values = result.nav_curve["nav"].to_list()
     chart_data = [
         fch.LineChartData(
-            points=[fch.LineChartDataPoint(x=i, y=float(v)) for i, v in enumerate(nav_values)],
+            points=[fch.LineChartDataPoint(x=i, y=float(v)) for i, v in enumerate(nav_curve)],
             color=AppColors.PRIMARY,
             stroke_width=2,
         )
@@ -247,19 +243,18 @@ def _build_nav_chart(result: BacktestResult | None) -> ft.Container:
 
 
 def _build_trades_table(
-    result: BacktestResult | None,
+    trades: tuple[TradeRow, ...],
     trades_page: int,
     set_trades_page: Callable[[int], None],
 ) -> ft.Container:
-    if not result or result.trades.is_empty():
+    if not trades:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_trades"), color=AppColors.TEXT_SECONDARY),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-    trades_df = result.trades
-    total_rows = len(trades_df)
+    total_rows = len(trades)
     total_pages = max(1, (total_rows + _TRADES_PAGE_SIZE - 1) // _TRADES_PAGE_SIZE)
     start = trades_page * _TRADES_PAGE_SIZE
     end = min(start + _TRADES_PAGE_SIZE, total_rows)
@@ -274,20 +269,20 @@ def _build_trades_table(
     ]
 
     rows = []
-    for row in trades_df[start:end].iter_rows(named=True):
-        action = row.get("action", "")
+    for trade in trades[start:end]:
+        action = trade.action
         action_color = AppColors.SUCCESS if action == "buy" else AppColors.ERROR
-        pnl = row.get("realized_pnl", 0)
+        pnl = trade.realized_pnl
         pnl_color = AppColors.SUCCESS if pnl > 0 else AppColors.ERROR if pnl < 0 else AppColors.TEXT_PRIMARY
 
         rows.append(
             ft.DataRow(
                 cells=[
-                    ft.DataCell(ft.Text(str(row.get("trade_date", "")), color=AppColors.TEXT_PRIMARY)),
-                    ft.DataCell(ft.Text(str(row.get("ts_code", "")), color=AppColors.TEXT_PRIMARY)),
+                    ft.DataCell(ft.Text(trade.trade_date, color=AppColors.TEXT_PRIMARY)),
+                    ft.DataCell(ft.Text(trade.ts_code, color=AppColors.TEXT_PRIMARY)),
                     ft.DataCell(ft.Text(action, color=action_color)),
-                    ft.DataCell(ft.Text(f"{row.get('price', 0):.2f}", color=AppColors.TEXT_PRIMARY)),
-                    ft.DataCell(ft.Text(f"{row.get('volume', 0):,}", color=AppColors.TEXT_PRIMARY)),
+                    ft.DataCell(ft.Text(f"{trade.price:.2f}", color=AppColors.TEXT_PRIMARY)),
+                    ft.DataCell(ft.Text(f"{trade.volume:,}", color=AppColors.TEXT_PRIMARY)),
                     ft.DataCell(ft.Text(f"{pnl:.2f}", color=pnl_color)),
                 ]
             )
@@ -350,17 +345,16 @@ def _build_trades_table(
     )
 
 
-def _build_ic_chart(result: BacktestResult | None) -> ft.Container:
-    if not result or len(result.ic_series) == 0:
+def _build_ic_chart(ic_series: tuple[float, ...]) -> ft.Container:
+    if not ic_series:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_ic_data"), color=AppColors.TEXT_SECONDARY),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-    ic_values = result.ic_series.to_list()
     bars = []
-    for i, ic in enumerate(ic_values):
+    for i, ic in enumerate(ic_series):
         color = AppColors.SUCCESS if ic > 0 else AppColors.ERROR if ic < 0 else AppColors.TEXT_SECONDARY
         bars.append(
             fch.BarChartGroup(
@@ -383,15 +377,16 @@ def _build_ic_chart(result: BacktestResult | None) -> ft.Container:
     return container
 
 
-def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
-    if not result or result.period_stats.is_empty():
+def _build_monthly_table(
+    period_stats: tuple[tuple[str, float, float, float], ...],
+) -> ft.Container:
+    if not period_stats:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_monthly_data"), color=AppColors.TEXT_SECONDARY),
             alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
-    stats_df = result.period_stats
     columns = [
         ft.DataColumn(label=ft.Text(I18n.get("backtest_col_month"), color=AppColors.TEXT_PRIMARY)),
         ft.DataColumn(label=ft.Text(I18n.get("backtest_col_return"), color=AppColors.TEXT_PRIMARY)),
@@ -400,11 +395,7 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
     ]
 
     rows = []
-    for row in stats_df.iter_rows(named=True):
-        monthly_ret = row.get("monthly_return", 0) or 0
-        bench_ret = row.get("benchmark_return", 0) or 0
-        excess = row.get("excess_return", 0) or 0
-
+    for year_month, monthly_ret, bench_ret, excess in period_stats:
         ret_color = (
             AppColors.SUCCESS if monthly_ret > 0 else AppColors.ERROR if monthly_ret < 0 else AppColors.TEXT_PRIMARY
         )
@@ -413,7 +404,7 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
         rows.append(
             ft.DataRow(
                 cells=[
-                    ft.DataCell(ft.Text(str(row.get("year_month", "")), color=AppColors.TEXT_PRIMARY)),
+                    ft.DataCell(ft.Text(year_month, color=AppColors.TEXT_PRIMARY)),
                     ft.DataCell(ft.Text(f"{monthly_ret * 100:.2f}%", color=ret_color)),
                     ft.DataCell(ft.Text(f"{bench_ret * 100:.2f}%", color=AppColors.TEXT_PRIMARY)),
                     ft.DataCell(ft.Text(f"{excess * 100:.2f}%", color=excess_color)),
@@ -436,7 +427,11 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
 
 
 def _build_content(
-    result: BacktestResult,
+    metrics: tuple[tuple[str, float], ...],
+    trades: tuple[TradeRow, ...],
+    nav_curve: tuple[float, ...],
+    ic_series: tuple[float, ...],
+    period_stats: tuple[tuple[str, float, float, float], ...],
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -444,7 +439,8 @@ def _build_content(
 ) -> ft.Column:
     """组装回测结果内容（metrics + Tabs 三件套）。
 
-    V1 三件套：ft.Tabs 包裹 ft.TabBar + ft.TabBarView，selected_index 由 use_state 驱动。
+    D11: 消费渲染就绪 props（metrics/trades/nav_curve/ic_series/period_stats），
+    不再接收 BacktestResult 领域对象。
     """
     # V1 三件套：selected_index/on_change 在 ft.Tabs 上（ft.TabBar 无这两个参数，
     # 仅有 on_click/on_hover；Flet 0.85.3 API 已验证）
@@ -459,7 +455,7 @@ def _build_content(
 
     return ft.Column(
         [
-            _build_metrics_section(result.metrics),
+            _build_metrics_section(dict(metrics)),
             ft.Divider(color=AppColors.DIVIDER),
             ft.Tabs(
                 length=4,
@@ -474,10 +470,10 @@ def _build_content(
                         ft.TabBarView(
                             expand=True,
                             controls=[
-                                _build_nav_chart(result),
-                                _build_trades_table(result, trades_page, set_trades_page),
-                                _build_ic_chart(result),
-                                _build_monthly_table(result),
+                                _build_nav_chart(nav_curve),
+                                _build_trades_table(trades, trades_page, set_trades_page),
+                                _build_ic_chart(ic_series),
+                                _build_monthly_table(period_stats),
                             ],
                         ),
                     ],
@@ -491,18 +487,23 @@ def _build_content(
 
 @ft.component
 def BacktestResultPanel(
-    result: BacktestResult | None = None,
+    metrics: tuple[tuple[str, float], ...] = (),
+    trades: tuple[TradeRow, ...] = (),
+    nav_curve: tuple[float, ...] = (),
+    ic_series: tuple[float, ...] = (),
+    period_stats: tuple[tuple[str, float, float, float], ...] = (),
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式：
-    - 纯展示组件（接收 result props），用 ``use_state`` 管理
+    - 纯展示组件（接收渲染就绪 props），用 ``use_state`` 管理
       trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - 无 page ref / 生命周期回调 / 手动刷新 / set_result
+    - 无 page ref / 生命周期回调 / 手动刷新
 
     Args:
-        result: 回测结果（None 时显示空状态）
+        metrics/trades/nav_curve/ic_series/period_stats: BacktestState 渲染就绪字段
+            （D11 拆解，源自 BacktestResult；全部为空时显示空状态）
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
@@ -511,11 +512,15 @@ def BacktestResultPanel(
     trades_page, set_trades_page = ft.use_state(0)
     selected_tab, set_selected_tab = ft.use_state(0)
 
-    if result is None:
+    if not metrics and not trades and not nav_curve:
         content = _build_empty_content()
     else:
         content = _build_content(
-            result,
+            metrics,
+            trades,
+            nav_curve,
+            ic_series,
+            period_stats,
             trades_page,
             set_trades_page,
             selected_tab,
