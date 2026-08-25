@@ -334,6 +334,9 @@ def ScreenerView(
     params_ref = ft.use_ref(lambda: {})
     _params_version, bump_params = ft.use_state(0)
 
+    # B14: slider 描述更新 debounce (asyncio.Task 引用)。
+    desc_timer_ref = ft.use_ref(lambda: None)
+
     # B12: 表格渲染 memo (memo_key, vt_columns, formatted_rows)。
     # AI 流式更新触发高频 re-render 时, 数据/分页未变则跳过 _build_table_data 重算。
     # use_ref(lambda: None) 会推断为 MutableRef[None] 无法持 tuple, 故 helper 显式返回 tuple | None。
@@ -702,10 +705,30 @@ def ScreenerView(
         bump_params(_params_version + 1)
 
     def _on_slider_value_change(name: str, val: float) -> None:
+        # B14: 参数更新立即生效；仅描述更新 debounce 150ms（高频拖动不重复调 update_strategy_desc）。
         _update_param(name, val)
-        # R.2.6.2: 动态更新策略描述 (vm.update_strategy_desc 用当前 params 重算 desc+color)
         if state.selected_strategy:
-            vm.update_strategy_desc(state.selected_strategy, params=dict(params_ref.current or {}))
+            _schedule_desc_update(state.selected_strategy)
+
+    async def _debounced_desc_update(strat) -> None:
+        try:
+            await asyncio.sleep(0.15)
+            vm.update_strategy_desc(strat, params=dict(params_ref.current or {}))
+        except asyncio.CancelledError:
+            raise  # R2: 取消传播
+
+    def _schedule_desc_update(strat) -> None:
+        prev = desc_timer_ref.current
+        if prev is not None:
+            prev.cancel()
+        task = asyncio.create_task(_debounced_desc_update(strat))
+        desc_timer_ref.current = task
+        task.add_done_callback(lambda t: _clear_desc_timer(task) if desc_timer_ref.current is task else None)
+
+    def _clear_desc_timer(task) -> None:
+        # MutableRef 仅含 current 槽，无 clear()；仅当仍是本任务时清除，避免误清新任务引用。
+        if desc_timer_ref.current is task:
+            desc_timer_ref.current = None
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField | None) -> None:
         # Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
