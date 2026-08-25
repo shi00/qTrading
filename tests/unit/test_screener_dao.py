@@ -401,6 +401,16 @@ class TestScreenerDaoBuildScreeningSql:
         assert "ROW_NUMBER() OVER" in sql
         assert "PARTITION BY ts_code" in sql
 
+    def test_build_sql_template_placeholder_replaced(self):
+        """review03-C7: __CLOSE_COND__ 模板占位符必须被 require_close 完全替换，无残留。"""
+        dao = ScreenerDao(MagicMock())
+        sql_true = dao._build_screening_sql(require_close=True)
+        sql_false = dao._build_screening_sql(require_close=False)
+        assert "__CLOSE_COND__" not in sql_true
+        assert "__CLOSE_COND__" not in sql_false
+        assert "WHERE q.close IS NOT NULL" in sql_true
+        assert "WHERE b.list_status = 'L'" in sql_false
+
 
 class TestScreenerDaoSwIndustryJoin:
     """Phase 3F-2 轨道 B：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member + COALESCE。
@@ -608,6 +618,16 @@ class TestScreenerDaoBuildScreeningSqlRange:
         sql = dao._build_screening_sql_range()
         assert "cal_date >= $1" in sql
         assert "cal_date <= $2" in sql
+
+    def test_build_sql_range_template_placeholder_replaced(self):
+        """review03-C7: __CLOSE_COND__ 模板占位符必须被 require_close 完全替换，无残留。"""
+        dao = ScreenerDao(MagicMock())
+        sql_true = dao._build_screening_sql_range(require_close=True)
+        sql_false = dao._build_screening_sql_range(require_close=False)
+        assert "__CLOSE_COND__" not in sql_true
+        assert "__CLOSE_COND__" not in sql_false
+        assert "WHERE q.close IS NOT NULL" in sql_true
+        assert "WHERE b.list_status = 'L'" in sql_false
 
 
 class TestScreenerDaoGetScreeningDataRange:

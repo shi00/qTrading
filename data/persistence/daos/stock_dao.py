@@ -196,9 +196,10 @@ class StockDao(BaseDao):
         )
 
         col_str = self._quote_columns(cols)
-        sql_insert = (
-            f"INSERT INTO stock_concepts ({col_str}) VALUES ({','.join([f'${i + 1}' for i in range(len(cols))])})"
-        )
+        # review03-C7: 列名来自 ORM 元数据（_quote_columns），占位符编号为确定性整数，
+        # 普通拼接避免 f-string 拼 SQL 模式（列名非用户输入）。
+        placeholders = ",".join("$" + str(i + 1) for i in range(len(cols)))
+        sql_insert = "INSERT INTO stock_concepts (" + col_str + ") VALUES (" + placeholders + ")"
 
         try:
             async with self._guarded_begin() as conn:
