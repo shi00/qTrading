@@ -24,7 +24,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, get_error_message
+from utils.error_classifier import classify_error, get_error_message_key
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION, LLM_PROVIDERS, is_recommended_model
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
@@ -426,7 +426,7 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
                 exc_info=True,
             )
             error_info = classify_error(ex, context="llm")
-            self._show_error(self._raw_message(get_error_message(error_info)))
+            self._show_error(get_error_message_key(error_info))
             return False
         finally:
             self._set_state(is_verifying=False)
@@ -597,7 +597,7 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
                 exc_info=True,
             )
             error_info = classify_error(ex, context="llm")
-            self._show_error(self._raw_message(get_error_message(error_info)))
+            self._show_error(get_error_message_key(error_info))
         finally:
             self._set_state(is_refreshing=False)
             self._set_loading_state(False)

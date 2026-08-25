@@ -215,14 +215,80 @@ class TestSingletonRegistry:
 class TestAtexitCleanupAll:
     """Tests for _atexit_cleanup_all centralized atexit handler"""
 
-    def _cleanup(self, *classes):
+    @pytest.fixture(autouse=True)
+    def _reset_module_flags(self):
+        """重置模块级标志，避免 _graceful_shutdown_completed / _atexit_fired 跨测试泄漏。"""
         import utils.singleton_registry as mod
 
         mod._atexit_fired = False
+        mod._graceful_shutdown_completed = False
+        yield
+        mod._atexit_fired = False
+        mod._graceful_shutdown_completed = False
+
+    def _cleanup(self, *classes):
+        import utils.singleton_registry as mod
+
         with mod._lock:
             for cls in classes:
                 if cls in mod._registry:
                     mod._registry.remove(cls)
+
+    def test_skips_cleanup_when_graceful_shutdown_completed(self):
+        """B10: 优雅停机已完成时，atexit 兜底短路，不再执行单例 _atexit_cleanup。"""
+        import utils.singleton_registry as mod
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        cleanup_called = []
+
+        class DummyAfterGraceful:
+            @classmethod
+            def _atexit_cleanup(cls):
+                cleanup_called.append(cls.__name__)
+
+        with _lock:
+            _registry.append(DummyAfterGraceful)
+
+        mod.mark_graceful_shutdown_completed()
+        _atexit_cleanup_all()
+
+        assert cleanup_called == [], "优雅停机完成后 atexit 兜底不应重复清理"
+
+        self._cleanup(DummyAfterGraceful)
+
+    def test_runs_cleanup_when_graceful_shutdown_not_completed(self):
+        """B10: 未完成优雅停机（异常退出）时，atexit 兜底照常执行。"""
+        import utils.singleton_registry as mod
+        from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock
+
+        cleanup_called = []
+
+        class DummyNoGraceful:
+            @classmethod
+            def _atexit_cleanup(cls):
+                cleanup_called.append(cls.__name__)
+
+        with _lock:
+            _registry.append(DummyNoGraceful)
+
+        assert mod.is_graceful_shutdown_completed() is False
+        _atexit_cleanup_all()
+
+        assert "DummyNoGraceful" in cleanup_called
+
+        self._cleanup(DummyNoGraceful)
+
+    def test_mark_and_is_graceful_shutdown_completed(self):
+        """B10: mark_graceful_shutdown_completed 置位后 is_graceful_shutdown_completed 返回 True。"""
+        import utils.singleton_registry as mod
+
+        mod._graceful_shutdown_completed = False
+        assert mod.is_graceful_shutdown_completed() is False
+
+        mod.mark_graceful_shutdown_completed()
+        assert mod.is_graceful_shutdown_completed() is True
+
+        mod._graceful_shutdown_completed = False
 
     def test_calls_atexit_cleanup_on_registered_singletons(self):
         from utils.singleton_registry import _atexit_cleanup_all, _registry, _lock

@@ -11,8 +11,9 @@ from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
-from utils.app_env import is_e2e_mode
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -97,17 +98,12 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
     PAGE_SIZE = 20  # 常量,不放入 state
 
     def __init__(self):
-        # E2E 模式下跳过 DataProcessor 实例化：DataProcessor.__init__ 会同步初始化
-        # TushareClient（为 40+ API 创建 rate_limiter，耗时 34s+），阻塞 Flet 主线程
-        # 导致 patch 无法下发到浏览器、E2E 浏览器 600s 超时失败。E2E 模式下
-        # _init_and_load 已跳过所有数据加载（home_view.py L156），DataProcessor 不会被
-        # 实际使用。与 bootstrap.py:136 / home_view.py:156 / app_layout.py:91 等现有
-        # E2E_TESTING 范式一致。
-        self.processor: DataProcessor | None
-        if is_e2e_mode():
-            self.processor = None
-        else:
-            self.processor = DataProcessor()
+        # 懒构造 DataProcessor：DataProcessor.__init__ 同步初始化 TushareClient
+        # （为 40+ API 创建 rate_limiter，耗时 34s+），若在 __init__ 同步构造会阻塞
+        # Flet 主线程（R16）。改为 _ensure_processor() 首次真正使用时经 IO 线程池异步
+        # 构造。E2E 下 home_view._init_and_load 顶部早返（home_view.py L165-167）在
+        # init_data 之前，不会触发懒构造；原 E2E_TESTING 特判已删除（懒构造天然兼容）。
+        self.processor: DataProcessor | None = None
 
         # Internal state (frozen snapshot)
         self._state = HomeState()
@@ -118,6 +114,19 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
+
+    async def _ensure_processor(self) -> DataProcessor:
+        """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。
+
+        双检 + loop-local 锁防并发双检竞态 (R11)：refresh_news 与 load_next_page 等
+        异步方法可能交错触发构造。key 带 VM 前缀避免跨实例共享同一锁。
+        """
+        if self.processor is None:
+            lock = get_loop_local("home_vm_processor_lock", asyncio.Lock)
+            async with lock:
+                if self.processor is None:
+                    self.processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
+        return self.processor
 
     def _invoke_single_subscriber(self, cb: Callable[[HomeState], None], snap: HomeState) -> None:
         """覆盖 per-cb 调用策略：HomeVM-specific try/except + warning logging。
@@ -242,9 +251,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
     async def init_data(self):
         """Initialize data processor"""
-        if self.processor is None:
-            return
-        await self.processor.init_data()
+        processor = await self._ensure_processor()
+        await processor.init_data()
 
     async def load_market_data(self):
         """
@@ -344,11 +352,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             self._set_state(is_loading_more=False)
 
     async def _fetch_news_batch(self, page):
-        if self.processor is None:
-            return None
         try:
+            processor = await self._ensure_processor()
             offset = page * self.PAGE_SIZE
-            return await self.processor.cache.get_market_news(
+            return await processor.cache.get_market_news(
                 limit=self.PAGE_SIZE,
                 offset=offset,
             )

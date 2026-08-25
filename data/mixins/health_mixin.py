@@ -30,7 +30,7 @@ from data.constants import (
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
@@ -626,7 +626,7 @@ class HealthCheckMixin:
         self.clear_cancel()  # type: ignore[attr-defined]
 
         if progress_callback:
-            progress_callback(0, 100, I18n.get("scan_step_init"))
+            progress_callback(0, 100, Message("scan_step_init"))
 
         try:
             # 1. Select Sample
@@ -707,7 +707,7 @@ class HealthCheckMixin:
                 # Update Progress
                 pct = int((idx / total_steps) * 100)
                 if progress_callback:
-                    progress_callback(pct, 100, I18n.get("scan_scanning", code=ts_code))
+                    progress_callback(pct, 100, Message("scan_scanning", {"code": ts_code}))
 
                 # Fetch Data via Batch Slice (No DB hit)
                 if batch_df is not None and not batch_df.empty:
@@ -830,7 +830,7 @@ class HealthCheckMixin:
             }
 
             if progress_callback:
-                progress_callback(100, 100, I18n.get("scan_complete"))
+                progress_callback(100, 100, Message("scan_complete"))
             return result
 
         except Exception as e:

@@ -334,6 +334,14 @@ def ScreenerView(
     params_ref = ft.use_ref(lambda: {})
     _params_version, bump_params = ft.use_state(0)
 
+    # B12: 表格渲染 memo (memo_key, vt_columns, formatted_rows)。
+    # AI 流式更新触发高频 re-render 时, 数据/分页未变则跳过 _build_table_data 重算。
+    # use_ref(lambda: None) 会推断为 MutableRef[None] 无法持 tuple, 故 helper 显式返回 tuple | None。
+    def _init_table_memo() -> tuple | None:
+        return None
+
+    table_memo_ref = ft.use_ref(_init_table_memo)
+
     # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
@@ -461,6 +469,18 @@ def ScreenerView(
         page = _get_page()
         if page is not None:
             page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
+
+    def _on_go_sync_click(e: ft.ControlEvent) -> None:
+        """UX-02 (P0-01): 质量门失败恢复动作 — 深链到设置页数据源子页.
+
+        当前唯一 action key "screener_action_go_sync" 的目标即数据源同步区;
+        未来新增其他 action key 时需按 key 分派目标 (参照 data_source_tab.py
+        snack.action_key 分支范式), 本按钮 visible 仅绑定该 key.
+        """
+        UILogger.log_action("ScreenerView", "Click", "btn_go_sync")
+        page = _get_page()
+        if page is not None:
+            page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
 
     async def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
@@ -750,13 +770,28 @@ def ScreenerView(
     status_text_value = _render_status_message(state.status_message)
     status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
 
-    # 表格数据: 从 VM 读取当前页
+    # 表格数据: 从 VM 读取当前页 (B12 memo: data_version + page_no + page_size + locale
+    # 均未变时复用已格式化结果, 避免 AI 流式更新高频 re-render 时重复执行 to_dict/全列格式化。
+    # 分页维度必须入 key: get_current_page_data() 按 (page_no-1)*page_size 切片,
+    # 翻页/改页大小后 data_version 不变, 纯 data_version key 会返回旧分页数据。
+    # locale 必须入 key: _format_cell_value 输出 unit_yi/unit_wan 等 locale 相关字符串,
+    # 切换语言后纯数据 key 会返回旧 locale 单位。
+    # df 空态前置判定 + memo=None 失效: 新 run 重置/无结果路径不改 data_version, 防止
+    # 陈旧命中 (memo key 需依赖 VM 侧 data_version 与内容变更原子递增, 见 screener_view_model
+    # _flush_ai_buffer / switch_to_realtime / load_history_data 的顺序修正))
     df = vm.get_current_page_data()
+    memo_key = (state.data_version, state.page_no, state.page_size, get_observable_state().locale)
+    memo = table_memo_ref.current
     if df is not None and not df.empty:
-        vt_columns, formatted_rows = _build_table_data(df, vm)
+        if memo is not None and memo[0] == memo_key:
+            vt_columns, formatted_rows = memo[1], memo[2]
+        else:
+            vt_columns, formatted_rows = _build_table_data(df, vm)
+            table_memo_ref.current = (memo_key, vt_columns, formatted_rows)
     else:
         vt_columns = []
         formatted_rows = []
+        table_memo_ref.current = None
 
     # 分页信息
     page_no = state.page_no
@@ -783,16 +818,20 @@ def ScreenerView(
             default = p.get("default", min_val)
             step = p.get("step", 1)
             current_val = (params_ref.current or {}).get(p_name, default)
-            return SliderInput(
-                label=label,
-                value=float(current_val),
-                min_val=float(min_val),
-                max_val=float(max_val),
-                step=float(step),
-                on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
-                # 固定宽度: 参数面板 ft.Row(wrap=True) 需要可测量宽度的子控件才能正确换行布局。
-                # width=None + Slider(expand=True) 导致宽度不确定 → 控件独占一行 →
-                # 参数面板变高 → table_card 视口高度被挤压到 0 → 表格行不生成语义节点 (PR #373 回归)。
+            # NOTE: SliderInput 为 @ft.component 组件, 返回 Component wrapper (继承 BaseControl 而非
+            # flet.Control), 无 col/width 布局属性, 直接在 wrapper 上赋 col 不会随 patch 下发客户端,
+            # ResponsiveRow 默认按 col=12 布局 → 控件独占整行 → 参数面板变高 → table_card 视口高度
+            # 被挤压到 0 → 表格行不生成语义节点 (PR #373 回归 / PR #550 E2E 失败)。
+            # 修复: 外层包 Container 承载 width 与 col (Container 为 Control, 布局属性可正常下发)。
+            return ft.Container(
+                content=SliderInput(
+                    label=label,
+                    value=float(current_val),
+                    min_val=float(min_val),
+                    max_val=float(max_val),
+                    step=float(step),
+                    on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
+                ),
                 width=AppStyles.CONTROL_WIDTH_MD,
             )
 
@@ -1300,10 +1339,22 @@ def ScreenerView(
 
     left_controls = ft.Column([title_row, realtime_controls], spacing=10)
 
+    # UX-02 (P0-01): 质量门失败态恢复动作 — status_action_key 即 i18n key (tier_hint 同范式),
+    # 非空时渲染「前往同步」按钮, 深链到设置页数据源子页
+    go_sync_btn = ft.TextButton(
+        content=I18n.get(state.status_action_key) if state.status_action_key else "",
+        icon=ft.Icons.SYNC,
+        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+        height=30,
+        visible=state.status_action_key is not None,
+        on_click=safe_on_click(_on_go_sync_click),
+    )
+
     status_row = ft.Row(
         [
             ft.ProgressRing(visible=progress_visible, width=20, height=20, color=AppColors.ACCENT),
             ft.Text(status_text_value, color=status_text_color),
+            go_sync_btn,
         ],
         alignment=ft.MainAxisAlignment.END,
         spacing=10,

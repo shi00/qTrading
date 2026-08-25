@@ -43,8 +43,12 @@ _SLOW_UPSERT_THRESHOLD_MS = 2000
 class BaseDao:
     _maintenance_event = None
 
-    def _check_engine(self) -> None:
+    def _check_engine(self, context: str | None = None) -> None:
         """Check if the engine is initialized and not disposed.
+
+        Args:
+            context: 可选操作上下文（如 "read"/"write"/"upsert"），用于生成
+                带操作语义的 EngineDisposedError 消息（保持与历史内联检查一致）。
 
         Raises:
             RuntimeError: If engine is not initialized.
@@ -57,8 +61,9 @@ class BaseDao:
         from data.cache.cache_manager import CacheManager
 
         if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
+            suffix = f", {context} rejected." if context else "."
             raise EngineDisposedError(
-                f"[{self.__class__.__name__}] Engine disposed. Call CacheManager.init_db() to reinitialize."
+                f"[{self.__class__.__name__}] Engine disposed{suffix} Call CacheManager.init_db() to reinitialize."
             )
 
     @asynccontextmanager
@@ -438,18 +443,7 @@ class BaseDao:
         conn: typing.Any = None,
     ):
         """Execute a single SQL statement. For bulk operations, use _save_upsert."""
-        if self.engine is None:
-            raise RuntimeError(
-                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
-            )
-
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
-            raise EngineDisposedError(
-                f"[{self.__class__.__name__}] Engine disposed, write rejected. "
-                f"Call CacheManager.init_db() to reinitialize."
-            )
+        self._check_engine(context="write")
 
         if params:
             params = (
@@ -584,18 +578,7 @@ class BaseDao:
         if df is None or df.empty:
             return 0
 
-        if self.engine is None:
-            raise RuntimeError(
-                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
-            )
-
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
-            raise EngineDisposedError(
-                f"[{self.__class__.__name__}] Engine disposed, upsert rejected. "
-                f"Call CacheManager.init_db() to reinitialize."
-            )
+        self._check_engine(context="upsert")
 
         import asyncio
 
@@ -849,18 +832,7 @@ class BaseDao:
             max_rows: Safety valve - if set, raises ValueError when result
                       exceeds this row count to prevent accidental full-table loads
         """
-        if self.engine is None:
-            raise RuntimeError(
-                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
-            )
-
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
-            raise EngineDisposedError(
-                f"[{self.__class__.__name__}] Engine disposed, read rejected. "
-                f"Call CacheManager.init_db() to reinitialize."
-            )
+        self._check_engine(context="read")
 
         if params is not None and isinstance(params, list):
             params = tuple(params)
@@ -955,18 +927,7 @@ class BaseDao:
         SQLAlchemy's identifier quoting and parameter binding, eliminating
         SQL injection risk from f-string interpolation.
         """
-        if self.engine is None:
-            raise RuntimeError(
-                f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
-            )
-
-        from data.cache.cache_manager import CacheManager
-
-        if CacheManager._instance is not None and getattr(CacheManager._instance, "_disposed", False):
-            raise EngineDisposedError(
-                f"[{self.__class__.__name__}] Engine disposed, read rejected. "
-                f"Call CacheManager.init_db() to reinitialize."
-            )
+        self._check_engine(context="read")
 
         await self._get_maintenance_event().wait()
 

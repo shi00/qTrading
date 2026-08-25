@@ -3,10 +3,12 @@
 覆盖:
 1. R2/R9/R16 红线守卫: CancelledError raise / DataSanitizer.sanitize_error / page.run_task
 2. 组件挂载/卸载: VM subscribe + load_strategies + subscribe_task_manager + FilePicker 注册
-3. 14 个 handler 测试: 成功/异常/边界/CancelledError 路径
+3. 15 个 handler 测试: 成功/异常/边界/CancelledError 路径
+   (UX-02 新增 _on_go_sync_click: 质量门失败恢复动作深链 "settings:data")
 4. 派生渲染: _build_param_control (四类型) / _build_params_panel / _build_log_card / _build_history_tree
 5. 深度链接: _execute_pending_strategy (None 早返回 / 策略不存在 / 自动执行)
 6. use_effect cleanup: FilePicker page.services append/remove + PubSub subscribe/unsubscribe
+7. UX-02 质量门恢复动作: status_action_key 显隐/label/深链回调/page=None 容错/active 往返状态保持
 
 测试范式参考 test_system_tab.py / test_backtest_view.py (FakeVM + component_renderer +
 _invoke helper + _rerender helper + page.run_task 提取 + asyncio.run 异步 handler).
@@ -217,14 +219,20 @@ def _get_sliders(env: dict) -> list[ft.Slider]:
 
 
 def _get_slider_inputs(env: dict) -> list[ft.Column]:
-    """返回渲染树中所有 SliderInput Column 实例 (UX 3.2)."""
+    """返回渲染树中所有 SliderInput 的 Column 渲染结果 (UX 3.2).
+
+    SliderInput 为 @ft.component 声明式组件：在父组件渲染树中以 Component
+    节点存在（props 非控件树），需 render_once 展开后取得 Column body。
+    """
+    from ui.components.slider_input import SliderInput
+
+    # Component.fn 存的是 @ft.component 装饰前的原始函数（= SliderInput.__component_impl__）
+    slider_impl = getattr(SliderInput, "__component_impl__", SliderInput)
+
     inputs: list[ft.Column] = []
     for ctrl in _walk_all_controls(env["result"]):
-        if isinstance(ctrl, ft.Column):
-            has_slider = any(isinstance(c, ft.Slider) for c in _walk_all_controls(ctrl))
-            has_textfield = any(isinstance(c, ft.TextField) for c in _walk_all_controls(ctrl))
-            if has_slider and has_textfield:
-                inputs.append(ctrl)
+        if isinstance(ctrl, Component) and ctrl.fn is slider_impl:
+            inputs.append(render_once(ctrl))
     return inputs
 
 
@@ -1026,6 +1034,115 @@ class TestOnBacktestClick:
 
         # 清理
         consume_pending_prefill()
+
+
+# ============================================================================
+# Handler 测试: _on_go_sync_click (UX-02: P0-01 质量门恢复动作)
+# ============================================================================
+
+
+class TestGoSyncAction:
+    """UX-02 P0-01: status_action_key 非空 → 状态栏渲染「前往同步」按钮.
+
+    覆盖:
+    - 按钮显隐: status_action_key=None → visible=False (声明式常驻构造); 非空 → visible=True
+    - label: I18n.get(status_action_key) (key 即 i18n key, tier_hint 同范式)
+    - 点击回调: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data") 深链
+    - page=None 容错: 不抛异常, 无 pubsub 调用
+    - 状态保持: active prop 往返 (切 tab → 返回) 后 VM state 不丢失
+    """
+
+    def _get_go_sync_button(self, env: dict) -> ft.TextButton:
+        """从渲染树中找到 go_sync TextButton (icon=SYNC, screener_view 内唯一)."""
+        buttons = _get_buttons(env)
+        go_sync_btns = [b for b in buttons if isinstance(b, ft.TextButton) and b.icon == ft.Icons.SYNC]
+        assert len(go_sync_btns) == 1, f"go_sync button (icon=SYNC) 应恰好 1 个, 实际 {len(go_sync_btns)}"
+        return go_sync_btns[0]
+
+    def test_button_hidden_by_default(self, screener_view_env) -> None:
+        """status_action_key=None (默认) → 按钮在树中且 visible=False (声明式常驻构造)."""
+        env = screener_view_env
+        btn = self._get_go_sync_button(env)
+        assert btn.visible is False
+
+    def test_button_visible_with_action_key(self, screener_view_env) -> None:
+        """status_action_key 非空 (质量门失败态) → 按钮可见且 label 为 i18n 翻译."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            status_action_key="screener_action_go_sync",
+            status_message=Message("screener_blocked", {"reason": "quality gate"}),
+            status_color="warning",
+        )
+        _rerender(env)
+        btn = self._get_go_sync_button(env)
+        assert btn.visible is True
+        assert btn.content == "i18n[screener_action_go_sync]"
+
+    def test_click_navigates_to_data_settings(self, screener_view_env) -> None:
+        """点击按钮 → 深链导航: pubsub 广播 (TOPIC_NAVIGATE, "settings:data")."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._set_state(status_action_key="screener_action_go_sync")
+        _rerender(env)
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        btn = self._get_go_sync_button(env)
+        _invoke(btn.on_click, _make_event())
+
+        from ui.views.screener_view import TOPIC_NAVIGATE
+
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings:data")
+
+    def test_click_page_none_no_pubsub_call(self, screener_view_env) -> None:
+        """page=None → 点击不抛异常, 无 pubsub 调用 (早返回容错)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._set_state(status_action_key="screener_action_go_sync")
+        _rerender(env)
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        from flet.controls.context import _context_page
+
+        saved = _context_page.get()
+        _context_page.set(None)
+        try:
+            btn = self._get_go_sync_button(env)
+            _invoke(btn.on_click, _make_event())
+        finally:
+            _context_page.set(saved)
+
+        assert not page.pubsub.send_all_on_topic.called
+
+    def test_state_preserved_across_active_roundtrip(self, screener_view_env) -> None:
+        """active prop 往返 (切 tab → 返回) → VM state 保持 + TaskManager 重订阅.
+
+        模拟「前往同步」后返回选股页: app_layout 用 visible prop 切换 (非销毁),
+        active 翻转触发 use_effect(deps=[active]) 重跑 (退订/重订阅 TaskManager),
+        VM state (选中策略/质量门状态) 不丢失.
+        """
+        env = screener_view_env
+        component = env["component"]
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            selected_strategy="value",
+            status_action_key="screener_action_go_sync",
+        )
+        _rerender(env)
+
+        # active 往返: False (切走, 触发退订 cleanup) → True (返回, 重新订阅)
+        component.kwargs["active"] = False
+        _rerender(env)
+        component.kwargs["active"] = True
+        _rerender(env)
+
+        # VM state 保持 (上下文不丢失)
+        assert fake_vm.state.selected_strategy == "value"
+        assert fake_vm.state.status_action_key == "screener_action_go_sync"
+        # active 翻转触发 TaskManager 退订/重订阅 (use_effect deps=[active])
+        assert fake_vm.method_calls.count("subscribe_task_manager") >= 2
 
 
 # ============================================================================
@@ -2600,6 +2717,104 @@ class TestTableDataRendering:
         # PaginatedTable mock 被调用 (rows 参数含数据)
         # 验证不抛异常
         assert callable(env["captured_callbacks"]["on_sort"])
+
+
+class TestTableDataMemo:
+    """B12: 表格渲染 memo — data_version/page_no/page_size 未变时复用, 分页/空态失效."""
+
+    @pytest.fixture
+    def counting_build(self, screener_view_env, monkeypatch):
+        """包裹 _build_table_data 计数 (初始 fixture render 已调用 1 次真实函数)."""
+        mod = screener_view_env["mod"]
+        real_build = mod._build_table_data
+        calls = {"n": 0}
+
+        def _counting(df, vm):
+            calls["n"] += 1
+            return real_build(df, vm)
+
+        monkeypatch.setattr(mod, "_build_table_data", _counting)
+        return calls
+
+    def test_same_key_reuses_memo(self, screener_view_env, counting_build) -> None:
+        """data_version/page_no/page_size 均未变 → 复用 memo, 不再调用 _build_table_data."""
+        env = screener_view_env
+        # 初始 render 已构建 memo (data_version=0, page_no=1, page_size=50)
+        _rerender(env)
+        assert counting_build["n"] == 0, "同 key 重渲染应命中 memo"
+
+        _rerender(env)
+        assert counting_build["n"] == 0, "再次同 key 重渲染仍应命中 memo"
+
+    def test_data_version_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """data_version 递增 → 重算 (新 run 结果 / 实时流 flush / 排序)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        fake_vm._set_state(data_version=1)
+        _rerender(env)
+        assert counting_build["n"] == 1, "data_version 变化应重算"
+
+        # 再次同 key 重渲染命中新 memo
+        _rerender(env)
+        assert counting_build["n"] == 1
+
+    def test_pagination_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """page_no / page_size 变化 → 重算 (防止旧分页数据)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        fake_vm._set_state(page_no=2, total_items=100, total_pages=2)
+        _rerender(env)
+        assert counting_build["n"] == 1, "page_no 变化应重算"
+
+        fake_vm._set_state(page_size=100, total_pages=1)
+        _rerender(env)
+        assert counting_build["n"] == 2, "page_size 变化应重算"
+
+    def test_empty_data_invalidates_memo(self, screener_view_env, counting_build) -> None:
+        """空数据 → EmptyState + memo 失效; 恢复数据 (data_version 不变) → 重算非陈旧命中.
+
+        对应 run 重置/无结果路径不改 data_version 的防陈旧场景 (B12 对抗性检视补充).
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 清空数据 → EmptyState (memo 失效)
+        fake_vm._current_page_data = pd.DataFrame()
+        fake_vm._set_state(total_items=0, total_pages=0)
+        env["captured_callbacks"].clear()
+        _rerender(env)
+        assert counting_build["n"] == 0
+        assert "on_sort" not in env["captured_callbacks"], "空态应渲染 EmptyState 而非表格"
+
+        # 恢复数据且 data_version 不变 (模拟 run 结果先于版本递增的窗口) → 必须重算, 不得命中空态前旧 memo
+        fake_vm._current_page_data = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]})
+        fake_vm._set_state(total_items=1, total_pages=1)
+        _rerender(env)
+        assert counting_build["n"] == 1, "空态失效后恢复数据应重算 (防陈旧命中)"
+
+    def test_locale_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """locale 切换 → 重算 (unit_yi/unit_wan 等格式化字符串 locale 相关, 防旧 locale 残留)."""
+        env = screener_view_env
+        state = env["mod"].get_observable_state()
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        state.locale = "en_US"
+        _rerender(env)
+        assert counting_build["n"] == 1, "locale 变化应重算 (格式化单位随 locale)"
+
+        # 同 locale 再次重渲染命中新 memo
+        _rerender(env)
+        assert counting_build["n"] == 1
 
 
 # ============================================================================

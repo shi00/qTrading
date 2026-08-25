@@ -143,11 +143,10 @@ COMMON_COLUMNS = {
 
 # Table Definitions with Table-Specific Column Overrides
 TABLE_DEFINITIONS = {
-    "stock_basic": {"alias": "tab_stock_basic", "columns": {}},
+    "stock_basic": {"alias": "tab_stock_basic"},
     "stock_concepts": {
         "alias": "tab_stock_concepts",
         "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_LLM_<sha256> 前缀概念)",
-        "columns": {},
     },
     "ai_concept_failures": {
         "alias": "tab_ai_concept_failures",
@@ -167,7 +166,6 @@ TABLE_DEFINITIONS = {
             "critical": True,
             "frequency": "daily",
         },
-        "columns": {},
     },
     "financial_reports": {
         "alias": "tab_financial_reports",
@@ -209,7 +207,6 @@ TABLE_DEFINITIONS = {
             "critical": True,
             "frequency": "daily",
         },
-        "columns": {},
     },
     "fina_forecast": {
         "alias": "tab_fina_forecast",
@@ -372,10 +369,9 @@ TABLE_DEFINITIONS = {
             "critical": True,
             "frequency": "daily",
         },
-        "columns": {},
     },
-    "index_daily": {"alias": "tab_index_daily", "columns": {}},
-    "index_dailybasic": {"alias": "tab_index_dailybasic", "columns": {}},
+    "index_daily": {"alias": "tab_index_daily"},
+    "index_dailybasic": {"alias": "tab_index_dailybasic"},
     "northbound_holding": {
         "alias": "tab_northbound_holding",
         "quality_config": {"tier": 2, "monitor": True, "sparse": True},
@@ -592,10 +588,9 @@ TABLE_DEFINITIONS = {
             "content_hash": "col_content_hash",
         },
     },
-    "trade_cal": {"alias": "tab_trade_cal", "columns": {}},
+    "trade_cal": {"alias": "tab_trade_cal"},
     "screening_history": {
         "alias": "tab_screening_history",
-        "columns": {},
     },
     "screening_thinking": {
         "alias": "tab_screening_thinking",

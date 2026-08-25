@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 _STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "true").lower() in ("true", "1", "yes")
 
 
+def is_strict_quality_gate_enabled() -> bool:
+    """返回 STRICT_QUALITY_GATE 判定结果（模块常量，单一事实来源，review03-C15）。
+
+    bootstrap 启动校验与本模块共用此函数，避免 env 判定双源漂移。
+    """
+    return _STRICT_QUALITY_GATE
+
+
 class QualityTier(IntEnum):
     CRITICAL = 0  # Data missing or broken
     BRONZE = 1  # Availability Check Passed (Tier 1)
@@ -60,8 +68,10 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
                 f"QualityGate STRICT mode: DataProcessor not found for {func_name}. "
                 f"Set STRICT_QUALITY_GATE=false to bypass (not recommended in production)."
             )
-        logger.warning(
-            "[QualityGate] Bypassed for %s: DataProcessor not found in context. (Could be test env or context missing)",
+        logger.error(
+            "[QualityGate] Bypassed for %s: DataProcessor not found in context "
+            "AND STRICT_QUALITY_GATE disabled — quality gate is a safety mechanism, "
+            "this should not happen.",
             func_name,
         )
         return

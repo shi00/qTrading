@@ -568,6 +568,57 @@ class TestShutdownCoordinatorExecuteCleanup:
         result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_success_marks_graceful_shutdown_completed(self):
+        """B10: 成功路径调用 mark_graceful_shutdown_completed。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(
+            return_value=[
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=True,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                ),
+            ]
+        )
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        assert result is True
+        mock_mark.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_critical_failure_does_not_mark_graceful(self):
+        """B10: 关键步骤失败不标记优雅完成，atexit 兜底保留。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(
+            return_value=[
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=False,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                    error="fail",
+                ),
+            ]
+        )
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        assert result is False
+        mock_mark.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_mark_graceful(self):
+        """B10: 超时路径不标记优雅完成（与 finally 区分，finally 会误标记）。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(side_effect=TimeoutError())
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        assert result is False
+        mock_mark.assert_not_called()
+
 
 @pytest.mark.slow
 class TestShutdownWatchdogForceExit:

@@ -7,9 +7,11 @@ import time
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import pandas as pd
 
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
@@ -150,7 +152,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
     def __init__(self):
         # Dependencies
-        self.data_processor = DataProcessor()
+        # data_processor 懒构造：DataProcessor.__init__ 同步初始化 TushareClient
+        # （40+ API rate_limiter，耗时 34s+），构造期同步会阻塞 Flet 主线程 (R16)。
+        # 首次筛选（_execute_screening）经 _ensure_processor() 在 IO 线程池异步构造。
+        self.data_processor: DataProcessor | None = None
         self.strategy_mgr = StrategyManager()
         self.review_mgr = ReviewManager()
 
@@ -193,6 +198,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
+
+    async def _ensure_processor(self) -> DataProcessor:
+        """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。
+
+        双检 + loop-local 锁防并发双检竞态 (R11)。key 带 VM 前缀避免跨实例共享锁。
+        View 侧 `vm.data_processor` sync 访问可能为 None（StockDetailDialog 已有
+        None 保护）；首次筛选后此属性即非 None。
+        """
+        if self.data_processor is None:
+            lock = get_loop_local("screener_vm_processor_lock", asyncio.Lock)
+            async with lock:
+                if self.data_processor is None:
+                    self.data_processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
+        return self.data_processor
 
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
 
@@ -643,20 +662,22 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         async def _execute_screening(task_id: str, **kwargs):
             try:
                 # 1. Prepare Context (may trigger massive data load)
+                # 首次筛选在此懒异步构造 DataProcessor（IO 线程池 offload，R16）
+                dp = await self._ensure_processor()
                 TaskManager().update_progress(
                     task_id,
                     0.05,
                     Message("task_loading_data"),
                 )
-                context = await self.data_processor.get_strategy_data()
+                context = await dp.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
                         task_id,
                         0.1,
                         Message("task_cache_empty_init"),
                     )
-                    await self.data_processor.init_data()
-                    context = await self.data_processor.get_strategy_data()
+                    await dp.init_data()
+                    context = await dp.get_strategy_data()
 
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
@@ -685,17 +706,18 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                             status_action_key=None,
                         )
 
-                context["data_processor"] = self.data_processor
+                context["data_processor"] = dp
                 context["params"] = params or {}  # Dynamic strategy parameters from UI
 
                 # Setup AI Callbacks
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
                 def _combined_ai_progress(current, total, msg):
                     self._on_ai_progress(current, total, msg)  # For local View UI
+                    # D7: msg 为 Message, 直接透传 (不再拼 "[c/t] " 前缀, 防 dataclass repr)
                     TaskManager().update_progress(
                         task_id,
                         current / total if total > 0 else 0,
-                        f"[{current}/{total}] {msg}",
+                        msg,
                     )
 
                 context["on_progress"] = _combined_ai_progress
@@ -1150,12 +1172,16 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     # --- AI Streaming Handlers ---
 
     def _on_ai_progress(self, current, total, msg):
-        # Pass through status update
+        # D7: msg 为 data 层 ai_mixin 的 Message (key+params), VM 只透传 key:
+        # msg_key 走 *_key 约定由 View 翻译, 内层 params (done/total) 平铺供模板填入.
+        params: dict[str, Any] = {"done": current, "total": total}
+        if isinstance(msg, Message):
+            params["msg_key"] = msg.key
+            params.update(msg.params)
+        else:  # 兜底: 非 Message 路径 (向后兼容)
+            params["msg"] = msg
         self._set_state(
-            status_message=Message(
-                "screener_ai_analyzing",
-                {"done": current, "total": total, "msg": msg},
-            ),
+            status_message=Message("screener_ai_analyzing", params),
             status_color="info",
             status_action_key=None,
         )
@@ -1280,8 +1306,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 cols.insert(insert_idx + 1, "ai_reason")
 
                 self._full_results = self._full_results[cols]  # type: ignore[untyped]
-            self._update_pagination()
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(data_version=self._state.data_version + 1)
+            self._update_pagination()
 
             self._last_ai_update = time.time()
 
@@ -1343,7 +1371,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 self._ai_buffer.extend(self._discarded_buffer)
                 logger.debug("[ScreenerVM] Merged %s discarded items back to ai_buffer", len(self._discarded_buffer))
                 self._discarded_buffer = []
-            self._update_pagination(page_no=pn)
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(
                 mode="REALTIME",
                 page_no=pn,
@@ -1352,6 +1381,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 stream_cards=stream_cards,
                 data_version=self._state.data_version + 1,
             )
+            self._update_pagination(page_no=pn)
         else:
             self._set_state(mode="REALTIME")
         logger.info("[ScreenerVM] Switched to REALTIME mode")
@@ -1458,7 +1488,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 sort_column = "ai_score"
             else:
                 sort_column = None
-            self._update_pagination(page_no=1)
+            # B12: 先递增 data_version 再通知分页, 保证数据内容变更与版本号原子一致,
+            # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(
                 page_no=1,
                 loading=False,
@@ -1466,6 +1497,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 sort_ascending=False,
                 data_version=self._state.data_version + 1,
             )
+            self._update_pagination(page_no=1)
         except asyncio.CancelledError:
             self._set_state(loading=False)
             raise

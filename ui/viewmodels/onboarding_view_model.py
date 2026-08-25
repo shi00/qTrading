@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
@@ -198,9 +199,26 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     # ------------------------------------------------------------------
 
     @property
-    def data_processor(self) -> DataProcessor:
+    def data_processor(self) -> DataProcessor | None:
+        """仅返回已构造实例（B11: 不再同步构造, 避免阻塞 UI 主线程 R16）。
+
+        同步使用点不应依赖本 property 触发构造——真实构造走 _ensure_processor()
+        （IO 线程池 offload）。测试注入 mock 后本 property 直接返回已注入实例。
+        """
+        return self._data_processor
+
+    async def _ensure_processor(self) -> DataProcessor:
+        """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。
+
+        双检 + loop-local 锁防并发双检竞态 (R11)：start_sync 等异步方法可能交错触发
+        构造。key 带 VM 前缀避免跨实例共享同一锁。
+        显式注入（构造参数 data_processor）后本方法直接返回已注入实例。
+        """
         if self._data_processor is None:
-            self._data_processor = DataProcessor()
+            lock = get_loop_local("onboarding_vm_processor_lock", asyncio.Lock)
+            async with lock:
+                if self._data_processor is None:
+                    self._data_processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
         return self._data_processor
 
     @property
@@ -461,11 +479,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         try:
 
             def progress_callback(current, total, message):
-                # DataProcessor 传入的 message 为 service 层已翻译字符串，不能作为 i18n key 透传，
-                # 否则产生 missing-translation 噪音。统一使用固定 key，进度百分比仍实时更新。
+                # DataProcessor 传入的 message 为 Message(key+params) (D7 改造后)；
+                # onboarding 引导页刻意使用固定 key 展示，进度百分比仍实时更新，
+                # 不逐条翻译下游同步阶段文案。
                 self._set_state(sync_progress=current / 100, sync_progress_message=Message("wizard_status_syncing"))
 
-            result = await self.data_processor.initialize_system(
+            dp = await self._ensure_processor()
+            result = await dp.initialize_system(
                 progress_callback=progress_callback,
                 quick=quick,
             )

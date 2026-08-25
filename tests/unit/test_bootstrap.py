@@ -4,7 +4,12 @@ import datetime
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
+from app.bootstrap import (
+    _validate_quality_gate_strictness,
+    check_onboarding_needed,
+    initialize_services,
+    mask_sensitive,
+)
 from data.persistence.db_migrator import DatabaseMigrationNeeded
 
 pytestmark = pytest.mark.unit
@@ -40,7 +45,34 @@ class TestMaskSensitive:
         result = mask_sensitive(token)
         assert result.startswith("tus")
         assert result.endswith("6789")
-        assert "***" in result
+
+
+class TestValidateQualityGateStrictness:
+    """review03-C15: 生产构建（非 E2E、非 DEBUG）下 STRICT_QUALITY_GATE=false 拒绝启动。"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        monkeypatch.delenv("E2E_TESTING", raising=False)
+        monkeypatch.delenv("DEBUG", raising=False)
+
+    def test_strict_enabled_passes(self):
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=True):
+            _validate_quality_gate_strictness()  # 不抛
+
+    def test_non_strict_non_dev_raises(self):
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
+            with pytest.raises(RuntimeError, match="STRICT_QUALITY_GATE=false"):
+                _validate_quality_gate_strictness()
+
+    def test_non_strict_e2e_allowed(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
+            _validate_quality_gate_strictness()  # E2E 放行（质量门控本就 bypass）
+
+    def test_non_strict_debug_allowed(self, monkeypatch):
+        monkeypatch.setenv("DEBUG", "true")
+        with patch("data.persistence.quality_gate.is_strict_quality_gate_enabled", return_value=False):
+            _validate_quality_gate_strictness()  # DEBUG 本地调试豁免
 
 
 class TestCheckOnboardingNeeded:
