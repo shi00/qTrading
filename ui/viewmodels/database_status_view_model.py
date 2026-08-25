@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from utils.config_handler import ConfigHandler
 from utils.config_models import AppConfig
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
@@ -108,7 +109,9 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         try:
             svc = self._get_maintenance_service()
             result = await svc.doctor()
-            config = AppConfig.model_validate(ConfigHandler.load_config())
+            # B13: ConfigHandler.load_config 同步读文件，offload 到 IO 线程池避免阻塞事件循环 (R16)。
+            config_raw = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.load_config)
+            config = AppConfig.model_validate(config_raw)
             log_dir = self._resolve_log_dir(config)
             port = config.db_port
             pg_version = str(result.pg_version) if result.pg_version is not None else None
