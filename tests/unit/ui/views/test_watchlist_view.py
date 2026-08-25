@@ -380,6 +380,8 @@ class TestWatchlistViewRendering:
         assert error_state is not None
         # 验证 detail 参数传递
         assert error_state.kwargs.get("detail") == "sanitized error detail"
+        # UX-03 (P2-09): 反馈问题 CTA 图标语义匹配 (不再固定 SETTINGS 误导)
+        assert error_state.kwargs.get("cta_icon") == ft.Icons.FEEDBACK
         # 不渲染 EmptyState (无 EmptyState Component)
         empty_state = _find_component_by_fn_name(result, "EmptyState")
         assert empty_state is None

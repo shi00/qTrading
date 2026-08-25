@@ -197,6 +197,7 @@ def WatchlistView(
             retry_text=I18n.get("common_retry"),
             on_cta=_on_cta,
             cta_text=I18n.get("error_state_contact_support"),
+            cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )
     elif not state.watchlist_rows:
         body = EmptyState(

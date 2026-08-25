@@ -1236,6 +1236,8 @@ class TestNavigateToDataSource:
 
         on_cta = captured_props.get("on_cta")
         assert on_cta is not None, "ErrorState 应含 on_cta 回调"  # noqa: weak-assertion 后续 L1127 有 assert_called_once_with 强断言
+        # UX-03 (P2-09): 前往数据源 CTA 图标语义匹配 (显式传 SETTINGS 保持现视觉)
+        assert captured_props.get("cta_icon") == ft.Icons.SETTINGS
 
         # 触发 CTA 回调
         page.pubsub.send_all_on_topic.reset_mock()

@@ -217,6 +217,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             retry_text=I18n.get("common_retry"),
             on_cta=_on_cta_report,
             cta_text=I18n.get("error_state_contact_support"),
+            cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )
     else:
         right_content = BacktestResultPanel(result=state.result)
