@@ -137,12 +137,31 @@ def _check_startup_errors(log_path: Path, log_offset: int = 0, timeout_s: float 
         time.sleep(0.5)
 
 
-def start_flet_app(
+_MAX_BIND_RETRIES = 3
+
+
+def _is_port_bind_conflict(exc: Exception) -> bool:
+    """判定启动失败是否为端口绑定冲突（WinError 10048）。
+
+    wait_until_ready 的 RuntimeError 消息内嵌 app 日志尾部，uvicorn bind 失败
+    （OSError 10048）时消息含 "10048"。其他启动失败（DB 初始化/代码异常）与
+    端口无关，换端口重试无意义，须保持直接抛出。
+    """
+    return "10048" in str(exc)
+
+
+def _start_flet_app_once(
     config_file: Path,
     env_overrides: dict[str, str],
     *,
-    startup_timeout_s: float = 60.0,
+    startup_timeout_s: float,
 ) -> tuple[subprocess.Popen, str]:
+    """单次启动尝试（供 start_flet_app 端口冲突重试复用）。
+
+    _free_port() 探测后端口即释放，子进程 import 数秒后才由 uvicorn 真正 bind，
+    期间该端口可能被本机其他本地 TCP 端点抢占（WinError 10048，见 start_flet_app
+    docstring 与 PR 557 CI run 32807572004 的 E2E 失败）。
+    """
     port = _free_port()
     env = {
         **os.environ,
@@ -202,3 +221,35 @@ def start_flet_app(
         proc.terminate()
         raise
     return proc, url
+
+
+def start_flet_app(
+    config_file: Path,
+    env_overrides: dict[str, str],
+    *,
+    startup_timeout_s: float = 60.0,
+) -> tuple[subprocess.Popen, str]:
+    """启动 Flet app 子进程；端口绑定冲突自动换新端口重试（上限 _MAX_BIND_RETRIES）。
+
+    Windows 下 ``_free_port()`` 探测端口后即释放，到子进程 uvicorn 真正 bind 之间
+    有秒级窗口，本机其他本地 TCP 端点可能抢占该端口，子进程 bind 失败退出
+    （code 3 / WinError 10048）。失败发生在 ``main(page)`` 之前，无 DB/sidecar
+    副作用，换新端口重试是安全的。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_BIND_RETRIES):
+        try:
+            return _start_flet_app_once(config_file, env_overrides, startup_timeout_s=startup_timeout_s)
+        except RuntimeError as exc:
+            if not _is_port_bind_conflict(exc):
+                raise
+            last_exc = exc
+            logger.warning(
+                "[E2E] Flet app 端口绑定冲突（10048），换新端口重试 (attempt %d/%d)",
+                attempt + 1,
+                _MAX_BIND_RETRIES,
+            )
+    # 多次换端口重试仍冲突：抛出最后一次原始异常，保持与单次启动一致的报错形态
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unreachable: _MAX_BIND_RETRIES >= 1 必然执行循环")  # pragma: no cover
