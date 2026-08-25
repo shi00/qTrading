@@ -499,6 +499,19 @@ class FletPage:
             return True
         return await self.page.locator(f'[aria-label*="{text}"]').count() > 0
 
+    async def expect_text_gone(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """等待指定文本从页面消失（轮询 has_text 直至 False）。
+
+        用于断言过滤/删除等操作真正生效（如过滤后目标股票外的代码不再出现）。
+        """
+        scaled = self._tm(timeout_ms)
+        start = asyncio.get_running_loop().time()
+        while (asyncio.get_running_loop().time() - start) * 1000 < scaled:
+            if not await self.has_text(text):
+                return
+            await self.page.wait_for_timeout(200)
+        raise AssertionError(f"expect_text_gone: 文本 '{text}' 在 {scaled}ms 内未消失")
+
     async def dump_semantics(self) -> list[dict]:
         return await self.page.eval_on_selector_all(
             "flt-semantics, [role]",

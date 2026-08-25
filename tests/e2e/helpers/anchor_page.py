@@ -293,6 +293,66 @@ class AnchorPage:
         await self.page.keyboard.press("Control+A")
         await self.page.keyboard.type(value, delay=30)
 
+    async def _read_expanded(self, eid_str: str) -> str | None:
+        """读取 COMPLEX 下拉当前展开态 (aria-expanded)。
+
+        仅适用于 ``role="button"`` 的 COMPLEX 锚点节点，EID 落 textContent
+        （形态 ``"EID\\n显示文本"``）。返回 ``"true"``/``"false"``/None。
+        """
+        return await self.page.evaluate(
+            r"""(args) => {
+                const {label} = args;
+                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                    .find(e => {
+                        const t = (e.textContent || '').trim();
+                        return t === label || t.startsWith(label + '.') || t.startsWith(label + '\n');
+                    });
+                return el ? el.getAttribute('aria-expanded') : null;
+            }""",
+            {"label": eid_str},
+        )
+
+    async def _find_option_element(self, option_text: str, eid_str: str) -> Any:
+        """定位下拉选项。
+
+        Flet 0.86.5 CanvasKit 下拉选项**无** option/menuitem 角色，渲染为
+        ``role="button"`` 节点（text 形如 ``"key (别名)"``）。候选集按优先级
+        搜索：菜单角色 → 按钮(下拉选项) → 宽泛兜底；匹配优先级 精确 > 前缀别名 >
+        ``(别名)`` 括号模式 > 裸子串。避免裸子串 ``"代码"`` 误命中页面导航/列头
+        等无关文本（PR 585 E2E 失败根因，见 reviews/plans/2026-08-25-...）。
+        """
+        option_handle = await self.page.evaluate_handle(
+            r"""(args) => {
+                const {text, dropdownEid} = args;
+                const normText = text.trim();
+                const isVisible = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                const notSelf = (e) => { const t=(e.textContent||'').trim(); return !(dropdownEid && (t.startsWith(dropdownEid+'\n')||t.startsWith(dropdownEid+'.'))); };
+                const matchPrio = (t) => {
+                    if (t === normText) return 1;
+                    if (t.startsWith(normText+' ')||t.startsWith(normText+'(')||t.startsWith(normText+'\n')) return 2;
+                    if (t.includes('('+normText+')')) return 3;
+                    if (t.includes(normText)) return 4;
+                    return 0;
+                };
+                // 候选组按优先级：菜单角色 → 按钮(下拉选项) → 宽泛兜底
+                const groups = [
+                    'flt-semantics[role="option"], flt-semantics[role="menuitem"]',
+                    'flt-semantics[role="button"]:not([aria-expanded])',
+                    'flt-semantics:not([aria-expanded])',
+                ];
+                for (const sel of groups) {
+                    const els = Array.from(document.querySelectorAll(sel)).filter(isVisible).filter(notSelf);
+                    for (let prio = 1; prio <= 4; prio++) {
+                        const hit = els.find(e => matchPrio((e.textContent||'').trim()) === prio);
+                        if (hit) return hit;
+                    }
+                }
+                return null;
+            }""",
+            {"text": option_text, "dropdownEid": eid_str},
+        )
+        return option_handle.as_element()
+
     async def select_option(
         self,
         dropdown_eid: Eid,
@@ -315,75 +375,33 @@ class AnchorPage:
               ``filter(has_text=...)`` 子串匹配, 避免短文本 (如"代码") 误命中.
         - C4: 展开前若残留 ``aria-expanded="true"`` 按 ``Escape`` 先收合, 避免
               第二次 click 被 Material 3 DropdownMenu 解读为"关闭"而非"打开".
-        - 原有"收合校验"逻辑保留 (``selection did not settle``), 向后兼容.
+        - C5 (PR 585 E2E 修复): 预探测选项**仅当菜单当前确认展开**时执行.
+              菜单关闭时选项节点不存在, 全页面文本匹配会误命中页面其他同文本元素
+              (导航/结果表表头「代码」), 导致菜单从未打开、点击落空. 故关闭态一律
+              先展开再搜索. 选项搜索用**候选组优先级** (菜单角色 → role=button
+              下拉选项 → 宽泛兜底) + **匹配优先级** (精确 > 前缀别名 > "(别名)"
+              括号模式 > 裸子串), 避免裸子串误命中页面无关文本.
+        - 收合确认 (坑点 6 步骤级重试): 空等 2s + ``retry_until_triggered`` 确认
+              菜单收合, 选择未落地即抛明确错误, 不静默返回.
         """
         eid_str, kind = dropdown_eid
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
 
-        async def _find_option_element() -> Any:
-            option_handle = await self.page.evaluate_handle(
-                r"""(args) => {
-                    const {text, dropdownEid} = args;
-                    const selectors = [
-                        'flt-semantics[role="option"]',
-                        'flt-semantics[role="menuitem"]',
-                        'flt-semantics[role="button"]:not([aria-expanded])',
-                        'flt-semantics:not([aria-expanded])'
-                    ];
-                    const rawEls = Array.from(document.querySelectorAll(selectors.join(',')));
-                    const els = rawEls.filter(e => {
-                        const r = e.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) return false;
-                        const t = (e.textContent || '').trim();
-                        if (dropdownEid && (t.startsWith(dropdownEid + '\n') || t.startsWith(dropdownEid + '.'))) return false;
-                        return true;
-                    });
-
-                    const normText = text.trim();
-                    // 1. 精确匹配
-                    let found = els.find(e => (e.textContent || '').trim() === normText);
-                    if (found) return found;
-
-                    // 2. 前缀/别名匹配 (e.g. "stock_basic (股票列表)" 或 "stock_basic (Stock Basic)")
-                    found = els.find(e => {
-                        const t = (e.textContent || '').trim();
-                        return t.startsWith(normText + ' ')
-                            || t.startsWith(normText + '(')
-                            || t.startsWith(normText + '\n');
-                    });
-                    if (found) return found;
-
-                    // 3. 括号/包含匹配
-                    found = els.find(e => {
-                        const t = (e.textContent || '').trim();
-                        return t.includes('(' + normText + ')') || t.includes(normText);
-                    });
-                    return found || null;
-                }""",
-                {"text": option_text, "dropdownEid": eid_str},
-            )
-            return option_handle.as_element()
-
         # 0. C4: 若下拉残留 expanded 状态（上次选择未完全收合），先按 Escape 收合
-        expanded_check = await self.page.evaluate(
-            r"""(args) => {
-                const {label} = args;
-                const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
-                    .find(e => {
-                        const t = (e.textContent || '').trim();
-                        return t === label || t.startsWith(label + '.') || t.startsWith(label + '\n');
-                    });
-                return el ? el.getAttribute('aria-expanded') : null;
-            }""",
-            {"label": eid_str},
-        )
+        expanded_check = await self._read_expanded(eid_str)
         if expanded_check == "true":
             await self.page.keyboard.press("Escape")
             await self.page.wait_for_timeout(300)
 
-        # 1. 优先探测选项是否已经在 DOM 中呈展开态
-        option_element = await _find_option_element()
+        # 1. 门控预探测：仅当菜单当前确认展开 (aria-expanded=true) 才在 DOM 中查找选项。
+        #    菜单关闭时选项节点不存在（Flet 动态生成，见 canvaskit-rendering-e2e-guide 坑点 3），
+        #    此时全页面文本匹配会误命中页面其他同文本元素（如结果表表头「代码」），
+        #    导致菜单从未打开、点击落空（PR 585 E2E 失败根因）。故关闭态一律走展开流程。
+        menu_expanded = await self._read_expanded(eid_str)
+        # Any: 后续闭包 (_interact/_menu_closed) 经 nonlocal 捕获，此处显式声明避免
+        # pyright 在捕获点对 `else None` 分支报 Optional 成员访问 (reportOptionalMemberAccess)
+        option_element: Any = await self._find_option_element(option_text, eid_str) if menu_expanded == "true" else None
         if not option_element:
             # 展开菜单：获取 Dropdown bbox
             r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
@@ -397,7 +415,7 @@ class AnchorPage:
             # 短轮询等待选项出现（最多等待 2s）
             quick_deadline = time.monotonic() + min(self._tm(timeout_ms) / 1000, 2.0)
             while time.monotonic() < quick_deadline:
-                option_element = await _find_option_element()
+                option_element = await self._find_option_element(option_text, eid_str)
                 if option_element:
                     break
                 await self.page.wait_for_timeout(100)
@@ -411,7 +429,7 @@ class AnchorPage:
 
                 expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
                 while time.monotonic() < expand_deadline:
-                    option_element = await _find_option_element()
+                    option_element = await self._find_option_element(option_text, eid_str)
                     if option_element:
                         break
                     await self.page.wait_for_timeout(100)
@@ -430,21 +448,36 @@ class AnchorPage:
             except Exception as click_err:
                 if click_attempt < 2 and "not attached" in str(click_err).lower():
                     await self.page.wait_for_timeout(150)
-                    fresh_elem = await _find_option_element()
+                    fresh_elem = await self._find_option_element(option_text, eid_str)
                     if fresh_elem:
                         option_element = fresh_elem
                         continue
                 raise
 
-        # 3. 等待菜单收合与 Flet 事件循环处理
-        settle_deadline = time.monotonic() + 1.0
-        while time.monotonic() < settle_deadline:
+        # 3. 确认菜单收合（选择落地）。CanvasKit 高负载下选项点击偶发被吞：
+        #    click 返回成功但 on_select 未触发、菜单保持展开，静默返回会导致下游
+        #    snackbar/状态断言全部超时。先空等 2s 正常收合；未收合则重定位选项
+        #    重试点击（interact+confirm 模式，见 canvaskit-rendering-e2e-guide 坑点 6
+        #    步骤级重试），耗尽仍不收合即抛明确错误，不静默吞。
+        async def _interact() -> None:
+            nonlocal option_element
+            fresh_elem = await self._find_option_element(option_text, eid_str)
+            if fresh_elem:
+                option_element = fresh_elem
+            await option_element.click(force=True)
+
+        async def _menu_closed() -> bool:
             try:
-                if not await option_element.is_visible():
-                    break
+                return not await option_element.is_visible()
             except Exception:
-                break
+                return True
+
+        settle_deadline = time.monotonic() + 2.0
+        while time.monotonic() < settle_deadline:
+            if await _menu_closed():
+                return
             await self.page.wait_for_timeout(100)
+        await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count
