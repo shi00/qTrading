@@ -201,17 +201,19 @@ class TestFinancialSyncGetEffectiveTradeDate:
     async def test_exception_fallback(self):
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
-    async def test_none_return_falls_back_to_today(self):
+    async def test_none_return_falls_back_to_synced_data(self):
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
 
 class TestFinancialSyncRunModes:

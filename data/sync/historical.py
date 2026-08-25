@@ -92,38 +92,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
-        """Prefer the latest closed trade date for default sync operations."""
-        try:
-            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
-            if trade_date is not None:
-                return trade_date
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] Effective trade date | SYSTEM-LEVEL failure: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
-                raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Effective trade date fallback (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] Effective trade date fallback (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-        return get_now().date()
+        """Prefer the latest closed trade date for default sync operations.
+
+        review03-C14: 委托共享回退链（交易日历服务 → 已同步行情最大日期 → 显式抛错），
+        不再回退到本地日历日（避免时区/非交易日导致的错误同步窗口）。
+        """
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        return await get_effective_trade_date(getattr(self.context, "processor", None))
 
     @log_async_operation(
         operation_name="HistoricalSyncStrategy.run",
