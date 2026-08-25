@@ -50,9 +50,11 @@ logger = logging.getLogger(__name__)
 
 from utils.singleton_registry import register_singleton
 
+from data.cache.cache_manager_delegations import CacheManagerDelegationMixin
+
 
 @register_singleton
-class CacheManager:
+class CacheManager(CacheManagerDelegationMixin):
     _instance = None
     _initialized = False
     _lock = threading.Lock()  # Thread-safe singleton
@@ -308,9 +310,11 @@ class CacheManager:
 
     # Backward compatibility for direct SQL usage if any
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def write_db(self, sql: str, params: tuple | list | None = None):
+    async def write_db(self, sql: str, params: tuple | list | None = None, *, suppress_errors: bool = False):
         dao = BaseDao(self.engine)
-        return await dao._write_db(sql, params, suppress_errors=True)
+        # review03-C12: 默认不再吞错——写入失败应传播（数据写丢失不可静默）。
+        # 调用方如确认失败可容忍（如记录清理），显式传 suppress_errors=True + 注释说明。
+        return await dao._write_db(sql, params, suppress_errors=suppress_errors)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_db(self, sql: str, params: tuple | list | None = None):
@@ -447,18 +451,7 @@ class CacheManager:
 
     # --- Stock Basic ---
 
-    async def save_stock_basic(self, df: pd.DataFrame, priority: int | None = None):
-        return await self.stock_dao.save_stock_basic(df, priority)
-
-    async def get_stock_basic(self):
-        return await self.stock_dao.get_stock_basic()
-
     # --- Concepts ---
-    async def save_concepts(self, df: pd.DataFrame):
-        return await self.stock_dao.save_concepts(df)
-
-    async def overwrite_concepts(self, df: pd.DataFrame):
-        return await self.stock_dao.overwrite_concepts(df)
 
     async def get_concepts(self, ts_codes: list | None = None):
         """
@@ -478,58 +471,8 @@ class CacheManager:
         return concepts_map.get(ts_code, [])
 
     # --- Daily Quotes ---
-    async def save_daily_quotes(
-        self,
-        df: pd.DataFrame,
-        priority: int | None = None,
-        suppress_errors: bool = False,
-    ):
-        return await self.quote_dao.save_daily_quotes(
-            df,
-            priority,
-            suppress_errors=suppress_errors,
-        )
-
-    async def check_data_exists(self, trade_date: str) -> bool:
-        await self.wait_for_maintenance()
-        return await self.quote_dao.check_data_exists(trade_date)
-
-    async def get_daily_quotes(
-        self,
-        ts_code: str | None = None,
-        start_date: datetime.date | str | None = None,
-        end_date: datetime.date | str | None = None,
-        ts_code_list: list | None = None,
-        suppress_errors: bool = True,
-    ):
-        return await self.quote_dao.get_daily_quotes(
-            ts_code,
-            start_date,
-            end_date,
-            ts_code_list,
-            suppress_errors=suppress_errors,
-        )
 
     # --- Daily Indicators ---
-    async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = False):
-        return await self.market_dao.save_daily_indicators(
-            df,
-            suppress_errors=suppress_errors,
-        )
-
-    async def get_daily_indicators(
-        self,
-        ts_code: str | None = None,
-        start_date: datetime.date | str | None = None,
-        end_date: datetime.date | str | None = None,
-        limit: int | None = None,
-    ):
-        return await self.market_dao.get_daily_indicators(
-            ts_code,
-            start_date,
-            end_date,
-            limit,
-        )
 
     async def get_daily_indicators_bulk(
         self,
@@ -547,14 +490,6 @@ class CacheManager:
             end_date,
         )
 
-    async def get_latest_trade_date(self):
-        await self.wait_for_maintenance()
-        return await self.quote_dao.get_latest_trade_date()
-
-    async def get_cached_trade_dates(self):
-        await self.wait_for_maintenance()
-        return await self.quote_dao.get_cached_trade_dates()
-
     async def get_cached_dates_for_table(self, table_name: str) -> set:
         """Proxy method for breakpoint resume check."""
         await self.wait_for_maintenance()
@@ -562,15 +497,7 @@ class CacheManager:
 
     # --- Indicators ---
 
-    async def get_latest_indicators(self, trade_date: str | None = None):
-        return await self.financial_dao.get_latest_indicators(trade_date)
-
-    async def get_cached_indicator_dates(self):
-        return await self.financial_dao.get_cached_indicator_dates()
-
     # --- Financial Reports ---
-    async def save_financial_reports(self, df: pd.DataFrame, conn=None):
-        return await self.financial_dao.save_financial_reports(df, conn=conn)
 
     @asynccontextmanager
     async def financial_transaction(self):
@@ -584,59 +511,11 @@ class CacheManager:
         async with self.financial_dao._guarded_begin() as conn:
             yield conn
 
-    async def get_cached_financial_records(self, period: str | None = None):
-        return await self.financial_dao.get_cached_financial_records(period)
-
     # --- Other Data Types ---
-    async def save_moneyflow(self, df: pd.DataFrame):
-        return await self.quote_dao.save_moneyflow(df)
-
-    async def save_northbound(self, df: pd.DataFrame):
-        return await self.quote_dao.save_northbound(df)
-
-    async def save_market_news(self, news_item: dict, wait: bool = False):
-        return await self.market_dao.save_market_news(news_item, wait)
-
-    async def get_market_news(
-        self,
-        limit: int | None = 50,
-        offset: int = 0,
-        min_publish_time: datetime.date | str | None = None,
-    ):
-        return await self.market_dao.get_market_news(limit, offset, min_publish_time)
 
     # --- Screening Data ---
-    async def get_screening_data(self, trade_date: str | None = None):
-        return await self.screener_dao.get_screening_data(trade_date)
-
-    async def get_fundamental_screening_data(self, trade_date: str | None = None):
-        return await self.screener_dao.get_fundamental_screening_data(trade_date)
-
-    async def get_screening_data_range(self, start_date: str, end_date: str):
-        return await self.screener_dao.get_screening_data_range(start_date, end_date)
-
-    async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
-        return await self.screener_dao.get_fundamental_screening_data_range(start_date, end_date)
 
     # --- Sync Stats & Misc ---
-    async def update_sync_status(
-        self,
-        table_name: str,
-        last_data_date: str,
-        record_count: int,
-        status: str = "success",
-        last_result_status: str | None = None,
-    ):
-        return await self.sync_dao.update_sync_status(
-            table_name,
-            last_data_date,
-            record_count,
-            status,
-            last_result_status,
-        )
-
-    async def get_sync_status(self, table_name: str | None = None) -> pd.DataFrame | dict | None:
-        return await self.sync_dao.get_sync_status(table_name)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def check_comprehensive_health(self, cancel_event: asyncio.Event | None = None):
@@ -933,18 +812,8 @@ class CacheManager:
         return await self.stock_dao.get_concept_count()
 
     # --- Extra Savers (Boilerplate) ---
-    async def save_fina_forecast(self, df: pd.DataFrame):
-        return await self.financial_dao.save_fina_forecast(df)
 
     # Phase 3G §4.3.4：业绩快报
-    async def save_express(self, df: pd.DataFrame):
-        return await self.express_dao.save_express(df)
-
-    async def save_fina_mainbz(self, df: pd.DataFrame):
-        return await self.financial_dao.save_fina_mainbz(df)
-
-    async def save_pledge_stat(self, df: pd.DataFrame):
-        return await self.financial_dao.save_pledge_stat(df)
 
     async def save_pledge_detail(self, df: pd.DataFrame):
         """Phase 3B：股权质押明细入库。"""
@@ -983,21 +852,6 @@ class CacheManager:
         """
         return await self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes)
 
-    async def save_repurchase(self, df: pd.DataFrame):
-        return await self.financial_dao.save_repurchase(df)
-
-    async def save_dividend(self, df: pd.DataFrame):
-        return await self.financial_dao.save_dividend(df)
-
-    async def save_index_daily(self, df: pd.DataFrame):
-        return await self.quote_dao.save_index_daily(df)
-
-    async def save_index_dailybasic(self, df: pd.DataFrame):
-        return await self.quote_dao.save_index_dailybasic(df)
-
-    async def get_index_daily(self, ts_code: str | None = None, trade_date: datetime.date | str | None = None):
-        return await self.quote_dao.get_index_daily(ts_code, trade_date)
-
     async def get_index_daily_range(
         self,
         ts_code_list: list,
@@ -1013,43 +867,6 @@ class CacheManager:
             end_date,
         )
 
-    async def save_limit_list(self, df: pd.DataFrame):
-        return await self.quote_dao.save_limit_list(df)
-
-    async def get_limit_list(
-        self,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        trade_date: str | None = None,
-    ):
-        return await self.quote_dao.get_limit_list(start_date, end_date, trade_date)
-
-    async def save_margin_daily(self, df: pd.DataFrame):
-        return await self.quote_dao.save_margin_daily(df)
-
-    async def save_suspend_d(self, df: pd.DataFrame):
-        return await self.quote_dao.save_suspend_d(df)
-
-    async def get_suspend_d(
-        self,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        trade_date: str | None = None,
-    ):
-        return await self.quote_dao.get_suspend_d(start_date, end_date, trade_date)
-
-    async def save_fina_audit(self, df: pd.DataFrame):
-        return await self.financial_dao.save_fina_audit(df)
-
-    async def save_top_list(self, df: pd.DataFrame):
-        return await self.quote_dao.save_top_list(df)
-
-    async def get_top_list(self, trade_date: str | None = None):
-        return await self.quote_dao.get_top_list(trade_date)
-
-    async def get_top_list_range(self, start_date: str, end_date: str):
-        return await self.quote_dao.get_top_list_range(start_date, end_date)
-
     async def save_top_inst(self, df: pd.DataFrame):
         """Phase 2E：top_inst 龙虎榜机构席位明细入库。"""
         return await self.top_inst_dao.save_top_inst(df)
@@ -1062,110 +879,20 @@ class CacheManager:
         """Phase 2G：stk_limit 每日涨跌停价格入库（仅数据层，不注入 AI）。"""
         return await self.stk_limit_dao.save_stk_limit(df)
 
-    async def save_block_trade(self, df: pd.DataFrame):
-        return await self.quote_dao.save_block_trade(df)
-
-    async def get_block_trade(self, trade_date: str | None = None):
-        return await self.quote_dao.get_block_trade(trade_date)
-
-    async def get_block_trade_range(self, start_date: str, end_date: str):
-        return await self.quote_dao.get_block_trade_range(start_date, end_date)
-
-    async def get_moneyflow(self, trade_date: str | None = None, ts_code: str | None = None):
-        return await self.quote_dao.get_moneyflow(trade_date, ts_code)
-
-    async def get_moneyflow_range(self, start_date: str, end_date: str):
-        return await self.quote_dao.get_moneyflow_range(start_date, end_date)
-
-    async def get_northbound(self, trade_date: str | None = None, ts_code: str | None = None):
-        return await self.quote_dao.get_northbound(trade_date, ts_code)
-
-    async def get_northbound_range(self, start_date: str, end_date: str):
-        return await self.quote_dao.get_northbound_range(start_date, end_date)
-
     # --- Screening History ---
-    async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
-        return await self.screener_dao.get_screening_history(strategy_name, limit)
-
-    async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
-        return await self.screener_dao.get_history_tree(offset, limit)
-
-    async def get_history_records(
-        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
-    ):
-        return await self.screener_dao.get_history_records(trade_date, strategy_name, run_id)
-
-    async def get_pending_reviews(self):
-        return await self.screener_dao.get_pending_reviews()
-
-    async def get_learning_examples(self, limit: int | None = 3):
-        return await self.screener_dao.get_learning_examples(limit)
 
     # --- Sync Status Step 4 ---
-    async def get_completed_step4_stocks(self, sync_version: int = 1):
-        return await self.sync_dao.get_completed_step4_stocks(sync_version)
-
-    async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
-        return await self.sync_dao.mark_stock_step4_completed(ts_code, sync_version, conn=conn)
-
-    async def clear_step4_sync_status(self):
-        return await self.sync_dao.clear_step4_sync_status()
 
     # --- Trade Calendar Logic ---
     async def get_trade_cal_range(self):
         """Get the min and max calendar dates from DB"""
         return await self.stock_dao.get_trade_cal_range()
 
-    async def save_trade_cal(self, df: pd.DataFrame):
-        return await self.stock_dao.save_trade_cal(df)
-
-    async def get_trade_cal(
-        self,
-        start_date: datetime.date | str | None = None,
-        end_date: datetime.date | str | None = None,
-        is_open: int | str | None = None,
-    ):
-        return await self.stock_dao.get_trade_cal(start_date, end_date, is_open)
-
-    async def get_start_date_by_trade_days(self, end_date: datetime.date | str | None, trade_days: int):
-        return await self.stock_dao.get_start_date_by_trade_days(end_date, trade_days)
-
-    async def get_latest_northbound(self):
-        return await self.quote_dao.get_latest_northbound()
-
     # --- Policy-Driven AI Extensions ---
 
     # Macro
-    async def save_macro_economy(self, df: pd.DataFrame):
-        return await self.macro_dao.save_macro_economy(df)
-
-    async def save_shibor_daily(self, df: pd.DataFrame):
-        return await self.macro_dao.save_shibor_daily(df)
 
     # Holders
-    async def save_holder_number(self, df: pd.DataFrame):
-        return await self.holder_dao.save_holder_number(df)
-
-    async def save_top10_holders(self, df: pd.DataFrame):
-        return await self.holder_dao.save_top10_holders(df)
-
-    async def save_index_weights(self, df: pd.DataFrame):
-        return await self.market_dao.save_index_weights(df)
-
-    async def get_index_weights(self, index_code: str | None, trade_date: str | None):
-        return await self.market_dao.get_index_weights(index_code, trade_date)
-
-    async def get_latest_index_weight_date(self):
-        return await self.market_dao.get_latest_index_weight_date()
-
-    async def save_moneyflow_hsgt(self, df: pd.DataFrame):
-        return await self.market_dao.save_moneyflow_hsgt(df)
-
-    async def get_moneyflow_hsgt(self, trade_date: datetime.date | str | None = None, limit: int | None = None):
-        return await self.market_dao.get_moneyflow_hsgt(trade_date, limit)
-
-    async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str):
-        return await self.market_dao.get_moneyflow_hsgt_range(start_date, end_date)
 
     # === Phase 1.5: Cache 层新增方法（AI Prompt 数据注入）===
 

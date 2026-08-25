@@ -35,6 +35,8 @@ class DatabaseQueryError(RuntimeError):
 
 _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
+# review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
+_LONG_TX_ROW_THRESHOLD = 20_000
 _SLOW_WRITE_THRESHOLD_MS = 2000
 _SLOW_READ_THRESHOLD_MS = 500
 _SLOW_UPSERT_THRESHOLD_MS = 2000
@@ -732,11 +734,21 @@ class BaseDao:
                     await conn.execute(stmt, chunk)
                     total_written += len(chunk)
             else:
-                async with self.engine.begin() as tx_conn:
+                if len(records) > _LONG_TX_ROW_THRESHOLD:
+                    # review03-C2: 超大批量时每块独立事务（依赖 UPSERT 幂等性保证重跑安全）。
+                    # 避免数十秒级长事务阻塞 vacuum/DDL、增大取消时回滚成本；
+                    # 中段失败时前 N 块已提交，可在日志看到已提交行数后重跑收敛。
                     for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
                         chunk = records[i : i + _UPSERT_CHUNK_SIZE]
-                        await tx_conn.execute(stmt, chunk)
+                        async with self.engine.begin() as tx_conn:
+                            await tx_conn.execute(stmt, chunk)
                         total_written += len(chunk)
+                else:
+                    async with self.engine.begin() as tx_conn:
+                        for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
+                            chunk = records[i : i + _UPSERT_CHUNK_SIZE]
+                            await tx_conn.execute(stmt, chunk)
+                            total_written += len(chunk)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_UPSERT_THRESHOLD_MS:
@@ -956,18 +968,26 @@ class BaseDao:
         stmt: sa.Select | sa.CompoundSelect,
         *,
         suppress_errors: bool = True,
+        max_rows: int | None = None,
     ) -> pd.DataFrame:
         """Execute a SQLAlchemy Core select statement and return DataFrame.
 
         This is the preferred way to build dynamic queries — it uses
         SQLAlchemy's identifier quoting and parameter binding, eliminating
         SQL injection risk from f-string interpolation.
+
+        Args:
+            suppress_errors: 失败时是否吞错返回空 DataFrame（默认吞）。
+            max_rows: 安全阀（review03-C4）——结果行数超限时抛 ValueError，
+                防止无 WHERE/LIMIT 的查询意外物化全表。检查位于 except 之外，
+                不受 suppress_errors=True 影响。
         """
         self._check_engine(context="read")
 
         await self._get_maintenance_event().wait()
 
         start_time = time.perf_counter()
+        df: pd.DataFrame = pd.DataFrame()
         try:
             async with self.engine.connect() as conn:
                 result = await conn.execute(stmt)
@@ -998,8 +1018,6 @@ class BaseDao:
                         len(df),
                         str(stmt)[:200],
                     )
-
-                return df
         except asyncio.CancelledError:
             logger.warning(
                 "[%s] Read cancelled during shutdown.",
@@ -1027,3 +1045,12 @@ class BaseDao:
             if not suppress_errors:
                 raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
             return pd.DataFrame()
+
+        # review03-C4: max_rows 检查位于 except 之外——超限是编程/查询错误，
+        # 不应被 suppress_errors=True 吞成"静默空结果"。
+        if max_rows is not None and len(df) > max_rows:
+            raise ValueError(
+                f"[{self.__class__.__name__}] Query exceeded max_rows={max_rows} "
+                f"(returned {len(df)} rows); refusing unbounded full-table materialization."
+            )
+        return df

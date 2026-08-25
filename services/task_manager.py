@@ -21,7 +21,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.config_handler import ConfigHandler
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
-from utils.singleton_registry import register_singleton
+from utils.singleton_registry import is_graceful_shutdown_completed, register_singleton
 from utils.thread_pool import ThreadPoolManager
 from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 
@@ -162,7 +162,15 @@ class TaskManager:
 
     @classmethod
     def _atexit_cleanup(cls):
-        """Cancel active tasks on process exit. Called by singleton_registry."""
+        """Cancel active tasks on process exit. Called by singleton_registry.
+
+        B10 兜底语义：atexit 触发时通常无运行中事件循环，``task.cancel()`` 的取消请求
+        实际不生效，任务 finally 清理块不会执行。资源释放保证仅在 ShutdownCoordinator
+        正常路径（``cancel_all_running_async`` 正确 await）成立。正常关机已完成时短路，
+        避免重复 cancel（日志噪音 + 无意义兜底）。
+        """
+        if is_graceful_shutdown_completed():
+            return
         inst = cls._instance
         if inst is not None:
             for task in list(inst._tasks.values()):
@@ -811,9 +819,11 @@ class TaskManager:
         # 4. Purge old records (>30 days)
         # H1 举一反三 fix: 与 completed_at (UTC tz-naive) 时区一致，避免 8 小时偏差
         cutoff_date = cast(datetime.datetime, to_utc_for_db(get_now() - datetime.timedelta(days=30)))
+        # review03-C12: 清理失败可容忍（不阻断 init_db）——显式打开吞错，_write_db 内部有 warning 日志
         await cache.write_db(
             "DELETE FROM task_history WHERE completed_at < $1",
             (cutoff_date,),
+            suppress_errors=True,
         )
 
         self._db_ready = True

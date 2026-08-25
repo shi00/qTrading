@@ -218,11 +218,15 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
 
-    def get_available_strategies(self) -> dict[str, str]:
-        """获取可用策略列表。"""
+    def get_available_strategies(self) -> tuple[tuple[str, str], ...]:
+        """获取可用策略列表 (D16: 返回 (key, name_key) 对, 不感知 locale).
+
+        VM 不调 I18n.get：name_key 是策略 i18n key, View 每次渲染按当前 locale
+        翻译, 避免 lazy initializer 固化 stale 翻译 (报告 04 D16).
+        """
         from strategies.all_strategies import StrategyManager
 
-        return StrategyManager().get_all_names()
+        return tuple((key, getattr(s, "name_key", key) or key) for key, s in StrategyManager().strategies.items())
 
     def create_config(
         self,
@@ -289,16 +293,12 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         async def _execute_backtest(task_id: str, **kwargs):
             try:
 
-                def _progress_callback(progress: float, message: str):
+                def _progress_callback(progress: float, message: Message):
                     if not self.state.is_running:
                         return
-                    # NOTE(lazy): message 是 service/engine 层硬编码英文字符串(非 i18n key),
-                    #   暂以原字符串作为 Message.key 直接透传。
-                    #   ceiling: service 传 i18n key + params 或新增 backtest_progress 通用 key。
-                    #   upgrade: BacktestView 声明式重写已完成(Phase C.2), i18n 改造待 Phase R.2.3 执行.
                     self._set_state(
                         progress=progress,
-                        progress_message=Message(message, {}),
+                        progress_message=message,
                     )
                     TaskManager().update_progress(task_id, progress, message)
 

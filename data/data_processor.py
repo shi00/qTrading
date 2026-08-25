@@ -20,7 +20,7 @@ from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
 from data.sync.sw_industry import SwIndustrySyncStrategy
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
@@ -377,20 +377,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         await self.init_data()
 
         if progress_callback:
-            progress_callback(0.2, 1.0, I18n.get("init_sync_market_snapshot"))
+            progress_callback(0.2, 1.0, Message("init_sync_market_snapshot"))
         result = await self.sync_daily_market_snapshot()
 
         if progress_callback:
-            progress_callback(0.5, 1.0, I18n.get("init_sync_financial"))
+            progress_callback(0.5, 1.0, Message("init_sync_financial"))
         await self.sync_financial_reports()
 
         if progress_callback:
-            progress_callback(0.8, 1.0, I18n.get("init_sync_ai_review"))
+            progress_callback(0.8, 1.0, Message("init_sync_ai_review"))
         review_mgr = ReviewManager()
         await review_mgr.run_review()
 
         if progress_callback:
-            progress_callback(1.0, 1.0, I18n.get("init_daily_update_done"))
+            progress_callback(1.0, 1.0, Message("init_daily_update_done"))
         return result
 
     @log_async_operation(
@@ -929,7 +929,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         Note: Call request_cancel() to cancel this operation.
         """
         from data.data_dictionary import validate_schema_definitions
-        from core.i18n import I18n
+        from core.i18n import I18n, Message
 
         # Run schema validation (DD-01)
         # STRICT_SCHEMA_GATE defaults to "1" (strict enabled) to fail fast on
@@ -952,7 +952,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         STEP_WEIGHTS = [10, 10, 0, 0, 50, 30] if quick else [1, 1, 45, 38, 10, 5]
         current_step = 0
 
-        def report_step(step_num, sub_progress=0, sub_total=1, sub_msg=""):
+        def report_step(step_num, sub_progress=0, sub_total=1, sub_msg: Message | str | None = ""):
             """Report progress with weighted calculation."""
             nonlocal current_step
             current_step = step_num
@@ -967,8 +967,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             step_weight = STEP_WEIGHTS[step_num - 1]
             current = base + (sub_progress / max(sub_total, 1)) * step_weight
 
-            step_label = I18n.get(f"init_step_{step_num}")
-            msg = f"{step_label}" + (f" - {sub_msg}" if sub_msg else "")
+            if isinstance(sub_msg, Message):
+                msg = sub_msg
+            elif sub_msg:
+                # NOTE(lazy): 遗留 str 直接拼接. ceiling: 历史同步等旧调用点尚未 Message 化.
+                #   upgrade: 全部 progress 调用点 Message 化后删除该分支.
+                step_label = I18n.get(f"init_step_{step_num}")
+                msg = f"{step_label} - {sub_msg}"
+            else:
+                msg = Message(f"init_step_{step_num}")
             progress_callback(current, 100, msg)
 
         try:
@@ -984,7 +991,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return None
 
             # ===== Step 1.5: Concepts (runs as part of Step 1) =====
-            report_step(1, 0.5, 1, I18n.get("init_sync_concepts"))  # type: ignore[attr-defined]
+            report_step(1, 0.5, 1, Message("init_sync_concepts"))
             await self.sync_concepts()
 
             # ===== Step 2: Trade Calendar (5%) =====
@@ -1045,7 +1052,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     return None
 
             # ===== Step 5: AI Alpha Data (10%) =====
-            report_step(5, 0, 3, I18n.get("init_sync_macro"))
+            report_step(5, 0, 3, Message("init_sync_macro"))
 
             macro_res = await self.strategies["macro"].run()
             if macro_res.status == "failed":
@@ -1054,7 +1061,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     macro_res.errors,
                 )
 
-            report_step(5, 1, 3, I18n.get("init_sync_holders"))
+            report_step(5, 1, 3, Message("init_sync_holders"))
 
             holder_res = await self.strategies["holder"].run()
             if holder_res.status == "failed":
@@ -1063,7 +1070,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     holder_res.errors,
                 )
 
-            report_step(5, 2, 3, I18n.get("init_step_5_done"))
+            report_step(5, 2, 3, Message("init_step_5_done"))
 
             if self.is_cancelled():
                 return None
@@ -1074,7 +1081,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
             # Report completion
             if progress_callback:
-                progress_callback(100, 100, I18n.get("init_step_complete"))
+                progress_callback(100, 100, Message("init_step_complete"))
 
             return result
 

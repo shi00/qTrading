@@ -73,9 +73,9 @@ class TestBacktestViewR16Compliance:
 class _FakeBacktestViewModel:
     """模拟 BacktestViewModel, 满足 use_viewmodel hook 契约 (state/subscribe/dispose)."""
 
-    def __init__(self, strategies: dict[str, str] | None = None) -> None:
+    def __init__(self, strategies: tuple[tuple[str, str], ...] | None = None) -> None:
         self._subscribers: list[Any] = []
-        self._strategies = strategies if strategies is not None else {"ma_cross": "MA 金叉"}
+        self._strategies = strategies if strategies is not None else (("ma_cross", "strategy_ma_cross_name"),)
         self.dispose_called: bool = False
         self.create_config_mock = MagicMock(return_value="fake_backtest_config")
         self.run_backtest_mock = MagicMock()
@@ -117,7 +117,7 @@ class _FakeBacktestViewModel:
         self.dispose_called = True
         self._subscribers.clear()
 
-    def get_available_strategies(self) -> dict[str, str]:
+    def get_available_strategies(self) -> tuple[tuple[str, str], ...]:
         return self._strategies
 
     def create_config(self, **kwargs: Any) -> Any:
@@ -308,7 +308,7 @@ def backtest_view_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     """挂载 BacktestView (默认 strategies={"ma_cross": ...}), 返回 env dict."""
     from ui.views import backtest_view as mod
 
-    fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+    fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
     mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
     component = make_component(mod.BacktestView)
@@ -332,7 +332,7 @@ def backtest_view_empty_env(mock_i18n_state, mock_app_colors_state, monkeypatch)
     """挂载 BacktestView (strategies={}), 返回 env dict (用于无策略路径测试)."""
     from ui.views import backtest_view as mod
 
-    fake_vm = _FakeBacktestViewModel(strategies={})
+    fake_vm = _FakeBacktestViewModel(strategies=())
     mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
     component = make_component(mod.BacktestView)
@@ -987,7 +987,12 @@ class TestConsumePrefill:
         set_pending_prefill("volume_breakout", params={"window": 20})
 
         try:
-            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉", "volume_breakout": "量价突破"})
+            fake_vm = _FakeBacktestViewModel(
+                strategies=(
+                    ("ma_cross", "strategy_ma_cross_name"),
+                    ("volume_breakout", "strategy_volume_breakout_name"),
+                )
+            )
             _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
             component = make_component(mod.BacktestView)
@@ -1017,7 +1022,7 @@ class TestConsumePrefill:
         set_pending_prefill("non_existent_strategy", params={"window": 30})
 
         try:
-            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+            fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
             _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
             component = make_component(mod.BacktestView)
@@ -1039,7 +1044,7 @@ class TestConsumePrefill:
         # 确保无 pending prefill
         _pending_prefill.clear()
 
-        fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+        fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
         _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
         component = make_component(mod.BacktestView)
@@ -1060,7 +1065,7 @@ class TestConsumePrefill:
         set_pending_prefill("ma_cross", params=test_params)
 
         try:
-            fake_vm = _FakeBacktestViewModel(strategies={"ma_cross": "MA 金叉"})
+            fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
             mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
             component = make_component(mod.BacktestView)

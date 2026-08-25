@@ -59,6 +59,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     ensure_correlation_id()
 
+    # review03-C15: 生产构建（非 E2E、非 DEBUG）下禁止关闭质量门控严格模式
+    _validate_quality_gate_strictness()
+
     # Skeptic-MAJOR-2 修复：Flet Web 模式下第二个 main(page) 调用时跳过重复初始化。
     # 单例服务（SchedulerService/NewsSubscriptionService/MarketDataService）自身有幂等 guard，
     # 但 TaskManager.init_db() 不幂等（每次 UPDATE task_history）、auto_probe_task 每次创建新 task。
@@ -161,8 +164,17 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     import os
 
+    from utils.app_env import is_e2e_mode  # review03-C16: E2E 判定统一收口
+
     logger.info("[Bootstrap] After TaskManager init, checking E2E_TESTING env (=%s)...", os.environ.get("E2E_TESTING"))
-    if os.environ.get("E2E_TESTING") == "true":
+    if is_e2e_mode():
+        # review03-C16: 非 DEBUG 环境下 E2E 模式激活应被审计（后门误触发显式化）
+        is_debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+        if not is_debug:
+            logger.critical(
+                "[Bootstrap] E2E_TESTING=true 在非 DEBUG 环境激活：确认这是显式测试运行，"
+                "否则该环境变量残留会使质量门控/日历服务后门静默生效。"
+            )
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
         # E2E 预热: 在服务初始化阶段预加载 AIService (触发 litellm import，约 18s+)，
         # 避免 UI 渲染时第一次导入阻塞 MainThread 导致 Flet patch 下发延迟、
@@ -372,6 +384,26 @@ async def _maybe_auto_probe_on_startup() -> None:
             error_info["code"],
             DataSanitizer.sanitize_error(e),
             exc_info=True,
+        )
+
+
+def _validate_quality_gate_strictness() -> None:
+    """review03-C15: 生产构建（非 E2E、非 DEBUG）下 STRICT_QUALITY_GATE=false 时拒绝启动。
+
+    质量门控是量化决策的安全机制——非严格模式下 processor 缺失会静默放行策略，
+    这对生产是"不应该发生"的配置。E2E 模式（测试数据本就低质量）与 DEBUG=true
+    （本地调试豁免）放行。
+    """
+    from data.persistence.quality_gate import is_strict_quality_gate_enabled
+    from utils.app_env import is_e2e_mode  # review03-C16: E2E 判定统一收口
+
+    is_e2e = is_e2e_mode()
+    is_debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+    if not is_e2e and not is_debug and not is_strict_quality_gate_enabled():
+        logger.error("[Bootstrap] STRICT_QUALITY_GATE=false 且非开发模式：质量门控是安全机制，拒绝启动。")
+        raise RuntimeError(
+            "STRICT_QUALITY_GATE=false 禁止在非开发模式启动：数据质量门控是量化决策安全机制。"
+            "请删除该环境变量，或设置 DEBUG=true 豁免（仅限本地调试）。"
         )
 
 

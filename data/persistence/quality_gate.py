@@ -5,9 +5,19 @@ import os
 import typing
 from enum import IntEnum
 
+from utils.app_env import is_e2e_mode
+
 logger = logging.getLogger(__name__)
 
 _STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "true").lower() in ("true", "1", "yes")
+
+
+def is_strict_quality_gate_enabled() -> bool:
+    """返回 STRICT_QUALITY_GATE 判定结果（模块常量，单一事实来源，review03-C15）。
+
+    bootstrap 启动校验与本模块共用此函数，避免 env 判定双源漂移。
+    """
+    return _STRICT_QUALITY_GATE
 
 
 class QualityTier(IntEnum):
@@ -48,7 +58,7 @@ def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
 
 def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
     """Shared logic to verify quality tier."""
-    if os.environ.get("E2E_TESTING") == "true":
+    if is_e2e_mode():
         logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
 
@@ -58,8 +68,10 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
                 f"QualityGate STRICT mode: DataProcessor not found for {func_name}. "
                 f"Set STRICT_QUALITY_GATE=false to bypass (not recommended in production)."
             )
-        logger.warning(
-            "[QualityGate] Bypassed for %s: DataProcessor not found in context. (Could be test env or context missing)",
+        logger.error(
+            "[QualityGate] Bypassed for %s: DataProcessor not found in context "
+            "AND STRICT_QUALITY_GATE disabled — quality gate is a safety mechanism, "
+            "this should not happen.",
             func_name,
         )
         return
