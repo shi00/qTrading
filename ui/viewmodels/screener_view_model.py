@@ -7,6 +7,7 @@ import time
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import pandas as pd
 
@@ -712,10 +713,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
                 def _combined_ai_progress(current, total, msg):
                     self._on_ai_progress(current, total, msg)  # For local View UI
+                    # D7: msg 为 Message, 直接透传 (不再拼 "[c/t] " 前缀, 防 dataclass repr)
                     TaskManager().update_progress(
                         task_id,
                         current / total if total > 0 else 0,
-                        f"[{current}/{total}] {msg}",
+                        msg,
                     )
 
                 context["on_progress"] = _combined_ai_progress
@@ -1170,12 +1172,16 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     # --- AI Streaming Handlers ---
 
     def _on_ai_progress(self, current, total, msg):
-        # Pass through status update
+        # D7: msg 为 data 层 ai_mixin 的 Message (key+params), VM 只透传 key:
+        # msg_key 走 *_key 约定由 View 翻译, 内层 params (done/total) 平铺供模板填入.
+        params: dict[str, Any] = {"done": current, "total": total}
+        if isinstance(msg, Message):
+            params["msg_key"] = msg.key
+            params.update(msg.params)
+        else:  # 兜底: 非 Message 路径 (向后兼容)
+            params["msg"] = msg
         self._set_state(
-            status_message=Message(
-                "screener_ai_analyzing",
-                {"done": current, "total": total, "msg": msg},
-            ),
+            status_message=Message("screener_ai_analyzing", params),
             status_color="info",
             status_action_key=None,
         )
