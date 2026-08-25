@@ -47,17 +47,27 @@ async def test_sql_console(e2e_page):
     await e2e_page.expect_text("平安银行", timeout_ms=TIMEOUTS.NAV)
 
 
-# 2026-08-25: select_filter_col 下拉交互在部分 Windows CI runner 仍偶发
-# (retry_until_triggered 3 次未确认)，恢复 rerun 吸收（同 test_settings_flow 模式）。
-@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_table_viewer_filter(e2e_page):
     """测试：数据表过滤查询 — 按股票代码过滤后结果仅含目标股票。
 
     种子数据 daily_quotes 共 120 行（2 只股票 × 60 天），过滤 ts_code=000001.SZ 后
-    仅剩平安银行 60 行。验证过滤查询不报错且结果包含目标数据。
+    仅剩平安银行 60 行。验证过滤查询不报错且结果仅含目标数据。
 
-    PR-3: anchor 化后消除 CanvasKit 抖动根源（fill_textbox/select_dropdown 的
-    Playwright 输入未触发应用 on_change 回调），移除 @pytest.mark.flaky 标记。
+    契约断言（杜绝假通过）：
+    - 基线：选表后未过滤结果即含 000001.SZ（auto-query 已加载数据）。
+    - 过滤后：000001.SZ 仍在 + 600519.SH（贵州茅台，未过滤第 1 页必现）消失，
+      证明过滤真正生效。默认排序 trade_date DESC + page_size=50 时未过滤第 1 页
+      含两只股票，600519.SH 消失是可靠的过滤生效信号。
+      注：effective_filter_col 默认 = table_columns[0] = ts_code（data_view.py），
+      仅断言 000001.SZ 存在无法区分"列下拉未选上但靠默认列过滤"的假通过；
+      该场景由 AnchorPage.select_option 的严格收合确认拦截（选择未落地即抛错）。
+      另注：总数文本 data_total_rows 位于 role=tabpanel 节点，expect_text 的
+      定位器排除 tabpanel，故用行内容断言而非总数文本。
+
+    PR-3: anchor 化后消除 CanvasKit 抖动根源，移除 @pytest.mark.flaky 标记。
+    PR 585: 修复 AnchorPage.select_option 菜单关闭态误匹配表头「代码」根因后，
+    恢复强断言并移除 reintroduced 的 flaky rerun（步骤级重试 > 用例级 flaky，
+    见 docs/flet/canvaskit-rendering-e2e-guide.md 坑点 6）。
     """
     # 导航到数据页
     dp = DataPage(e2e_page)
@@ -67,6 +77,9 @@ async def test_table_viewer_filter(e2e_page):
     # 选择 daily_quotes 表（通过 anchor）
     # PR-478: select_table 内部已通过 TABLE_READY EID 等待 schema 加载完成
     await dp.select_table("daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+
+    # 基线：auto-query 后未过滤结果即含 000001.SZ（数据已加载）
+    await e2e_page.expect_text("000001.SZ", timeout_ms=TIMEOUTS.NAV)
 
     # 设置过滤器：列=代码(ts_code)，操作符==（默认值），值=000001.SZ
     # 注：filter_op 的默认值已是 "="（见 ui/views/data_view.py 的 _build_filter_op_options），
@@ -79,8 +92,9 @@ async def test_table_viewer_filter(e2e_page):
     # 点击查询按钮触发过滤（通过 anchor）
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 
-    # 验证过滤后平安银行仍在结果中（过滤查询成功且结果正确）
+    # 过滤后仅剩平安银行 60 行：目标股票存在 + 贵州茅台(600519.SH)消失
     await e2e_page.expect_text("000001.SZ", timeout_ms=TIMEOUTS.NAV)
+    await e2e_page.expect_text_gone("600519.SH", timeout_ms=TIMEOUTS.NAV)
 
 
 # [PITFALL_WARNING] Flet Web CanvasKit 自动化测试黑洞避坑指南
