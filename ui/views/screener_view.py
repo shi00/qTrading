@@ -1356,9 +1356,23 @@ def ScreenerView(
         ),
     )
 
+    # UX-04: 股票代码过滤输入 — 并入策略下拉同一行 (避免增加主体/表格垂直高度,
+    # 挤占 PaginatedTable 视口导致 E2E 行点击塌陷)。
+    stock_filter_field = ft.TextField(
+        label=I18n.get("screener_filter_stock"),
+        value=state.stock_filter,
+        dense=True,
+        border_color=AppColors.DIVIDER,
+        focused_border_color=AppColors.PRIMARY,
+        text_size=AppStyles.FONT_SIZE_BODY,
+        width=AppStyles.CONTROL_WIDTH_SM,
+        on_change=safe_on_change(_on_stock_filter_change),
+    )
+    filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
+
     realtime_controls = ft.Column(
         [
-            ft.Row([strategy_dropdown], spacing=10),
+            ft.Row([strategy_dropdown, filter_row], spacing=10),
             ft.Text(
                 _render_strategy_desc(state.strategy_desc) or I18n.get("screener_no_strategy_hint"),
                 size=AppStyles.FONT_SIZE_BODY,
@@ -1482,19 +1496,6 @@ def ScreenerView(
     )
 
     # 2. 表格区
-    # UX-04: 股票代码过滤输入 (表格区首行常驻, 含 EmptyState 分支 — 过滤无结果时仍可清空恢复)
-    stock_filter_field = ft.TextField(
-        label=I18n.get("screener_filter_stock"),
-        value=state.stock_filter,
-        dense=True,
-        border_color=AppColors.DIVIDER,
-        focused_border_color=AppColors.PRIMARY,
-        text_size=AppStyles.FONT_SIZE_BODY,
-        width=AppStyles.CONTROL_WIDTH_SM,
-        on_change=safe_on_change(_on_stock_filter_change),
-    )
-    filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
-
     pagination_row = ft.Row(
         safe_controls(
             [
@@ -1536,10 +1537,10 @@ def ScreenerView(
     # 用户可通过工具栏的运行按钮重新执行策略
     table_content: ft.Control
     if not formatted_rows and not state.loading:
-        # UX-04: 空态分支保留过滤框 (过滤无结果 → 可清空恢复, 不锁死恢复路径)
+        # UX-04: 过滤框并入控制卡下拉行 (见 realtime_controls), 表格区不再内嵌,
+        # 过滤无结果 → 可清空恢复, 不锁死恢复路径。
         table_content = ft.Column(
             [
-                filter_row,
                 ft.Container(
                     content=EmptyState(
                         icon=ft.Icons.INBOX,
@@ -1555,7 +1556,6 @@ def ScreenerView(
     else:
         table_content = ft.Column(
             [
-                filter_row,
                 PaginatedTable(
                     rows=formatted_rows,
                     columns=vt_columns,
@@ -1618,7 +1618,9 @@ def ScreenerView(
             log_column_controls,
             spacing=5,
         ),
-        expand=True,
+        # 仅当有流式/AI 卡片时展开抢占高度; 否则折叠, 避免挤压表格视口
+        # (PR #591 E2E 回归根因: 空 log_card 占 1/3 高度 → 表格行视口高度塌陷)。
+        expand=bool(state.stream_cards),
         padding=ft.Padding.only(top=10),
         visible=is_realtime,
     )
