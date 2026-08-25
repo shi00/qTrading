@@ -17,6 +17,8 @@ should not be retried, while transient errors (RateLimitError, ServiceUnavailabl
 can be retried.
 """
 
+from core.i18n import Message
+
 SYSTEM_LEVEL_EXCEPTIONS = (
     MemoryError,
     SystemExit,
@@ -384,6 +386,9 @@ def get_error_message(error_info: dict) -> str:
     (the allowed single-direction dependency, see core/__init__.py).
     Pure utils/strategies code that does not need localized messages should
     just read error_info["message_key"] and pass it up.
+
+    VM 层禁止调用本函数（产出已翻译字符串、感知 locale）；
+    ViewModel 必须使用 get_error_message_key() 产出 Message(key, params)。
     """
     from core.i18n import I18n
 
@@ -392,3 +397,14 @@ def get_error_message(error_info: dict) -> str:
     if format_args:
         return I18n.get(message_key, **format_args)
     return I18n.get(message_key)
+
+
+def get_error_message_key(error_info: dict) -> Message:
+    """classify_error 结果 → Message(key, params)，供 VM 层产出 i18n key（不感知 locale）。
+
+    符合 CLAUDE.md §3.2「VM 不感知 locale，只产出 i18n key」：
+    VM 将本函数返回值直接存入 state（Message），View 渲染时按当前 locale 翻译。
+    View 层 / 非 VM 调用方仍可使用 get_error_message()。
+    """
+    message_key = error_info.get("message_key", "common_err_unknown")
+    return Message(message_key, error_info.get("format_args") or {})
