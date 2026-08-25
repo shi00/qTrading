@@ -898,6 +898,8 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     sql_text, set_sql_text = ft.use_state("")
     status_text, set_status_text = ft.use_state(I18n.get("data_sql_ready"))
     status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+    # D6: SQL 错误原文折叠展示 (仅失败且有 raw_detail 时可见)
+    detail_text, set_detail_text = ft.use_state("")
 
     # --- 异步 handler (R2: except Exception 不捕获 CancelledError) ---
     async def _run_query(e: ft.ControlEvent) -> None:
@@ -906,6 +908,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
         set_status_text(I18n.get("data_status_executing"))
         set_status_color(AppColors.INFO)
+        set_detail_text("")
         try:
             start_time = time.time()
             await vm.execute_sql(sql_text)
@@ -929,7 +932,13 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                     set_status_text(I18n.get("data_sql_error"))
                     set_status_color(AppColors.ERROR)
             else:
-                set_status_text(I18n.get("data_sql_error"))
+                # D6: 渲染 VM 产出的 SqlErrorInfo(key, params) + 脱敏原文折叠展示
+                err = s.sql_error
+                if err is not None:
+                    set_status_text(I18n.get(err.message_key, **err.format_args))
+                    set_detail_text(err.raw_detail or "")
+                else:
+                    set_status_text(I18n.get("data_sql_error"))
                 set_status_color(AppColors.ERROR)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
@@ -1086,6 +1095,28 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
             ft.Container(
                 content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
                 padding=5,
+                bgcolor=AppColors.SURFACE_VARIANT,
+            ),
+            ft.Container(
+                # D6: SQL 错误原文折叠展示（raw_detail 存在时可见）
+                content=ft.ExpansionTile(
+                    title=ft.Text(
+                        I18n.get("data_sql_error_detail"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.ERROR,
+                    ),
+                    maintain_state=False,
+                    tile_padding=ft.Padding.symmetric(horizontal=8),
+                    controls=[
+                        ft.Text(
+                            detail_text,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                            selectable=True,
+                        ),
+                    ],
+                ),
+                visible=bool(detail_text),
                 bgcolor=AppColors.SURFACE_VARIANT,
             ),
         ],

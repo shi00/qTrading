@@ -282,6 +282,7 @@
     "data_sql_success": "查询成功 (耗时 {time:.3f}s). 共返回 {rows} 行.",
     "data_sql_success_truncated": "查询成功 (耗时 {time:.3f}s). 显示前 {limit} 行 (共 {rows} 行).",
     "data_sql_error": "执行错误",
+    "data_sql_error_detail": "错误详情",
     "data_btn_count": "统计行数",
     "data_loading": "正在加载数据...",
     "data_loading_hint": "正在读取数据库表结构",

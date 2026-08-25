@@ -4,14 +4,18 @@ import functools
 import logging
 import re
 import typing
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pandas as pd
 
 from utils.correlation import ensure_correlation_id
-from utils.error_classifier import classify_error, classify_severity, get_error_message
+from utils.error_classifier import (
+    classify_error,
+    classify_severity,
+    get_error_message_key,
+)
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -48,6 +52,19 @@ class SqlResultRow:
 
 
 @dataclass(frozen=True)
+class SqlErrorInfo:
+    """SQL 执行错误 (D6: VM 不感知 locale, 存 i18n key + format_args + 脱敏原文).
+
+    - ``message_key``/``format_args``: 由 get_error_message_key 产出, View 按当前 locale 翻译
+    - ``raw_detail``: DB 原始错误(DataSanitizer 脱敏), View 折叠展示供排查
+    """
+
+    message_key: str
+    format_args: Mapping[str, str] = field(default_factory=dict)
+    raw_detail: str | None = None
+
+
+@dataclass(frozen=True)
 class DataExplorerState:
     """DataExplorerViewModel 的不可变状态快照 (L771 合规).
 
@@ -79,8 +96,8 @@ class DataExplorerState:
     sql_success: bool = False
     sql_result_columns: tuple[str, ...] = ()
     sql_result_rows: tuple[SqlResultRow, ...] = ()
-    # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
-    sql_error: str | None = None
+    # D6: SqlErrorInfo(key, params, raw_detail) — VM 不持有已翻译字符串
+    sql_error: SqlErrorInfo | None = None
     # Phase 6.4 (FR-UX-006): 数据新鲜度 (daily_quotes 最新 trade_date + 滞后天数)
     data_latest_date: str = ""  # YYYY-MM-DD formatted, empty = not loaded
     data_lag_days: int = 0  # today - latest_date in days
@@ -520,7 +537,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         try:
             result = await self._tp.run_async(TaskType.CPU, self._db.execute_sql, sql)
             # 声明式: 结果写入 state (L771 合规, tuple[Row, ...])
-            self._set_state(**_sql_result_to_state_fields(result))
+            state_fields = _sql_result_to_state_fields(result)
+            # D6: DB 层直接返回的文本错误 (无 i18n key, 如 "Only SELECT allowed")
+            # 统一包 SqlErrorInfo(_raw_msg_), 令 sql_error 字段保持单一类型 SqlErrorInfo.
+            raw_err = state_fields.get("sql_error")
+            if isinstance(raw_err, str):
+                state_fields["sql_error"] = SqlErrorInfo("_raw_msg_", {"default": raw_err}, raw_detail=raw_err)
+            self._set_state(**state_fields)
             return result
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during execute_sql.")
@@ -542,9 +565,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", safe_error(e), exc_info=True)
-            # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
-            error_msg = get_error_message(error_info)
-            error_result = {"success": False, "data": None, "error": error_msg}
+            # D6: VM 产出 SqlErrorInfo(key, params, raw_detail)，View 按 locale 翻译；原文脱敏后折叠展示
+            msg = get_error_message_key(error_info)
+            error_result = {
+                "success": False,
+                "data": None,
+                "error": SqlErrorInfo(msg.key, msg.params, raw_detail=safe_error(e)),
+            }
             self._set_state(**_sql_result_to_state_fields(error_result))
             return error_result
         finally:
