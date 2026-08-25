@@ -536,7 +536,18 @@ class TestCacheManagerWriteReadDb:
         mock_dao._write_db = AsyncMock(return_value=1)
         with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
             await mgr.write_db("INSERT INTO test VALUES (?)", ("val",))
-            mock_dao._write_db.assert_called_once_with("INSERT INTO test VALUES (?)", ("val",), suppress_errors=True)
+            # review03-C12: 默认不再吞错（suppress_errors=False）
+            mock_dao._write_db.assert_called_once_with("INSERT INTO test VALUES (?)", ("val",), suppress_errors=False)
+
+    @pytest.mark.asyncio
+    async def test_write_db_suppress_optin(self):
+        """review03-C12: 显式 suppress_errors=True 仍被透传（如记录清理等可容忍失败路径）。"""
+        mgr = _make_mgr()
+        mock_dao = MagicMock()
+        mock_dao._write_db = AsyncMock(return_value=-1)
+        with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
+            await mgr.write_db("DELETE FROM test", (), suppress_errors=True)
+            mock_dao._write_db.assert_called_once_with("DELETE FROM test", (), suppress_errors=True)
 
     @pytest.mark.asyncio
     async def test_read_db(self):
@@ -559,7 +570,7 @@ class TestCacheManagerPublicWriteReadDb:
         mock_dao._write_db = AsyncMock(return_value=1)
         with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
             result = await mgr.write_db("INSERT INTO test VALUES (?)", ("val",))
-            mock_dao._write_db.assert_called_once_with("INSERT INTO test VALUES (?)", ("val",), suppress_errors=True)
+            mock_dao._write_db.assert_called_once_with("INSERT INTO test VALUES (?)", ("val",), suppress_errors=False)
             assert result == 1
 
     @pytest.mark.asyncio

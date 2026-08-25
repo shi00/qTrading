@@ -310,9 +310,11 @@ class CacheManager(CacheManagerDelegationMixin):
 
     # Backward compatibility for direct SQL usage if any
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def write_db(self, sql: str, params: tuple | list | None = None):
+    async def write_db(self, sql: str, params: tuple | list | None = None, *, suppress_errors: bool = False):
         dao = BaseDao(self.engine)
-        return await dao._write_db(sql, params, suppress_errors=True)
+        # review03-C12: 默认不再吞错——写入失败应传播（数据写丢失不可静默）。
+        # 调用方如确认失败可容忍（如记录清理），显式传 suppress_errors=True + 注释说明。
+        return await dao._write_db(sql, params, suppress_errors=suppress_errors)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_db(self, sql: str, params: tuple | list | None = None):

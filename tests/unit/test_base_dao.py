@@ -2526,6 +2526,52 @@ class TestChunkedExecute:
         assert db_fn.call_count == 2
 
 
+class TestReadDbSelectMaxRows:
+    """review03-C4: _read_db_select 的 max_rows 安全阀在 suppress_errors=True 下也必须抛错。"""
+
+    def _mk(self, rows):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        mock_conn = AsyncMock()  # AsyncMock：await conn.execute(...) → mock_result
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(i,) for i in range(rows)]
+        mock_result.keys.return_value = ["id"]
+        mock_conn.execute.return_value = mock_result
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        event_mock = MagicMock()
+        event_mock.wait = AsyncMock(return_value=None)
+        dao._get_maintenance_event = MagicMock(return_value=event_mock)
+        return dao, mock_engine
+
+    @pytest.mark.asyncio
+    async def test_max_rows_exceeded_raises_despite_suppress(self):
+        """suppress_errors=True（默认）不能吞掉 max_rows 超限——超限是查询错误而非 IO 失败。"""
+        dao, mock_engine = self._mk(5)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(
+                return_value=pd.DataFrame([(i,) for i in range(5)], columns=["id"])
+            )
+            with pytest.raises(ValueError, match="max_rows"):
+                await dao._read_db_select("SELECT 1", max_rows=3)
+
+    @pytest.mark.asyncio
+    async def test_within_max_rows_returns_df(self):
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            df = await dao._read_db_select("SELECT 1", max_rows=10)
+            assert len(df) == 1
+
+
 class TestSaveUpsertLongTx:
     """review03-C2: conn=None 且行数超阈值 → 每块独立事务（begin 次数 = 块数）。"""
 

@@ -94,6 +94,12 @@ def register_singleton[TClass: type](cls: TClass) -> TClass:
 
 def reset_all_singletons() -> None:
     """Reset all registered singletons. Intended for test teardown."""
+    # R7: 复位模块级 atexit 状态，避免跨测试泄漏。真实执行 ShutdownCoordinator
+    # 成功路径的测试（如 test_concurrency_audit）会置位 _graceful_shutdown_completed，
+    # 不复位会导致后续依赖该标志短路的测试（如 TaskManager._atexit_cleanup）失败。
+    global _atexit_fired, _graceful_shutdown_completed
+    _atexit_fired = False
+    _graceful_shutdown_completed = False
     with _lock:
         for cls in list(_registry):
             if hasattr(cls, "_reset_singleton"):
