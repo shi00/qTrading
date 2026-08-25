@@ -1,6 +1,6 @@
 """watchlist_view — 关注列表视图 (FR-UX-004, Task 4.2).
 
-声明式组件，展示用户关注的股票列表，支持移除、查看个股（UX-04: 深链跳
+声明式组件，展示用户关注的股票列表，支持添加、移除、查看个股（UX-04: 深链跳
 选股页并按代码过滤）。
 - VM 通过 ``use_viewmodel(factory=lambda: WatchlistViewModel())`` 内部模式消费
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
@@ -14,7 +14,9 @@ import typing
 import flet as ft
 
 from ui.components.confirm_dialog import ConfirmDialog
+from ui.components.flet_type_helpers import safe_on_click
 from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState
+from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
@@ -127,6 +129,9 @@ def WatchlistView(
     confirm_open, set_confirm_open = ft.use_state(False)
     pending_remove_ts_code, set_pending_remove_ts_code = ft.use_state("")
 
+    # 「添加关注」对话框 state (issue #433)
+    add_dialog_open, set_add_dialog_open = ft.use_state(False)
+
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
         if not active:
@@ -149,6 +154,50 @@ def WatchlistView(
             page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("watchlist_remove_failed"), "error")
+
+    # --- 添加关注 (issue #433) ---
+    async def _do_add(ts_code: str, stock_name: str, note: str) -> None:
+        try:
+            await vm.add_to_watchlist(ts_code, stock_name, note or None)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("watchlist_added"), "success")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[WatchlistView] Add failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
+
+    def _on_add(ts_code: str, stock_name: str, note: str) -> None:
+        """WatchlistAddDialog on_add: 关闭对话框并调度 _do_add 执行添加。"""
+        set_add_dialog_open(False)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_add, ts_code, stock_name, note)
+
+    def _on_add_search(keyword: str) -> None:
+        """WatchlistAddDialog on_search: run_task 调度 VM.search_stocks (R16)。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(vm.search_stocks, keyword)
+
+    def _on_add_dialog_close() -> None:
+        """WatchlistAddDialog on_close: 关闭对话框并清空搜索状态。"""
+        set_add_dialog_open(False)
+        page = _get_page()
+        if page is not None:
+            page.run_task(vm.clear_search)
+
+    def _on_open_add_dialog() -> None:
+        """点击「添加关注」按钮：打开对话框。
+
+        state setter 隐式依赖 page 上下文；page 不可用时提前返回 (参考 _on_remove).
+        """
+        if _get_page() is None:
+            return
+        set_add_dialog_open(True)
 
     def _on_remove(ts_code: str) -> None:
         # 弹出 ConfirmDialog 二次确认 (防误删); 实际删除在 _do_confirm_remove
@@ -273,11 +322,23 @@ def WatchlistView(
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(
-                    I18n.get("watchlist_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
+                ft.Row(
+                    [
+                        ft.Text(
+                            I18n.get("watchlist_title"),
+                            size=AppStyles.FONT_SIZE_XL,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                        ft.Container(expand=True),
+                        ft.OutlinedButton(
+                            content=I18n.get("watchlist_add"),
+                            icon=ft.Icons.ADD,
+                            on_click=safe_on_click(lambda _e: _on_open_add_dialog()),
+                            style=AppStyles.outline_button(),
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
                 ft.Container(content=ft.Column(content_controls, expand=True, spacing=8), expand=True),
@@ -289,6 +350,15 @@ def WatchlistView(
                     on_cancel=_do_cancel_remove,
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
+                ),
+                WatchlistAddDialog(
+                    open_state=add_dialog_open,
+                    search_results=state.search_results,
+                    is_searching=state.is_searching,
+                    search_error=state.search_error,
+                    on_search=_on_add_search,
+                    on_add=_on_add,
+                    on_close=_on_add_dialog_close,
                 ),
             ],
             expand=True,

@@ -77,6 +77,15 @@ class _FakeWatchlistViewModel:
     async def remove_from_watchlist(self, ts_code: str) -> None:
         self.method_calls.append(("remove_from_watchlist", {"ts_code": ts_code}))
 
+    async def add_to_watchlist(self, ts_code: str, stock_name: str, note: str | None = None) -> None:
+        self.method_calls.append(("add_to_watchlist", {"ts_code": ts_code, "stock_name": stock_name, "note": note}))
+
+    async def search_stocks(self, keyword: str) -> None:
+        self.method_calls.append(("search_stocks", {"keyword": keyword}))
+
+    async def clear_search(self) -> None:
+        self.method_calls.append(("clear_search", {}))
+
 
 # ---------------------------------------------------------------------------
 # 辅助函数
@@ -317,6 +326,19 @@ def mock_watchlist_vm(monkeypatch):
 
     monkeypatch.setattr(watchlist_view_module, "ConfirmDialog", _fake_confirm_dialog)
     fake_vm.captured_callbacks = captured_callbacks  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
+
+    # Mock WatchlistAddDialog: 捕获 on_add/on_search/on_close 回调 (open_state=True 时)
+    captured_add_callbacks: dict[str, Any] = {}
+
+    def _fake_add_dialog(**kwargs: Any) -> Any:
+        if kwargs.get("open_state"):
+            captured_add_callbacks["on_add"] = kwargs.get("on_add")
+            captured_add_callbacks["on_search"] = kwargs.get("on_search")
+            captured_add_callbacks["on_close"] = kwargs.get("on_close")
+        return MagicMock(name="WatchlistAddDialog")
+
+    monkeypatch.setattr(watchlist_view_module, "WatchlistAddDialog", _fake_add_dialog)
+    fake_vm.captured_add_callbacks = captured_add_callbacks  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
 
     return fake_vm
 
@@ -907,3 +929,203 @@ class TestWatchlistViewRemoveCallback:
         ]
         # 触发 on_click 不应抛异常 (page=None 时 _on_remove 提前返回, 不调 state setter)
         _click_icon_button(icon_buttons[0])
+
+
+class TestWatchlistViewAddCallback:
+    """issue #433: 「添加关注」按钮 → WatchlistAddDialog → on_add 回调流程测试."""
+
+    def _render_with_add_dialog(
+        self,
+        mock_watchlist_vm,
+        mock_i18n_for_view,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ) -> tuple[Any, Any]:
+        """渲染组件并点击「添加关注」按钮, 返回 (page, component)."""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        # 定位标题栏「添加关注」OutlinedButton 并触发 on_click
+        add_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.ADD
+        ]
+        assert len(add_buttons) == 1, "标题栏应渲染「添加关注」按钮"
+        assert callable(add_buttons[0].on_click)
+        add_buttons[0].on_click(MagicMock())  # type: ignore[call-issue]  # [reason: 同 _click_icon_button, Flet on_click Union 含 0 参分支]
+
+        # 重渲染让 WatchlistAddDialog 以 open_state=True 渲染并捕获回调
+        _rerender(component)
+        return page, component
+
+    def test_add_button_opens_dialog_and_captures_callbacks(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """点击「添加关注」按钮 → 对话框以 open_state=True 渲染, 捕获 on_add/on_search/on_close."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        add_callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in add_callbacks
+        assert "on_search" in add_callbacks
+        assert "on_close" in add_callbacks
+        # 打开对话框本身不触发 run_task (搜索/添加由用户后续操作触发)
+        assert not page.run_task.called
+
+    def test_on_search_schedules_vm_search_stocks(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_search(keyword) → page.run_task(vm.search_stocks, keyword)."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_search" in callbacks
+        on_search = callbacks["on_search"]
+        on_search("平安")
+        assert page.run_task.call_args is not None
+        assert page.run_task.call_args.args[0] == mock_watchlist_vm.search_stocks
+        assert page.run_task.call_args.args[1] == "平安"
+
+    def test_on_close_schedules_vm_clear_search(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_close → 关闭对话框 + page.run_task(vm.clear_search)."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_close" in callbacks
+        on_close = callbacks["on_close"]
+        on_close()
+        assert page.run_task.call_args is not None
+        assert page.run_task.call_args.args[0] == mock_watchlist_vm.clear_search
+
+    def test_on_add_schedules_do_add(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """on_add(ts_code, name, note) → 关闭对话框 + page.run_task(_do_add, ...)."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in callbacks
+        on_add = callbacks["on_add"]
+        on_add("000001.SZ", "平安银行", "重点")
+        assert page.run_task.call_args is not None
+        # 第一个参数是 _do_add 闭包 (async), 后续为 (ts_code, stock_name, note)
+        handler = page.run_task.call_args.args[0]
+        assert handler.__name__ == "_do_add"
+        assert page.run_task.call_args.args[1:] == ("000001.SZ", "平安银行", "重点")
+
+    def test_do_add_success_calls_vm_and_toast(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """_do_add 成功 → vm.add_to_watchlist + 成功 toast."""
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        toast_calls: list[tuple[str, str]] = []
+        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in callbacks
+        on_add = callbacks["on_add"]
+        on_add("000001.SZ", "平安银行", "重点")
+        assert ("add_to_watchlist", {"ts_code": "000001.SZ", "stock_name": "平安银行", "note": "重点"}) in (
+            mock_watchlist_vm.method_calls
+        )
+        assert any("watchlist_added" in msg for msg, _ in toast_calls)
+
+    def test_do_add_empty_note_passes_none(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """备注为空时 _do_add 传 note=None 给 VM (note or None).
+
+        真实调用路径: dialog 侧 _on_confirm 已对 note.strip(), 空白备注以 "" 传入.
+        """
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in callbacks
+        on_add = callbacks["on_add"]
+        on_add("600000.SH", "浦发银行", "")
+        assert ("add_to_watchlist", {"ts_code": "600000.SH", "stock_name": "浦发银行", "note": None}) in (
+            mock_watchlist_vm.method_calls
+        )
+
+    def test_do_add_cancelled_error_propagates(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """R2 红线：CancelledError 必须 raise（不吞没）。"""
+
+        async def _raise_cancelled(ts_code: str, stock_name: str, note: str | None = None) -> None:
+            raise asyncio.CancelledError()
+
+        mock_watchlist_vm.add_to_watchlist = _raise_cancelled  # type: ignore[assignment]
+
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_add = mock_watchlist_vm.captured_add_callbacks.get("on_add")
+        assert on_add is not None  # noqa: weak-assertion R2 前置 guard: on_add 为后续 pytest.raises 块的调用对象
+        # R2 红线：CancelledError 必须 raise（不吞没）；pytest.raises 即为断言
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，pytest.raises 本身即为强断言
+            on_add("000001.SZ", "平安银行", "重点")
+
+    def test_do_add_exception_shows_error_toast(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """普通异常应显示错误 toast（不 crash）。"""
+
+        async def _raise_exc(ts_code: str, stock_name: str, note: str | None = None) -> None:
+            raise RuntimeError("add failed")
+
+        mock_watchlist_vm.add_to_watchlist = _raise_exc  # type: ignore[assignment]
+
+        page, _ = self._render_with_add_dialog(
+            mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+        )
+        toast_calls: list[tuple[str, str]] = []
+        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        callbacks = mock_watchlist_vm.captured_add_callbacks
+        assert "on_add" in callbacks
+        on_add = callbacks["on_add"]
+        on_add("000001.SZ", "平安银行", "重点")
+        assert any("watchlist_add_failed" in msg for msg, _ in toast_calls)
+
+    def test_open_add_dialog_no_page_does_not_crash(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """page 为 None 时 _on_open_add_dialog 提前返回 (不 crash)."""
+        from flet.controls.context import _context_page
+
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        _context_page.set(None)
+        result = render_once(component)
+
+        add_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.ADD
+        ]
+        assert callable(add_buttons[0].on_click)
+        # page=None 时 _on_open_add_dialog 提前返回, 不调 state setter, 不 crash
+        add_buttons[0].on_click(MagicMock())  # type: ignore[call-issue]  # [reason: 同 _click_icon_button, Flet on_click Union 含 0 参分支]
+        # 对话框未打开 (无 open_state=True 渲染), 未捕获回调
+        assert not mock_watchlist_vm.captured_add_callbacks.get("on_add")
