@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 _registry: list[type[object]] = []
 _lock = threading.Lock()
 _atexit_fired = False
+_graceful_shutdown_completed = False
+
+
+def mark_graceful_shutdown_completed() -> None:
+    """由 ShutdownCoordinator 正常完成关机后调用，标记优雅停机已完成。
+
+    B10: 显式表达 atexit 兜底与 ShutdownCoordinator async 路径的主从关系——
+    正常关机走 ShutdownCoordinator（await 资源清理），atexit 仅作异常退出兜底。
+    """
+    global _graceful_shutdown_completed
+    _graceful_shutdown_completed = True
+
+
+def is_graceful_shutdown_completed() -> bool:
+    """查询优雅停机是否已完成。atexit 兜底据此短路，避免重复清理。"""
+    return _graceful_shutdown_completed
 
 
 def _atexit_cleanup_all() -> None:
@@ -36,6 +52,10 @@ def _atexit_cleanup_all() -> None:
     if _atexit_fired:
         return
     _atexit_fired = True
+
+    # B10: 正常关机（ShutdownCoordinator 成功完成）后 atexit 兜底无需重复执行。
+    if is_graceful_shutdown_completed():
+        return
 
     with _lock:
         for cls in reversed(list(_registry)):

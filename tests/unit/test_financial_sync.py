@@ -6,6 +6,7 @@ import datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 import pandas as pd
 
+from core.i18n import Message
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.base import SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
@@ -94,6 +95,25 @@ class TestFinancialSyncRun:
         result = await strategy.run(force=True)
         assert result is not None
         assert isinstance(result, SyncResult)
+
+    @pytest.mark.asyncio
+    async def test_incremental_sync_reports_progress_done(self):
+        """D7: 增量 sync 的 progress_sync_done 上报 Message({'day': ...}) 而非已翻译字符串。"""
+        ctx = make_ctx()
+        ctx.cache.get_sync_status = AsyncMock(
+            return_value={
+                "last_sync_date": datetime.datetime(2024, 6, 1),
+            }
+        )
+        # 增量每天有披露目标 → 进入每日 batch 处理 → L751 progress_sync_done
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        messages: list = []
+        result = await strategy.run(progress_callback=lambda c, t, m: messages.append(m))
+        assert result is not None
+        assert any(isinstance(m, Message) and m.key == "progress_sync_done" and "day" in m.params for m in messages)
 
     @pytest.mark.asyncio
     async def test_full_sync_first_run(self):

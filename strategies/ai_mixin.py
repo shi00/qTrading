@@ -34,8 +34,8 @@ from data.constants import TOP_LIST_NET_AMOUNT_UNIT, get_column_unit
 from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
-from core.i18n import I18n
-from utils.async_utils import gather_return_exceptions_propagating_cancel
+from core.i18n import I18n, Message
+from utils.async_utils import gather_for_shutdown_cleanup, gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -349,7 +349,7 @@ class AIStrategyMixin:
                 on_progress(
                     0,
                     0,
-                    I18n.get("ai_not_configured"),
+                    Message("ai_not_configured"),
                 )
             return candidates_df
 
@@ -367,7 +367,7 @@ class AIStrategyMixin:
                 on_progress(
                     0,
                     0,
-                    I18n.get("ai_external_acknowledgment_prompt"),
+                    Message("ai_external_acknowledgment_prompt"),
                 )
 
         # --- Guard: DataProcessor Available? ---
@@ -605,7 +605,7 @@ class AIStrategyMixin:
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
         if on_progress:
-            on_progress(0, total_tasks, I18n.get("ai_progress_init"))
+            on_progress(0, total_tasks, Message("ai_progress_init"))
 
         on_card_error = context.get("on_card_error")  # UX-2.3: 单股失败回调
 
@@ -691,7 +691,7 @@ class AIStrategyMixin:
                     on_progress(
                         completed,
                         total_tasks,
-                        I18n.get("ai_progress_done", done=completed, total=total_tasks),
+                        Message("ai_progress_done", {"done": completed, "total": total_tasks}),
                     )
 
             logger.info(
@@ -812,7 +812,7 @@ class AIStrategyMixin:
         for task in pending:
             task.cancel()
         # 等待被取消的 task 完成；CancelledError 和其他异常都被吞没（已记录日志或预期）
-        await asyncio.gather(*pending, return_exceptions=True)
+        await gather_for_shutdown_cleanup(*pending)
 
     def _build_result_row(self, row_data: dict, res: object) -> dict | None:
         """把单股 AI 结果组装为结果行；无效（None/异常/score==0）返回 None。"""

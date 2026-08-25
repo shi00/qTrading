@@ -18,7 +18,6 @@
 
 import asyncio
 import logging
-import os
 import typing
 from collections.abc import Callable
 
@@ -34,6 +33,7 @@ from ui.pubsub_topics import CACHE_CLEARED_TOPIC, TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel
+from utils.app_env import is_e2e_mode
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -162,7 +162,7 @@ def HomeView(
         # E2E 测试不依赖 HomeView 异步数据（test_home_view_loads 仅断言静态标签），
         # 跳过是安全的。bootstrap.py:131 / main.py:209 / quality_gate.py 等已有
         # E2E_TESTING 检查先例，此处与之一致。
-        if os.environ.get("E2E_TESTING") == "true":
+        if is_e2e_mode():
             vm.set_loading(False)
             return
         try:
@@ -214,7 +214,7 @@ def HomeView(
         NewsSubscriptionService → AIService → litellm import (同步阻塞 MainThread),
         造成 E2E 回归。
         """
-        if os.environ.get("E2E_TESTING") == "true":
+        if is_e2e_mode():
             return
         vm.stop()
 

@@ -16,6 +16,7 @@ import polars as pl
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr
 from utils.sanitizers import DataSanitizer
+from core.i18n import Message
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
@@ -58,7 +59,7 @@ class VectorBacktestEngine:
         self,
         strategy: BaseStrategy,
         params: dict | None = None,
-        progress_callback: Callable[[float, str], None] | None = None,
+        progress_callback: Callable[[float, Message], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
         start_time = time.perf_counter()
@@ -69,14 +70,14 @@ class VectorBacktestEngine:
             raise ValueError(f"Invalid backtest config: {errors}")
 
         if progress_callback:
-            progress_callback(0.0, "Loading historical data...")
+            progress_callback(0.0, Message("backtest_progress_loading"))
 
         trade_dates = await self._get_trade_dates()
         quotes_df, quote_warnings = await self._load_quotes(trade_dates)
         benchmark_df = await self._load_benchmark(trade_dates)
 
         if progress_callback:
-            progress_callback(0.1, "Running strategy on each period...")
+            progress_callback(0.1, Message("backtest_progress_running_strategy"))
 
         failed_signal_dates: list[dict] = []
 
@@ -90,7 +91,7 @@ class VectorBacktestEngine:
         )
 
         if progress_callback:
-            progress_callback(0.5, "Simulating trades...")
+            progress_callback(0.5, Message("backtest_progress_simulating"))
 
         # BT-002: 加载 stock_meta（含 delist_date）用于区分退市与临时停牌
         stock_meta = await self.data_provider.get_stock_meta()
@@ -103,7 +104,7 @@ class VectorBacktestEngine:
         )
 
         if progress_callback:
-            progress_callback(0.7, "Calculating portfolio returns...")
+            progress_callback(0.7, Message("backtest_progress_calc_returns"))
 
         nav_curve = BacktestMetrics.calc_nav_curve(
             positions,
@@ -113,7 +114,7 @@ class VectorBacktestEngine:
         daily_returns = BacktestMetrics.calc_daily_returns(nav_curve)
 
         if progress_callback:
-            progress_callback(0.8, "Calculating metrics...")
+            progress_callback(0.8, Message("backtest_progress_calc_metrics"))
 
         ic_series = self._calc_ic_series(signals, quotes_df, trade_dates)
 
@@ -446,7 +447,7 @@ class VectorBacktestEngine:
         strategy: BaseStrategy,
         params: dict | None,
         trade_dates: list[date],
-        progress_callback: Callable[[float, str], None] | None = None,
+        progress_callback: Callable[[float, Message], None] | None = None,
         failed_signal_dates: list[dict] | None = None,
         cancel_check: Callable[[], bool] | None = None,
     ) -> pl.DataFrame:
@@ -492,7 +493,7 @@ class VectorBacktestEngine:
 
             if progress_callback and i % 10 == 0:
                 progress = 0.1 + 0.4 * (i / total_dates)
-                progress_callback(progress, f"Processing {signal_date}...")
+                progress_callback(progress, Message("backtest_progress_processing", {"date": signal_date.isoformat()}))
 
         if not signals_list:
             return pl.DataFrame()

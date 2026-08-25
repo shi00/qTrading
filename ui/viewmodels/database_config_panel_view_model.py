@@ -24,7 +24,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, get_error_message
+from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -291,13 +291,13 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
             logger.warning("[DatabaseConfigVM] ValueError: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[DatabaseConfigVM] ValueError traceback", exc_info=True)
             error_info = classify_error(e, context="db")
-            self._show_error(self._raw_message(get_error_message(error_info)))
+            self._show_error(get_error_message_key(error_info))
             return False
         except Exception as e:
             logger.error("[DatabaseConfigVM] Test connection failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[DatabaseConfigVM] Test connection failed traceback", exc_info=True)
             error_info = classify_error(e, context="db")
-            self._show_error(self._raw_message(get_error_message(error_info)))
+            self._show_error(get_error_message_key(error_info))
             return False
         finally:
             self._set_state(is_verifying=False)
@@ -383,7 +383,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
             logger.error("[DatabaseConfigVM] Save config failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[DatabaseConfigVM] Save config failed traceback", exc_info=True)
             error_info = classify_error(e, context="db")
-            self._show_error(self._raw_message(get_error_message(error_info)))
+            self._show_error(get_error_message_key(error_info))
             return False
         finally:
             self._set_state(is_saving=False)

@@ -25,7 +25,7 @@ from data.constants import (
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
-from core.i18n import I18n
+from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
@@ -516,7 +516,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         progress_callback(
                             processed_count,
                             total_days,
-                            I18n.get("progress_sync_market").format(date=date_obj.strftime("%Y%m%d")),
+                            Message("progress_sync_market", {"date": date_obj.strftime("%Y%m%d")}),
                         )
                 except EngineDisposedError:
                     raise
