@@ -819,9 +819,11 @@ class TaskManager:
         # 4. Purge old records (>30 days)
         # H1 举一反三 fix: 与 completed_at (UTC tz-naive) 时区一致，避免 8 小时偏差
         cutoff_date = cast(datetime.datetime, to_utc_for_db(get_now() - datetime.timedelta(days=30)))
+        # review03-C12: 清理失败可容忍（不阻断 init_db）——显式打开吞错，_write_db 内部有 warning 日志
         await cache.write_db(
             "DELETE FROM task_history WHERE completed_at < $1",
             (cutoff_date,),
+            suppress_errors=True,
         )
 
         self._db_ready = True

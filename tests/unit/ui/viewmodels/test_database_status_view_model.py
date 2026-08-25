@@ -192,6 +192,31 @@ class TestRefreshStatus:
         await vm.refresh_status()
         assert vm.state.pg_version is None
 
+    @pytest.mark.asyncio
+    async def test_refresh_status_offloads_load_config(self, mock_maintenance_service, mock_config_dict):
+        """B13: ConfigHandler.load_config 经 ThreadPoolManager.run_async(IO) offload，不阻塞事件循环。"""
+        from utils.thread_pool import TaskType
+
+        with (
+            patch(
+                "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+                return_value=mock_config_dict,
+            ) as mock_load_config,
+            patch("ui.viewmodels.database_status_view_model.ThreadPoolManager") as mock_tpm_cls,
+        ):
+            mock_tpm = MagicMock()
+            mock_tpm_cls.return_value = mock_tpm
+            mock_tpm.run_async = AsyncMock(return_value=mock_config_dict)
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+            await vm.refresh_status()
+
+        # run_async 至少一次以 (TaskType.IO, load_config) 提交（B13 offload）
+        assert any(
+            c.args[0] is TaskType.IO and c.args[1] is mock_load_config for c in mock_tpm.run_async.await_args_list
+        ), "load_config 应经 ThreadPoolManager.run_async(TaskType.IO, ...) offload"
+        # doctor 仍直接 await（async-native，不经线程池）
+        mock_maintenance_service.doctor.assert_awaited_once_with()
+
 
 # --- open_data_dir / open_log_dir ---
 

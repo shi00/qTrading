@@ -689,6 +689,16 @@ class TestEmbeddedPostgresServiceStart:
         finally:
             await service.stop()
 
+    def test_start_stop_share_same_rlock(self, fake_paths) -> None:
+        """review03-C18: start 与 stop 状态变迁共用同一 RLock，契约不再依赖调用方串行。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        assert isinstance(service._lock, type(threading.RLock())), "cls._lock 必须为 RLock（可重入）"
+        assert not hasattr(service, "_start_lock"), "独立 _start_lock 应已移除（统一为 cls._lock）"
+        # 结构验证：stop_sync 使用的锁即 start 使用的锁（同一 RLock）
+        assert svc_module.EmbeddedPostgresService._lock is service._lock
+
     @pytest.mark.asyncio(loop_scope="function")
     async def test_start_stdout_reader_task_started_after_start(self, fake_paths) -> None:
         """M9: start() 后启动 daemon 线程读 stdout 写入 sidecar.stdout.log。

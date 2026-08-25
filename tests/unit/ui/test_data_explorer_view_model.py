@@ -19,6 +19,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import (
     DataExplorerState,
     DataExplorerViewModel,
+    SqlErrorInfo,
     SqlResultRow,
     TableRow,
 )
@@ -141,7 +142,7 @@ class TestDispose:
             sql_success=True,
             sql_result_columns=("a",),
             sql_result_rows=(SqlResultRow(values=(1,)),),
-            sql_error="boom",
+            sql_error=SqlErrorInfo("_raw_msg_", {"default": "boom"}, raw_detail="boom"),
         )
         vm.dispose()
         assert vm.state.tables_list == ()
@@ -448,9 +449,11 @@ class TestExecuteSQL:
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("DROP TABLE stock_basic")
         assert result["success"] is False
-        # 声明式: error 写入 state.sql_error
+        # D6: DB 层文本错误统一包 SqlErrorInfo(_raw_msg_) 写入 state.sql_error
         assert vm.state.sql_success is False
-        assert vm.state.sql_error == "Only SELECT allowed"
+        assert isinstance(vm.state.sql_error, SqlErrorInfo)
+        assert vm.state.sql_error.message_key == "_raw_msg_"
+        assert vm.state.sql_error.format_args.get("default") == "Only SELECT allowed"
         assert vm.state.sql_result_rows == ()
 
     async def test_exception_handling(self, vm, mock_db):

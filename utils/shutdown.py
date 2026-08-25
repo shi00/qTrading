@@ -36,6 +36,11 @@ _CLEANUP_STEPS = [
     ("Step 8", "_step8_stop_embedded_postgres", True, 35.0),
 ]
 
+# B9: Step 8 停止 PG 的 wait_for 超时（秒）。取值依据：Step 8 默认 step 预算 35.0s，
+# 留 5s margin 给 force_exit 看门狗；超时后放弃等待 stop_sync 线程（proc.wait 会自然完成），
+# 避免阻塞整个 shutdown。30s 是平衡值——无限等待会卡死退出，立即 SIGKILL 需崩溃恢复。
+_STEP8_PG_STOP_TIMEOUT_S = 30.0
+
 
 class ShutdownCoordinator:
     """
@@ -519,12 +524,19 @@ class ShutdownCoordinator:
             # 单例未注册（external 模式或从未启动）— 无操作
             return
         try:
-            # H1: 30s < Step 8 default 35s，留 5s margin 给 force_exit
-            await asyncio.wait_for(asyncio.to_thread(service.stop_sync), timeout=30.0)
+            # H1: _STEP8_PG_STOP_TIMEOUT_S(30s) < Step 8 default 35s，留 5s margin 给 force_exit
+            await asyncio.wait_for(asyncio.to_thread(service.stop_sync), timeout=_STEP8_PG_STOP_TIMEOUT_S)
             logger.info("[Shutdown] Step 8: EmbeddedPostgresService stopped.")
         except TimeoutError:
-            # 线程仍在后台运行（stop_sync 中的 proc.wait 会完成），放弃等待
-            logger.warning("[Shutdown] Step 8: stop_sync timed out after 30s, abandoning thread.")
+            # 线程仍在后台运行（stop_sync 中的 proc.wait 会完成），放弃等待。
+            # B9 可观测性：日志补充超时常量来源 + 频繁出现时的定位提示（PG checkpoint 慢）。
+            logger.warning(
+                "[Shutdown] Step 8: stop_sync timed out after %.1fs "
+                "(timeout constant _STEP8_PG_STOP_TIMEOUT_S); abandoning thread. "
+                "If this recurs frequently, investigate slow PG checkpoint/stop: "
+                "check wal_keep_size, max_wal_size, and active connections.",
+                _STEP8_PG_STOP_TIMEOUT_S,
+            )
         except Exception as e:
             logger.error(
                 "[Shutdown] Step 8 stop embedded postgres failed: %s",

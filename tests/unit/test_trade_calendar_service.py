@@ -580,6 +580,81 @@ class TestClearCache:
         assert svc._latest_trade_date_cache["val"] is None
 
 
+class TestGetEffectiveTradeDate:
+    """review03-C14: 共享回退链（日历服务 → 已同步行情最大日期 → 显式抛错，不依赖本地时区）。"""
+
+    def _proc(self, calendar_date=None, calendar_error=None, synced_date=None, synced_error=None):
+        trade_calendar = MagicMock()
+        if calendar_error is not None:
+            trade_calendar.get_latest_trade_date = AsyncMock(side_effect=calendar_error)
+        else:
+            trade_calendar.get_latest_trade_date = AsyncMock(return_value=calendar_date)
+        cache = MagicMock()
+        if synced_error is not None:
+            cache.get_latest_trade_date = AsyncMock(side_effect=synced_error)
+        else:
+            cache.get_latest_trade_date = AsyncMock(return_value=synced_date)
+        return MagicMock(trade_calendar=trade_calendar, cache=cache)
+
+    @pytest.mark.asyncio
+    async def test_l1_calendar_success(self):
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_date=datetime.date(2024, 6, 14))
+        assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_l1_datetime_normalized(self):
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_date=datetime.datetime(2024, 6, 14, 15, 0))
+        assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_l1_none_falls_back_to_synced(self):
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_date=None, synced_date=datetime.date(2024, 6, 14))
+        assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_l1_exception_falls_back_to_synced(self):
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_error=OSError("network"), synced_date=datetime.date(2024, 6, 14))
+        assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_all_sources_unavailable_raises(self):
+        from data.domain_services.trade_calendar_service import TradeDateUnavailableError, get_effective_trade_date
+
+        proc = self._proc(calendar_date=None, synced_date=None)
+        with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
+            await get_effective_trade_date(proc)
+
+    @pytest.mark.asyncio
+    async def test_no_processor_raises(self):
+        from data.domain_services.trade_calendar_service import TradeDateUnavailableError, get_effective_trade_date
+
+        with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
+            await get_effective_trade_date(None)
+
+    @pytest.mark.asyncio
+    async def test_result_independent_of_local_timezone(self):
+        """UTC 时区下回退结果仍为注入的交易日（不依赖 get_now().date()）。"""
+        import os
+
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        os.environ["TZ"] = "UTC"
+        try:
+            proc = self._proc(calendar_date=None, synced_date=datetime.date(2024, 6, 14))
+            result = await get_effective_trade_date(proc)
+            assert result == datetime.date(2024, 6, 14)
+        finally:
+            os.environ.pop("TZ", None)
+
+
 class TestGetTradeCalDf:
     @pytest.mark.asyncio
     async def test_from_cache(self):

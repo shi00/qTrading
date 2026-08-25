@@ -383,11 +383,9 @@ class TestBacktestDAO:
 
     @pytest.mark.asyncio
     async def test_delete_result_cache_manager_disposed(self, dao: BacktestDAO) -> None:
-        """R5: CacheManager 已 disposed 时 _check_engine 抛 EngineDisposedError，必须传播。"""
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_instance = MagicMock()
-            mock_instance._disposed = True
-            mock_cm._instance = mock_instance
+        """R5: 引擎 disposed 时 _check_engine 抛 EngineDisposedError，必须传播。"""
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError):
                 await dao.delete_result("test_run_001")
 

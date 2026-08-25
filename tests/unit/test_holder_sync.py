@@ -58,9 +58,10 @@ class TestHolderSyncGetEffectiveTradeDate:
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("test error"))
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
 
 class TestHolderSyncStkHoldernumber:
@@ -385,12 +386,15 @@ class TestHolderSyncStrategyConstants:
 
 class TestHolderSyncStrategyGetEffectiveTradeDate:
     @pytest.mark.asyncio
-    async def test_no_processor(self):
+    async def test_no_processor_raises(self):
+        """review03-C14: 无 processor（无任何数据源）→ 抛 TradeDateUnavailableError（不猜本地日期）。"""
+        from data.domain_services.trade_calendar_service import TradeDateUnavailableError
+
         ctx = MagicMock(spec=SyncContext)
         ctx.processor = None
         strategy = HolderSyncStrategy(ctx)
-        result = await strategy._get_effective_trade_date()
-        assert result is not None
+        with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
+            await strategy._get_effective_trade_date()
 
     @pytest.mark.asyncio
     async def test_with_processor_date(self):
@@ -419,14 +423,18 @@ class TestHolderSyncStrategyGetEffectiveTradeDate:
         assert result == datetime.date(2024, 6, 15)
 
     @pytest.mark.asyncio
-    async def test_processor_exception_fallback(self):
+    async def test_processor_exception_fallback_to_synced_data(self):
+        """review03-C14: L1 日历服务异常 → 回退到已同步行情最大日期。"""
+        import datetime
+
         ctx = MagicMock(spec=SyncContext)
         mock_processor = MagicMock()
         mock_processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        mock_processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         ctx.processor = mock_processor
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert result is not None
+        assert result == datetime.date(2024, 6, 15)
 
 
 class TestHolderSyncStrategyInit:
@@ -441,6 +449,8 @@ class TestHolderSyncSyncPledgeStat:
     @pytest.mark.asyncio
     async def test_with_data(self):
         ctx = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(
             return_value=pd.DataFrame(
@@ -459,6 +469,8 @@ class TestHolderSyncSyncPledgeStat:
     @pytest.mark.asyncio
     async def test_no_data(self):
         ctx = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(return_value=pd.DataFrame())
         strategy = HolderSyncStrategy(ctx)
@@ -488,6 +500,8 @@ class TestHolderSyncSyncPledgeStat:
         import datetime as _dt
 
         ctx = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(
             return_value=pd.DataFrame(
@@ -524,6 +538,8 @@ class TestHolderSyncSyncPledgeStat:
         import datetime as _dt
 
         ctx = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(
             return_value=pd.DataFrame(
@@ -789,9 +805,10 @@ class TestHolderSyncGetEffectiveTradeDateNone:
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
 
 class TestHolderSyncRunErrorPaths:
@@ -2206,13 +2223,14 @@ class TestGetEffectiveTradeDateSeverityBranches:
 
     @pytest.mark.asyncio
     async def test_recoverable_severity_falls_back(self):
-        """recoverable severity（OSError network）应 fallback 到 today。"""
+        """recoverable severity（OSError network）应回退到已同步行情最大日期。"""
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=OSError("network down"))
+        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
     async def test_engine_disposed_reraises(self):

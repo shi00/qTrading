@@ -57,17 +57,20 @@ _STATUS_COLOR_MAP = {
 
 
 def _render_message(msg: Message | None) -> str:
-    """Render a Message to localized text via I18n.get."""
+    """Render a Message to localized text via I18n.get.
+
+    D8: 翻译 ``*_key`` 后缀 params 为当前 locale (R.2.3) — VM 只产出 i18n key
+    (如 ``provider_key``), View 渲染时翻译为显示名并替换回同名去后缀字段,
+    与 screener_view._render_status_message 行为一致.
+    """
     if msg is None:
         return ""
-    return I18n.get(msg.key, **msg.params)
-
-
-def _get_provider_name(provider: dict, provider_id: str) -> str:
-    """获取供应商显示名称（locale 感知）。"""
-    if I18n.current_locale() == "zh_CN":
-        return provider.get("name", provider_id)
-    return provider.get("name_en", provider.get("name", provider_id))
+    params = dict(msg.params)
+    for k in list(params):
+        if k.endswith("_key") and isinstance(params[k], str):
+            params[k[:-4]] = I18n.get(params[k])
+            del params[k]
+    return I18n.get(msg.key, **params)
 
 
 def _build_provider_options() -> list[ft.dropdown.Option]:
@@ -84,7 +87,8 @@ def _build_provider_options() -> list[ft.dropdown.Option]:
             options.append(
                 ft.dropdown.Option(
                     key=provider_id,
-                    text=_get_provider_name(provider, provider_id),
+                    # D8: 显示名走 i18n key（llm_provider_{id}），View 按当前 locale 渲染
+                    text=I18n.get(f"llm_provider_{provider_id}"),
                 )
             )
 
@@ -98,7 +102,8 @@ def _build_provider_options() -> list[ft.dropdown.Option]:
             options.append(
                 ft.dropdown.Option(
                     key=provider_id,
-                    text=_get_provider_name(provider, provider_id),
+                    # D8: 显示名走 i18n key（llm_provider_{id}），View 按当前 locale 渲染
+                    text=I18n.get(f"llm_provider_{provider_id}"),
                 )
             )
 

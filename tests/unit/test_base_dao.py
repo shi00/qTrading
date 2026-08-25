@@ -8,6 +8,7 @@ import datetime
 import inspect
 import logging
 import pytest
+from typing import cast
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
@@ -566,9 +567,8 @@ class TestBaseDaoWriteDbExtended:
     async def test_write_disposed_engine(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 await dao._write_db("INSERT INTO t VALUES ($1)")
 
@@ -1522,9 +1522,8 @@ class TestBaseDaoReadDbExtended:
     async def test_read_disposed_engine(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 await dao._read_db("SELECT 1")
 
@@ -1695,9 +1694,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_write_db_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, write rejected"):
                 await dao._write_db("INSERT INTO t VALUES ($1)")
 
@@ -1705,9 +1703,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_read_db_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
                 await dao._read_db("SELECT 1")
 
@@ -1715,9 +1712,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_read_db_select_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
                 await dao._read_db_select(sa.select(1))
 
@@ -1725,9 +1721,8 @@ class TestEngineDisposedErrorDBP01:
     async def test_save_upsert_disposed_raises_engine_disposed_error(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed, upsert rejected"):
                 await dao._save_upsert(
                     pd.DataFrame({"a": [1]}),
@@ -1754,9 +1749,8 @@ class TestEngineDisposedErrorDBP01:
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
         caught = False
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             try:
                 await dao._write_db("INSERT INTO t VALUES ($1)")
             except EngineDisposedError:
@@ -1768,9 +1762,8 @@ class TestEngineDisposedErrorDBP01:
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
         caught = False
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             try:
                 await dao._read_db("SELECT 1")
             except RuntimeError:
@@ -2098,13 +2091,12 @@ class TestGuardedBegin:
 
     @pytest.mark.asyncio
     async def test_cache_manager_disposed_raises_engine_disposed_error(self):
-        """Path 4: _check_engine raises EngineDisposedError when CacheManager is disposed."""
+        """Path 4: _check_engine raises EngineDisposedError when engine is disposed."""
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
 
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError, match="Engine disposed"):
                 async with dao._guarded_begin():
                     pass
@@ -2219,9 +2211,8 @@ class TestBaseDaoReadDbSelect:
     async def test_select_engine_disposed_raises(self):
         mock_engine = MagicMock()
         dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = MagicMock()
-            mock_cm._instance._disposed = True
+        # review03-C11: 释放状态由 engine_provider 提供，替代旧 CacheManager._instance 模拟
+        with patch("data.persistence.engine_provider.is_disposed", return_value=True):
             with pytest.raises(EngineDisposedError):
                 await dao._read_db_select(sa.select(1))
 
@@ -2363,7 +2354,7 @@ class TestChunkedInQueryMultipleChunks:
     async def test_multiple_chunks_dynamic(self):
         call_count = 0
 
-        async def mock_read_fn(sql, params):
+        async def mock_read_fn(sql, params, **kwargs):
             nonlocal call_count
             call_count += 1
             return pd.DataFrame({"id": [call_count * 2 - 1, call_count * 2]})
@@ -2526,6 +2517,52 @@ class TestChunkedExecute:
         assert db_fn.call_count == 2
 
 
+class TestReadDbSelectMaxRows:
+    """review03-C4: _read_db_select 的 max_rows 安全阀在 suppress_errors=True 下也必须抛错。"""
+
+    def _mk(self, rows):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        mock_conn = AsyncMock()  # AsyncMock：await conn.execute(...) → mock_result
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(i,) for i in range(rows)]
+        mock_result.keys.return_value = ["id"]
+        mock_conn.execute.return_value = mock_result
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        event_mock = MagicMock()
+        event_mock.wait = AsyncMock(return_value=None)
+        dao._get_maintenance_event = MagicMock(return_value=event_mock)
+        return dao, mock_engine
+
+    @pytest.mark.asyncio
+    async def test_max_rows_exceeded_raises_despite_suppress(self):
+        """suppress_errors=True（默认）不能吞掉 max_rows 超限——超限是查询错误而非 IO 失败。"""
+        dao, mock_engine = self._mk(5)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(
+                return_value=pd.DataFrame([(i,) for i in range(5)], columns=["id"])
+            )
+            with pytest.raises(ValueError, match="max_rows"):
+                await dao._read_db_select("SELECT 1", max_rows=3)
+
+    @pytest.mark.asyncio
+    async def test_within_max_rows_returns_df(self):
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            df = await dao._read_db_select("SELECT 1", max_rows=10)
+            assert len(df) == 1
+
+
 class TestSaveUpsertLongTx:
     """review03-C2: conn=None 且行数超阈值 → 每块独立事务（begin 次数 = 块数）。"""
 
@@ -2625,6 +2662,83 @@ class TestSaveUpsertLongTx:
         assert len(begins) == 1, f"期望 1 次单事务 begin，实际 {len(begins)}"
 
 
+class TestChunkedReadFailFast:
+    """review03-C1: 读路径 chunk 失败显式化（fail-fast，弃部分结果，不静默吞错）。"""
+
+    async def _flaky_read(self, sql, params, **kwargs):
+        self._flaky_calls += 1
+        if self._flaky_calls == 2:
+            raise ConnectionError("chunk timeout")
+        return pd.DataFrame({"id": params})
+
+    @pytest.mark.asyncio
+    async def test_chunk_failure_raises_database_query_error(self):
+        """第二块失败 → gather 收集异常 → _chunked_execute 抛 DatabaseQueryError（fail-fast）。"""
+        self._flaky_calls = 0
+        values = list(range(700))  # 2 chunks（500 + 200）
+
+        with pytest.raises(DatabaseQueryError, match="partial results discarded"):
+            await BaseDao._chunked_execute(
+                self._flaky_read,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                values,
+                chunk_size=500,
+            )
+
+    @pytest.mark.asyncio
+    async def test_batch_partial_failure_returns_empty_with_error_log(self, caplog):
+        """13 个 get_*_batch 的兜底：部分块失败 → 整体空 + logger.error（不静默返回残缺数据）。"""
+        import logging
+
+        dao = BaseDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=ConnectionError("deadlock"))
+
+        with caplog.at_level(logging.ERROR, logger="data.persistence.daos.base_dao"):
+            df = await dao._batch_get_with_as_of_date(
+                lambda as_of: ("SELECT x FROM t WHERE id IN ({placeholders})", None),
+                [str(i) for i in range(700)],
+                None,
+                "failfast_test",
+            )
+        assert df.empty
+        assert any("Chunked read failed" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_outer_cancellation_propagates(self):
+        """外层 task 取消 → gather 抛 CancelledError（R2：取消必须传播）。"""
+
+        async def never(sql, params, **kwargs):
+            await asyncio.sleep(10)
+
+        task = asyncio.create_task(
+            BaseDao._chunked_execute(
+                never,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                list(range(700)),
+                chunk_size=500,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_chunk_engine_disposed_propagates_original(self):
+        """R5：并发路径块抛 EngineDisposedError 必须原样传播，不包装为 DatabaseQueryError。"""
+
+        async def disposed(sql, params, **kwargs):
+            raise EngineDisposedError("engine disposed")
+
+        with pytest.raises(EngineDisposedError, match="engine disposed"):
+            await BaseDao._chunked_execute(
+                disposed,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                list(range(700)),
+                chunk_size=500,
+            )
+
+
 class TestChunkedExecuteParallel:
     """Task 5.1 (PERF-M1 / DATA-D5): Verify parallel chunked execution produces
     correct results and limits concurrency to avoid connection pool exhaustion."""
@@ -2650,9 +2764,10 @@ class TestChunkedExecuteParallel:
         )
         # Results must be in chunk order (0,2,4) regardless of execution order
         assert len(results) == 3
-        assert results[0]["chunk_idx"].iloc[0] == 0
-        assert results[1]["chunk_idx"].iloc[0] == 2
-        assert results[2]["chunk_idx"].iloc[0] == 4
+        df_results = cast(list[pd.DataFrame], results)  # _chunked_execute 返回 union（含失败异常），此处窄化
+        assert df_results[0]["chunk_idx"].iloc[0] == 0
+        assert df_results[1]["chunk_idx"].iloc[0] == 2
+        assert df_results[2]["chunk_idx"].iloc[0] == 4
 
     @pytest.mark.asyncio
     async def test_parallel_semaphore_limits_concurrency(self):
@@ -2721,7 +2836,7 @@ class TestChunkedExecuteParallel:
         """chunked_in_query should correctly concatenate parallel chunk results."""
         codes = [f"{i:06d}.SH" for i in range(6)]
 
-        async def mock_read_fn(sql, params):
+        async def mock_read_fn(sql, params, **kwargs):
             return pd.DataFrame({"ts_code": params})
 
         result = await BaseDao.chunked_in_query(

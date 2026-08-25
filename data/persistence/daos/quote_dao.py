@@ -380,7 +380,9 @@ class QuoteDao(BaseDao):
                 logger.warning("[QuoteDao] Table '%s' not in metadata or missing column '%s'", table_name, date_col)
                 return set()
             stmt = sa.select(sa.distinct(tbl.c[date_col])).order_by(tbl.c[date_col])
-            df = await self._read_db_select(stmt)
+            # review03-C4: 无 WHERE/LIMIT 的全表 DISTINCT 扫描——显式 max_rows 守卫
+            # （物化行数 = 去重后的日期数，防御 date_col 高基数 / 数据异常的意外放大）
+            df = await self._read_db_select(stmt, max_rows=50_000)
             if df is None or df.empty:
                 return set()
             return set(df[date_col])

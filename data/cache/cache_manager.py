@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 import config
 from data.constants import get_health_depth_full_trade_days
 from data.data_dictionary import TABLE_DEFINITIONS
+from data.persistence import engine_provider
 
 # DAOs
 from data.persistence.daos.backtest_dao import BacktestDAO
@@ -99,6 +100,9 @@ class CacheManager(CacheManagerDelegationMixin):
         del_loop_local("cache_maint_event")
         del_loop_local("cache_init_lock")
 
+        # review03-C11 Step2: 清空 engine_provider 模块级状态，保证跨用例隔离
+        engine_provider.reset_engine_provider()
+
     @classmethod
     def _atexit_cleanup(cls):
         """C-P2-3: Centralized atexit cleanup via singleton_registry.
@@ -112,6 +116,8 @@ class CacheManager(CacheManagerDelegationMixin):
                     # R5 修复 #M5-005：先标记 _disposed 阻塞新查询，再 dispose 引擎，
                     # 避免 dispose 期间新查询进入导致 ConnectionRefusedError
                     inst._disposed = True
+                    # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫即时生效
+                    engine_provider.mark_disposed(True)
                     inst.engine.sync_engine.dispose()
             except Exception as e:
                 # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
@@ -187,6 +193,8 @@ class CacheManager(CacheManagerDelegationMixin):
     def _create_engine(self, connection_string: str):
         """Create async engine and update DAO references."""
         self._disposed = False
+        # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫恢复可用状态
+        engine_provider.mark_disposed(False)
 
         pool_config = get_db_pool_config()
 
@@ -196,6 +204,8 @@ class CacheManager(CacheManagerDelegationMixin):
             future=True,
             **pool_config,
         )
+        # review03-C11 Step2: 记录引擎引用（语义化标记，与 disposed 状态同临界区维护）
+        engine_provider.set_engine(self.engine)
 
         # 由 _DAO_REGISTRY 驱动 DAO.engine 同步，消除 17 行重复手写赋值
         for attr_name, _ in self._DAO_REGISTRY:
@@ -244,9 +254,13 @@ class CacheManager(CacheManagerDelegationMixin):
                 )
             try:
                 self._disposed = True
+                # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫即时生效
+                engine_provider.mark_disposed(True)
                 if self.engine is not None:
                     await self.engine.dispose()
                     self.engine = None
+                    # review03-C11 Step2: 引擎引用已释放，同步清空 provider 标记
+                    engine_provider.set_engine(None)
                     # 由 _DAO_REGISTRY 驱动 DAO.engine 清空，消除 17 行重复手写赋值
                     for attr_name, _ in self._DAO_REGISTRY:
                         getattr(self, attr_name).engine = None
@@ -310,9 +324,11 @@ class CacheManager(CacheManagerDelegationMixin):
 
     # Backward compatibility for direct SQL usage if any
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def write_db(self, sql: str, params: tuple | list | None = None):
+    async def write_db(self, sql: str, params: tuple | list | None = None, *, suppress_errors: bool = False):
         dao = BaseDao(self.engine)
-        return await dao._write_db(sql, params, suppress_errors=True)
+        # review03-C12: 默认不再吞错——写入失败应传播（数据写丢失不可静默）。
+        # 调用方如确认失败可容忍（如记录清理），显式传 suppress_errors=True + 注释说明。
+        return await dao._write_db(sql, params, suppress_errors=suppress_errors)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_db(self, sql: str, params: tuple | list | None = None):

@@ -24,6 +24,15 @@ from services.ai_service import AIService
 logger = logging.getLogger(__name__)
 
 
+# B15: 超时/间隔魔数提为命名常量（报告不建议新建全局 timeout 模块，故定义于本模块顶部）。
+_QUEUE_PUT_TIMEOUT_S = 1.0  # 队列满时快速失败，避免阻塞订阅回调
+_QUEUE_GET_TIMEOUT_S = 1.0  # 队列空时轮询间隔，避免忙等
+_QUEUE_DRAIN_DEFAULT_S = 3.0  # stop_async 默认 drain 超时（默认参数值）
+_PROCESSING_SLEEP_S = 5.0  # 处理循环异常后休眠间隔，避免紧密错误循环
+_FETCH_RESULT_TIMEOUT_S = 5.0  # 单次异步监听器结果等待上限
+_HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
+
+
 class NewsUpdateType:
     NEW_ITEM = "new_item"
     TAG_UPDATE = "tag_update"
@@ -141,7 +150,7 @@ class NewsSubscriptionService:
         if self.processing_queue is None:
             return
         try:
-            await asyncio.wait_for(self.processing_queue.put(item), timeout=1.0)
+            await asyncio.wait_for(self.processing_queue.put(item), timeout=_QUEUE_PUT_TIMEOUT_S)
         except TimeoutError:
             # Serialize drop-then-put to avoid race window between multiple producers.
             def _lock_factory():
@@ -161,7 +170,7 @@ class NewsSubscriptionService:
                 except asyncio.QueueFull:
                     logger.warning("[NewsService] Queue still full after drop, skipping item")
 
-    async def stop_async(self, drain_timeout: float = 3.0):
+    async def stop_async(self, drain_timeout: float = _QUEUE_DRAIN_DEFAULT_S):
         """Stop service gracefully and drain processing queue before cancellation."""
         self._running = False
 
@@ -368,7 +377,7 @@ class NewsSubscriptionService:
                 try:
                     item = await asyncio.wait_for(
                         self.processing_queue.get(),  # type: ignore[union-attr]
-                        timeout=1.0,
+                        timeout=_QUEUE_GET_TIMEOUT_S,
                     )
                 except TimeoutError:
                     continue
@@ -423,7 +432,7 @@ class NewsSubscriptionService:
                 )
                 logger.debug("[NewsService] Error in processing loop traceback:", exc_info=True)
                 # Prevent tight error loop logging
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(_PROCESSING_SLEEP_S)
 
     async def _notify_listeners(
         self,
@@ -453,7 +462,7 @@ class NewsSubscriptionService:
                     else:
                         result = listener()
                     if inspect.isawaitable(result):
-                        await asyncio.wait_for(result, timeout=5.0)
+                        await asyncio.wait_for(result, timeout=_FETCH_RESULT_TIMEOUT_S)
                     else:
                         # Defensive: marked async but returned non-awaitable (e.g. sync fn
                         # with is_async attr). Log and skip -- do NOT re-run to avoid double
@@ -467,19 +476,19 @@ class NewsSubscriptionService:
                         _l, _ut, _d = listener, update_type, data
                         await asyncio.wait_for(
                             ThreadPoolManager().run_async(TaskType.IO, _l, _ut, _d),
-                            timeout=5.0,
+                            timeout=_FETCH_RESULT_TIMEOUT_S,
                         )
                     elif param_count == 1:
                         _l, _ut = listener, update_type
                         await asyncio.wait_for(
                             ThreadPoolManager().run_async(TaskType.IO, _l, _ut),
-                            timeout=5.0,
+                            timeout=_FETCH_RESULT_TIMEOUT_S,
                         )
                     else:
                         _l = listener
                         await asyncio.wait_for(
                             ThreadPoolManager().run_async(TaskType.IO, _l),
-                            timeout=5.0,
+                            timeout=_FETCH_RESULT_TIMEOUT_S,
                         )
                 if listener in self._listener_errors:
                     del self._listener_errors[listener]
@@ -631,7 +640,7 @@ class NewsSubscriptionService:
                                     if inspect.iscoroutinefunction(raw) or getattr(raw, "is_async", False):
                                         result = listener(display_msg)
                                         if inspect.isawaitable(result):
-                                            await asyncio.wait_for(result, timeout=3.0)
+                                            await asyncio.wait_for(result, timeout=_HOT_CONCEPT_TAG_TIMEOUT_S)
                                         else:
                                             logger.error(
                                                 "[NewsService] Alert listener %s marked async but returned non-awaitable; skipping.",
@@ -641,7 +650,7 @@ class NewsSubscriptionService:
                                         _l, _msg = listener, display_msg
                                         await asyncio.wait_for(
                                             ThreadPoolManager().run_async(TaskType.IO, _l, _msg),
-                                            timeout=3.0,
+                                            timeout=_HOT_CONCEPT_TAG_TIMEOUT_S,
                                         )
                                 except TimeoutError:
                                     logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)

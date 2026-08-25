@@ -466,6 +466,8 @@ class TestLLMConfigPanelViewModelUpdateProvider:
         assert len(received) >= 2
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "llm_switch_provider_hint"
+        # D8: VM 产出 provider_key 而非中文显示名（不感知 locale）
+        assert vm.state.status_message.params == {"provider_key": "llm_provider_deepseek"}
         assert vm.state.status_type == "info"
 
     @pytest.mark.asyncio

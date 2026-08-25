@@ -241,7 +241,6 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
         通过 ThreadPoolManager offload。
         """
         provider = LLM_PROVIDERS.get(provider_id, {})
-        provider_name = self._get_provider_name(provider, provider_id)
 
         # 加载该供应商已存储的专属凭证（不回退全局 Key）
         stored_cred = await ThreadPoolManager().run_async(
@@ -300,18 +299,10 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
         self._show_info(
             Message(
                 "llm_switch_provider_hint",
-                {"provider": provider_name},
+                # D8: VM 只产出 i18n key（provider_key），View 按当前 locale 渲染显示名（R.2.3 *_key 约定）
+                {"provider_key": f"llm_provider_{provider_id}"},
             )
         )
-
-    @staticmethod
-    def _get_provider_name(provider: dict, provider_id: str) -> str:
-        """获取供应商显示名称（locale 无关，View 层做 i18n 渲染）。
-
-        VM 不感知 locale，直接返回中文 name；View 的 provider_options
-        从 LLM_PROVIDERS + I18n 构建，此 name 仅用于 switch hint Message 参数。
-        """
-        return provider.get("name", provider_id)
 
     # --- get_current_config ---
 
