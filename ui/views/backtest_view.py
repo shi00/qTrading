@@ -62,8 +62,9 @@ def BacktestView(active: bool = True) -> ft.Container:
     ft.use_state(AppColors.get_observable_state)
 
     # --- UI local state ---
+    # D16: vm 返回 (key, name_key) 对; name_key 为 i18n key, 下拉渲染时逐次翻译
     strategies = ft.use_state(lambda: vm.get_available_strategies())[0]
-    selected_strategy, set_selected_strategy = ft.use_state(lambda: next(iter(strategies), None))
+    selected_strategy, set_selected_strategy = ft.use_state(lambda: next((k for k, _ in strategies), None))
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
     # Task 11.3: 存储上次回测提交 (strategy_key, backtest_config) 供 ErrorState on_retry 复用
     last_run, set_last_run = ft.use_state(lambda: None)  # type: ignore[assignment]  [reason: ft.use_state 无泛型支持, pyright 推断为 Never, 运行时正确]
@@ -77,7 +78,7 @@ def BacktestView(active: bool = True) -> ft.Container:
         if prefill is None:
             return
         strategy_key = prefill.get("strategy_key")
-        if strategy_key and strategy_key in strategies:
+        if strategy_key and any(k == strategy_key for k, _ in strategies):
             set_selected_strategy(strategy_key)
         _prefilled_params.current = prefill.get("params")
 
@@ -181,7 +182,8 @@ def BacktestView(active: bool = True) -> ft.Container:
         EIDS.BACKTEST.STRATEGY_DROPDOWN,
         ft.Dropdown(
             label=I18n.get("backtest_select_strategy"),
-            options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
+            # D16: 渲染时按当前 locale 翻译 name_key（组件已订阅 locale，切换自动重渲染）
+            options=[ft.dropdown.Option(key, I18n.get(name_key)) for key, name_key in strategies],
             value=selected_strategy,
             on_select=safe_on_select(_on_strategy_change),
             width=AppStyles.CONTROL_WIDTH_LG,
