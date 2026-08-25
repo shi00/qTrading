@@ -105,11 +105,15 @@ class BaseDao:
         extra_params=None,
         conn: typing.Any = None,
         **db_kwargs,
-    ):
+    ) -> list[typing.Any]:
         """IN 子句分块执行的公共逻辑（ARCH-M5 / CQ-M4 代码去重）。
 
-        处理：分块分割、占位符生成、SQL 模板调用、参数组装，对每个分块调用
+        处理：分块分割、占位符生成、SQL 模板调用，对每个分块调用
         ``db_fn(sql, params, **kwargs)`` 并收集返回值。
+
+        返回类型为 ``list[Any]``（不同调用方 db_fn 返回类型各异，如 int /
+        DataFrame）；若不标注，pyright 会把 ``gather(return_exceptions=True)``
+        的结果推断为 ``list[Unknown | BaseException]``，污染调用方的类型检查。
 
         当 ``conn`` 显式传入时（共享事务连接场景），强制串行 for 循环执行分块：
         asyncpg 禁止单连接并发执行语句，并发会触发
