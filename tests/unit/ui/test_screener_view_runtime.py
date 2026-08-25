@@ -1952,17 +1952,65 @@ class TestOnRowClickAndDetailClose:
 
 
 class TestUpdateParamAndSliderChange:
-    """_update_param / _on_slider_change: 更新参数 + 动态策略描述."""
+    """_update_param / _on_slider_change: 更新参数 + debounce 动态策略描述 (B14)."""
 
-    def test_update_param_via_slider(self, screener_view_with_params_env) -> None:
-        """_on_slider_change → _update_param + vm.update_strategy_desc."""
+    def test_update_param_via_slider(self, screener_view_with_params_env, monkeypatch) -> None:
+        """_on_slider_change → _update_param 立即生效，update_strategy_desc 经 debounce 调度.
+
+        B14: 同步渲染环境无运行事件循环，patch asyncio.create_task 验证 debounce 调度；
+        update_strategy_desc 不再同步立即调用。
+        """
         env = screener_view_with_params_env
         fake_vm = env["fake_vm"]
-        sliders = _get_sliders(env)
+        from ui.views import screener_view as mod
 
-        if sliders:
-            _invoke(sliders[0].on_change, _make_event(60))
-            assert any("update_strategy_desc" in c for c in fake_vm.method_calls)
+        created: list = []
+        mock_task = MagicMock()
+
+        def _fake_create_task(coro):
+            created.append(coro)
+            coro.close()  # 避免 "coroutine was never awaited" 警告
+            return mock_task
+
+        monkeypatch.setattr(mod.asyncio, "create_task", _fake_create_task)
+
+        slider_inputs = _get_slider_inputs(env)
+        assert slider_inputs, "应存在 SliderInput"
+        sliders = [c for c in _walk_all_controls(slider_inputs[0]) if isinstance(c, ft.Slider)]
+        assert sliders, "SliderInput 内部应有 ft.Slider"
+        _invoke(sliders[0].on_change, _make_event(60))
+        assert len(created) == 1, "应调度一个 debounce task"
+        assert not any("update_strategy_desc" in c for c in fake_vm.method_calls), (
+            "debounce 期间不应立即调用 update_strategy_desc"
+        )
+
+    def test_slider_debounce_cancels_previous_task(self, screener_view_with_params_env, monkeypatch) -> None:
+        """连续拖动 → 前一个 debounce task 被 cancel，仅保留最新调度 (B14)."""
+        env = screener_view_with_params_env
+        from ui.views import screener_view as mod
+
+        tasks: list = []
+
+        def _fake_create_task(coro):
+            t = MagicMock()
+            tasks.append(t)
+            coro.close()  # 避免 "coroutine was never awaited" 警告
+            return t
+
+        monkeypatch.setattr(mod.asyncio, "create_task", _fake_create_task)
+
+        slider_inputs = _get_slider_inputs(env)
+        assert slider_inputs, "应存在 SliderInput"
+        sliders = [c for c in _walk_all_controls(slider_inputs[0]) if isinstance(c, ft.Slider)]
+        assert sliders, "SliderInput 内部应有 ft.Slider"
+        _invoke(sliders[0].on_change, _make_event(60))
+        _invoke(sliders[0].on_change, _make_event(70))
+        _invoke(sliders[0].on_change, _make_event(80))
+
+        assert len(tasks) == 3, "每次 on_change 调度一个新 task"
+        tasks[0].cancel.assert_called_once_with()
+        tasks[1].cancel.assert_called_once_with()
+        tasks[2].cancel.assert_not_called(), "最新 task 不应被 cancel"
 
 
 # ============================================================================
