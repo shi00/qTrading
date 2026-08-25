@@ -212,6 +212,10 @@ class BaseDao:
         for r in results:
             if isinstance(r, asyncio.CancelledError):
                 raise r
+            # R5 红线：引擎释放异常必须原样传播，不包装为 DatabaseQueryError，
+            # 否则调用方"EngineDisposedError → 降级/重连"路径被类型检查绕过。
+            if isinstance(r, EngineDisposedError):
+                raise r
             if isinstance(r, BaseException):
                 raise DatabaseQueryError(
                     f"[{BaseDao.__name__}] Chunked read failed; partial results discarded "

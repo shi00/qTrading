@@ -2589,6 +2589,21 @@ class TestChunkedReadFailFast:
         with pytest.raises(asyncio.CancelledError):
             await task
 
+    @pytest.mark.asyncio
+    async def test_chunk_engine_disposed_propagates_original(self):
+        """R5：并发路径块抛 EngineDisposedError 必须原样传播，不包装为 DatabaseQueryError。"""
+
+        async def disposed(sql, params, **kwargs):
+            raise EngineDisposedError("engine disposed")
+
+        with pytest.raises(EngineDisposedError, match="engine disposed"):
+            await BaseDao._chunked_execute(
+                disposed,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                list(range(700)),
+                chunk_size=500,
+            )
+
 
 class TestChunkedExecuteParallel:
     """Task 5.1 (PERF-M1 / DATA-D5): Verify parallel chunked execution produces
