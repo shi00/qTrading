@@ -6,6 +6,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
+import sqlalchemy as sa
 
 from data.persistence.daos.stock_dao import StockDao
 
@@ -414,3 +415,48 @@ class TestUpsertAiConcepts:
         entries = [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
         await dao.upsert_ai_concepts(entries)
         dao._save_upsert.assert_called_once()
+
+
+class TestSearchStocks:
+    """stock_dao.search_stocks 单元测试（issue #433 添加关注搜索框）."""
+
+    @pytest.mark.asyncio
+    async def test_empty_keyword_returns_empty_df(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock()
+        result = await dao.search_stocks("")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+        dao._read_db_select.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_keyword_returns_empty_df(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock()
+        result = await dao.search_stocks("   ")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+        dao._read_db_select.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keyword_queries_db(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]}))
+        result = await dao.search_stocks("平安")
+        assert len(result) == 1
+        assert result.iloc[0]["ts_code"] == "000001.SZ"
+        # stmt 参数化查询 (R4): 仅传 SQLAlchemy 语句, 无字符串拼接
+        dao._read_db_select.assert_awaited_once()
+        stmt = dao._read_db_select.call_args.args[0]
+        assert isinstance(stmt, sa.Select)
+
+    @pytest.mark.asyncio
+    async def test_keyword_stripped(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.search_stocks("  平安  ")
+        stmt = dao._read_db_select.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        # 关键词去除首尾空白后进入参数化查询
+        assert "%平安%" in compiled
+        assert "%  平安  %" not in compiled

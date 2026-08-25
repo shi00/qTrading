@@ -38,6 +38,14 @@ class WatchlistRow:
 
 
 @dataclass(frozen=True)
+class StockSearchRow:
+    """「添加关注」搜索结果行数据 (L771 合规: frozen dataclass)."""
+
+    ts_code: str = ""
+    name: str = ""
+
+
+@dataclass(frozen=True)
 class WatchlistState:
     """WatchlistViewModel 的不可变状态快照 (L771 合规, 无 dual-track)."""
 
@@ -45,6 +53,10 @@ class WatchlistState:
     is_loading: bool = False
     load_error: Message | None = None
     load_error_detail: str | None = None
+    search_results: tuple[StockSearchRow, ...] = ()
+    is_searching: bool = False
+    search_keyword: str = ""
+    search_error: Message | None = None
 
 
 class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
@@ -114,9 +126,39 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             logger.warning("[WatchlistVM] is_in_watchlist error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             return False
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def search_stocks(self, keyword: str) -> None:
+        """按代码/名称搜索上市股票，结果写入 state.search_results（添加关注对话框）。
+
+        keyword 为空/全空白时清空搜索结果，不发起查询。
+        """
+        keyword = (keyword or "").strip()
+        if not keyword:
+            await self.clear_search()
+            return
+        self._set_state(is_searching=True, search_error=None)
+        try:
+            df = await self.cache.search_stocks(keyword)
+            rows = _df_to_stock_search_rows(df)
+            self._set_state(search_results=rows, search_keyword=keyword, is_searching=False)
+        except asyncio.CancelledError:
+            self._set_state(is_searching=False)
+            raise
+        except Exception as e:
+            _handle_error(e, "search_stocks", self, search=True)
+
+    async def clear_search(self) -> None:
+        """清空搜索状态（添加关注对话框关闭时调用）。"""
+        self._set_state(
+            search_results=(),
+            search_keyword="",
+            is_searching=False,
+            search_error=None,
+        )
+
 
 # ============================================================
-# 纯转换函数 (DataFrame → tuple[WatchlistRow, ...])
+# 纯转换函数 (DataFrame → tuple[WatchlistRow, ...] / tuple[StockSearchRow, ...])
 # 模块级, 无副作用, 可独立测试
 # ============================================================
 
@@ -140,8 +182,29 @@ def _df_to_watchlist_rows(df: pd.DataFrame | None) -> tuple[WatchlistRow, ...]:
     )
 
 
-def _handle_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
-    """统一错误处理: classify_error + Message + 日志 (对齐 DataExplorerViewModel)."""
+def _df_to_stock_search_rows(df: pd.DataFrame | None) -> tuple[StockSearchRow, ...]:
+    """DataFrame → tuple[StockSearchRow, ...] (L771 合规).
+
+    fillna("") 统一处理 None/NaN → "" (pandas to_dict 将 None 转为 NaN).
+    """
+    if df is None or df.empty:
+        return ()
+    df = df.fillna("")
+    return tuple(
+        StockSearchRow(
+            ts_code=str(row.get("ts_code", "") or ""),
+            name=str(row.get("name", "") or ""),
+        )
+        for row in df.to_dict("records")
+    )
+
+
+def _handle_error(e: Exception, op: str, vm: WatchlistViewModel, *, search: bool = False) -> None:
+    """统一错误处理: classify_error + Message + 日志 (对齐 DataExplorerViewModel).
+
+    search=True 时错误写入 ``search_error``（添加关注对话框独立展示，不影响列表加载）；
+    否则写入 ``load_error`` + ``load_error_detail``。
+    """
     error_info = classify_error(e, context="db")
     severity = classify_severity(e, context="db")
     sanitized = DataSanitizer.sanitize_error(e)
@@ -157,11 +220,11 @@ def _handle_error(e: Exception, op: str, vm: WatchlistViewModel) -> None:
         )
     else:
         logger.error("[WatchlistVM] Operational error in %s: %s", op, sanitized, exc_info=True)
-    vm._set_state(
-        is_loading=False,
-        load_error=Message(
-            error_info.get("message_key", "common_err_unknown"),
-            error_info.get("format_args") or {},
-        ),
-        load_error_detail=sanitized,
+    message = Message(
+        error_info.get("message_key", "common_err_unknown"),
+        error_info.get("format_args") or {},
     )
+    if search:
+        vm._set_state(is_searching=False, search_error=message)
+    else:
+        vm._set_state(is_loading=False, load_error=message, load_error_detail=sanitized)

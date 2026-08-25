@@ -4,6 +4,7 @@ import logging
 import typing
 
 import pandas as pd
+import sqlalchemy as sa
 
 from data.persistence.models import (
     StockBasic,
@@ -46,6 +47,31 @@ class StockDao(BaseDao):
         if df is not None and not df.empty:
             return df["cnt"].iloc[0] or 0
         return 0
+
+    async def search_stocks(self, keyword: str, limit: int = 10) -> pd.DataFrame:
+        """按代码/名称/拼音符号模糊搜索上市股票（stock_basic，list_status='L'）.
+
+        供关注列表「添加关注」搜索框使用；keyword 为空或全空白返回空 DataFrame。
+        SQLAlchemy ilike 参数化查询（R4：参数经绑定，无字符串拼接注入风险）。
+        """
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return pd.DataFrame()
+        pattern = f"%{keyword}%"
+        stmt = (
+            sa.select(StockBasic.ts_code, StockBasic.name, StockBasic.symbol)
+            .where(
+                sa.or_(
+                    StockBasic.ts_code.ilike(pattern),
+                    StockBasic.name.ilike(pattern),
+                    StockBasic.symbol.ilike(pattern),
+                )
+            )
+            .where(StockBasic.list_status == "L")
+            .order_by(StockBasic.ts_code)
+            .limit(limit)
+        )
+        return await self._read_db_select(stmt)
 
     # --- Trade Calendar ---
     async def save_trade_cal(self, df):

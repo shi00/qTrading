@@ -484,6 +484,10 @@ class CacheManager(CacheManagerDelegationMixin):
         concepts_map = await self.stock_dao.get_concepts([ts_code])
         return concepts_map.get(ts_code, [])
 
+    async def search_stocks(self, keyword: str, limit: int = 10) -> pd.DataFrame:
+        """按代码/名称模糊搜索上市股票（供关注列表「添加关注」搜索框）。"""
+        return await self.stock_dao.search_stocks(keyword, limit=limit)
+
     # --- Daily Quotes ---
 
     # --- Daily Indicators ---

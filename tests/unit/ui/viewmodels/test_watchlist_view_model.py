@@ -20,7 +20,13 @@ import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel, _df_to_watchlist_rows
+from ui.viewmodels.watchlist_view_model import (
+    StockSearchRow,
+    WatchlistRow,
+    WatchlistViewModel,
+    _df_to_stock_search_rows,
+    _df_to_watchlist_rows,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +42,7 @@ def mock_cache():
     cache.add_to_watchlist = AsyncMock(return_value=1)
     cache.remove_from_watchlist = AsyncMock(return_value=1)
     cache.is_in_watchlist = AsyncMock(return_value=False)
+    cache.search_stocks = AsyncMock(return_value=pd.DataFrame())
     return cache
 
 
@@ -254,3 +261,115 @@ class TestDfToWatchlistRows:
         assert rows[0].stock_name == ""
         assert rows[0].added_at == ""
         assert rows[0].note == ""
+
+
+# --- search_stocks (issue #433 添加关注搜索) ---
+
+
+def _make_stock_search_df() -> pd.DataFrame:
+    """构造含 2 行 stock_basic 搜索结果 DataFrame。"""
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "600000.SH"],
+            "name": ["平安银行", "浦发银行"],
+        }
+    )
+
+
+class TestSearchStocks:
+    @pytest.mark.asyncio
+    async def test_search_stocks_calls_cache_and_updates_state(self, vm, mock_cache):
+        mock_cache.search_stocks.return_value = _make_stock_search_df()
+        await vm.search_stocks("平安")
+        mock_cache.search_stocks.assert_awaited_once_with("平安")
+        assert len(vm.state.search_results) == 2
+        assert vm.state.search_results[0].ts_code == "000001.SZ"
+        assert vm.state.search_results[0].name == "平安银行"
+        assert vm.state.search_keyword == "平安"
+        assert vm.state.is_searching is False
+        assert vm.state.search_error is None
+
+    @pytest.mark.asyncio
+    async def test_search_stocks_strips_keyword(self, vm, mock_cache):
+        await vm.search_stocks("  平安  ")
+        mock_cache.search_stocks.assert_awaited_once_with("平安")
+
+    @pytest.mark.asyncio
+    async def test_search_stocks_empty_keyword_skips_query(self, vm, mock_cache):
+        """空/全空白关键词不发起查询，仅清空结果。"""
+        await vm.search_stocks("   ")
+        mock_cache.search_stocks.assert_not_awaited()
+        assert vm.state.search_results == ()
+        assert vm.state.search_keyword == ""
+        assert vm.state.is_searching is False
+
+    @pytest.mark.asyncio
+    async def test_search_stocks_propagates_cancelled_error(self, vm, mock_cache):
+        import asyncio
+
+        mock_cache.search_stocks.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
+            await vm.search_stocks("平安")
+        assert vm.state.is_searching is False
+
+    @pytest.mark.asyncio
+    async def test_search_stocks_sets_search_error_on_exception(self, vm, mock_cache):
+        """搜索失败写入 search_error，不影响列表 load_error（独立错误通道）。"""
+        mock_cache.search_stocks.side_effect = RuntimeError("db error")
+        await vm.search_stocks("平安")
+        assert vm.state.search_error is not None
+        assert isinstance(vm.state.search_error, Message)
+        assert vm.state.is_searching is False
+        assert vm.state.load_error is None
+
+
+# --- clear_search ---
+
+
+class TestClearSearch:
+    @pytest.mark.asyncio
+    async def test_clear_search_resets_search_state(self, vm, mock_cache):
+        mock_cache.search_stocks.return_value = _make_stock_search_df()
+        await vm.search_stocks("平安")
+        assert vm.state.search_results  # 先确认有搜索结果
+        await vm.clear_search()
+        assert vm.state.search_results == ()
+        assert vm.state.search_keyword == ""
+        assert vm.state.is_searching is False
+        assert vm.state.search_error is None
+
+
+# --- StockSearchRow ---
+
+
+class TestStockSearchRow:
+    def test_row_is_frozen(self):
+        row = StockSearchRow(ts_code="000001.SZ", name="平安银行")
+        with pytest.raises(FrozenInstanceError):  # noqa: weak-assertion frozen 契约：赋值即抛错，仅验证不可变性
+            row.ts_code = "999999.SZ"  # type: ignore[misc]
+
+
+# --- _df_to_stock_search_rows (纯函数) ---
+
+
+class TestDfToStockSearchRows:
+    """_df_to_stock_search_rows 纯函数测试（含 None / empty / 缺列 边界）。"""
+
+    def test_none_df_returns_empty_tuple(self):
+        assert _df_to_stock_search_rows(None) == ()
+
+    def test_empty_df_returns_empty_tuple(self):
+        assert _df_to_stock_search_rows(pd.DataFrame()) == ()
+
+    def test_normal_df_returns_rows(self):
+        rows = _df_to_stock_search_rows(_make_stock_search_df())
+        assert len(rows) == 2
+        assert rows[0].ts_code == "000001.SZ"
+        assert rows[0].name == "平安银行"
+
+    def test_missing_columns_returns_defaults(self):
+        df = pd.DataFrame([{"ts_code": "000001.SZ"}])  # 缺 name
+        rows = _df_to_stock_search_rows(df)
+        assert len(rows) == 1
+        assert rows[0].ts_code == "000001.SZ"
+        assert rows[0].name == ""
