@@ -19,21 +19,146 @@ logger = logging.getLogger(__name__)
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
 
+# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__ 为唯一可变点，
+# 由 _build_screening_sql/_build_screening_sql_range 按 require_close 布尔
+# 替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
+_SCREENING_SQL_TEMPLATE = """
+              SELECT b.ts_code,
+                     b.name,
+                     COALESCE(m.sw_l2_name, b.industry) AS industry,
+                     b.list_date,
+                     b.list_status,
+                     q.trade_date,
+                     q.close,
+                     q.pct_chg,
+                     q.vol,
+                     q.amount,
+                     i.pe_ttm,
+                     i.pb,
+                     i.ps_ttm,
+                     i.dv_ttm,
+                     i.total_mv,
+                     i.circ_mv,
+                     i.turnover_rate,
+                     f.roe,
+                     f.grossprofit_margin,
+                     f.debt_to_assets,
+                     f.or_yoy,
+                     f.netprofit_yoy,
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
+               FROM stock_basic b
+                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
+                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
+                        LEFT JOIN (SELECT f_inner.ts_code,
+                                          f_inner.roe,
+                                          f_inner.grossprofit_margin,
+                                          f_inner.debt_to_assets,
+                                          f_inner.or_yoy,
+                                          f_inner.netprofit_yoy
+                                   FROM (SELECT ts_code,
+                                                roe,
+                                                grossprofit_margin,
+                                                debt_to_assets,
+                                                or_yoy,
+                                                netprofit_yoy,
+                                                ROW_NUMBER() OVER (
+                                                    PARTITION BY ts_code
+                                                    ORDER BY ann_date DESC, end_date DESC
+                                                ) AS rn
+                                         FROM financial_reports
+                                         WHERE ann_date <= $3) f_inner
+                                   WHERE f_inner.rn = 1) f
+                                  ON b.ts_code = f.ts_code
+                        LEFT JOIN LATERAL (
+                            SELECT sw_l2_name
+                            FROM sw_industry_member
+                            WHERE ts_code = b.ts_code
+                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            LIMIT 1
+                        ) m ON TRUE
+                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
+               WHERE __CLOSE_COND__b.list_status = 'L'
+                 AND b.list_date <= $4
+                 AND (b.delist_date IS NULL OR b.delist_date > $5)
+              """
+
+
+_SCREENING_SQL_RANGE_TEMPLATE = """
+              SELECT b.ts_code,
+                     b.name,
+                     COALESCE(m.sw_l2_name, b.industry) AS industry,
+                     b.list_date,
+                     b.list_status,
+                     cal.cal_date AS trade_date,
+                     q.close,
+                     q.pct_chg,
+                     q.vol,
+                     q.amount,
+                     i.pe_ttm,
+                     i.pb,
+                     i.ps_ttm,
+                     i.dv_ttm,
+                     i.total_mv,
+                     i.circ_mv,
+                     i.turnover_rate,
+                     f.roe,
+                     f.grossprofit_margin,
+                     f.debt_to_assets,
+                     f.or_yoy,
+                     f.netprofit_yoy,
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
+               FROM (
+                   SELECT cal_date
+                   FROM trade_cal
+                   WHERE is_open = 1
+                     AND cal_date >= $1
+                     AND cal_date <= $2
+               ) cal
+                        CROSS JOIN stock_basic b
+                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = cal.cal_date
+                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = cal.cal_date
+                        LEFT JOIN LATERAL (
+                            SELECT f_inner.roe,
+                                   f_inner.grossprofit_margin,
+                                   f_inner.debt_to_assets,
+                                   f_inner.or_yoy,
+                                   f_inner.netprofit_yoy
+                            FROM financial_reports f_inner
+                            WHERE f_inner.ts_code = b.ts_code
+                              AND f_inner.ann_date <= cal.cal_date
+                            ORDER BY f_inner.ann_date DESC, f_inner.end_date DESC
+                            LIMIT 1
+                        ) f ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT sw_l2_name
+                            FROM sw_industry_member
+                            WHERE ts_code = b.ts_code
+                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            LIMIT 1
+                        ) m ON TRUE
+                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
+               WHERE __CLOSE_COND__b.list_status = 'L'
+                 AND b.list_date <= cal.cal_date
+                 AND (b.delist_date IS NULL OR b.delist_date > cal.cal_date)
+              """
+
+
 class ScreenerDao(BaseDao):
     @functools.cached_property
     def SH_BASE_COLS(self):
-        # SH_BASE_COLS 用于复杂 JOIN 查询的列名常量（review03-C7 后仅 _build_screening_sql* 使用）。
+        # SH_BASE_COLS/SH_FULL_COLS 为历史遗留的列名常量，保留供外部引用与
+        # integration 测试断言（review03-C7：消除 f-string 拼 SQL 模式）。
         # 简单查询已迁移到 SQLAlchemy Core（_read_db_select），见 _base_cols()。
         cols = [
             c.name
             for c in ScreeningHistory.__table__.columns
             if c.name not in {"updated_at", "created_at", "params_snapshot"}
         ]
-        return ", ".join(f"sh.{c}" for c in cols)
+        return ", ".join("sh." + c for c in cols)
 
     @functools.cached_property
     def SH_FULL_COLS(self):
-        return f"{self.SH_BASE_COLS}, st.thinking, sh.params_snapshot"
+        return self.SH_BASE_COLS + ", st.thinking, sh.params_snapshot"
 
     @staticmethod
     def _base_cols() -> list:
@@ -138,66 +263,11 @@ class ScreenerDao(BaseDao):
 
     # --- Screening Data Fetch for Logic ---
     def _build_screening_sql(self, *, require_close: bool = True) -> str:
-        close_condition = "q.close IS NOT NULL\n                 AND " if require_close else ""
-        return f"""
-              SELECT b.ts_code,
-                     b.name,
-                     COALESCE(m.sw_l2_name, b.industry) AS industry,
-                     b.list_date,
-                     b.list_status,
-                     q.trade_date,
-                     q.close,
-                     q.pct_chg,
-                     q.vol,
-                     q.amount,
-                     i.pe_ttm,
-                     i.pb,
-                     i.ps_ttm,
-                     i.dv_ttm,
-                     i.total_mv,
-                     i.circ_mv,
-                     i.turnover_rate,
-                     f.roe,
-                     f.grossprofit_margin,
-                     f.debt_to_assets,
-                     f.or_yoy,
-                     f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
-               FROM stock_basic b
-                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
-                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
-                        LEFT JOIN (SELECT f_inner.ts_code,
-                                          f_inner.roe,
-                                          f_inner.grossprofit_margin,
-                                          f_inner.debt_to_assets,
-                                          f_inner.or_yoy,
-                                          f_inner.netprofit_yoy
-                                   FROM (SELECT ts_code,
-                                                roe,
-                                                grossprofit_margin,
-                                                debt_to_assets,
-                                                or_yoy,
-                                                netprofit_yoy,
-                                                ROW_NUMBER() OVER (
-                                                    PARTITION BY ts_code
-                                                    ORDER BY ann_date DESC, end_date DESC
-                                                ) AS rn
-                                         FROM financial_reports
-                                         WHERE ann_date <= $3) f_inner
-                                   WHERE f_inner.rn = 1) f
-                                  ON b.ts_code = f.ts_code
-                        LEFT JOIN LATERAL (
-                            SELECT sw_l2_name
-                            FROM sw_industry_member
-                            WHERE ts_code = b.ts_code
-                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
-                            LIMIT 1
-                        ) m ON TRUE
-                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
-               WHERE {close_condition}b.list_status = 'L'
-                 AND b.list_date <= $4
-                 AND (b.delist_date IS NULL OR b.delist_date > $5)
-              """
+        # review03-C7: SQL 模板为模块级静态常量，__CLOSE_COND__ 仅由 require_close
+        # 布尔决定两种受控片段（空串 / "q.close IS NOT NULL...\nAND "），无用户输入，
+        # 避免 f-string 拼 SQL 模式（列名亦来自 ORM 元数据，非拼接点）。
+        close_clause = "q.close IS NOT NULL\n                 AND " if require_close else ""
+        return _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
 
     async def get_screening_data(self, trade_date: str | None = None):
         if not trade_date:
@@ -218,65 +288,10 @@ class ScreenerDao(BaseDao):
         return await self._read_db(sql, (trade_date,) * 6)
 
     def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
-        close_condition = "q.close IS NOT NULL AND " if require_close else ""
-        return f"""
-              SELECT b.ts_code,
-                     b.name,
-                     COALESCE(m.sw_l2_name, b.industry) AS industry,
-                     b.list_date,
-                     b.list_status,
-                     cal.cal_date AS trade_date,
-                     q.close,
-                     q.pct_chg,
-                     q.vol,
-                     q.amount,
-                     i.pe_ttm,
-                     i.pb,
-                     i.ps_ttm,
-                     i.dv_ttm,
-                     i.total_mv,
-                     i.circ_mv,
-                     i.turnover_rate,
-                     f.roe,
-                     f.grossprofit_margin,
-                     f.debt_to_assets,
-                     f.or_yoy,
-                     f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
-               FROM (
-                   SELECT cal_date
-                   FROM trade_cal
-                   WHERE is_open = 1
-                     AND cal_date >= $1
-                     AND cal_date <= $2
-               ) cal
-                        CROSS JOIN stock_basic b
-                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = cal.cal_date
-                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = cal.cal_date
-                        LEFT JOIN LATERAL (
-                            SELECT f_inner.roe,
-                                   f_inner.grossprofit_margin,
-                                   f_inner.debt_to_assets,
-                                   f_inner.or_yoy,
-                                   f_inner.netprofit_yoy
-                            FROM financial_reports f_inner
-                            WHERE f_inner.ts_code = b.ts_code
-                              AND f_inner.ann_date <= cal.cal_date
-                            ORDER BY f_inner.ann_date DESC, f_inner.end_date DESC
-                            LIMIT 1
-                        ) f ON TRUE
-                        LEFT JOIN LATERAL (
-                            SELECT sw_l2_name
-                            FROM sw_industry_member
-                            WHERE ts_code = b.ts_code
-                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
-                            LIMIT 1
-                        ) m ON TRUE
-                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
-               WHERE {close_condition}b.list_status = 'L'
-                 AND b.list_date <= cal.cal_date
-                 AND (b.delist_date IS NULL OR b.delist_date > cal.cal_date)
-              """
+        # review03-C7: 同 _build_screening_sql，__CLOSE_COND__ 仅由 require_close
+        # 布尔决定两种受控片段，避免 f-string 拼 SQL 模式。
+        close_clause = "q.close IS NOT NULL AND " if require_close else ""
+        return _SCREENING_SQL_RANGE_TEMPLATE.replace("__CLOSE_COND__", close_clause)
 
     async def get_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=True)
