@@ -35,6 +35,8 @@ class DatabaseQueryError(RuntimeError):
 
 _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
+# review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
+_LONG_TX_ROW_THRESHOLD = 20_000
 _SLOW_WRITE_THRESHOLD_MS = 2000
 _SLOW_READ_THRESHOLD_MS = 500
 _SLOW_UPSERT_THRESHOLD_MS = 2000
@@ -696,11 +698,21 @@ class BaseDao:
                     await conn.execute(stmt, chunk)
                     total_written += len(chunk)
             else:
-                async with self.engine.begin() as tx_conn:
+                if len(records) > _LONG_TX_ROW_THRESHOLD:
+                    # review03-C2: 超大批量时每块独立事务（依赖 UPSERT 幂等性保证重跑安全）。
+                    # 避免数十秒级长事务阻塞 vacuum/DDL、增大取消时回滚成本；
+                    # 中段失败时前 N 块已提交，可在日志看到已提交行数后重跑收敛。
                     for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
                         chunk = records[i : i + _UPSERT_CHUNK_SIZE]
-                        await tx_conn.execute(stmt, chunk)
+                        async with self.engine.begin() as tx_conn:
+                            await tx_conn.execute(stmt, chunk)
                         total_written += len(chunk)
+                else:
+                    async with self.engine.begin() as tx_conn:
+                        for i in range(0, len(records), _UPSERT_CHUNK_SIZE):
+                            chunk = records[i : i + _UPSERT_CHUNK_SIZE]
+                            await tx_conn.execute(stmt, chunk)
+                            total_written += len(chunk)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_UPSERT_THRESHOLD_MS:

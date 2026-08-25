@@ -23,13 +23,19 @@ def _reset_all_singletons():
     root conftest.py (which handle non-singleton state).
     """
     from app.bootstrap import reset_services_initialized
+    from utils.loop_local import clear_all_loop_locals
     from utils.proxy_manager import ProxyManager
     from utils.singleton_registry import reset_all_singletons
 
+    # B7: 彻底隔离 loop-local 外层键空间（_stores + _fallback_store）。
+    # 根 conftest 只清 _fallback_store，此处补清 _stores，避免 get_loop_local 的
+    # 外层 dict[str, WeakKeyDictionary] key 跨测试累积（key 数量 = 调用点数量）。
+    clear_all_loop_locals()
     reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()
     yield
+    clear_all_loop_locals()
     reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()

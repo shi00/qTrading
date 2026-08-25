@@ -60,10 +60,11 @@ class MarketDao(BaseDao):
         params = []
         idx = 1
         if min_publish_time:
-            sql += f" AND publish_time >= ${idx}"
+            # review03-C7: 占位符编号为代码自增整数（非用户输入），普通拼接避免 f-string 拼 SQL
+            sql += " AND publish_time >= $" + str(idx)
             params.append(min_publish_time)
             idx += 1
-        sql += f" ORDER BY publish_time DESC LIMIT ${idx} OFFSET ${idx + 1}"
+        sql += " ORDER BY publish_time DESC LIMIT $" + str(idx) + " OFFSET $" + str(idx + 1)
         params.extend([limit, offset])
         return await self._read_db(sql, params)
 
