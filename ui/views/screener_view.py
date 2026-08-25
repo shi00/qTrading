@@ -462,6 +462,18 @@ def ScreenerView(
         if page is not None:
             page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
 
+    def _on_go_sync_click(e: ft.ControlEvent) -> None:
+        """UX-02 (P0-01): 质量门失败恢复动作 — 深链到设置页数据源子页.
+
+        当前唯一 action key "screener_action_go_sync" 的目标即数据源同步区;
+        未来新增其他 action key 时需按 key 分派目标 (参照 data_source_tab.py
+        snack.action_key 分支范式), 本按钮 visible 仅绑定该 key.
+        """
+        UILogger.log_action("ScreenerView", "Click", "btn_go_sync")
+        page = _get_page()
+        if page is not None:
+            page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
+
     async def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
             await vm.sort_data(col_id, new_asc)
@@ -1300,10 +1312,22 @@ def ScreenerView(
 
     left_controls = ft.Column([title_row, realtime_controls], spacing=10)
 
+    # UX-02 (P0-01): 质量门失败态恢复动作 — status_action_key 即 i18n key (tier_hint 同范式),
+    # 非空时渲染「前往同步」按钮, 深链到设置页数据源子页
+    go_sync_btn = ft.TextButton(
+        content=I18n.get(state.status_action_key) if state.status_action_key else "",
+        icon=ft.Icons.SYNC,
+        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+        height=30,
+        visible=state.status_action_key is not None,
+        on_click=safe_on_click(_on_go_sync_click),
+    )
+
     status_row = ft.Row(
         [
             ft.ProgressRing(visible=progress_visible, width=20, height=20, color=AppColors.ACCENT),
             ft.Text(status_text_value, color=status_text_color),
+            go_sync_btn,
         ],
         alignment=ft.MainAxisAlignment.END,
         spacing=10,

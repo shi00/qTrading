@@ -3,10 +3,12 @@
 覆盖:
 1. R2/R9/R16 红线守卫: CancelledError raise / DataSanitizer.sanitize_error / page.run_task
 2. 组件挂载/卸载: VM subscribe + load_strategies + subscribe_task_manager + FilePicker 注册
-3. 14 个 handler 测试: 成功/异常/边界/CancelledError 路径
+3. 15 个 handler 测试: 成功/异常/边界/CancelledError 路径
+   (UX-02 新增 _on_go_sync_click: 质量门失败恢复动作深链 "settings:data")
 4. 派生渲染: _build_param_control (四类型) / _build_params_panel / _build_log_card / _build_history_tree
 5. 深度链接: _execute_pending_strategy (None 早返回 / 策略不存在 / 自动执行)
 6. use_effect cleanup: FilePicker page.services append/remove + PubSub subscribe/unsubscribe
+7. UX-02 质量门恢复动作: status_action_key 显隐/label/深链回调/page=None 容错/active 往返状态保持
 
 测试范式参考 test_system_tab.py / test_backtest_view.py (FakeVM + component_renderer +
 _invoke helper + _rerender helper + page.run_task 提取 + asyncio.run 异步 handler).
@@ -1026,6 +1028,115 @@ class TestOnBacktestClick:
 
         # 清理
         consume_pending_prefill()
+
+
+# ============================================================================
+# Handler 测试: _on_go_sync_click (UX-02: P0-01 质量门恢复动作)
+# ============================================================================
+
+
+class TestGoSyncAction:
+    """UX-02 P0-01: status_action_key 非空 → 状态栏渲染「前往同步」按钮.
+
+    覆盖:
+    - 按钮显隐: status_action_key=None → visible=False (声明式常驻构造); 非空 → visible=True
+    - label: I18n.get(status_action_key) (key 即 i18n key, tier_hint 同范式)
+    - 点击回调: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data") 深链
+    - page=None 容错: 不抛异常, 无 pubsub 调用
+    - 状态保持: active prop 往返 (切 tab → 返回) 后 VM state 不丢失
+    """
+
+    def _get_go_sync_button(self, env: dict) -> ft.TextButton:
+        """从渲染树中找到 go_sync TextButton (icon=SYNC, screener_view 内唯一)."""
+        buttons = _get_buttons(env)
+        go_sync_btns = [b for b in buttons if isinstance(b, ft.TextButton) and b.icon == ft.Icons.SYNC]
+        assert len(go_sync_btns) == 1, f"go_sync button (icon=SYNC) 应恰好 1 个, 实际 {len(go_sync_btns)}"
+        return go_sync_btns[0]
+
+    def test_button_hidden_by_default(self, screener_view_env) -> None:
+        """status_action_key=None (默认) → 按钮在树中且 visible=False (声明式常驻构造)."""
+        env = screener_view_env
+        btn = self._get_go_sync_button(env)
+        assert btn.visible is False
+
+    def test_button_visible_with_action_key(self, screener_view_env) -> None:
+        """status_action_key 非空 (质量门失败态) → 按钮可见且 label 为 i18n 翻译."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            status_action_key="screener_action_go_sync",
+            status_message=Message("screener_blocked", {"reason": "quality gate"}),
+            status_color="warning",
+        )
+        _rerender(env)
+        btn = self._get_go_sync_button(env)
+        assert btn.visible is True
+        assert btn.content == "i18n[screener_action_go_sync]"
+
+    def test_click_navigates_to_data_settings(self, screener_view_env) -> None:
+        """点击按钮 → 深链导航: pubsub 广播 (TOPIC_NAVIGATE, "settings:data")."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._set_state(status_action_key="screener_action_go_sync")
+        _rerender(env)
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        btn = self._get_go_sync_button(env)
+        _invoke(btn.on_click, _make_event())
+
+        from ui.views.screener_view import TOPIC_NAVIGATE
+
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings:data")
+
+    def test_click_page_none_no_pubsub_call(self, screener_view_env) -> None:
+        """page=None → 点击不抛异常, 无 pubsub 调用 (早返回容错)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+        fake_vm._set_state(status_action_key="screener_action_go_sync")
+        _rerender(env)
+        page.pubsub.send_all_on_topic.reset_mock()
+
+        from flet.controls.context import _context_page
+
+        saved = _context_page.get()
+        _context_page.set(None)
+        try:
+            btn = self._get_go_sync_button(env)
+            _invoke(btn.on_click, _make_event())
+        finally:
+            _context_page.set(saved)
+
+        assert not page.pubsub.send_all_on_topic.called
+
+    def test_state_preserved_across_active_roundtrip(self, screener_view_env) -> None:
+        """active prop 往返 (切 tab → 返回) → VM state 保持 + TaskManager 重订阅.
+
+        模拟「前往同步」后返回选股页: app_layout 用 visible prop 切换 (非销毁),
+        active 翻转触发 use_effect(deps=[active]) 重跑 (退订/重订阅 TaskManager),
+        VM state (选中策略/质量门状态) 不丢失.
+        """
+        env = screener_view_env
+        component = env["component"]
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            selected_strategy="value",
+            status_action_key="screener_action_go_sync",
+        )
+        _rerender(env)
+
+        # active 往返: False (切走, 触发退订 cleanup) → True (返回, 重新订阅)
+        component.kwargs["active"] = False
+        _rerender(env)
+        component.kwargs["active"] = True
+        _rerender(env)
+
+        # VM state 保持 (上下文不丢失)
+        assert fake_vm.state.selected_strategy == "value"
+        assert fake_vm.state.status_action_key == "screener_action_go_sync"
+        # active 翻转触发 TaskManager 退订/重订阅 (use_effect deps=[active])
+        assert fake_vm.method_calls.count("subscribe_task_manager") >= 2
 
 
 # ============================================================================
