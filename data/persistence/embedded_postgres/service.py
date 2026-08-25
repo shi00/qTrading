@@ -70,12 +70,9 @@ class EmbeddedPostgresService:
     使用双检锁 + ``_initialized`` 守卫保证单例；``from_config(AppConfig)`` 从配置解析路径。
     测试用 ``__init__`` 注入 fake path；生产用 ``from_config``。
 
-    并发契约（P3-M4-EmbeddedPg-StartStop-Lock-Ordering 文档化）：
-    - ``_start_lock`` 与 ``cls._lock`` 锁顺序未互锁，``_start_sync`` 持 ``_start_lock`` 设置
-      ``self._process``/``self._connection_info``，``stop_sync`` 持 ``cls._lock`` 操作同字段，
-      并发交错可能返回已被 stop 的进程引用。
-    - 调用方必须保证 ``start`` 与 ``stop`` 不并发调用。当前应用层仅在启动期调用 ``start``、
-      关闭期调用 ``stop``，不构成并发场景。
+    并发契约（review03-C18 修订）：start 与 stop 的状态变迁统一由 ``cls._lock``（RLock）
+    串行化——``_start_sync`` 与 ``stop_sync`` 持同一把锁，start/stop 并发时互斥，
+    不会返回已被 stop 的进程引用。应用层仅在启动期调用 ``start``、关闭期调用 ``stop``。
     """
 
     _instance: EmbeddedPostgresService | None = None
@@ -126,8 +123,8 @@ class EmbeddedPostgresService:
             self._process: subprocess.Popen[str] | None = None
             self._connection_info: ConnectionInfo | None = None
             self._stderr_file: object | None = None
-            # H5: 串行化并发 start()，避免双 Popen（两个协程同时进入 _start_sync）
-            self._start_lock = threading.Lock()
+            # review03-C18: start 与 stop 的状态变迁统一由 cls._lock（RLock）串行化；
+            # 不再使用独立的 _start_lock（原"_start_lock 与 cls._lock 不互锁"的并发缺口）。
             self._svc_logger = _setup_service_logger(self._log_dir)
             self._initialized = True
 
@@ -215,24 +212,23 @@ class EmbeddedPostgresService:
     def _start_sync(self) -> ConnectionInfo:
         """同步启动 sidecar（供 asyncio.to_thread 包装）。
 
-        H5: 使用 _start_lock 串行化并发调用，避免双 Popen。快速路径无锁检查
-        已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
+        review03-C18: 持 ``cls._lock``（RLock）串行化并发调用，避免双 Popen。
+        快速路径无锁检查已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
 
-        并发契约：``_start_lock`` 不与 ``cls._lock`` 互锁，调用方需保证不与
-        ``stop_sync`` 并发调用（详见类 docstring）。
+        并发契约：与 ``stop_sync`` 共享 ``cls._lock``，start/stop 互斥（详见类 docstring）。
         """
         # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
         if self._connection_info is not None and self._process is not None and self._process.poll() is None:
             return self._connection_info
-        # H5: 串行化并发 start()，避免双 Popen
-        with self._start_lock:
+        # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
+        with self.__class__._lock:
             # 双检锁：获取锁后再次检查（另一线程可能已启动完成）
             if self._connection_info is not None and self._process is not None and self._process.poll() is None:
                 return self._connection_info
             return self._start_sync_impl()
 
     def _start_sync_impl(self) -> ConnectionInfo:
-        """实际启动逻辑（由 _start_sync 在 _start_lock 内调用）。"""
+        """实际启动逻辑（由 _start_sync 在 cls._lock 内调用）。"""
         # §17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏
         self._verify_sidecar_sha256()
 
