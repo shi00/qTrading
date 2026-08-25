@@ -230,6 +230,11 @@ class ThreadPoolManager:
         Propagates contextvars (e.g. correlation_id) to worker threads.
 
         Usage: await ThreadPoolManager().run_async(TaskType.IO, my_func, arg1, key=val)
+
+        取消语义：取消 ``run_async`` 的 await 只取消等待（``run_in_executor`` 返回的
+        Future 被取消），**不会终止 worker 线程中正在执行的同步函数**（concurrent.futures
+        固有语义——线程无法被外部中断）。需要真正可中断的长任务，必须自行接受
+        ``threading.Event`` 并在函数体内周期性检查。
         """
         import inspect
 
