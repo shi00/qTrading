@@ -219,14 +219,20 @@ def _get_sliders(env: dict) -> list[ft.Slider]:
 
 
 def _get_slider_inputs(env: dict) -> list[ft.Column]:
-    """返回渲染树中所有 SliderInput Column 实例 (UX 3.2)."""
+    """返回渲染树中所有 SliderInput 的 Column 渲染结果 (UX 3.2).
+
+    SliderInput 为 @ft.component 声明式组件：在父组件渲染树中以 Component
+    节点存在（props 非控件树），需 render_once 展开后取得 Column body。
+    """
+    from ui.components.slider_input import SliderInput
+
+    # Component.fn 存的是 @ft.component 装饰前的原始函数（= SliderInput.__component_impl__）
+    slider_impl = getattr(SliderInput, "__component_impl__", SliderInput)
+
     inputs: list[ft.Column] = []
     for ctrl in _walk_all_controls(env["result"]):
-        if isinstance(ctrl, ft.Column):
-            has_slider = any(isinstance(c, ft.Slider) for c in _walk_all_controls(ctrl))
-            has_textfield = any(isinstance(c, ft.TextField) for c in _walk_all_controls(ctrl))
-            if has_slider and has_textfield:
-                inputs.append(ctrl)
+        if isinstance(ctrl, Component) and ctrl.fn is slider_impl:
+            inputs.append(render_once(ctrl))
     return inputs
 
 
