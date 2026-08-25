@@ -13,6 +13,10 @@ from utils.db_utils import get_db_pool_config
 
 logger = logging.getLogger(__name__)
 
+# C6（review03）：会话级语句超时，防止用户手滑的重查询挂住连接（SELECT pg_sleep 等）。
+# 不扩展关键字黑名单——statement_timeout 不关心 SQL 内容，只关心执行时长（报告 03 §2.2 C6）。
+_STATEMENT_TIMEOUT = "10s"
+
 _OP_MAP = {
     "=": lambda c, v: c == v,
     ">": lambda c, v: c > v,
@@ -361,6 +365,8 @@ class DataExplorerQueryClient:
                 conn = conn.execution_options(isolation_level="REPEATABLE READ")
                 with conn.begin():
                     conn.execute(sa.text("SET TRANSACTION READ ONLY"))
+                    # C6: SET LOCAL 在事务内生效，超时后语句被服务端取消（resource 滥用防线）
+                    conn.execute(sa.text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
                     result = conn.execute(sa.text(sql_query))
 
                     # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
