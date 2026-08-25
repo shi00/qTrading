@@ -37,6 +37,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import (
+    SqlErrorInfo,
     SqlResultRow,
     TableRow,
     _sql_result_to_state_fields,
@@ -389,7 +390,8 @@ class _FakeDataExplorerState:
     sql_success: bool = False
     sql_result_columns: tuple[str, ...] = ()
     sql_result_rows: tuple[SqlResultRow, ...] = ()
-    sql_error: str | None = None
+    # D6: 镜像 DataExplorerState — sql_error 为 SqlErrorInfo(key, params, raw_detail)
+    sql_error: SqlErrorInfo | None = None
     # Phase 6.4 (FR-UX-006): 数据新鲜度字段 (对齐 DataExplorerState)
     data_latest_date: str = ""
     data_lag_days: int = 0
@@ -459,8 +461,12 @@ class _FakeDataExplorerViewModel:
     async def execute_sql(self, sql: str) -> dict:
         self.method_calls.append(("execute_sql", {"sql": sql}))
         result = self._sql_result or {"success": False, "data": None, "error": "no result"}
-        # 声明式: 从 result 更新 state (镜像真实 VM execute_sql 行为)
-        self._set_state(**_sql_result_to_state_fields(result))
+        # 声明式: 从 result 更新 state (镜像真实 VM execute_sql 行为, 含 D6 SqlErrorInfo 包装)
+        state_fields = _sql_result_to_state_fields(result)
+        raw_err = state_fields.get("sql_error")
+        if isinstance(raw_err, str):
+            state_fields["sql_error"] = SqlErrorInfo("_raw_msg_", {"default": raw_err}, raw_detail=raw_err)
+        self._set_state(**state_fields)
         return result
 
     # --- sync methods ---
@@ -1827,6 +1833,43 @@ class TestSQLConsoleTabEventHandlers:
         buttons = _find_by_type(result, ft.Button)
         coro = buttons[0].on_click(MagicMock())
         _run_async_coro(coro)  # should not raise
+
+    def test_run_query_failure_shows_detail_expansion(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """D6: sql_error.raw_detail 存在 → ExpansionTile 折叠展示脱敏错误原文。"""
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        vm._sql_result = {"success": False, "data": None, "error": "syntax error near FROM"}
+        component = make_component(SQLConsoleTab, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+
+        # Set SQL text
+        outlined_btns = _find_by_type(result, ft.OutlinedButton)
+        outlined_btns[0].on_click(MagicMock())
+
+        # Re-render + trigger
+        result = render_once(component)
+        buttons = _find_by_type(result, ft.Button)
+        coro = buttons[0].on_click(MagicMock())
+        _run_async_coro(coro)
+        # 触发 handler 更新组件 state 后重新渲染, 反映 detail 折叠
+        result = render_once(component)
+
+        # stub execute_sql 将 "syntax error near FROM" 包为 SqlErrorInfo(_raw_msg_, raw_detail)
+        # → SQLConsoleTab 渲染可见 ExpansionTile, 内含错误原文
+        tiles = _find_by_type(result, ft.ExpansionTile)
+        detail_tiles = [t for t in tiles if getattr(t, "visible", True) is True]
+        assert detail_tiles, "包含 raw_detail 时应渲染可见的 ExpansionTile"
+        texts = " ".join(
+            getattr(c, "value", "") or "" for c in _collect_controls(detail_tiles[0]) if isinstance(c, ft.Text)
+        )
+        assert "syntax error near FROM" in texts
 
 
 # ============================================================================

@@ -358,6 +358,7 @@
     "data_sql_success": "Success ({time:.3f}s). Returned {rows} rows.",
     "data_sql_success_truncated": "Success ({time:.3f}s). Showing first {limit} rows (Total {rows}).",
     "data_sql_error": "Execution Error",
+    "data_sql_error_detail": "Error Detail",
     "data_btn_count": "Count Rows",
     "data_loading": "Loading data...",
     "data_loading_hint": "Reading database table structure",
