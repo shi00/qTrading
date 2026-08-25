@@ -352,7 +352,7 @@ class TestGetConcepts:
         codes = [f"{i:06d}.SZ" for i in range(1, 1201)]
         call_count = 0
 
-        async def mock_read_db(sql, params=None):
+        async def mock_read_db(sql, params=None, **kwargs):
             nonlocal call_count
             call_count += 1
             n = len(params) if params else 10
