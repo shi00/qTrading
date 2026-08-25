@@ -74,6 +74,10 @@ def register_singleton[TClass: type](cls: TClass) -> TClass:
 
 def reset_all_singletons() -> None:
     """Reset all registered singletons. Intended for test teardown."""
+    # R7: 复位模块级 atexit 标志（xdist 下其他用例置位后，依赖 _atexit_fired
+    # 短路的后续测试如 TaskManager._atexit_cleanup 会因跨测试泄漏失败）。
+    global _atexit_fired
+    _atexit_fired = False
     with _lock:
         for cls in list(_registry):
             if hasattr(cls, "_reset_singleton"):
