@@ -107,6 +107,18 @@ class TestBacktestConfigValidation:
         assert len(errors) == 1
         assert "initial_capital must be positive" in errors[0]
 
+    def test_validate_non_finite_capital_rejected(self) -> None:
+        """UX-05 对抗检视 MAJOR: inf/nan 必须被 validate 拦截 (<=0 无法排除非有限数)。"""
+        for bad in (float("inf"), float("nan")):
+            config = BacktestConfig(
+                start_date=date(2023, 1, 1),
+                end_date=date(2023, 12, 31),
+                initial_capital=bad,
+            )
+            errors = config.validate()
+            assert len(errors) == 1
+            assert "initial_capital must be positive" in errors[0]
+
     def test_validate_preload_max_days_zero(self) -> None:
         config = BacktestConfig(
             start_date=date(2023, 1, 1),

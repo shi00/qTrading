@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from datetime import date, timedelta
 
@@ -42,6 +43,53 @@ from ui.theme import AppColors, AppStyles
 logger = logging.getLogger(__name__)
 
 
+def _validate_backtest_inputs(
+    start_date: date,
+    end_date: date,
+    initial_capital_str: str,
+    max_positions_str: str,
+) -> dict[str, str]:
+    """UX-05 (P1-01): 校验回测输入，返回 {字段标识: i18n error key}；全部合法返回空 dict。
+
+    规则与后端 strategies/backtest/config.py::validate 严格对齐：
+    - initial_capital: 非空 / float 可解析且 isfinite（拦截 inf/nan/溢出）/ > 0
+    - max_positions: 非空 / int 可解析（整数语义）/ >= 1
+    - 日期: start < end（严格小于, 与后端 L70 一致）
+    """
+    errors: dict[str, str] = {}
+
+    if not initial_capital_str:
+        errors["initial_capital"] = "backtest_error_required"
+    else:
+        try:
+            capital = float(initial_capital_str)
+        except ValueError:
+            errors["initial_capital"] = "backtest_error_invalid_number"
+        else:
+            # isfinite: float("inf")/float("nan")/float("1e309") 均通过 >0 但会破坏 NAV（对抗检视 MAJOR）
+            if not math.isfinite(capital):
+                errors["initial_capital"] = "backtest_error_invalid_number"
+            elif capital <= 0:
+                errors["initial_capital"] = "backtest_error_capital_positive"
+
+    if not max_positions_str:
+        errors["max_positions"] = "backtest_error_required"
+    else:
+        try:
+            positions = int(max_positions_str)
+        except ValueError:
+            # 整数语义: "3.5"/"50.0" 被 int() 拒绝 → 非法
+            errors["max_positions"] = "backtest_error_invalid_number"
+        else:
+            if positions < 1:
+                errors["max_positions"] = "backtest_error_positions_positive"
+
+    if start_date >= end_date:
+        errors["date_range"] = "backtest_error_date_range"
+
+    return errors
+
+
 def _get_config_from_state(
     start_date: date,
     end_date: date,
@@ -55,7 +103,9 @@ def _get_config_from_state(
 ) -> dict:
     """从 UI 状态提取回测配置 dict（纯函数，可独立单测）。
 
-    含类型转换、默认值兜底、stamp_duty_auto 分段逻辑：
+    含类型转换、stamp_duty_auto 分段逻辑（**UX-05: 非法输入不再静默兜底**——
+    调用方须先经 _validate_backtest_inputs 校验，此处 float/int 转换失败
+    自然抛 ValueError，trust boundary 不吞噬）：
     - stamp_duty_auto=True → stamp_duty_rate=None（由 BacktestConfig 默认值决定）
     - stamp_duty_auto=False → stamp_duty_rate=slider_value/1000（‰ → 小数，0 合法）
     - commission slider 值为万分之一（‱）→ commission_rate=slider_value/10000（0 合法）
@@ -64,15 +114,8 @@ def _get_config_from_state(
     注：commission/slippage/stamp_duty_rate 入参类型为 float（use_state 初始化 +
     on_change 的 None 兜底保证非 None），0 是合法值，不用 falsy 兜底。
     """
-    try:
-        initial_capital = float(initial_capital_str or "1000000")
-    except ValueError:
-        initial_capital = 1_000_000.0
-
-    try:
-        max_positions = int(max_positions_str or "50")
-    except ValueError:
-        max_positions = 50
+    initial_capital = float(initial_capital_str)
+    max_positions = int(max_positions_str)
 
     if stamp_duty_auto:
         stamp_duty_rate_val = None
@@ -156,6 +199,9 @@ def BacktestConfigPanel(
     show_start_picker, set_show_start_picker = ft.use_state(False)
     show_end_picker, set_show_end_picker = ft.use_state(False)
 
+    # --- UX-05 (P1-01): 输入校验 (渲染期派生, 非 use_state — 无双源真相, 修正后即时消失) ---
+    validation_errors = _validate_backtest_inputs(start_date, end_date, initial_capital, max_positions)
+
     def _on_start_change(e: ft.ControlEvent) -> None:
         val = get_control_value(e.control, ft.DatePicker)
         if val is not None:
@@ -206,6 +252,13 @@ def BacktestConfigPanel(
         set_show_end_picker(True)
 
     def _on_run_click(e: ft.ControlEvent) -> None:
+        # UX-05: disabled 是第一道防线 (Flet 原生), handler 内校验短路是第二道防线 —
+        # 防御绕过按钮 enabled 语义的调用路径 (组件测试直调 handler/未来新调用方)
+        if validation_errors:
+            logger.warning(
+                "[BacktestConfigPanel] run blocked by input validation errors: %s", sorted(validation_errors)
+            )
+            return
         if on_run_backtest is not None:
             config = _get_config_from_state(
                 start_date=start_date,
@@ -283,6 +336,26 @@ def BacktestConfigPanel(
         on_change=safe_on_change(_on_max_positions_change),
     )
 
+    # --- UX-05: 字段错误提示 (声明式常驻构造, visible 驱动; flet 0.86.5 无 TextField.error_text) ---
+    # 常驻构造: 无错误时 content 为空串 (visible=False), 避免条件插入破坏响应式布局后重排
+    def _field_error(field: str) -> ft.Text:
+        error_key = validation_errors.get(field)
+        return ft.Text(
+            I18n.get(error_key) if error_key else "",
+            color=AppColors.ERROR,
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            visible=field in validation_errors,
+        )
+
+    capital_error = _field_error("initial_capital")
+    positions_error = _field_error("max_positions")
+    date_range_error = ft.Text(
+        I18n.get(validation_errors["date_range"]) if "date_range" in validation_errors else "",
+        color=AppColors.ERROR,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        visible="date_range" in validation_errors,
+    )
+
     def _on_commission_change(val: float) -> None:
         set_commission(val)
 
@@ -351,6 +424,8 @@ def BacktestConfigPanel(
         ft.Button(
             content=I18n.get("backtest_run"),
             icon=ft.Icons.PLAY_ARROW,
+            # UX-05: 任何非法参数无法提交
+            disabled=bool(validation_errors),
             on_click=safe_on_click(_on_run_click),
             style=ft.ButtonStyle(
                 bgcolor=AppColors.PRIMARY,
@@ -387,6 +462,8 @@ def BacktestConfigPanel(
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 start_date_btn,
+                                # UX-05: 日期区间错误 (常驻构造, visible 驱动)
+                                date_range_error,
                             ],
                             spacing=4,
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
@@ -418,7 +495,7 @@ def BacktestConfigPanel(
                 ft.ResponsiveRow(
                     [
                         ft.Column(
-                            [initial_capital_input],
+                            [initial_capital_input, capital_error],
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
@@ -428,7 +505,7 @@ def BacktestConfigPanel(
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                         ft.Column(
-                            [max_position_input],
+                            [max_position_input, positions_error],
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),

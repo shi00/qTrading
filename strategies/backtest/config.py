@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
@@ -69,7 +70,7 @@ class BacktestConfig:
         errors = []
         if self.start_date >= self.end_date:
             errors.append("start_date must be before end_date")
-        if self.initial_capital <= 0:
+        if self.initial_capital <= 0 or not math.isfinite(self.initial_capital):
             errors.append("initial_capital must be positive")
         if self.commission_rate < 0 or self.commission_rate > 0.01:
             errors.append("commission_rate should be between 0 and 1%")

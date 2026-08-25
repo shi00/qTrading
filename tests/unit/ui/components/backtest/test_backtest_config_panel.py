@@ -867,29 +867,37 @@ class TestFormControlsOnChange:
 
 
 class TestInitialCapitalEdgeCases:
-    """initial_capital 空/非数字容错 (组件层 _on_run_click 触发 _get_config_from_state)。"""
+    """UX-05 (P1-01): initial_capital 非法输入 → 显式校验 (disabled + 错误提示 + 不调用 on_run)。"""
 
-    def test_empty_initial_capital_falls_back_in_run_click(self) -> None:
-        """空 initial_capital → _on_run_click 触发 config.initial_capital=1000000。"""
+    def test_empty_initial_capital_disables_run(self) -> None:
+        """空 initial_capital → 资金错误 Text 渲染 + run disabled + on_run 不被调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_initial_capital]")
         _invoke(field.on_change, _make_event(""))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True, "空资金应禁用运行按钮"
+        # handler 防御短路: 直调 on_click 也不触发 on_run_backtest
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["initial_capital"] == 1_000_000.0
+        assert not on_run.called, "非法输入下 on_run_backtest 不应被调用"
 
-    def test_non_numeric_initial_capital_falls_back_in_run_click(self) -> None:
-        """非数字 initial_capital → config.initial_capital=1000000。"""
+    def test_non_numeric_initial_capital_disables_run(self) -> None:
+        """非数字 initial_capital → invalid_number 错误 + run disabled + on_run 不被调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_initial_capital]")
         _invoke(field.on_change, _make_event("abc"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True, "非数字资金应禁用运行按钮"
+        error_texts = [
+            c
+            for c in _walk_controls(new_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_invalid_number]"
+        ]
+        assert error_texts, "应渲染 invalid_number 错误提示"
+        assert any(getattr(et, "visible", True) for et in error_texts), "错误提示应为可见"
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["initial_capital"] == 1_000_000.0
+        assert not on_run.called
 
     def test_decimal_initial_capital_accepted(self) -> None:
         """decimal initial_capital (1234567.89) → 接受为 float。"""
@@ -898,6 +906,7 @@ class TestInitialCapitalEdgeCases:
         _invoke(field.on_change, _make_event("1234567.89"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is False, "合法资金应保持运行按钮可用"
         _invoke(run_btn.on_click, _make_event())
         config = on_run.call_args.args[0]
         assert config["initial_capital"] == 1_234_567.89
@@ -918,66 +927,194 @@ class TestInitialCapitalEdgeCases:
 
 
 class TestMaxPositionsEdgeCases:
-    """max_positions 边界 (0/负数/超大值)。
+    """UX-05 (P1-01): max_positions 非法输入 → 显式校验 (disabled + 错误提示 + 不调用 on_run)。
 
-    组件层不做边界校验 (由后续 BacktestConfig 处理), _get_config_from_state
-    仅做 int 转换, 这些边界值会原样传入 config。
+    合法超大值 (999999) 保持无上限契约 (与后端仅 >0 约束一致)。
     """
 
-    def test_max_positions_zero(self) -> None:
-        """max_positions=0 → config.max_position_count=0 (组件层不限制)。"""
+    def test_max_positions_zero_disables_run(self) -> None:
+        """max_positions=0 → disabled + positions_positive 错误 + on_run 不调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
         _invoke(field.on_change, _make_event("0"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True, "持仓数为 0 应禁用运行按钮"
+        error_texts = [
+            c
+            for c in _walk_controls(new_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_positions_positive]"
+        ]
+        assert error_texts and any(getattr(et, "visible", True) for et in error_texts), (
+            "应渲染可见的 positions_positive 错误"
+        )
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["max_position_count"] == 0
+        assert not on_run.called
 
-    def test_max_positions_negative(self) -> None:
-        """max_positions=-5 → config.max_position_count=-5 (组件层不限制)。"""
+    def test_max_positions_negative_disables_run(self) -> None:
+        """max_positions=-5 → disabled + positions_positive 错误 + on_run 不调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
         _invoke(field.on_change, _make_event("-5"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["max_position_count"] == -5
+        assert not on_run.called
 
-    def test_max_positions_large_value(self) -> None:
-        """max_positions=999999 → config.max_position_count=999999 (组件层不限制)。"""
+    def test_max_positions_large_value_accepted(self) -> None:
+        """max_positions=999999 → 合法 (无上限契约), run enabled + config==999999。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
         _invoke(field.on_change, _make_event("999999"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is False, "超大合法持仓数不应禁用运行按钮"
         _invoke(run_btn.on_click, _make_event())
         config = on_run.call_args.args[0]
         assert config["max_position_count"] == 999_999
 
-    def test_max_positions_empty_falls_back(self) -> None:
-        """max_positions='' → config.max_position_count=50 (空兜底)。"""
+    def test_max_positions_empty_disables_run(self) -> None:
+        """max_positions='' → disabled + required 错误 + on_run 不调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
         _invoke(field.on_change, _make_event(""))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True, "空持仓数应禁用运行按钮"
+        error_texts = [
+            c
+            for c in _walk_controls(new_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_required]"
+        ]
+        assert error_texts and any(getattr(et, "visible", True) for et in error_texts), "应渲染可见的 required 错误"
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["max_position_count"] == 50
+        assert not on_run.called
 
-    def test_max_positions_non_numeric_falls_back(self) -> None:
-        """max_positions='abc' → config.max_position_count=50 (ValueError 兜底)。"""
+    def test_max_positions_non_numeric_disables_run(self) -> None:
+        """max_positions='abc' → disabled + invalid_number 错误 + on_run 不调用。"""
         on_run, _, result, component = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
         _invoke(field.on_change, _make_event("abc"))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True
         _invoke(run_btn.on_click, _make_event())
-        config = on_run.call_args.args[0]
-        assert config["max_position_count"] == 50
+        assert not on_run.called
+
+
+# ============================================================================
+# UX-05: 校验交互闭环 (显式校验验收)
+# ============================================================================
+
+
+class TestValidationUX05:
+    """UX-05 验收: 非法无法提交 / 错误可见 / 修正后立即消失 (声明式渲染期派生)。"""
+
+    @staticmethod
+    def _error_texts(root: Any, value: str) -> list[ft.Text]:
+        return [c for c in _walk_controls(root) if isinstance(c, ft.Text) and c.value == value]
+
+    def test_invalid_then_fix_error_clears_and_run_enabled(self) -> None:
+        """非法输入 → 修正为合法 → 错误提示隐藏 (content 退化为空串 + visible=False) + run enabled。
+
+        验收: 修正后错误立即消失。常驻构造语义: 错误 Text 控件始终在树中,
+        无错误时 content="" 且 visible=False.
+        """
+        _, _, result, component = _render_panel()
+        field = _find_text_field(result, "i18n[backtest_initial_capital]")
+        _invoke(field.on_change, _make_event("abc"))
+        invalid_result = _rerender(component)
+        assert _find_run_button(invalid_result).disabled is True
+        invalid_errors = self._error_texts(invalid_result, "i18n[backtest_error_invalid_number]")
+        assert invalid_errors and any(et.visible is True for et in invalid_errors), "非法时错误提示应可见"
+
+        _invoke(field.on_change, _make_event("500000"))
+        fixed_result = _rerender(component)
+        run_btn = _find_run_button(fixed_result)
+        assert run_btn.disabled is False, "修正后运行按钮应恢复可用"
+        # 修正后: 不存在任何可见的错误文案 Text (visible=True 且 value 为 error key 翻译)
+        visible_errors = [
+            c
+            for c in _walk_controls(fixed_result)
+            if isinstance(c, ft.Text)
+            and c.visible is True
+            and str(getattr(c, "value", "")).startswith("i18n[backtest_error_")
+        ]
+        assert not visible_errors, f"修正后不应有可见错误提示: {[e.value for e in visible_errors]}"
+
+    def test_start_equal_end_date_blocks_run(self) -> None:
+        """对抗检视 INFO 改名: start==end (通过 start DatePicker 选中今天, 默认 end=today) → 日期错误 + run disabled。"""
+        _, page, result, component = _render_panel()
+        # 复用 TestDatePickerStateUpdate 范式: 打开 start picker
+        date_btns = _find_date_buttons(result)
+        _invoke(date_btns[0].on_click, _make_event())
+        _rerender(component)
+        date_pickers = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)]
+        assert len(date_pickers) >= 1
+        picker = date_pickers[0]
+        # 选中今天 = 默认 end (start==end → 严格小于规则非法)
+        _invoke(picker.on_change, _make_event(date.today()))
+        new_result = _rerender(component)
+        run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True, "start==end (同日区间) 应禁用运行按钮"
+        errors = self._error_texts(new_result, "i18n[backtest_error_date_range]")
+        assert errors and any(et.visible is True for et in errors), "应渲染可见的日期区间错误"
+
+    def test_date_range_fixed_re_enables_run(self) -> None:
+        """对抗检视 INFO 3: start==end 非法 → 修正 start 为一年前 (start<end) → 日期错误隐藏 + run enabled。"""
+        _, page, result, component = _render_panel()
+        date_btns = _find_date_buttons(result)
+        # 第一次: start 选今天 → start==end → 非法
+        _invoke(date_btns[0].on_click, _make_event())
+        _rerender(component)
+        start_picker = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)][0]
+        _invoke(start_picker.on_change, _make_event(date.today()))
+        blocked_result = _rerender(component)
+        assert _find_run_button(blocked_result).disabled is True
+        # 第二次: start 改回一年前 → start<end → 恢复可用
+        _invoke(date_btns[0].on_click, _make_event())
+        _rerender(component)
+        start_picker = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)][0]
+        _invoke(start_picker.on_change, _make_event(date.today() - timedelta(days=365)))
+        fixed_result = _rerender(component)
+        run_btn = _find_run_button(fixed_result)
+        assert run_btn.disabled is False, "日期修正后运行按钮应恢复可用"
+        visible_range_errors = [
+            c
+            for c in _walk_controls(fixed_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_date_range]" and c.visible is True
+        ]
+        assert not visible_range_errors, "日期修正后区间错误应隐藏"
+
+    def test_default_values_run_enabled(self) -> None:
+        """默认值 (1000000 / 50 / start<end) → 无错误 + run enabled (零回归)。"""
+        _, _, result, _ = _render_panel()
+        run_btn = _find_run_button(result)
+        assert run_btn.disabled is False, "默认合法输入应保持运行按钮可用"
+        all_errors = [
+            c
+            for c in _walk_controls(result)
+            if isinstance(c, ft.Text) and getattr(c, "value", "").startswith("i18n[backtest_error_")
+        ]
+        assert not any(getattr(e, "visible", True) for e in all_errors), "默认状态下不应有可见错误提示"
+
+    def test_both_fields_invalid_blocks_run(self) -> None:
+        """资金 + 持仓同时非法 → 两条错误均可见 + run disabled + on_run 不调用。"""
+        on_run, _, result, component = _render_panel()
+        capital_field = _find_text_field(result, "i18n[backtest_initial_capital]")
+        positions_field = _find_text_field(result, "i18n[backtest_max_positions]")
+        _invoke(capital_field.on_change, _make_event(""))
+        _invoke(positions_field.on_change, _make_event("0"))
+        new_result = _rerender(component)
+        run_btn = _find_run_button(new_result)
+        assert run_btn.disabled is True
+        assert any(et.visible is True for et in self._error_texts(new_result, "i18n[backtest_error_required]"))
+        assert any(
+            et.visible is True for et in self._error_texts(new_result, "i18n[backtest_error_positions_positive]")
+        )
+        _invoke(run_btn.on_click, _make_event())
+        assert not on_run.called
 
 
 # ============================================================================
