@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.i18n import Message
 from data.external.news_fetcher import NewsFetcher
 from data.persistence.review_manager import ReviewManager
 from strategies.ai_strategy import AISelectionStrategy
@@ -132,12 +133,11 @@ class TestAISelectionStrategy:
 
         # AI 不可用 → 返回量化初筛结果 (非空), 不 raise
         assert not result.empty
-        # on_progress 提示 ai_not_configured (出现在任意一次调用中)
-        from ui.i18n import I18n
-
-        expected_msg = I18n.get("ai_not_configured")
+        # on_progress 提示 ai_not_configured (出现在任意一次调用中, D7 后为 Message)
         messages = [c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "") for c in on_progress.call_args_list]
-        assert expected_msg in messages, f"ai_not_configured not in on_progress calls: {messages}"
+        assert any(isinstance(m, Message) and m.key == "ai_not_configured" for m in messages), (
+            f"ai_not_configured Message not in on_progress calls: {messages}"
+        )
 
     @pytest.mark.asyncio
     @patch("strategies.ai_mixin.AIService")
