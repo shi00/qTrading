@@ -299,6 +299,141 @@ class TestScreenerViewModelPagination:
         assert vm.state.page_no == 2  # already at last page
 
 
+class TestScreenerViewModelStockFilter:
+    """UX-04 (P2-01): 股票代码过滤 — VM 层 ts_code 子串匹配 + 分页联动.
+
+    覆盖: set_stock_filter 状态更新/幂等/分页重算、get_current_page_data
+    过滤切片、子串/大小写/字面量(regex=False)匹配语义、列缺失/空串跳过、
+    尾随空格原值存储+匹配 strip、clear_filters 重置、has_export_data 解耦。
+    """
+
+    _DF = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "600000.SH", "000002.SZ"],
+            "name": ["平安银行", "浦发银行", "万科A"],
+        }
+    )
+
+    def test_set_stock_filter_updates_state_and_pagination(self, vm):
+        vm._full_results = self._DF.copy()
+        vm._update_pagination()
+        assert vm.state.total_items == 3
+        assert vm.state.data_version == 0
+
+        vm.set_stock_filter("000001")
+
+        assert vm.state.stock_filter == "000001"
+        assert vm.state.page_no == 1
+        assert vm.state.total_items == 1
+        assert vm.state.total_pages == 1
+        assert vm.state.data_version == 1
+
+    def test_set_stock_filter_idempotent(self, vm):
+        vm._full_results = self._DF.copy()
+        notified = []
+        vm.subscribe(lambda s: notified.append(s))
+        vm.set_stock_filter("000001")
+        assert len(notified) == 1
+
+        vm.set_stock_filter("000001")  # 相同值: 幂等短路, 不触发重渲染
+
+        assert len(notified) == 1
+
+    def test_get_current_page_data_filtered(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("000001")
+
+        page = vm.get_current_page_data()
+
+        assert list(page["ts_code"]) == ["000001.SZ"]
+
+    def test_filter_partial_code_substring(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("0002")  # 尾部子串 (非前缀): 000002.SZ 索引 2-5 命中
+
+        page = vm.get_current_page_data()
+
+        assert list(page["ts_code"]) == ["000002.SZ"]
+
+    def test_filter_case_insensitive(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("sz")
+
+        page = vm.get_current_page_data()
+
+        assert set(page["ts_code"]) == {"000001.SZ", "000002.SZ"}
+
+    def test_filter_regex_literal(self, vm):
+        # 字面量匹配: "." 不作正则通配, "000001XSZ" 不应命中 "000001.SZ"
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ", "000001XSZ"]})
+        vm.set_stock_filter("000001.SZ")
+
+        page = vm.get_current_page_data()
+
+        assert list(page["ts_code"]) == ["000001.SZ"]
+
+    def test_filter_missing_ts_code_column_noop(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        vm.set_stock_filter("000001")
+
+        assert vm.state.total_items == 3
+        assert len(vm.get_current_page_data()) == 3
+
+    def test_filter_empty_string_noop(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("000001")
+        vm.set_stock_filter("")  # 清空过滤: 恢复全量
+
+        assert vm.state.total_items == 3
+        assert len(vm.get_current_page_data()) == 3
+
+    def test_filter_no_match_empty_page(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("999999")
+
+        assert vm.state.total_items == 0
+        assert vm.state.total_pages == 0
+        assert vm.get_current_page_data().empty
+
+    def test_filter_with_trailing_space_still_matches(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("000001 ")  # 原值含尾随空格 (受控 TextField 光标保护)
+
+        assert vm.state.stock_filter == "000001 "  # 存储不 strip
+
+        page = vm.get_current_page_data()
+
+        assert list(page["ts_code"]) == ["000001.SZ"]  # 匹配时 strip
+
+    def test_update_pagination_respects_filter(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("sz")
+        assert vm.state.total_items == 2
+
+        vm.change_page_size(1)
+
+        assert vm.state.total_pages == 2  # 分页基于过滤后行数重算
+
+    def test_clear_filters_resets_stock_filter(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("000001")
+
+        vm.clear_filters()
+
+        assert vm.state.stock_filter == ""
+        assert vm.state.total_items == 3  # 分页同步恢复全量, 状态自洽
+
+    def test_has_export_data_property(self, vm):
+        vm._full_results = self._DF.copy()
+        vm.set_stock_filter("999999")  # 过滤无匹配
+
+        assert vm.state.total_items == 0
+        assert vm.has_export_data is True  # 全量判据: 与过滤显示解耦
+
+        vm._full_results = None
+        assert vm.has_export_data is False
+
+
 class TestScreenerViewModelSorting:
     @pytest.mark.asyncio
     async def test_sorting(self, vm):
@@ -1052,7 +1187,8 @@ class TestSwitchToHistory:
 
 class TestSwitchToRealtime:
     def test_restores_snapshot(self, vm):
-        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        # UX-04: 150 行 (page_size=50) 使 page_no=3 合法 — 快照恢复语义验证
+        vm._full_results = pd.DataFrame({"A": range(150)})
         vm._set_state(page_no=3, sort_column="A", sort_ascending=False)
         vm._ai_buffer = [{"x": 1}]
         vm.switch_to_history()
@@ -1060,6 +1196,24 @@ class TestSwitchToRealtime:
         assert vm.state.page_no == 3
         assert vm.state.sort_column == "A"
         assert vm.state.sort_ascending is False
+
+    def test_restores_snapshot_clamps_page_no_after_filter_shrink(self, vm):
+        """UX-04 对抗检视 MINOR-1 回归: HISTORY 中修改过滤后切回, 快照页码必须 clamp.
+
+        攻击路径: REALTIME 150 行翻到第 3 页 → switch_to_history 快照 page_no=3 →
+        HISTORY 中设置 stock_filter → switch_to_realtime 恢复全量数据但过滤生效,
+        total_pages 缩小 → 未 clamp 时 page_no=3 越界 (空表格 + "第 3 页/共 1 页").
+        """
+        vm._full_results = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(150)]})
+        vm._set_state(page_no=3)
+        vm.switch_to_history()
+
+        vm.set_stock_filter("000001")  # HISTORY 中过滤: 150 行 → 1 行
+
+        vm.switch_to_realtime()
+        assert vm.state.page_no == 1  # clamp 到过滤后合法范围
+        assert vm.state.total_pages == 1
+        assert vm.state.total_items == 1
 
     def test_restores_stream_cards_and_buffers(self, vm):
         """P1-3: switch_to_realtime 必须恢复 stream_cards 和 _stream_buffers。"""

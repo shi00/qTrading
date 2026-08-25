@@ -792,6 +792,8 @@ class TestBacktestViewErrorState:
         assert getattr(right_content.fn, "__name__", "") == "ErrorState"
         # detail 参数已透传
         assert right_content.kwargs.get("detail") == "sanitized error detail"
+        # UX-03 (P2-09): 反馈问题 CTA 图标语义匹配 (不再固定 SETTINGS 误导)
+        assert right_content.kwargs.get("cta_icon") == ft.Icons.FEEDBACK
 
     def test_result_panel_restored_on_success(self, backtest_view_env) -> None:
         """status_color="success" → BacktestResultPanel 恢复 (非 ErrorState)."""

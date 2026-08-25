@@ -137,6 +137,8 @@ class ScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
     is_retrying: bool = False
+    # UX-04 (P2-01): 股票代码过滤 (ts_code 子串匹配, 空串=不过滤; 深链/手动输入两来源)
+    stock_filter: str = ""
 
 
 class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
@@ -229,13 +231,17 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         跨线程封送 + subscribers snapshot）。
         """
         ps = page_size if page_size is not None else self._state.page_size
-        if self._full_results is not None:
-            total_items = len(self._full_results)
+        filtered = self._get_filtered_results()
+        if filtered is not None:
+            total_items = len(filtered)
             total_pages = (total_items + ps - 1) // ps
         else:
             total_items = 0
             total_pages = 0
         pn = page_no if page_no is not None else self._state.page_no
+        # UX-04: 页码 clamp — 过滤/模式切换缩小 total_pages 后, 恢复的历史 page_no
+        # 可能越界 (HISTORY 中修改过滤后 switch_to_realtime 恢复快照页码 → 空表格)
+        pn = max(1, min(pn, total_pages)) if total_pages else 1
         self._set_state(
             page_size=ps,
             page_no=pn,
@@ -989,25 +995,78 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """重置筛选/排序/分页/档位提示至默认值 (P1-3 #71).
 
         EmptyState 的 ``on_cta`` 回调调用本命令，清空当前筛选状态以便用户重新执行策略。
-        不清除 ``_full_results`` (保留上次结果供用户参考); 仅重置 state 中的
-        ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` 字段。
+        不清除 ``_full_results`` (保留上次结果供用户参考); 重置 state 中的
+        ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` /
+        ``stock_filter`` 字段 (UX-04), 分页按全量重算保持状态自洽。
         """
+        ps = self._state.page_size
+        base = self._full_results
+        total_items = len(base) if base is not None else 0
+        total_pages = (total_items + ps - 1) // ps if total_items else 0
         self._set_state(
             page_no=1,
             sort_column=None,
             sort_ascending=True,
             tier_hint=None,
+            stock_filter="",
+            total_items=total_items,
+            total_pages=total_pages,
         )
+
+    # --- Stock code filter (UX-04 P2-01) ---
+
+    def _get_filtered_results(self, stock_filter: str | None = None) -> pd.DataFrame | None:
+        """UX-04: 应用股票代码过滤 — ts_code 子串匹配 (case-insensitive, 字面量).
+
+        Args:
+            stock_filter: 显式过滤值 (None 时读 ``state.stock_filter``)。
+                匹配前 strip; 空串/列缺失时跳过过滤返回全量。
+        """
+        if self._full_results is None or self._full_results.empty:
+            return self._full_results
+        code = (self._state.stock_filter if stock_filter is None else stock_filter).strip()
+        if not code or "ts_code" not in self._full_results.columns:
+            return self._full_results
+        # regex=False: ts_code 含 "." (如 000001.SZ), 字面量匹配防通配误命中
+        mask = self._full_results["ts_code"].astype(str).str.contains(code, case=False, na=False, regex=False)
+        return self._full_results[mask]
+
+    def set_stock_filter(self, value: str) -> None:
+        """UX-04: 设置股票代码过滤 (深链/手动输入), 回到第 1 页并重算分页.
+
+        原值存储不 strip (受控 TextField 光标保护: state 与输入框内容一致,
+        防重渲染重置 value 导致光标跳动); 匹配时 ``_get_filtered_results``
+        内部 strip。
+        """
+        if value == self._state.stock_filter:
+            return  # 幂等: 相同值不触发重渲染
+        ps = self._state.page_size
+        filtered = self._get_filtered_results(value)
+        total_items = len(filtered) if filtered is not None else 0
+        total_pages = (total_items + ps - 1) // ps if total_items else 0
+        self._set_state(
+            stock_filter=value,
+            page_no=1,
+            total_items=total_items,
+            total_pages=total_pages,
+            data_version=self._state.data_version + 1,
+        )
+
+    @property
+    def has_export_data(self) -> bool:
+        """UX-04: 全量结果非空判据 (导出按钮禁用用, 与过滤后 total_items 解耦)."""
+        return self._full_results is not None and not self._full_results.empty
 
     def get_current_page_data(self):
         """Get data for current page (Synchronous, fast slicing)"""
-        if self._full_results is None or self._full_results.empty:
+        filtered = self._get_filtered_results()
+        if filtered is None or filtered.empty:
             return pd.DataFrame()
 
         start = (self._state.page_no - 1) * self._state.page_size
         end = start + self._state.page_size
         # Slicing is fast enough for main thread
-        return self._full_results.iloc[start:end]
+        return filtered.iloc[start:end]
 
     # --- Stream Card Management (state-driven, §3.2 MVVM) ---
 
@@ -1375,7 +1434,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             # 避免 _update_pagination 的 render 在旧版本号下命中 View 侧陈旧表格 memo。
             self._set_state(
                 mode="REALTIME",
-                page_no=pn,
+                # UX-04: 读回 clamp 后合法页码 — HISTORY 中可能已修改 stock_filter/
+                # page_size 使快照 page_no 越界, _update_pagination 已钳制到合法范围
+                page_no=self._state.page_no,
                 sort_column=sc,
                 sort_ascending=sa,
                 stream_cards=stream_cards,

@@ -1,6 +1,7 @@
 """watchlist_view — 关注列表视图 (FR-UX-004, Task 4.2).
 
-声明式组件，展示用户关注的股票列表，支持移除、点击查看详情。
+声明式组件，展示用户关注的股票列表，支持移除、查看个股（UX-04: 深链跳
+选股页并按代码过滤）。
 - VM 通过 ``use_viewmodel(factory=lambda: WatchlistViewModel())`` 内部模式消费
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 异步操作通过 ``page.run_task`` 调度 (R16); CancelledError 必须 raise (R2)
@@ -16,6 +17,7 @@ from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
 from utils.sanitizers import DataSanitizer
@@ -41,8 +43,13 @@ def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
 def _build_watchlist_row(
     row: WatchlistRow,
     on_remove: typing.Callable[[str], None],
+    on_view: typing.Callable[[str], None] | None = None,
 ) -> ft.Container:
-    """构建单行关注列表项 (股票名 + 代码 + 加入日期 + 备注 + 移除按钮)."""
+    """构建单行关注列表项 (股票名 + 代码 + 加入日期 + 备注 + 查看/移除按钮).
+
+    UX-04: ``on_view`` 传入时在删除按钮前渲染「查看个股」按钮 (SEARCH_OUTLINED,
+    描边风格对齐 DELETE_OUTLINE); None 时不渲染 (位置参数兼容).
+    """
     name = row.stock_name or row.ts_code
     sub_parts = [row.ts_code]
     if row.added_at:
@@ -74,6 +81,18 @@ def _build_watchlist_row(
                     ],
                     spacing=2,
                     expand=True,
+                ),
+                *(
+                    [
+                        ft.IconButton(
+                            icon=ft.Icons.SEARCH_OUTLINED,
+                            icon_color=AppColors.TEXT_SECONDARY,
+                            tooltip=I18n.get("watchlist_view_stock"),
+                            on_click=lambda _e: on_view(row.ts_code),
+                        )
+                    ]
+                    if on_view is not None
+                    else []
                 ),
                 ft.IconButton(
                     icon=ft.Icons.DELETE_OUTLINE,
@@ -140,6 +159,18 @@ def WatchlistView(
         set_pending_remove_ts_code(ts_code)
         set_confirm_open(True)
 
+    def _on_view_stock(ts_code: str) -> None:
+        """UX-04: 行「查看」深链 — 携带 ts_code 跳选股页并填充代码过滤.
+
+        ts_code 为 DB 主键正常非空; 空值时降级纯 tab 导航,
+        避免 "screener:" 空段消息被协议解析吞掉 (与 home_view 同构防护).
+        """
+        page = _get_page()
+        if page is None:
+            return
+        message = f"screener:{ts_code}" if ts_code else "screener"
+        page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, message)
+
     def _do_confirm_remove() -> None:
         """ConfirmDialog on_confirm: 执行删除并关闭对话框。"""
         ts_code = pending_remove_ts_code
@@ -197,6 +228,7 @@ def WatchlistView(
             retry_text=I18n.get("common_retry"),
             on_cta=_on_cta,
             cta_text=I18n.get("error_state_contact_support"),
+            cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )
     elif not state.watchlist_rows:
         body = EmptyState(
@@ -206,7 +238,7 @@ def WatchlistView(
         )
     else:
         body = ft.Column(
-            [_build_watchlist_row(row, _on_remove) for row in state.watchlist_rows],
+            [_build_watchlist_row(row, _on_remove, _on_view_stock) for row in state.watchlist_rows],
             scroll=ft.ScrollMode.AUTO,
             expand=True,
             spacing=4,

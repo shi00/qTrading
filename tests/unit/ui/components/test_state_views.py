@@ -339,3 +339,76 @@ class TestErrorStateDetail:
         assert col.controls[3].content == "Report Issue"
         # toggle 按钮在 cta 之后
         assert isinstance(col.controls[4], ft.TextButton)
+
+
+class TestCtaIcon:
+    """UX-03 (P2-09): CTA 图标由调用方可选传入, 未传时不显示图标.
+
+    覆盖:
+    - EmptyState: cta_icon 缺省 → CTA 按钮 icon is None; 传入 → 渲染该图标
+    - ErrorState: cta_icon 缺省 → 次 CTA 按钮 icon is None; 传入 → 渲染该图标
+    """
+
+    def test_empty_state_cta_no_icon_by_default(self, mock_i18n_state, mock_app_colors_state):
+        """EmptyState cta_icon 缺省 → CTA 按钮无图标 (不再固定 REFRESH)."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            EmptyState,
+            icon=ft.Icons.INBOX,
+            on_cta=lambda: None,
+            cta_text="Go",
+        )
+        container = render_once(c)
+        # icon + cta_button = 2 controls
+        cta_btn = container.content.controls[1]
+        assert isinstance(cta_btn, ft.TextButton)
+        assert cta_btn.icon is None
+
+    def test_empty_state_cta_custom_icon(self, mock_i18n_state, mock_app_colors_state):
+        """EmptyState 传入 cta_icon → CTA 按钮渲染该图标."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            EmptyState,
+            icon=ft.Icons.INBOX,
+            on_cta=lambda: None,
+            cta_text="Go",
+            cta_icon=ft.Icons.SYNC,
+        )
+        container = render_once(c)
+        cta_btn = container.content.controls[1]
+        assert isinstance(cta_btn, ft.TextButton)
+        assert cta_btn.icon == ft.Icons.SYNC
+
+    def test_error_state_cta_no_icon_by_default(self, mock_i18n_state, mock_app_colors_state):
+        """ErrorState cta_icon 缺省 → 次 CTA 按钮无图标 (不再固定 SETTINGS)."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            on_cta=lambda: None,
+            cta_text="Report Issue",
+        )
+        container = render_once(c)
+        # icon + cta_button = 2 controls (无 title/message/retry)
+        cta_btn = container.content.controls[1]
+        assert isinstance(cta_btn, ft.TextButton)
+        assert cta_btn.icon is None
+
+    def test_error_state_cta_custom_icon(self, mock_i18n_state, mock_app_colors_state):
+        """ErrorState 传入 cta_icon → 次 CTA 按钮渲染该图标."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            on_cta=lambda: None,
+            cta_text="Report Issue",
+            cta_icon=ft.Icons.FEEDBACK,
+        )
+        container = render_once(c)
+        cta_btn = container.content.controls[1]
+        assert isinstance(cta_btn, ft.TextButton)
+        assert cta_btn.icon == ft.Icons.FEEDBACK
