@@ -88,6 +88,10 @@ async def test_settings_language_switch(e2e_page):
 
 
 @pytest.mark.mutates_config
+# [PITFALL_FLAKY] Windows CI CanvasKit 高负载下 Dropdown 选项点击偶发被吞：
+# 应用未收到 select 事件、菜单保持展开，snackbar 断言超时（PR 585 run 32831673563）。
+# AnchorPage.select_option 已尽力重试，仍偶发；用 rerun 吸收（项目 memory 既有模式）。
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_settings_log_level_switch(e2e_page):
     """测试：System Tab 日志级别切换 — 切换到 DEBUG 后 snackbar 提示出现。
 

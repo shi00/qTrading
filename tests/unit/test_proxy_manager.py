@@ -172,8 +172,27 @@ class TestProxyManagerGetHttpxProxyConfig:
 
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=False):
             result = ProxyManager.get_httpx_proxy_config()
-            assert "proxies" in result
-            assert "https://" in result["proxies"]
+            assert result == {"proxy": "http://proxy:8080"}
+
+    def test_httpx_async_client_accepts_config(self):
+        """httpx 0.28 AsyncClient(**get_httpx_proxy_config()) 可真实构造（防 proxies 回归）。
+
+        B16 检视修复：httpx 0.28 移除 ``proxies`` 参数，旧 ``{"proxies": ...}`` 格式
+        会抛 TypeError（有代理环境变量的用户功能失效）。
+        """
+        import httpx
+
+        ProxyManager._no_proxy_domains = set()
+        ProxyManager._initialized = True
+
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=False):
+            cfg = ProxyManager.get_httpx_proxy_config()
+
+        import asyncio
+
+        # 核心验证：构造不应抛 TypeError（httpx 0.28 移除 proxies 参数）
+        client = httpx.AsyncClient(**cfg)
+        asyncio.run(client.aclose())  # httpx 0.28 AsyncClient 用 aclose
 
 
 class TestProxyManagerGetRequestsProxyConfig:

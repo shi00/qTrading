@@ -5,6 +5,22 @@ Tests for NewsFetcher.
 """
 
 import asyncio
+
+
+def _wire_http_get(mock_client, mock_response):
+    """B16: requests.get -> httpx.AsyncClient mock 适配（httpx 0.28 async with）。
+
+    mock_client 是 patch("httpx.AsyncClient") 的类 mock；AsyncClient(...) 构造返回
+    mock_client.return_value（实例）。async with 需要实例的 __aenter__ 返回自身，
+    get 为 AsyncMock 返回 mock_response。
+    """
+    instance = mock_client.return_value
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.get = AsyncMock(return_value=mock_response)
+    return mock_response
+
+
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -97,7 +113,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
     """测试全球新闻获取（直连 CLS API）。"""
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     def test_get_global_news_success(self, mock_get, mock_pool):
         """成功获取全球新闻"""
         mock_resp = MagicMock()
@@ -119,7 +135,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
                 ]
             }
         }
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -134,14 +150,14 @@ class TestGetLatestGlobalNews(unittest.TestCase):
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     def test_get_global_news_empty(self, mock_get, mock_pool):
         """空 roll_data 返回空列表"""
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"data": {"roll_data": []}}
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -154,14 +170,14 @@ class TestGetLatestGlobalNews(unittest.TestCase):
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     def test_get_global_news_none_response(self, mock_get, mock_pool):
         """返回 None 时返回空列表"""
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = None
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -173,14 +189,13 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_global_news_runtime_error(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_global_news_runtime_error(self, mock_get):
         """RuntimeError 返回空列表且不触发熔断"""
         import data.external.news_fetcher as nf_mod
 
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("Pool error"))
-        mock_pool.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = RuntimeError("Pool error")
 
         async def run_test():
             result = await NewsFetcher.get_latest_global_news(limit=20)
@@ -190,14 +205,14 @@ class TestGetLatestGlobalNews(unittest.TestCase):
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     def test_get_global_news_missing_structure(self, mock_get, mock_pool):
         """返回 JSON 缺少 data 键时返回空列表"""
         mock_resp = MagicMock()
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"unexpected": "structure"}
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -213,22 +228,16 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 class TestGetUSMajorMoves(unittest.TestCase):
     """测试美股动态获取"""
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_us_moves_success(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_us_moves_success(self, mock_get):
         """成功获取美股动态"""
         import data.external.news_fetcher as nf_mod
 
         nf_mod._US_MOVES_CACHE.clear()
 
-        mock_data = [
-            {"name": "NVDA", "cname": "英伟达", "chg": "2.5"},
-            {"name": "TSLA", "cname": "特斯拉", "chg": "-1.2"},
-            {"name": "AAPL", "cname": "苹果", "chg": "0.5"},
-        ]
-
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_data)
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "100", "diff": "2.5", "chg": "2.5"}, {"name": "TSLA", "cname": "特斯拉", "price": "200", "diff": "-2.0", "chg": "-1.2"}]});'
+        _wire_http_get(mock_get, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
@@ -236,16 +245,16 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_us_moves_empty(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_us_moves_empty(self, mock_get):
         """空数据返回默认消息"""
         import data.external.news_fetcher as nf_mod
 
         nf_mod._US_MOVES_CACHE.clear()
 
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=[])
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": []});'
+        _wire_http_get(mock_get, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
@@ -253,16 +262,17 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_us_moves_none(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_us_moves_none(self, mock_get):
         """None 数据返回默认消息"""
         import data.external.news_fetcher as nf_mod
 
         nf_mod._US_MOVES_CACHE.clear()
 
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=None)
-        mock_pool.return_value = mock_manager
+        # Sina JSONP 解析后 data 为空列表 -> 视为无数据
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": []});'
+        _wire_http_get(mock_get, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()
@@ -270,16 +280,15 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_us_moves_error(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_us_moves_error(self, mock_get):
         """错误返回错误消息"""
         import data.external.news_fetcher as nf_mod
 
         nf_mod._US_MOVES_CACHE.clear()
 
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=Exception("Network error"))
-        mock_pool.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = Exception("Network error")
 
         async def run_test():
             result = await NewsFetcher.get_us_major_moves()

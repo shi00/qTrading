@@ -47,6 +47,9 @@ async def test_sql_console(e2e_page):
     await e2e_page.expect_text("平安银行", timeout_ms=TIMEOUTS.NAV)
 
 
+# 2026-08-25: select_filter_col 下拉交互在部分 Windows CI runner 仍偶发
+# (retry_until_triggered 3 次未确认)，恢复 rerun 吸收（同 test_settings_flow 模式）。
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_table_viewer_filter(e2e_page):
     """测试：数据表过滤查询 — 按股票代码过滤后结果仅含目标股票。
 

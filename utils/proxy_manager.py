@@ -151,11 +151,15 @@ class ProxyManager:
 
     @staticmethod
     def get_httpx_proxy_config() -> dict:
-        """
-        Return proxy configuration suitable for httpx clients.
+        """Return proxy configuration suitable for httpx 0.28+ clients.
 
-        Returns:
-            Dict with 'proxies' key for httpx, or empty dict if no proxy needed.
+        httpx 0.28 移除 ``proxies``/``mounts`` 参数，改用单一 ``proxy``（str/Proxy）。
+        返回 ``{"proxy": <url>}``（https 优先）或空 dict（无代理时，调用方依赖
+        httpx ``trust_env=True`` 默认读环境代理）。
+        # NOTE(lazy): httpx 0.28 显式 proxy 时不再应用 NO_PROXY 域（httpx 0.28
+        移除 Proxy.no_proxy 参数）. ceiling: 外部 API 请求（Sina/LLM）不依赖
+        no_proxy 域，走代理即可. upgrade: httpx 恢复显式 no_proxy 支持或项目出现
+        需绕代理的外部域时.
         """
         http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
         https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
@@ -163,13 +167,9 @@ class ProxyManager:
         if not http_proxy and not https_proxy:
             return {}
 
-        proxies = {}
-        if http_proxy:
-            proxies["http://"] = http_proxy
-        if https_proxy:
-            proxies["https://"] = https_proxy
-
-        return {"proxies": proxies} if proxies else {}
+        # httpx 0.28 单 URL proxy；https 优先（与 requests 版 proxies 语义对齐）
+        url = https_proxy or http_proxy
+        return {"proxy": url}
 
     @staticmethod
     def get_no_proxy_env_dict() -> dict[str, str]:
