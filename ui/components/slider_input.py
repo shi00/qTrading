@@ -4,12 +4,13 @@
 精确定位小数的问题（如止损率 0.035）。用户既可拖动 Slider 粗调，
 也可在 TextField 中键入精确数值。
 
-契约 (CLAUDE.md §3.2 MVVM + §3.3 声明式 UI):
-- 普通工厂函数（非 ``@ft.component``），返回 ``ft.Column``，无 class 子类
+契约 (CLAUDE.md §3.2 MVVM + §3.3 声明式 UI, 修复报告 04 D1):
+- ``@ft.component`` 声明式函数组件，返回 ``ft.Column``，无 class 子类
 - 受控组件：``value`` prop 由父级驱动，``on_change`` 上抛新值
-- 局部 TextField 光标输入中文本不即时上抛（blur/submit 时 _commit_text 提交），
-  避免每次按键触发父级 re-render；父级 ``value`` prop 变化依赖 View 整体
-  re-render（工厂函数重建）时同步 TextField 文本
+- 编辑中间态由 ``use_state`` 的 ``draft`` 承载：TextField 光标输入中不即时
+  上抛（blur/submit 时 commit），避免每次按键触发 re-render 重建控件丢焦点；
+  父级 ``value`` prop 变化经 ``use_effect([value])`` 同步到 draft
+- 零命令式 ``.update()`` / ``.value = `` 赋值（全部由状态驱动）
 - 颜色全部使用 ``AppColors`` 语义 token，订阅 ``AppColors.get_observable_state`` 自动重渲染
 """
 
@@ -49,6 +50,7 @@ def _default_fmt(value: float) -> str:
     return f"{value:.10f}".rstrip("0").rstrip(".")
 
 
+@ft.component
 def SliderInput(
     value: float = 0.0,
     min_val: float = 0.0,
@@ -78,13 +80,60 @@ def SliderInput(
         expand: 是否在父容器中扩展填充（``Column(expand=True)``）。
     """
     formatter = fmt or _default_fmt
-    text_val = formatter(value)
+
+    # 编辑中间态：TextField 光标输入中不即时上抛；父级 value 变化由 use_effect 同步。
+    # use_state setter 有浅值比较，相同值不触发 re-render（不打断输入/拖动）。
+    draft, set_draft = ft.use_state(lambda: formatter(value))
+    ft.use_effect(lambda: set_draft(formatter(value)), [value])
 
     if divisions is None:
         divisions = int(round((max_val - min_val) / step)) if step > 0 else None
 
+    def _on_slider_change(e: ft.ControlEvent) -> None:
+        raw = get_control_value(e.control, ft.Slider) if e and e.control else value
+        try:
+            new_val = _snap_to_step(float(raw), min_val, max_val, step)
+        except (TypeError, ValueError):
+            return
+        set_draft(formatter(new_val))
+        if on_change is not None:
+            on_change(new_val)
+
+    def _commit_text(raw: str | None) -> None:
+        """解析 TextField 文本，clamp + snap 后上抛 on_change。
+
+        空输入或非法输入时恢复为当前 ``value`` prop 的格式化值（不调用 on_change）。
+        """
+        text = (raw or "").strip()
+        if not text:
+            set_draft(formatter(value))
+            return
+        try:
+            parsed = float(text)
+        except ValueError:
+            set_draft(formatter(value))
+            return
+        new_val = _snap_to_step(parsed, min_val, max_val, step)
+        set_draft(formatter(new_val))
+        if new_val != value and on_change is not None:
+            on_change(new_val)
+
+    def _on_text_change(e: ft.ControlEvent) -> None:
+        """输入中仅更新草稿（不 commit），避免父级重渲染覆盖编辑中文本。
+
+        commit 延迟到 blur/submit，保证光标输入不被打断、不跳回。
+        """
+        if e and e.control:
+            set_draft(get_control_value(e.control, ft.TextField))
+
+    def _on_text_submit(e: ft.ControlEvent) -> None:
+        _commit_text(get_control_value(e.control, ft.TextField) if e and e.control else None)
+
+    def _on_text_blur(e: ft.ControlEvent) -> None:
+        _commit_text(get_control_value(e.control, ft.TextField) if e and e.control else None)
+
     text_field = ft.TextField(
-        value=text_val,
+        value=draft,
         keyboard_type=ft.KeyboardType.NUMBER,
         dense=True,
         border_color=AppColors.DIVIDER,
@@ -93,6 +142,9 @@ def SliderInput(
         content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
         width=70,
         disabled=disabled,
+        on_change=safe_on_change(_on_text_change),
+        on_submit=safe_on_change(_on_text_submit),
+        on_blur=safe_on_change(_on_text_blur),
     )
 
     slider = ft.Slider(
@@ -104,61 +156,8 @@ def SliderInput(
         active_color=AppColors.PRIMARY,
         expand=True,
         disabled=disabled,
+        on_change=safe_on_change(_on_slider_change),
     )
-
-    def _on_slider_change(e: ft.ControlEvent) -> None:
-        raw = get_control_value(e.control, ft.Slider) if e and e.control else value
-        try:
-            new_val = _snap_to_step(float(raw), min_val, max_val, step)
-        except (TypeError, ValueError):
-            return
-        formatted = formatter(new_val)
-        if text_field.value != formatted:
-            text_field.value = formatted
-            if text_field.page:
-                text_field.update()
-        if on_change is not None:
-            on_change(new_val)
-
-    def _commit_text() -> None:
-        """解析 TextField 文本，clamp + snap 后上抛 on_change。
-
-        空输入或非法输入时恢复为当前 ``value`` prop 的格式化值（不调用 on_change）。
-        """
-        raw = (text_field.value or "").strip()
-        if not raw:
-            text_field.value = formatter(value)
-            if text_field.page:
-                text_field.update()
-            return
-        try:
-            parsed = float(raw)
-        except ValueError:
-            text_field.value = formatter(value)
-            if text_field.page:
-                text_field.update()
-            return
-        new_val = _snap_to_step(parsed, min_val, max_val, step)
-        formatted = formatter(new_val)
-        text_field.value = formatted
-        if slider.value != new_val:
-            slider.value = new_val
-            if slider.page:
-                slider.update()
-        if text_field.page:
-            text_field.update()
-        if new_val != value and on_change is not None:
-            on_change(new_val)
-
-    def _on_text_submit(_e: ft.ControlEvent) -> None:
-        _commit_text()
-
-    def _on_text_blur(_e: ft.ControlEvent) -> None:
-        _commit_text()
-
-    slider.on_change = safe_on_change(_on_slider_change)
-    text_field.on_submit = safe_on_change(_on_text_submit)
-    text_field.on_blur = safe_on_change(_on_text_blur)
 
     column_controls: list = []
     if label is not None:

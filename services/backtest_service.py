@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
+from core.i18n import Message
 from data.cache.cache_manager import CacheManager
 
 if TYPE_CHECKING:
@@ -61,7 +62,7 @@ class BacktestService:
         strategy_key: str,
         config: BacktestConfig,
         params: dict | None = None,
-        progress_callback: Callable[[float, str], None] | None = None,
+        progress_callback: Callable[[float, Message], None] | None = None,
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
@@ -89,7 +90,7 @@ class BacktestService:
         strategy: BaseStrategy,
         config: BacktestConfig,
         params: dict | None = None,
-        progress_callback: Callable[[float, str], None] | None = None,
+        progress_callback: Callable[[float, Message], None] | None = None,
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:

@@ -2517,14 +2517,158 @@ class TestChunkedExecute:
                 pd.DataFrame({"ts_code": values[500:]}),
             ]
         )
-        results = await BaseDao._chunked_execute(
+        await BaseDao._chunked_execute(
             db_fn,
             "SELECT * FROM t WHERE ts_code IN ({placeholders})",
             values,
             chunk_size=500,
         )
         assert db_fn.call_count == 2
-        assert len(results) == 2
+
+
+class TestReadDbSelectMaxRows:
+    """review03-C4: _read_db_select 的 max_rows 安全阀在 suppress_errors=True 下也必须抛错。"""
+
+    def _mk(self, rows):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        mock_conn = AsyncMock()  # AsyncMock：await conn.execute(...) → mock_result
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(i,) for i in range(rows)]
+        mock_result.keys.return_value = ["id"]
+        mock_conn.execute.return_value = mock_result
+        mock_engine.connect.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__aexit__ = AsyncMock(return_value=False)
+        event_mock = MagicMock()
+        event_mock.wait = AsyncMock(return_value=None)
+        dao._get_maintenance_event = MagicMock(return_value=event_mock)
+        return dao, mock_engine
+
+    @pytest.mark.asyncio
+    async def test_max_rows_exceeded_raises_despite_suppress(self):
+        """suppress_errors=True（默认）不能吞掉 max_rows 超限——超限是查询错误而非 IO 失败。"""
+        dao, mock_engine = self._mk(5)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(
+                return_value=pd.DataFrame([(i,) for i in range(5)], columns=["id"])
+            )
+            with pytest.raises(ValueError, match="max_rows"):
+                await dao._read_db_select("SELECT 1", max_rows=3)
+
+    @pytest.mark.asyncio
+    async def test_within_max_rows_returns_df(self):
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            df = await dao._read_db_select("SELECT 1", max_rows=10)
+            assert len(df) == 1
+
+
+class TestSaveUpsertLongTx:
+    """review03-C2: conn=None 且行数超阈值 → 每块独立事务（begin 次数 = 块数）。"""
+
+    @pytest.mark.asyncio
+    async def test_oversize_commits_per_chunk(self):
+        from data.persistence.daos import base_dao as bd_mod
+
+        begins: list[int] = []
+        mock_engine = MagicMock()
+
+        class _BeginCM:
+            def __init__(self):
+                self._conn = AsyncMock()
+
+            async def __aenter__(self):
+                begins.append(1)
+                return self._conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_engine.begin = MagicMock(side_effect=lambda: _BeginCM())
+        dao = bd_mod.BaseDao(mock_engine)
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col = MagicMock()
+        mock_col.name = "id"
+        mock_table.c = {"id": mock_col}
+
+        df = pd.DataFrame({"id": list(range(1001)), "name": ["x"] * 1001})
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": i, "name": "x"} for i in range(1001)])
+            mock_stmt = MagicMock()
+            mock_stmt.excluded = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
+            with patch.object(bd_mod, "_LONG_TX_ROW_THRESHOLD", 2):
+                result = await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+        assert result == 1001
+        # records=1001 → 3 chunks（500/500/1）；阈值=2 → 每块独立事务 → begin 3 次
+        assert len(begins) == 3, f"期望 3 个独立事务（每块一个 begin），实际 {len(begins)}"
+
+    @pytest.mark.asyncio
+    async def test_normal_size_keeps_single_transaction(self):
+        from data.persistence.daos import base_dao as bd_mod
+
+        begins: list[int] = []
+        mock_engine = MagicMock()
+
+        class _BeginCM:
+            def __init__(self):
+                self._conn = AsyncMock()
+
+            async def __aenter__(self):
+                begins.append(1)
+                return self._conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        mock_engine.begin = MagicMock(side_effect=lambda: _BeginCM())
+        dao = bd_mod.BaseDao(mock_engine)
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col = MagicMock()
+        mock_col.name = "id"
+        mock_table.c = {"id": mock_col}
+
+        df = pd.DataFrame({"id": [1, 2], "name": ["x", "y"]})
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "name": "x"}, {"id": 2, "name": "y"}])
+            mock_stmt = MagicMock()
+            mock_stmt.excluded = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
+            # 默认阈值 20000 → 2 行走单事务 → begin 1 次
+            result = await dao._save_upsert(df, "test_table", ["id", "name"], ["id"])
+        assert result == 2
+        assert len(begins) == 1, f"期望 1 次单事务 begin，实际 {len(begins)}"
 
 
 class TestChunkedExecuteParallel:

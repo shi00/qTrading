@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
+from utils.singleton_registry import mark_graceful_shutdown_completed
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,9 @@ class ShutdownCoordinator:
             self._cleanup_success = len(critical_failures) == 0
             if self._cleanup_success:
                 logger.info("[Shutdown] ========== Shutdown Sequence Complete ==========")
+                # B10: 仅成功路径标记。禁止放 finally——超时/异常/外部取消路径也执行 finally，
+                # 会把非成功关机错误标记为"优雅完成"，导致 atexit 兜底被短路、资源清理不再执行。
+                mark_graceful_shutdown_completed()
             else:
                 failed_names = ", ".join(r.name for r in critical_failures)
                 logger.error("[Shutdown] Shutdown completed with CRITICAL step failures: %s", failed_names)

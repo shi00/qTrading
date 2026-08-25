@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 _registry: list[type[object]] = []
 _lock = threading.Lock()
 _atexit_fired = False
+_graceful_shutdown_completed = False
+
+
+def mark_graceful_shutdown_completed() -> None:
+    """由 ShutdownCoordinator 正常完成关机后调用，标记优雅停机已完成。
+
+    B10: 显式表达 atexit 兜底与 ShutdownCoordinator async 路径的主从关系——
+    正常关机走 ShutdownCoordinator（await 资源清理），atexit 仅作异常退出兜底。
+    """
+    global _graceful_shutdown_completed
+    _graceful_shutdown_completed = True
+
+
+def is_graceful_shutdown_completed() -> bool:
+    """查询优雅停机是否已完成。atexit 兜底据此短路，避免重复清理。"""
+    return _graceful_shutdown_completed
 
 
 def _atexit_cleanup_all() -> None:
@@ -36,6 +52,10 @@ def _atexit_cleanup_all() -> None:
     if _atexit_fired:
         return
     _atexit_fired = True
+
+    # B10: 正常关机（ShutdownCoordinator 成功完成）后 atexit 兜底无需重复执行。
+    if is_graceful_shutdown_completed():
+        return
 
     with _lock:
         for cls in reversed(list(_registry)):
@@ -74,10 +94,12 @@ def register_singleton[TClass: type](cls: TClass) -> TClass:
 
 def reset_all_singletons() -> None:
     """Reset all registered singletons. Intended for test teardown."""
-    # R7: 复位模块级 atexit 标志（xdist 下其他用例置位后，依赖 _atexit_fired
-    # 短路的后续测试如 TaskManager._atexit_cleanup 会因跨测试泄漏失败）。
-    global _atexit_fired
+    # R7: 复位模块级 atexit 状态，避免跨测试泄漏。真实执行 ShutdownCoordinator
+    # 成功路径的测试（如 test_concurrency_audit）会置位 _graceful_shutdown_completed，
+    # 不复位会导致后续依赖该标志短路的测试（如 TaskManager._atexit_cleanup）失败。
+    global _atexit_fired, _graceful_shutdown_completed
     _atexit_fired = False
+    _graceful_shutdown_completed = False
     with _lock:
         for cls in list(_registry):
             if hasattr(cls, "_reset_singleton"):

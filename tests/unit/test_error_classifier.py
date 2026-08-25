@@ -8,7 +8,13 @@ import threading
 
 import pytest
 
-from utils.error_classifier import classify_error, classify_severity, get_error_message
+from core.i18n import Message
+from utils.error_classifier import (
+    classify_error,
+    classify_severity,
+    get_error_message,
+    get_error_message_key,
+)
 from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
@@ -431,6 +437,36 @@ class TestGetErrorMessage:
         with patch("core.i18n.I18n.get", return_value="未知错误") as mock_get:
             get_error_message({"code": "test"})
             mock_get.assert_called_once_with("common_err_unknown")
+
+
+class TestGetErrorMessageKey:
+    """D5: VM 层经 get_error_message_key 产出 Message(key, params)，不感知 locale。"""
+
+    def test_message_key_and_empty_params(self):
+        result = get_error_message_key({"code": "test", "message_key": "some_key"})
+        assert isinstance(result, Message)
+        assert result.key == "some_key"
+        assert result.params == {}
+
+    def test_passes_format_args(self):
+        result = get_error_message_key(
+            {
+                "code": "format",
+                "message_key": "db_err_format",
+                "format_args": {"error": "bad"},
+            }
+        )
+        assert result.key == "db_err_format"
+        assert result.params == {"error": "bad"}
+
+    def test_no_format_args(self):
+        result = get_error_message_key({"code": "test", "message_key": "some_key"})
+        assert result.params == {}
+
+    def test_default_key_when_missing(self):
+        result = get_error_message_key({"code": "test"})
+        assert result.key == "common_err_unknown"
+        assert result.params == {}
 
 
 class TestClassifySeverityAdditional:

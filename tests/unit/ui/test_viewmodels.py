@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -278,6 +278,35 @@ class TestHomeViewModelLoadNextPage:
         assert len(home_vm.state.news_rows) == 21
 
 
+class TestHomeViewModelFetchNewsBatch:
+    """B11: _fetch_news_batch 经 _ensure_processor 获取 processor (R16) 的真实路径."""
+
+    @pytest.mark.asyncio
+    async def test_success_fetches_via_processor_cache(self, home_vm, mock_processor):
+        """成功路径: _ensure_processor 返回实例后调 processor.cache.get_market_news."""
+        home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
+        mock_processor.cache.get_market_news = AsyncMock(return_value=pd.DataFrame({"c": ["x"]}))
+        batch = await home_vm._fetch_news_batch(1)
+        mock_processor.cache.get_market_news.assert_awaited_once_with(limit=home_vm.PAGE_SIZE, offset=20)
+        assert batch is not None
+
+    @pytest.mark.asyncio
+    async def test_error_returns_none(self, home_vm, mock_processor):
+        """异常路径: cache 抛异常 → 记录日志并返回 None (不吞没 CancelledError)."""
+        home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
+        mock_processor.cache.get_market_news = AsyncMock(side_effect=RuntimeError("boom"))
+        batch = await home_vm._fetch_news_batch(0)
+        assert batch is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self, home_vm, mock_processor):
+        """R2: CancelledError 必须传播, 不被 except Exception 吞没."""
+        home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
+        mock_processor.cache.get_market_news = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await home_vm._fetch_news_batch(0)
+
+
 class TestHomeViewModelClearState:
     def test_clear_state_resets_all(self, home_vm):
         from ui.viewmodels.home_view_model import MarketIndexRow, NewsRow
@@ -293,6 +322,47 @@ class TestHomeViewModelClearState:
         assert home_vm.state.news_page == 0
         assert home_vm.state.news_rows == ()
         assert home_vm.state.market_indices == ()
+
+
+class TestHomeViewModelProcessorLazy:
+    """B11: _ensure_processor 懒构造（IO 线程池 offload, R16）。"""
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_lazy_constructs(self):
+        """processor 为 None 时首次调用经 IO 线程池构造 DataProcessor（双检+loop-local 锁）。"""
+        with (
+            patch("ui.viewmodels.home_view_model.DataProcessor") as cls,
+            patch("ui.viewmodels.home_view_model.ThreadPoolManager") as mock_tp,
+        ):
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(return_value=mock_instance)
+            mock_tp.return_value = tp_instance
+
+            vm = HomeViewModel()
+            assert vm.processor is None
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        assert vm.processor is mock_instance
+        tp_instance.run_async.assert_awaited_once_with(ANY, cls)
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_returns_existing_instance(self):
+        """已构造后再次调用直接返回现有实例，不重复经线程池构造（双检第二层）。"""
+        with patch("ui.viewmodels.home_view_model.DataProcessor") as cls:
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+
+            vm = HomeViewModel()
+            vm.processor = mock_instance  # 模拟已构造（含测试注入）
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        cls.assert_not_called()
 
 
 # ============================================================================
@@ -335,7 +405,60 @@ def mock_tm():
 
 @pytest.fixture
 def screener_vm(mock_dp, mock_sm, mock_rm, mock_tm):
-    return ScreenerViewModel()
+    vm = ScreenerViewModel()
+    # B11 懒构造: 构造期 data_processor 为 None, 此处显式注入 mock_dp 模拟 DI,
+    # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
+    vm.data_processor = mock_dp
+    return vm
+
+
+class TestScreenerViewModelProcessorLazy:
+    """B11: _ensure_processor 懒构造（IO 线程池 offload, R16）。"""
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_lazy_constructs(self):
+        """data_processor 为 None 时首次调用经 IO 线程池构造 DataProcessor（双检+loop-local 锁）。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor") as cls,
+            patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tp,
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch("ui.viewmodels.screener_view_model.TaskManager"),
+        ):
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(return_value=mock_instance)
+            mock_tp.return_value = tp_instance
+
+            vm = ScreenerViewModel()
+            assert vm.data_processor is None
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        assert vm.data_processor is mock_instance
+        tp_instance.run_async.assert_awaited_once_with(ANY, cls)
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_returns_existing_instance(self):
+        """已构造后再次调用直接返回现有实例，不重复经线程池构造（双检第二层）。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor") as cls,
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch("ui.viewmodels.screener_view_model.TaskManager"),
+        ):
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+
+            vm = ScreenerViewModel()
+            vm.data_processor = mock_instance  # 模拟已构造（含测试注入）
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        cls.assert_not_called()
 
 
 class TestScreenerViewModelDispose:

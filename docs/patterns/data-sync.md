@@ -52,3 +52,11 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - `SyncContext.cancel_event` 作为依赖注入容器传递到 syncer，syncer 在分块循环中检查 `cancel_event.is_set()` 主动退出。
 - syncer 主动退出时必须 `raise asyncio.CancelledError`（或让其向上传播），由 `TaskManager` 统一处理任务状态转换。
 - `ThreadPoolManager.run_async()` 包装的同步阻塞段也需响应取消（通过 `cancel_event` 协作式取消，非强制 kill）。
+
+### 数据库连接生命周期（review03-C13 契约）
+
+**断连后必须显式 `CacheManager.init_db()`**：若 PostgreSQL 进程整体不可用（内置 PG 崩溃、外部 PG 重启），连接池的 `pool_pre_ping=True` 只能处理"连接失效"（池内单个连接被服务端关闭），**无法**处理"数据库进程不可用"。恢复后必须由调用方显式调用 `CacheManager.init_db()` 重建引擎与连接池。
+
+- **不实现自动重连**：自动重连会引入重连风暴风险，且会掩盖真实故障（PG 崩溃是异常事件，应让用户看到明确错误并触发诊断流程）。
+- **失败表现**：断连期间 DAO 操作抛 `EngineDisposedError`（R5）或连接池超时异常，经 `classify_error` 分类后按严重度记录；不应静默吞没。
+- **UI 提示映射**：连接失败/`EngineDisposedError` 应映射为可操作用户提示（如"数据库连接已断开，点击重新连接"），而非通用错误——该映射属错误反馈路径（报告 05 范围）。

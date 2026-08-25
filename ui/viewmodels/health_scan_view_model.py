@@ -14,8 +14,8 @@
 i18n 状态驱动（CLAUDE.md §3.2）：
 - VM 不调 I18n.get，不感知 locale
 - error_key 为 i18n key，View 渲染时 I18n.get(error_key)
-- status_text 字段值是 data 层 progress_callback 回调透传的已翻译字符串
-  （data/mixins/health_mixin.py 调 I18n.get 后传入），VM 仅透传不解析
+- status_text 字段值是 data 层 progress_callback 回调透传的 Message（key+params），
+  VM 仅透传不解析，View 渲染时 I18n.get(status_text.key, **status_text.params)
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT as HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
 )
 from data.data_processor import DataProcessor
+from core.i18n import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.sanitizers import DataSanitizer
 
@@ -48,15 +49,15 @@ class HealthScanState:
     Attributes:
         scan_state: 扫描状态 ("idle" | "scanning" | "done" | "error")
         progress: 进度 0.0~1.0
-        status_text: data 层 progress_callback 回调透传的已翻译字符串
-            (data/mixins/health_mixin.py 调 I18n.get 后传入；VM 不调 I18n.get)
+        status_text: data 层 progress_callback 回调透传的 Message（key+params）
+            (data/mixins/health_mixin.py 构造 Message 后传入；VM 不调 I18n.get)
         result: 扫描结果字典（scan_state="done" 时非 None）
         error_key: 错误状态 i18n key（View 渲染时 I18n.get(error_key)），非错误时为 None
     """
 
     scan_state: str = "idle"
     progress: float = 0.0
-    status_text: str = ""
+    status_text: Message | str | None = ""
     result: dict[str, Any] | None = None
     error_key: str | None = None
 
@@ -111,7 +112,7 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
 
         self._set_state(scan_state="scanning")
 
-        def on_progress(current: int, total: int, msg: str) -> None:
+        def on_progress(current: int, total: int, msg: Message) -> None:
             """工作线程回调：直接调 _set_state，由 Mixin 自动封送回主 loop。"""
             self._set_state(progress=current / total, status_text=msg)
 

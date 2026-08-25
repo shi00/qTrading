@@ -1387,6 +1387,17 @@ class TestTaskManagerAtexitCleanup:
         TaskManager._atexit_cleanup()
         mock_task.cancel.assert_not_called()
 
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.is_graceful_shutdown_completed", return_value=True)
+    def test_skips_when_graceful_shutdown_completed(self, mock_flag, mock_tp):
+        """B10: 优雅停机已完成时短路，不重复 cancel 活跃任务。"""
+        mgr = TaskManager()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mgr._tasks = {"t1": MagicMock(_asyncio_task=mock_task)}
+        TaskManager._atexit_cleanup()
+        mock_task.cancel.assert_not_called()
+
 
 class TestTaskManagerGetSemaphoreFallback:
     """覆盖 _get_semaphore 在 limit<=0 时回退到 ThreadPoolManager 的分支。"""

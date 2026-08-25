@@ -5,6 +5,7 @@ import datetime
 from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
 import pandas as pd
 
+from core.i18n import Message
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.base import SyncResult, SyncStatus
@@ -106,7 +107,11 @@ class TestHistoricalSyncRun:
         result = await strategy.run(days=5, progress_callback=progress_callback)
         assert result.status == "success"
         assert len(callback_called) > 0
-        assert any("20240614" in msg for msg in callback_called)
+        # D7: progress_callback 透传 Message(key, params) 而非已翻译字符串, 断言 Message 对象
+        assert any(
+            isinstance(msg, Message) and msg.key == "progress_sync_market" and msg.params.get("date") == "20240614"
+            for msg in callback_called
+        )
 
 
 class TestHistoricalSyncDailySnapshot:

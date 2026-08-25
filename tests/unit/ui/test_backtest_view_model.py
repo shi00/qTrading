@@ -247,39 +247,48 @@ class TestBacktestViewModel:
 
     @patch("strategies.all_strategies.StrategyManager")
     def test_get_available_strategies(self, mock_manager):
-        """测试获取可用策略列表。"""
-        mock_manager.return_value.get_all_names.return_value = {"test_strategy": "测试策略"}
+        """D16: VM 返回 (key, name_key) 对, 不产出翻译名。"""
+        mock_strategy = MagicMock()
+        mock_strategy.name_key = "strategy_test_name"
+        mock_manager.return_value.strategies = {"test_strategy": mock_strategy}
 
         vm = BacktestViewModel()
         strategies = vm.get_available_strategies()
 
-        assert "test_strategy" in strategies
-        assert strategies["test_strategy"] == "测试策略"
+        assert ("test_strategy", "strategy_test_name") in strategies
 
     @patch("strategies.all_strategies.StrategyManager")
     def test_get_available_strategies_empty(self, mock_manager):
         """测试获取空策略列表。"""
-        mock_manager.return_value.get_all_names.return_value = {}
+        mock_manager.return_value.strategies = {}
 
         vm = BacktestViewModel()
         strategies = vm.get_available_strategies()
 
-        assert strategies == {}
+        assert strategies == ()
 
     @patch("strategies.all_strategies.StrategyManager")
     def test_get_available_strategies_multiple(self, mock_manager):
-        """测试获取多个策略列表。"""
-        mock_manager.return_value.get_all_names.return_value = {
-            "strategy1": "策略1",
-            "strategy2": "策略2",
+        """D16: 多个策略返回 name_key pairs, 含缺 name_key 回退 key。"""
+        s1 = MagicMock()
+        s1.name_key = "strategy_1_name"
+        s2 = MagicMock()
+        s2.name_key = "strategy_2_name"
+        s3 = MagicMock()
+        del s3.name_key  # 无 name_key → 回退 key
+        mock_manager.return_value.strategies = {
+            "strategy1": s1,
+            "strategy2": s2,
+            "strategy3": s3,
         }
 
         vm = BacktestViewModel()
-        strategies = vm.get_available_strategies()
+        strategies = dict(vm.get_available_strategies())
 
-        assert len(strategies) == 2
-        assert strategies["strategy1"] == "策略1"
-        assert strategies["strategy2"] == "策略2"
+        assert len(strategies) == 3
+        assert strategies["strategy1"] == "strategy_1_name"
+        assert strategies["strategy2"] == "strategy_2_name"
+        assert strategies["strategy3"] == "strategy3"
 
     @pytest.mark.asyncio
     async def test_run_backtest_already_running(self):
@@ -414,7 +423,7 @@ class TestBacktestViewModelRunBacktest:
         async def service_run(**kwargs):
             progress_cb = kwargs.get("progress_callback")
             if progress_cb:
-                progress_cb(0.5, "halfway")
+                progress_cb(0.5, Message("halfway"))
             return MagicMock(duration_ms=500, metrics={"sharpe_ratio": 2.0})
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
@@ -673,13 +682,13 @@ class TestBacktestViewModelRunBacktest:
         """测试任务取消后进度回调不更新状态。"""
         vm = BacktestViewModel()
 
-        captured_progress_cb: Callable[[float, str], None] | None = None
+        captured_progress_cb: Callable[[float, Message], None] | None = None
 
         async def service_run(**kwargs):
             nonlocal captured_progress_cb
             captured_progress_cb = kwargs.get("progress_callback")
             if captured_progress_cb:
-                captured_progress_cb(0.3, "processing")
+                captured_progress_cb(0.3, Message("test_progress"))
             raise asyncio.CancelledError()
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)

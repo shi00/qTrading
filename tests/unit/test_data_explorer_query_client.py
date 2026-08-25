@@ -456,6 +456,34 @@ class TestExecuteSql:
         assert result["success"] is True
         assert isinstance(result["data"], pd.DataFrame)
 
+    def test_statement_timeout_set(self):
+        """C6: execute_sql 必须设置会话级 statement_timeout，防止重查询挂住连接。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["ts_code"]
+        mock_result.fetchmany.return_value = [("000001.SZ",)]
+        executed: list = []
+
+        def _record(sql, *args, **kwargs):
+            executed.append(sql)
+            return mock_result
+
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.side_effect = _record
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT * FROM stock_basic")
+        assert result["success"] is True
+        sql_texts = [str(s) for s in executed]
+        assert any("SET TRANSACTION READ ONLY" in t for t in sql_texts)
+        assert any("SET LOCAL statement_timeout" in t for t in sql_texts)
+        # 用户查询在 SET LOCAL 之后执行（语序校验）
+        assert sql_texts.index([t for t in sql_texts if "SELECT * FROM stock_basic" in t][0]) > sql_texts.index(
+            [t for t in sql_texts if "SET LOCAL statement_timeout" in t][0]
+        )
+
     def test_select_truncated(self):
         dm = _make_dm()
         mock_conn = MagicMock()

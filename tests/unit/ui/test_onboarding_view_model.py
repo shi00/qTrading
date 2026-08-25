@@ -3,7 +3,7 @@
 TDD RED phase: these tests define the expected ViewModel contract.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -131,10 +131,47 @@ class TestOnboardingVMInit:
         assert vm.validation_in_progress is False
 
     def test_data_processor_lazy_init(self, vm):
+        """B11: property 不再同步构造 DataProcessor（避免阻塞 UI 主线程 R16）。
+
+        未触发懒构造时 data_processor 为 None；真实构造走 _ensure_processor()
+        （IO 线程池 offload），见 test_ensure_processor_lazy_constructs。
+        """
         assert vm._data_processor is None
-        dp = vm.data_processor
-        assert dp is not None
-        assert vm._data_processor is not None
+        assert vm.data_processor is None
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_lazy_constructs(self, vm):
+        """B11: _ensure_processor 首次调用经 IO 线程池构造 DataProcessor（双检+loop-local 锁）。"""
+        assert vm._data_processor is None
+        with (
+            patch("ui.viewmodels.onboarding_view_model.DataProcessor") as cls,
+            patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as mock_tp,
+        ):
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(return_value=mock_instance)
+            mock_tp.return_value = tp_instance
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        assert vm._data_processor is mock_instance
+        tp_instance.run_async.assert_awaited_once_with(ANY, cls)
+
+    @pytest.mark.asyncio
+    async def test_ensure_processor_returns_existing_instance(self, vm):
+        """已构造后再次调用直接返回现有实例，不重复经线程池构造（双检第二层）。"""
+        with patch("ui.viewmodels.onboarding_view_model.DataProcessor") as cls:
+            mock_instance = MagicMock()
+            cls.return_value = mock_instance
+
+            vm._data_processor = mock_instance  # 模拟已构造（含 DI 注入）
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        cls.assert_not_called()
 
     def test_constructor_injection(self, mock_data_processor):
         vm = OnboardingViewModel(data_processor=mock_data_processor)

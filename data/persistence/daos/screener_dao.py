@@ -19,126 +19,10 @@ logger = logging.getLogger(__name__)
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
 
-class ScreenerDao(BaseDao):
-    @functools.cached_property
-    def SH_BASE_COLS(self):
-        # SH_BASE_COLS 用于 SELECT 查询，需包含 computed 列（t1_pct, alpha 等），
-        # 直接从 __table__.columns 获取以绕过 get_model_columns 的 computed 过滤。
-        cols = [
-            c.name
-            for c in ScreeningHistory.__table__.columns
-            if c.name not in {"updated_at", "created_at", "params_snapshot"}
-        ]
-        return ", ".join(f"sh.{c}" for c in cols)
-
-    @functools.cached_property
-    def SH_FULL_COLS(self):
-        return f"{self.SH_BASE_COLS}, st.thinking, sh.params_snapshot"
-
-    # --- Screening History ---
-
-    async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
-        # SECURITY: f-string 仅注入 SH_BASE_COLS（代码内常量，来自 ScreeningHistory 模型字段），
-        # 非用户输入，无注入风险。用户输入值（strategy_name, limit）通过 $N 占位符参数化。
-        sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history sh WHERE 1=1"
-        p = []
-        idx = 1
-        if strategy_name:
-            sql += f" AND sh.strategy_name=${idx}"
-            p.append(strategy_name)
-            idx += 1
-        sql += f" ORDER BY sh.trade_date DESC LIMIT ${idx}"
-        p.append(limit)
-        return await self._read_db(sql, p)
-
-    async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
-        effective_limit = limit or 30
-        sql = """
-            SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
-            FROM screening_history
-            WHERE trade_date >= CURRENT_DATE - INTERVAL '180 days'
-            GROUP BY run_id, trade_date, strategy_name
-            ORDER BY trade_date DESC, MIN(created_at) DESC
-            LIMIT $1 OFFSET $2
-        """
-        return await self._read_db(
-            sql,
-            (effective_limit, offset),
-        )
-
-    async def get_history_records(
-        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
-    ):
-        if run_id:
-            # SECURITY: f-string 仅注入 SH_FULL_COLS（代码内常量，来自 ScreeningHistory 模型字段），
-            # 非用户输入，无注入风险。用户输入值（run_id）通过 $1 占位符参数化。
-            sql = (
-                f"SELECT {self.SH_FULL_COLS} FROM screening_history sh"
-                f" LEFT JOIN screening_thinking st ON sh.id = st.history_id"
-                f" WHERE sh.run_id = $1 ORDER BY sh.ai_score DESC"
-            )
-            return await self._read_db(sql, (run_id,))
-
-        # SECURITY: f-string 仅注入 SH_FULL_COLS（代码内常量，来自 ScreeningHistory 模型字段），
-        # 非用户输入，无注入风险。用户输入值（trade_date, strategy_name）通过 $N 占位符参数化。
-        sql = (
-            f"SELECT {self.SH_FULL_COLS} FROM screening_history sh"
-            f" LEFT JOIN screening_thinking st ON sh.id = st.history_id"
-            f" WHERE sh.trade_date = $1"
-        )
-        p = [trade_date]
-        if strategy_name:
-            sql += " AND sh.strategy_name = $2"
-            p.append(strategy_name)
-        sql += " ORDER BY sh.ai_score DESC"
-        return await self._read_db(sql, p)
-
-    async def get_pending_reviews(self):
-        sql = f"""
-            SELECT {self.SH_BASE_COLS} FROM screening_history sh
-            WHERE (sh.review_status IN ($1, $2) OR sh.review_status IS NULL)
-              AND sh.trade_date >= CURRENT_DATE - INTERVAL '90 days'
-            ORDER BY sh.created_at DESC LIMIT 500
-        """
-        df = await self._read_db(sql, (REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
-        if df is None or df.empty:
-            return []
-        return df.to_dict("records")
-
-    async def get_learning_examples(self, limit: int | None = 3):
-        sql_win = f"""
-            SELECT {self.SH_BASE_COLS}
-            FROM screening_history sh
-            WHERE sh.prediction_result='WIN' AND sh.alpha IS NOT NULL
-            ORDER BY sh.alpha DESC, sh.t1_pct DESC
-            LIMIT $1
-        """
-        sql_loss = f"""
-            SELECT {self.SH_BASE_COLS}
-            FROM screening_history sh
-            WHERE sh.prediction_result='LOSS' AND sh.alpha IS NOT NULL
-            ORDER BY sh.alpha ASC, sh.t1_pct ASC
-            LIMIT $1
-        """
-
-        wins = await self._read_db(sql_win, (limit,))
-        losses = await self._read_db(sql_loss, (limit,))
-
-        return wins, losses
-
-    # --- Internal: Resolve latest trade date from DB (Defense in Depth) ---
-    async def _get_latest_closed_trade_date(self) -> str:
-        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
-        if df is not None and not df.empty:
-            val = df["max_td"].iloc[0]
-            if val is not None and not (isinstance(val, (float, Decimal)) and val != val):
-                return str(val)
-        return None  # type: ignore[untyped]
-
-    # --- Screening Data Fetch for Logic ---
-    def _build_screening_sql(self, *, require_close: bool = True) -> str:
-        close_condition = "q.close IS NOT NULL\n                 AND " if require_close else ""
-        return f"""
+# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__ 为唯一可变点，
+# 由 _build_screening_sql/_build_screening_sql_range 按 require_close 布尔
+# 替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
+_SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
                      COALESCE(m.sw_l2_name, b.industry) AS industry,
@@ -193,32 +77,13 @@ class ScreenerDao(BaseDao):
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
-               WHERE {close_condition}b.list_status = 'L'
+               WHERE __CLOSE_COND__b.list_status = 'L'
                  AND b.list_date <= $4
                  AND (b.delist_date IS NULL OR b.delist_date > $5)
               """
 
-    async def get_screening_data(self, trade_date: str | None = None):
-        if not trade_date:
-            trade_date = await self._get_latest_closed_trade_date()
-        if not trade_date:
-            logger.warning("[ScreenerDao] No trade_date available for screening data query")
-            return pd.DataFrame()
-        sql = self._build_screening_sql(require_close=True)
-        return await self._read_db(sql, (trade_date,) * 6)
 
-    async def get_fundamental_screening_data(self, trade_date: str | None = None):
-        if not trade_date:
-            trade_date = await self._get_latest_closed_trade_date()
-        if not trade_date:
-            logger.warning("[ScreenerDao] No trade_date available for fundamental screening data query")
-            return pd.DataFrame()
-        sql = self._build_screening_sql(require_close=False)
-        return await self._read_db(sql, (trade_date,) * 6)
-
-    def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
-        close_condition = "q.close IS NOT NULL AND " if require_close else ""
-        return f"""
+_SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
                      COALESCE(m.sw_l2_name, b.industry) AS industry,
@@ -272,10 +137,161 @@ class ScreenerDao(BaseDao):
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
-               WHERE {close_condition}b.list_status = 'L'
+               WHERE __CLOSE_COND__b.list_status = 'L'
                  AND b.list_date <= cal.cal_date
                  AND (b.delist_date IS NULL OR b.delist_date > cal.cal_date)
               """
+
+
+class ScreenerDao(BaseDao):
+    @functools.cached_property
+    def SH_BASE_COLS(self):
+        # SH_BASE_COLS/SH_FULL_COLS 为历史遗留的列名常量，保留供外部引用与
+        # integration 测试断言（review03-C7：消除 f-string 拼 SQL 模式）。
+        # 简单查询已迁移到 SQLAlchemy Core（_read_db_select），见 _base_cols()。
+        cols = [
+            c.name
+            for c in ScreeningHistory.__table__.columns
+            if c.name not in {"updated_at", "created_at", "params_snapshot"}
+        ]
+        return ", ".join("sh." + c for c in cols)
+
+    @functools.cached_property
+    def SH_FULL_COLS(self):
+        return self.SH_BASE_COLS + ", st.thinking, sh.params_snapshot"
+
+    @staticmethod
+    def _base_cols() -> list:
+        """ScreeningHistory 基础列（排除审计列），供 SQLAlchemy Core SELECT 使用。"""
+        return [
+            c
+            for c in ScreeningHistory.__table__.columns
+            if c.name not in {"updated_at", "created_at", "params_snapshot"}
+        ]
+
+    # --- Screening History ---
+
+    async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
+        t = ScreeningHistory.__table__
+        stmt = sa.select(*self._base_cols()).select_from(t)
+        if strategy_name:
+            stmt = stmt.where(t.c.strategy_name == strategy_name)
+        stmt = stmt.order_by(t.c.trade_date.desc()).limit(limit)
+        return await self._read_db_select(stmt)
+
+    async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
+        effective_limit = limit or 30
+        sql = """
+            SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
+            FROM screening_history
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '180 days'
+            GROUP BY run_id, trade_date, strategy_name
+            ORDER BY trade_date DESC, MIN(created_at) DESC
+            LIMIT $1 OFFSET $2
+        """
+        return await self._read_db(
+            sql,
+            (effective_limit, offset),
+        )
+
+    async def get_history_records(
+        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
+    ):
+        sh = ScreeningHistory.__table__
+        st = Base.metadata.tables["screening_thinking"]
+        stmt = (
+            sa.select(*self._base_cols(), st.c.thinking, sh.c.params_snapshot)
+            .select_from(sh)
+            .join(st, sh.c.id == st.c.history_id, isouter=True)
+        )
+        if run_id:
+            stmt = stmt.where(sh.c.run_id == run_id)
+        else:
+            stmt = stmt.where(sh.c.trade_date == trade_date)
+            if strategy_name:
+                stmt = stmt.where(sh.c.strategy_name == strategy_name)
+        stmt = stmt.order_by(sh.c.ai_score.desc())
+        return await self._read_db_select(stmt)
+
+    async def get_pending_reviews(self):
+        t = ScreeningHistory.__table__
+        stmt = (
+            sa.select(*self._base_cols())
+            .select_from(t)
+            .where(
+                sa.or_(
+                    t.c.review_status.in_([REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE]),
+                    t.c.review_status.is_(None),
+                ),
+                t.c.trade_date >= sa.func.current_date() - sa.text("INTERVAL '90 days'"),
+            )
+            .order_by(t.c.created_at.desc())
+            .limit(500)
+        )
+        df = await self._read_db_select(stmt)
+        if df is None or df.empty:
+            return []
+        return df.to_dict("records")
+
+    async def get_learning_examples(self, limit: int | None = 3):
+        t = ScreeningHistory.__table__
+        base = self._base_cols()
+        wins = await self._read_db_select(
+            sa.select(*base)
+            .select_from(t)
+            .where(t.c.prediction_result == "WIN", t.c.alpha.isnot(None))
+            .order_by(t.c.alpha.desc(), t.c.t1_pct.desc())
+            .limit(limit)
+        )
+        losses = await self._read_db_select(
+            sa.select(*base)
+            .select_from(t)
+            .where(t.c.prediction_result == "LOSS", t.c.alpha.isnot(None))
+            .order_by(t.c.alpha.asc(), t.c.t1_pct.asc())
+            .limit(limit)
+        )
+        return wins, losses
+
+    # --- Internal: Resolve latest trade date from DB (Defense in Depth) ---
+    async def _get_latest_closed_trade_date(self) -> str:
+        df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
+        if df is not None and not df.empty:
+            val = df["max_td"].iloc[0]
+            if val is not None and not (isinstance(val, (float, Decimal)) and val != val):
+                return str(val)
+        return None  # type: ignore[untyped]
+
+    # --- Screening Data Fetch for Logic ---
+    def _build_screening_sql(self, *, require_close: bool = True) -> str:
+        # review03-C7: SQL 模板为模块级静态常量，__CLOSE_COND__ 仅由 require_close
+        # 布尔决定两种受控片段（空串 / "q.close IS NOT NULL...\nAND "），无用户输入，
+        # 避免 f-string 拼 SQL 模式（列名亦来自 ORM 元数据，非拼接点）。
+        close_clause = "q.close IS NOT NULL\n                 AND " if require_close else ""
+        return _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
+
+    async def get_screening_data(self, trade_date: str | None = None):
+        if not trade_date:
+            trade_date = await self._get_latest_closed_trade_date()
+        if not trade_date:
+            logger.warning("[ScreenerDao] No trade_date available for screening data query")
+            return pd.DataFrame()
+        sql = self._build_screening_sql(require_close=True)
+        return await self._read_db(sql, (trade_date,) * 6)
+
+    async def get_fundamental_screening_data(self, trade_date: str | None = None):
+        if not trade_date:
+            trade_date = await self._get_latest_closed_trade_date()
+        if not trade_date:
+            logger.warning("[ScreenerDao] No trade_date available for fundamental screening data query")
+            return pd.DataFrame()
+        sql = self._build_screening_sql(require_close=False)
+        return await self._read_db(sql, (trade_date,) * 6)
+
+    def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
+        # review03-C7: 同 _build_screening_sql，__CLOSE_COND__ 仅由 require_close
+        # 布尔决定两种受控片段，避免 f-string 拼 SQL 模式。
+        close_clause = "q.close IS NOT NULL AND " if require_close else ""
+        return _SCREENING_SQL_RANGE_TEMPLATE.replace("__CLOSE_COND__", close_clause)
 
     async def get_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=True)

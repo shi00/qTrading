@@ -403,6 +403,10 @@ def PaginatedTable(
 ) -> ft.Column:
     """声明式分页表格 (方案 D-v3: 水平滚动 + sticky header + 列宽拖拽 + hover 局部化).
 
+    本组件不做窗口化 (无虚拟滚动), 依赖调用方分页, 单页 ≤100 行:
+    调用方应先分页、仅传当页 rows, 由本组件 Column 全量渲染 (方案 D-v2 保留,
+    确保 E2E 语义节点稳定)。类名保留 "PaginatedTable", 以本文档为准确认行为。
+
     Args:
         rows: 当页全量行数据 (dict 列表); Column 直接渲染全部行.
         columns: 列定义 (id/label/width)。

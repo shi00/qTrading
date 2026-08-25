@@ -97,6 +97,13 @@ def _patch_run_async(exit_code: int, stdout: str, stderr: str = ""):
     )
 
 
+class _DirectTP:
+    """ThreadPoolManager 替身：run_async 直接同步执行 func（用于测试闭包内异常路径）。"""
+
+    async def run_async(self, task_type, func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+
 class _TPMock:
     """ThreadPoolManager 替身：run_async 直接返回预设元组。"""
 
@@ -478,6 +485,29 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         assert "--target-data-dir" in argv
         target_idx = argv.index("--target-data-dir") + 1
         assert argv[target_idx] == str(target)
+
+
+class TestRunSidecarTimeout:
+    """review03-C19: subprocess.TimeoutExpired 必须包装为 EmbeddedPgMaintenanceError（可操作提示）。"""
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_timeout_wrapped_as_business_error(self, maintenance_service) -> None:
+        import subprocess
+
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="sidecar", timeout=3600),
+            ),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="超时"):
+                await maintenance_service._run_sidecar(["sidecar", "doctor"])
 
 
 # =============================================================================

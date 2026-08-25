@@ -15,7 +15,7 @@ from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS,
 from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
-from core.i18n import I18n
+from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
@@ -306,10 +306,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                 progress_callback(
                     total_stocks,
                     total_stocks,
-                    I18n.get("progress_sync_fundamentals").format(
-                        current=total_stocks,
-                        total=total_stocks,
-                        stock=I18n.get("status_ready"),
+                    Message(
+                        "progress_sync_fundamentals",
+                        {"current": total_stocks, "total": total_stocks, "stock_key": "status_ready"},
                     ),
                 )
             return
@@ -466,10 +465,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                     progress_callback(
                         pct,
                         100,
-                        I18n.get("progress_sync_fundamentals").format(
-                            current=completed_count,
-                            total=total_stocks,
-                            stock=ts_code,
+                        Message(
+                            "progress_sync_fundamentals",
+                            {"current": completed_count, "total": total_stocks, "stock": ts_code},
                         ),
                     )
 
@@ -751,7 +749,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
 
             if progress_callback:
-                progress_callback(0, 0, f"{I18n.get('progress_sync_done')} {day_str}")
+                progress_callback(0, 0, Message("progress_sync_done", {"day": day_str}))
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date
@@ -909,16 +907,15 @@ class FinancialSyncStrategy(ISyncStrategy):
                 progress_callback(
                     i + 1,
                     total,
-                    I18n.get("progress_sync_fundamentals").format(
-                        current=i + 1,
-                        total=total,
-                        stock=f"batch:{d}",
+                    Message(
+                        "progress_sync_fundamentals",
+                        {"current": i + 1, "total": total, "stock": f"batch:{d}"},
                     ),
                 )
 
         # Final completion report
         if progress_callback:
-            progress_callback(total, total, I18n.get("status_ready"))
+            progress_callback(total, total, Message("status_ready"))
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_comprehensive_financial_data(
@@ -1211,7 +1208,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         progress_callback(
                             period_idx * len(ts_codes) + i,
                             len(periods) * len(ts_codes),
-                            I18n.get("status_repairing", period=period, code=ts_code),
+                            Message("status_repairing", {"period": period, "code": ts_code}),
                         )
                 except EngineDisposedError:
                     raise

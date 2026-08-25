@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
@@ -99,7 +100,9 @@ class DataSourceState:
 
     # --- Progress ---
     progress: float = 0.0
-    progress_message: Message | None = None
+    # str 兜底: initialize_system 的 report_step 路径 (E1 暂留 I18n.get) 仍可产出已翻译字符串;
+    # D7 改造后其余路径均为 Message, View 渲染对 str 直显兜底.
+    progress_message: Message | str | None = None
 
     # --- 业务数据 (L771 合规: frozen dataclass / Message, 直接暴露) ---
     # health_result: 最近一次健康检查结果 (None 表示未检查)
@@ -133,7 +136,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         # 显式注入仅为统一风格、便于测试替换。
         # Task 7.2: AIService 改为惰性构造 (避免 DataSourceTab 打开即触发 litellm import
         # 阻塞主线程); 仅在 execute_ai_concept_rebuild 实际用到时才构造。
-        self._processor = processor or DataProcessor()
+        # B11: DataProcessor 懒构造——DataProcessor.__init__ 同步初始化 TushareClient
+        # （40+ API rate_limiter，耗时 34s+），构造期同步会阻塞 Flet 主线程 (R16)。
+        # 首次实际使用经 _ensure_processor() 在 IO 线程池异步构造；显式 DI 注入保留
+        # （测试注入 mock 后 _ensure_processor 直接返回已注入实例）。
+        self._processor = processor
         self._cache = cache or CacheManager()
         self._ai_service = ai_service
         self._tm = TaskManager()
@@ -152,6 +159,20 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         # _tm_callback 持有订阅 callback 引用, dispose 时用于 unsubscribe
         self._tm_callback: Callable[[list[AppTask]], None] | None = None
         self._subscribe_to_task_manager()
+
+    async def _ensure_processor(self) -> DataProcessor:
+        """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。
+
+        双检 + loop-local 锁防并发双检竞态 (R11)：check_health / init_sync 等异步
+        方法可能交错触发构造。key 带 VM 前缀避免跨实例共享同一锁。
+        显式注入（构造参数 processor）后本方法直接返回已注入实例。
+        """
+        if self._processor is None:
+            lock = get_loop_local("data_source_vm_processor_lock", asyncio.Lock)
+            async with lock:
+                if self._processor is None:
+                    self._processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
+        return self._processor
 
     def _subscribe_to_task_manager(self) -> None:
         """订阅 TaskManager 任务状态更新 (内部行为, View 不感知).
@@ -333,7 +354,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                 if not self._tm.update_progress(task_id, 0.2, Message("task_progress_checking")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
-                result = await self._processor.check_data_health()
+                dp = await self._ensure_processor()
+                result = await dp.check_data_health()
                 if not self._tm.update_progress(task_id, 0.9, Message("task_progress_analyzing")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
@@ -374,17 +396,17 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         async def _daily_logic(task_id: str, **kwargs):
             def _progress(c, t, msg):
                 # P1-5: 同步进度上报到 VM state (View ProgressBar 渲染);
-                # NOTE(lazy) 范式与 _combined_progress 一致: msg 是 service 层已翻译字符串,
-                # 包 Message(key) 透传, I18n.get 未命中时原样返回 key.
+                # D7: msg 已由 data 层 Message 化, 直接透传 (VM 不感知 locale).
                 progress_val = c / t if t else 0
-                self._set_state(progress=progress_val, progress_message=Message(str(msg)))
+                self._set_state(progress=progress_val, progress_message=msg)
                 # T8 fix: 若 update_progress 返回 False（任务已取消/不再 RUNNING），抛 CancelledError 早退
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                 if not self._tm.update_progress(task_id, progress_val, msg):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
             try:
-                result = await self._processor.run_daily_update(progress_callback=_progress)
+                dp = await self._ensure_processor()
+                result = await dp.run_daily_update(progress_callback=_progress)
                 # Task 8.2: 同步结果可见化 — 消费 SyncResult.skipped 与 skipped_permission 汇总
                 if result is not None and getattr(result, "skipped", 0) > 0:
                     self._emit_snack(
@@ -459,7 +481,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
                 # Task 7.2: _get_ai_service() 惰性构造, 避免 __init__ 触发 litellm import
-                await self._processor.run_ai_concept_tagging(
+                dp = await self._ensure_processor()
+                await dp.run_ai_concept_tagging(
                     task_id=task_id,
                     cancel_event=cancel_event,
                     manual_trigger=True,
@@ -553,22 +576,21 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 self._set_state(progress=0, progress_message=Message("wizard_status_init"))
 
                 def _combined_progress(c, t, m):
-                    # NOTE(lazy): m 是 service 层传入的字符串,作为 key 透传. ceiling: service 层产出 Message. upgrade: service 层重构.
-                    self._set_state(progress=c / t if t > 0 else 0, progress_message=Message(m))
+                    # D7: data 层 progress 已 Message 化, 直接透传 (注: initialize_system 的
+                    # report_step 路径 E1 暂留 str, View 渲染对 str 直显兜底);
+                    # current/total 由 ProgressBar 可视化, 不再拼 "[c/t] " 文本前缀.
+                    self._set_state(progress=c / t if t > 0 else 0, progress_message=m)
                     # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
                     # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                    if not self._tm.update_progress(
-                        task_id,
-                        c / t if t > 0 else 0,
-                        f"[{c:.2f}/{t}] {m}",
-                    ):
+                    if not self._tm.update_progress(task_id, c / t if t > 0 else 0, m):
                         raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
-                report = await self._processor.initialize_system(
+                dp = await self._ensure_processor()
+                report = await dp.initialize_system(
                     progress_callback=_combined_progress,
                 )
 
-                if self._processor.is_cancelled():
+                if dp.is_cancelled():
                     raise asyncio.CancelledError("task cancelled by user (is_cancelled returned True)")
 
                 if report is None:
@@ -614,7 +636,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     async def cancel_init_sync(self):
         """Cancel running init sync."""
-        await self._processor.request_cancel()
+        # 懒构造下 DataProcessor 可能尚未构造（R16）；未构造时无需 request_cancel
+        if self._processor is not None:
+            await self._processor.request_cancel()
         task_id = self._active_task_ids.get("system_init_sync")
         if task_id:
             self._tm.cancel_task(task_id)
@@ -726,11 +750,14 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     async def get_health_report(self) -> dict:
         """Get health report data for dialog display."""
-        return await self._processor.check_data_health()
+        dp = await self._ensure_processor()
+        return await dp.check_data_health()
 
-    def get_data_processor(self) -> DataProcessor:
+    def get_data_processor(self) -> DataProcessor | None:
         """暴露 DataProcessor 实例 (Task 5.1: 从 View 迁入, 内聚到 VM).
 
+        B11 懒构造后可能为 None（未实际使用过）；View 侧（HealthScanDialog）已有
+        None 保护（HealthScanViewModel L108 错误态处理），不会崩溃。
         View 通过本方法获取处理器实例并传递给 HealthScanDialog 组件,
         不再直接 import ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
         """
