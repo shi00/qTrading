@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import akshare as ak
 import pandas as pd
-import requests
+import httpx
 from cachetools import TTLCache
 
 from utils.sanitizers import DataSanitizer
@@ -264,7 +264,7 @@ class NewsFetcher:
         except TimeoutError as e:
             _log_with_severity(e, "[News] Timeout fetching news for %s", ts_code)
             # 监控告警：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，
-            # 底层 ThreadPoolManager IO 线程中的 _fetch（含 akshare/requests.get）
+            # 底层 ThreadPoolManager IO 线程中的 _fetch（含 akshare 同步调用）
             # 无法被强制取消，会持续占用 IO 池槽位直至 _fetch 自然返回。
             # 多次超时累积可能耗尽 IO 线程池 max_workers，需关注线程池占用。
             logger.warning(
@@ -315,20 +315,22 @@ class NewsFetcher:
                 logger.info("[NewsFetcher] CLS circuit breaker is HALF-OPEN. Attempting probe request.")
 
         # 2. 直连请求函数 (移出全局锁，避免 akshare 挂起时死锁)
-        def _fetch_cls():
+        async def _fetch_cls():
             url = "https://www.cls.cn/api/cache?name=telegraph"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "Referer": "https://www.cls.cn/telegraph",
             }
-            with requests.get(url, headers=headers, timeout=5.0) as resp:
+            # B16: requests → httpx.AsyncClient（async-native IO，可被外层 wait_for 取消）
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
 
         try:
-            # 使用全局 IO 线程池异步执行请求，防止阻塞 asyncio 事件循环
-            data = await ThreadPoolManager().run_async(TaskType.IO, _fetch_cls)
+            # B16: httpx async-native，直接 await（无需线程池提交）
+            data = await _fetch_cls()
 
             # 请求成功，闭合熔断器并清空计数（F5-P1: 锁内重置，锁外记日志）
             with _CLS_STATE_LOCK:
@@ -467,7 +469,7 @@ class NewsFetcher:
         MAX_RETRIES = 3
         RETRY_DELAY = 1.0
 
-        def _fetch():
+        async def _fetch():
             # Direct call to Sina US API
             # SEC-006: Use HTTPS to prevent MITM tampering on the wire.
             url = "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
@@ -485,8 +487,10 @@ class NewsFetcher:
 
             from utils.proxy_manager import ProxyManager
 
-            proxy_config = ProxyManager.get_requests_proxy_config()
-            with requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {})) as resp:  # type: ignore[arg-type]
+            # B16: httpx 使用 get_httpx_proxy_config（proxy 映射格式兼容）
+            proxy_cfg = ProxyManager.get_httpx_proxy_config()
+            async with httpx.AsyncClient(timeout=10, **proxy_cfg) as client:
+                resp = await client.get(url, params=params, headers=headers)
                 content = resp.text
 
                 start = content.find("(")
@@ -550,7 +554,7 @@ class NewsFetcher:
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
-                data_list = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
+                data_list = await _fetch()  # B16: httpx async-native，直接 await
                 if data_list is not None:
                     break
             except Exception as e:

@@ -20,6 +20,21 @@ from data.external.news_fetcher import (
 from utils.time_utils import CST_TZ
 import requests
 
+
+def _wire_http_get(mock_client, mock_response):
+    """B16: requests.get -> httpx.AsyncClient mock 适配。
+
+    mock_client 是 patch("httpx.AsyncClient") 的类 mock；AsyncClient(...) 构造返回
+    mock_client.return_value（实例）。async with 需要实例的 __aenter__ 返回自身，
+    get 为 AsyncMock 返回 mock_response。
+    """
+    instance = mock_client.return_value
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.get = AsyncMock(return_value=mock_response)
+    return mock_response
+
+
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
@@ -283,7 +298,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_success_with_data(self, mock_get, mock_tpm):
         """成功获取数据，ctime 秒级时间戳正确转换。"""
         mock_response = MagicMock()
@@ -298,7 +313,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -312,7 +327,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_success_with_millisecond_ctime(self, mock_get, mock_tpm):
         """ctime 毫秒级时间戳自动检测并除以 1000。"""
         mock_response = MagicMock()
@@ -326,7 +341,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -338,7 +353,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_success_with_missing_ctime(self, mock_get, mock_tpm):
         """ctime 缺失时回退到 get_now()。"""
         mock_response = MagicMock()
@@ -352,7 +367,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -364,7 +379,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_success_with_invalid_ctime(self, mock_get, mock_tpm):
         """ctime 非法值时回退到 get_now()。"""
         mock_response = MagicMock()
@@ -378,7 +393,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -389,7 +404,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_title_fallback_to_content(self, mock_get, mock_tpm):
         """title 缺失时回退到 content。"""
         mock_response = MagicMock()
@@ -403,7 +418,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -414,7 +429,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_empty_title_and_content_returns_no_title_code(self, mock_get, mock_tpm):
         """title 和 content 均空时返回业务 code "no_title"（data 层不感知 locale）。"""
         mock_response = MagicMock()
@@ -428,7 +443,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -440,7 +455,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_empty_roll_data(self, mock_get, mock_tpm):
         """roll_data 为空列表时返回空列表。"""
         mock_response = MagicMock()
@@ -448,7 +463,7 @@ class TestGetLatestGlobalNews:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": {"roll_data": []}}
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -459,7 +474,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_missing_data_structure(self, mock_get, mock_tpm):
         """返回 JSON 缺少 data/roll_data 键时返回空列表。"""
         mock_response = MagicMock()
@@ -467,7 +482,7 @@ class TestGetLatestGlobalNews:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"unexpected": "structure"}
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -477,12 +492,11 @@ class TestGetLatestGlobalNews:
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_runtime_error_does_not_trigger_circuit_breaker(self, mock_tpm):
+    @patch("httpx.AsyncClient")
+    async def test_runtime_error_does_not_trigger_circuit_breaker(self, mock_get):
         """RuntimeError（基础设施错误）不递增熔断计数。"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
-        mock_tpm.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = RuntimeError("no pool")
 
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
@@ -490,10 +504,11 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_requests_exception_increments_circuit_breaker(self, mock_get, mock_tpm):
         """requests 异常递增熔断计数。"""
-        mock_get.side_effect = requests.ConnectionError("network down")
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -505,14 +520,14 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_http_error_increments_circuit_breaker(self, mock_get, mock_tpm):
         """HTTP 4xx/5xx 递增熔断计数。"""
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden")
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -524,7 +539,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_limit_truncates_results(self, mock_get, mock_tpm):
         """limit 参数截断结果数量。"""
         mock_response = MagicMock()
@@ -534,7 +549,7 @@ class TestGetLatestGlobalNews:
         mock_response.json.return_value = {
             "data": {"roll_data": [{"title": f"新闻{i}", "content": "", "ctime": 1718330400 + i} for i in range(10)]}
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -545,7 +560,7 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sorted_desc_by_time(self, mock_get, mock_tpm):
         """结果按时间降序排列。"""
         mock_response = MagicMock()
@@ -560,7 +575,7 @@ class TestGetLatestGlobalNews:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -580,13 +595,13 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_success_with_data(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
@@ -613,11 +628,10 @@ class TestGetUsMajorMoves:
         assert "NVDA" in result
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_all_retries_fail(self, mock_tpm):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("network error"))
+    @patch("httpx.AsyncClient")
+    async def test_all_retries_fail(self, mock_get):
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = Exception("network error")
 
         with patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock):
             result = await NewsFetcher.get_us_major_moves()
@@ -626,13 +640,13 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_jsonp_parse_failure(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "invalid response without jsonp"
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=[])
@@ -642,7 +656,7 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_high_pct_movers(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -650,7 +664,7 @@ class TestGetUsMajorMoves:
         mock_resp.text = (
             'IO({"data": [{"name": "UNKNOWN", "cname": "未知", "price": "10.0", "diff": "0.5", "chg": "5.0"}]});'
         )
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
@@ -670,13 +684,13 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_no_giants_fallback(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "SMALL1", "cname": "小公司1", "price": "1.0", "diff": "0.01", "chg": "0.5"}, {"name": "SMALL2", "cname": "小公司2", "price": "2.0", "diff": "0.02", "chg": "0.3"}, {"name": "SMALL3", "cname": "小公司3", "price": "3.0", "diff": "0.03", "chg": "0.1"}, {"name": "SMALL4", "cname": "小公司4", "price": "4.0", "diff": "0.04", "chg": "0.2"}, {"name": "SMALL5", "cname": "小公司5", "price": "5.0", "diff": "0.05", "chg": "0.4"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
@@ -694,7 +708,7 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_invalid_chg_value(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -702,7 +716,7 @@ class TestGetUsMajorMoves:
         mock_resp.text = (
             'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "invalid"}]});'
         )
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
@@ -722,13 +736,13 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_json_decode_error(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "IO(not valid json);"
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=[])
@@ -738,13 +752,13 @@ class TestGetUsMajorMoves:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_exception_in_processing(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=[{"name": "NVDA"}])
@@ -970,7 +984,7 @@ class TestGetHotConcepts:
 class TestNewsFetcherGetLatestGlobalNews:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_get_latest_global_news(self, mock_get, mock_tpm):
         """基本冒烟测试：返回 list 类型。"""
         mock_response = MagicMock()
@@ -978,7 +992,7 @@ class TestNewsFetcherGetLatestGlobalNews:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": {"roll_data": []}}
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1320,7 +1334,7 @@ class TestGetLatestGlobalNewsDirectExecution:
     """通过 ThreadPoolManager side_effect 直接执行 _fetch_cls 的测试。"""
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_direct_success_ctime_seconds(self, mock_get):
         """秒级 ctime 直接执行成功。"""
         mock_resp = MagicMock()
@@ -1334,7 +1348,7 @@ class TestGetLatestGlobalNewsDirectExecution:
                 ]
             }
         }
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1348,7 +1362,7 @@ class TestGetLatestGlobalNewsDirectExecution:
         assert result[0]["time"] == "2024-06-14 10:00:00"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_direct_success_ctime_milliseconds(self, mock_get):
         """毫秒级 ctime 自动检测并转换。"""
         mock_resp = MagicMock()
@@ -1362,7 +1376,7 @@ class TestGetLatestGlobalNewsDirectExecution:
                 ]
             }
         }
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1374,7 +1388,7 @@ class TestGetLatestGlobalNewsDirectExecution:
         assert result[0]["time"] == "2024-06-14 10:00:00"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_direct_missing_data_key(self, mock_get):
         """返回 JSON 缺少 data 键时返回空列表。"""
         mock_resp = MagicMock()
@@ -1382,7 +1396,7 @@ class TestGetLatestGlobalNewsDirectExecution:
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"no_data": True}
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1395,13 +1409,13 @@ class TestGetLatestGlobalNewsDirectExecution:
 
 class TestGetUsMajorMovesDirectExecution:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_fetch_direct_success(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1413,13 +1427,13 @@ class TestGetUsMajorMovesDirectExecution:
         assert "NVDA" in result
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_empty_data_warning(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1431,13 +1445,13 @@ class TestGetUsMajorMovesDirectExecution:
         assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_json_decode_error(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "IO(not valid json);"
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1448,13 +1462,13 @@ class TestGetUsMajorMovesDirectExecution:
         assert isinstance(result, str)
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_invalid_jsonp_structure(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "no jsonp structure here"
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1465,14 +1479,14 @@ class TestGetUsMajorMovesDirectExecution:
         assert isinstance(result, str)
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_consecutive_empty_threshold_error(self, mock_get):
         _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1484,7 +1498,7 @@ class TestGetUsMajorMovesDirectExecution:
         assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= _SINA_EMPTY_THRESHOLD
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_sina_consecutive_empty_threshold_logs_warning(self, mock_get, caplog):
         """Empty-data degradation threshold must log WARNING, not ERROR (CLAUDE.md §5.4)."""
         _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
@@ -1492,7 +1506,7 @@ class TestGetUsMajorMovesDirectExecution:
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1513,13 +1527,13 @@ class TestGetUsMajorMovesDirectExecution:
         assert not any(r.levelno == logging.ERROR for r in degraded_records)
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_us_moves_processing_exception(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1633,10 +1647,11 @@ class TestCLSCircuitBreaker:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm):
         """连续 3 次失败后熔断器开启。"""
-        mock_get.side_effect = requests.ConnectionError("network down")
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
@@ -1651,7 +1666,7 @@ class TestCLSCircuitBreaker:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
         """熔断开启期间直接返回空列表，不发起网络调用。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
@@ -1669,7 +1684,7 @@ class TestCLSCircuitBreaker:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_circuit_half_open_recovery(self, mock_get, mock_tpm):
         """冷却期过后半开探活成功，熔断器关闭恢复。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
@@ -1683,7 +1698,7 @@ class TestCLSCircuitBreaker:
         mock_resp.json.return_value = {
             "data": {"roll_data": [{"title": "探活成功", "content": "", "ctime": 1718330400}]}
         }
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1698,14 +1713,15 @@ class TestCLSCircuitBreaker:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
         """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
 
-        mock_get.side_effect = requests.ConnectionError("still down")
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = requests.ConnectionError("still down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1728,7 +1744,8 @@ class TestCLSCircuitBreaker:
 
         # 探活失败后 61s 应再次进入半开
         mock_get.reset_mock()
-        mock_get.side_effect = requests.ConnectionError("still down")
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = requests.ConnectionError("still down")
         second_probe_time = probe_time + datetime.timedelta(seconds=61)
         with patch("data.external.news_fetcher.get_now", return_value=second_probe_time):
             res = await NewsFetcher.get_latest_global_news()
@@ -1944,7 +1961,7 @@ class TestClassifyErrorIntegration:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_timestamp_conversion_failure_logs_code(self, mock_get, mock_tpm, caplog):
         """路径 8: get_latest_global_news except Exception (Timestamp) — 转换失败日志含 [code=]。"""
         mock_response = MagicMock()
@@ -1958,7 +1975,7 @@ class TestClassifyErrorIntegration:
                 ]
             }
         }
-        mock_get.return_value = mock_response
+        _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1971,12 +1988,11 @@ class TestClassifyErrorIntegration:
         assert code_records, "Expected [code=...] in Timestamp conversion log"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_runtime_error_logs_code_and_returns_empty(self, mock_tpm, caplog):
+    @patch("httpx.AsyncClient")
+    async def test_runtime_error_logs_code_and_returns_empty(self, mock_get, caplog):
         """路径 9: get_latest_global_news except RuntimeError — 降级返回 []，日志含 [code=]。"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
-        mock_tpm.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = RuntimeError("no pool")
 
         with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
             result = await NewsFetcher.get_latest_global_news()
@@ -1986,10 +2002,11 @@ class TestClassifyErrorIntegration:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_cls_failure_logs_code_and_warning_level(self, mock_get, mock_tpm, caplog):
         """路径 10: get_latest_global_news except Exception (CLS) — 连接错误日志含 [code=]，recoverable→WARNING。"""
-        mock_get.side_effect = requests.ConnectionError("network down")
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -2007,14 +2024,14 @@ class TestClassifyErrorIntegration:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_json_decode_failure_logs_code(self, mock_get, mock_tpm, caplog):
         """路径 11: get_us_major_moves except json.JSONDecodeError — 解析失败日志含 [code=]。"""
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "IO(not valid json);"
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -2026,12 +2043,11 @@ class TestClassifyErrorIntegration:
         assert code_records, "Expected [code=...] in JSON decode error log"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_us_api_attempt_failure_logs_code(self, mock_tpm, caplog):
+    @patch("httpx.AsyncClient")
+    async def test_us_api_attempt_failure_logs_code(self, mock_get, caplog):
         """路径 12: get_us_major_moves except Exception (attempt) — 重试失败日志含 [code=]。"""
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("attempt connection error"))
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = Exception("attempt connection error")
 
         with patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock):
             with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
@@ -2042,14 +2058,14 @@ class TestClassifyErrorIntegration:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.requests.get")
+    @patch("httpx.AsyncClient")
     async def test_us_moves_fetching_error_logs_code(self, mock_get, mock_tpm, caplog):
         """路径 13: get_us_major_moves retry except Exception — json.loads 抛异常时重试日志含 [code=]。"""
         mock_resp = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
-        mock_get.return_value = mock_resp
+        _wire_http_get(mock_get, mock_resp)
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -2107,34 +2123,31 @@ class TestDegradationSemantics:
     """验证降级语义：except 块仍返回空列表/空字符串，不 raise（DoD ④）。"""
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_runtime_error_returns_empty_list(self, mock_tpm):
+    @patch("httpx.AsyncClient")
+    async def test_runtime_error_returns_empty_list(self, mock_get):
         """RuntimeError 时 get_latest_global_news 仍返回 []（不 raise）。"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("infra down"))
-        mock_tpm.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = RuntimeError("infra down")
 
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_connection_error_returns_empty_list(self, mock_tpm):
+    @patch("httpx.AsyncClient")
+    async def test_connection_error_returns_empty_list(self, mock_get):
         """ConnectionError 时 get_latest_global_news 仍返回 []（不 raise）。"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=ConnectionError("network down"))
-        mock_tpm.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = ConnectionError("network down")
 
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_system_error_does_not_propagate(self, mock_tpm):
+    @patch("httpx.AsyncClient")
+    async def test_system_error_does_not_propagate(self, mock_get):
         """即使 system 级异常（MemoryError）也被降级为返回 []，不 raise。"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=MemoryError("oom"))
-        mock_tpm.return_value = mock_manager
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = MemoryError("oom")
 
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
