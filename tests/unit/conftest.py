@@ -31,11 +31,20 @@ def _reset_all_singletons():
     # 根 conftest 只清 _fallback_store，此处补清 _stores，避免 get_loop_local 的
     # 外层 dict[str, WeakKeyDictionary] key 跨测试累积（key 数量 = 调用点数量）。
     clear_all_loop_locals()
+    # B2+B10 修复: test_shutdown 完整清理成功路径会真实调用 mark_graceful_shutdown_completed(),
+    # 置位模块级 _graceful_shutdown_completed 后无 autouse 重置会跨测试污染
+    # test_task_manager 的 _atexit_cleanup 短路 (test_cancels_active_tasks 失败)。
+    # 此处前后重置, 保证每个测试从"未优雅停机"基线开始。
+    # 注意: 须以模块引用方式修改, 不能用 from-import 值绑定 (否则只改本模块局部变量)。
+    import utils.singleton_registry as _sr
+
+    _sr._graceful_shutdown_completed = False
     reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()
     yield
     clear_all_loop_locals()
+    _sr._graceful_shutdown_completed = False
     reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()
