@@ -783,16 +783,20 @@ def ScreenerView(
             default = p.get("default", min_val)
             step = p.get("step", 1)
             current_val = (params_ref.current or {}).get(p_name, default)
-            return SliderInput(
-                label=label,
-                value=float(current_val),
-                min_val=float(min_val),
-                max_val=float(max_val),
-                step=float(step),
-                on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
-                # 固定宽度: 参数面板 ft.Row(wrap=True) 需要可测量宽度的子控件才能正确换行布局。
-                # width=None + Slider(expand=True) 导致宽度不确定 → 控件独占一行 →
-                # 参数面板变高 → table_card 视口高度被挤压到 0 → 表格行不生成语义节点 (PR #373 回归)。
+            # NOTE: SliderInput 为 @ft.component 组件, 返回 Component wrapper (继承 BaseControl 而非
+            # flet.Control), 无 col/width 布局属性, 直接在 wrapper 上赋 col 不会随 patch 下发客户端,
+            # ResponsiveRow 默认按 col=12 布局 → 控件独占整行 → 参数面板变高 → table_card 视口高度
+            # 被挤压到 0 → 表格行不生成语义节点 (PR #373 回归 / PR #550 E2E 失败)。
+            # 修复: 外层包 Container 承载 width 与 col (Container 为 Control, 布局属性可正常下发)。
+            return ft.Container(
+                content=SliderInput(
+                    label=label,
+                    value=float(current_val),
+                    min_val=float(min_val),
+                    max_val=float(max_val),
+                    step=float(step),
+                    on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
+                ),
                 width=AppStyles.CONTROL_WIDTH_MD,
             )
 
