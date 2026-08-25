@@ -42,6 +42,7 @@ from ui.components.toast_manager import ToastManager, ToastManagerView
 from ui.i18n import I18n
 from ui.startup_views import StartupView, _StartupBridge
 from ui.theme import apply_page_theme
+from utils.app_env import is_e2e_mode
 from utils.config_handler import ConfigHandler
 from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
 from utils.log_decorators import UILogger
@@ -154,7 +155,7 @@ async def _prepare_db_with_retry(
             )
 
             # E2E / Web 模式：失败立即退出，避免无头浏览器/UI 多 session 场景复杂化
-            if os.environ.get("E2E_TESTING") == "true" or os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in (
+            if is_e2e_mode() or os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in (
                 "true",
                 "1",
                 "yes",
@@ -456,7 +457,7 @@ async def main(page: ft.Page):
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
     # 进程最终通过 proc.terminate() 清理。
-    if os.environ.get("E2E_TESTING") != "true":
+    if not is_e2e_mode():
         page.on_disconnect = _on_disconnect
 
     def on_error(e):
@@ -545,7 +546,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
     run_kwargs = {"main": main, "assets_dir": assets}
-    if os.environ.get("E2E_TESTING") == "true":
+    if is_e2e_mode():
         # E2E 强制 CanvasKit：Flet 0.86.x 默认 skwasm 在 headless Windows CI 上
         # 渲染管线卡死（字体测量 GPU stall 后无 frame 产出），main 分支一直用
         # CanvasKit 且 E2E 稳定通过。被 3cff3ab1 调试改动误删，现恢复。

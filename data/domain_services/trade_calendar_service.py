@@ -22,6 +22,7 @@ import pandas as pd
 
 from data.constants import MARKET_CLOSE_HOUR
 from data.domain_services.offline_calendar import OfflineCalendar
+from utils.app_env import is_e2e_mode
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
@@ -157,9 +158,8 @@ class TradeCalendarService:
         Returns:
             DataFrame 或 None
         """
-        import os
 
-        if os.environ.get("E2E_TESTING") == "true":
+        if is_e2e_mode():
             logger.debug(
                 "[TradeCalendarService] E2E mode: skipping Tushare API fetch for %s - %s",
                 start_date,
@@ -365,9 +365,7 @@ class TradeCalendarService:
                 # 3年约730个交易日，如果记录数远低于预期跨度的交易日密度，说明数据不完整
                 span_days = (end_obj - start_obj).days
                 expected_min = max(1, int(span_days * 0.6))  # 保守估计：60% 是交易日
-                import os
-
-                is_e2e = os.environ.get("E2E_TESTING") == "true"
+                is_e2e = is_e2e_mode()
                 if not is_e2e and span_days > 30 and len(df) < expected_min * 0.5:
                     # 数据明显不完整，回退到 API 补充
                     logger.warning(
