@@ -135,11 +135,16 @@ class ThreadPoolManager:
 
         # 3. Graceful shutdown of old pools in background thread to avoid blocking reload
         def shutdown_old_pools():
+            # 务实方案（B5）：wait=False + cancel_futures=True，立即取消旧池排队任务，
+            # 运行中任务继续执行直到自然结束；进程退出时 daemon 线程被强杀亦无等待代价。
+            # 低频热重载路径不为 drain 引入持续任务计数器（宪法 §1.3）。
             if old_io_pool:
-                old_io_pool.shutdown(wait=True)
+                old_io_pool.shutdown(wait=False, cancel_futures=True)
             if old_cpu_pool:
-                old_cpu_pool.shutdown(wait=True)
-            logger.info("Old Thread Pools shut down completely.")
+                old_cpu_pool.shutdown(wait=False, cancel_futures=True)
+            logger.warning(
+                "Old Thread Pools shut down (wait=False); in-flight tasks may be interrupted on process exit."
+            )
 
         threading.Thread(target=shutdown_old_pools, daemon=True).start()
 
