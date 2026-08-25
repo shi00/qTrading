@@ -161,8 +161,17 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     import os
 
+    from utils.app_env import is_e2e_mode  # review03-C16: E2E 判定统一收口
+
     logger.info("[Bootstrap] After TaskManager init, checking E2E_TESTING env (=%s)...", os.environ.get("E2E_TESTING"))
-    if os.environ.get("E2E_TESTING") == "true":
+    if is_e2e_mode():
+        # review03-C16: 非 DEBUG 环境下 E2E 模式激活应被审计（后门误触发显式化）
+        is_debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+        if not is_debug:
+            logger.critical(
+                "[Bootstrap] E2E_TESTING=true 在非 DEBUG 环境激活：确认这是显式测试运行，"
+                "否则该环境变量残留会使质量门控/日历服务后门静默生效。"
+            )
         logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
         # E2E 预热: 在服务初始化阶段预加载 AIService (触发 litellm import，约 18s+)，
         # 避免 UI 渲染时第一次导入阻塞 MainThread 导致 Flet patch 下发延迟、

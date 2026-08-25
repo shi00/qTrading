@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -12,6 +11,7 @@ from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.app_env import is_e2e_mode
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # 实际使用。与 bootstrap.py:136 / home_view.py:156 / app_layout.py:91 等现有
         # E2E_TESTING 范式一致。
         self.processor: DataProcessor | None
-        if os.environ.get("E2E_TESTING") == "true":
+        if is_e2e_mode():
             self.processor = None
         else:
             self.processor = DataProcessor()
