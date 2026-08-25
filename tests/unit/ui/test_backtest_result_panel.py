@@ -34,6 +34,7 @@ from ui.components.backtest.backtest_result_panel import (
     _metric_card,
 )
 from ui.theme import AppColors
+from ui.viewmodels.backtest_view_model import _to_period_stats_rows, _to_trade_rows
 
 pytestmark = pytest.mark.unit
 
@@ -241,7 +242,7 @@ class TestBuildNavChart:
     def test_build_nav_chart_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(sample_result)
+            container = _build_nav_chart((1_000_000.0, 1_010_000.0))
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.LineChart)
@@ -249,7 +250,7 @@ class TestBuildNavChart:
     def test_build_nav_chart_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(empty_result)
+            container = _build_nav_chart(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -257,7 +258,7 @@ class TestBuildNavChart:
     def test_build_nav_chart_no_result(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(None)
+            container = _build_nav_chart(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -269,7 +270,7 @@ class TestBuildTradesTable:
     def test_build_trades_table_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_trades_table(sample_result, 0, MagicMock())
+            container = _build_trades_table(_to_trade_rows(sample_result.trades), 0, MagicMock())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Column)
@@ -277,7 +278,7 @@ class TestBuildTradesTable:
     def test_build_trades_table_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_trades_table(empty_result, 0, MagicMock())
+            container = _build_trades_table((), 0, MagicMock())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -295,7 +296,7 @@ class TestBuildTradesTable:
         set_trades_page = MagicMock()
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_trades_table(sample_result, 1, set_trades_page)
+            container = _build_trades_table(_to_trade_rows(sample_result.trades), 1, set_trades_page)
 
         # pagination 是 Column 的第 2 个控件（DataTable 后）
         pagination = container.content.controls[1]
@@ -310,7 +311,7 @@ class TestBuildTradesTable:
         """trades_page=0 时 prev_button disabled。"""
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_trades_table(sample_result, 0, MagicMock())
+            container = _build_trades_table(_to_trade_rows(sample_result.trades), 0, MagicMock())
 
         pagination = container.content.controls[1]
         prev_btn = pagination.controls[0]
@@ -323,7 +324,7 @@ class TestBuildIcChart:
     def test_build_ic_chart_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(sample_result)
+            container = _build_ic_chart((0.02, 0.04, -0.01, 0.05))
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.BarChart)
@@ -331,7 +332,7 @@ class TestBuildIcChart:
     def test_build_ic_chart_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(empty_result)
+            container = _build_ic_chart(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -339,7 +340,7 @@ class TestBuildIcChart:
     def test_build_ic_chart_no_result(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(None)
+            container = _build_ic_chart(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -351,7 +352,7 @@ class TestBuildMonthlyTable:
     def test_build_monthly_table_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_monthly_table(sample_result)
+            container = _build_monthly_table(_to_period_stats_rows(sample_result.period_stats))
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.DataTable)
@@ -359,7 +360,7 @@ class TestBuildMonthlyTable:
     def test_build_monthly_table_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_monthly_table(empty_result)
+            container = _build_monthly_table(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -367,7 +368,7 @@ class TestBuildMonthlyTable:
     def test_build_monthly_table_no_result(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_monthly_table(None)
+            container = _build_monthly_table(())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)

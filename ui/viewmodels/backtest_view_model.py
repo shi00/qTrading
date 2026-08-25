@@ -4,7 +4,7 @@
 - frozen dataclass BacktestState + subscribe/_notify
 - 调用 BacktestService 运行回测
 - 通过 TaskManager.submit_task() 异步执行
-- 回测结果直接放入 state.result (L771 合规, 无 dual-track version + property)
+- 回测结果拆解为渲染就绪字段放入 state (D11, L771 合规, 无 dual-track version + property)
 """
 
 from __future__ import annotations
@@ -14,11 +14,12 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
-from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.config import BacktestConfig
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -56,17 +57,65 @@ def consume_pending_prefill() -> dict[str, object] | None:
     return data
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
+class TradeRow:
+    """回测成交记录行 (D11: 渲染就绪, 与 engine trades DataFrame 列对齐).
+
+    列对应 portfolio.py trades_list: trade_date / ts_code / action /
+    price / volume / realized_pnl (buy 记录 realized_pnl=0).
+    """
+
+    trade_date: str
+    ts_code: str
+    action: str
+    price: float
+    volume: float
+    realized_pnl: float
+
+
+def _to_trade_rows(trades_df: Any) -> tuple[TradeRow, ...]:
+    """BacktestResult.trades (pl.DataFrame) → tuple[TradeRow, ...] (D11 拆解)."""
+    if trades_df is None or trades_df.is_empty():
+        return ()
+    return tuple(
+        TradeRow(
+            trade_date=str(r.get("trade_date", "")),
+            ts_code=r.get("ts_code", "") or "",
+            action=r.get("action", "") or "",
+            price=float(r.get("price", 0) or 0),
+            volume=float(r.get("volume", 0) or 0),
+            realized_pnl=float(r.get("realized_pnl", 0) or 0),
+        )
+        for r in trades_df.iter_rows(named=True)
+    )
+
+
+def _to_period_stats_rows(period_df: Any) -> tuple[tuple[str, float, float, float], ...]:
+    """BacktestResult.period_stats (pl.DataFrame) → 渲染行 (D11 拆解).
+
+    行 = (year_month, monthly_return, benchmark_return, excess_return), 均为原始值,
+    View 渲染时格式化百分比.
+    """
+    if period_df is None or period_df.is_empty():
+        return ()
+    return tuple(
+        (
+            str(r.get("year_month", "")),
+            float(r.get("monthly_return", 0) or 0),
+            float(r.get("benchmark_return", 0) or 0),
+            float(r.get("excess_return", 0) or 0),
+        )
+        for r in period_df.iter_rows(named=True)
+    )
+
+
+@dataclass(frozen=True)
 class BacktestState:
     """BacktestViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
 
-    NOTE(lazy): result 字段类型为 BacktestResult | None (strategies 层 frozen
-    dataclass 领域对象, 内部含 pl.DataFrame/pl.Series). 自定义 __eq__ 让 result
-    用 identity 比较, 避免 BacktestResult.__eq__ 触发 DataFrame __eq__ 抛
-    TypeError (Flet use_state setter L110 `if new_value != hook.value:` 安全性,
-    spec.md §Flet use_state setter 安全性).
-    ceiling: BacktestResult 拆解为 tuple[Row, ...] 需重写 BacktestResultPanel.
-    upgrade: BacktestResultPanel 接收 tuple[Row, ...] 形式时, 移除自定义 __eq__/__hash__.
+    D11: result (BacktestResult 领域对象, 含 pl.DataFrame/pl.Series) 拆解为
+    渲染就绪字段, 全部 frozen + 可哈希 → 使用 dataclass 默认 __eq__/__hash__
+    (Flet use_state setter 同值跳过安全).
     """
 
     is_running: bool = False
@@ -74,37 +123,18 @@ class BacktestState:
     progress_message: Message | None = None
     status_message: Message | None = None
     status_color: str = ""
-    # 回测结果直接放入 state (BacktestResult 是 strategies 层 frozen dataclass 领域对象)
-    result: BacktestResult | None = None
+    # 回测结果 (渲染就绪, 源自 BacktestResult):
+    # - metrics: (key, value) 键值对序列 (result.metrics 为 dict[str, float])
+    # - trades: 成交记录 (分页渲染)
+    # - nav_curve / ic_series: 图表点序列
+    # - period_stats: 月收益表行 (year_month, monthly_return, benchmark_return, excess_return)
+    metrics: tuple[tuple[str, float], ...] = ()
+    trades: tuple[TradeRow, ...] = ()
+    nav_curve: tuple[float, ...] = ()
+    ic_series: tuple[float, ...] = ()
+    period_stats: tuple[tuple[str, float, float, float], ...] = ()
     # 已脱敏的错误详情 (Task 11.4): run_backtest 失败时由 DataSanitizer.sanitize_error 产出
     error_detail: str | None = None
-
-    def __eq__(self, other: object) -> bool:
-        """自定义 __eq__: result 字段用 identity 比较, 避免 DataFrame __eq__ 抛 TypeError."""
-        if not isinstance(other, BacktestState):
-            return NotImplemented
-        return (
-            self.is_running == other.is_running
-            and self.progress == other.progress
-            and self.progress_message == other.progress_message
-            and self.status_message == other.status_message
-            and self.status_color == other.status_color
-            and self.result is other.result
-            and self.error_detail == other.error_detail
-        )
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.is_running,
-                self.progress,
-                self.progress_message,
-                self.status_message,
-                self.status_color,
-                id(self.result),
-                self.error_detail,
-            )
-        )
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -115,7 +145,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
     1. 管理回测配置状态（frozen BacktestState snapshot）
     2. 调用 BacktestService 运行回测
     3. 通过 TaskManager 异步执行
-    4. 回测结果直接放入 state.result (L771 合规, 无 dual-track)
+    4. 回测结果拆解为渲染就绪字段放入 state（D11, L771 合规, 无 dual-track）
     """
 
     def __init__(
@@ -282,7 +312,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             progress_message=Message("backtest_initializing"),
             status_message=Message("backtest_starting"),
             status_color="info",
-            result=None,
+            metrics=(),
+            trades=(),
+            nav_curve=(),
+            ic_series=(),
+            period_stats=(),
             error_detail=None,
         )
 
@@ -309,9 +343,13 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     cancel_check=_cancel_check,
                 )
 
-                # 成功终态: is_running=False + progress=1.0 + result (L771 合规, 无 dual-track)
+                # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(
-                    result=result,
+                    metrics=tuple(result.metrics.items()),
+                    trades=_to_trade_rows(result.trades),
+                    nav_curve=tuple(float(v) for v in result.nav_curve["nav"].to_list()),
+                    ic_series=tuple(float(v) for v in result.ic_series.to_list()),
+                    period_stats=_to_period_stats_rows(result.period_stats),
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),

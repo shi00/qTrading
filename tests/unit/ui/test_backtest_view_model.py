@@ -9,6 +9,7 @@ from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import polars as pl
 import pytest
 
 from services.task_manager import TaskManager
@@ -17,6 +18,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
     BacktestState,
     BacktestViewModel,
+    TradeRow,
     consume_pending_prefill,
     set_pending_prefill,
 )
@@ -68,7 +70,7 @@ class TestBacktestViewModel:
     def test_init(self):
         """测试初始化。"""
         vm = BacktestViewModel()
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         assert vm.state.is_running is False
 
     def test_state_defaults(self):
@@ -79,7 +81,7 @@ class TestBacktestViewModel:
         assert vm.state.progress_message is None
         assert vm.state.status_message is None
         assert vm.state.status_color == ""
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
 
     def test_notifies_subscribers(self):
         """subscribe 接收状态快照；_set_state 触发通知。"""
@@ -115,7 +117,7 @@ class TestBacktestViewModel:
         vm._set_state(is_running=True, status_color="info", progress=0.5)
         vm.dispose()
 
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         assert vm.state.is_running is False
         assert vm.state.status_color == ""
         assert vm.state.progress == 0.0
@@ -135,7 +137,7 @@ class TestBacktestViewModel:
             mock_tm.cancel_task.assert_called_once_with("running_task_001")
 
         assert vm._task_id is None
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         assert vm.state.is_running is False
         assert vm.state.progress == 0.0
         assert vm.state.status_color == ""
@@ -171,7 +173,7 @@ class TestBacktestViewModel:
             mock_tm.cancel_task.assert_called_once_with("running_task_001")
 
         assert vm._task_id is None
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         assert vm.state.is_running is False
 
     def test_is_running_via_state(self):
@@ -362,7 +364,11 @@ class TestBacktestViewModelRunBacktest:
         vm = BacktestViewModel()
         mock_result = MagicMock()
         mock_result.duration_ms = 1500
-        mock_result.metrics = {"sharpe_ratio": 1.5}
+        mock_result.metrics = {"sharpe_ratio": 1.5, "total_return": 0.1}
+        mock_result.trades = pl.DataFrame()
+        mock_result.period_stats = pl.DataFrame()
+        mock_result.nav_curve = pl.DataFrame({"nav": [1.0, 1.1]})
+        mock_result.ic_series = pl.Series([0.1, 0.2])
         vm.service.run_backtest = AsyncMock(return_value=mock_result)
         return vm, mock_result
 
@@ -400,7 +406,9 @@ class TestBacktestViewModelRunBacktest:
 
         execution_result = await captured_factory(task_id="task_123")
 
-        assert vm.state.result is mock_result
+        assert vm.state.metrics == (("sharpe_ratio", 1.5), ("total_return", 0.1))
+        assert vm.state.nav_curve == (1.0, 1.1)
+        assert vm.state.ic_series == (0.1, 0.2)
         assert vm.state.is_running is False
         assert vm.state.status_color == "success"
         assert vm.state.error_detail is None
@@ -612,7 +620,7 @@ class TestBacktestViewModelRunBacktest:
             await vm.run_backtest("test_strategy", config)
 
         assert vm.state.is_running is True
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         assert vm.state.status_color == "info"
         assert vm.state.progress == 0.0
 
@@ -717,7 +725,7 @@ class TestBacktestViewModelRunBacktest:
         # After cancellation, is_running must be False
         assert vm.state.is_running is False
         # Result must remain None (no partial result)
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
 
         # F3-11: 取消路径显式终态 progress=0.0（清空避免 UI 残留文案）
         assert vm.state.progress == 0.0
@@ -767,7 +775,7 @@ class TestBacktestViewModelRunBacktest:
 
         # Verify state reverts properly
         assert vm.state.is_running is False
-        assert vm.state.result is None
+        assert vm.state.metrics == ()
         # Verify status was set to error
         assert vm.state.status_color == "error"
         assert vm.state.status_message is not None
@@ -901,53 +909,58 @@ class TestBacktestStateEquality:
         assert state.__eq__(123) is NotImplemented
         assert state.__eq__(None) is NotImplemented
 
-    def test_eq_uses_identity_for_result_field(self):
-        """result 字段用 identity 比较：不同对象不等，同一对象等。
+    def test_eq_default_semantics_for_render_fields(self):
+        """D11: 渲染就绪字段走 dataclass 默认 __eq__（frozen tuple 可哈希比较）。
 
-        回归保障：若误将 `is` 改回 `==`，BacktestResult 内部 DataFrame __eq__
-        会抛 TypeError，本测试可捕获。覆盖行 62: `self.result is other.result`.
+        回归保障：若重引入 BacktestResult 领域对象并自定义 __eq__，本测试
+        通过渲染字段（metrics/trades 等）差异即可捕获（D11 删除自定义 __eq__/__hash__）。
         """
-        result_a = MagicMock(name="result_a")
-        result_b = MagicMock(name="result_b")
-        state_a = BacktestState(result=result_a)
-        state_b = BacktestState(result=result_b)
-        state_c = BacktestState(result=result_a)  # 同一 result identity
-
-        assert state_a != state_b  # 不同 result identity
-        assert state_a == state_c  # 同一 result identity
-
-    def test_eq_false_when_other_fields_differ(self):
-        """任一非 result 字段不等则 __eq__ 返回 False。"""
-        result = MagicMock()
+        trade_a = TradeRow("20240101", "000001.SZ", "buy", 10.0, 100.0, 0.0)
+        trade_b = TradeRow("20240101", "000002.SZ", "buy", 10.0, 100.0, 0.0)
         base = BacktestState(
             is_running=True,
             progress=0.5,
             progress_message=Message("prog"),
             status_message=Message("status"),
             status_color="info",
-            result=result,
+            metrics=(("sharpe_ratio", 1.2),),
+            trades=(trade_a,),
+            nav_curve=(1.0,),
+            ic_series=(0.1,),
+            period_stats=(("2024-01", 0.05, 0.03, 0.02),),
         )
-        # 逐字段变更，验证每个字段都参与比较
+        # 同一值 → ((默认 __eq__ 全字段比较)) 相等
+        same = replace(base)
+        assert base == same
+        # 渲染字段任一差异 → 不等
+        assert base != replace(base, metrics=(("sharpe_ratio", 1.5),))
+        assert base != replace(base, trades=(trade_b,))
+        assert base != replace(base, nav_curve=(2.0,))
+        assert base != replace(base, ic_series=(0.2,))
+        assert base != replace(base, period_stats=(("2024-02", 0.06, 0.04, 0.02),))
+        # 其他字段仍参与比较
         assert base != replace(base, is_running=False)
-        assert base != replace(base, progress=0.6)
-        assert base != replace(base, progress_message=Message("other"))
-        assert base != replace(base, status_message=Message("other"))
-        assert base != replace(base, status_color="warning")
         assert base != replace(base, error_detail="some detail")
 
-    def test_hash_is_deterministic_and_usable_as_dict_key(self):
-        """__hash__ 不抛异常、确定性、可作 dict key。
-
-        覆盖行 66-75: 自定义 __hash__ 实现。
-        自定义 __eq__ 会 disable 默认 __hash__，必须显式重定义才能 hashable。
-        """
-        result = MagicMock()
-        state_a = BacktestState(is_running=True, progress=0.5, result=result)
-        state_b = BacktestState(is_running=True, progress=0.5, result=result)
+    def test_state_is_hashable_with_render_fields(self):
+        """D11: 全渲染字段可哈希 → dict key 可用（默认 dataclass __hash__）。"""
+        trade = TradeRow("20240101", "000001.SZ", "buy", 10.0, 100.0, 0.0)
+        state_a = BacktestState(
+            is_running=True,
+            progress=0.5,
+            metrics=(("sharpe_ratio", 1.2),),
+            trades=(trade,),
+        )
+        state_b = BacktestState(
+            is_running=True,
+            progress=0.5,
+            metrics=(("sharpe_ratio", 1.2),),
+            trades=(trade,),
+        )
 
         assert hash(state_a) == hash(state_b)
 
-        # 可作为 dict key（验证 __hash__ + __eq__ 一致性）
+        # 可作为 dict key（验证默认 __hash__ + __eq__ 一致性）
         d: dict = {state_a: "value"}
         assert d[state_b] == "value"
 
