@@ -1115,13 +1115,12 @@ class TestHomeViewExceptionPaths:
 
 
 class TestOnViewStockNavigation:
-    """L117-128: _on_view_stock 新闻「查看个股」跳转 PubSub 广播测试.
+    """_on_view_stock 新闻「查看个股」跳转 PubSub 广播测试 (Task 8.1 + UX-04).
 
     覆盖:
-    - L122: _ = stock_code (参数消费占位)
-    - L123-124: try: page = ft.context.page
-    - L125-126: if page is not None: page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")
-    - L127-128: except RuntimeError: logger.debug
+    - page 可用 + 非空代码: 深链 "screener:<code>" (UX-04: 携带股票代码)
+    - page 可用 + 空代码: 降级纯 tab 导航 "screener" (向后兼容)
+    - page 不可用 (RuntimeError): except 守卫, 不抛异常
 
     实现方式: mock NewsFeed 捕获 on_view_stock 回调 (子组件在渲染中被展开为 ft.Control,
     无法从渲染树提取 Component 描述符的 kwargs, 改用 mock 捕获调用契约).
@@ -1130,7 +1129,10 @@ class TestOnViewStockNavigation:
     def test_on_view_stock_broadcasts_navigate_to_screener(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
     ) -> None:
-        """L125-126: page 可用时 → pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")."""
+        """page 可用 + 代码非空 → pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener:600000").
+
+        UX-04: 深链消息携带股票代码, app_layout 透传 ScreenerView 填充代码过滤。
+        """
         import ui.views.home_view as home_view_module
         from ui.views.home_view import TOPIC_NAVIGATE, HomeView
 
@@ -1149,13 +1151,41 @@ class TestOnViewStockNavigation:
         render_once(component)
 
         on_view_stock = captured_props.get("on_view_stock")
-        assert on_view_stock is not None, "NewsFeed 应含 on_view_stock 回调"  # noqa: weak-assertion 后续 L1044 有 assert_called_once_with 强断言
+        assert on_view_stock is not None, "NewsFeed 应含 on_view_stock 回调"  # noqa: weak-assertion chain-guard, 非终态: 后续 assert_called_once_with 是强断言
 
         # 触发回调 (模拟用户点击新闻中「查看个股」按钮)
         page.pubsub.send_all_on_topic.reset_mock()
         on_view_stock("600000")
 
-        # 验证: pubsub 广播导航到 screener tab
+        # 验证: pubsub 广播深链 (携带代码) 导航到 screener tab
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener:600000")
+
+    def test_on_view_stock_empty_code_falls_back(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm, monkeypatch
+    ) -> None:
+        """page 可用 + 代码为空 → 降级纯 tab 导航 "screener" (空段消息会被协议解析吞掉)."""
+        import ui.views.home_view as home_view_module
+        from ui.views.home_view import TOPIC_NAVIGATE, HomeView
+
+        captured_props: dict = {}
+
+        def _fake_news_feed(**kwargs: Any) -> Any:
+            captured_props.update(kwargs)
+            return MagicMock(name="NewsFeed")
+
+        monkeypatch.setattr(home_view_module, "NewsFeed", _fake_news_feed)
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        on_view_stock = captured_props.get("on_view_stock")
+        assert on_view_stock is not None  # noqa: weak-assertion chain-guard, 非终态: 后续 assert_called_once_with 是强断言
+
+        page.pubsub.send_all_on_topic.reset_mock()
+        on_view_stock("")
+
         page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener")
 
     def test_on_view_stock_page_none_logs_debug(
@@ -1184,7 +1214,7 @@ class TestOnViewStockNavigation:
         render_once(component)
 
         on_view_stock = captured_props.get("on_view_stock")
-        assert on_view_stock is not None
+        assert on_view_stock is not None  # noqa: weak-assertion chain-guard, 非终态: 后续 pubsub 未调用断言是强断言
 
         # 模拟 page 不可用 (ft.context.page 抛 RuntimeError)
         page.pubsub.send_all_on_topic.reset_mock()

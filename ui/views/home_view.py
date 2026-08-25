@@ -112,15 +112,17 @@ def HomeView(
             logger.debug("[HomeView] page not available for navigation")
 
     def _on_view_stock(stock_code: str) -> None:
-        """新闻「查看个股」跳转 (Task 8.1): PubSub 广播导航到选股页.
+        """新闻「查看个股」跳转 (Task 8.1 + UX-04): 深链携带股票代码.
 
-        最小实现: 跳转到选股 tab 供用户进一步研究该股票代码。
+        消息 "screener:<code>" (UX-01 深链协议, screener 段语义=股票代码):
+        app_layout 切 screener tab 并将 code 透传 ScreenerView 填充代码过滤;
+        code 为空时降级纯 tab 导航 (空段消息会被协议解析判非法, 不发送).
         """
-        _ = stock_code  # 预留: 后续可扩展为跨视图股票代码预填
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "screener")
+                message = f"screener:{stock_code}" if stock_code else "screener"
+                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, message)
         except RuntimeError:
             logger.debug("[HomeView] page not available for view_stock navigation")
 

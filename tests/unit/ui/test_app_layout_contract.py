@@ -176,13 +176,14 @@ class TestAppLayoutContract:
         """DoD: 7 个子视图必须用函数调用消费 (HomeView(active=...)/ScreenerView(active=...)/...)。
 
         UX-01 后 SettingsView 为多行构造 (active + target_subtab 两个 prop),
-        断言放宽为 ``SettingsView(`` 函数调用存在性; active prop 的 kwargs
-        验证由 test_app_layout_runtime.py 的深链测试覆盖。
+        UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request 两个 prop),
+        断言放宽为 ``SettingsView(`` / ``ScreenerView(`` 函数调用存在性;
+        active prop 的 kwargs 验证由 test_app_layout_runtime.py 的深链测试覆盖。
         """
         source = _code_source()
         for view_name in [
             "HomeView(active=",
-            "ScreenerView(active=",
+            "ScreenerView(",
             "BacktestView(active=",
             "DataExplorerView(active=",
             "TaskCenterView(active=",
@@ -263,13 +264,15 @@ class TestBuildPagesStack:
     def test_consumes_all_seven_subviews_in_stack(self):
         """DoD: ``_build_pages_stack`` 必须预先创建所有 7 个子视图放入 Stack。
 
-        UX-01 后 SettingsView 为多行构造 (active + target_subtab), 断言为
-        ``SettingsView(`` 构造存在性; active prop 由 runtime 深链测试覆盖。
+        UX-01 后 SettingsView 为多行构造 (active + target_subtab),
+        UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request),
+        断言为 ``SettingsView(`` / ``ScreenerView(`` 构造存在性;
+        active prop 由 runtime 深链测试覆盖。
         """
         source = _code_source()
         for view_name in [
             "HomeView(active=",
-            "ScreenerView(active=",
+            "ScreenerView(",
             "BacktestView(active=",
             "DataExplorerView(active=",
             "TaskCenterView(active=",

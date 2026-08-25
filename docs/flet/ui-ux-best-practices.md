@@ -135,7 +135,7 @@ Flet 使用 Flutter 渲染，但 Flet Python API 不等同于 Flutter Widget API
 - **[建议]** Tabs 只用于同一上下文中的并列内容，不作为任意深度路由系统。
 - **[建议]** 用户能从标题、选中状态或路径信息判断当前位置。
 
-#### 导航深链协议（TOPIC_NAVIGATE，UX-01）
+#### 导航深链协议（TOPIC_NAVIGATE，UX-01 / UX-04）
 
 跨视图导航统一走 PubSub `TOPIC_NAVIGATE` 单通道，消息格式为 `"<tab>"` 或 `"<tab>:<subtab>"`：
 
@@ -144,12 +144,15 @@ Flet 使用 Flutter 渲染，但 Flet Python API 不等同于 Flutter Widget API
 | `"settings"` | 切换到 settings 主 tab（向后兼容） |
 | `"settings:data"` | 切换到 settings 主 tab 并激活 data 子页（深链） |
 | `"settings:<未知子页>"` | warning + 降级为仅切主 tab（不吞导航） |
-| `"<非 settings tab>:<subtab>"` | warning + 子页段忽略（目前仅 settings 定义子页） |
+| `"screener"` | 切换到 screener 主 tab（向后兼容） |
+| `"screener:<code>"` | 切换到 screener 主 tab 并填充股票代码过滤（UX-04 深链，`<code>` 为任意非空字符串） |
+| `"<其他 tab>:<subtab>"` | warning + 子页段忽略（仅 settings/screener 定义 subtab 语义） |
 | `"a:b:c"` / 空段 | warning + 整体忽略 |
 
-- 合法子页 key：`data` / `database` / `ai` / `tasks` / `notify` / `system`（单一事实源：`ui/views/settings_view.py` 的 `SETTINGS_SUBTAB_INDEX`，从 `_TAB_CONFIG` 派生，与 `EIDS.SETTINGS.tab` role 对齐）。
-- 发送方示例：`page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")`（见 `home_view._navigate_to_data_source`）。
-- 实现约束（Flet hooks 语义）：订阅 handler 是订阅时闭包，内部 state 读取是 stale 的——`AppLayout._on_navigate` 内禁止读取 state 当前值做逻辑判断，state 写入必须用函数式更新（seq 递增防重复深链失效）；子页激活经 `SettingsView` 的 `target_subtab=(key, seq)` prop + `use_effect(dependencies=[target_subtab])` 应用。
+- 合法 settings 子页 key：`data` / `database` / `ai` / `tasks` / `notify` / `system`（单一事实源：`ui/views/settings_view.py` 的 `SETTINGS_SUBTAB_INDEX`，从 `_TAB_CONFIG` 派生，与 `EIDS.SETTINGS.tab` role 对齐）。
+- subtab 段语义由目标 tab 定义：settings 段为白名单子页 key；screener 段为股票代码（任意非空字符串，无白名单）。解析层不感知语义差异，仅按 tab 分派。
+- 发送方示例：`page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")`（见 `home_view._navigate_to_data_source`）、`send_all_on_topic(TOPIC_NAVIGATE, "screener:600000")`（见 `home_view._on_view_stock` / `watchlist_view._on_view_stock`）。
+- 实现约束（Flet hooks 语义）：订阅 handler 是订阅时闭包，内部 state 读取是 stale 的——`AppLayout._on_navigate` 内禁止读取 state 当前值做逻辑判断，state 写入必须用函数式更新（seq 递增防重复深链失效）；子页激活经 `SettingsView` 的 `target_subtab=(key, seq)` prop + `use_effect(dependencies=[target_subtab])` 应用；screener 过滤填充经 `ScreenerView` 的 `stock_filter_request=(code, seq)` prop + 同构 `use_effect` 应用。
 - 扩展新页面子页时：以同一协议扩展（key 表与消费方 prop 同步新增），不新增 PubSub topic。
 
 ### 4.4 反馈组件

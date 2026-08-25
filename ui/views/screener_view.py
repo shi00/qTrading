@@ -298,6 +298,7 @@ def _format_history_date(date_str) -> tuple[str, str]:
 def ScreenerView(
     initial_strategy: str | None = None,
     active: bool = True,
+    stock_filter_request: tuple[str, int] | None = None,
 ) -> ft.Container:
     """选股视图 (声明式).
 
@@ -311,6 +312,8 @@ def ScreenerView(
 
     Args:
         initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
+        stock_filter_request: 深度链接股票代码过滤请求 (UX-04, (code, seq) 元组,
+            app_layout 深链 "screener:<code>" 透传; seq 递增保证重复深链触发 effect)
     """
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
@@ -419,6 +422,16 @@ def ScreenerView(
             )
 
     ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
+
+    # --- UX-04: 应用外部导航深链的股票代码过滤请求 (home/watchlist "查看个股") ---
+    def _apply_stock_filter_request() -> None:
+        if stock_filter_request is None:
+            return
+        code, _seq = stock_filter_request
+        if code:
+            vm.set_stock_filter(code)
+
+    ft.use_effect(_apply_stock_filter_request, dependencies=[stock_filter_request])
 
     # --- 事件 handler ---
 
@@ -554,7 +567,7 @@ def ScreenerView(
         )
         if not filepath:
             return
-        # Task 3.2: export_disabled 改为派生 (state.total_items == 0), 不再手动 set
+        # Task 3.2: export_disabled 改为派生 (UX-04: 基于 vm.has_export_data 全量判据), 不再手动 set
         try:
             if format_ == "csv":
                 path, error = await vm.export_results(filepath)
@@ -591,6 +604,11 @@ def ScreenerView(
         page = _get_page()
         if page is not None:
             page.run_task(_do_export, "excel")
+
+    def _on_stock_filter_change(e: ft.ControlEvent) -> None:
+        # UX-04: on_change 原值入 state (不 strip, 匹配时才 strip), 消除受控输入光标跳动
+        UILogger.log_action("ScreenerView", "Input", "stock_filter")
+        vm.set_stock_filter(get_control_value(e.control, ft.TextField) or "")
 
     def _on_page_size_change(e: ft.ControlEvent) -> None:
         try:
@@ -819,13 +837,13 @@ def ScreenerView(
     # 分页信息
     page_no = state.page_no
     total_pages = state.total_pages
-    total_items = state.total_items
 
-    # Task 3.2: 派生状态 (单源真相: state.loading / state.selected_strategy / state.total_items)
+    # Task 3.2: 派生状态 (单源真相: state.loading / state.selected_strategy)
     progress_visible = state.loading
     run_disabled = state.loading or state.is_retrying or not state.selected_strategy
-    # 导出按钮: 有数据时启用
-    export_btn_disabled = total_items == 0
+    # UX-04: 导出按钮判据用全量结果 (has_export_data), 与过滤后 total_items 解耦 —
+    # 过滤无匹配时按钮仍可用 (全量数据可导出), 语义为 "有结果可导出"
+    export_btn_disabled = not vm.has_export_data
 
     # --- 构建参数面板 ---
 
@@ -1464,6 +1482,19 @@ def ScreenerView(
     )
 
     # 2. 表格区
+    # UX-04: 股票代码过滤输入 (表格区首行常驻, 含 EmptyState 分支 — 过滤无结果时仍可清空恢复)
+    stock_filter_field = ft.TextField(
+        label=I18n.get("screener_filter_stock"),
+        value=state.stock_filter,
+        dense=True,
+        border_color=AppColors.DIVIDER,
+        focused_border_color=AppColors.PRIMARY,
+        text_size=AppStyles.FONT_SIZE_BODY,
+        width=AppStyles.CONTROL_WIDTH_SM,
+        on_change=safe_on_change(_on_stock_filter_change),
+    )
+    filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
+
     pagination_row = ft.Row(
         safe_controls(
             [
@@ -1505,14 +1536,26 @@ def ScreenerView(
     # 用户可通过工具栏的运行按钮重新执行策略
     table_content: ft.Control
     if not formatted_rows and not state.loading:
-        table_content = EmptyState(
-            icon=ft.Icons.INBOX,
-            title=I18n.get("screener_no_results"),
-            message=I18n.get("screener_no_data_context"),
+        # UX-04: 空态分支保留过滤框 (过滤无结果 → 可清空恢复, 不锁死恢复路径)
+        table_content = ft.Column(
+            [
+                filter_row,
+                ft.Container(
+                    content=EmptyState(
+                        icon=ft.Icons.INBOX,
+                        title=I18n.get("screener_no_results"),
+                        message=I18n.get("screener_no_data_context"),
+                    ),
+                    expand=True,
+                ),
+            ],
+            spacing=0,
+            expand=True,
         )
     else:
         table_content = ft.Column(
             [
+                filter_row,
                 PaginatedTable(
                     rows=formatted_rows,
                     columns=vt_columns,

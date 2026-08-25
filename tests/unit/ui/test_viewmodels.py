@@ -587,7 +587,9 @@ class TestScreenerViewModelSwitchToHistory:
 
 class TestScreenerViewModelSwitchToRealtime:
     def test_restores_snapshot(self, screener_vm):
-        df = pd.DataFrame({"a": [1]})
+        # UX-04: 150 行 (page_size=50) 使 page_no=3 合法 — 快照恢复语义验证,
+        # 与 tests/unit/test_screener_view_model.py 同构 (页码 clamp 后不允许越界)
+        df = pd.DataFrame({"a": range(150)})
         screener_vm._set_state(mode="HISTORY")
         screener_vm._realtime_snapshot = {
             "full_results": df,

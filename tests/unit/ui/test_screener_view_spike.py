@@ -62,6 +62,7 @@ class FakeScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     status_action_key: str | None = None
     is_retrying: bool = False
+    stock_filter: str = ""
 
 
 class FakeScreenerViewModel:

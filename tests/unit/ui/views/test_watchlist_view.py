@@ -262,6 +262,32 @@ class TestBuildWatchlistRow:
         sub_texts = [v for v in text_values if "000001.SZ" in v]
         assert any(v.strip() == "000001.SZ" for v in sub_texts)
 
+    def test_watchlist_row_renders_view_button(self) -> None:
+        """UX-04: on_view 传入时渲染 SEARCH_OUTLINED 查看按钮 (删除按钮前), 回调绑定 ts_code."""
+        row = _make_row()
+        on_remove = MagicMock()
+        on_view = MagicMock()
+        container = _build_watchlist_row(row, on_remove, on_view)
+        row_content = container.content
+        assert isinstance(row_content, ft.Row)
+        icon_buttons = [c for c in row_content.controls if isinstance(c, ft.IconButton)]
+        assert len(icon_buttons) == 2, "应含查看和删除两个按钮"
+        view_button = icon_buttons[0]
+        assert view_button.icon == ft.Icons.SEARCH_OUTLINED
+        _click_icon_button(view_button)
+        on_view.assert_called_once_with("000001.SZ")
+
+    def test_build_row_without_on_view_no_button(self) -> None:
+        """UX-04: on_view=None (默认) → 无查看按钮, 仅删除按钮 (位置参数兼容守护)."""
+        row = _make_row()
+        on_remove = MagicMock()
+        container = _build_watchlist_row(row, on_remove)
+        row_content = container.content
+        icon_buttons = [c for c in row_content.controls if isinstance(c, ft.IconButton)]
+        assert len(icon_buttons) == 1
+        assert icon_buttons[0].icon == ft.Icons.DELETE_OUTLINE
+        assert not any(b.icon == ft.Icons.SEARCH_OUTLINED for b in icon_buttons)
+
 
 # ---------------------------------------------------------------------------
 # 组件运行时测试
@@ -534,6 +560,79 @@ class TestWatchlistViewErrorStateCallbacks:
         assert on_retry is not None  # noqa: weak-assertion no-crash 测试无显式终态断言, 此为 on_retry() 调用前置 sanity check
         # 触发 on_retry 不应抛异常 (page 为 None)
         on_retry()
+
+
+class TestWatchlistViewViewStock:
+    """UX-04 (P2-01): 行「查看」按钮深链跳选股页测试."""
+
+    def test_view_button_click_navigates_to_screener(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UX-04: 点击行「查看」按钮 → pubsub 广播深链 "screener:000001.SZ"."""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        from ui.views.watchlist_view import TOPIC_NAVIGATE
+
+        rows = (_make_row(ts_code="000001.SZ"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.pubsub = MagicMock()  # type: ignore[attr-defined]  # [reason: FakePage 未声明 pubsub, 测试按需挂载 mock]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        assert len(view_buttons) == 1, "列表行应渲染查看按钮"
+        # tooltip 为 i18n key (mock_i18n_for_view 返回 key 本身)
+        assert view_buttons[0].tooltip == "watchlist_view_stock"
+
+        _click_icon_button(view_buttons[0])
+
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener:000001.SZ")
+
+    def test_view_button_empty_code_falls_back_to_pure_tab_navigation(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UX-04 R1-MINOR-4: ts_code 为空时降级纯 tab 导航 "screener".
+
+        空代码若发 "screener:" 空段消息会被协议解析判非法整体吞掉, 导航失效.
+        """
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        from ui.views.watchlist_view import TOPIC_NAVIGATE
+
+        rows = (_make_row(ts_code=""),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.pubsub = MagicMock()  # type: ignore[attr-defined]  # [reason: FakePage 未声明 pubsub, 测试按需挂载 mock]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        assert len(view_buttons) == 1
+
+        _click_icon_button(view_buttons[0])
+
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener")
 
 
 class TestWatchlistViewLoadEffect:

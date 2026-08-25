@@ -596,13 +596,15 @@ class TestOnNavigateDeepLink:
     - 未知子页: 降级切主 tab + target_subtab 保持 None
     - 格式非法: warning + 不 run_task
     - 非设置页带子页: 子页段忽略 + 正常切主 tab
+    - UX-04: screener 段语义 = 股票代码, ScreenerView 收到 stock_filter_request,
+      且不污染 settings request
     """
 
     def _render_pages_stack(self, env: dict) -> MagicMock:
         """重渲染 AppLayout 并渲染 _build_pages_stack 子组件.
 
         render_once 不递归渲染子 Component, 需手动渲染 _build_pages_stack
-        才会调用 SettingsView mock (携带最新 settings_subtab_request)。
+        才会调用 SettingsView/ScreenerView mock (携带最新 request props)。
         """
         result = render_once(env["component"])
         env["result"] = result
@@ -639,6 +641,55 @@ class TestOnNavigateDeepLink:
         settings_mock = self._render_pages_stack(env)
         assert settings_mock.call_args.kwargs.get("target_subtab") == ("data", 2)
 
+    def test_screener_deep_link_passes_stock_filter(self, app_layout_env) -> None:
+        """UX-04: MARKET → "screener:000001": run_task(SCREENER) + ScreenerView 收到
+        stock_filter_request=("000001", 1) + SettingsView target_subtab 为 None
+        (防 settings request 污染回归)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].ScreenerView.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
+        _, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SCREENER),), "深链应切换到 SCREENER 主 tab"
+
+        self._render_pages_stack(env)
+        screener_mock = env["mod"].ScreenerView
+        assert "active" in screener_mock.call_args.kwargs, "ScreenerView 应被 _build_pages_stack 构造 (含 active prop)"
+        assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001", 1)
+        settings_mock = env["mod"].SettingsView
+        assert settings_mock.call_args.kwargs.get("target_subtab") is None, "screener 深链不应污染 settings request"
+
+    def test_screener_repeated_deep_link_increments_seq(self, app_layout_env) -> None:
+        """UX-04: 两次 "screener:000001" → seq 递增为 2 (函数式更新防 stale closure)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        env["mod"].ScreenerView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
+        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
+        self._render_pages_stack(env)
+        screener_mock = env["mod"].ScreenerView
+        assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001", 2)
+
+    def test_screener_deep_link_code_with_suffix_normalized_lower(self, app_layout_env) -> None:
+        """UX-04 契约锚定: "screener:000001.SZ" → 协议解析 .lower() 归一为 "000001.sz".
+
+        匹配语义不受影响 (VM 层 str.contains case=False); 过滤框显示小写值
+        为已知接受行为 (对抗检视 MINOR-2, 化妆级瑕疵记录在案).
+        """
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        env["mod"].ScreenerView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001.SZ")
+        self._render_pages_stack(env)
+        screener_mock = env["mod"].ScreenerView
+        assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001.sz", 1)
+
     def test_unknown_subtab_falls_back_to_main_tab(self, app_layout_env) -> None:
         """ "settings:nonexistent" → warning + 仍切 settings + target_subtab 保持 None."""
         env = app_layout_env
@@ -671,21 +722,29 @@ class TestOnNavigateDeepLink:
         assert not page.run_task.called, "格式非法消息不应调用 run_task"
 
     def test_non_settings_tab_with_subtab_ignores_subtab(self, app_layout_env) -> None:
-        """ "screener:data" → warning + 正常切 screener 主 tab + target_subtab=None."""
+        """ "backtest:data" → warning + 正常切 backtest 主 tab + 两个 request prop 均为 None.
+
+        UX-04 后 screener 段为合法深链 (股票代码), 降级语义样本改用 backtest
+        (非当前 tab, 避开 same-tab 早返回路径)。
+        """
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
         page.run_task.reset_mock()
         env["mod"].SettingsView.reset_mock()
+        env["mod"].ScreenerView.reset_mock()
 
         with patch.object(env["mod"].logger, "warning") as mock_warn:
-            handler(env["mod"].TOPIC_NAVIGATE, "screener:data")
-            assert mock_warn.call_count == 1, "非设置页带子页应记录 warning"
+            handler(env["mod"].TOPIC_NAVIGATE, "backtest:data")
+            assert mock_warn.call_count == 1, "未知深链 tab 带子页应记录 warning"
         _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.SCREENER),), "应正常切换到 SCREENER 主 tab"
+        assert args == (int(env["mod"].NavTabs.BACKTEST),), "应正常切换到 BACKTEST 主 tab"
 
-        settings_mock = self._render_pages_stack(env)
+        self._render_pages_stack(env)
+        settings_mock = env["mod"].SettingsView
         assert settings_mock.call_args.kwargs.get("target_subtab") is None
+        screener_mock = env["mod"].ScreenerView
+        assert screener_mock.call_args.kwargs.get("stock_filter_request") is None
 
 
 # ============================================================================

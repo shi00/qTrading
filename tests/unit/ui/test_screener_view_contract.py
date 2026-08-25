@@ -533,9 +533,11 @@ class TestScreenerViewContract:
         )
 
     def test_no_export_disabled_use_state(self):
-        """Task 3.2: View 禁止 use_state 持有 export_disabled, 改为派生 state.total_items == 0.
+        """Task 3.2 + UX-04: View 禁止 use_state 持有 export_disabled, 改为派生判据.
 
         DoD: grep `export_disabled.*use_state\\|set_export_disabled` ui/views/screener_view.py = 0.
+        UX-04 (R2-1): 导出按钮禁用判据从 total_items == 0 改为 not vm.has_export_data
+        (全量非空判据, 与过滤显示解耦 — 过滤无结果但全量有数据时仍可导出).
         """
         import re
 
@@ -543,17 +545,15 @@ class TestScreenerViewContract:
 
         # 禁止: export_disabled 通过 use_state 解构持有 (双源真相)
         use_state_matches = re.findall(r"export_disabled[^\n]*use_state", code)
-        assert use_state_matches == [], (
-            f"export_disabled 不应使用 use_state (派生 state.total_items, Task 3.2): {use_state_matches}"
-        )
+        assert use_state_matches == [], f"export_disabled 不应使用 use_state (UX-04 判据派生): {use_state_matches}"
 
         # 禁止: set_export_disabled 任何调用/解构
         set_matches = re.findall(r"\bset_export_disabled\b", code)
-        assert set_matches == [], f"禁止 set_export_disabled 调用 (派生 state.total_items, Task 3.2): {set_matches}"
+        assert set_matches == [], f"禁止 set_export_disabled 调用 (自定义判据, 单源真相): {set_matches}"
 
-        # 必须: 从 state.total_items 派生 export_btn_disabled
-        assert "export_btn_disabled = total_items == 0" in code, (
-            "必须从 state.total_items 派生 export_btn_disabled (Task 3.2)"
+        # 必须: 从 vm.has_export_data 派生 export_btn_disabled (UX-04 全量非空判据)
+        assert "export_btn_disabled = not vm.has_export_data" in code, (
+            "必须从 vm.has_export_data 派生 export_btn_disabled (UX-04 R2-1: 全量非空判据, 与过滤显示解耦)"
         )
 
     def test_no_history_tree_use_state(self):

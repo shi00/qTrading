@@ -400,6 +400,16 @@ class _FakeScreenerViewModel:
     def change_page(self, delta: int) -> None:
         self.method_calls.append(f"change_page:{delta}")
 
+    def set_stock_filter(self, value: str) -> None:
+        """UX-04: Mock vm.set_stock_filter (记录调用 + 更新 state, 与生产 VM 行为一致)."""
+        self.method_calls.append(f"set_stock_filter:{value}")
+        self._set_state(stock_filter=value)
+
+    @property
+    def has_export_data(self) -> bool:
+        """UX-04: Mock vm.has_export_data (全量结果非空判据, FakeVM 以 _current_page_data 近似)."""
+        return self._current_page_data is not None and not self._current_page_data.empty
+
     def change_page_size(self, new_size: int) -> None:
         self.method_calls.append(f"change_page_size:{new_size}")
 
@@ -2912,10 +2922,11 @@ class TestPaginationControls:
         assert icon_btns[0].disabled is False
 
     def test_export_disabled_when_no_data(self, screener_view_env) -> None:
-        """total_items=0 → export button disabled (export_disabled 默认 True 也使按钮 disabled)."""
+        """UX-04: 全量结果为空 (has_export_data=False) → export button disabled."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
+        fake_vm._current_page_data = pd.DataFrame()
         fake_vm._set_state(total_items=0, strategies_loaded=True)
         _rerender(env)
 
@@ -2923,10 +2934,9 @@ class TestPaginationControls:
         assert export_btn.disabled is True
 
     def test_export_enabled_when_has_data(self, screener_view_env) -> None:
-        """Task 3.2: export_btn_disabled 派生自 state.total_items == 0.
+        """UX-04: 全量结果非空 (has_export_data=True) → export button 启用.
 
-        total_items>0 → export_btn_disabled = False → 按钮启用.
-        (原 test_export_disabled_by_default 守护的 use_state(True) 默认值已删除, 派生状态无"默认 disabled"语义.)
+        导出判据从过滤后 total_items 解耦为全量判据 (检视修正 R2-1).
         """
         env = screener_view_env
         fake_vm = env["fake_vm"]
@@ -2935,8 +2945,8 @@ class TestPaginationControls:
         _rerender(env)
 
         export_btn = _get_export_button(env)
-        # total_items>0 → export_btn_disabled = (10 == 0) = False
-        assert export_btn.disabled is False, "total_items>0 时 export button 应启用 (Task 3.2 派生状态)"
+        # _current_page_data 非空 (fixture 默认) → has_export_data=True → enabled
+        assert export_btn.disabled is False, "全量结果非空时 export button 应启用 (UX-04 全量判据)"
 
 
 # ============================================================================
@@ -3013,18 +3023,19 @@ class TestDerivedStateFromVM:
         assert run_btn.disabled is False, "loading=False + 有策略时 run button 应启用"
 
     def test_export_disabled_when_no_data(self, screener_view_env) -> None:
-        """state.total_items=0 → export_btn_disabled=True."""
+        """UX-04: 全量结果为空 (has_export_data=False) → export_btn_disabled=True."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
+        fake_vm._current_page_data = pd.DataFrame()
         fake_vm._set_state(total_items=0, strategies_loaded=True)
         _rerender(env)
 
         export_btn = _get_export_button(env)
-        assert export_btn.disabled is True, "total_items=0 时 export button 应 disabled"
+        assert export_btn.disabled is True, "全量结果为空时 export button 应 disabled"
 
     def test_export_enabled_when_has_data(self, screener_view_env) -> None:
-        """state.total_items>0 → export_btn_disabled=False."""
+        """UX-04: 全量结果非空 (has_export_data=True) → export_btn_disabled=False."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
@@ -3032,7 +3043,22 @@ class TestDerivedStateFromVM:
         _rerender(env)
 
         export_btn = _get_export_button(env)
-        assert export_btn.disabled is False, "total_items>0 时 export button 应启用"
+        assert export_btn.disabled is False, "全量结果非空时 export button 应启用"
+
+    def test_export_enabled_when_filter_no_match(self, screener_view_env) -> None:
+        """UX-04 (R2-1 守护): 过滤无匹配 (total_items=0) 但全量结果非空 → export 仍启用.
+
+        导出判据与过滤显示解耦: 语义为 "有结果可导出", 全量数据导出不受过滤影响.
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 过滤无匹配: total_items=0 但 _current_page_data (全量近似) 非空
+        fake_vm._set_state(stock_filter="NOMATCH", total_items=0, total_pages=0, strategies_loaded=True)
+        _rerender(env)
+
+        export_btn = _get_export_button(env)
+        assert export_btn.disabled is False, "过滤无匹配但全量结果非空时 export button 应启用 (UX-04 解耦)"
 
     def test_derived_state_auto_updates_on_loading_change(self, screener_view_env) -> None:
         """DoD: loading 变化时按钮自动在 PLAY_ARROW/STOP 间切换 (Task 3.2)."""
@@ -3117,3 +3143,77 @@ class TestPageNoneEarlyReturn:
             assert not page.run_task.called
         finally:
             _context_page.set(saved)
+
+
+# ============================================================================
+# UX-04 (P2-01): 股票代码过滤测试
+# ============================================================================
+
+
+def _get_stock_filter_field(env: dict) -> ft.TextField:
+    """从渲染树中找到股票代码过滤 TextField (label 为 i18n[screener_filter_stock])."""
+    fields = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField)]
+    filter_fields = [tf for tf in fields if tf.label == "i18n[screener_filter_stock]"]
+    assert len(filter_fields) == 1, "应恰好渲染一个股票代码过滤输入框"
+    return filter_fields[0]
+
+
+class TestStockFilterUX04:
+    """UX-04 (P2-01): 深链过滤请求消费 + 过滤输入 UI 绑定 + 空态保留过滤框."""
+
+    def test_stock_filter_request_applies_filter(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """stock_filter_request=("000001", 1) prop → mount effect 调 vm.set_stock_filter("000001")."""
+        from ui.views import screener_view as mod
+
+        fake_vm = _FakeScreenerViewModel()
+        _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
+
+        component = make_component(mod.ScreenerView, stock_filter_request=("000001", 1))
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert "set_stock_filter:000001" in fake_vm.method_calls, "深链 prop 应触发 vm.set_stock_filter"
+
+    def test_stock_filter_request_none_no_call(self, screener_view_env) -> None:
+        """stock_filter_request=None (fixture 默认) → 不调 set_stock_filter."""
+        env = screener_view_env
+        assert not any(c.startswith("set_stock_filter:") for c in env["fake_vm"].method_calls)
+
+    def test_stock_filter_field_value_binding(self, screener_view_env) -> None:
+        """VM state stock_filter="000001" → TextField value=="000001" (受控绑定)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(stock_filter="000001", strategies_loaded=True)
+        _rerender(env)
+
+        field = _get_stock_filter_field(env)
+        assert field.value == "000001", "过滤输入框 value 应绑定 VM state.stock_filter"
+
+    def test_stock_filter_input_triggers_set(self, screener_view_env) -> None:
+        """手动输入 on_change → vm.set_stock_filter 被调用 (原值不 strip)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        field = _get_stock_filter_field(env)
+        _invoke(field.on_change, _make_event("000001 "))
+
+        assert "set_stock_filter:000001 " in fake_vm.method_calls, (
+            "on_change 应原值传给 set_stock_filter (不 strip, 光标保护)"
+        )
+
+    def test_empty_state_branch_keeps_filter_row(self, screener_view_env) -> None:
+        """无结果 + 过滤非空 → EmptyState 分支中过滤框仍存在 (可清空恢复)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._current_page_data = pd.DataFrame()
+        fake_vm._set_state(stock_filter="NOMATCH", total_items=0, total_pages=0, strategies_loaded=True)
+        env["captured_callbacks"].clear()
+        _rerender(env)
+
+        # EmptyState 分支: PaginatedTable 未调用
+        assert env["captured_callbacks"] == {}
+        # 过滤框仍存在且 value 绑定
+        field = _get_stock_filter_field(env)
+        assert field.value == "NOMATCH", "空态分支过滤框应保留且绑定当前过滤值"
