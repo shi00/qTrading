@@ -508,6 +508,7 @@ man/              ← 架构专题文档 (数据库账号分离、表分区策�
 - **asyncio 模式**: 全项目使用 `asyncio` 驱动异步。
 - **线程安全**: UI 回调可能来自线程池，使用 `loop.call_soon_threadsafe()` 转移到事件循环。
 - **线程池分离**: IO 密集型使用 `TaskType.IO`，CPU 密集型 (NumPy/Pandas 等 GIL 释放型) 使用 `TaskType.CPU`；纯 Python CPU 密集任务应使用 `ProcessPoolExecutor` (项目暂无)。
+- **`run_async` 取消语义**: 取消 `run_async` 的 await 只取消等待（`run_in_executor` 的 Future 被取消），**不会终止 worker 线程中正在执行的同步函数**（concurrent.futures 固有语义，线程无法被外部中断）。需要真正可中断的长任务，必须自行接受 `threading.Event` 并在函数体内周期性检查。关机路径（如 shutdown Step 5/6/8）使用 `asyncio.to_thread` 而非线程池，避免关机时依赖正在被关闭的池。
 - **CancelledError 必须传播**: 永远 `raise` 不吞没，否则破坏优雅停机 (对应 [CLAUDE.md R2](./CLAUDE.md#31--绝对禁止))。
 - **事件循环绑定对象**: 使用 `utils.loop_local` 的 `get_loop_local()` / `del_loop_local()` / `clear_all_loop_locals()` 管理 `asyncio.Event`、`asyncio.Lock` 等绑定到特定事件循环的对象，避免跨循环死锁 (对应 [CLAUDE.md R11](./CLAUDE.md#31--绝对禁止))。
 - **`asyncio.gather`** 涉及失败可恢复场景使用 `return_exceptions=True`，并在调用方逐个分类异常。
