@@ -35,7 +35,7 @@ from data.external.news_fetcher import NewsFetcher
 from services.ai_service import AIService
 from strategies.utils import fmt_val, safe_float
 from core.i18n import I18n, Message
-from utils.async_utils import gather_return_exceptions_propagating_cancel
+from utils.async_utils import gather_for_shutdown_cleanup, gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -812,7 +812,7 @@ class AIStrategyMixin:
         for task in pending:
             task.cancel()
         # 等待被取消的 task 完成；CancelledError 和其他异常都被吞没（已记录日志或预期）
-        await asyncio.gather(*pending, return_exceptions=True)
+        await gather_for_shutdown_cleanup(*pending)
 
     def _build_result_row(self, row_data: dict, res: object) -> dict | None:
         """把单股 AI 结果组装为结果行；无效（None/异常/score==0）返回 None。"""
