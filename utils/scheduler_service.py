@@ -14,7 +14,7 @@ import threading
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
@@ -540,7 +540,7 @@ class SchedulerService:
             processor = DataProcessor()
             # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
             # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
-            if not tm.update_progress(task_id, 0.05, I18n.get("sched_ai_concept_clear_history")):
+            if not tm.update_progress(task_id, 0.05, Message("sched_ai_concept_clear_history")):
                 raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
             # Scheduled run: manual_trigger=False → only sync free data sources, no LLM call
             await processor.run_ai_concept_tagging(
@@ -611,26 +611,28 @@ class SchedulerService:
             from data.persistence.review_manager import ReviewManager
             from strategies.ai_strategy import AISelectionStrategy
 
-            tm.update_progress(task_id, 0.1, I18n.get("sched_pred_init"))
+            tm.update_progress(task_id, 0.1, Message("sched_pred_init"))
             processor = DataProcessor()
             await processor.init_data()
 
-            tm.update_progress(task_id, 0.2, I18n.get("sched_pred_prepare"))
+            tm.update_progress(task_id, 0.2, Message("sched_pred_prepare"))
             await processor.prepare_market_data()
 
-            tm.update_progress(task_id, 0.3, I18n.get("sched_pred_context"))
+            tm.update_progress(task_id, 0.3, Message("sched_pred_context"))
             context = await processor.get_strategy_data()
             if not context:
                 raise RuntimeError(I18n.get("sched_pred_no_context"))
             context["data_processor"] = processor
 
-            tm.update_progress(task_id, 0.5, I18n.get("sched_pred_running"))
+            tm.update_progress(task_id, 0.5, Message("sched_pred_running"))
 
             # Inject progress callback so strategy.filter() reports AI analysis sub-progress
             def _ai_progress(current, total, msg):
                 # Map to 50%→90% range
+                # msg 透传 Message (E4): 不拼接 f"[{current}/{total}] " 前缀,
+                # current/total 已由进度条可视化, Message 拼接会输出 dataclass repr.
                 sub_pct = 0.5 + (current / max(total, 1)) * 0.4
-                tm.update_progress(task_id, sub_pct, f"[{current}/{total}] {msg}")
+                tm.update_progress(task_id, sub_pct, msg)
 
             context["on_progress"] = _ai_progress
 
@@ -638,7 +640,7 @@ class SchedulerService:
             result_df = await strategy.filter(context)
 
             if result_df is not None and not result_df.empty:
-                tm.update_progress(task_id, 0.9, I18n.get("sched_pred_saving"))
+                tm.update_progress(task_id, 0.9, Message("sched_pred_saving"))
                 rm = ReviewManager()
                 analysis_trade_date = context.get("trade_date")
                 if not analysis_trade_date:

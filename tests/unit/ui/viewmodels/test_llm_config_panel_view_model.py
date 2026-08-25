@@ -847,7 +847,8 @@ class TestLLMConfigPanelViewModelRefreshModels:
             await vm.refresh_models()
         assert vm.state.status_type == "error"
         assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "_raw_msg_"
+        # D5: VM 经 get_error_message_key 产出 Message(key) 而非 _raw_msg_ 动态文本
+        assert vm.state.status_message.key == "llm_err_unknown"
         assert vm.state.is_refreshing is False
 
     @pytest.mark.asyncio

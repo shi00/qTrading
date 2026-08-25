@@ -119,9 +119,9 @@ class TestDailySyncProgressIntegration:
 
         async def _fake_daily_update(progress_callback=None):
             assert progress_callback is not None
-            progress_callback(1, 2, "sync_step_1")
+            progress_callback(1, 2, Message("sync_step_1"))
             await asyncio.sleep(0)
-            progress_callback(2, 2, "sync_step_2")
+            progress_callback(2, 2, Message("sync_step_2"))
 
         mock_processor.run_daily_update.side_effect = _fake_daily_update
 

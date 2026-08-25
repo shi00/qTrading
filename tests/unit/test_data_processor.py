@@ -9,6 +9,7 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
+from core.i18n import Message
 from data.data_processor import DataProcessor
 
 pytestmark = pytest.mark.unit
@@ -976,6 +977,47 @@ class TestDataProcessorInitializeSystem:
             mock_ch.get_init_history_years.return_value = 1
             result = await dp.initialize_system(quick=True)
             assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_reports_progress_messages(self):
+        """D7: initialize_system 成功路径经 progress_callback 上报 Message(key)（直透/缺省生成/完成）。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+            assert result is not None
+
+        # report_step 缺省生成 Message（无 sub_msg）与直透 Message（同步子进度）均生效
+        assert any(m.key == "init_step_1" for c, t, m in progress)
+        assert any(m.key == "init_sync_concepts" for c, t, m in progress)
+        # 完成上报 init_step_complete（非 init_step_N）
+        assert any(m.key == "init_step_complete" for c, t, m in progress)
+        # D7: 全部消息均为 Message 而非已翻译字符串
+        assert all(isinstance(m, Message) for c, t, m in progress)
+        # 加权进度单调上升到 100
+        values = [c for c, t, m in progress]
+        assert values == sorted(values)
+        assert values[-1] == 100
 
     @pytest.mark.asyncio
     async def test_stock_basic_returns_zero(self):

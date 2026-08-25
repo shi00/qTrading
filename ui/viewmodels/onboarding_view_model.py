@@ -479,8 +479,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         try:
 
             def progress_callback(current, total, message):
-                # DataProcessor 传入的 message 为 service 层已翻译字符串，不能作为 i18n key 透传，
-                # 否则产生 missing-translation 噪音。统一使用固定 key，进度百分比仍实时更新。
+                # DataProcessor 传入的 message 为 Message(key+params) (D7 改造后)；
+                # onboarding 引导页刻意使用固定 key 展示，进度百分比仍实时更新，
+                # 不逐条翻译下游同步阶段文案。
                 self._set_state(sync_progress=current / 100, sync_progress_message=Message("wizard_status_syncing"))
 
             dp = await self._ensure_processor()

@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import date, datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
+from core.i18n import Message
 from utils.scheduler_service import SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -1096,6 +1097,48 @@ class TestNightlyPredictionLogicClosure:
         assert stored_strategy_name == "strategy_ai_nightly_name"
         # 不应等于旧 identifier
         assert stored_strategy_name != "AI_Auto_Nightly"
+
+    @pytest.mark.asyncio
+    async def test_nightly_prediction_ai_progress_forwards_message(self):
+        """D7(E4): _ai_progress 将 strategy.filter 的 Message 透传给 update_progress，不拼接前缀。"""
+        svc = _make_svc()
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.init_data = AsyncMock()
+        mock_dp.prepare_market_data = AsyncMock()
+        mock_dp.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
+
+        async def _filter_with_progress(context):
+            on_progress = context.get("on_progress")
+            if on_progress:
+                on_progress(50, 100, Message("ai_progress_done", {"done": 50, "total": 100}))
+            return result_df
+
+        mock_strategy = MagicMock()
+        mock_strategy.filter = AsyncMock(side_effect=_filter_with_progress)
+        mock_tm = MagicMock()
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock()
+        now_val = datetime(2024, 6, 14, 20, 30)
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("utils.scheduler_service.get_now", return_value=now_val),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_nightly_prediction()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            await factory("test_task")
+
+        # on_progress(50,100) → sub_pct = 0.5 + 0.5*0.4 = 0.7，Message 原样透传（无 f-string 前缀）
+        ai_calls = [c for c in mock_tm.update_progress.call_args_list if isinstance(c.args[2], Message)]
+        assert any(c.args[2].key == "ai_progress_done" and c.args[1] == 0.7 for c in ai_calls)
 
     @pytest.mark.asyncio
     async def test_prediction_logic_no_context_raises(self):

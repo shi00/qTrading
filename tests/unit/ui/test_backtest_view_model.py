@@ -414,7 +414,7 @@ class TestBacktestViewModelRunBacktest:
         async def service_run(**kwargs):
             progress_cb = kwargs.get("progress_callback")
             if progress_cb:
-                progress_cb(0.5, "halfway")
+                progress_cb(0.5, Message("halfway"))
             return MagicMock(duration_ms=500, metrics={"sharpe_ratio": 2.0})
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
@@ -673,13 +673,13 @@ class TestBacktestViewModelRunBacktest:
         """测试任务取消后进度回调不更新状态。"""
         vm = BacktestViewModel()
 
-        captured_progress_cb: Callable[[float, str], None] | None = None
+        captured_progress_cb: Callable[[float, Message], None] | None = None
 
         async def service_run(**kwargs):
             nonlocal captured_progress_cb
             captured_progress_cb = kwargs.get("progress_callback")
             if captured_progress_cb:
-                captured_progress_cb(0.3, "processing")
+                captured_progress_cb(0.3, Message("test_progress"))
             raise asyncio.CancelledError()
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)

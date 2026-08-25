@@ -100,7 +100,9 @@ class DataSourceState:
 
     # --- Progress ---
     progress: float = 0.0
-    progress_message: Message | None = None
+    # str 兜底: initialize_system 的 report_step 路径 (E1 暂留 I18n.get) 仍可产出已翻译字符串;
+    # D7 改造后其余路径均为 Message, View 渲染对 str 直显兜底.
+    progress_message: Message | str | None = None
 
     # --- 业务数据 (L771 合规: frozen dataclass / Message, 直接暴露) ---
     # health_result: 最近一次健康检查结果 (None 表示未检查)
@@ -394,10 +396,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         async def _daily_logic(task_id: str, **kwargs):
             def _progress(c, t, msg):
                 # P1-5: 同步进度上报到 VM state (View ProgressBar 渲染);
-                # NOTE(lazy) 范式与 _combined_progress 一致: msg 是 service 层已翻译字符串,
-                # 包 Message(key) 透传, I18n.get 未命中时原样返回 key.
+                # D7: msg 已由 data 层 Message 化, 直接透传 (VM 不感知 locale).
                 progress_val = c / t if t else 0
-                self._set_state(progress=progress_val, progress_message=Message(str(msg)))
+                self._set_state(progress=progress_val, progress_message=msg)
                 # T8 fix: 若 update_progress 返回 False（任务已取消/不再 RUNNING），抛 CancelledError 早退
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                 if not self._tm.update_progress(task_id, progress_val, msg):
@@ -575,15 +576,13 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 self._set_state(progress=0, progress_message=Message("wizard_status_init"))
 
                 def _combined_progress(c, t, m):
-                    # NOTE(lazy): m 是 service 层传入的字符串,作为 key 透传. ceiling: service 层产出 Message. upgrade: service 层重构.
-                    self._set_state(progress=c / t if t > 0 else 0, progress_message=Message(m))
+                    # D7: data 层 progress 已 Message 化, 直接透传 (注: initialize_system 的
+                    # report_step 路径 E1 暂留 str, View 渲染对 str 直显兜底);
+                    # current/total 由 ProgressBar 可视化, 不再拼 "[c/t] " 文本前缀.
+                    self._set_state(progress=c / t if t > 0 else 0, progress_message=m)
                     # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
                     # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                    if not self._tm.update_progress(
-                        task_id,
-                        c / t if t > 0 else 0,
-                        f"[{c:.2f}/{t}] {m}",
-                    ):
+                    if not self._tm.update_progress(task_id, c / t if t > 0 else 0, m):
                         raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
                 dp = await self._ensure_processor()

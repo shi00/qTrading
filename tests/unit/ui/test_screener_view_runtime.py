@@ -2719,6 +2719,104 @@ class TestTableDataRendering:
         assert callable(env["captured_callbacks"]["on_sort"])
 
 
+class TestTableDataMemo:
+    """B12: 表格渲染 memo — data_version/page_no/page_size 未变时复用, 分页/空态失效."""
+
+    @pytest.fixture
+    def counting_build(self, screener_view_env, monkeypatch):
+        """包裹 _build_table_data 计数 (初始 fixture render 已调用 1 次真实函数)."""
+        mod = screener_view_env["mod"]
+        real_build = mod._build_table_data
+        calls = {"n": 0}
+
+        def _counting(df, vm):
+            calls["n"] += 1
+            return real_build(df, vm)
+
+        monkeypatch.setattr(mod, "_build_table_data", _counting)
+        return calls
+
+    def test_same_key_reuses_memo(self, screener_view_env, counting_build) -> None:
+        """data_version/page_no/page_size 均未变 → 复用 memo, 不再调用 _build_table_data."""
+        env = screener_view_env
+        # 初始 render 已构建 memo (data_version=0, page_no=1, page_size=50)
+        _rerender(env)
+        assert counting_build["n"] == 0, "同 key 重渲染应命中 memo"
+
+        _rerender(env)
+        assert counting_build["n"] == 0, "再次同 key 重渲染仍应命中 memo"
+
+    def test_data_version_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """data_version 递增 → 重算 (新 run 结果 / 实时流 flush / 排序)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        fake_vm._set_state(data_version=1)
+        _rerender(env)
+        assert counting_build["n"] == 1, "data_version 变化应重算"
+
+        # 再次同 key 重渲染命中新 memo
+        _rerender(env)
+        assert counting_build["n"] == 1
+
+    def test_pagination_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """page_no / page_size 变化 → 重算 (防止旧分页数据)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        fake_vm._set_state(page_no=2, total_items=100, total_pages=2)
+        _rerender(env)
+        assert counting_build["n"] == 1, "page_no 变化应重算"
+
+        fake_vm._set_state(page_size=100, total_pages=1)
+        _rerender(env)
+        assert counting_build["n"] == 2, "page_size 变化应重算"
+
+    def test_empty_data_invalidates_memo(self, screener_view_env, counting_build) -> None:
+        """空数据 → EmptyState + memo 失效; 恢复数据 (data_version 不变) → 重算非陈旧命中.
+
+        对应 run 重置/无结果路径不改 data_version 的防陈旧场景 (B12 对抗性检视补充).
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 清空数据 → EmptyState (memo 失效)
+        fake_vm._current_page_data = pd.DataFrame()
+        fake_vm._set_state(total_items=0, total_pages=0)
+        env["captured_callbacks"].clear()
+        _rerender(env)
+        assert counting_build["n"] == 0
+        assert "on_sort" not in env["captured_callbacks"], "空态应渲染 EmptyState 而非表格"
+
+        # 恢复数据且 data_version 不变 (模拟 run 结果先于版本递增的窗口) → 必须重算, 不得命中空态前旧 memo
+        fake_vm._current_page_data = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]})
+        fake_vm._set_state(total_items=1, total_pages=1)
+        _rerender(env)
+        assert counting_build["n"] == 1, "空态失效后恢复数据应重算 (防陈旧命中)"
+
+    def test_locale_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """locale 切换 → 重算 (unit_yi/unit_wan 等格式化字符串 locale 相关, 防旧 locale 残留)."""
+        env = screener_view_env
+        state = env["mod"].get_observable_state()
+
+        _rerender(env)
+        assert counting_build["n"] == 0
+
+        state.locale = "en_US"
+        _rerender(env)
+        assert counting_build["n"] == 1, "locale 变化应重算 (格式化单位随 locale)"
+
+        # 同 locale 再次重渲染命中新 memo
+        _rerender(env)
+        assert counting_build["n"] == 1
+
+
 # ============================================================================
 # 分页控件测试
 # ============================================================================

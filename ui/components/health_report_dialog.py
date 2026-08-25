@@ -6,6 +6,7 @@ from typing import Any
 
 import flet as ft
 
+from core.i18n import Message
 from ui.components.flet_type_helpers import safe_controls
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -763,7 +764,7 @@ def _build_scan_result(result: dict, on_init_data: Callable[[], None] | None = N
 def _build_scan_content(
     scan_state: str,
     progress: float,
-    status_text: str,
+    status_text: Message | str | None,
     result: dict | None,
     width: int,
     height: int,
@@ -775,7 +776,7 @@ def _build_scan_content(
     Args:
         scan_state: 扫描状态 ("idle" | "scanning" | "done" | "error")
         progress: 进度 0.0~1.0
-        status_text: 状态文本（i18n 已解析）
+        status_text: 状态文本 (Message 由当前 locale 渲染; str 直显向后兼容)
         result: 扫描结果字典（scan_state="done" 时非 None）
         width: 对话框宽度
         height: 对话框高度
@@ -790,7 +791,12 @@ def _build_scan_content(
         )
 
     # 进度阶段：idle / scanning / error
-    status_display = I18n.get(error_key or "db_err_format") if scan_state == "error" else status_text
+    if scan_state == "error":
+        status_display = I18n.get(error_key or "db_err_format")
+    elif isinstance(status_text, Message):
+        status_display = I18n.get(status_text.key, **status_text.params)
+    else:
+        status_display = status_text or ""
     progress_value: float | None = progress if scan_state == "scanning" else None
 
     return ft.Container(
