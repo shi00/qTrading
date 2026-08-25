@@ -248,30 +248,30 @@ class TestBacktestViewModel:
         assert config.risk_free_rate == 0.03
 
     @patch("strategies.all_strategies.StrategyManager")
-    def test_get_available_strategies(self, mock_manager):
-        """D16: VM 返回 (key, name_key) 对, 不产出翻译名。"""
+    def test_init_assembles_available_strategies(self, mock_manager):
+        """D2: VM 初始化装配 (key, name_key) 到 state.available_strategies, 并默认选中首个。"""
         mock_strategy = MagicMock()
         mock_strategy.name_key = "strategy_test_name"
         mock_manager.return_value.strategies = {"test_strategy": mock_strategy}
 
         vm = BacktestViewModel()
-        strategies = vm.get_available_strategies()
 
-        assert ("test_strategy", "strategy_test_name") in strategies
+        assert ("test_strategy", "strategy_test_name") in vm.state.available_strategies
+        assert vm.state.selected_strategy_key == "test_strategy"
 
     @patch("strategies.all_strategies.StrategyManager")
-    def test_get_available_strategies_empty(self, mock_manager):
-        """测试获取空策略列表。"""
+    def test_init_empty_strategies(self, mock_manager):
+        """D2: 空策略 → available_strategies==() 且 selected_strategy_key=None。"""
         mock_manager.return_value.strategies = {}
 
         vm = BacktestViewModel()
-        strategies = vm.get_available_strategies()
 
-        assert strategies == ()
+        assert vm.state.available_strategies == ()
+        assert vm.state.selected_strategy_key is None
 
     @patch("strategies.all_strategies.StrategyManager")
-    def test_get_available_strategies_multiple(self, mock_manager):
-        """D16: 多个策略返回 name_key pairs, 含缺 name_key 回退 key。"""
+    def test_init_multiple_strategies(self, mock_manager):
+        """D16/D2: 多策略 name_key pairs 含缺 name_key 回退 key, 默认选中首个。"""
         s1 = MagicMock()
         s1.name_key = "strategy_1_name"
         s2 = MagicMock()
@@ -285,12 +285,42 @@ class TestBacktestViewModel:
         }
 
         vm = BacktestViewModel()
-        strategies = dict(vm.get_available_strategies())
+        strategies = dict(vm.state.available_strategies)
 
         assert len(strategies) == 3
         assert strategies["strategy1"] == "strategy_1_name"
         assert strategies["strategy2"] == "strategy_2_name"
         assert strategies["strategy3"] == "strategy3"
+        assert vm.state.selected_strategy_key == "strategy1"
+
+    @patch("strategies.all_strategies.StrategyManager")
+    def test_select_strategy_updates_state(self, mock_manager):
+        """D2: select_strategy(key) → state.selected_strategy_key 更新。"""
+        mock_manager.return_value.strategies = {"s1": MagicMock(), "s2": MagicMock()}
+
+        vm = BacktestViewModel()
+        vm.select_strategy("s2")
+        assert vm.state.selected_strategy_key == "s2"
+
+    @patch("strategies.all_strategies.StrategyManager")
+    def test_select_strategy_none_clears_selection(self, mock_manager):
+        """D2: select_strategy(None) → selected_strategy_key=None (清空选择)。"""
+        mock_manager.return_value.strategies = {"s1": MagicMock()}
+
+        vm = BacktestViewModel()
+        vm.select_strategy(None)
+        assert vm.state.selected_strategy_key is None
+
+    def test_record_last_run_updates_state(self):
+        """D2: record_last_run(strategy_key, config) → state.last_run_summary 记录。"""
+        vm = BacktestViewModel()
+        config = vm.create_config(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+        vm.record_last_run("ma_cross", config)
+
+        assert vm.state.last_run_summary == ("ma_cross", config)
 
     @pytest.mark.asyncio
     async def test_run_backtest_already_running(self):

@@ -83,6 +83,10 @@ class _FakeBacktestViewModel:
 
         # 构造 state-like 对象 (避免 import 真实 BacktestState 触发 strategies 层依赖)
         class _State:
+            # D2: 业务状态下沉 — 可用策略/选中策略/上次提交
+            available_strategies: Any = ()
+            selected_strategy_key: Any = None
+            last_run_summary: Any = None
             is_running: bool = False
             progress: float = 0.0
             progress_message: Any = None
@@ -96,6 +100,9 @@ class _FakeBacktestViewModel:
             error_detail: Any = None
 
         self._state = _State()
+        # D2: 模拟 VM 初始化装配策略 + 默认选中首个
+        self._state.available_strategies = self._strategies
+        self._state.selected_strategy_key = next((k for k, _ in self._strategies), None)
 
     @property
     def state(self) -> Any:
@@ -121,8 +128,13 @@ class _FakeBacktestViewModel:
         self.dispose_called = True
         self._subscribers.clear()
 
-    def get_available_strategies(self) -> tuple[tuple[str, str], ...]:
-        return self._strategies
+    def select_strategy(self, key: Any) -> None:
+        """D2: command — 受控更新选中策略到 state."""
+        self._set_state(selected_strategy_key=key)
+
+    def record_last_run(self, strategy_key: Any, config: Any) -> None:
+        """D2: command — 记录上次提交供 retry 复用."""
+        self._set_state(last_run_summary=(strategy_key, config))
 
     def create_config(self, **kwargs: Any) -> Any:
         return self.create_config_mock(**kwargs)
