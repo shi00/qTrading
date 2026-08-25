@@ -8,6 +8,7 @@ import datetime
 import inspect
 import logging
 import pytest
+from typing import cast
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
@@ -2363,7 +2364,7 @@ class TestChunkedInQueryMultipleChunks:
     async def test_multiple_chunks_dynamic(self):
         call_count = 0
 
-        async def mock_read_fn(sql, params):
+        async def mock_read_fn(sql, params, **kwargs):
             nonlocal call_count
             call_count += 1
             return pd.DataFrame({"id": [call_count * 2 - 1, call_count * 2]})
@@ -2527,6 +2528,68 @@ class TestChunkedExecute:
         assert len(results) == 2
 
 
+class TestChunkedReadFailFast:
+    """review03-C1: 读路径 chunk 失败显式化（fail-fast，弃部分结果，不静默吞错）。"""
+
+    async def _flaky_read(self, sql, params, **kwargs):
+        self._flaky_calls += 1
+        if self._flaky_calls == 2:
+            raise ConnectionError("chunk timeout")
+        return pd.DataFrame({"id": params})
+
+    @pytest.mark.asyncio
+    async def test_chunk_failure_raises_database_query_error(self):
+        """第二块失败 → gather 收集异常 → _chunked_execute 抛 DatabaseQueryError（fail-fast）。"""
+        self._flaky_calls = 0
+        values = list(range(700))  # 2 chunks（500 + 200）
+
+        with pytest.raises(DatabaseQueryError, match="partial results discarded"):
+            await BaseDao._chunked_execute(
+                self._flaky_read,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                values,
+                chunk_size=500,
+            )
+
+    @pytest.mark.asyncio
+    async def test_batch_partial_failure_returns_empty_with_error_log(self, caplog):
+        """13 个 get_*_batch 的兜底：部分块失败 → 整体空 + logger.error（不静默返回残缺数据）。"""
+        import logging
+
+        dao = BaseDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=ConnectionError("deadlock"))
+
+        with caplog.at_level(logging.ERROR, logger="data.persistence.daos.base_dao"):
+            df = await dao._batch_get_with_as_of_date(
+                lambda as_of: ("SELECT x FROM t WHERE id IN ({placeholders})", None),
+                [str(i) for i in range(700)],
+                None,
+                "failfast_test",
+            )
+        assert df.empty
+        assert any("Chunked read failed" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_outer_cancellation_propagates(self):
+        """外层 task 取消 → gather 抛 CancelledError（R2：取消必须传播）。"""
+
+        async def never(sql, params, **kwargs):
+            await asyncio.sleep(10)
+
+        task = asyncio.create_task(
+            BaseDao._chunked_execute(
+                never,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                list(range(700)),
+                chunk_size=500,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 class TestChunkedExecuteParallel:
     """Task 5.1 (PERF-M1 / DATA-D5): Verify parallel chunked execution produces
     correct results and limits concurrency to avoid connection pool exhaustion."""
@@ -2552,9 +2615,10 @@ class TestChunkedExecuteParallel:
         )
         # Results must be in chunk order (0,2,4) regardless of execution order
         assert len(results) == 3
-        assert results[0]["chunk_idx"].iloc[0] == 0
-        assert results[1]["chunk_idx"].iloc[0] == 2
-        assert results[2]["chunk_idx"].iloc[0] == 4
+        df_results = cast(list[pd.DataFrame], results)  # _chunked_execute 返回 union（含失败异常），此处窄化
+        assert df_results[0]["chunk_idx"].iloc[0] == 0
+        assert df_results[1]["chunk_idx"].iloc[0] == 2
+        assert df_results[2]["chunk_idx"].iloc[0] == 4
 
     @pytest.mark.asyncio
     async def test_parallel_semaphore_limits_concurrency(self):
@@ -2623,7 +2687,7 @@ class TestChunkedExecuteParallel:
         """chunked_in_query should correctly concatenate parallel chunk results."""
         codes = [f"{i:06d}.SH" for i in range(6)]
 
-        async def mock_read_fn(sql, params):
+        async def mock_read_fn(sql, params, **kwargs):
             return pd.DataFrame({"ts_code": params})
 
         result = await BaseDao.chunked_in_query(

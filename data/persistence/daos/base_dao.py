@@ -199,7 +199,20 @@ class BaseDao:
             chunk = values[i : i + chunk_size]
             chunk_tasks.append(_execute_chunk(chunk, actual_start_idx))
 
-        results = await asyncio.gather(*chunk_tasks)
+        # review03-C1: 读路径失败语义显式化（fail-fast）。
+        # gather(return_exceptions=True) 使"块级异常"不再依赖隐式默认参数：
+        #   1. 结果位置出现 CancelledError → 必须 raise（R2 红线，配合优雅停机）；
+        #   2. 结果位置出现其他异常 → 抛 DatabaseQueryError 并丢弃部分结果，
+        #      避免调用方拿到"看起来正常但缺块"的残缺数据集。
+        results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+            if isinstance(r, BaseException):
+                raise DatabaseQueryError(
+                    f"[{BaseDao.__name__}] Chunked read failed; partial results discarded "
+                    f"to avoid silent data loss: {r}"
+                ) from r
         return list(results)
 
     @staticmethod
@@ -225,8 +238,12 @@ class BaseDao:
             params_fn: callable(values_chunk) -> extra params list, appended after values
             start_idx: starting index for placeholders (default 1)
             extra_params: prefix parameters list to prepend to query arguments
-            **read_db_kwargs: extra kwargs to pass to read_db_fn (e.g., suppress_errors=True)
+            **read_db_kwargs: extra kwargs to pass to read_db_fn
+                (review03-C1: suppress_errors 默认强制 False——块级读失败必须显式失败，
+                而非被 _read_db 吞成空 DF 后过滤，否则部分块失败会静默返回残缺数据集)
         """
+        # review03-C1: 读路径块失败显式化——禁止 _read_db 默认的 suppress_errors=True 吞错
+        read_db_kwargs.setdefault("suppress_errors", False)
         results = await BaseDao._chunked_execute(
             read_db_fn,
             sql_template,
@@ -237,7 +254,8 @@ class BaseDao:
             extra_params=extra_params,
             **read_db_kwargs,
         )
-        all_results = [df for df in results if df is not None and not df.empty]
+        # review03-C1: 只收集 DataFrame 结果；BaseException 已被 _chunked_execute 显式排查
+        all_results = [df for df in results if isinstance(df, pd.DataFrame) and not df.empty]
         if all_results:
             return pd.concat(all_results, ignore_index=True)
         return pd.DataFrame()
@@ -343,6 +361,16 @@ class BaseDao:
             raise
         except EngineDisposedError:
             raise
+        except DatabaseQueryError as e:
+            # review03-C1: 分块查询部分失败 → fail-fast 已整体放弃（不返回残缺数据）。
+            # 语义升级为 error：调用方可区分"查询失败"与"无数据"（leader 通过日志审计）。
+            logger.error(
+                "[%s] %s | Chunked read failed, partial results discarded: %s",
+                self.__class__.__name__,
+                log_prefix,
+                DataSanitizer.sanitize_error(e),
+            )
+            return pd.DataFrame()
         except Exception as e:
             logger.warning(
                 "[%s] %s: %s",
