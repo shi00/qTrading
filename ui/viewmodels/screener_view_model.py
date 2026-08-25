@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
@@ -150,7 +151,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
     def __init__(self):
         # Dependencies
-        self.data_processor = DataProcessor()
+        # data_processor 懒构造：DataProcessor.__init__ 同步初始化 TushareClient
+        # （40+ API rate_limiter，耗时 34s+），构造期同步会阻塞 Flet 主线程 (R16)。
+        # 首次筛选（_execute_screening）经 _ensure_processor() 在 IO 线程池异步构造。
+        self.data_processor: DataProcessor | None = None
         self.strategy_mgr = StrategyManager()
         self.review_mgr = ReviewManager()
 
@@ -193,6 +197,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
+
+    async def _ensure_processor(self) -> DataProcessor:
+        """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。
+
+        双检 + loop-local 锁防并发双检竞态 (R11)。key 带 VM 前缀避免跨实例共享锁。
+        View 侧 `vm.data_processor` sync 访问可能为 None（StockDetailDialog 已有
+        None 保护）；首次筛选后此属性即非 None。
+        """
+        if self.data_processor is None:
+            lock = get_loop_local("screener_vm_processor_lock", asyncio.Lock)
+            async with lock:
+                if self.data_processor is None:
+                    self.data_processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
+        return self.data_processor
 
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
 
@@ -643,20 +661,22 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         async def _execute_screening(task_id: str, **kwargs):
             try:
                 # 1. Prepare Context (may trigger massive data load)
+                # 首次筛选在此懒异步构造 DataProcessor（IO 线程池 offload，R16）
+                dp = await self._ensure_processor()
                 TaskManager().update_progress(
                     task_id,
                     0.05,
                     Message("task_loading_data"),
                 )
-                context = await self.data_processor.get_strategy_data()
+                context = await dp.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
                         task_id,
                         0.1,
                         Message("task_cache_empty_init"),
                     )
-                    await self.data_processor.init_data()
-                    context = await self.data_processor.get_strategy_data()
+                    await dp.init_data()
+                    context = await dp.get_strategy_data()
 
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
@@ -685,7 +705,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                             status_action_key=None,
                         )
 
-                context["data_processor"] = self.data_processor
+                context["data_processor"] = dp
                 context["params"] = params or {}  # Dynamic strategy parameters from UI
 
                 # Setup AI Callbacks

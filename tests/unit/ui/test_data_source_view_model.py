@@ -8,7 +8,7 @@ H2-2 改造: 移除 dual-track, state 字段全部用 frozen dataclass / Message
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -105,7 +105,9 @@ def mock_task_manager():
 
 @pytest.fixture
 def vm(mock_processor, mock_cache, mock_ai_service, mock_task_manager):
-    return DataSourceViewModel()
+    # B11 懒构造: 构造期 _processor 为 None, 此处显式 DI 注入 mock_processor,
+    # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
+    return DataSourceViewModel(processor=mock_processor)
 
 
 @pytest.fixture
@@ -142,12 +144,43 @@ def _assert_snack(bound_vm, snapshots, message_key, color_name):
 
 
 class TestDataSourceViewModelInit:
-    def test_default_dependencies_created(self, vm):
-        assert isinstance(vm._processor, DataProcessor)
+    def test_default_dependencies_created(self, vm, mock_processor):
+        # B11 懒构造: vm fixture 已 DI 注入 mock_processor, _processor 为注入实例;
+        # 未注入时默认 None, 首次 _ensure_processor() 经 IO 线程池构造 (R16)
+        assert vm._processor is mock_processor
         assert isinstance(vm._cache, CacheManager)
         assert isinstance(vm._tm, TaskManager)
         # Task 7.2: AIService 惰性构造, 默认 None (仅 _get_ai_service() 调用时才构造)
         assert vm._ai_service is None
+
+    async def test_ensure_processor_lazy_constructs(self, mock_task_manager):
+        """B11: 未注入时 _processor 为 None; _ensure_processor 首次调用经 IO 线程池构造。"""
+        vm = DataSourceViewModel()
+        assert vm._processor is None
+        with patch("ui.viewmodels.data_source_view_model.DataProcessor") as cls:
+            mock_instance = MagicMock(spec=DataProcessor)
+            cls.return_value = mock_instance
+            with patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tp:
+                tp_instance = MagicMock()
+                tp_instance.run_async = AsyncMock(return_value=mock_instance)
+                mock_tp.return_value = tp_instance
+                dp = await vm._ensure_processor()
+        assert dp is mock_instance
+        assert vm._processor is mock_instance
+        tp_instance.run_async.assert_awaited_once_with(ANY, cls)
+
+    async def test_ensure_processor_returns_existing_instance(self, mock_task_manager):
+        """已构造后再次调用直接返回现有实例，不重复经线程池构造（双检第二层）。"""
+        with patch("ui.viewmodels.data_source_view_model.DataProcessor") as cls:
+            mock_instance = MagicMock(spec=DataProcessor)
+            cls.return_value = mock_instance
+
+            vm = DataSourceViewModel(processor=mock_instance)  # DI 注入模拟已构造
+
+            dp = await vm._ensure_processor()
+
+        assert dp is mock_instance
+        cls.assert_not_called()
 
     def test_get_ai_service_lazy_constructs_on_first_call(self, mock_ai_service):
         """Task 7.2: _get_ai_service() 首次调用惰性构造 AIService, 再次调用复用同一实例."""

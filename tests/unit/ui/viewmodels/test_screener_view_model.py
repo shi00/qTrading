@@ -24,11 +24,15 @@ pytestmark = pytest.mark.unit
 def vm():
     """ScreenerViewModel with mocked dependencies."""
     with (
-        patch("ui.viewmodels.screener_view_model.DataProcessor"),
+        patch("ui.viewmodels.screener_view_model.DataProcessor") as mock_dp_cls,
         patch("ui.viewmodels.screener_view_model.StrategyManager"),
         patch("ui.viewmodels.screener_view_model.ReviewManager"),
     ):
-        return ScreenerViewModel()
+        vm = ScreenerViewModel()
+        # B11 懒构造: 构造期 data_processor 为 None, 此处显式注入 mock 实例,
+        # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
+        vm.data_processor = mock_dp_cls.return_value
+        return vm
 
 
 # --- StreamCard dataclass ---
