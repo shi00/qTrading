@@ -119,6 +119,8 @@ class TestHistoricalSyncIntegrity:
 
         mock_sync_strategy.context.processor = MagicMock()
         mock_sync_strategy.context.processor.trade_calendar = MagicMock()
+        # review03-C14: _run_historical_sync 需经 get_effective_trade_date 锚定交易日（L1）
+        mock_sync_strategy.context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=d5)
         mock_sync_strategy.context.processor.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[d1, d2, d3, d4, d5]
         )
@@ -713,6 +715,8 @@ class TestBreakpointResumeCoreTables:
 
         mock_context.processor = MagicMock()
         mock_context.processor.trade_calendar = MagicMock()
+        # review03-C14: _run_historical_sync 需经 get_effective_trade_date 锚定交易日（L1）
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
         mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=trade_dates)
 
         cached_dates = {d1, d2}
