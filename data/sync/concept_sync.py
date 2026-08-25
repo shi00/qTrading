@@ -44,6 +44,9 @@ _AI_TAG_DEFAULT_BATCH = 50
 
 # Polling interval (seconds) for cancel-aware LLM calls. Project memory hard
 # constraint: long-running operations must check cancel_event every 2 seconds.
+# 取值依据: 2s 为协作式取消的响应粒度——过长会延迟用户取消感知（拖慢停机），
+# 过短则每轮 wait_for(shield) 空转开销增加；LLM 推理单次秒级，2s 轮询平衡
+# 响应延迟与轮询开销。作为 wait_for 的超时阈值驱动轮询循环。
 _AI_TAG_CANCEL_POLL_INTERVAL = 2.0
 
 
@@ -703,6 +706,15 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
         若取消信号到达，取消底层 LLM task 并 raise CancelledError；否则正常返回
         LLM 响应。底层 LLM 调用本身不受影响（asyncio.shield 保护），但本调用
         会主动 cancel 它以释放资源。
+
+        **shield 保护什么**：外部 ``wait_for`` 超时取消的是 shield 包装层，LLM
+        子任务（``llm_task``）本身不会被取消——shield 将取消隔离在包装层外。
+
+        **取消如何传递**：``cancel_event`` 置位时由本函数显式 ``llm_task.cancel()``
+        并 await 清理（suppress 内部 CancelledError，保留原始 CancelledError 传播，R2）。
+
+        **为什么不能直接 await**：直接 ``await llm_task`` 会让外部取消直接打到 LLM
+        任务内部，无法响应协作式 ``cancel_event`` 标志（threading.Event 由外部线程置位）。
         """
         if cancel_event is None:
             return await ai_service.chat_with_web_search(
