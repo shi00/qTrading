@@ -164,8 +164,13 @@ class TestTableDefinitions:
     def test_stock_basic_has_alias(self):
         assert "alias" in TABLE_DEFINITIONS["stock_basic"]
 
-    def test_stock_basic_has_columns(self):
-        assert "columns" in TABLE_DEFINITIONS["stock_basic"]
+    def test_no_empty_columns_fields(self):
+        """review03-C9 收缩：数据字典不得存在空 'columns' 字段（删除优于空壳）。"""
+        for table_name, table_def in TABLE_DEFINITIONS.items():
+            columns = table_def.get("columns")
+            assert columns is None or (isinstance(columns, dict) and len(columns) > 0), (
+                f"Table '{table_name}' has empty 'columns' field — remove it (review03-C9)"
+            )
 
     def test_all_tables_have_alias(self):
         for table_name, table_def in TABLE_DEFINITIONS.items():
@@ -232,12 +237,16 @@ class TestValidateSchemaDefinitions:
         mock_base.metadata = mock_metadata
 
         TABLE_DEFINITIONS.get("stock_basic", {}).get("columns", {})
-        TABLE_DEFINITIONS.setdefault("stock_basic", {})["columns"]["phantom_col"] = "test_phantom"
+        TABLE_DEFINITIONS.setdefault("stock_basic", {}).setdefault("columns", {})["phantom_col"] = "test_phantom"
         try:
             validate_schema_definitions()
         finally:
-            if "phantom_col" in TABLE_DEFINITIONS.get("stock_basic", {}).get("columns", {}):
-                del TABLE_DEFINITIONS["stock_basic"]["columns"]["phantom_col"]
+            # 清理注入的 phantom 列；若 columns 因此变空则整体移除（review03-C9 收缩，避免空壳残留）
+            stock_def = TABLE_DEFINITIONS.get("stock_basic", {})
+            if "phantom_col" in stock_def.get("columns", {}):
+                del stock_def["columns"]["phantom_col"]
+            if stock_def.get("columns") == {}:
+                stock_def.pop("columns", None)
 
 
 @patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
@@ -323,10 +332,6 @@ class TestDataDictionaryConstants:
     def test_table_definitions_entry_has_alias(self):
         for table_name, table_def in TABLE_DEFINITIONS.items():
             assert "alias" in table_def, f"Table {table_name} missing 'alias' key"
-
-    def test_table_definitions_entry_has_columns(self):
-        for table_name, table_def in TABLE_DEFINITIONS.items():
-            assert "columns" in table_def, f"Table {table_name} missing 'columns' key"
 
     def test_table_definitions_columns_values_are_i18n_keys(self):
         for table_name, table_def in TABLE_DEFINITIONS.items():
