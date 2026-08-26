@@ -171,7 +171,8 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     # 显式 external 模式让 main.py 的 prepare_database_runtime() 立即返回 None，
     # 避免在无 sidecar binary 的环境（如 unit-test Linux CI）触发 EmbeddedPostgresStartError。
     monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
-    monkeypatch.setattr(app_main, "setup_logging", lambda: None)
+    # review01-A7: setup_logging 已随 main.py 瘦身迁出 app.application（由 main.py::main 顶层负责），
+    # run() 不再调用；删除无效 patch，避免 monkeypatch.setattr 对不存在属性抛 AttributeError。
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
     monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
@@ -541,7 +542,7 @@ async def test_min_window_size_and_web_skip(monkeypatch):
     # --- 桌面模式：设置最小尺寸 1280x720 并最大化 ---
     _prepare_main(monkeypatch)
     desktop_page = _DummyPage()
-    await app_main.main(desktop_page)
+    await app_main.run(desktop_page)
 
     assert desktop_page.window.min_width == 1280
     assert desktop_page.window.min_height == 720
