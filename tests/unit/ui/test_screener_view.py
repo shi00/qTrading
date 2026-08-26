@@ -3,7 +3,8 @@
 声明式重写后 View 层测试聚焦:
 - 纯函数辅助 (_format_cell_value / _build_table_data / _parse_num /
   _build_strategy_options / _build_page_size_options / _resolve_group_title /
-  _format_history_date / _build_strategy_desc) 覆盖
+  _build_strategy_desc) 覆盖
+- _format_history_date 已内聚到 VM (A16), 测试见本文件 TestFormatHistoryDate (调用 VM 静态方法)
 - _compute_tier_hint 已迁入 VM (R.2.1), 测试见 test_screener_view_model.py
 - 声明式契约守护见 test_screener_view_contract.py
 - VM 交互 / 流式渲染 / 深度链接 / 模式切换由集成测试 (flet_test_page fixture) 承担,
@@ -16,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from ui.viewmodels.screener_view_model import StrategyDepRow
+from ui.viewmodels.screener_view_model import ScreenerViewModel, StrategyDepRow
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
     _HIDDEN_COLS,
@@ -24,7 +25,6 @@ from ui.views.screener_view import (
     _build_strategy_options,
     _build_table_data,
     _format_cell_value,
-    _format_history_date,
     _parse_num,
     _render_status_message,
     _resolve_group_title,
@@ -314,27 +314,27 @@ class TestResolveGroupTitle:
 
 
 class TestFormatHistoryDate:
-    """_format_history_date 纯函数测试。"""
+    """ScreenerViewModel._format_history_date 纯函数测试（A16：View 侧重复实现已删除）。"""
 
     def test_date_object(self):
         dt = datetime.date(2024, 3, 15)
-        display, key = _format_history_date(dt)
+        display, key = ScreenerViewModel._format_history_date(dt)
         assert display == "2024-03-15"
         assert key == "2024-03-15"
 
     def test_datetime_object(self):
         dt = datetime.datetime(2024, 3, 15, 10, 30)
-        display, key = _format_history_date(dt)
+        display, key = ScreenerViewModel._format_history_date(dt)
         assert display == "2024-03-15"
         assert key == "2024-03-15"
 
     def test_8digit_string(self):
-        display, key = _format_history_date("20240315")
+        display, key = ScreenerViewModel._format_history_date("20240315")
         assert display == "2024-03-15"
         assert key == "20240315"
 
     def test_non_date_string(self):
-        display, key = _format_history_date("notadate")
+        display, key = ScreenerViewModel._format_history_date("notadate")
         assert display == "notadate"
         assert key == "notadate"
 
