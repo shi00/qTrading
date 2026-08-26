@@ -297,6 +297,422 @@ def _create_overview_card(
 
 
 # ============================================================================
+# D15: Onboarding 各 step 渲染函数 — 从 OnboardingWizard 巨型 if/elif 分支提取,
+# 纯函数接收 props, 无闭包/状态, 降低条件分支深度 (报告 04 D15).
+# ============================================================================
+
+
+def _build_welcome_step(
+    language_value: str,
+    on_language_select: Callable[[ft.ControlEvent], None],
+    hovered_card: int,
+    on_card_hover: Callable[[int], Callable[[ft.ControlEvent], None]],
+) -> ft.Control:
+    """Step 0: Welcome 概览 (D15: 从 OnboardingWizard step==0 分支提取)."""
+    lang_label = I18n.get_language_label()
+    lang_options = [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
+    language_dropdown = ft.Dropdown(
+        label=lang_label,
+        tooltip=lang_label,
+        value=language_value,
+        width=AppStyles.calc_dropdown_width(lang_options, label=lang_label),
+        text_size=AppStyles.FONT_SIZE_LG,
+        border_radius=8,
+        content_padding=AppStyles.SPACING_SM,
+        options=lang_options,
+        on_select=safe_on_select(on_language_select),
+    )
+
+    overview_cards_data = [
+        (ft.Icons.STORAGE, AppColors.PRIMARY, "wizard_overview_db_title", "wizard_overview_db_desc", True, 0),
+        (ft.Icons.KEY, AppColors.PRIMARY, "wizard_overview_token_title", "wizard_overview_token_desc", True, 1),
+        (
+            ft.Icons.CLOUD,
+            AppColors.ACCENT,
+            "wizard_overview_cloud_ai_title",
+            "wizard_overview_cloud_ai_desc",
+            True,
+            2,
+        ),
+        (
+            ft.Icons.PSYCHOLOGY,
+            AppColors.ACCENT,
+            "wizard_overview_local_model_title",
+            "wizard_overview_local_model_desc",
+            False,
+            3,
+        ),
+        (
+            ft.Icons.CLOUD_SYNC,
+            AppColors.PRIMARY,
+            "wizard_overview_sync_title",
+            "wizard_overview_sync_desc",
+            False,
+            4,
+        ),
+        (
+            ft.Icons.SCHEDULE,
+            AppColors.ACCENT,
+            "wizard_overview_schedule_title",
+            "wizard_overview_schedule_desc",
+            False,
+            5,
+        ),
+    ]
+
+    return ft.Column(
+        safe_controls(
+            [
+                ft.Container(height=10),
+                ft.Container(
+                    content=language_dropdown,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Container(height=12),
+                ft.ResponsiveRow(
+                    safe_controls(
+                        [
+                            _create_overview_card(
+                                icon=icon,
+                                color=color,
+                                title_key=title_key,
+                                desc_key=desc_key,
+                                required=required,
+                                is_hovered=(hovered_card == idx),
+                                on_hover=on_card_hover(idx),
+                            )
+                            for icon, color, title_key, desc_key, required, idx in overview_cards_data
+                        ]
+                    ),
+                    spacing=20,
+                    run_spacing=20,
+                ),
+            ]
+        ),
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_database_step(database_vm: DatabaseConfigPanelViewModel) -> ft.Control:
+    """Step 1: Database 配置 (D15: 从 OnboardingWizard step==1 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.STORAGE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Text(
+                I18n.get("wizard_db_title"),
+                size=AppStyles.FONT_SIZE_XL,
+                weight=ft.FontWeight.W_500,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_db_desc"),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Container(height=20),
+            DatabaseConfigPanel(
+                vm=database_vm,
+                compact=True,
+                show_save_button=False,
+                show_header=False,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_token_step(tushare_vm: TushareConfigPanelViewModel) -> ft.Control:
+    """Step 2: Token 配置 (D15: 从 OnboardingWizard step==2 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.KEY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Text(
+                I18n.get("wizard_step1_title"),
+                size=AppStyles.FONT_SIZE_XL,
+                weight=ft.FontWeight.W_500,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_step1_desc"),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Container(height=20),
+            TushareConfigPanel(
+                vm=tushare_vm,
+                compact=True,
+                show_save_button=False,
+                show_register_link=True,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_cloud_ai_step(llm_vm: LLMConfigPanelViewModel) -> ft.Control:
+    """Step 3: Cloud AI 配置 (D15: 从 OnboardingWizard step==3 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.CLOUD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Text(
+                I18n.get("wizard_step_cloud_ai_title"),
+                size=AppStyles.FONT_SIZE_XL,
+                weight=ft.FontWeight.W_500,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_step_cloud_ai_desc"),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Container(height=10),
+            ft.Container(
+                content=LLMConfigPanel(
+                    vm=llm_vm,
+                    compact=True,
+                    show_save_button=False,
+                ),
+                padding=AppStyles.SPACING_SM,
+                border_radius=8,
+                bgcolor=AppColors.SURFACE,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_local_model_step(local_model_vm: LocalModelConfigPanelViewModel) -> ft.Control:
+    """Step 4: Local Model 配置 (D15: 从 OnboardingWizard step==4 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.PSYCHOLOGY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Text(
+                I18n.get("wizard_step_local_model_title"),
+                size=AppStyles.FONT_SIZE_XL,
+                weight=ft.FontWeight.W_500,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_step_local_model_desc"),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Container(height=20),
+            ft.Container(
+                content=LocalModelConfigPanel(
+                    vm=local_model_vm,
+                    show_save_button=False,
+                    compact=True,
+                    show_internal_loading=False,
+                ),
+                padding=AppStyles.SPACING_SM,
+                border_radius=8,
+                bgcolor=AppColors.SURFACE,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_data_sync_step(
+    init_history_years: int,
+    sync_in_progress: bool,
+    sync_progress: float | None,
+    sync_progress_message: Message | None,
+    on_quick_sync_click: Callable[[ft.ControlEvent], None],
+    on_full_sync_click: Callable[[ft.ControlEvent], None],
+    on_sync_later: Callable[[ft.ControlEvent], None],
+    on_cancel_sync_click: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """Step 5: Data Sync (D15: 从 OnboardingWizard step==5 分支提取)."""
+    years = init_history_years
+    is_syncing = sync_in_progress
+    return ft.Column(
+        safe_controls(
+            [
+                ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step3_title"),
+                    size=AppStyles.FONT_SIZE_XL,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
+                    size=AppStyles.FONT_SIZE_LG,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=10),
+                ft.Container(
+                    content=ft.Column(
+                        safe_controls(
+                            [
+                                ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=AppStyles.FONT_SIZE_HEADLINE),
+                                ft.Text(
+                                    I18n.get("wizard_sync_warning"),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.WARNING,
+                                    text_align=ft.TextAlign.CENTER,
+                                ),
+                            ]
+                        ),
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=AppStyles.SPACING_SM,
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
+                ),
+                ft.Container(height=20),
+                ft.Row(
+                    safe_controls(
+                        [
+                            ft.Button(
+                                content=I18n.get("wizard_sync_quick"),
+                                icon=ft.Icons.FLASH_ON,
+                                style=AppStyles.accent_button(),
+                                on_click=safe_on_click(on_quick_sync_click),
+                                disabled=is_syncing,
+                            ),
+                            ft.Button(
+                                content=I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
+                                icon=ft.Icons.CLOUD_SYNC,
+                                style=AppStyles.primary_button(),
+                                on_click=safe_on_click(on_full_sync_click),
+                                disabled=is_syncing,
+                            ),
+                            ft.TextButton(
+                                content=I18n.get("wizard_btn_sync_later"),
+                                icon=ft.Icons.SCHEDULE,
+                                on_click=safe_on_click(on_sync_later),
+                                disabled=is_syncing,
+                            ),
+                            ft.Button(
+                                content=I18n.get("wizard_btn_cancel"),
+                                icon=ft.Icons.CANCEL,
+                                color=AppColors.ERROR,
+                                on_click=safe_on_click(on_cancel_sync_click),
+                                visible=is_syncing,
+                            ),
+                        ]
+                    ),
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
+                ),
+                ft.Container(height=20),
+                ft.ProgressBar(
+                    width=AppStyles.CONTROL_WIDTH_LG,
+                    value=sync_progress,
+                    color=AppColors.ACCENT,
+                    bgcolor=AppColors.BORDER,
+                ),
+                ft.Text(
+                    _render_message(sync_progress_message) or I18n.get("wizard_status_ready"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ]
+        ),
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_schedule_step(
+    schedule_enabled: bool,
+    on_schedule_enabled_change: Callable[[bool], None],
+    schedule_time: str,
+    on_schedule_time_change: Callable[[str], None],
+) -> ft.Control:
+    """Step 6: Schedule (D15: 从 OnboardingWizard step==6 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.SCHEDULE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Text(
+                I18n.get("wizard_step4_title"),
+                size=AppStyles.FONT_SIZE_XL,
+                weight=ft.FontWeight.W_500,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_step4_desc"),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Container(height=20),
+            ft.Row(
+                [
+                    ft.Checkbox(
+                        label=I18n.get("wizard_schedule_label"),
+                        value=bool(schedule_enabled),
+                        active_color=AppColors.PRIMARY,
+                        on_change=lambda e: on_schedule_enabled_change(bool(e.control.value)),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            ft.Container(height=15),
+            ft.Row(
+                [
+                    ft.TextField(
+                        label=I18n.get("wizard_schedule_time_label"),
+                        value=schedule_time,
+                        hint_text="HH:MM",
+                        width=150,
+                        text_align=ft.TextAlign.CENTER,
+                        border_color=AppColors.PRIMARY,
+                        label_style=ft.TextStyle(color=AppColors.PRIMARY),
+                        on_change=lambda e: on_schedule_time_change(e.control.value),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            ft.Text(
+                I18n.get("wizard_schedule_note"),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_HINT,
+                text_align=ft.TextAlign.CENTER,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_complete_step() -> ft.Control:
+    """Step 7: Complete (D15: 从 OnboardingWizard else 分支提取)."""
+    return ft.Column(
+        [
+            ft.Icon(ft.Icons.CELEBRATION, size=AppStyles.ICON_SIZE_HERO, color=AppColors.SUCCESS),
+            ft.Text(
+                I18n.get("wizard_step5_title"),
+                size=AppStyles.FONT_SIZE_DISPLAY,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("wizard_step5_desc"),
+                size=AppStyles.FONT_SIZE_TITLE,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+# ============================================================================
 # OnboardingWizard
 # ============================================================================
 
@@ -582,393 +998,39 @@ def OnboardingWizard(
         visible=show_header,
     )
 
-    # --- Step content (条件渲染) ---
+    # --- Step content (条件渲染; D15: 各 step 拆为模块级纯函数, 扁平化分派) ---
     step = state.current_step
 
     if step == 0:
-        lang_label = I18n.get_language_label()
-        lang_options = [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
-        language_dropdown = ft.Dropdown(
-            label=lang_label,
-            tooltip=lang_label,
-            value=language_value,
-            width=AppStyles.calc_dropdown_width(lang_options, label=lang_label),
-            text_size=AppStyles.FONT_SIZE_LG,
-            border_radius=8,
-            content_padding=AppStyles.SPACING_SM,
-            options=lang_options,
-            on_select=safe_on_select(_on_language_select),
-        )
-
-        overview_cards_data = [
-            (ft.Icons.STORAGE, AppColors.PRIMARY, "wizard_overview_db_title", "wizard_overview_db_desc", True, 0),
-            (ft.Icons.KEY, AppColors.PRIMARY, "wizard_overview_token_title", "wizard_overview_token_desc", True, 1),
-            (
-                ft.Icons.CLOUD,
-                AppColors.ACCENT,
-                "wizard_overview_cloud_ai_title",
-                "wizard_overview_cloud_ai_desc",
-                True,
-                2,
-            ),
-            (
-                ft.Icons.PSYCHOLOGY,
-                AppColors.ACCENT,
-                "wizard_overview_local_model_title",
-                "wizard_overview_local_model_desc",
-                False,
-                3,
-            ),
-            (
-                ft.Icons.CLOUD_SYNC,
-                AppColors.PRIMARY,
-                "wizard_overview_sync_title",
-                "wizard_overview_sync_desc",
-                False,
-                4,
-            ),
-            (
-                ft.Icons.SCHEDULE,
-                AppColors.ACCENT,
-                "wizard_overview_schedule_title",
-                "wizard_overview_schedule_desc",
-                False,
-                5,
-            ),
-        ]
-
-        step_content = ft.Column(
-            safe_controls(
-                [
-                    ft.Container(height=10),
-                    ft.Container(
-                        content=language_dropdown,
-                        alignment=ft.Alignment.CENTER,
-                    ),
-                    ft.Container(height=12),
-                    ft.ResponsiveRow(
-                        safe_controls(
-                            [
-                                _create_overview_card(
-                                    icon=icon,
-                                    color=color,
-                                    title_key=title_key,
-                                    desc_key=desc_key,
-                                    required=required,
-                                    is_hovered=(hovered_card == idx),
-                                    on_hover=_on_card_hover(idx),
-                                )
-                                for icon, color, title_key, desc_key, required, idx in overview_cards_data
-                            ]
-                        ),
-                        spacing=20,
-                        run_spacing=20,
-                    ),
-                ]
-            ),
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
+        step_content = _build_welcome_step(language_value, _on_language_select, hovered_card, _on_card_hover)
     elif step == 1:
-        # Database step
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.STORAGE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_db_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_db_desc"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=20),
-                DatabaseConfigPanel(
-                    vm=database_vm,
-                    compact=True,
-                    show_save_button=False,
-                    show_header=False,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
+        step_content = _build_database_step(database_vm)
     elif step == 2:
-        # Token step
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.KEY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_step1_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step1_desc"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=20),
-                TushareConfigPanel(
-                    vm=tushare_vm,
-                    compact=True,
-                    show_save_button=False,
-                    show_register_link=True,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
+        step_content = _build_token_step(tushare_vm)
     elif step == 3:
-        # Cloud AI step
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.CLOUD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_step_cloud_ai_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step_cloud_ai_desc"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=10),
-                ft.Container(
-                    content=LLMConfigPanel(
-                        vm=llm_vm,
-                        compact=True,
-                        show_save_button=False,
-                    ),
-                    padding=AppStyles.SPACING_SM,
-                    border_radius=8,
-                    bgcolor=AppColors.SURFACE,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
+        step_content = _build_cloud_ai_step(llm_vm)
     elif step == 4:
-        # Local Model step
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.PSYCHOLOGY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_step_local_model_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step_local_model_desc"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=20),
-                ft.Container(
-                    content=LocalModelConfigPanel(
-                        vm=local_model_vm,
-                        show_save_button=False,
-                        compact=True,
-                        show_internal_loading=False,
-                    ),
-                    padding=AppStyles.SPACING_SM,
-                    border_radius=8,
-                    bgcolor=AppColors.SURFACE,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
+        step_content = _build_local_model_step(local_model_vm)
     elif step == 5:
-        # Data Sync step
-        years = state.init_history_years
-        is_syncing = state.sync_in_progress
-
-        step_content = ft.Column(
-            safe_controls(
-                [
-                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                    ft.Text(
-                        I18n.get("wizard_step3_title"),
-                        size=AppStyles.FONT_SIZE_XL,
-                        weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_PRIMARY,
-                    ),
-                    ft.Container(height=10),
-                    ft.Text(
-                        I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
-                        size=AppStyles.FONT_SIZE_LG,
-                        color=AppColors.TEXT_SECONDARY,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                    ft.Container(height=10),
-                    ft.Container(
-                        content=ft.Column(
-                            safe_controls(
-                                [
-                                    ft.Icon(
-                                        ft.Icons.WARNING, color=AppColors.WARNING, size=AppStyles.FONT_SIZE_HEADLINE
-                                    ),
-                                    ft.Text(
-                                        I18n.get("wizard_sync_warning"),
-                                        size=AppStyles.FONT_SIZE_BODY_SM,
-                                        color=AppColors.WARNING,
-                                        text_align=ft.TextAlign.CENTER,
-                                    ),
-                                ]
-                            ),
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
-                        padding=AppStyles.SPACING_SM,
-                        border_radius=8,
-                        bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
-                    ),
-                    ft.Container(height=20),
-                    ft.Row(
-                        safe_controls(
-                            [
-                                ft.Button(
-                                    content=I18n.get("wizard_sync_quick"),
-                                    icon=ft.Icons.FLASH_ON,
-                                    style=AppStyles.accent_button(),
-                                    on_click=safe_on_click(_on_quick_sync_click),
-                                    disabled=is_syncing,
-                                ),
-                                ft.Button(
-                                    content=I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
-                                    icon=ft.Icons.CLOUD_SYNC,
-                                    style=AppStyles.primary_button(),
-                                    on_click=safe_on_click(_on_full_sync_click),
-                                    disabled=is_syncing,
-                                ),
-                                ft.TextButton(
-                                    content=I18n.get("wizard_btn_sync_later"),
-                                    icon=ft.Icons.SCHEDULE,
-                                    on_click=safe_on_click(_on_sync_later),
-                                    disabled=is_syncing,
-                                ),
-                                ft.Button(
-                                    content=I18n.get("wizard_btn_cancel"),
-                                    icon=ft.Icons.CANCEL,
-                                    color=AppColors.ERROR,
-                                    on_click=safe_on_click(_on_cancel_sync_click),
-                                    visible=is_syncing,
-                                ),
-                            ]
-                        ),
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        wrap=True,
-                    ),
-                    ft.Container(height=20),
-                    ft.ProgressBar(
-                        width=AppStyles.CONTROL_WIDTH_LG,
-                        value=state.sync_progress,
-                        color=AppColors.ACCENT,
-                        bgcolor=AppColors.BORDER,
-                    ),
-                    ft.Text(
-                        _render_message(state.sync_progress_message) or I18n.get("wizard_status_ready"),
-                        size=AppStyles.FONT_SIZE_BODY_SM,
-                        color=AppColors.TEXT_SECONDARY,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ]
-            ),
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        step_content = _build_data_sync_step(
+            state.init_history_years,
+            state.sync_in_progress,
+            state.sync_progress,
+            state.sync_progress_message,
+            _on_quick_sync_click,
+            _on_full_sync_click,
+            _on_sync_later,
+            _on_cancel_sync_click,
         )
-
     elif step == 6:
-        # Schedule step
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.SCHEDULE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_step4_title"),
-                    size=AppStyles.FONT_SIZE_XL,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step4_desc"),
-                    size=AppStyles.FONT_SIZE_LG,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=20),
-                ft.Row(
-                    [
-                        ft.Checkbox(
-                            label=I18n.get("wizard_schedule_label"),
-                            value=bool(schedule_enabled),
-                            active_color=AppColors.PRIMARY,
-                            on_change=lambda e: set_schedule_enabled(bool(e.control.value)),
-                        )
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-                ft.Container(height=15),
-                ft.Row(
-                    [
-                        ft.TextField(
-                            label=I18n.get("wizard_schedule_time_label"),
-                            value=schedule_time,
-                            hint_text="HH:MM",
-                            width=150,
-                            text_align=ft.TextAlign.CENTER,
-                            border_color=AppColors.PRIMARY,
-                            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-                            on_change=lambda e: set_schedule_time(e.control.value),
-                        )
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-                ft.Text(
-                    I18n.get("wizard_schedule_note"),
-                    size=AppStyles.FONT_SIZE_BODY_SM,
-                    color=AppColors.TEXT_HINT,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        step_content = _build_schedule_step(
+            schedule_enabled,
+            lambda v: set_schedule_enabled(v),
+            schedule_time,
+            lambda v: set_schedule_time(v),
         )
-
     else:
-        # Complete step (step == 7)
-        step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.CELEBRATION, size=AppStyles.ICON_SIZE_HERO, color=AppColors.SUCCESS),
-                ft.Text(
-                    I18n.get("wizard_step5_title"),
-                    size=AppStyles.FONT_SIZE_DISPLAY,
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step5_desc"),
-                    size=AppStyles.FONT_SIZE_TITLE,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        )
+        step_content = _build_complete_step()
 
     # --- Navigation buttons ---
     config = STEP_CONFIGS[state.current_step]

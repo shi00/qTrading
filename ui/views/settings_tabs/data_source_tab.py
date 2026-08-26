@@ -47,7 +47,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow, TaskStatus
+from ui.viewmodels.data_source_view_model import DataSourceState, DataSourceViewModel, HealthResultRow, TaskStatus
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
@@ -197,6 +197,436 @@ _HEALTH_STATUS_VISUALS: dict[str, tuple[ft.IconData, str]] = {
     "ds_health_cancelled": (ft.Icons.CANCEL_OUTLINED, AppColors.WARNING),
     "common_check_fail": (ft.Icons.ERROR, AppColors.ERROR),
 }
+
+
+# ============================================================================
+# D15: DataSourceTab 区块渲染函数 — 从巨型组件提取为模块级纯函数,
+# 每个 DashboardCard 自含派生逻辑 (接收 state + 回调 props, 无闭包/状态).
+# ============================================================================
+
+
+def _build_health_dashboard(
+    state: DataSourceState,
+    on_check_health: Callable[[ft.ControlEvent], None],
+    on_health_report_click: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """Health Dashboard 区块 (D15: 从 DataSourceTab 提取, 派生逻辑自含)."""
+    # 直接从 state 派生 metric 值 (无 dual-track, 与组件原逻辑一致)
+    if state.health_checking:
+        metric_health_value = I18n.get("ds_status_checking")
+        metric_health_icon = ft.Icons.HOURGLASS_TOP
+        metric_health_color = AppColors.INFO
+    elif state.health_error is not None:
+        health_key = "common_check_fail"
+        metric_health_value = I18n.get(health_key)
+        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
+            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
+        )
+    elif state.health_result is not None:
+        status = state.health_result.status
+        if status == "yellow":
+            health_key = "ds_health_lag"
+        elif status == "red":
+            health_key = "ds_health_error"
+        else:
+            health_key = "ds_health_ok"
+        metric_health_value = I18n.get(health_key)
+        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
+            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
+        )
+    else:
+        metric_health_value = I18n.get("ds_status_checking")
+        metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
+        metric_health_color = AppColors.WARNING
+
+    if state.health_result is not None:
+        latest = state.health_result.market_latest_local
+        metric_sync_value = I18n.get("ds_never_sync") if not latest or str(latest) == "None" else str(latest)
+        cov_val = state.health_result.details_financial_coverage
+        metric_coverage_value = f"{cov_val:.1f}%"
+    else:
+        metric_sync_value = I18n.get("ds_not_checked")
+        metric_coverage_value = I18n.get("ds_val_placeholder_count")
+
+    # Health summary content
+    if state.health_checking:
+        health_summary_content: ft.Control = ft.Text(
+            I18n.get("health_checking"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
+        )
+    elif state.health_result is not None:
+        health_summary_content = _build_health_summary_content(state.health_result)
+    elif state.health_error is not None:
+        health_summary_content = ft.Text(
+            I18n.get("ds_health_check_error"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.ERROR
+        )
+    else:
+        health_summary_content = ft.Text(
+            I18n.get("settings_check_health"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
+        )
+
+    style_health = AppStyles.primary_button()
+    style_health.padding = ft.Padding.symmetric(horizontal=15, vertical=0)
+
+    btn_check_health = ft.Button(
+        content=I18n.get("settings_check_health"),
+        icon=ft.Icons.REFRESH,
+        on_click=safe_on_click(on_check_health),
+        style=style_health,
+        height=40,
+        width=AppStyles.CONTROL_WIDTH_MD,
+        disabled=state.health_checking,
+    )
+    btn_health_report = ft.IconButton(
+        icon=ft.Icons.INFO_OUTLINE,
+        tooltip=I18n.get("health_report_title"),
+        on_click=safe_on_click(on_health_report_click),
+    )
+
+    metric_sync = MetricCard(
+        label=I18n.get("ds_last_update"),
+        value=metric_sync_value,
+        icon=safe_icon_str(ft.Icons.ACCESS_TIME),
+        status_color=AppColors.PRIMARY,
+    )
+    metric_coverage = MetricCard(
+        label=I18n.get("ds_data_coverage"),
+        value=metric_coverage_value,
+        icon=safe_icon_str(ft.Icons.DATA_USAGE),
+        status_color=AppColors.INFO,
+    )
+    metric_health = MetricCard(
+        label=I18n.get("ds_sys_health"),
+        value=metric_health_value,
+        icon=safe_icon_str(metric_health_icon),
+        status_color=metric_health_color,
+    )
+
+    return DashboardCard(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        SectionHeader(I18n.get("settings_sec_health"), title_key="settings_sec_health"),
+                        ft.Row([btn_health_report, btn_check_health]),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.ResponsiveRow(
+                    [
+                        ft.Column([metric_sync], col={"sm": 6, "md": 4}),
+                        ft.Column([metric_coverage], col={"sm": 6, "md": 4}),
+                        ft.Column([metric_health], col={"sm": 6, "md": 4}),
+                    ],
+                ),
+                ft.Container(height=10),
+                ft.Container(height=10),
+                ft.Container(height=10),
+                ft.Container(
+                    content=health_summary_content,
+                    padding=ft.Padding.symmetric(vertical=10, horizontal=15),
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    border_radius=8,
+                    border=ft.Border.all(1, AppColors.DIVIDER),
+                ),
+            ],
+        ),
+    )
+
+
+def _build_action_console(
+    state: DataSourceState,
+    on_full_sync: Callable[[ft.ControlEvent], None],
+    on_ai_concept_rebuild: Callable[[ft.ControlEvent], None],
+    on_clear_cache: Callable[[ft.ControlEvent], None],
+    on_cancel_active_task: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """Action Console 区块 (D15: 从 DataSourceTab 提取, P1-5 次级进度自含)."""
+    # ActionChip loading state (derived from is_syncing + active_key)
+    action_full_sync_loading = state.is_syncing and state.active_key == "daily_sync"
+    action_ai_concept_loading = state.is_syncing and state.active_key == "ai_concept_sync"
+    action_clear_cache_loading = state.is_syncing and state.active_key == "cache_clear"
+
+    # P1-5: Secondary progress 区域
+    secondary_progress_visible = state.is_syncing and state.active_key in (
+        "daily_sync",
+        "ai_concept_sync",
+        "cache_clear",
+    )
+    secondary_cancellable = state.active_key in ("daily_sync", "ai_concept_sync")
+    if secondary_progress_visible and state.progress_message is not None:
+        secondary_progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
+    elif secondary_progress_visible and state.active_key != "cache_clear":
+        secondary_progress_text_value = f"{state.progress * 100:.1f}%"
+    else:
+        secondary_progress_text_value = ""
+
+    secondary_progress_bar = ft.ProgressBar(
+        value=state.progress if state.active_key != "cache_clear" else None,
+        visible=secondary_progress_visible,
+        expand=True,
+    )
+    secondary_progress_text = ft.Text(
+        secondary_progress_text_value,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.INFO,
+        visible=bool(secondary_progress_text_value),
+    )
+    secondary_cancel_button = ft.Button(
+        content=I18n.get("common_cancel"),
+        on_click=safe_on_click(on_cancel_active_task),
+        visible=secondary_progress_visible and secondary_cancellable,
+        style=AppStyles.danger_button(),
+    )
+
+    action_full_sync = ActionChip(
+        icon=safe_icon_str(ft.Icons.SYNC_PROBLEM),
+        title=I18n.get("settings_full_sync"),
+        subtitle=I18n.get("ds_action_full"),
+        on_click=on_full_sync,
+        is_loading=action_full_sync_loading,
+    )
+    action_ai_concept_rebuild = ActionChip(
+        icon=safe_icon_str(ft.Icons.AUTO_FIX_HIGH),
+        title=I18n.get("ds_btn_ai_concept_rebuild"),
+        subtitle=I18n.get("ds_btn_ai_concept_rebuild_desc"),
+        on_click=on_ai_concept_rebuild,
+        is_loading=action_ai_concept_loading,
+    )
+    action_clear_cache = ActionChip(
+        icon=safe_icon_str(ft.Icons.CLEANING_SERVICES),
+        title=I18n.get("settings_clear_cache"),
+        subtitle=I18n.get("ds_action_clear"),
+        on_click=on_clear_cache,
+        is_loading=action_clear_cache_loading,
+    )
+
+    return DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("ds_shortcut_console"), title_key="ds_shortcut_console"),
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.ResponsiveRow(
+                    [
+                        ft.Column([action_full_sync], col={"sm": 12, "md": 4}),
+                        ft.Column([action_ai_concept_rebuild], col={"sm": 12, "md": 4}),
+                        ft.Column([action_clear_cache], col={"sm": 12, "md": 4}),
+                    ],
+                    run_spacing=10,
+                ),
+                ft.Row(
+                    [secondary_progress_bar, secondary_progress_text, secondary_cancel_button],
+                    spacing=8,
+                    visible=secondary_progress_visible,
+                ),
+            ],
+        ),
+    )
+
+
+def _build_connection_card(tushare_vm: TushareConfigPanelViewModel) -> ft.Control:
+    """Connection Settings 区块 (D15: 从 DataSourceTab 提取)."""
+    tushare_panel = TushareConfigPanel(
+        vm=tushare_vm,
+        compact=False,
+        show_save_button=True,
+        show_register_link=False,
+    )
+
+    row_token = SettingRow(
+        icon=safe_icon_str(ft.Icons.KEY_ROUNDED),
+        title=I18n.get("settings_token"),
+        subtitle=I18n.get("settings_token_desc"),
+        control=tushare_panel,
+        icon_color=AppColors.ACCENT,
+        title_key="settings_token",
+        subtitle_key="settings_token_desc",
+        left_col={"xs": 12, "sm": 12, "md": 5, "lg": 4},
+        right_col={"xs": 12, "sm": 12, "md": 7, "lg": 8},
+    )
+    return DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("settings_sec_api"), title_key="settings_sec_api"),
+                ft.Container(height=10),
+                row_token,
+            ],
+        ),
+    )
+
+
+def _build_historical_card(
+    state: DataSourceState,
+    vm: DataSourceViewModel,
+    on_init_historical: Callable[[ft.ControlEvent], None],
+    on_history_years_change: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """Historical Data 区块 (D15: 从 DataSourceTab 提取, init sync 进度自含)."""
+    # Sync button state (init sync)
+    if state.is_syncing and state.init_sync_cancellable:
+        sync_button_content = I18n.get("settings_cancel_sync")
+        sync_button_icon = ft.Icons.STOP_CIRCLE
+        sync_button_style = AppStyles.danger_button()
+    elif state.is_syncing:
+        sync_button_content = I18n.get("sys_init_cancel_wait")
+        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
+        sync_button_style = AppStyles.primary_button()
+    else:
+        sync_button_content = I18n.get("settings_init_data")
+        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
+        sync_button_style = AppStyles.primary_button()
+
+    # Progress bar/text (derived from init sync state)
+    progress_visible = state.init_sync_running or (state.is_syncing and state.active_key == "system_init_sync")
+    if state.init_sync_final_status == TaskStatus.CANCELLED:
+        progress_text_value = I18n.get("ds_progress_cancelled_fmt", msg=I18n.get("settings_msg_sync_cancelled"))
+    elif state.init_sync_final_status == TaskStatus.FAILED:
+        progress_text_value = I18n.get("ds_init_fail_generic")
+    elif state.progress_message is not None:
+        progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
+    else:
+        progress_text_value = ""
+
+    progress_bar = ft.ProgressBar(width=None, visible=progress_visible, expand=True)
+    if progress_visible:
+        progress_bar.value = state.progress
+    progress_text = ft.Text(
+        progress_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.INFO, visible=bool(progress_text_value)
+    )
+
+    style_init = AppStyles.primary_button()
+    style_init.padding = ft.Padding.symmetric(horizontal=15, vertical=0)
+
+    sync_button = ft.Button(
+        content=sync_button_content,
+        icon=sync_button_icon,
+        on_click=safe_on_click(on_init_historical),
+        tooltip=I18n.get("settings_init_desc"),
+        style=sync_button_style,
+        height=40,
+        width=AppStyles.CONTROL_WIDTH_MD,
+        disabled=(
+            (state.is_syncing and state.active_key in ("daily_sync", "ai_concept_sync", "cache_clear"))
+            or (state.is_syncing and state.active_key == "system_init_sync")
+        )
+        and not (state.is_syncing and state.init_sync_cancellable),
+    )
+
+    years_value = str(vm.get_history_years())
+    history_years_dropdown = ft.Dropdown(
+        label=I18n.get("settings_history_range"),
+        value=years_value,
+        options=_build_history_years_options(),
+        width=150,
+        on_select=safe_on_select(on_history_years_change),
+    )
+
+    row_init = SettingRow(
+        icon=safe_icon_str(ft.Icons.HISTORY_ROUNDED),
+        title=I18n.get("settings_init_data"),
+        subtitle=I18n.get("settings_hint_first_run"),
+        control=ft.Column(
+            [
+                ft.Row(
+                    [history_years_dropdown, sync_button],
+                    alignment=ft.MainAxisAlignment.END,
+                    spacing=10,
+                    wrap=True,
+                ),
+                ft.Row(
+                    [
+                        ft.Column(
+                            [progress_bar, progress_text],
+                            spacing=2,
+                            expand=True,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.END,
+                ),
+            ],
+            spacing=5,
+            alignment=ft.MainAxisAlignment.CENTER,
+            expand=True,
+        ),
+        icon_color=ft.Colors.TERTIARY,
+        title_key="settings_init_data",
+        subtitle_key="settings_hint_first_run",
+    )
+    return DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("settings_init_data"), title_key="settings_init_data"),
+                ft.Container(height=10),
+                row_init,
+            ],
+        ),
+    )
+
+
+def _build_data_flow_card() -> ft.Control:
+    """数据存储与流向说明区块 (静态展示, D15: 从 DataSourceTab 提取)."""
+    return DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("ds_data_flow_title"), title_key="ds_data_flow_title"),
+                ft.Container(height=10),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.STORAGE, size=AppStyles.FONT_SIZE_LG, color=AppColors.INFO),
+                        ft.Column(
+                            [
+                                ft.Text(
+                                    I18n.get("ds_data_flow_storage_title"),
+                                    size=AppStyles.FONT_SIZE_BODY,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                                ft.Text(
+                                    I18n.get("ds_data_flow_storage_desc"),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.CLOUD_SYNC, size=AppStyles.FONT_SIZE_LG, color=AppColors.ACCENT),
+                        ft.Column(
+                            [
+                                ft.Text(
+                                    I18n.get("ds_data_flow_outbound_title"),
+                                    size=AppStyles.FONT_SIZE_BODY,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                                ft.Text(
+                                    f"• {I18n.get('ds_data_flow_outbound_tushare')}",
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                                ft.Text(
+                                    f"• {I18n.get('ds_data_flow_outbound_llm')}",
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=10,
+                    alignment=ft.MainAxisAlignment.START,
+                ),
+            ],
+        ),
+    )
 
 
 # ============================================================================
@@ -572,421 +1002,14 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(_on_cache_cleared_version_change, dependencies=[state.cache_cleared_version])
 
-    # --- Derived state for MetricCard rendering (直接从 state 派生, 无 dual-track) ---
-    if state.health_checking:
-        metric_health_value = I18n.get("ds_status_checking")
-        metric_health_icon = ft.Icons.HOURGLASS_TOP
-        metric_health_color = AppColors.INFO
-    elif state.health_error is not None:
-        # 健康检查出错 (common_check_fail)
-        health_key = "common_check_fail"
-        metric_health_value = I18n.get(health_key)
-        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
-            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-        )
-    elif state.health_result is not None:
-        # 有健康检查结果, 从 status 派生 health_key
-        status = state.health_result.status
-        if status == "yellow":
-            health_key = "ds_health_lag"
-        elif status == "red":
-            health_key = "ds_health_error"
-        else:
-            health_key = "ds_health_ok"
-        metric_health_value = I18n.get(health_key)
-        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
-            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-        )
-    else:
-        # 未检查过 (初始状态)
-        metric_health_value = I18n.get("ds_status_checking")
-        metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
-        metric_health_color = AppColors.WARNING
-
-    # metric_sync / metric_coverage: 从 state.health_result 派生 (有结果时) 或未检查文案
-    if state.health_result is not None:
-        latest = state.health_result.market_latest_local
-        metric_sync_value = I18n.get("ds_never_sync") if not latest or str(latest) == "None" else str(latest)
-        cov_val = state.health_result.details_financial_coverage
-        metric_coverage_value = f"{cov_val:.1f}%"
-    else:
-        metric_sync_value = I18n.get("ds_not_checked")
-        metric_coverage_value = I18n.get("ds_val_placeholder_count")
-
-    metric_sync_icon = ft.Icons.ACCESS_TIME
-    metric_sync_color = AppColors.PRIMARY
-    metric_coverage_icon = ft.Icons.DATA_USAGE
-    metric_coverage_color = AppColors.INFO
-
-    # --- Sync button state (init sync) ---
-    if state.is_syncing and state.init_sync_cancellable:
-        sync_button_content = I18n.get("settings_cancel_sync")
-        sync_button_icon = ft.Icons.STOP_CIRCLE
-        sync_button_style = AppStyles.danger_button()  # P2-9: 替换为 danger_button 统一风格
-    elif state.is_syncing:
-        sync_button_content = I18n.get("sys_init_cancel_wait")
-        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
-        sync_button_style = AppStyles.primary_button()
-    else:
-        sync_button_content = I18n.get("settings_init_data")
-        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
-        sync_button_style = AppStyles.primary_button()
-
-    # --- ActionChip loading state (derived from is_syncing + active_key) ---
-    action_full_sync_loading = state.is_syncing and state.active_key == "daily_sync"
-    action_ai_concept_loading = state.is_syncing and state.active_key == "ai_concept_sync"
-    action_clear_cache_loading = state.is_syncing and state.active_key == "cache_clear"
-    # 当任一 action 处于 loading 时, 其他 action 禁用
-    any_action_loading = state.is_syncing and state.active_key in ("daily_sync", "ai_concept_sync", "cache_clear")
-    # init sync 运行时也禁用 actions (除 sync_button 自身)
-    init_sync_running = state.is_syncing and state.active_key == "system_init_sync"
-    actions_disabled = any_action_loading or init_sync_running
-
-    # --- Progress bar/text (derived from init sync state) ---
-    progress_visible = state.init_sync_running or (state.is_syncing and state.active_key == "system_init_sync")
-    if state.init_sync_final_status == TaskStatus.CANCELLED:
-        progress_text_value = I18n.get("ds_progress_cancelled_fmt", msg=I18n.get("settings_msg_sync_cancelled"))
-    elif state.init_sync_final_status == TaskStatus.FAILED:
-        progress_text_value = I18n.get("ds_init_fail_generic")
-    elif state.progress_message is not None:
-        progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
-    else:
-        progress_text_value = ""
-
-    # --- Health summary content (直接从 state 派生, 无 dual-track) ---
-    if state.health_checking:
-        health_summary_content: ft.Control = ft.Text(
-            I18n.get("health_checking"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
-        )
-    elif state.health_result is not None:
-        health_summary_content = _build_health_summary_content(state.health_result)
-    elif state.health_error is not None:
-        health_summary_content = ft.Text(
-            I18n.get("ds_health_check_error"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.ERROR
-        )
-    else:
-        health_summary_content = ft.Text(
-            I18n.get("settings_check_health"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
-        )
-
-    # --- Build controls ---
-    style_health = AppStyles.primary_button()
-    style_health.padding = ft.Padding.symmetric(horizontal=15, vertical=0)
-
-    btn_check_health = ft.Button(
-        content=I18n.get("settings_check_health"),
-        icon=ft.Icons.REFRESH,
-        on_click=safe_on_click(_on_check_health),
-        style=style_health,
-        height=40,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        disabled=state.health_checking,
+    # --- Build section cards (D15: 各区块为模块级纯函数, 从巨型组件中提出) ---
+    health_dashboard = _build_health_dashboard(state, _on_check_health, _on_health_report_click)
+    action_console = _build_action_console(
+        state, _on_full_sync, _on_ai_concept_rebuild, _on_clear_cache, _on_cancel_active_task
     )
-    btn_health_report = ft.IconButton(
-        icon=ft.Icons.INFO_OUTLINE,
-        tooltip=I18n.get("health_report_title"),
-        on_click=safe_on_click(_on_health_report_click),
-    )
-
-    # MetricCards (props 推送, 声明式自动重渲染)
-    metric_sync = MetricCard(
-        label=I18n.get("ds_last_update"),
-        value=metric_sync_value,
-        icon=safe_icon_str(metric_sync_icon),
-        status_color=metric_sync_color,
-    )
-    metric_coverage = MetricCard(
-        label=I18n.get("ds_data_coverage"),
-        value=metric_coverage_value,
-        icon=safe_icon_str(metric_coverage_icon),
-        status_color=metric_coverage_color,
-    )
-    metric_health = MetricCard(
-        label=I18n.get("ds_sys_health"),
-        value=metric_health_value,
-        icon=safe_icon_str(metric_health_icon),
-        status_color=metric_health_color,
-    )
-
-    health_dashboard = DashboardCard(
-        content=ft.Column(
-            [
-                ft.Row(
-                    [
-                        SectionHeader(I18n.get("settings_sec_health"), title_key="settings_sec_health"),
-                        ft.Row([btn_health_report, btn_check_health]),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                ft.ResponsiveRow(
-                    [
-                        ft.Column([metric_sync], col={"sm": 6, "md": 4}),
-                        ft.Column([metric_coverage], col={"sm": 6, "md": 4}),
-                        ft.Column([metric_health], col={"sm": 6, "md": 4}),
-                    ],
-                ),
-                ft.Container(height=10),
-                ft.Container(height=10),
-                ft.Container(height=10),
-                ft.Container(
-                    content=health_summary_content,
-                    padding=ft.Padding.symmetric(vertical=10, horizontal=15),
-                    bgcolor=AppColors.SURFACE_VARIANT,
-                    border_radius=8,
-                    border=ft.Border.all(1, AppColors.DIVIDER),
-                ),
-            ],
-        ),
-    )
-
-    # ActionChips (props 推送, is_loading 派生自 state)
-    action_full_sync = ActionChip(
-        icon=safe_icon_str(ft.Icons.SYNC_PROBLEM),
-        title=I18n.get("settings_full_sync"),
-        subtitle=I18n.get("ds_action_full"),
-        on_click=_on_full_sync,
-        is_loading=action_full_sync_loading,
-    )
-    action_ai_concept_rebuild = ActionChip(
-        icon=safe_icon_str(ft.Icons.AUTO_FIX_HIGH),
-        title=I18n.get("ds_btn_ai_concept_rebuild"),
-        subtitle=I18n.get("ds_btn_ai_concept_rebuild_desc"),
-        on_click=_on_ai_concept_rebuild,
-        is_loading=action_ai_concept_loading,
-    )
-    action_clear_cache = ActionChip(
-        icon=safe_icon_str(ft.Icons.CLEANING_SERVICES),
-        title=I18n.get("settings_clear_cache"),
-        subtitle=I18n.get("ds_action_clear"),
-        on_click=_on_clear_cache,
-        is_loading=action_clear_cache_loading,
-    )
-
-    # --- P1-5: Secondary progress 区域 (daily_sync/ai_concept_sync/cache_clear) ---
-    # 复刻 backtest 范式: ProgressBar + 进度文本 + 取消按钮; 复用 state.progress/active_key
-    # cache_clear (cancellable=False) 不显示取消按钮且无进度回调 → ProgressBar indeterminate
-    secondary_progress_visible = state.is_syncing and state.active_key in (
-        "daily_sync",
-        "ai_concept_sync",
-        "cache_clear",
-    )
-    secondary_cancellable = state.active_key in ("daily_sync", "ai_concept_sync")
-    if secondary_progress_visible and state.progress_message is not None:
-        secondary_progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
-    elif secondary_progress_visible and state.active_key != "cache_clear":
-        secondary_progress_text_value = f"{state.progress * 100:.1f}%"
-    else:
-        secondary_progress_text_value = ""
-
-    secondary_progress_bar = ft.ProgressBar(
-        # cache_clear 无进度回调 → value=None 显示 indeterminate 动画
-        value=state.progress if state.active_key != "cache_clear" else None,
-        visible=secondary_progress_visible,
-        expand=True,
-    )
-    secondary_progress_text = ft.Text(
-        secondary_progress_text_value,
-        size=AppStyles.FONT_SIZE_BODY_SM,
-        color=AppColors.INFO,
-        visible=bool(secondary_progress_text_value),
-    )
-    secondary_cancel_button = ft.Button(
-        content=I18n.get("common_cancel"),
-        on_click=safe_on_click(_on_cancel_active_task),
-        visible=secondary_progress_visible and secondary_cancellable,
-        style=AppStyles.danger_button(),
-    )
-
-    action_console = DashboardCard(
-        content=ft.Column(
-            [
-                SectionHeader(I18n.get("ds_shortcut_console"), title_key="ds_shortcut_console"),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                ft.ResponsiveRow(
-                    [
-                        ft.Column([action_full_sync], col={"sm": 12, "md": 4}),
-                        ft.Column([action_ai_concept_rebuild], col={"sm": 12, "md": 4}),
-                        ft.Column([action_clear_cache], col={"sm": 12, "md": 4}),
-                    ],
-                    run_spacing=10,
-                ),
-                # P1-5: 长任务进度反馈区域 (ProgressBar + 进度文本 + 取消按钮)
-                ft.Row(
-                    [secondary_progress_bar, secondary_progress_text, secondary_cancel_button],
-                    spacing=8,
-                    visible=secondary_progress_visible,
-                ),
-            ],
-        ),
-    )
-
-    # Connection Settings (TushareConfigPanel 消费 tushare_vm, props 推送)
-    tushare_panel = TushareConfigPanel(
-        vm=tushare_vm,
-        compact=False,
-        show_save_button=True,
-        show_register_link=False,
-    )
-
-    row_token = SettingRow(
-        icon=safe_icon_str(ft.Icons.KEY_ROUNDED),
-        title=I18n.get("settings_token"),
-        subtitle=I18n.get("settings_token_desc"),
-        control=tushare_panel,
-        icon_color=AppColors.ACCENT,
-        title_key="settings_token",
-        subtitle_key="settings_token_desc",
-        left_col={"xs": 12, "sm": 12, "md": 5, "lg": 4},
-        right_col={"xs": 12, "sm": 12, "md": 7, "lg": 8},
-    )
-    connection_card = DashboardCard(
-        content=ft.Column(
-            [
-                SectionHeader(I18n.get("settings_sec_api"), title_key="settings_sec_api"),
-                ft.Container(height=10),
-                row_token,
-            ],
-        ),
-    )
-
-    # Historical Data
-    progress_bar = ft.ProgressBar(width=None, visible=progress_visible, expand=True)
-    if progress_visible:
-        progress_bar.value = state.progress
-    progress_text = ft.Text(
-        progress_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.INFO, visible=bool(progress_text_value)
-    )
-
-    style_init = AppStyles.primary_button()
-    style_init.padding = ft.Padding.symmetric(horizontal=15, vertical=0)
-
-    sync_button = ft.Button(
-        content=sync_button_content,
-        icon=sync_button_icon,
-        on_click=safe_on_click(_on_init_historical),
-        tooltip=I18n.get("settings_init_desc"),
-        style=sync_button_style,
-        height=40,
-        width=AppStyles.CONTROL_WIDTH_MD,
-        disabled=actions_disabled and not (state.is_syncing and state.init_sync_cancellable),
-    )
-
-    years_value = str(vm.get_history_years())
-    history_years_dropdown = ft.Dropdown(
-        label=I18n.get("settings_history_range"),
-        value=years_value,
-        options=_build_history_years_options(),
-        width=150,
-        on_select=safe_on_select(_on_history_years_change),
-    )
-
-    row_init = SettingRow(
-        icon=safe_icon_str(ft.Icons.HISTORY_ROUNDED),
-        title=I18n.get("settings_init_data"),
-        subtitle=I18n.get("settings_hint_first_run"),
-        control=ft.Column(
-            [
-                ft.Row(
-                    [history_years_dropdown, sync_button],
-                    alignment=ft.MainAxisAlignment.END,
-                    spacing=10,
-                    wrap=True,
-                ),
-                ft.Row(
-                    [
-                        ft.Column(
-                            [progress_bar, progress_text],
-                            spacing=2,
-                            expand=True,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.END,
-                ),
-            ],
-            spacing=5,
-            alignment=ft.MainAxisAlignment.CENTER,
-            expand=True,
-        ),
-        icon_color=ft.Colors.TERTIARY,
-        title_key="settings_init_data",
-        subtitle_key="settings_hint_first_run",
-    )
-    historical_card = DashboardCard(
-        content=ft.Column(
-            [
-                SectionHeader(I18n.get("settings_init_data"), title_key="settings_init_data"),
-                ft.Container(height=10),
-                row_init,
-            ],
-        ),
-    )
-
-    # --- Task 2.3: 数据存储与流向说明区 (静态展示, 无 VM 交互) ---
-    # 本地 PG 存储路径 + 外发渠道清单 (Tushare/AkShare 查询、云端 LLM 分析)
-    # i18n key 由 View 直接解析, locale 变化经组件顶部 ft.use_state(get_observable_state) 自动重渲染
-    data_flow_card = DashboardCard(
-        content=ft.Column(
-            [
-                SectionHeader(I18n.get("ds_data_flow_title"), title_key="ds_data_flow_title"),
-                ft.Container(height=10),
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.STORAGE, size=AppStyles.FONT_SIZE_LG, color=AppColors.INFO),
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    I18n.get("ds_data_flow_storage_title"),
-                                    size=AppStyles.FONT_SIZE_BODY,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=AppColors.TEXT_PRIMARY,
-                                ),
-                                ft.Text(
-                                    I18n.get("ds_data_flow_storage_desc"),
-                                    size=AppStyles.FONT_SIZE_BODY_SM,
-                                    color=AppColors.TEXT_SECONDARY,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                    ],
-                    spacing=10,
-                    alignment=ft.MainAxisAlignment.START,
-                ),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.CLOUD_SYNC, size=AppStyles.FONT_SIZE_LG, color=AppColors.ACCENT),
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    I18n.get("ds_data_flow_outbound_title"),
-                                    size=AppStyles.FONT_SIZE_BODY,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=AppColors.TEXT_PRIMARY,
-                                ),
-                                ft.Text(
-                                    f"• {I18n.get('ds_data_flow_outbound_tushare')}",
-                                    size=AppStyles.FONT_SIZE_BODY_SM,
-                                    color=AppColors.TEXT_SECONDARY,
-                                ),
-                                ft.Text(
-                                    f"• {I18n.get('ds_data_flow_outbound_llm')}",
-                                    size=AppStyles.FONT_SIZE_BODY_SM,
-                                    color=AppColors.TEXT_SECONDARY,
-                                ),
-                            ],
-                            spacing=2,
-                            expand=True,
-                        ),
-                    ],
-                    spacing=10,
-                    alignment=ft.MainAxisAlignment.START,
-                ),
-            ],
-        ),
-    )
+    connection_card = _build_connection_card(tushare_vm)
+    historical_card = _build_historical_card(state, vm, _on_init_historical, _on_history_years_change)
+    data_flow_card = _build_data_flow_card()
 
     # --- Confirm dialog (use_dialog 无条件调用, 以 None/AlertDialog 切换显隐) ---
     # Flet hook 顺序必须跨渲染稳定: 禁止把 use_dialog 放进 if 块条件调用, 否则破坏
