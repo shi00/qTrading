@@ -39,13 +39,24 @@ def _setup_mock_engine_begin(mock_conn):
 
 
 class TestBaseDaoPrepareDataParams:
-    def test_none_df(self):
-        result = BaseDao._prepare_data_params(None, ["col1"])
-        assert result is None
+    """_prepare_data_params 转换行为覆盖（review07-G2：同类用例参数化合并，保留原断言强度）。"""
 
-    def test_empty_df(self):
-        result = BaseDao._prepare_data_params(pd.DataFrame(), ["col1"])
-        assert result is None
+    @pytest.mark.parametrize(
+        ("df", "expected"),
+        [
+            (None, None),
+            (pd.DataFrame(), None),
+            (pd.DataFrame({"col1": [1, 2, 3]}), [[1], [2], [3]]),
+        ],
+        ids=["none_df", "empty_df", "multiple_rows"],
+    )
+    def test_frame_shape_and_null(self, df, expected):
+        result = BaseDao._prepare_data_params(df, ["col1"])
+        if expected is None:
+            assert result is None
+        else:
+            assert result is not None
+            assert [list(r) for r in result] == expected
 
     def test_missing_cols_filled_with_none(self):
         df = pd.DataFrame({"col1": [1]})
@@ -54,23 +65,20 @@ class TestBaseDaoPrepareDataParams:
         assert len(result) == 1
         assert result[0][1] is None
 
-    def test_numpy_int_conversion(self):
-        df = pd.DataFrame({"col1": [np.int64(42)]})
+    @pytest.mark.parametrize(
+        ("value", "expected_value", "expected_type"),
+        [
+            (np.int64(42), 42, int),
+            (np.float64(3.14), 3.14, float),
+            (np.bool_(True), True, bool),
+        ],
+        ids=["numpy_int", "numpy_float", "numpy_bool"],
+    )
+    def test_numpy_scalar_conversion(self, value, expected_value, expected_type):
+        df = pd.DataFrame({"col1": [value]})
         result = BaseDao._prepare_data_params(df, ["col1"])
-        assert result[0][0] == 42
-        assert isinstance(result[0][0], int)
-
-    def test_numpy_float_conversion(self):
-        df = pd.DataFrame({"col1": [np.float64(3.14)]})
-        result = BaseDao._prepare_data_params(df, ["col1"])
-        assert result[0][0] == 3.14
-        assert isinstance(result[0][0], float)
-
-    def test_numpy_bool_conversion(self):
-        df = pd.DataFrame({"col1": [np.bool_(True)]})
-        result = BaseDao._prepare_data_params(df, ["col1"])
-        assert result[0][0] is True
-        assert isinstance(result[0][0], bool)
+        assert result[0][0] == expected_value
+        assert isinstance(result[0][0], expected_type)
 
     def test_nan_to_none(self):
         df = pd.DataFrame({"col1": [float("nan")]})
@@ -369,11 +377,16 @@ class TestExceptExceptionNarrowedEP11:
     to specific exception types with debug logging."""
 
     def test_date_conversion_catches_value_type_error(self):
+        # review07-G2：原 inspect.signature 断言已删除（焊死私有方法签名，重构即断）。
+        # 改为行为级断言——Date 列经 _prepare_data_params 转换为 datetime.date，同输入可执行。
+        import datetime as _dt
+
         import data.persistence.daos.base_dao as base_dao_mod
 
-        assert hasattr(base_dao_mod.BaseDao, "_prepare_data_params")
-        sig = inspect.signature(base_dao_mod.BaseDao._prepare_data_params)
-        assert sig is not None, "E-P1-1: _prepare_data_params should exist and be callable"
+        df = pd.DataFrame({"trade_date": [pd.Timestamp("2024-06-15")]})
+        result = base_dao_mod.BaseDao._prepare_data_params(df, ["trade_date"])
+        # result 为 None 时下标访问抛 TypeError/IndexError，测试失败，等价于空结果检查
+        assert isinstance(result[0][0], (_dt.date, _dt.datetime))
 
     @pytest.mark.asyncio
     async def test_write_db_engine_check_logs_debug(self):
