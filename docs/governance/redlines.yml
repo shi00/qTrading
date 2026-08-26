@@ -34,7 +34,7 @@ redlines:
   - id: R1
     title: 架构越界
     description: "core/ 导入任何其他层模块；data/ 导入 services/strategies/ui/；services/ 导入 strategies/ui/；strategies/ 导入 ui/"
-    enforcement: "pre-commit（import-linter 4 条契约）"
+    enforcement: "pre-commit（import-linter 6 条契约）"
     automation_coverage: partial
     human_review_required: true
     rule_type: EXCEPTIONABLE

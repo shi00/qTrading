@@ -219,6 +219,54 @@ type = "forbidden"
 source_modules = ["strategies"]
 forbidden_modules = ["ui"]
 
+# 契约 5: R1 — utils 为横切叶子层，不得反向依赖任何业务层 (§3.1 R1 / §4.1)
+# review01-A1：将 test_architecture_boundaries.py 中 utils 方向检查提升为 pre-commit 契约，
+# 使 utils 反向依赖在提交阶段即被拦截（此前仅在 CI 全量测试阶段暴露）。
+# ignore_imports 登记存量函数内 lazy import（review01-A1 取证：lint-imports 会分析函数体内
+# import）。这些违规按 review01-A2/A6 计划逐个消除：方向性违规（scheduler_service →
+# strategies/services）通过夜间预测下沉消除；循环打破型（config_handler ↔ db_config_service）
+# 保留但必须带 # lazy-import: 注释。消除后同步移除对应 ignore 条目。
+[[tool.importlinter.contracts]]
+name = "R1: utils must not import business layers"
+type = "forbidden"
+source_modules = ["utils"]
+forbidden_modules = ["data", "services", "strategies", "ui", "app"]
+ignore_imports = [
+    # config_handler ↔ db_config_service 循环打破（A2 标注 lazy-import，保留）
+    "utils.config_handler -> data.persistence.db_config_service",
+    # diagnostics 采集时访问业务单例（A2 评估下沉到 services/diagnostics）
+    "utils.diagnostics -> data.data_processor",
+    "utils.diagnostics -> services.task_manager",
+    # scheduler_service 业务 job 编排（A2-1 下沉到 services/scheduled_jobs/）
+    "utils.scheduler_service -> data.cache.cache_manager",
+    "utils.scheduler_service -> data.data_processor",
+    "utils.scheduler_service -> data.persistence.app_state_service",
+    "utils.scheduler_service -> data.persistence.review_manager",
+    "utils.scheduler_service -> services.task_manager",
+    "utils.scheduler_service -> strategies.ai_strategy",
+    # shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
+    "utils.shutdown -> data.data_processor",
+    "utils.shutdown -> data.domain_services.market_data_service",
+    "utils.shutdown -> data.persistence.data_explorer_query_client",
+    "utils.shutdown -> data.persistence.embedded_postgres.service",
+    "utils.shutdown -> services.local_model_manager",
+    "utils.shutdown -> services.news_subscription_service",
+    "utils.shutdown -> services.task_manager",
+]
+
+# 契约 6: R1 — ui 不得导入 app（编排层单向，app 仅被 main.py 调用）(§3.1 R1 / §4.1)
+# review01-A1/A3：ui/startup_views.py 是启动装配序列的延伸，登记为契约级例外（与
+# docs/governance/exceptions.yml EX-0001 保持一致）；其余 ui → app 导入一律拦截。
+[[tool.importlinter.contracts]]
+name = "R1: ui must not import app"
+type = "forbidden"
+source_modules = ["ui"]
+forbidden_modules = ["app"]
+ignore_imports = [
+    "ui.startup_views -> app.bootstrap",
+    "ui.startup_views -> app.startup_controller",
+]
+
 # qTrading embedded PostgreSQL sidecar 配置 (pg_plan §15.5 AI-12)
 # 由 scripts/verify_versions.py 校验与 sidecars/qtrading-pg-sidecar/Cargo.toml 一致
 [tool.qtrading.sidecar]
