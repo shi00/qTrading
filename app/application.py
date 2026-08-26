@@ -17,11 +17,14 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import flet as ft
 
 from app.bootstrap import EmbeddedPgStartupScenario, mask_sensitive
+
+if TYPE_CHECKING:
+    from utils.shutdown import ShutdownCoordinator
 
 
 def _trace_log(msg: str) -> None:
@@ -61,6 +64,48 @@ from utils.log_decorators import UILogger
 from utils.proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
+
+
+class ApplicationSession:
+    """启动会话资源上下文管理器（review01-A8）。
+
+    封装启动期创建的会话资源（CacheManager 引擎、ShutdownCoordinator），
+    在启动流程抛异常时统一回滚，避免留下"数据库已迁移、引擎已就绪、
+    后台服务未启动"的部分初始化状态。
+
+    - 正常退出（__aexit__ 无异常）：不自动清理，交由 run() 注册到
+      ShutdownCoordinator 的正常关闭路径（window close / disconnect）处理。
+    - 异常退出（__aexit__ 有异常）：逆序释放——先 cancel 已注册任务并
+      coordinator 尽力清理，再 cache_manager.close() dispose 引擎。
+      已注册单例由各单例 _reset_singleton 在进程退出/测试重置时兜底，
+      此处聚焦引擎与后台任务这两个会泄漏跨会话资源的对象。
+    """
+
+    def __init__(self, page: ft.Page) -> None:
+        self._page = page
+        self.cache_manager: CacheManager | None = None
+        self.coordinator: ShutdownCoordinator | None = None
+
+    async def __aenter__(self) -> ApplicationSession:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        if exc_type is not None:
+            await self._rollback()
+        return False
+
+    async def _rollback(self) -> None:
+        """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。"""
+        if self.coordinator is not None:
+            try:
+                await self.coordinator.do_cleanup()
+            except Exception:
+                logger.exception("[App] Startup rollback: ShutdownCoordinator cleanup failed")
+        if self.cache_manager is not None:
+            try:
+                await self.cache_manager.close()
+            except Exception:
+                logger.exception("[App] Startup rollback: CacheManager close failed")
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:
@@ -422,11 +467,15 @@ async def run(page: ft.Page):
             )
         else:
             logger.info("[Main] Embedded DB URL ContextVar override active; no DATABASE_URL env var present")
+    session = ApplicationSession(page)
+    await session.__aenter__()
     cache_manager = CacheManager()
+    session.cache_manager = cache_manager
 
     from utils.shutdown import ShutdownCoordinator
 
     coordinator = ShutdownCoordinator(page)
+    session.coordinator = coordinator
 
     def _is_web_mode() -> bool:
         return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
@@ -540,7 +589,14 @@ async def run(page: ft.Page):
 
     logger.info("[Main] Before controller.start()")
     _trace_log("[Main] Before controller.start()")
-    await controller.start(db_url, token, llm_api_key, onboarding_complete)
+    try:
+        await controller.start(db_url, token, llm_api_key, onboarding_complete)
+    except BaseException:
+        # review01-A8: 启动编排失败统一回滚——释放引擎与后台任务，
+        # 避免"数据库已迁移、引擎已就绪、后台服务未启动"的部分初始化状态。
+        # BaseException 覆盖 CancelledError（R2 红线，回滚后 re-raise 配合优雅停机）。
+        await session._rollback()
+        raise
     _trace_log("[Main] After controller.start()")
     logger.info("[Main] After controller.start()")
 

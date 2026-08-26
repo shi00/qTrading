@@ -253,3 +253,87 @@ async def test_run_controller_start_receives_config(monkeypatch):
     assert captured["token"] is None
     assert captured["llm_api_key"] is None
     assert captured["onboarding"] is False
+
+
+class TestApplicationSession:
+    """ApplicationSession（A8 统一回滚）测试。"""
+
+    @pytest.mark.asyncio
+    async def test_enter_returns_self(self):
+        page = _DummyPage()
+        session = app_main.ApplicationSession(page)
+        entered = await session.__aenter__()
+        assert entered is session
+        assert session.cache_manager is None
+        assert session.coordinator is None
+
+    @pytest.mark.asyncio
+    async def test_clean_exit_does_not_rollback(self):
+        page = _DummyPage()
+        session = app_main.ApplicationSession(page)
+        session.cache_manager = MagicMock()
+        session.coordinator = MagicMock()
+        # 正常退出（无异常）：不调用回滚
+        result = await session.__aexit__(None, None, None)
+        assert result is False
+        session.cache_manager.close.assert_not_called()
+        session.coordinator.do_cleanup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exception_exit_rolls_back_cache_manager_and_coordinator(self):
+        page = _DummyPage()
+        session = app_main.ApplicationSession(page)
+        session.cache_manager = MagicMock()
+        session.cache_manager.close = AsyncMock()
+        session.coordinator = MagicMock()
+        session.coordinator.do_cleanup = AsyncMock()
+
+        result = await session.__aexit__(type(Exception), Exception("boom"), None)
+
+        assert result is False  # 不吞没异常
+        session.coordinator.do_cleanup.assert_awaited_once()
+        session.cache_manager.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_exception_exit_rolls_back_cache_manager_only(self):
+        """coordinator 未创建时（CacheManager 已建但 coordinator 前失败）仅关引擎。"""
+        page = _DummyPage()
+        session = app_main.ApplicationSession(page)
+        session.cache_manager = MagicMock()
+        session.cache_manager.close = AsyncMock()
+
+        result = await session.__aexit__(type(Exception), Exception("boom"), None)
+
+        assert result is False
+        session.cache_manager.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rollback_failure_does_not_mask_original_exception(self):
+        """回滚自身失败只记日志，不掩盖原始异常（__aexit__ 仍返回 False 传播）。"""
+        page = _DummyPage()
+        session = app_main.ApplicationSession(page)
+        session.cache_manager = MagicMock()
+        session.cache_manager.close = AsyncMock(side_effect=RuntimeError("close failed"))
+        session.coordinator = MagicMock()
+        session.coordinator.do_cleanup = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+
+        result = await session.__aexit__(type(Exception), Exception("boom"), None)
+
+        assert result is False  # 原始异常继续传播
+        session.coordinator.do_cleanup.assert_awaited_once()
+        session.cache_manager.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_controller_start_exception_propagates(monkeypatch):
+    """controller.start 抛异常时 run() 传播异常（A8：回滚由 ApplicationSession 单测覆盖）。"""
+    _prepare_run_mocks(monkeypatch)
+
+    mock_controller = MagicMock()
+    mock_controller.auto_probe_task = None
+    mock_controller.start = AsyncMock(side_effect=RuntimeError("start failed"))
+    monkeypatch.setattr(app_main, "StartupController", lambda **_: mock_controller)
+
+    page = _DummyPage()
+    with pytest.raises(RuntimeError, match="start failed"):
+        await app_main.run(page)
