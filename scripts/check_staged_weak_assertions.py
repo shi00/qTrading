@@ -24,6 +24,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from scan_weak_assertions import compute_new_issues, load_baseline, scan_file  # noqa: E402
 
+
+def _make_signature(rel_path: str, issue_type: str, source_line: str) -> tuple[str, str, str]:
+    """弱断言签名（与 scan_weak_assertions.make_signature 等价，本地实现避免跨脚本 import 解析问题）。"""
+    return (rel_path, issue_type, source_line.strip().lower())
+
+
 # baseline 路径与 CI 一致（scripts/ 的父目录是项目根）
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "tests" / "weak_assertion_baseline.json"
 
@@ -59,6 +65,18 @@ def main() -> int:
 
     # 只阻断新增弱断言（不在 baseline 中的）
     new_issues = compute_new_issues(current=all_issues, baseline=baseline)
+
+    # review07-G3: 触达文件含 baseline 存量条目时提示顺手清理（WARNING 不阻断）
+    baseline_sigs = {_make_signature(e.rel_path, e.issue_type, e.source_line) for e in baseline}
+    legacy_counts: dict[str, int] = {}
+    for issue in all_issues:
+        if _make_signature(issue.rel_path, issue.issue_type, issue.source_line) in baseline_sigs:
+            legacy_counts[issue.rel_path] = legacy_counts.get(issue.rel_path, 0) + 1
+    for rel_path, count in sorted(legacy_counts.items()):
+        print(
+            f"::warning::baseline 存量弱断言 {rel_path} 含 {count} 条，建议顺手清理"
+            f"（review07-G3 policy: 每季度下降不少于 10%，目标 {len(baseline) * 10 // 100} 条/季度）"
+        )
 
     if not new_issues:
         return 0
