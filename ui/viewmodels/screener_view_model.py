@@ -60,6 +60,18 @@ class StreamCard:
 
 
 @dataclass(frozen=True)
+class StrategyRunRow:
+    """历史树中单次回测运行行 (D10: 替换 'strategy_name'/'run_id'/'cnt' 裸 dict).
+
+    strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2 VM 不感知 locale).
+    """
+
+    strategy_name: str
+    run_id: str
+    cnt: int
+
+
+@dataclass(frozen=True)
 class HistoryTreeRow:
     """历史树单行 (immutable, state-driven, Task 3.2).
 
@@ -70,7 +82,7 @@ class HistoryTreeRow:
     display_date: str
     d_key: str
     total_cnt: int
-    strategies: tuple[dict, ...]
+    strategies: tuple[StrategyRunRow, ...]
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,19 @@ class HistoryTreeState:
     offset: int = 0
     has_more: bool = False
     loading: bool = False
+
+
+@dataclass(frozen=True)
+class StrategyDepRow:
+    """单个策略的依赖信息行 (D10: 替换 ``{"name": str, "missing_apis": list}`` 裸 dict).
+
+    ``name_key`` 为策略 i18n raw key (VM 装配, 不经 I18n.get, §3.2 不感知 locale),
+    View 渲染时按当前 locale 翻译; ``missing_apis`` 用 tuple 保证 frozen 契约.
+    """
+
+    key: str
+    name_key: str
+    missing_apis: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,7 +152,9 @@ class ScreenerState:
     data_version: int = 0
     # Strategy loading (R.2.6.1: 业务状态迁入 VM, View 构建 Flet Options 时翻译)
     strategies_loaded: bool = False
-    strategies_with_dep: dict[str, dict] = field(default_factory=dict)
+    # D10: tuple[StrategyDepRow, ...] 不可变行序列 (frozen 契约, 替换裸 dict)
+    # name_key 为 raw i18n key, View 渲染时翻译 — 消除 VM 感知 locale 与 stale 翻译
+    strategies_with_dep: tuple[StrategyDepRow, ...] = ()
     # Strategy description (R.2.6.2: 业务状态迁入 VM, View 映射 color 标识符到 AppColors)
     # P3-ScreenerVM-I18n-Get-Residual: 改为 Message 结构 (desc_key + params),
     # View 渲染时翻译 (§3.2 VM 不感知 locale).
@@ -517,11 +544,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """加载策略列表到 state (R.2.6.1: 业务状态迁入 VM).
 
         从 strategy_mgr 获取策略+依赖信息, 存入 state.strategies_with_dep.
-        View 渲染时调 _build_strategy_options(state.strategies_with_dep, ...) 构建 Flet Options,
+        View 渲染时调 _build_strategy_options(state.strategies_with_dep) 构建 Flet Options,
         确保 locale 切换后 Options 自动重新翻译 (避免 use_state 缓存旧 locale 翻译).
         """
         try:
-            strategies_with_dep = self.strategy_mgr.get_all_with_dependencies()
+            strategies_with_dep = self._build_strategy_dep_rows()
             self._set_state(
                 strategies_with_dep=strategies_with_dep,
                 strategies_loaded=True,
@@ -535,6 +562,25 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 status_color="error",
                 status_action_key=None,
             )
+
+    def _build_strategy_dep_rows(self) -> tuple[StrategyDepRow, ...]:
+        """将 strategy_mgr 的依赖 dict 装配为不可变行序列 (D10: frozen 契约).
+
+        ``name`` 用 ``name_key`` (raw i18n key) 替代已翻译显示名 — VM 不感知 locale
+        (§3.2), View 渲染时按当前 locale 翻译 (消除 stale 翻译, D16 同理念).
+        """
+        rows: list[StrategyDepRow] = []
+        for key, info in self.strategy_mgr.get_all_with_dependencies().items():
+            strategy_obj = self.strategy_mgr.get_strategy(key)
+            name_key = getattr(strategy_obj, "name_key", key) or key
+            rows.append(
+                StrategyDepRow(
+                    key=key,
+                    name_key=name_key,
+                    missing_apis=tuple(info.get("missing_apis", [])),
+                )
+            )
+        return tuple(rows)
 
     def update_strategy_desc(self, selected_strategy: str | None, params: dict | None = None) -> None:
         """更新策略描述 Message 和颜色到 state (R.2.6.2: 业务状态迁入 VM).
@@ -556,8 +602,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         try:
             strategy_obj = self.strategy_mgr.get_strategy(selected_strategy)
-            strategies_with_dep = self.strategy_mgr.get_all_with_dependencies()
-            dep_info = strategies_with_dep.get(selected_strategy, {})
+            dep_info = next(
+                (r for r in self._build_strategy_dep_rows() if r.key == selected_strategy),
+                None,
+            )
 
             if strategy_obj:
                 if params is None:
@@ -572,7 +620,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
             # missing_apis 非空时: params 追加 missing_apis 字段, color=warning
             # View 渲染时识别 missing_apis 字段追加 "strategy_missing_apis" 翻译后缀
-            missing_apis = dep_info.get("missing_apis")
+            missing_apis = dep_info.missing_apis if dep_info else ()
             if missing_apis:
                 merged_params = dict(desc_msg.params)
                 merged_params["missing_apis"] = ", ".join(missing_apis)
@@ -1029,7 +1077,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             return self._full_results
         # regex=False: ts_code 含 "." (如 000001.SZ), 字面量匹配防通配误命中
         mask = self._full_results["ts_code"].astype(str).str.contains(code, case=False, na=False, regex=False)
-        return self._full_results[mask]
+        # bool Series 布尔索引返回 DataFrame; cast 收窄 pyright 对 pd 布尔掩码的联合推断
+        return typing.cast("pd.DataFrame | None", self._full_results[mask])
 
     def set_stock_filter(self, value: str) -> None:
         """UX-04: 设置股票代码过滤 (深链/手动输入), 回到第 1 页并重算分页.
@@ -1493,20 +1542,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         策略名 strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2).
         """
         # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
-        tree: dict[str, list[dict]] = {}
+        tree: dict[str, list[StrategyRunRow]] = {}
         for _, row in df.iterrows():
             date = str(row["trade_date"])
             tree.setdefault(date, []).append(
-                {
-                    "run_id": row["run_id"],
-                    "strategy_name": row["strategy_name"],
-                    "cnt": int(row["cnt"]),
-                }
+                StrategyRunRow(
+                    strategy_name=str(row["strategy_name"]),
+                    run_id=str(row["run_id"]),
+                    cnt=int(row["cnt"]),
+                )
             )
         rows: list[HistoryTreeRow] = []
         for date_str, strategies in tree.items():
             display_date, d_key = ScreenerViewModel._format_history_date(date_str)
-            total_cnt = sum(s["cnt"] for s in strategies)
+            total_cnt = sum(s.cnt for s in strategies)
             rows.append(
                 HistoryTreeRow(
                     display_date=display_date,

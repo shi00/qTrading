@@ -144,7 +144,10 @@ class TestStartScan:
 
         assert vm.state.scan_state == "done"
         assert vm.state.result is not None
-        assert vm.state.result["score"] == 90
+        # D10: result 收敛为 frozen QualityScanResult (属性访问)
+        assert vm.state.result.score == 90
+        assert vm.state.result.tier == 3
+        assert vm.state.result.avg_continuity == pytest.approx(0.95)
         # state 转换序列：scanning → done
         assert [s.scan_state for s in received] == ["scanning", "done"]
         # DataProcessor 调用参数（sample_size 默认 50，progress_callback 注入）

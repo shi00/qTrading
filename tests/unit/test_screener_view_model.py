@@ -10,7 +10,7 @@ import pytest
 
 from core.i18n import Message
 from ui.components.virtual_table import next_sort_state
-from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
+from ui.viewmodels.screener_view_model import ScreenerViewModel, StrategyDepRow, TASK_NAME_PREFIX
 from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
@@ -1439,13 +1439,17 @@ class TestScreenerViewModelLoadStrategies:
     def test_load_strategies_updates_state(self, mock_dp, mock_sm, mock_rm):
         """load_strategies() 成功时更新 state.strategies_with_dep + state.strategies_loaded=True."""
         vm = ScreenerViewModel()
+        mock_strategy = MagicMock()
+        mock_strategy.name_key = "strategy_value_name"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
         mock_strategies = {"value": {"name": "价值策略", "missing_apis": []}}
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value=mock_strategies)
 
         vm.load_strategies()
 
         assert vm.state.strategies_loaded is True
-        assert vm.state.strategies_with_dep == mock_strategies
+        # D10: dict 收敛为不可变 StrategyDepRow 行 (name → name_key raw i18n key)
+        assert vm.state.strategies_with_dep == (StrategyDepRow(key="value", name_key="strategy_value_name"),)
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")

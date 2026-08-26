@@ -21,6 +21,7 @@ from tests.unit.ui.component_renderer import (
 )
 from tests.unit.ui.conftest import wrap_mock_page
 from ui.components.health_report_dialog import logger as dialog_logger
+from ui.viewmodels.health_scan_view_model import QualityScanResult
 
 pytestmark = pytest.mark.unit
 
@@ -699,7 +700,7 @@ class TestBuildScanResultExtended:
         """avg_fundamental > 0.7 时用 SUCCESS 色。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95, "avg_fundamental": 0.8}
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95, avg_fundamental=0.8)
         column = _build_scan_result(result)
         # 最后一个 Row 是 fundamental/fin_recency 行
         # Row.controls[0] 是 fundamental Column, Column.controls[1] 是 value Text
@@ -711,7 +712,7 @@ class TestBuildScanResultExtended:
         """0.5 < avg_fundamental <= 0.7 时用 WARNING 色。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 60, "tier": 2, "avg_lag": 5, "avg_continuity": 0.8, "avg_fundamental": 0.6}
+        result = QualityScanResult(score=60, tier=2, avg_lag=5, avg_continuity=0.8, avg_fundamental=0.6)
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
         fundamental_value = fundamental_row.controls[0].controls[1]
@@ -721,7 +722,7 @@ class TestBuildScanResultExtended:
         """avg_fundamental <= 0.5 时用 ERROR 色。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 30, "tier": 1, "avg_lag": 30, "avg_continuity": 0.5, "avg_fundamental": 0.3}
+        result = QualityScanResult(score=30, tier=1, avg_lag=30, avg_continuity=0.5, avg_fundamental=0.3)
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
         fundamental_value = fundamental_row.controls[0].controls[1]
@@ -731,14 +732,14 @@ class TestBuildScanResultExtended:
         """fin_recency_ok=True 时显示 CHECK icon (SUCCESS 色) (P2-7: ✓ → ft.Icon)。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {
-            "score": 90,
-            "tier": 3,
-            "avg_lag": 1,
-            "avg_continuity": 0.95,
-            "avg_fundamental": 0.8,
-            "fin_recency_ok": True,
-        }
+        result = QualityScanResult(
+            score=90,
+            tier=3,
+            avg_lag=1,
+            avg_continuity=0.95,
+            avg_fundamental=0.8,
+            fin_recency_ok=True,
+        )
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
         # Row.controls[1] 是 fin_recency Column, Column.controls[1] 是 value Icon (P2-7)
@@ -751,14 +752,14 @@ class TestBuildScanResultExtended:
         """fin_recency_ok=False 时显示 CLOSE icon (ERROR 色) (P2-7: ✗ → ft.Icon)。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {
-            "score": 30,
-            "tier": 1,
-            "avg_lag": 30,
-            "avg_continuity": 0.5,
-            "avg_fundamental": 0.3,
-            "fin_recency_ok": False,
-        }
+        result = QualityScanResult(
+            score=30,
+            tier=1,
+            avg_lag=30,
+            avg_continuity=0.5,
+            avg_fundamental=0.3,
+            fin_recency_ok=False,
+        )
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
         fin_recency_value = fundamental_row.controls[1].controls[1]
@@ -770,7 +771,7 @@ class TestBuildScanResultExtended:
         """tier 渲染为 quality_tier_N 文本。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 60, "tier": 2, "avg_lag": 5, "avg_continuity": 0.8, "avg_fundamental": 0.6}
+        result = QualityScanResult(score=60, tier=2, avg_lag=5, avg_continuity=0.8, avg_fundamental=0.6)
         column = _build_scan_result(result)
         # score_row 是 column.controls[1]
         # score_row.controls[1] 是 Column, Column.controls[1] 是 tier Text
@@ -782,7 +783,7 @@ class TestBuildScanResultExtended:
         """score == 80 不 > 80，用 WARNING 色（边界测试）。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 80, "tier": 2, "avg_lag": 5, "avg_continuity": 0.8, "avg_fundamental": 0.6}
+        result = QualityScanResult(score=80, tier=2, avg_lag=5, avg_continuity=0.8, avg_fundamental=0.6)
         column = _build_scan_result(result)
         score_row = column.controls[1]
         icon = score_row.controls[0]
@@ -792,7 +793,7 @@ class TestBuildScanResultExtended:
         """score == 50 不 > 50，用 ERROR 色（边界测试）。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 50, "tier": 1, "avg_lag": 30, "avg_continuity": 0.5, "avg_fundamental": 0.3}
+        result = QualityScanResult(score=50, tier=1, avg_lag=30, avg_continuity=0.5, avg_fundamental=0.3)
         column = _build_scan_result(result)
         score_row = column.controls[1]
         icon = score_row.controls[0]
@@ -803,7 +804,7 @@ class TestBuildScanResultExtended:
         """L744-745: on_init_data 非空时在结果区末尾渲染 Divider + "初始化数据"按钮。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95, "avg_fundamental": 0.8}
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95, avg_fundamental=0.8)
         on_init_data = MagicMock()
         column = _build_scan_result(result, on_init_data=on_init_data)
         # 默认 6 个 controls + 2 个追加 (Divider + Row)
@@ -824,7 +825,7 @@ class TestBuildScanResultExtended:
         """L743: on_init_data=None 时不追加 Divider + 按钮（仅默认 controls）。"""
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95, "avg_fundamental": 0.8}
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95, avg_fundamental=0.8)
         column = _build_scan_result(result, on_init_data=None)
         # 默认 6 个 controls，无追加
         assert len(column.controls) == 6
