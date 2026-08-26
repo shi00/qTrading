@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import app.startup_controller as startup_ctrl
-import main as app_main
+import app.application as app_main
 import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
@@ -221,7 +221,7 @@ async def test_disconnect_success_cancels_watchdog(monkeypatch):
     _prepare_main(monkeypatch)
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
 
     assert page.on_disconnect is not None
     on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
@@ -239,7 +239,7 @@ async def test_window_close_success_cancels_watchdog(monkeypatch):
     _prepare_main(monkeypatch)
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
 
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
@@ -268,7 +268,7 @@ async def test_window_close_cancel_does_not_shutdown(monkeypatch):
     _prepare_main(monkeypatch)
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
@@ -297,7 +297,7 @@ async def test_window_close_failure_forces_exit(monkeypatch):
     monkeypatch.setattr(app_main.asyncio, "sleep", AsyncMock(return_value=None))
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
@@ -324,7 +324,7 @@ async def test_disconnect_failure_forces_exit(monkeypatch):
     monkeypatch.setattr(app_main.asyncio, "sleep", AsyncMock(return_value=None))
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
     assert page.on_disconnect is not None
     on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
     await on_disconnect(MagicMock())
@@ -352,7 +352,7 @@ async def test_window_close_during_shutdown_does_not_reopen_dialog(monkeypatch):
     monkeypatch.setattr(_FakeCoordinator, "do_cleanup", _blocking_cleanup, raising=False)
     page = _DummyPage()
 
-    await app_main.main(page)
+    await app_main.run(page)
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
@@ -391,7 +391,7 @@ async def test_window_close_logs_dialog_state_transitions(monkeypatch):
     ui_logger_spy = MagicMock()
     monkeypatch.setattr(app_main.UILogger, "log_action", ui_logger_spy)
 
-    await app_main.main(page)
+    await app_main.run(page)
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
