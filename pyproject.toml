@@ -254,17 +254,13 @@ ignore_imports = [
 ]
 
 # 契约 6: R1 — ui 不得导入 app（编排层单向，app 仅被 main.py 调用）(§3.1 R1 / §4.1)
-# review01-A1/A3：ui/startup_views.py 是启动装配序列的延伸，登记为契约级例外（与
-# docs/governance/exceptions.yml EX-0001 保持一致）；其余 ui → app 导入一律拦截。
+# review01-A3：ui/startup_views.py 已消除对 app 层的运行时导入（纯类型下沉 core + Protocol 解耦），
+# 契约 6 无 ignore 例外；其余 ui → app 导入一律拦截。
 [[tool.importlinter.contracts]]
 name = "R1: ui must not import app"
 type = "forbidden"
 source_modules = ["ui"]
 forbidden_modules = ["app"]
-ignore_imports = [
-    "ui.startup_views -> app.bootstrap",
-    "ui.startup_views -> app.startup_controller",
-]
 
 # qTrading embedded PostgreSQL sidecar 配置 (pg_plan §15.5 AI-12)
 # 由 scripts/verify_versions.py 校验与 sidecars/qtrading-pg-sidecar/Cargo.toml 一致

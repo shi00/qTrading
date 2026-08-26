@@ -5,7 +5,6 @@ import atexit
 import logging
 import os
 from datetime import timedelta
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -18,6 +17,9 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
+
+# review01-A3: EmbeddedPgStartupScenario 下沉到 core.startup_types（纯类型），此处 re-export 兼容旧引用
+from core.startup_types import EmbeddedPgStartupScenario
 
 if TYPE_CHECKING:
     from utils.config_models import AppConfig
@@ -606,20 +608,6 @@ def _cleanup_embedded_pg_url_file(url_file: Path) -> None:
         url_file.unlink(missing_ok=True)
     except OSError as e:
         logger.debug("[Bootstrap] failed to cleanup embedded PG URL file: %s", e)
-
-
-class EmbeddedPgStartupScenario(Enum):
-    """Embedded PostgreSQL 启动场景（UX 改进 spec §启动侧方案 A）。
-
-    用于 LoadingView 差异化文案：
-    - ``FIRST_RUN``: 首次启动（需解压 bundled binaries + initdb，预计 30-60s）
-    - ``NORMAL``: 普通启动（仅 PG 启动+健康检查，预计 2-5s）
-    - ``UNKNOWN``: 异常状态（marker 与 PG_VERSION 不一致，保守按 NORMAL 文案显示）
-    """
-
-    FIRST_RUN = "first_run"
-    NORMAL = "normal"
-    UNKNOWN = "unknown"
 
 
 def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupScenario | None:
