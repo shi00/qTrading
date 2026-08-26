@@ -22,7 +22,9 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _R16_SINGLETON_CLASSES,
     _base_class_names,
     _check_R16_in_tree,
+    _check_R4_fstring_in_tree,
     _check_R4_in_tree,
+    _check_R4_literal_assignments_in_tree,
     _check_R_no_bare_ft_colors_in_tree,
     _check_R_no_bare_font_size_in_tree,
     _decorator_names,
@@ -40,6 +42,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R16_vm_init_singleton_construction,
     check_R4,
     check_R4_in_tests,
+    check_R4_literal_assignments,
     check_R_no_bare_ft_colors_in_ui,
     check_R_no_bare_font_size_in_ui,
     main,
@@ -139,6 +142,82 @@ class TestR4PureFunction:
         code = "async def f():\n    await conn.close()\n"
         errors = self._check(code)
         assert errors == []
+
+
+class TestR4LiteralAssignmentsFunction:
+    """R4 补充检测（review07-G18）：'以 SQL 关键字开头 + %s' 字符串字面量。
+
+    绕过路径 1（SQL 存入变量）：``sql = "SELECT ... %s"`` 后 ``conn.execute(sql, x)``，
+    原先第一参数非常量未被检出；本检测对字面量本体打标记。
+    """
+
+    def _check(self, code: str) -> list[str]:
+        import tempfile
+
+        tree = ast.parse(code)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "fake_module.py"
+            p.write_text(code, encoding="utf-8")
+            return _check_R4_literal_assignments_in_tree(tree, p)
+
+    def test_sql_literal_with_percent_s_detected(self):
+        """变量赋值：'SELECT ... %s' 常量字面量应被检测（绕过路径 1）。"""
+        code = 'async def f():\n    sql = "SELECT * FROM users WHERE id = %s"\n    await conn.execute(sql, uid)\n'
+        errors = self._check(code)
+        assert len(errors) == 1
+        assert "R4" in errors[0]
+
+    def test_direct_call_not_duplicated(self):
+        """conn.execute("...%s...") 直接被原规则命中，本检测不应重复报（去重）。"""
+        code = 'async def f():\n    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_log_message_not_flagged(self):
+        """日志/文案（非 SQL 关键字开头）不应被误报（如 '[X] Failed to update %s'）。"""
+        code = 'logger.info("[DAO] Failed to update prediction result: %s", (e,))\n'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_no_percent_s_not_flagged(self):
+        """SQL 开头但无 %s 的常量不应被检测。"""
+        code = 'async def f():\n    sql = "SELECT * FROM users WHERE id = 1"\n'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_noqa_r4_exempts_line(self):
+        """行尾 # noqa: R4 豁免合法 SQL 模板（如文档化示例）。"""
+        code = 'async def f():\n    sql = "SELECT * FROM t WHERE id = %s"  # noqa: R4 - 文档示例\n    return sql\n'
+        errors = self._check(code)
+        assert errors == []
+
+
+class TestR4FstringFunction:
+    """R4 补充检测（review07-G18）：f-string SQL 模板（绕过路径 2），WARNING 语义。"""
+
+    def _warn(self, code: str) -> list[str]:
+        tree = ast.parse(code)
+        fake_path = ROOT / "data" / "fake_module.py"
+        return _check_R4_fstring_in_tree(tree, fake_path)
+
+    def test_sql_fstring_template_warns(self):
+        """f-string 以 SQL 关键字开头应产生 WARNING。"""
+        code = 'async def f():\n    sql = f"SELECT DISTINCT ON (ts_code) {cols}"\n'
+        warnings = self._warn(code)
+        assert len(warnings) == 1
+        assert "R4" in warnings[0]
+
+    def test_non_sql_fstring_not_warned(self):
+        """非 SQL 开头的 f-string（如文案）不应产生 WARNING。"""
+        code = 'msg = f"Security Alert: Only SELECT statements are allowed. Found: {x}"\n'
+        warnings = self._warn(code)
+        assert warnings == []
+
+    def test_plain_string_not_warned(self):
+        """普通字符串（非 f-string）不进入 f-string 检测。"""
+        code = 'sql = "SELECT * FROM t"\n'
+        warnings = self._warn(code)
+        assert warnings == []
 
 
 # ============================================================================
@@ -694,6 +773,11 @@ class TestRedlineIntegrationOnCurrentCodebase:
         """R4（tests/）：当前 tests/ 目录无 asyncpg 原生查询 %s 占位符。"""
         errors = check_R4_in_tests()
         assert errors == [], "R4 (tests) violations found:\n  " + "\n  ".join(errors)
+
+    def test_check_R4_literal_assignments_passes(self):
+        """R4 补充（review07-G18）：当前生产代码无'SQL 开头 + %s'的未豁免字面量。"""
+        errors = check_R4_literal_assignments()
+        assert errors == [], "R4 literal assignment violations found:\n  " + "\n  ".join(errors)
 
     def test_check_R12_passes(self):
         """R12：当前代码库 models.py 的 __tablename__ 与 TABLE_DEFINITIONS 一致。"""
