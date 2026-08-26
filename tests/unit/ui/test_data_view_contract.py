@@ -380,6 +380,10 @@ class _FakeDataExplorerState:
     filter_col: str | None = None
     filter_op: str = "="
     filter_val: str = ""
+    # D4: 过滤草稿字段 (镜像 DataExplorerState, View 读 state.filter_*_draft)
+    filter_col_draft: str | None = None
+    filter_op_draft: str = "="
+    filter_val_draft: str = ""
     is_loading: bool = False
     tables_loaded: bool = True
     error_message: Message | None = None
@@ -489,6 +493,20 @@ class _FakeDataExplorerViewModel:
 
     def set_filter(self, col: str, op: str, val: str) -> None:
         self.method_calls.append(("set_filter", {"col": col, "op": op, "val": val}))
+
+    # --- D4: 过滤草稿 (镜像真实 VM) ---
+
+    def set_filter_draft_col(self, col: str | None) -> None:
+        self.method_calls.append(("set_filter_draft_col", {"col": col}))
+
+    def set_filter_draft_op(self, op: str) -> None:
+        self.method_calls.append(("set_filter_draft_op", {"op": op}))
+
+    def set_filter_draft_val(self, val: str) -> None:
+        self.method_calls.append(("set_filter_draft_val", {"val": val}))
+
+    def commit_filter(self) -> None:
+        self.method_calls.append(("commit_filter", {}))
 
     def set_sort(self, col_index: int | None, ascending: bool) -> None:
         self.method_calls.append(("set_sort", {"col_index": col_index, "ascending": ascending}))
@@ -1199,7 +1217,7 @@ class TestTableViewerTabEventHandlers:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_on_query_click → _do_query → vm.set_filter + vm.query_data(page=1)。"""
+        """_on_query_click → _do_query → vm.commit_filter + vm.query_data(page=1)。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
@@ -1212,7 +1230,7 @@ class TestTableViewerTabEventHandlers:
         btn_query.on_click(MagicMock())
 
         calls = [c[0] for c in vm.method_calls]
-        assert "set_filter" in calls
+        assert "commit_filter" in calls  # D4: 草稿提交由 VM.commit_filter 内聚, 不再调 set_filter
         assert "query_data" in calls
         # PR-478: mount 的 _load_initial_table 也会调 query_data() (无 page 参数),
         # 需过滤出 click handler 触发的带 page 参数的调用

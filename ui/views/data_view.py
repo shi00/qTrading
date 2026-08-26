@@ -297,16 +297,13 @@ def TableViewerTab(
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
-    # --- 本地 UI 状态 (输入框值, 用户覆盖) ---
-    filter_col_override, set_filter_col_override = typing.cast(
-        tuple[str | None, typing.Callable[[str | None], None]], ft.use_state(None)
-    )
-    filter_op_value, set_filter_op_value = ft.use_state("=")
-    filter_val_text, set_filter_val_text = ft.use_state("")
-
+    # --- 本地 UI 状态 (D4: 过滤草稿已入 VM state, 仅剩非业务输入) ---
+    # 过滤条件 (col/op/val) 草稿存 VM state.filter_*_draft, 点击查询时 commit_filter()
+    # 提交为已生效条件 — 消除原 filter_col_override/filter_op_value/filter_val_text
+    # 三个 View 局部 state 与 VM 双轨不一致风险 (报告 04 D4).
     effective_filter_col = (
-        filter_col_override
-        if filter_col_override is not None
+        state.filter_col_draft
+        if state.filter_col_draft is not None
         else (state.table_columns[0] if state.table_columns else None)
     )
 
@@ -388,9 +385,7 @@ def TableViewerTab(
         try:
             vm.set_table(new_table)
             UILogger.log_action("TableViewerTab", "Select", f"table={new_table}")
-            vm.reset_table_state()
-            set_filter_col_override(None)
-            set_filter_val_text("")
+            vm.reset_table_state()  # D4: 草稿与已提交过滤由 reset_table_state 一并重置
             await _load_schema_and_data()
         except asyncio.CancelledError:
             raise  # R2: 必须传播
@@ -398,7 +393,7 @@ def TableViewerTab(
     async def _do_query() -> None:
         ensure_correlation_id()
         UILogger.log_action("TableViewerTab", "Click", "btn_query")
-        vm.set_filter(effective_filter_col or "", filter_op_value, filter_val_text)
+        vm.commit_filter()  # D4: 草稿 → 已提交 (VM 内聚, 消除 View 双轨)
         try:
             await vm.query_data(page=1)
         except asyncio.CancelledError:
@@ -608,7 +603,7 @@ def TableViewerTab(
                 filter_col_options, label=filter_col_label, min_width=150.0, max_width=360.0
             ),
             value=effective_filter_col,
-            on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
+            on_select=lambda e: vm.set_filter_draft_col(e.control.value if e and e.control else None),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
             border_color=AppColors.INPUT_BORDER,
@@ -625,8 +620,8 @@ def TableViewerTab(
         ft.Dropdown(
             label=I18n.get("data_filter_op"),
             width=100,
-            value=filter_op_value,
-            on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
+            value=state.filter_op_draft,
+            on_select=lambda e: vm.set_filter_draft_op((e.control.value if e and e.control else None) or "="),
             options=_build_filter_op_options(),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
@@ -643,8 +638,8 @@ def TableViewerTab(
         ft.TextField(
             label=I18n.get("data_filter_val"),
             width=AppStyles.CONTROL_WIDTH_MD,
-            value=filter_val_text,
-            on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
+            value=state.filter_val_draft,
+            on_change=lambda e: vm.set_filter_draft_val(e.control.value if e and e.control else ""),
             on_submit=safe_on_change(_on_query_click),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,

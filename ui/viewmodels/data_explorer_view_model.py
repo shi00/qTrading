@@ -82,6 +82,11 @@ class DataExplorerState:
     filter_col: str | None = None
     filter_op: str = "="
     filter_val: str = ""
+    # D4: 过滤条件草稿 (View 输入中间态, 与已提交 filter_col/op/val 分离;
+    #     点击查询时由 commit_filter() 提交, 消除 View 侧局部 use_state 双轨)
+    filter_col_draft: str | None = None
+    filter_op_draft: str = "="
+    filter_val_draft: str = ""
     is_loading: bool = False
     tables_loaded: bool = False
     error_message: Message | None = None
@@ -601,6 +606,32 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         """Set the current filter parameters."""
         self._set_state(filter_col=col, filter_op=op, filter_val=val)
 
+    # --- D4: 过滤草稿 (View 输入中间态) ---
+
+    def set_filter_draft_col(self, col: str | None) -> None:
+        """记录过滤列草稿 (None 表示跟随默认列)."""
+        self._set_state(filter_col_draft=col)
+
+    def set_filter_draft_op(self, op: str) -> None:
+        """记录过滤操作符草稿."""
+        self._set_state(filter_op_draft=op)
+
+    def set_filter_draft_val(self, val: str) -> None:
+        """记录过滤值草稿."""
+        self._set_state(filter_val_draft=val)
+
+    def commit_filter(self) -> None:
+        """将过滤草稿提交为已生效过滤条件 (D4: 消除 View 双轨 state).
+
+        过滤列草稿为 None 时回退到当前表第一列 (与原 View effective_filter_col 一致).
+        """
+        col = self._state.filter_col_draft or (self._state.table_columns[0] if self._state.table_columns else None)
+        self._set_state(
+            filter_col=col,
+            filter_op=self._state.filter_op_draft,
+            filter_val=self._state.filter_val_draft,
+        )
+
     def set_sort(self, col_index: int | None, ascending: bool):
         """Set the current sort column index and direction."""
         if col_index is not None and not isinstance(col_index, int):
@@ -634,6 +665,9 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             filter_col=None,
             filter_op="=",
             filter_val="",
+            filter_col_draft=None,
+            filter_op_draft="=",
+            filter_val_draft="",
             table_columns=(),
             numeric_cols=frozenset(),
             table_rows=(),
