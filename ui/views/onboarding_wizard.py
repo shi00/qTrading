@@ -303,18 +303,21 @@ def _create_overview_card(
 
 
 def _build_welcome_step(
-    language_value: str,
     on_language_select: Callable[[ft.ControlEvent], None],
     hovered_card: int,
     on_card_hover: Callable[[int], Callable[[ft.ControlEvent], None]],
 ) -> ft.Control:
-    """Step 0: Welcome 概览 (D15: 从 OnboardingWizard step==0 分支提取)."""
+    """Step 0: Welcome 概览 (D15: 从 OnboardingWizard step==0 分支提取).
+
+    D17: 下拉 value 直接读 get_observable_state().locale — 组件已订阅 observable,
+    无需 View 第二份 locale 状态.
+    """
     lang_label = I18n.get_language_label()
     lang_options = [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()]
     language_dropdown = ft.Dropdown(
         label=lang_label,
         tooltip=lang_label,
-        value=language_value,
+        value=get_observable_state().locale,
         width=AppStyles.calc_dropdown_width(lang_options, label=lang_label),
         text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
@@ -770,7 +773,8 @@ def OnboardingWizard(
     # --- Pure UI state ---
     schedule_enabled, set_schedule_enabled = ft.use_state(True)
     schedule_time, set_schedule_time = ft.use_state(state.schedule_time)
-    language_value, set_language_value = ft.use_state(I18n.current_locale())
+    # D17: locale 直接读 observable (已订阅 get_observable_state 自动重渲染),
+    # 不再持有局部副本 (语言切换/校验失败均以 I18n 状态源为准, 消除 stale)
     hovered_card, set_hovered_card = ft.use_state(-1)
 
     # --- Bind panel methods to onboarding VM (每次渲染用最新闭包绑定, idempotent) ---
@@ -823,7 +827,7 @@ def OnboardingWizard(
         try:
             success = await onboarding_vm.save_language(new_locale)
             if not success:
-                set_language_value(I18n.current_locale())
+                # D17: 无 locale 局部副本, 保存失败时 observable 未变 → 下拉自然保持旧值
                 logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
                 return
             # I18n.set_locale 触发 observable → ft.use_state 自动重渲染
@@ -909,7 +913,8 @@ def OnboardingWizard(
 
     def _on_language_select(e: ft.ControlEvent) -> None:
         new_locale = get_control_value(e.control, ft.Dropdown)
-        set_language_value(new_locale)
+        # D17: 不 set 局部值 — I18n.set_locale (async handler) 触发 observable 重渲染,
+        # 下拉 value 读 observable locale 自动同步; 无需第二份状态.
         page = _get_page()
         if page is not None:
             page.run_task(_do_language_change, new_locale)
@@ -1002,7 +1007,7 @@ def OnboardingWizard(
     step = state.current_step
 
     if step == 0:
-        step_content = _build_welcome_step(language_value, _on_language_select, hovered_card, _on_card_hover)
+        step_content = _build_welcome_step(_on_language_select, hovered_card, _on_card_hover)
     elif step == 1:
         step_content = _build_database_step(database_vm)
     elif step == 2:
