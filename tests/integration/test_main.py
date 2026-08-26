@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import app.startup_controller as startup_ctrl
-import main as app_main
+import app.application as app_main
 import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
@@ -171,7 +171,8 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     # 显式 external 模式让 main.py 的 prepare_database_runtime() 立即返回 None，
     # 避免在无 sidecar binary 的环境（如 unit-test Linux CI）触发 EmbeddedPostgresStartError。
     monkeypatch.setenv("QTRADING_DATABASE_MODE", "external")
-    monkeypatch.setattr(app_main, "setup_logging", lambda: None)
+    # review01-A7: setup_logging 已随 main.py 瘦身迁出 app.application（由 main.py::main 顶层负责），
+    # run() 不再调用；删除无效 patch，避免 monkeypatch.setattr 对不存在属性抛 AttributeError。
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
     monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
@@ -262,7 +263,7 @@ class TestMainWindowDestroyError:
                     pass
 
         page = _PageWithDestroyError()
-        await app_main.main(page)
+        await app_main.run(page)
 
         assert page.window.on_event is not None
         on_event = cast(AsyncEventHandler, page.window.on_event)
@@ -294,7 +295,7 @@ class TestMainRunTask:
                 self._run_task_called = True
 
         page = _PageWithRunTask()
-        await app_main.main(page)
+        await app_main.run(page)
 
         # 触发 close_confirm 流程以驱动 on_shutdown_request 回调
         # (lambda: page.run_task(_perform_window_shutdown))，验证 page.run_task 被调用
@@ -314,7 +315,7 @@ class TestMainShowHideDialog:
         _prepare_main(monkeypatch)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         assert page.window.on_event is not None
         on_event = cast(AsyncEventHandler, page.window.on_event)
@@ -328,7 +329,7 @@ class TestMainShowHideDialog:
         _prepare_main(monkeypatch)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         on_event = cast(AsyncEventHandler, page.window.on_event)
         await on_event(SimpleNamespace(type="close"))
@@ -349,7 +350,7 @@ class TestMainPageDialogMatchesCloseConfirm:
         _prepare_main(monkeypatch)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         on_event = cast(AsyncEventHandler, page.window.on_event)
         await on_event(SimpleNamespace(type="close"))
@@ -404,7 +405,7 @@ class TestMainConfigHandlerCalls:
             mock_ns.return_value = mock_ns_instance
 
             page = _DummyPage()
-            await app_main.main(page)
+            await app_main.run(page)
 
             assert "get_db_url" in calls
             assert "get_token" in calls
@@ -432,7 +433,7 @@ class TestMainMaskSensitive:
             mock_ns.return_value = mock_ns_instance
 
             page = _DummyPage()
-            await app_main.main(page)
+            await app_main.run(page)
 
             assert len(logger_spy.messages) > 0
             assert any("DB_URL" in d for d in logger_spy.messages)
@@ -446,7 +447,7 @@ class TestMainOnError:
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         assert page.on_error is not None
         test_error = RuntimeError("test error")
@@ -468,7 +469,7 @@ class TestMainDisconnectCleanupDone:
         monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _CoordinatorWithCleanupDone)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         assert page.on_disconnect is not None
         on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
@@ -495,7 +496,7 @@ class TestMainWindowCloseShowDialogSkipped:
         ):
             mock_init.return_value = {"success": False, "error": "db_init_failed"}
             page = _DummyPage()
-            await app_main.main(page)
+            await app_main.run(page)
 
             assert page.window.on_event is not None
             on_event = cast(AsyncEventHandler, page.window.on_event)
@@ -514,7 +515,7 @@ class TestMainHideCloseConfirmDialog:
         _prepare_main(monkeypatch)
 
         page = _DummyPage()
-        await app_main.main(page)
+        await app_main.run(page)
 
         assert page.window.on_event is not None
         on_event = cast(AsyncEventHandler, page.window.on_event)
@@ -541,7 +542,7 @@ async def test_min_window_size_and_web_skip(monkeypatch):
     # --- 桌面模式：设置最小尺寸 1280x720 并最大化 ---
     _prepare_main(monkeypatch)
     desktop_page = _DummyPage()
-    await app_main.main(desktop_page)
+    await app_main.run(desktop_page)
 
     assert desktop_page.window.min_width == 1280
     assert desktop_page.window.min_height == 720
@@ -550,7 +551,7 @@ async def test_min_window_size_and_web_skip(monkeypatch):
     # --- Web 模式：跳过窗口尺寸设置，保持 _DummyWindow 初始值 0 ---
     monkeypatch.setenv("FLET_FORCE_WEB_SERVER", "true")
     web_page = _DummyPage()
-    await app_main.main(web_page)
+    await app_main.run(web_page)
 
     assert web_page.window.min_width == 0
     assert web_page.window.min_height == 0

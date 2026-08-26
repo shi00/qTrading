@@ -27,7 +27,7 @@ import pytest
 @pytest.mark.asyncio(loop_scope="function")
 async def test_first_attempt_success() -> None:
     """prepare_database_runtime 第一次成功 → 返回 URL，不渲染 PreInitErrorView。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
     with patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare:
@@ -46,14 +46,14 @@ async def test_first_attempt_success() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_failure_then_retry_success() -> None:
     """第一次失败、用户点 Retry、第二次成功 → 渲染 PreInitErrorView 1 次，返回 URL。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
     ):
         mock_prepare.side_effect = [RuntimeError("sidecar failed"), expected_url]
         page = MagicMock()
@@ -71,13 +71,13 @@ async def test_failure_then_retry_success() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_failure_then_exit() -> None:
     """失败后用户点 Exit → sys.exit(0) 被调用。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="exit"),
-        patch("main.sys.exit", side_effect=SystemExit(0)) as mock_exit,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="exit"),
+        patch("app.application.sys.exit", side_effect=SystemExit(0)) as mock_exit,
     ):
         mock_prepare.side_effect = RuntimeError("sidecar failed")
         page = MagicMock()
@@ -94,7 +94,7 @@ async def test_failure_then_exit() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_external_mode_no_retry() -> None:
     """external 模式（prepare_database_runtime 返回 None）→ 不进入重试循环。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.return_value = None
@@ -112,7 +112,7 @@ async def test_external_mode_no_retry() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_cancelled_error_propagates() -> None:
     """prepare_database_runtime 抛 CancelledError → 不捕获，正确传播（R2 红线）。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare:
         mock_prepare.side_effect = asyncio.CancelledError()
@@ -129,12 +129,12 @@ async def test_cancelled_error_propagates() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_e2e_mode_exits_on_failure() -> None:
     """E2E 模式 + 失败 → sys.exit(1)，不渲染 PreInitErrorView。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+        patch("app.application.sys.exit", side_effect=SystemExit(1)) as mock_exit,
     ):
         mock_prepare.side_effect = RuntimeError("sidecar failed")
         page = MagicMock()
@@ -158,7 +158,7 @@ async def test_wait_for_user_action_retry() -> None:
     """_wait_for_user_action: retry_event 被 set → 返回 "retry"。"""
     import threading
 
-    from main import _wait_for_user_action
+    from app.application import _wait_for_user_action
 
     retry_event = threading.Event()
     exit_event = threading.Event()
@@ -179,7 +179,7 @@ async def test_wait_for_user_action_exit() -> None:
     """_wait_for_user_action: exit_event 被 set → 返回 "exit"。"""
     import threading
 
-    from main import _wait_for_user_action
+    from app.application import _wait_for_user_action
 
     retry_event = threading.Event()
     exit_event = threading.Event()
@@ -198,7 +198,7 @@ async def test_wait_for_user_action_cancel_sets_both_events() -> None:
     """_wait_for_user_action: 外部取消时 finally set 两个 event 避免线程泄漏（P1-1 回归测试）。"""
     import threading
 
-    from main import _wait_for_user_action
+    from app.application import _wait_for_user_action
 
     retry_event = threading.Event()
     exit_event = threading.Event()
@@ -222,12 +222,12 @@ async def test_wait_for_user_action_cancel_sets_both_events() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_window_close_during_error_view_propagates_cancelled() -> None:
     """用户在 PreInitErrorView 关窗口 → CancelledError 正确传播（R2 红线）。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock) as mock_wait,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock) as mock_wait,
     ):
         mock_prepare.side_effect = RuntimeError("sidecar failed")
         # 模拟用户关窗口：_wait_for_user_action 抛 CancelledError
@@ -313,15 +313,15 @@ async def test_retry_backoff_sleeps_between_attempts() -> None:
 
     验证：第一次失败后 sleep(1s)，第二次失败后 sleep(2s)。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
         # 三次失败后第四次成功
         mock_prepare.side_effect = [
@@ -348,13 +348,13 @@ async def test_retry_backoff_sleeps_between_attempts() -> None:
 @pytest.mark.asyncio(loop_scope="function")
 async def test_backoff_capped_at_30_seconds() -> None:
     """P2-1: 退避间隔上限 30s（避免长时间卡顿）。"""
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
         # 6 次失败后第 7 次成功，验证第 6 次退避 = 30（上限）
         mock_prepare.side_effect = [RuntimeError(f"fail{i}") for i in range(6)] + [None]
@@ -375,14 +375,14 @@ async def test_persistent_failure_passes_failure_count_to_error_view() -> None:
 
     验证：第三次失败渲染 PreInitErrorView 时 failure_count=3。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="exit"),
-        patch("main.sys.exit", side_effect=SystemExit(0)),
-        patch("main.asyncio.sleep", new_callable=AsyncMock),
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="exit"),
+        patch("app.application.sys.exit", side_effect=SystemExit(0)),
+        patch("app.application.asyncio.sleep", new_callable=AsyncMock),
     ):
         # 三次连续失败，第四次用户选 exit
         mock_prepare.side_effect = RuntimeError("persistent fail")
@@ -406,13 +406,13 @@ async def test_backoff_sleep_cancelled_propagates() -> None:
 
     用户在退避等待期间关窗口 → main(page) 协程被取消 → asyncio.sleep 抛 CancelledError。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
         mock_prepare.side_effect = RuntimeError("fail")
         # 模拟 sleep 被取消
@@ -432,7 +432,7 @@ async def test_wait_for_event_or_timeout_returns_event_when_set() -> None:
     """P2-4: _wait_for_event_or_timeout: event 已 set → 立即返回 "event"."""
     import threading
 
-    from main import _wait_for_event_or_timeout
+    from app.application import _wait_for_event_or_timeout
 
     event = threading.Event()
     event.set()
@@ -448,11 +448,11 @@ async def test_wait_for_event_or_timeout_returns_timeout_when_sleep_completes() 
     """P2-4: _wait_for_event_or_timeout: event 未 set 且 sleep 完成 → 返回 "timeout"."""
     import threading
 
-    from main import _wait_for_event_or_timeout
+    from app.application import _wait_for_event_or_timeout
 
     event = threading.Event()
 
-    with patch("main.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    with patch("app.application.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         result = await _wait_for_event_or_timeout(event, 5)
 
     assert result == "timeout"
@@ -466,7 +466,7 @@ async def test_wait_for_event_or_timeout_cancelled_sets_event() -> None:
     """P2-4: _wait_for_event_or_timeout: 外部取消时 finally set event 避免线程泄漏."""
     import threading
 
-    from main import _wait_for_event_or_timeout
+    from app.application import _wait_for_event_or_timeout
 
     event = threading.Event()
 
@@ -489,14 +489,14 @@ async def test_prepare_db_with_retry_backoff_exit_triggers_sys_exit() -> None:
     验证：第一次失败 → 用户 Retry → 渲染 LoadingView（带 Exit 按钮） →
     用户点 Exit → _wait_for_event_or_timeout 返回 "event" → sys.exit(0)。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="event"),
-        patch("main.sys.exit", side_effect=SystemExit(0)) as mock_exit,
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="event"),
+        patch("app.application.sys.exit", side_effect=SystemExit(0)) as mock_exit,
     ):
         mock_prepare.side_effect = RuntimeError("sidecar failed")
         page = MagicMock()
@@ -516,15 +516,15 @@ async def test_prepare_db_with_retry_backoff_renders_loading_view_with_countdown
 
     验证：第一次失败 → Retry → 渲染 LoadingView 时传入 backoff=1、failure_count=1、on_exit 回调。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
     ):
         mock_prepare.side_effect = [RuntimeError("fail"), expected_url]
         page = MagicMock()
@@ -548,15 +548,15 @@ async def test_prepare_db_with_retry_backoff_timeout_continues_retry() -> None:
 
     验证：第一次失败 → Retry → 渲染 LoadingView → 退避超时 → 第二次成功。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     expected_url = "postgresql+asyncpg://user:pass@127.0.0.1:5432/db"
 
     with (
         patch("app.bootstrap.prepare_database_runtime", new_callable=AsyncMock) as mock_prepare,
         patch("utils.sanitizers.DataSanitizer.sanitize_error", return_value="sanitized error"),
-        patch("main._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
-        patch("main._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
+        patch("app.application._wait_for_user_action", new_callable=AsyncMock, return_value="retry"),
+        patch("app.application._wait_for_event_or_timeout", new_callable=AsyncMock, return_value="timeout"),
     ):
         mock_prepare.side_effect = [RuntimeError("fail"), expected_url]
         page = MagicMock()

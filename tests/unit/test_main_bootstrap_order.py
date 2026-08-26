@@ -13,7 +13,7 @@ from __future__ import annotations
 import inspect
 import re
 
-from main import main
+from app.application import run as main_entry
 
 
 def test_main_imports_prepare_database_runtime() -> None:
@@ -22,7 +22,7 @@ def test_main_imports_prepare_database_runtime() -> None:
     P0-1: prepare_database_runtime 的导入与调用已移到 _prepare_db_with_retry 函数，
     main() 内不再直接导入（仅导入 detect_embedded_pg_startup_scenario）。
     """
-    from main import _prepare_db_with_retry
+    from app.application import _prepare_db_with_retry
 
     source = inspect.getsource(_prepare_db_with_retry)
     assert re.search(r"from app\.bootstrap import .*prepare_database_runtime", source), (
@@ -40,7 +40,7 @@ def test_prepare_db_with_retry_called_before_cache_manager() -> None:
     P0-1：prepare_database_runtime 的调用与错误处理已封装到 _prepare_db_with_retry，
     main() 直接调用 _prepare_db_with_retry(page, scenario)。
     """
-    source = inspect.getsource(main)
+    source = inspect.getsource(main_entry)
     prepare_pos = source.find("_prepare_db_with_retry(")
     cache_manager_pos = source.find("CacheManager()")
 
@@ -58,7 +58,7 @@ def test_main_calls_prepare_db_with_retry() -> None:
     失败时不再直接 sys.exit(1)，而是渲染 PreInitErrorView 供用户 Retry/Exit。
     E2E/Web 模式仍保留 sys.exit(1) 快速失败路径（在 _prepare_db_with_retry 内部）。
     """
-    source = inspect.getsource(main)
+    source = inspect.getsource(main_entry)
     assert "_prepare_db_with_retry" in source, (
         f"main() 源码应含 '_prepare_db_with_retry' 调用（P0-1：封装重试逻辑），实际源码片段：\n{source[:2000]}"
     )
@@ -70,12 +70,12 @@ def test_main_imports_log_exception_with_severity() -> None:
     inspect.getsource(main) 仅返回函数体，不含模块级 import；
     改用 hasattr 验证模块属性是否存在。
     """
-    import main as main_mod
+    import app.application as main_mod
 
     assert hasattr(main_mod, "log_exception_with_severity"), (
-        "main 模块应导入 log_exception_with_severity（用于 prepare_database_runtime 失败时记 severity 日志）"
+        "app.application 模块应导入 log_exception_with_severity（用于 prepare_database_runtime 失败时记 severity 日志）"
     )
-    assert hasattr(main_mod, "sys"), "main 模块应导入 sys（用于 sys.exit(1) 强制退出）"
+    assert hasattr(main_mod, "sys"), "app.application 模块应导入 sys（用于 sys.exit(1) 强制退出）"
 
 
 def test_main_persists_embedded_db_url_in_config() -> None:
@@ -94,7 +94,7 @@ def test_main_persists_embedded_db_url_in_config() -> None:
     - main() 源码含 "config.DB_URL = embedded_db_url"（永久设置）
     - main() 源码不含 "with override_db_url("（不再用上下文管理器）
     """
-    source = inspect.getsource(main)
+    source = inspect.getsource(main_entry)
     assert "config.DB_URL = embedded_db_url" in source, (
         f"main() 源码应含 'config.DB_URL = embedded_db_url'（D15：永久设置 embedded URL），"
         f"实际源码片段：\n{source[:2000]}"
@@ -116,7 +116,7 @@ def test_main_pops_database_url_env_in_embedded_mode() -> None:
     - main() 源码含 'os.environ.pop("DATABASE_URL", None)'
     - 该调用在 'ConfigHandler._db_url_override.set' 之后
     """
-    source = inspect.getsource(main)
+    source = inspect.getsource(main_entry)
     assert 'os.environ.pop("DATABASE_URL", None)' in source, (
         f"main() 源码应含 'os.environ.pop(\"DATABASE_URL\", None)'（P3：根因修复），实际源码片段：\n{source[:2500]}"
     )
