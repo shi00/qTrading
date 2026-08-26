@@ -1413,6 +1413,8 @@ def ScreenerView(
         text_size=AppStyles.FONT_SIZE_BODY,
         width=AppStyles.CONTROL_WIDTH_SM,
         on_change=safe_on_change(_on_stock_filter_change),
+        # D19: Enter 提交 → 触发策略运行 (表单主操作)
+        on_submit=safe_on_change(_on_run_click_sync),
     )
     filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
 

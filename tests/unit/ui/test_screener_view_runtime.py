@@ -3223,3 +3223,22 @@ class TestStockFilterUX04:
         # 过滤框仍存在且 value 绑定
         field = _get_stock_filter_field(env)
         assert field.value == "NOMATCH", "空态分支过滤框应保留且绑定当前过滤值"
+
+    def test_stock_filter_enter_submit_triggers_run(self, screener_view_env) -> None:
+        """D19: 过滤输入框 Enter (on_submit) → 触发策略运行 (表单主操作)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        fake_vm._set_state(selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+
+        page.run_task.reset_mock()
+        field = _get_stock_filter_field(env)
+        on_submit = getattr(field, "on_submit", None)
+        assert on_submit is not None, "过滤输入框应绑定 on_submit"  # noqa: weak-assertion on_submit 为后续 _invoke 调用的前置 guard
+        _invoke(on_submit, _make_event("000001"))
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+        assert any("run_strategy:value" in c for c in fake_vm.method_calls), "Enter 提交应触发策略运行"
