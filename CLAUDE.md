@@ -158,7 +158,7 @@
 
 | # | 红线 | 说明 | 强制状态 |
 |---|------|------|---------|
-| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 4 条契约） |
+| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 6 条契约） |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests） |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) | pre-commit |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
@@ -177,7 +177,7 @@
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 
-> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 4 条契约守护（pre-commit `import-linter` hook）；R4/R12/R13/R14/R15 已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R16 UI 阻塞暂缓（AST 扫描误报风险高，需更精确的事件处理器识别逻辑）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 例外见 `docs/governance/exceptions.yml` EX-0001）；R4/R12/R13/R14/R15 已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R16 UI 阻塞暂缓（AST 扫描误报风险高，需更精确的事件处理器识别逻辑）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
 > **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
 > - `INVARIANT`：不可豁免的无条件安全不变量；
@@ -234,9 +234,9 @@ app → 编排所有层，仅被 main.py 调用
 **绝对禁止反向依赖：** `core` 导入 `data`/`services`/`strategies`/`ui`/`utils`/`app` 中的任何模块；`data` 导入 `ui`/`services`/`strategies`；`services` 导入 `ui`；`strategies` 导入 `ui`。
 
 **架构守护范围（P2-03）：**
-- **import-linter（pre-commit）** 守护 R1 表内方向：`core` 禁入 `data/services/strategies/ui/utils/app`；`data` 禁入 `services/strategies/ui`；`services` 禁入 `strategies/ui`；`strategies` 禁入 `ui`。
-- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`。
-- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）与函数体内 lazy import（显式解耦手段）不视为架构违规；仅模块级 import 受检。
+- **import-linter（pre-commit）** 守护 R1 表内方向：`core` 禁入 `data/services/strategies/ui/utils/app`；`data` 禁入 `services/strategies/ui`；`services` 禁入 `strategies/ui`；`strategies` 禁入 `ui`；`utils`（横切叶子）禁入 `data/services/strategies/ui/app`（契约 5，含函数体内 import）；`ui` 禁入 `app`（契约 6，`ui.startup_views` 契约级例外，与 `docs/governance/exceptions.yml` EX-0001 一致）。
+- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`（模块级 import 视角，与契约 5 互补）。
+- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）被 import-linter 与 AST 测试双重豁免；函数体内 lazy import 不视为 AST 测试违规，但 **import-linter 契约 5/6 仍会分析函数体内 import**——`utils` 层的函数内跨层 import 须带 `# lazy-import: <原因>` 注释并经契约级 ignore_imports 白名单登记（见 `pyproject.toml` 契约 5 注释）。
 - **例外唯一注册入口**：架构边界例外统一登记于 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml)（rule_id=R1），测试仅从注册表读取，不各自维护。
 
 > **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。

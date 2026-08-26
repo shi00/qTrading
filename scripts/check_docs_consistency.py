@@ -806,7 +806,7 @@ ENFORCEMENT_KEYWORD_PENDING: tuple[str, ...] = ("待实现", "暂缓")  # R16 �
 # ruff 关键词使用 word boundary 匹配，避免误匹配 'scruffian' 等
 RUFF_KEYWORD_PATTERN = re.compile(r"\bruff\b", re.IGNORECASE)
 
-# import-linter 契约数量正则（从 enforcement 文本解析期望数量，如 "4 条契约"）
+# import-linter 契约数量正则（从 enforcement 文本解析期望数量，如 "6 条契约"）
 IMPORT_LINTER_CONTRACT_COUNT_PATTERN = re.compile(r"(\d+)\s*条契约")
 # pyproject.toml 中 import-linter 契约 section 起始标记
 IMPORT_LINTER_CONTRACT_SECTION_PATTERN = re.compile(r"^\[\[tool\.importlinter\.contracts\]\]", re.MULTILINE)

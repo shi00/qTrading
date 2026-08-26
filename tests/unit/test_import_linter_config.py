@@ -4,10 +4,10 @@
 
 与 test_architecture_boundaries.py 互补：
 - test_architecture_boundaries.py: AST 扫描模块级 import，覆盖 R1 + §4.2 全部方向（含 utils 隔离）
-- test_import_linter_config.py: 调用 lint-imports 检查完整导入图（含 lazy import），覆盖 R1 四个禁止方向
+- test_import_linter_config.py: 调用 lint-imports 检查完整导入图（含 lazy import），覆盖 R1 六个禁止方向（core/data/services/strategies + utils 叶子层 + ui→app）
 
-import-linter 的优势：能捕获函数体内的延迟导入（lazy import），AST 扫描无法覆盖。
-AST 扫描的优势：能检测 utils→业务层等 §4.2 扩展方向，import-linter 配置仅覆盖 R1 红线。
+import-linter 的优势：能捕获函数体内的延迟导入（lazy import，含 utils 层跨层 lazy import，契约 5），AST 扫描无法覆盖。
+AST 扫描的优势：能检测 §4.2 扩展方向（如 data/services/strategies 禁入 app），import-linter 契约 2/3 与契约 5/6 部分重叠、部分互补。
 """
 
 from pathlib import Path
