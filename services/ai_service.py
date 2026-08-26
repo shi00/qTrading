@@ -16,7 +16,7 @@ from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.config_models import NEWS_CATEGORY_MAP
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
@@ -718,18 +718,11 @@ class AIService:
                     with contextlib.suppress(OSError):
                         os.remove(file_path)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[AIService] Prompt dump cleanup skipped (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
@@ -815,18 +808,11 @@ class AIService:
                     if fb_provider not in self._failover_credentials:
                         self._failover_credentials[fb_provider] = ConfigHandler.get_llm_config_for_provider(fb_provider)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[AIService] Failover credential pre-load skipped (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
@@ -1273,18 +1259,11 @@ class AIService:
                     except json.JSONDecodeError:
                         pass
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e, context="general")
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[AIService] JSON heuristic extraction failed (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
 
@@ -1480,18 +1459,11 @@ class AIService:
                 stock_info.pop("concepts", None)
 
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[AIService] Analyze | Concepts processing failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             stock_info.pop("concepts", None)
@@ -1531,18 +1503,11 @@ class AIService:
                 safe_as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
                 history_context = await rm.get_learning_context(as_of=safe_as_of)
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e, context="general")
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[AIService] Analyze | ⚠️ Learning context fetch failed (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 history_context = ""
@@ -1889,18 +1854,11 @@ class AIService:
             )
             return {"error": "Local model timeout", "score": 0}
         except Exception as e:
-            error_info = classify_error(e, context="llm")
-            severity = classify_severity(e, context="llm")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "llm",
                 "[AIService] Analyze | ❌ Top-level failure (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
@@ -2086,18 +2044,11 @@ class AIService:
             )
             return result
         except Exception as e:
-            error_info = classify_error(e, context="llm")
-            severity = classify_severity(e, context="llm")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "llm",
                 "[AIService] Classify | ❌ All providers failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             logger.debug("[AIService] Classify | All providers failed traceback:", exc_info=True)

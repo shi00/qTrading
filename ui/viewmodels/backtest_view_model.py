@@ -23,7 +23,7 @@ from strategies.backtest.config import BacktestConfig
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 
@@ -403,19 +403,12 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 )
                 raise
             except Exception as e:
-                # F3-09: classify_error + classify_severity 分级日志
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                # F3-09: 分级日志收口到 log_classified
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[BacktestVM] Backtest failed (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 # F3-11: 失败路径显式终态（progress 清空避免 UI 残留文案）

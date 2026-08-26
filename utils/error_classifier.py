@@ -17,6 +17,11 @@ should not be retried, while transient errors (RateLimitError, ServiceUnavailabl
 can be retried.
 """
 
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 from core.i18n import Message
 
 SYSTEM_LEVEL_EXCEPTIONS = (
@@ -408,3 +413,40 @@ def get_error_message_key(error_info: dict) -> Message:
     """
     message_key = error_info.get("message_key", "common_err_unknown")
     return Message(message_key, error_info.get("format_args") or {})
+
+
+def log_classified(
+    logger: logging.Logger,
+    exc: Exception,
+    context: str = "general",
+    msg: str = "",
+    *args: Any,
+    **kwargs: Any,
+) -> dict:
+    """分类异常、按严重度选级别记录、返回 error_info 供调用方使用。
+
+    review01-A13：收口全项目 30+ 文件重复的
+    「classify_error + classify_severity + 三分支选级别」样板代码。
+    msg 的前两个 ``%s`` 由本函数自动填充 ``error_info["code"]`` 与
+    ``DataSanitizer.sanitize_error(exc)``，其余格式参数经 ``*args`` 透传，
+    日志级别按严重度选择（system→critical / recoverable→warning / 其他→error）。
+
+    示例（原 8 行 → 1 行）：
+        error_info = log_classified(
+            logger, e, context="general",
+            msg="[Bootstrap] DB init failed (%s): %s",
+            exc_info=True,
+        )
+    """
+    from utils.sanitizers import DataSanitizer
+
+    error_info = classify_error(exc, context=context)
+    severity = classify_severity(exc, context=context)
+    if severity == "system":
+        _log = logger.critical
+    elif severity == "recoverable":
+        _log = logger.warning
+    else:
+        _log = logger.error
+    _log(msg, error_info["code"], DataSanitizer.sanitize_error(exc), *args, **kwargs)
+    return error_info

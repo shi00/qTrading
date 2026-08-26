@@ -17,7 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
@@ -204,18 +204,11 @@ class SchedulerService:
                 replace_existing=True,
             )
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Scheduler] Failed to start (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
@@ -257,18 +250,11 @@ class SchedulerService:
                 self._last_ai_concept_date,
             )
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Scheduler] Failed to load DB state, using ConfigHandler cache (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
@@ -331,18 +317,11 @@ class SchedulerService:
             )
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Scheduler] Config check failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return
@@ -473,18 +452,11 @@ class SchedulerService:
                 )
                 return
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Scheduler] Trade calendar check failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             if get_now().weekday() >= 5:

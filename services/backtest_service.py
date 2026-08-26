@@ -19,7 +19,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from core.i18n import Message
@@ -122,19 +122,12 @@ class BacktestService:
             )
             return result
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
             sanitized = DataSanitizer.sanitize_error(e)
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[BacktestService] Failed to persist backtest result (%s): %s",
-                error_info["code"],
-                sanitized,
                 exc_info=True,
             )
             new_warnings = list(result.data_warnings) + [f"persist_failed: {sanitized}"]
@@ -196,18 +189,11 @@ class BacktestService:
 
             return version("astock-screener")
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[BacktestService] Failed to get app version (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return "dev"

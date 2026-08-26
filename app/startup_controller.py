@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 from app.bootstrap import check_onboarding_needed, initialize_services, reset_services_initialized
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -90,18 +90,11 @@ class StartupController:
                 result.get("error"),
             )
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Startup] initialize_services raised exception (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             self._transition(StartupState.INIT_FAILED, error="init_exception", detail=DataSanitizer.sanitize_error(e))
@@ -168,18 +161,11 @@ class StartupController:
         try:
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Startup] set_onboarding_complete(False) failed during reconfigure (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             self._transition(
@@ -203,18 +189,11 @@ class StartupController:
             await self._cache_manager.init_db(force=True, auto_migrate=True)
             self._transition(StartupState.UPGRADE_SUCCESS)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Startup] DB upgrade failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             self._transition(

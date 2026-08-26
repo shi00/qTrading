@@ -23,8 +23,7 @@ from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
-from utils.error_classifier import classify_error, classify_severity
-from utils.sanitizers import DataSanitizer
+from utils.error_classifier import log_classified
 from utils.time_utils import get_now
 
 if TYPE_CHECKING:
@@ -131,18 +130,11 @@ async def _run_nightly_prediction(svc: SchedulerService, runner: AISelectionRunn
             )
             return
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Scheduler] Trade calendar check failed for prediction (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
         if get_now().weekday() >= 5:

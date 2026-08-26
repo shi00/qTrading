@@ -13,7 +13,7 @@ import traceback
 from typing import Any
 
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
@@ -70,19 +70,12 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
         )
         result_queue.put(("ready", model_path))
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e)
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
         sanitized = DataSanitizer.sanitize_error(e)
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[LocalModel] Model load failed (%s): %s",
-            error_info["code"],
-            sanitized,
             exc_info=True,
         )
         result_queue.put(("error", f"Model load failed: {sanitized}\n{traceback.format_exc()}"))
@@ -94,18 +87,11 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
         except queue.Empty:
             continue
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[LocalModel] Worker queue get error (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             continue
@@ -144,19 +130,12 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             output = "".join(collected_content)
             result_queue.put(("ok", output))
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
             sanitized = DataSanitizer.sanitize_error(e)
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[LocalModel] Worker inference failed (%s): %s",
-                error_info["code"],
-                sanitized,
                 exc_info=True,
             )
             result_queue.put(("error", f"{sanitized}\n{traceback.format_exc()}"))
@@ -209,18 +188,11 @@ class LocalModelManager:
                 try:
                     inst._shutdown_worker()
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
-                    severity = classify_severity(e)
-                    if severity == "system":
-                        _log = logger.critical
-                    elif severity == "recoverable":
-                        _log = logger.warning
-                    else:
-                        _log = logger.error
-                    _log(
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
                         "[LocalModel] Error during reset shutdown (%s): %s",
-                        error_info["code"],
-                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
             cls._instance = None
@@ -235,18 +207,11 @@ class LocalModelManager:
             try:
                 inst._shutdown_worker()
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[LocalModel] Error during atexit shutdown (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
 
@@ -307,18 +272,11 @@ class LocalModelManager:
                 try:
                     self._request_queue.put(_SENTINEL, timeout=2.0)
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
-                    severity = classify_severity(e)
-                    if severity == "system":
-                        _log = logger.critical
-                    elif severity == "recoverable":
-                        _log = logger.warning
-                    else:
-                        _log = logger.error
-                    _log(
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
                         "[LocalModel] Failed to send sentinel to worker (%s): %s",
-                        error_info["code"],
-                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
                 self._worker_proc.join(timeout=5)
@@ -346,18 +304,11 @@ class LocalModelManager:
                 self._request_queue.close()
                 self._request_queue.join_thread()
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[LocalModel] Failed to close request queue (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
         if self._result_queue is not None:
@@ -365,18 +316,11 @@ class LocalModelManager:
                 self._result_queue.close()
                 self._result_queue.join_thread()
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[LocalModel] Failed to close result queue (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
 
@@ -531,18 +475,11 @@ class LocalModelManager:
                     hash_sha256.update(chunk)
             return hash_sha256.hexdigest()
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[LocalModel] Failed to calculate SHA-256 (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return ""
@@ -682,18 +619,11 @@ class LocalModelManager:
                     self._model_path = ""
                     self._model_stat = (0, 0)
                     self._last_config = {}
-                    error_info = classify_error(e, context="general")
-                    severity = classify_severity(e)
-                    if severity == "system":
-                        _log = logger.critical
-                    elif severity == "recoverable":
-                        _log = logger.warning
-                    else:
-                        _log = logger.error
-                    _log(
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
                         "[LocalModel] Failed to load model (%s): %s",
-                        error_info["code"],
-                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
                     return False
@@ -787,19 +717,12 @@ class LocalModelManager:
                 lambda: request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
             )
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
             sanitized = DataSanitizer.sanitize_error(e)
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[LocalModel] Failed to send request to worker (%s): %s",
-                error_info["code"],
-                sanitized,
                 exc_info=True,
             )
             self._worker_ready = False
