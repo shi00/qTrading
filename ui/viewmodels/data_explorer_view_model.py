@@ -131,7 +131,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         #   ceiling: dispose 后调用方若忘记检查 _disposed 直接访问 _db 会抛 AttributeError.
         #   upgrade: 改用 _get_db() helper 方法返回 DataExplorerQueryClient（内部 raise）.
         self._db: DataExplorerQueryClient = db_manager or DataExplorerQueryClient()
-        self._tp = thread_pool or ThreadPoolManager()
+        self._tp = thread_pool or ThreadPoolManager()  # noqa: R16 - 持有注册单例引用（幂等工厂），线程池实例由统一生命周期管理
 
         # Internal state (frozen snapshot)
         self._state = DataExplorerState()

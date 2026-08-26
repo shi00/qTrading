@@ -69,7 +69,7 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     """
 
     def __init__(self, cache: CacheManager | None = None):
-        self.cache = cache or CacheManager()
+        self.cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
         self._state: WatchlistState = WatchlistState()
         self._subscribers: list[Callable[[WatchlistState], None]] = []
         self._init_mixin_fields()

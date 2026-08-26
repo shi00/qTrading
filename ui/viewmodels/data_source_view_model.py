@@ -141,9 +141,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         # 首次实际使用经 _ensure_processor() 在 IO 线程池异步构造；显式 DI 注入保留
         # （测试注入 mock 后 _ensure_processor 直接返回已注入实例）。
         self._processor = processor
-        self._cache = cache or CacheManager()
+        self._cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
         self._ai_service = ai_service
-        self._tm = TaskManager()
+        self._tm = TaskManager()  # noqa: R16 - 持有注册单例引用（幂等工厂）
 
         # Business state (internal mutable tracking, not for View)
         self._active_task_ids: dict[str, str] = {}

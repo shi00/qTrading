@@ -1,4 +1,4 @@
-"""红线自动化检查脚本（R4/R12/R13/R14/R15 + UI 裸 ft.Colors 拦截 + Tushare token 日志脱敏）。
+"""红线自动化检查脚本（R4/R12/R13/R14/R15/R16 + UI 裸 ft.Colors 拦截 + Tushare token 日志脱敏）。
 
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
 - R4  SQL 注入：扫描 data/ 与 tests/ 目录下 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
@@ -6,13 +6,18 @@
 - R13 DAO 未注册：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
 - R15 单例未注册：扫描带 _instance/__new__ 的单例类是否使用 @register_singleton
+- R16 UI 阻塞主循环（部分守护）：扫描 ViewModel __init__ 中构造已注册单例（B11 类重型初始化风险）；
+  事件处理器内同步 IO 仍为人工评审
 - R_no_bare_ft_colors_in_ui: 扫描 UI 层裸 ft.Colors.<COLOR> 引用 (必须替换为 AppColors token)
 - R_tushare_token_log: 扫描 tushare_client.py 中 logger 调用是否直接打印 self.token / token 明文 (R9 红线)
 - R_lazy_import_whitelist: 扫描函数体内禁止方向的跨层 import 是否带 # lazy-import: <原因> 注释（review01-A2-2）
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
-R16（UI 阻塞主循环）因 AST 检查误报风险高暂未实现，登记于 docs/debt/known-technical-debt.md 已知技术债（CONTRIBUTING.md 仅保留入口索引）。
+R16 说明（review07-G20）：最小可行切面为"ViewModel __init__ 同步构造已注册单例"。单例首次构造可能执行
+重型初始化（B11：DataProcessor 阻塞 34s），VM 构造路径位于 Flet 渲染/事件线程，有阻塞主循环风险。
+rule_type=NEW_CODE（docs/governance/redlines.yml）：存量 8 处持有引用已显式 # noqa: R16 豁免，
+新增构造默认 ERROR，须显式声明原因或改造为惰性/命令内注入。
 """
 
 from __future__ import annotations
@@ -946,6 +951,103 @@ def check_R_lazy_import_whitelist() -> list[str]:
 
 
 # ============================================================================
+# R16: UI 阻塞主循环（部分守护：ViewModel __init__ 构造已注册单例检测）
+# ============================================================================
+
+# 已注册单例白名单（与 docs/architecture/singleton-lifecycle.md 注册清单一致；
+# 该清单由 tests/unit/test_docs_consistency.py TestSingletonRegistryConsistency 动态比对守护）
+_R16_SINGLETON_CLASSES = frozenset(
+    {
+        "CacheManager",
+        "ThreadPoolManager",
+        "TaskManager",
+        "AIService",
+        "SchedulerService",
+        "DataProcessor",
+        "MarketDataService",
+        "NewsSubscriptionService",
+        "TushareClient",
+        "AkshareConceptClient",
+        "LocalModelManager",
+        "StrategyManager",
+        "MetaDataManager",
+        "EmbeddedPostgresService",
+        "EmbeddedPgMaintenanceService",
+    }
+)
+
+# 检测目录：ViewModel 与 UI 组件工厂域（B11 类同步重型初始化风险路径）
+_R16_SCAN_DIRS = ("ui/viewmodels", "ui/components")
+
+_R16_NOQA_MARKER = "# noqa: R16"
+
+
+def _noqa_r16_on_line(path: Path, lineno: int) -> bool:
+    """检查指定行是否带 # noqa: R16 豁免标记（存量持有引用显式豁免）。"""
+    try:
+        line = path.read_text(encoding="utf-8").splitlines()[lineno - 1]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return False
+    return _R16_NOQA_MARKER in line
+
+
+def _check_R16_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查 AST 中 ViewModel __init__ 内构造已注册单例的调用。"""
+    errors: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        # 契约测试用临时文件构造 AST（不在 ROOT 下），fallback 到绝对路径显示
+        rel = source_path
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) or item.name != "__init__":
+                continue
+            for call in ast.walk(item):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                else:
+                    continue
+                if name not in _R16_SINGLETON_CLASSES:
+                    continue
+                if _noqa_r16_on_line(source_path, call.lineno):
+                    continue
+                errors.append(
+                    f"R16 UI 阻塞主循环: {rel}:{call.lineno} ViewModel {node.name}.__init__ "
+                    f"同步构造已注册单例 {name}()（首次构造可能触发阻塞主循环的重型初始化；"
+                    f"应改为惰性获取/命令内依赖注入，存量持有引用须显式 {_R16_NOQA_MARKER} 声明原因）"
+                )
+    return errors
+
+
+def check_R16_vm_init_singleton_construction() -> list[str]:
+    """R16（部分）：扫描 ui/viewmodels/、ui/components/ 下 ViewModel __init__ 构造已注册单例。
+
+    review07-G20 最小可行切面：捕获 B11 类问题（VM 同步构造重单例阻塞事件循环）。
+    事件处理器内同步 IO 等其他 R16 场景仍为人工评审（诚实降级范围）。
+    """
+    errors: list[str] = []
+    for sub in _R16_SCAN_DIRS:
+        target_dir = ROOT / sub
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            errors.extend(_check_R16_in_tree(tree, p))
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -959,6 +1061,7 @@ def main() -> int:
         ("R13 DAO 未注册", check_R13()),
         ("R14 策略未注册", check_R14()),
         ("R15 单例未注册", check_R15()),
+        ("R16 UI 阻塞主循环 (VM 构造单例)", check_R16_vm_init_singleton_construction()),
         ("R_no_bare_ft_colors_in_ui", check_R_no_bare_ft_colors_in_ui()),
         ("R_no_bare_font_size_in_ui", check_R_no_bare_font_size_in_ui()),
         ("R_tushare_token_log", check_R_tushare_token_log()),
@@ -975,7 +1078,7 @@ def main() -> int:
         return 1
 
     print(
-        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist）"
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist）"
     )
     return 0
 

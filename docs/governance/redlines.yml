@@ -154,8 +154,8 @@ redlines:
   - id: R16
     title: UI 阻塞主循环
     description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)"
-    enforcement: "可自动化待实现（AST 检查，暂缓：误报风险高）"
-    automation_coverage: none
+    enforcement: "pre-commit（check_redlines.py，部分守护：VM __init__ 构造已注册单例检测；事件处理器内同步 IO 仍仅人工评审）"
+    automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
 

@@ -68,7 +68,7 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
     """
 
     def __init__(self):
-        self._task_manager = TaskManager()
+        self._task_manager = TaskManager()  # noqa: R16 - 持有注册单例引用（幂等工厂），用于任务中心编排
         self._state = TaskCenterState()
         self._subscribers: list[Callable[[TaskCenterState], None]] = []
         # Mixin 字段初始化（跨线程修复）- 不再单独维护 self._main_loop
