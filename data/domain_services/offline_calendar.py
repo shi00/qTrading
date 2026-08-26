@@ -5,7 +5,7 @@ import typing
 import pandas as pd
 from pandas_market_calendars import get_calendar
 
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -35,18 +35,11 @@ class OfflineCalendar:
                 # SSE includes holidays for Shanghai Stock Exchange (A-Share)
                 cls._calendar = get_calendar("SSE")
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[OfflineCalendar] Failed to load SSE calendar (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 return None
@@ -111,18 +104,11 @@ class OfflineCalendar:
             return [d.strftime("%Y%m%d") for d in valid]
 
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[OfflineCalendar] Range check failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return []

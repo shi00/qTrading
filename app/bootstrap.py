@@ -13,7 +13,7 @@ from services.news_subscription_service import NewsSubscriptionService
 from data.persistence.db_migrator import DatabaseMigrationNeeded
 from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
@@ -94,18 +94,11 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "auto_probe_task": None,
         }
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] Database initialization failed (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
         if show_toast_fn:
@@ -139,18 +132,11 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         await TaskManager().init_db()
         logger.info("[Bootstrap] TaskManager.init_db() completed.")
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] TaskManager init failed (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
         if show_toast_fn:
@@ -306,18 +292,11 @@ async def _warmup_tushare_capabilities() -> None:
         else:
             logger.debug("[Bootstrap] Tushare capability cache empty after load (first startup or token changed)")
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] Tushare capability warmup failed (non-critical) (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
 
@@ -338,18 +317,11 @@ def _validate_failover_credentials() -> None:
                 ", ".join(missing),
             )
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] Failover credential validation skipped (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
 
@@ -394,18 +366,11 @@ async def _maybe_auto_probe_on_startup() -> None:
         raise
     except Exception as e:
         # 非取消异常降级 warning，不影响主流程
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] Auto probe failed (non-critical) (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
 
@@ -444,18 +409,11 @@ def _validate_strategy_tier_coverage() -> None:
 
         registered_keys = set(StrategyManager().strategies.keys())
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] validate_strategy_tier_coverage skipped (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
         return
@@ -463,18 +421,11 @@ def _validate_strategy_tier_coverage() -> None:
     try:
         validate_strategy_tier_coverage(registered_keys)
     except Exception as e:
-        error_info = classify_error(e, context="general")
-        severity = classify_severity(e, context="general")
-        if severity == "system":
-            _log = logger.critical
-        elif severity == "recoverable":
-            _log = logger.warning
-        else:
-            _log = logger.error
-        _log(
+        log_classified(
+            logger,
+            e,
+            "general",
             "[Bootstrap] validate_strategy_tier_coverage failed (%s): %s",
-            error_info["code"],
-            DataSanitizer.sanitize_error(e),
             exc_info=True,
         )
 

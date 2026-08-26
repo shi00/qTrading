@@ -23,7 +23,7 @@ import pandas as pd
 from data.constants import MARKET_CLOSE_HOUR
 from data.domain_services.offline_calendar import OfflineCalendar
 from utils.app_env import is_e2e_mode
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
@@ -206,18 +206,11 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] Failed to persist calendar data (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return False
@@ -330,18 +323,11 @@ class TradeCalendarService:
             return False
 
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] ensure_calendar_range failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return False
@@ -386,18 +372,11 @@ class TradeCalendarService:
             return self._offline.is_trading_day(date_obj)
 
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] is_trading_day check failed, using offline (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return self._offline.is_trading_day(date_obj)
@@ -472,18 +451,11 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] get_trade_dates failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
@@ -518,18 +490,11 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] count_trade_days failed, using list (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             dates = await self.get_trade_dates(start_obj, end_obj)
@@ -571,18 +536,11 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] get_start_date_by_trade_days failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
@@ -733,18 +691,11 @@ class TradeCalendarService:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
+                log_classified(
+                    logger,
+                    e,
+                    "general",
                     "[TradeCalendarService] get_latest_trade_date failed (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
 
@@ -854,18 +805,11 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[TradeCalendarService] get_trade_cal_df failed (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return pd.DataFrame()

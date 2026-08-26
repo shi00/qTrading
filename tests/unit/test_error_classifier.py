@@ -4,7 +4,9 @@
 # 测试行为由测试用例本身验证。
 
 import json
+import logging
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +16,7 @@ from utils.error_classifier import (
     classify_severity,
     get_error_message,
     get_error_message_key,
+    log_classified,
 )
 from utils.time_utils import get_now
 
@@ -305,6 +308,86 @@ class TestClassifyErrorDBContext:
         assert result["code"] == "embedded_start_failed"
         assert result["message_key"] == "db_err_embedded_start_failed"
         assert "format_args" not in result, "fallback 分支不应传 format_args，模板无 {error} 占位符"
+
+
+class TestLogClassified:
+    """log_classified（A13 收口）测试：按严重度选级别 + 返回 error_info。
+
+    msg 前两个 %s 由函数自动填充 (error_info["code"], sanitize_error(exc))。
+    """
+
+    def test_system_severity_uses_critical(self):
+        logger = logging.getLogger("test_log_classified_system")
+        with (
+            patch.object(logger, "critical") as mock_critical,
+            patch.object(logger, "warning") as mock_warning,
+            patch.object(logger, "error") as mock_error,
+        ):
+            error_info = log_classified(logger, MemoryError("boom"), "general", "ops (%s): %s")
+        mock_critical.assert_called_once_with("ops (%s): %s", "unknown", "boom")
+        mock_warning.assert_not_called()
+        mock_error.assert_not_called()
+        assert error_info["code"] == "unknown"
+
+    def test_recoverable_severity_uses_warning(self):
+        logger = logging.getLogger("test_log_classified_recoverable")
+        with (
+            patch.object(logger, "critical") as mock_critical,
+            patch.object(logger, "warning") as mock_warning,
+            patch.object(logger, "error") as mock_error,
+        ):
+            error_info = log_classified(logger, TimeoutError("timed out"), "general", "ops (%s): %s")
+        mock_warning.assert_called_once_with("ops (%s): %s", "timeout", "timed out")
+        mock_critical.assert_not_called()
+        mock_error.assert_not_called()
+        assert error_info["code"] == "timeout"
+
+    def test_operational_severity_uses_error(self):
+        logger = logging.getLogger("test_log_classified_operational")
+        with (
+            patch.object(logger, "critical") as mock_critical,
+            patch.object(logger, "warning") as mock_warning,
+            patch.object(logger, "error") as mock_error,
+        ):
+            error_info = log_classified(logger, ValueError("bad value"), "general", "ops (%s): %s")
+        mock_error.assert_called_once_with("ops (%s): %s", "unknown", "bad value")
+        mock_critical.assert_not_called()
+        mock_warning.assert_not_called()
+        assert error_info["code"] == "unknown"
+
+    def test_passes_extra_args_and_kwargs(self):
+        logger = logging.getLogger("test_log_classified_extra")
+        with patch.object(logger, "error") as mock_error:
+            log_classified(
+                logger,
+                ValueError("bad value"),
+                "general",
+                "detail (%s) ctx=%s",
+                "extra-ctx",
+                exc_info=True,
+            )
+        mock_error.assert_called_once_with("detail (%s) ctx=%s", "unknown", "bad value", "extra-ctx", exc_info=True)
+
+    def test_context_token_uses_code_first(self):
+        logger = logging.getLogger("test_log_classified_token")
+        with patch.object(logger, "warning") as mock_warning:
+            error_info = log_classified(logger, Exception("connection refused"), "token", "t (%s): %s")
+        mock_warning.assert_called_once_with("t (%s): %s", "network", "connection refused")
+        assert error_info["code"] == "network"
+
+    def test_sanitizes_sensitive_error_text(self):
+        logger = logging.getLogger("test_log_classified_sanitize")
+        with patch.object(logger, "error") as mock_error:
+            log_classified(
+                logger,
+                Exception("db failed password=secret123"),
+                "general",
+                "err (%s): %s",
+            )
+        # password=secret123 应被脱敏为 password=***
+        call_args = mock_error.call_args[0]
+        assert "secret123" not in call_args[2]
+        assert "password=***" in call_args[2]
 
 
 class TestClassifyErrorChartContext:

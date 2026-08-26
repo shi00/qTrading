@@ -19,7 +19,7 @@ import pandas as pd
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
@@ -370,18 +370,11 @@ class MarketDataService:
                 except asyncio.CancelledError:
                     raise  # R2: 传播取消
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
-                    severity = classify_severity(e)
-                    if severity == "system":
-                        _log = logger.critical
-                    elif severity == "recoverable":
-                        _log = logger.warning
-                    else:
-                        _log = logger.error
-                    _log(
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
                         "[MarketDataService] Listener error (%s): %s",
-                        error_info["code"],
-                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
 
