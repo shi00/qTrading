@@ -40,6 +40,8 @@ from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
     ScreenerState,
+    StrategyDepRow,
+    StrategyRunRow,
     StreamCard,
 )
 
@@ -285,7 +287,7 @@ class _FakeScreenerViewModel:
 
     def __init__(
         self,
-        strategies_with_dep: dict | None = None,
+        strategies_with_dep: tuple[StrategyDepRow, ...] | None = None,
         strategy_params: list | None = None,
         history_tree_data: dict | None = None,
     ) -> None:
@@ -293,10 +295,10 @@ class _FakeScreenerViewModel:
         self._subscribers: list[Any] = []
         self.dispose_called: bool = False
         self.method_calls: list[str] = []
-        self._strategies_with_dep = strategies_with_dep or {
-            "value": {"name": "价值策略", "missing_apis": []},
-            "momentum": {"name": "动量策略", "missing_apis": []},
-        }
+        self._strategies_with_dep = strategies_with_dep or (
+            StrategyDepRow(key="value", name_key="strategy_value_name"),
+            StrategyDepRow(key="momentum", name_key="strategy_momentum_name"),
+        )
         self._strategy_params = strategy_params or []
         self._history_tree_data = history_tree_data or {}
         self._export_data: pd.DataFrame | None = None
@@ -456,18 +458,22 @@ class _FakeScreenerViewModel:
             else:
                 self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
             return
-        # 构建 HistoryTreeRow (模拟 VM._build_history_tree_rows)
+        # 构建 HistoryTreeRow (模拟 VM._build_history_tree_rows; D10: 行对象 StrategyRunRow)
         rows: list[HistoryTreeRow] = []
         for date_str, strategies in self._history_tree_data.items():
             s_str = str(date_str)
             display = f"{s_str[:4]}-{s_str[4:6]}-{s_str[6:]}" if len(s_str) == 8 and s_str.isdigit() else s_str
-            total_cnt = sum(s["cnt"] for s in strategies)
+            strategy_rows = tuple(
+                StrategyRunRow(strategy_name=str(s["strategy_name"]), run_id=str(s["run_id"]), cnt=int(s["cnt"]))
+                for s in strategies
+            )
+            total_cnt = sum(r.cnt for r in strategy_rows)
             rows.append(
                 HistoryTreeRow(
                     display_date=display,
                     d_key=s_str,
                     total_cnt=total_cnt,
-                    strategies=tuple(strategies),
+                    strategies=strategy_rows,
                 )
             )
         if append:
@@ -2385,7 +2391,7 @@ class TestExecutePendingStrategy:
         from ui.views import screener_view as mod
 
         fake_vm = _FakeScreenerViewModel(
-            strategies_with_dep={"value": {"name": "价值策略", "missing_apis": []}},
+            strategies_with_dep=(StrategyDepRow(key="value", name_key="strategy_value_name"),),
         )
         _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
 
@@ -2403,7 +2409,7 @@ class TestExecutePendingStrategy:
         from ui.views import screener_view as mod
 
         fake_vm = _FakeScreenerViewModel(
-            strategies_with_dep={"value": {"name": "价值策略", "missing_apis": []}},
+            strategies_with_dep=(StrategyDepRow(key="value", name_key="strategy_value_name"),),
             strategy_params=[{"name": "num_param", "type": "number", "default": 10}],
         )
         _patch_screener_view_mocks(mod, monkeypatch, fake_vm)

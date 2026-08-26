@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
+from ui.viewmodels.health_scan_view_model import QualityScanResult
+
 pytestmark = pytest.mark.unit
 
 
@@ -517,7 +519,7 @@ class TestBuildScanContent:
     def test_done_state_returns_result_container(self):
         from ui.components.health_report_dialog import _build_scan_content
 
-        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95}
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95)
         content = _build_scan_content("done", 1.0, "done", result, 450, 300)
         assert content.width == 450
         assert content.height == 300
@@ -561,7 +563,7 @@ class TestBuildScanResult:
     def test_high_score_uses_success_color(self):
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95}
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95)
         column = _build_scan_result(result)
         # column.controls[1] 是 ft.Row (score row)
         # Row.controls[0] 是 ft.Icon, Row.controls[1] 是 ft.Column (score text)
@@ -572,7 +574,7 @@ class TestBuildScanResult:
     def test_medium_score_uses_warning_color(self):
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 60, "tier": 2, "avg_lag": 5, "avg_continuity": 0.8}
+        result = QualityScanResult(score=60, tier=2, avg_lag=5, avg_continuity=0.8)
         column = _build_scan_result(result)
         score_row = column.controls[1]
         icon = score_row.controls[0]
@@ -581,7 +583,7 @@ class TestBuildScanResult:
     def test_low_score_uses_error_color(self):
         from ui.components.health_report_dialog import _build_scan_result
 
-        result = {"score": 30, "tier": 1, "avg_lag": 30, "avg_continuity": 0.5}
+        result = QualityScanResult(score=30, tier=1, avg_lag=30, avg_continuity=0.5)
         column = _build_scan_result(result)
         score_row = column.controls[1]
         icon = score_row.controls[0]

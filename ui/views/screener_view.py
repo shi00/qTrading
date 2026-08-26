@@ -47,7 +47,12 @@ from ui.theme import AppColors, AppStyles
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.viewmodels import Message
-from ui.viewmodels.screener_view_model import _MAX_LOG_CARDS, ScreenerViewModel, StreamCard
+from ui.viewmodels.screener_view_model import (
+    _MAX_LOG_CARDS,
+    ScreenerViewModel,
+    StrategyDepRow,
+    StreamCard,
+)
 from ui.viewmodels.backtest_view_model import set_pending_prefill
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
 from utils.log_decorators import UILogger
@@ -217,18 +222,17 @@ def _safe_show_toast(
         show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
 
 
-def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.dropdown.Option]:
-    """构建策略下拉框选项 (翻译策略名 + missing_apis 标记)。"""
+def _build_strategy_options(strategies_with_dep: tuple[StrategyDepRow, ...]) -> list[ft.dropdown.Option]:
+    """构建策略下拉框选项 (D10: 行对象含 name_key, 渲染时按当前 locale 翻译 + missing_apis 标记).
+
+    VM 不感知 locale (§3.2): name_key 为 raw i18n key, 组件已订阅 locale, 切换自动重渲染.
+    """
     options = []
-    for key, info in strategies_with_dep.items():
-        strategy_obj = strategy_mgr.get_strategy(key)
-        if strategy_obj and hasattr(strategy_obj, "name_key"):
-            name = I18n.get(strategy_obj.name_key)
-        else:
-            name = info["name"]
-        if info.get("missing_apis"):
+    for row in strategies_with_dep:
+        name = I18n.get(row.name_key)
+        if row.missing_apis:
             name = f"{name} (!)"  # P2-7: 警告 emoji 改为文本符号, 避免 UI 依赖 emoji 字体
-        options.append(ft.dropdown.Option(key, name))
+        options.append(ft.dropdown.Option(row.key, name))
     return options
 
 
@@ -395,8 +399,8 @@ def ScreenerView(
             return
         key = pending_strategy
         set_pending_strategy(None)
-        # 验证策略存在 (R.2.6.1: 从 state.strategies_with_dep 检查)
-        if key not in state.strategies_with_dep:
+        # 验证策略存在 (R.2.6.1: 从 state.strategies_with_dep 检查, D10: strategy 行对象序列)
+        if not any(r.key == key for r in state.strategies_with_dep):
             logger.warning("[ScreenerView] Pending strategy %s not found.", key)
             return
         # 选中策略 (R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state)
@@ -1240,17 +1244,15 @@ def ScreenerView(
                     )
                 ]
                 for s in strategies:
-                    strategy_display = translate_strategy_name(s["strategy_name"])
-                    run_suffix = f" [{s['run_id'][:8]}]" if len(strategies) > 1 else ""
+                    strategy_display = translate_strategy_name(s.strategy_name)
+                    run_suffix = f" [{s.run_id[:8]}]" if len(strategies) > 1 else ""
                     subtiles.append(
                         ft.ListTile(
                             leading=ft.Icon(
                                 ft.Icons.TRENDING_UP, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY
                             ),
-                            title=ft.Text(
-                                f"{strategy_display}{run_suffix} ({s['cnt']})", size=AppStyles.FONT_SIZE_BODY
-                            ),
-                            on_click=lambda e, d=d_key, rid=s["run_id"]: _on_tree_item_click(d, run_id=rid),
+                            title=ft.Text(f"{strategy_display}{run_suffix} ({s.cnt})", size=AppStyles.FONT_SIZE_BODY),
+                            on_click=lambda e, d=d_key, rid=s.run_id: _on_tree_item_click(d, run_id=rid),
                             dense=True,
                         )
                     )
@@ -1339,7 +1341,7 @@ def ScreenerView(
 
     # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
     strategy_label = I18n.get("select_strategy")
-    strategy_options = _build_strategy_options(state.strategies_with_dep, vm.strategy_mgr)
+    strategy_options = _build_strategy_options(state.strategies_with_dep)
     strategy_dropdown = anchored(
         EIDS.SCREENER.STRATEGY_DROPDOWN,
         ft.Dropdown(

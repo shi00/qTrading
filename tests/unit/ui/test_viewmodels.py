@@ -1076,12 +1076,12 @@ class TestScreenerViewModelLoadHistoryTree:
         row_0516 = next(r for r in rows if r.d_key == "2026-05-16")
         assert row_0516.total_cnt == 8
         assert len(row_0516.strategies) == 2
-        assert row_0516.strategies[0]["run_id"] == "r1"
-        assert row_0516.strategies[0]["strategy_name"] == "momentum"
+        assert row_0516.strategies[0].run_id == "r1"
+        assert row_0516.strategies[0].strategy_name == "momentum"
         row_0515 = next(r for r in rows if r.d_key == "2026-05-15")
         assert row_0515.total_cnt == 7
         assert len(row_0515.strategies) == 1
-        assert row_0515.strategies[0]["run_id"] == "r3"
+        assert row_0515.strategies[0].run_id == "r3"
         # offset = 0 + len(df) = 3, has_more = len(df) >= 30 is False
         assert screener_vm.state.history_tree.offset == 3
         assert screener_vm.state.history_tree.has_more is False

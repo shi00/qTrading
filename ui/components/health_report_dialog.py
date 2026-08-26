@@ -19,6 +19,7 @@ from ui.viewmodels.health_scan_view_model import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
     HealthScanViewModel,
+    QualityScanResult,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -613,24 +614,25 @@ def _scan_dialog_size(page: ft.Page | None) -> tuple[int, int]:
     return w, h
 
 
-def _build_scan_result(result: dict, on_init_data: Callable[[], None] | None = None) -> ft.Column:
+def _build_scan_result(result: QualityScanResult, on_init_data: Callable[[], None] | None = None) -> ft.Column:
     """构建扫描结果内容（纯函数，由旧 ``HealthScanDialog.show_results`` 转换）。
 
     Task 5.3: ``on_init_data`` 非空时在结果区底部添加"初始化数据"按钮（修复深链）。
+    D10: result 为 frozen QualityScanResult（属性访问，不再裸 dict）。
     """
-    score = result.get("score", 0)
-    tier = result.get("tier", 1)
-    avg_lag = result.get("avg_lag", 99)
-    avg_cont = result.get("avg_continuity", 0)
+    score = result.score
+    tier = result.tier
+    avg_lag = result.avg_lag
+    avg_cont = result.avg_continuity
 
     color = AppColors.SUCCESS if score > 80 else (AppColors.WARNING if score > 50 else AppColors.ERROR)
-    avg_fundamental = result.get("avg_fundamental", 0)
+    avg_fundamental = result.avg_fundamental or 0
     fundamental_color = (
         AppColors.SUCCESS
         if avg_fundamental > 0.7
         else (AppColors.WARNING if avg_fundamental > 0.5 else AppColors.ERROR)
     )
-    fin_recency_ok = result.get("fin_recency_ok", False)
+    fin_recency_ok = result.fin_recency_ok
 
     result_controls: list[ft.Control] = [
         ft.Container(height=20),
@@ -694,7 +696,7 @@ def _build_scan_result(result: dict, on_init_data: Callable[[], None] | None = N
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
-                            f"{result.get('sample_size', 0)}",
+                            f"{result.sample_size}",
                             size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                         ),
@@ -765,7 +767,7 @@ def _build_scan_content(
     scan_state: str,
     progress: float,
     status_text: Message | str | None,
-    result: dict | None,
+    result: QualityScanResult | None,
     width: int,
     height: int,
     error_key: str | None = None,
@@ -777,7 +779,7 @@ def _build_scan_content(
         scan_state: 扫描状态 ("idle" | "scanning" | "done" | "error")
         progress: 进度 0.0~1.0
         status_text: 状态文本 (Message 由当前 locale 渲染; str 直显向后兼容)
-        result: 扫描结果字典（scan_state="done" 时非 None）
+        result: 扫描结果 (D10: QualityScanResult, scan_state="done" 时非 None)
         width: 对话框宽度
         height: 对话框高度
         error_key: 错误状态 i18n key（scan_state="error" 时使用，默认 "db_err_format"）

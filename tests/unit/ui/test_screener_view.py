@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from ui.viewmodels.screener_view_model import StrategyDepRow
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
     _HIDDEN_COLS,
@@ -237,50 +238,39 @@ class TestParseNum:
 
 
 class TestBuildStrategyOptions:
-    """_build_strategy_options 纯函数测试。"""
+    """_build_strategy_options 纯函数测试 (D10: 入参由裸 dict 改 StrategyDepRow 行对象)."""
 
-    def test_with_name_key(self):
-        """策略有 name_key 时用 I18n.get(name_key) 翻译。"""
-        mock_mgr = MagicMock()
-        mock_strategy = MagicMock()
-        mock_strategy.name_key = "strategy_value_name"
-        mock_mgr.get_strategy.return_value = mock_strategy
+    def test_translates_name_key(self):
+        """name_key 经 I18n.get() 即时翻译 (D16: 每次渲染按当前 locale, 无 stale)."""
         with patch("ui.views.screener_view.I18n") as mock_i18n:
             mock_i18n.get.return_value = "价值策略"
-            result = _build_strategy_options(
-                {"value": {"name": "旧名称", "missing_apis": []}},
-                mock_mgr,
-            )
+            result = _build_strategy_options((StrategyDepRow(key="value", name_key="strategy_value_name"),))
         assert len(result) == 1
         assert result[0].key == "value"
         assert result[0].text == "价值策略"
+        mock_i18n.get.assert_called_once_with("strategy_value_name")
 
-    def test_without_name_key_falls_back_to_info_name(self):
-        """策略无 name_key (或 get_strategy 返回 None) 时用 info['name']。"""
-        mock_mgr = MagicMock()
-        mock_mgr.get_strategy.return_value = None
-        result = _build_strategy_options(
-            {"momentum": {"name": "动量策略", "missing_apis": []}},
-            mock_mgr,
-        )
+    def test_name_key_falls_back_to_key(self):
+        """策略无 name_key 时 VM 回退 key 作为 name_key, View 按其翻译。"""
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "动量策略"
+            result = _build_strategy_options((StrategyDepRow(key="momentum", name_key="momentum"),))
         assert len(result) == 1
         assert result[0].text == "动量策略"
 
     def test_missing_apis_adds_warning_suffix(self):
         """missing_apis 非空时追加 (!) 标记 (P2-7: ⚠️ → 文本符号)。"""
-        mock_mgr = MagicMock()
-        mock_mgr.get_strategy.return_value = None
-        result = _build_strategy_options(
-            {"northbound": {"name": "北向资金", "missing_apis": ["api1", "api2"]}},
-            mock_mgr,
-        )
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "北向资金"
+            result = _build_strategy_options(
+                (StrategyDepRow(key="northbound", name_key="northbound", missing_apis=("api1", "api2")),)
+            )
         assert result[0].text is not None
         assert "(!)" in result[0].text
 
     def test_empty_strategies(self):
-        """空策略字典返回空列表。"""
-        mock_mgr = MagicMock()
-        assert _build_strategy_options({}, mock_mgr) == []
+        """空策略列表返回空 options。"""
+        assert _build_strategy_options(()) == []
 
 
 class TestBuildPageSizeOptions:

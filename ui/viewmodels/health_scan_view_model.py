@@ -43,6 +43,31 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class QualityScanResult:
+    """深度扫描评分汇总 (D10: 替换 ``dict[str, Any]`` 裸 dict, 兑现 frozen 契约).
+
+    渲染就绪字段: View 只读, 不可就地修改 state.result (frozen dataclass).
+
+    Attributes:
+        score: 综合评分 0~100
+        tier: 质量等级 1~3
+        sample_size: 抽样股票数
+        avg_continuity: 平均连续覆盖率
+        avg_lag: 平均滞后天数
+        avg_fundamental: 基本面字段完整度 (未计算时为 None)
+        fin_recency_ok: 财务报告新鲜度是否达标
+    """
+
+    score: int = 0
+    tier: int = 0
+    sample_size: int = 0
+    avg_continuity: float = 0.0
+    avg_lag: float = 99.0
+    avg_fundamental: float | None = None
+    fin_recency_ok: bool = False
+
+
+@dataclass(frozen=True)
 class HealthScanState:
     """HealthScanViewModel 的不可变状态快照。View 通过 subscribe 接收。
 
@@ -51,14 +76,14 @@ class HealthScanState:
         progress: 进度 0.0~1.0
         status_text: data 层 progress_callback 回调透传的 Message（key+params）
             (data/mixins/health_mixin.py 构造 Message 后传入；VM 不调 I18n.get)
-        result: 扫描结果字典（scan_state="done" 时非 None）
+        result: 扫描结果 (D10: QualityScanResult frozen dataclass, scan_state="done" 时非 None)
         error_key: 错误状态 i18n key（View 渲染时 I18n.get(error_key)），非错误时为 None
     """
 
     scan_state: str = "idle"
     progress: float = 0.0
     status_text: Message | str | None = ""
-    result: dict[str, Any] | None = None
+    result: QualityScanResult | None = None
     error_key: str | None = None
 
 
@@ -117,16 +142,36 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
             self._set_state(progress=current / total, status_text=msg)
 
         try:
-            result = await self._data_processor.run_quality_scan(
+            raw_result = await self._data_processor.run_quality_scan(
                 sample_size=50,
                 progress_callback=on_progress,
             )
-            self._set_state(result=result, scan_state="done")
+            self._set_state(result=self._to_quality_scan_result(raw_result), scan_state="done")
         except asyncio.CancelledError:
             raise  # R2: CancelledError 必须传播以配合优雅停机
         except Exception as ex:
             logger.error("[HealthScanVM] Scan failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             self._set_state(scan_state="error", error_key="db_err_format")
+
+    @staticmethod
+    def _to_quality_scan_result(raw: dict | None) -> QualityScanResult:
+        """将 data 层扫描结果 dict 收敛为渲染就绪 frozen 对象 (D10).
+
+        raw 可能缺部分字段 (如 run_quality_scan 无数据早退仅返回 score/tier),
+        逐字段 get 取默认值, 不抛异常.
+        """
+        if raw is None:
+            return QualityScanResult()
+        avg_fundamental = raw.get("avg_fundamental")
+        return QualityScanResult(
+            score=int(raw.get("score", 0)),
+            tier=int(raw.get("tier", 1)),
+            sample_size=int(raw.get("sample_size", 0)),
+            avg_continuity=float(raw.get("avg_continuity", 0.0)),
+            avg_lag=float(raw.get("avg_lag", 99.0)),
+            avg_fundamental=float(avg_fundamental) if avg_fundamental is not None else None,
+            fin_recency_ok=bool(raw.get("fin_recency_ok", False)),
+        )
 
     def cancel_pending_futures(self) -> None:
         """取消 pending futures（R2 兼容不重新抛出）。
