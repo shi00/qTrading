@@ -8,6 +8,7 @@
 用法::
 
     python scripts/check_per_file_coverage.py
+    python scripts/check_per_file_coverage.py --report   # 分层达标率统计（不阻断，review07-G14 测量）
 
 前置：先跑 ``pytest --cov --cov-report=json`` 生成 coverage.json。
 
@@ -17,6 +18,7 @@
     2: coverage.json 未找到 / 配置错误
 """
 
+import argparse
 import json
 import sys
 import tomllib
@@ -56,7 +58,52 @@ def match_threshold(file_path: str, default_threshold: int, layered: list[tuple[
     return default_threshold, None
 
 
+def _report_layered(files: dict, default_threshold: int, layered: list[tuple[str, int]]) -> None:
+    """review07-G14: 输出各分层前缀的达标率统计（不阻断，供 CI 观测分层门禁差距）。
+
+    按 match_threshold 分组，统计每前缀：文件总数 / 达标数 / 平均覆盖率 / 未达标文件样例。
+    未匹配分层的文件归入 "(default)"。输出到 stderr（::warning:: 语义，不改变退出码）。
+    """
+    groups: dict[str, dict] = {}
+    for fp, d in sorted(files.items()):
+        summary = d.get("summary", {})
+        stmts = summary.get("num_statements", 0)
+        if stmts == 0:
+            continue
+        pct = summary.get("percent_covered", 0)
+        threshold, matched_prefix = match_threshold(fp, default_threshold, layered)
+        key = matched_prefix or "(default)"
+        g = groups.setdefault(
+            key,
+            {"threshold": threshold, "total": 0, "pass": 0, "sum_pct": 0.0, "below": []},
+        )
+        g["total"] += 1
+        g["sum_pct"] += pct
+        if pct >= threshold:
+            g["pass"] += 1
+        else:
+            g["below"].append(f"{fp}({pct:.0f}%)")
+
+    lines = ["::warning::[分层覆盖率] 达标率统计（review07-G14 测量，不阻断）："]
+    for key, g in sorted(groups.items()):
+        avg = g["sum_pct"] / g["total"] if g["total"] else 0.0
+        status = f"{g['pass']}/{g['total']} 达标" if g["pass"] == g["total"] else f"{g['pass']}/{g['total']} 达标 ⚠"
+        lines.append(
+            f"  - {key:<12} threshold={g['threshold']}%  {status}  平均 {avg:.1f}%"
+            + (f"  未达标: {', '.join(g['below'][:5])}" if g["below"] else "")
+        )
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Per-file coverage gate (D37).")
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="输出分层达标率统计（不阻断，用于 review07-G14 测量分层门禁差距）",
+    )
+    args = parser.parse_args()
+
     default_threshold, layered, enforce_layered = load_config()
     cov_path = ROOT / "coverage.json"
     if not cov_path.exists():
@@ -67,6 +114,12 @@ def main() -> int:
         cov = json.load(f)
 
     files = cov.get("files", {})
+
+    # --report 模式：输出各分层前缀的达标率统计（不阻断），用于判断是否可开启 enforce_layered
+    if args.report:
+        _report_layered(files, default_threshold, layered)
+        return 0
+
     below_default: list[tuple[str, float, int, int, int, str | None]] = []
     below_layered: list[tuple[str, float, int, int, int, str | None]] = []
 
