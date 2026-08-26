@@ -38,17 +38,27 @@ def test_prepare_db_with_retry_called_before_cache_manager() -> None:
     CacheManager（CacheManager 构造时建引擎，依赖 DATABASE_URL）。
 
     P0-1：prepare_database_runtime 的调用与错误处理已封装到 _prepare_db_with_retry，
-    main() 直接调用 _prepare_db_with_retry(page, scenario)。
+    run() 直接调用 _prepare_db_with_retry(page, scenario)。
+
+    review01-A8：CacheManager() 已随启动编排提取到 _run_session（ApplicationSession 上下文内），
+    因此断言改为：run() 中 _prepare_db_with_retry 调用在 _run_session 调用之前，
+    且 _run_session 源码含 CacheManager() 构造。
     """
+    from app.application import _run_session
+
     source = inspect.getsource(main_entry)
     prepare_pos = source.find("_prepare_db_with_retry(")
-    cache_manager_pos = source.find("CacheManager()")
+    run_session_pos = source.find("_run_session(")
 
-    assert prepare_pos != -1, f"main() 源码应含 '_prepare_db_with_retry(' 调用，实际源码片段：\n{source[:1500]}"
-    assert cache_manager_pos != -1, f"main() 源码应含 'CacheManager()' 调用，实际源码片段：\n{source[:1500]}"
-    assert prepare_pos < cache_manager_pos, (
-        "_prepare_db_with_retry() 必须在 CacheManager() 之前调用（Phase 2 §3.4）。"
-        f"prepare_pos={prepare_pos}, cache_manager_pos={cache_manager_pos}"
+    assert prepare_pos != -1, f"run() 源码应含 '_prepare_db_with_retry(' 调用，实际源码片段：\n{source[:1500]}"
+    assert run_session_pos != -1, f"run() 源码应含 '_run_session(' 调用，实际源码片段：\n{source[:1500]}"
+    assert prepare_pos < run_session_pos, (
+        "_prepare_db_with_retry() 必须在 _run_session()（内含 CacheManager 构造）之前调用（Phase 2 §3.4）。"
+        f"prepare_pos={prepare_pos}, run_session_pos={run_session_pos}"
+    )
+    session_source = inspect.getsource(_run_session)
+    assert "CacheManager()" in session_source, (
+        f"_run_session() 源码应含 'CacheManager()' 调用，实际源码片段：\n{session_source[:1500]}"
     )
 
 
