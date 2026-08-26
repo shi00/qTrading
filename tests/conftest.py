@@ -329,22 +329,38 @@ def mock_external_services(request: pytest.FixtureRequest) -> Iterator[None]:
 
     patches = []
 
-    # Mock NewsFetcher network calls (async)
-    from data.external.news_fetcher import NewsFetcher
+    # review07-G9: mock 真实外部边界（而非业务方法），使 NewsFetcher/ReviewManager 自身
+    # 逻辑（参数校验/错误处理/数据转换）在单元测试中真实执行。
+    # - get_stock_news 真实边界 = akshare 同步函数（在 ThreadPool 中调用）
+    # - get_us_major_moves 真实边界 = httpx.AsyncClient.get（JSONP 解析）
+    # - get_learning_context 真实边界 = ScreenerDao.get_learning_context（DB 查询）
+    import httpx
+    import pandas as pd
 
-    patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
-    patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
+    import akshare as ak
 
-    # Mock ReviewManager database calls (async)
-    from data.persistence.review_manager import ReviewManager
+    # NewsFetcher.get_stock_news：patch akshare 数据源（返回空 DataFrame → 方法返回 []）
+    patches.append(patch.object(ak, "stock_zh_a_disclosure_report_cninfo", return_value=pd.DataFrame()))
+    patches.append(patch.object(ak, "stock_news_em", return_value=pd.DataFrame()))
+
+    # NewsFetcher.get_us_major_moves：patch httpx.AsyncClient.get（返回空 JSONP → 解析为空 list）
+    class _FakeHttpxResponse:
+        def __init__(self, text: str = ""):
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    async def _fake_httpx_get(*args, **kwargs):
+        return _FakeHttpxResponse(text="__cb([]);")
+
+    patches.append(patch.object(httpx.AsyncClient, "get", new=_fake_httpx_get))
+
+    # ReviewManager.get_learning_context：patch DAO 查询边界（返回空 DataFrame → 方法真实构建 XML）
+    from data.persistence.daos.screener_dao import ScreenerDao
 
     patches.append(
-        patch.object(
-            ReviewManager,
-            "get_learning_context",
-            new_callable=AsyncMock,
-            return_value="",
-        )
+        patch.object(ScreenerDao, "get_learning_context", new_callable=AsyncMock, return_value=pd.DataFrame())
     )
 
     for p in patches:
