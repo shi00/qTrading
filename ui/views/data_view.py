@@ -6,7 +6,8 @@
 变更要点:
 - 三个命令式 class (TableViewerTab/SQLConsoleTab/DataExplorerView) → ft.component 函数组件
 - DataExplorerView 通过 ``use_viewmodel(factory=)`` 内部模式实例化 DataExplorerViewModel
-- TableViewerTab/SQLConsoleTab 通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state
+- 子 Tab (TableViewerTab/SQLConsoleTab) 为纯 props 组件: state 由父组件唯一订阅后传入
+  (D13: 消除同一 VM 三重订阅导致的三子树重复渲染), 不再 ``use_viewmodel(vm=)``
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``, cleanup 时移除
 - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
@@ -44,7 +45,13 @@ from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, MAX_EXPORT_ROWS, SqlResultRow, TableRow
+from ui.viewmodels.data_explorer_view_model import (
+    DataExplorerState,
+    DataExplorerViewModel,
+    MAX_EXPORT_ROWS,
+    SqlResultRow,
+    TableRow,
+)
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -270,21 +277,22 @@ def _ceil_div(n: int, d: int) -> int:
 
 @ft.component
 def TableViewerTab(
+    state: DataExplorerState,
     vm: DataExplorerViewModel,
     active: bool = True,
 ) -> ft.Column:
     """Tab 1: 可视化表浏览器 (声明式).
 
-    通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
+    D13: 不再 ``use_viewmodel(vm=)`` 自订阅 — state 由父组件唯一订阅后经 props 传入
+    (纯 props 子组件, 消除同一 VM 三重订阅导致的三子树重复渲染).
+
     FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``。
 
     Args:
+        state: 父组件传入的 VM state snapshot (DataExplorerView 唯一订阅).
         vm: 外部传入的 DataExplorerViewModel (由 DataExplorerView 实例化并共享)。
         active: 当前 tab 是否激活 (控制副作用执行)。
     """
-    # --- 订阅 VM state (外部模式) ---
-    state, _ = use_viewmodel(vm=vm)
-
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -881,15 +889,13 @@ def TableViewerTab(
 
 
 @ft.component
-def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
+def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Column:
     """Tab 2: SQL 控制台 (声明式).
 
-    通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
+    D13: 不再 ``use_viewmodel(vm=)`` 自订阅 — state 由父组件唯一订阅后经 props 传入
+    (纯 props 子组件).
     SQL 结果从 ``state.sql_success``/``sql_result_columns``/``sql_result_rows`` 读取 (L771 合规).
     """
-    # --- 订阅 VM state (外部模式) ---
-    state, _ = use_viewmodel(vm=vm)
-
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -1140,13 +1146,14 @@ def DataExplorerView(active: bool = True) -> ft.Container:
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
     - page 访问用 ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-    - 子 Tab 通过 ``use_viewmodel(vm=)`` 外部模式订阅同一 VM
+    - 子 Tab 为纯 props 组件 (state 由本组件唯一订阅后传入, D13 消除三重订阅)
 
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
     """
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
-    _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
+    # D13: 此处为唯一订阅点 — state 经 props 传下给纯子组件, 消除三重订阅重复渲染
+    state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
 
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
@@ -1207,7 +1214,7 @@ def DataExplorerView(active: bool = True) -> ft.Container:
                 tab_bar,
                 ft.TabBarView(
                     expand=True,
-                    controls=[TableViewerTab(vm=vm, active=active), SQLConsoleTab(vm=vm)],
+                    controls=[TableViewerTab(state=state, vm=vm, active=active), SQLConsoleTab(state=state, vm=vm)],
                 ),
             ],
         ),
