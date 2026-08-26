@@ -827,8 +827,10 @@ def OnboardingWizard(
         try:
             success = await onboarding_vm.save_language(new_locale)
             if not success:
-                # D17: 无 locale 局部副本, 保存失败时 observable 未变 → 下拉自然保持旧值
+                # D17: 失败时重设当前 locale —— set_locale 无条件通知 listeners 触发重渲染,
+                # 下拉 value 从 observable 刷新回持久化前的旧值 (原 set_language_value 回滚语义)
                 logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
+                I18n.set_locale(I18n.current_locale())
                 return
             # I18n.set_locale 触发 observable → ft.use_state 自动重渲染
             I18n.set_locale(new_locale)
