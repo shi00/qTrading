@@ -161,7 +161,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         cache: CacheManager | None = None,
         service: BacktestService | None = None,
     ):
-        self.cache = cache or CacheManager()
+        self.cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂返回唯一实例），首次构造为轻量建仓
         if service is None:
             # 装配默认工厂：ui 层可导入 strategies（CLAUDE.md §4.1 允许 strategies ← ui），
             # 通过依赖注入传给 BacktestService，避免 services 层运行时依赖 strategies（R1 红线）。

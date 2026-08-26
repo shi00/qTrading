@@ -19,7 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_redlines import (  # noqa: E402 - sys.path 注入后导入
+    _R16_SINGLETON_CLASSES,
     _base_class_names,
+    _check_R16_in_tree,
     _check_R4_in_tree,
     _check_R_no_bare_ft_colors_in_tree,
     _check_R_no_bare_font_size_in_tree,
@@ -35,6 +37,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R13,
     check_R14,
     check_R15,
+    check_R16_vm_init_singleton_construction,
     check_R4,
     check_R4_in_tests,
     check_R_no_bare_ft_colors_in_ui,
@@ -556,6 +559,95 @@ class TestR15PureFunction:
 
 
 # ============================================================================
+# R16 纯函数测试 (review07-G20)
+# ============================================================================
+
+
+def _r16_check(code: str) -> list[str]:
+    """构造临时源码树并调用 _check_R16_in_tree（源码经临时文件落盘以支持 noqa 行读取）。"""
+    import tempfile
+    from pathlib import Path
+
+    tree = ast.parse(code)
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "ui" / "viewmodels" / "fake_vm.py"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(code, encoding="utf-8")
+        return _check_R16_in_tree(tree, p)
+
+
+class TestR16PureFunction:
+    """R16 纯函数测试：验证 ViewModel __init__ 构造已注册单例的检测逻辑。"""
+
+    def test_detects_singleton_construction_in_init(self):
+        """VM __init__ 中构造已注册单例应被检测。"""
+        code = "import services.task_manager\nclass MyVM:\n    def __init__(self):\n        self._tm = TaskManager()\n"
+        errors = _r16_check(code)
+        assert len(errors) == 1
+        assert "R16" in errors[0]
+        assert "TaskManager" in errors[0]
+
+    def test_noqa_r16_exempts_line(self):
+        """显式 # noqa: R16 豁免的调用行不应被检测。"""
+        code = (
+            "import services.task_manager\n"
+            "class MyVM:\n"
+            "    def __init__(self):\n"
+            "        self._tm = TaskManager()  # noqa: R16 - 持有引用\n"
+        )
+        errors = _r16_check(code)
+        assert errors == []
+
+    def test_reflection_without_construction_not_detected(self):
+        """仅引用（赋值给变量引用而非构造调用，如 lambda/类型传递）不涉及构造则不应报。"""
+        code = "class MyVM:\n    def __init__(self):\n        self._tp = ThreadPoolManager  # 仅类型引用\n"
+        errors = _r16_check(code)
+        assert errors == []
+
+    def test_non_singleton_call_not_detected(self):
+        """构造非注册单例类（如普通类）不应被检测。"""
+        code = "class MyVM:\n    def __init__(self):\n        self._x = SomeService()\n"
+        errors = _r16_check(code)
+        assert errors == []
+
+    def test_other_methods_not_scanned(self):
+        """仅 __init__ 被扫描；其他方法中构造单例不报（避免误伤命令内 DI）。"""
+        code = (
+            "import services.task_manager\n"
+            "class MyVM:\n"
+            "    def __init__(self):\n"
+            "        pass\n"
+            "    def run(self):\n"
+            "        m = TaskManager()\n"
+        )
+        errors = _r16_check(code)
+        assert errors == []
+
+    def test_whitelist_matches_content(self):
+        """单例白名单与 singleton-lifecycle.md 注册清单保持一致（联动 G24 动态比对测试）。"""
+        assert "TaskManager" in _R16_SINGLETON_CLASSES
+        assert "DataProcessor" in _R16_SINGLETON_CLASSES
+        assert "SomeService" not in _R16_SINGLETON_CLASSES
+
+    def test_whitelist_matches_documented_singletons(self):
+        """R16 单例白名单 == singleton-lifecycle.md 注册单例集合（防漂移传递闭包）。
+
+        G24 的 TestSingletonRegistryConsistency 强制 文档清单 ↔ singleton_registry 一致；
+        本测试再强制 白名单 ↔ 文档清单 一致，二者传递闭包确保白名单永不漂移。
+        """
+        import re
+
+        content = (ROOT / "docs" / "architecture" / "singleton-lifecycle.md").read_text(encoding="utf-8")
+        section = content.split("**注册单例（", 1)[1].split("**非注册单例", 1)[0]
+        documented = frozenset(re.findall(r"^\| `(\w+)`", section, flags=re.M))
+        assert documented == _R16_SINGLETON_CLASSES, (
+            "check_redlines.py _R16_SINGLETON_CLASSES 与 singleton-lifecycle.md 注册清单不一致。"
+            f"\n白名单独有: {sorted(_R16_SINGLETON_CLASSES - documented)}"
+            f"\n文档独有: {sorted(documented - _R16_SINGLETON_CLASSES)}"
+        )
+
+
+# ============================================================================
 # 辅助函数测试
 # ============================================================================
 
@@ -622,6 +714,11 @@ class TestRedlineIntegrationOnCurrentCodebase:
         """R15：当前代码库所有单例类使用 @register_singleton 装饰器。"""
         errors = check_R15()
         assert errors == [], "R15 violations found:\n  " + "\n  ".join(errors)
+
+    def test_check_R16_passes(self):
+        """R16（部分）：当前代码库 ViewModel __init__ 无未豁免的已注册单例构造。"""
+        errors = check_R16_vm_init_singleton_construction()
+        assert errors == [], "R16 (VM singleton construction) violations found:\n  " + "\n  ".join(errors)
 
     def test_main_returns_zero(self):
         """脚本 main() 在当前代码库状态下应返回 0（全部通过）。"""

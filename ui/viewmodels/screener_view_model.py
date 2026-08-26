@@ -190,7 +190,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # （40+ API rate_limiter，耗时 34s+），构造期同步会阻塞 Flet 主线程 (R16)。
         # 首次筛选（_execute_screening）经 _ensure_processor() 在 IO 线程池异步构造。
         self.data_processor: DataProcessor | None = None
-        self.strategy_mgr = StrategyManager()
+        self.strategy_mgr = StrategyManager()  # noqa: R16 - 持有注册单例引用（幂等工厂），用于策略注册表查询
         self.review_mgr = ReviewManager()
 
         # Immutable state + subscribers (§3.0.1)
