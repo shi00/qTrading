@@ -11,7 +11,9 @@ from typing import Any
 
 import pandas as pd
 
+from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
+
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
@@ -314,7 +316,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         文件读 (单次 < 5ms), 在 use_effect 上下文中可接受。返回值由 ResizableSplitter
         内部 clamp 到 [min_width, max_width]。
         """
-        from utils.config_handler import ConfigHandler
 
         return ConfigHandler.get_typed(config_key, int, default_width)
 
@@ -325,7 +326,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         ThreadPoolManager.run_async 提交 IO 写盘, 不阻塞 Flet 事件处理器。
         复用 _background_tasks + _on_background_task_done 跟踪 task 生命周期。
         """
-        from utils.config_handler import ConfigHandler
 
         async def _persist() -> None:
             try:
@@ -401,7 +401,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         Raises:
             Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
         """
-        from utils.config_handler import ConfigHandler
 
         await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, None)
         # get_base_prompt 内部调 ConfigHandler.get_strategy_prompt / get_ai_system_prompt (load_config IO),
@@ -427,8 +426,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if not is_valid:
             return False, warning
 
-        from utils.config_handler import ConfigHandler
-
         await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, prompt)
         return True, None
 
@@ -440,7 +437,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         ConfigHandler._config_cache 命中时为纯内存读 (非 IO); 首次未命中
         触发小 JSON 文件读 (< 5ms), 在 use_effect 上下文中可接受。
         """
-        from utils.config_handler import ConfigHandler
 
         presets = ConfigHandler.get_strategy_presets(strategy_key)
         return list(presets.keys())
@@ -451,7 +447,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         Raises:
             Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
         """
-        from utils.config_handler import ConfigHandler
 
         await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_strategy_preset, strategy_key, name, params)
 
@@ -461,7 +456,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         Returns:
             参数 dict; 预设不存在时返回空 dict.
         """
-        from utils.config_handler import ConfigHandler
 
         presets = ConfigHandler.get_strategy_presets(strategy_key)
         return presets.get(name, {})
@@ -472,7 +466,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         Returns:
             bool: True 表示已删除, False 表示预设不存在.
         """
-        from utils.config_handler import ConfigHandler
 
         return bool(
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.delete_strategy_preset, strategy_key, name)
@@ -631,7 +624,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         try:
             from data.external.tushare_client import TushareClient
             from services.ai_service import get_strategy_min_tier
-            from utils.config_handler import ConfigHandler
 
             current_tier = ConfigHandler.get_tushare_point_tier()
             min_tier = get_strategy_min_tier(selected_strategy)

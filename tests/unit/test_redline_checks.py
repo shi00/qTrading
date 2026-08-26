@@ -1115,3 +1115,125 @@ class TestRNoBareFontSizeIntegration:
     def test_main_returns_zero_with_font_size_check(self):
         """main() 包含 R_no_bare_font_size_in_ui 检查后仍应返回 0 (当前代码库合规)。"""
         assert main() == 0
+
+
+# ============================================================================
+# R_lazy_import_whitelist 纯函数测试 (review01-A2-2)
+# ============================================================================
+
+
+class TestLazyImportWhitelist:
+    """review01-A2-2: 禁止方向的函数体内跨层 import 必须带 # lazy-import: 注释。
+
+    覆盖场景：
+    - utils 层函数体内跨层 import（data/services）无注释 → 报错
+    - 带 # lazy-import: 注释 → 通过
+    - 模块级跨层 import（非函数体内）→ 不报
+    - if TYPE_CHECKING: 块内跨层 import → 豁免
+    - 合法方向（services → data）→ 不报
+    - import 多行化（ruff format 后注释落末行）→ 按行范围检测
+    """
+
+    def _mk(self, tmp_path, monkeypatch, layer: str, filename: str, content: str):
+        """构造 layer/<filename> 文件并 monkeypatch ROOT，返回 (errors)。"""
+        layer_dir = tmp_path / layer
+        layer_dir.mkdir(parents=True, exist_ok=True)
+        (layer_dir / filename).write_text(content, encoding="utf-8")
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        return check_redlines.check_R_lazy_import_whitelist()
+
+    def test_function_body_cross_layer_import_without_marker_flagged(self, tmp_path, monkeypatch):
+        """utils 层函数体内 import data 无 lazy-import 注释 → 报错。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "utils",
+            "bad.py",
+            "def f():\n    from data.data_processor import DataProcessor\n    return DataProcessor()\n",
+        )
+        assert len(errors) == 1
+        assert "lazy-import" in errors[0]
+        assert "utils/bad.py:2" in errors[0]
+
+    def test_function_body_cross_layer_import_with_marker_ok(self, tmp_path, monkeypatch):
+        """utils 层函数体内 import services 带 lazy-import 注释 → 通过。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "utils",
+            "ok.py",
+            "def f():\n    from services.task_manager import TaskManager  # lazy-import: 打破循环\n    return TaskManager()\n",
+        )
+        assert errors == []
+
+    def test_module_level_cross_layer_import_not_flagged(self, tmp_path, monkeypatch):
+        """模块级跨层 import（非函数体内）→ 不报（import-linter 契约 5 已守护）。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "utils",
+            "mod.py",
+            "from data.data_processor import DataProcessor\n\ndef f():\n    return 1\n",
+        )
+        assert errors == []
+
+    def test_type_checking_block_exempt(self, tmp_path, monkeypatch):
+        """if TYPE_CHECKING: 块内跨层 import → 豁免（仅类型检查，非运行时依赖）。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "services",
+            "tc.py",
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from strategies.ai_strategy import AISelectionStrategy\n\ndef f() -> None:\n    return None\n",
+        )
+        assert errors == []
+
+    def test_legal_direction_not_flagged(self, tmp_path, monkeypatch):
+        """合法方向（services 层函数内 import data）→ 不报（services → data 属合法依赖）。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "services",
+            "legal.py",
+            "async def f():\n    from data.data_processor import DataProcessor\n    return DataProcessor()\n",
+        )
+        assert errors == []
+
+    def test_multiline_import_marker_on_end_line(self, tmp_path, monkeypatch):
+        """ruff format 多行化 import 后注释落在末行 → 按 [lineno, end_lineno] 范围检测。"""
+        content = (
+            "def f():\n"
+            "    from data.persistence.db_config_service import (\n"
+            "        DatabaseConfigService,\n"
+            "    )  # lazy-import: 打破循环依赖\n"
+            "    return DatabaseConfigService()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "multi.py", content)
+        assert errors == []
+
+    def test_multiline_import_without_marker_flagged(self, tmp_path, monkeypatch):
+        """ruff format 多行化 import 且无 lazy-import 注释 → 报错。"""
+        content = (
+            "def f():\n"
+            "    from data.persistence.db_config_service import (\n"
+            "        DatabaseConfigService,\n"
+            "    )\n"
+            "    return DatabaseConfigService()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "multi_bad.py", content)
+        assert len(errors) == 1
+        assert "multi_bad.py" in errors[0]
+
+    def test_import_multi_alias_targets(self, tmp_path, monkeypatch):
+        """from services import a, b（多别名 import）→ 目标模块 'services' 命中禁止方向。"""
+        errors = self._mk(
+            tmp_path,
+            monkeypatch,
+            "utils",
+            "multi_alias.py",
+            "def f():\n    from services import a, b\n    return a\n",
+        )
+        assert len(errors) == 1
+        assert "services" in errors[0]

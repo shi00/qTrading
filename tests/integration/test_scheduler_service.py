@@ -1,13 +1,13 @@
 """Tests for SchedulerService singleton management."""
 
 import datetime
-import sys
 import typing
-import types
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
+
+from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
 
 pytestmark = pytest.mark.integration
 
@@ -157,7 +157,6 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
 @pytest.mark.asyncio
 async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch):
     """夜间预测任务应将 context.trade_date 透传到 save_results，并生成唯一 run_id。"""
-    import services.task_manager as tm_mod
     import utils.scheduler_service as sched_mod
 
     sched_mod.SchedulerService._reset_singleton()
@@ -219,15 +218,16 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             assert context["trade_date"] == "20260423"
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-    monkeypatch.setattr("data.data_processor.DataProcessor", _FakeProcessor)
-    monkeypatch.setattr("data.persistence.review_manager.ReviewManager", _FakeReviewManager)
-    monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
-    monkeypatch.setitem(
-        sys.modules,
-        "strategies.ai_strategy",
-        types.SimpleNamespace(AISelectionStrategy=_FakeStrategy),
-    )
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.DataProcessor", _FakeProcessor)
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.TaskManager", _FakeTaskManager)
 
+    async def _ai_runner(context):
+        strategy = _FakeStrategy()
+        return await strategy.filter(context)
+
+    # review01-A2-1: 夜间预测业务编排已下沉；经 register_job 注入 runner（依赖倒置）
+    service.register_job("nightly_prediction", build_nightly_prediction_job(_ai_runner))
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
     assert holder["unique_key"] == "nightly_prediction", "nightly_prediction should have unique_key for deduplication"
@@ -244,7 +244,6 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
 @pytest.mark.asyncio
 async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
     """夜间预测任务在缺少 context.trade_date 时应拒绝保存。"""
-    import services.task_manager as tm_mod
     import utils.scheduler_service as sched_mod
 
     sched_mod.SchedulerService._reset_singleton()
@@ -306,15 +305,16 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
         async def filter(self, context):
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-    monkeypatch.setattr("data.data_processor.DataProcessor", _FakeProcessor)
-    monkeypatch.setattr("data.persistence.review_manager.ReviewManager", _FakeReviewManager)
-    monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
-    monkeypatch.setitem(
-        sys.modules,
-        "strategies.ai_strategy",
-        types.SimpleNamespace(AISelectionStrategy=_FakeStrategy),
-    )
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.DataProcessor", _FakeProcessor)
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.TaskManager", _FakeTaskManager)
 
+    async def _ai_runner(context):
+        strategy = _FakeStrategy()
+        return await strategy.filter(context)
+
+    # review01-A2-1: 夜间预测业务编排已下沉；经 register_job 注入 runner（依赖倒置）
+    service.register_job("nightly_prediction", build_nightly_prediction_job(_ai_runner))
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
     assert holder["unique_key"] == "nightly_prediction", "nightly_prediction should have unique_key for deduplication"

@@ -237,13 +237,12 @@ ignore_imports = [
     # diagnostics 采集时访问业务单例（A2 评估下沉到 services/diagnostics）
     "utils.diagnostics -> data.data_processor",
     "utils.diagnostics -> services.task_manager",
-    # scheduler_service 业务 job 编排（A2-1 下沉到 services/scheduled_jobs/）
+    # scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态，
+    # 启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释）
     "utils.scheduler_service -> data.cache.cache_manager",
     "utils.scheduler_service -> data.data_processor",
     "utils.scheduler_service -> data.persistence.app_state_service",
-    "utils.scheduler_service -> data.persistence.review_manager",
     "utils.scheduler_service -> services.task_manager",
-    "utils.scheduler_service -> strategies.ai_strategy",
     # shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
     "utils.shutdown -> data.data_processor",
     "utils.shutdown -> data.domain_services.market_data_service",

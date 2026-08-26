@@ -9,7 +9,6 @@ import pandas as pd
 from datetime import date, datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
-from core.i18n import Message
 from utils.scheduler_service import SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -519,81 +518,41 @@ class TestRunAiConceptTagger:
             mock_tm_instance.submit_task.assert_called_once()
 
 
-class TestRunNightlyPrediction:
-    @pytest.mark.asyncio
-    async def test_disabled(self):
-        svc = _make_svc()
-        with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
-            mock_ch.is_auto_update_enabled.return_value = False
-            await svc._run_nightly_prediction()
+class TestSchedulerDispatchNightlyPrediction:
+    """review01-A2-1: svc._run_nightly_prediction 仅调度注册的 job（业务编排已下沉）。
+
+    夜间预测业务逻辑（enabled/idempotency/交易日检查 + AI 选股 + 保存）已迁移至
+    ``services/scheduled_jobs/nightly_prediction.py``，对应业务测试见
+    ``tests/unit/test_nightly_prediction_job.py``。本类验证 SchedulerService 的
+    依赖注入调度机制（register_job → 调用）。
+    """
 
     @pytest.mark.asyncio
-    async def test_already_done(self):
+    async def test_unregistered_job_warns_and_returns(self):
         svc = _make_svc()
-        today_str = "20240615"
-        svc._last_pred_date = today_str
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.get_now") as mock_now,
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            mock_now.return_value.date.return_value = date(2024, 6, 15)
+        with patch("utils.scheduler_service.logger") as mock_logger:
             await svc._run_nightly_prediction()
+        # 强断言：警告消息包含"未注册"提示（而非仅 .called 布尔标志）
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert any("not registered" in str(c.args[0]) for c in warning_calls)
 
     @pytest.mark.asyncio
-    async def test_not_trading_day(self):
+    async def test_registered_job_is_invoked_with_svc(self):
         svc = _make_svc()
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor") as mock_dp,
-            patch("utils.scheduler_service.get_now") as mock_now,
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            mock_dp_instance = MagicMock()
-            mock_dp_instance.trade_calendar = MagicMock()
-            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=False)
-            mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = date(2024, 6, 15)
-            await svc._run_nightly_prediction()
+        mock_job = AsyncMock()
+        svc.register_job("nightly_prediction", mock_job)
+        await svc._run_nightly_prediction()
+        mock_job.assert_awaited_once_with(svc)
 
-    @pytest.mark.asyncio
-    async def test_calendar_check_fails_weekend(self):
+    def test_register_job_stores_and_reset_clears(self):
         svc = _make_svc()
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor") as mock_dp,
-            patch("utils.scheduler_service.get_now") as mock_now,
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            mock_dp_instance = MagicMock()
-            mock_dp_instance.trade_calendar = MagicMock()
-            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
-            mock_dp.return_value = mock_dp_instance
-            mock_now_dt = MagicMock()
-            mock_now_dt.date.return_value = date(2024, 6, 15)
-            mock_now_dt.weekday.return_value = 6
-            mock_now.return_value = mock_now_dt
-            await svc._run_nightly_prediction()
-
-    @pytest.mark.asyncio
-    async def test_trading_day_submits_task(self):
-        svc = _make_svc()
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor") as mock_dp,
-            patch("utils.scheduler_service.get_now") as mock_now,
-            patch("services.task_manager.TaskManager") as mock_tm,
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            mock_dp_instance = MagicMock()
-            mock_dp_instance.trade_calendar = MagicMock()
-            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-            mock_dp.return_value = mock_dp_instance
-            mock_now.return_value.date.return_value = date(2024, 6, 15)
-            mock_tm_instance = MagicMock()
-            mock_tm.return_value = mock_tm_instance
-            await svc._run_nightly_prediction()
-            mock_tm_instance.submit_task.assert_called_once()
+        mock_job = MagicMock()
+        svc.register_job("nightly_prediction", mock_job)
+        assert svc._registered_jobs["nightly_prediction"] is mock_job
+        # reset 后新实例注册表为空（新实例 __init__ 初始化 _registered_jobs）
+        SchedulerService._reset_singleton()
+        svc2 = _make_svc()
+        assert "nightly_prediction" not in svc2._registered_jobs
 
 
 class TestScheduleJobsInvalidTime:
@@ -998,217 +957,3 @@ class TestAiConceptLogicClosure:
                 await factory("test_task")
             # 验证后续的 run_ai_concept_tagging 未执行（早退生效）
             mock_dp.run_ai_concept_tagging.assert_not_called()
-
-
-class TestNightlyPredictionLogicClosure:
-    @pytest.mark.asyncio
-    async def test_prediction_logic_with_empty_result(self):
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
-        mock_strategy = MagicMock()
-        mock_strategy.filter = AsyncMock(return_value=pd.DataFrame())
-        mock_tm = MagicMock()
-        mock_rm = MagicMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
-
-    @pytest.mark.asyncio
-    async def test_prediction_logic_with_results(self):
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
-        mock_strategy = MagicMock()
-        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
-        mock_strategy.filter = AsyncMock(return_value=result_df)
-        mock_tm = MagicMock()
-        mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
-
-    @pytest.mark.asyncio
-    async def test_scheduler_stores_i18n_key(self):
-        """R.3.1: nightly_prediction 应存储 "strategy_ai_nightly_name" (i18n key) 而非 "AI_Auto_Nightly" identifier。"""
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
-        mock_strategy = MagicMock()
-        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
-        mock_strategy.filter = AsyncMock(return_value=result_df)
-        mock_tm = MagicMock()
-        mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            await factory("test_task")
-
-        mock_rm.save_results.assert_called_once()
-        stored_strategy_name = mock_rm.save_results.call_args.args[0]
-        assert stored_strategy_name == "strategy_ai_nightly_name"
-        # 不应等于旧 identifier
-        assert stored_strategy_name != "AI_Auto_Nightly"
-
-    @pytest.mark.asyncio
-    async def test_nightly_prediction_ai_progress_forwards_message(self):
-        """D7(E4): _ai_progress 将 strategy.filter 的 Message 透传给 update_progress，不拼接前缀。"""
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
-        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
-
-        async def _filter_with_progress(context):
-            on_progress = context.get("on_progress")
-            if on_progress:
-                on_progress(50, 100, Message("ai_progress_done", {"done": 50, "total": 100}))
-            return result_df
-
-        mock_strategy = MagicMock()
-        mock_strategy.filter = AsyncMock(side_effect=_filter_with_progress)
-        mock_tm = MagicMock()
-        mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            await factory("test_task")
-
-        # on_progress(50,100) → sub_pct = 0.5 + 0.5*0.4 = 0.7，Message 原样透传（无 f-string 前缀）
-        ai_calls = [c for c in mock_tm.update_progress.call_args_list if isinstance(c.args[2], Message)]
-        assert any(c.args[2].key == "ai_progress_done" and c.args[1] == 0.7 for c in ai_calls)
-
-    @pytest.mark.asyncio
-    async def test_prediction_logic_no_context_raises(self):
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value=None)
-        mock_tm = MagicMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            with pytest.raises(RuntimeError):
-                await factory("test_task")
-
-    @pytest.mark.asyncio
-    async def test_prediction_logic_no_trade_date_raises(self):
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
-        mock_dp.init_data = AsyncMock()
-        mock_dp.prepare_market_data = AsyncMock()
-        mock_dp.get_strategy_data = AsyncMock(return_value={})
-        mock_strategy = MagicMock()
-        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
-        mock_strategy.filter = AsyncMock(return_value=result_df)
-        mock_tm = MagicMock()
-        mock_rm = MagicMock()
-        now_val = datetime(2024, 6, 14, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-            patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            with pytest.raises(RuntimeError):
-                await factory("test_task")
-
-    @pytest.mark.asyncio
-    async def test_prediction_calendar_fails_weekday(self):
-        svc = _make_svc()
-        mock_dp = MagicMock()
-        mock_dp.trade_calendar = MagicMock()
-        mock_dp.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal err"))
-        mock_tm = MagicMock()
-        now_val = datetime(2024, 6, 12, 20, 30)
-
-        with (
-            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("data.data_processor.DataProcessor", return_value=mock_dp),
-            patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("services.task_manager.TaskManager", return_value=mock_tm),
-        ):
-            mock_ch.is_auto_update_enabled.return_value = True
-            await svc._run_nightly_prediction()
-            mock_tm.submit_task.assert_called_once()

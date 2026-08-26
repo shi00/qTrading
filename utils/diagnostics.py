@@ -65,7 +65,10 @@ class SystemDiagnosticsCollector:
             }
 
             # 任务管理器指标
-            from services.task_manager import TaskManager, TaskStatus
+            from services.task_manager import (
+                TaskManager,
+                TaskStatus,
+            )  # lazy-import: 诊断采集时才访问业务单例，避免模块加载即拉起全栈
 
             tm_manager = TaskManager()
             all_tasks = tm_manager.get_all_tasks()
@@ -102,7 +105,9 @@ class SystemDiagnosticsCollector:
             # 5. 调用数据质量检查 (check_data_health)
             health_info = {}
             try:
-                from data.data_processor import DataProcessor
+                from data.data_processor import (
+                    DataProcessor,
+                )  # lazy-import: 诊断采集时才访问业务单例，避免模块加载即拉起全栈
 
                 dp = DataProcessor()
                 if hasattr(dp, "check_data_health"):
