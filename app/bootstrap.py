@@ -191,6 +191,9 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     else:
         started: list[str] = []
         try:
+            # review01-A2-1: 先注册业务 job（夜间预测等）再启动调度器。
+            # SchedulerService 不再感知具体业务类，由 app 层完成依赖注入装配。
+            _register_scheduler_jobs()
             SchedulerService().start()
             started.append("scheduler")
             await NewsSubscriptionService().start()
@@ -234,6 +237,24 @@ def reset_services_initialized() -> None:
     """
     global _services_initialized
     _services_initialized = False
+
+
+def _register_scheduler_jobs() -> None:
+    """review01-A2-1: 注册定时业务 job（SchedulerService 依赖注入装配）。
+
+    夜间预测等业务编排已下沉到 services/scheduled_jobs/。因 services 禁入 strategies
+    （契约 3 / R1），AI 策略执行器（AISelectionRunner）由本 app 层构造并注入——
+    app 层作为编排层可合法 import strategies + services，实现依赖倒置。
+    """
+    from strategies.ai_strategy import AISelectionStrategy
+    from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
+
+    async def _ai_runner(context: dict):
+        # 每次执行新建策略实例（与原 SchedulerService._prediction_logic 行为一致）
+        strategy = AISelectionStrategy()
+        return await strategy.filter(context)
+
+    SchedulerService().register_job("nightly_prediction", build_nightly_prediction_job(_ai_runner))
 
 
 async def _stop_started_services(started: list[str]) -> None:

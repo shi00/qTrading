@@ -10,6 +10,7 @@ is used only as a startup cache for fast access before the DB is available.
 import asyncio
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -126,16 +127,30 @@ class SchedulerService:
         self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
         self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
         self._db_state_loaded = False
+        # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
+        # SchedulerService 仅调度注册的 callable，不感知具体业务类。
+        self._registered_jobs: dict[str, Callable[[object], Awaitable[object]]] = {}
         self._initialized = True
         logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
+
+    def register_job(self, job_name: str, job_fn: Callable[[object], Awaitable[object]]) -> None:
+        """注册定时业务 job（review01-A2-1 依赖注入）。
+
+        由 app 层启动装配调用（app 可合法 import services + utils）。job_fn 接收
+        SchedulerService 实例（提供 idempotency 状态与进度上报接口），返回 None。
+        """
+        self._registered_jobs[job_name] = job_fn
+        logger.info("[Scheduler] Registered job '%s'", job_name)
 
     @staticmethod
     def _persist_run_date(config_key: str, value: str | None):
         ConfigHandler.save_config({config_key: value or ""})
 
     async def _persist_run_date_db(self, db_key: str, config_key: str, value: str | None):
-        from data.cache.cache_manager import CacheManager
-        from data.persistence.app_state_service import set_app_state
+        from data.cache.cache_manager import (
+            CacheManager,
+        )  # lazy-import: 避免 SchedulerService 模块加载即拉起 data 全栈；运行时经单例获取引擎
+        from data.persistence.app_state_service import set_app_state  # lazy-import: 同上（DB idempotency 状态写入）
 
         engine = CacheManager._instance.engine if CacheManager._instance else None
         if engine is not None:
@@ -214,8 +229,8 @@ class SchedulerService:
         if self._db_state_loaded:
             return
 
-        from data.cache.cache_manager import CacheManager
-        from data.persistence.app_state_service import get_app_state
+        from data.cache.cache_manager import CacheManager  # lazy-import: 启动性能——DB 就绪后才读取 idempotency 状态
+        from data.persistence.app_state_service import get_app_state  # lazy-import: 同上（DB idempotency 状态读取）
 
         engine = CacheManager._instance.engine if CacheManager._instance else None
         if engine is None:
@@ -447,7 +462,7 @@ class SchedulerService:
 
         # Check Trading Day
         try:
-            from data.data_processor import DataProcessor
+            from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅交易日检查时加载 DataProcessor
 
             processor = DataProcessor()
             is_trading = await processor.trade_calendar.is_trading_day(today)
@@ -476,11 +491,11 @@ class SchedulerService:
                 return
 
         # Submit via TaskManager for visibility and persistence
-        from services.task_manager import TaskManager
+        from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
 
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
-            from data.data_processor import DataProcessor
+            from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
             processor = DataProcessor()
 
@@ -530,12 +545,12 @@ class SchedulerService:
             logger.debug("[Scheduler] AI Concept tagging already done for %s, skipping", today_str)
             return
 
-        from services.task_manager import TaskManager
+        from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
 
         async def _ai_concept_logic(task_id: str, **kwargs):
             tm = TaskManager()
             cancel_event = tm.get_cancel_event(task_id)
-            from data.data_processor import DataProcessor
+            from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
             processor = DataProcessor()
             # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
@@ -561,117 +576,20 @@ class SchedulerService:
         )
 
     async def _run_nightly_prediction(self):
-        """Execute AI Strategy (20:30)"""
-        from utils.correlation import ensure_correlation_id
+        """Execute registered nightly prediction job (review01-A2-1 下沉).
 
-        ensure_correlation_id()
-
-        if not ConfigHandler.is_auto_update_enabled():
-            return
-
-        today = get_now().date()
-        today_str = today.strftime("%Y%m%d")
-        if self._last_pred_date == today_str:
-            return
-
-        try:
-            from data.data_processor import DataProcessor
-
-            processor = DataProcessor()
-            is_trading = await processor.trade_calendar.is_trading_day(today)
-            if not is_trading:
-                logger.info(
-                    "[Scheduler] Prediction skipped (%s is not a trading day)",
-                    today_str,
-                )
-                return
-        except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
-                "[Scheduler] Trade calendar check failed for prediction (%s): %s",
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
-                exc_info=True,
+        夜间预测完整编排（交易日检查 + TaskManager 提交 + AI 选股 + 结果保存）已迁移至
+        ``services/scheduled_jobs/nightly_prediction.py``。本方法仅调度注册的 job，
+        不再感知 AISelectionStrategy/DataProcessor/ReviewManager/TaskManager 等业务类，
+        消除 ``utils → strategies`` 方向性违规（契约 5）与隐藏三角依赖（A6）。
+        """
+        job_fn = self._registered_jobs.get("nightly_prediction")
+        if job_fn is None:
+            logger.warning(
+                "[Scheduler] nightly_prediction job not registered (call SchedulerService.register_job)",
             )
-            if get_now().weekday() >= 5:
-                return
-
-        from services.task_manager import TaskManager
-
-        async def _prediction_logic(task_id: str, **kwargs):
-            tm = TaskManager()
-            from data.data_processor import DataProcessor
-            from data.persistence.review_manager import ReviewManager
-            from strategies.ai_strategy import AISelectionStrategy
-
-            tm.update_progress(task_id, 0.1, Message("sched_pred_init"))
-            processor = DataProcessor()
-            await processor.init_data()
-
-            tm.update_progress(task_id, 0.2, Message("sched_pred_prepare"))
-            await processor.prepare_market_data()
-
-            tm.update_progress(task_id, 0.3, Message("sched_pred_context"))
-            context = await processor.get_strategy_data()
-            if not context:
-                raise RuntimeError(I18n.get("sched_pred_no_context"))
-            context["data_processor"] = processor
-
-            tm.update_progress(task_id, 0.5, Message("sched_pred_running"))
-
-            # Inject progress callback so strategy.filter() reports AI analysis sub-progress
-            def _ai_progress(current, total, msg):
-                # Map to 50%→90% range
-                # msg 透传 Message (E4): 不拼接 f"[{current}/{total}] " 前缀,
-                # current/total 已由进度条可视化, Message 拼接会输出 dataclass repr.
-                sub_pct = 0.5 + (current / max(total, 1)) * 0.4
-                tm.update_progress(task_id, sub_pct, msg)
-
-            context["on_progress"] = _ai_progress
-
-            strategy = AISelectionStrategy()
-            result_df = await strategy.filter(context)
-
-            if result_df is not None and not result_df.empty:
-                tm.update_progress(task_id, 0.9, Message("sched_pred_saving"))
-                rm = ReviewManager()
-                analysis_trade_date = context.get("trade_date")
-                if not analysis_trade_date:
-                    raise RuntimeError("Nightly prediction context missing trade_date; refusing to save results")
-                import uuid as _uuid
-
-                run_id = _uuid.uuid4().hex[:16]
-                # R.3.1: 存储 i18n key (非 identifier)。
-                # 这里有意使用 "strategy_ai_nightly_name" 而非 AISelectionStrategy.name_key
-                # (= "strategy_ai_active_name")：夜间定时预测与用户交互式 AI 选股是两个
-                # 语义场景，UI 上需区分显示（"夜间 AI 预测" vs "AI 主动选股"），非 DRY 违反。
-                await rm.save_results(
-                    "strategy_ai_nightly_name",
-                    result_df,
-                    trade_date=analysis_trade_date,
-                    run_id=run_id,
-                    params_snapshot={},
-                )
-                await self._mark_nightly_prediction_done_db(today_str)
-                return I18n.get("sched_pred_done_found", count=len(result_df))
-
-            logger.info("[Scheduler] Nightly prediction found no candidates, NOT marking done to allow retry")
-            return I18n.get("sched_pred_done_empty")
-
-        TaskManager().submit_task(
-            name=I18n.get("sched_task_prediction", date=today_str),
-            task_type=I18n.get("task_type_ai_screening"),
-            coroutine_factory=_prediction_logic,
-            cancellable=False,
-            unique_key="nightly_prediction",
-        )
+            return
+        await job_fn(self)
 
     def get_status(self) -> dict:
         """Get scheduler status for UI display"""

@@ -373,7 +373,7 @@ class ShutdownCoordinator:
                 await asyncio.wait(pending, timeout=2.0)
             self._registered_tasks.clear()
 
-        from services.task_manager import TaskManager
+        from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if TaskManager._instance is not None:
             await TaskManager._instance.cancel_all_running_async()
@@ -381,8 +381,10 @@ class ShutdownCoordinator:
     async def _step1_stop_services(self):
         logger.info("[Shutdown] Step 1: Stopping background services...")
 
-        from data.domain_services.market_data_service import MarketDataService
-        from services.news_subscription_service import NewsSubscriptionService
+        from data.domain_services.market_data_service import (
+            MarketDataService,
+        )  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
+        from services.news_subscription_service import NewsSubscriptionService  # lazy-import: 同上
         from utils.scheduler_service import SchedulerService
 
         if SchedulerService._instance is not None:
@@ -404,7 +406,7 @@ class ShutdownCoordinator:
 
     async def _step2_flush_db_writes(self):
         logger.info("[Shutdown] Step 2: Flushing pending DB writes...")
-        from services.task_manager import TaskManager
+        from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if TaskManager._instance is None:
             logger.info("[Shutdown]   - TaskManager not initialized, skipping flush.")
@@ -415,7 +417,7 @@ class ShutdownCoordinator:
 
     async def _step3_close_processor(self):
         logger.info("[Shutdown] Step 3: Closing DataProcessor...")
-        from data.data_processor import DataProcessor
+        from data.data_processor import DataProcessor  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if DataProcessor._instance is not None:
             await DataProcessor._instance.close()
@@ -457,7 +459,9 @@ class ShutdownCoordinator:
         await asyncio.to_thread(self._step5_unload_ai_model_sync)
 
     def _step5_unload_ai_model_sync(self):
-        from services.local_model_manager import LocalModelManager
+        from services.local_model_manager import (
+            LocalModelManager,
+        )  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if LocalModelManager._instance is not None and (
             LocalModelManager._instance._worker_ready or LocalModelManager._instance._model_path
@@ -498,7 +502,9 @@ class ShutdownCoordinator:
 
     def _step7_close_database_managers_sync(self):
         # lazy import to avoid circular dependency
-        from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+        from data.persistence.data_explorer_query_client import (
+            DataExplorerQueryClient,
+        )  # lazy-import: 打破循环依赖 + 关机步骤按需加载
 
         DataExplorerQueryClient.close_all()
         logger.info("[Shutdown]   - DataExplorerQueryClient shared engine closed.")
@@ -516,7 +522,9 @@ class ShutdownCoordinator:
         R2 红线：CancelledError 是 BaseException 子类，不被 `except Exception` 捕获，
         自然传播至 _run_async_step → do_cleanup，配合优雅停机。
         """
-        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from data.persistence.embedded_postgres.service import (
+            EmbeddedPostgresService,
+        )  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         try:
             service = EmbeddedPostgresService.get_instance()

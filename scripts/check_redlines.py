@@ -8,6 +8,7 @@
 - R15 单例未注册：扫描带 _instance/__new__ 的单例类是否使用 @register_singleton
 - R_no_bare_ft_colors_in_ui: 扫描 UI 层裸 ft.Colors.<COLOR> 引用 (必须替换为 AppColors token)
 - R_tushare_token_log: 扫描 tushare_client.py 中 logger 调用是否直接打印 self.token / token 明文 (R9 红线)
+- R_lazy_import_whitelist: 扫描函数体内禁止方向的跨层 import 是否带 # lazy-import: <原因> 注释（review01-A2-2）
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
@@ -830,6 +831,121 @@ def check_R_no_bare_font_size_in_ui() -> list[str]:
 
 
 # ============================================================================
+# review01-A2-2: 函数体内跨层 lazy import 白名单
+# ============================================================================
+
+# 禁止方向与 tests/unit/test_architecture_boundaries.py FORBIDDEN_IMPORTS 保持一致
+_LAZY_IMPORT_FORBIDDEN_DIRECTIONS: dict[str, frozenset[str]] = {
+    "core": frozenset({"data", "services", "strategies", "ui", "app", "utils"}),
+    "data": frozenset({"services", "strategies", "ui", "app"}),
+    "services": frozenset({"strategies", "ui", "app"}),
+    "strategies": frozenset({"ui", "app"}),
+    "ui": frozenset({"app"}),
+    "utils": frozenset({"data", "services", "strategies", "ui", "app"}),
+}
+
+_LAZY_IMPORT_MARKER = "# lazy-import:"
+_LAZY_IMPORT_SCAN_LAYERS = ("core", "data", "services", "strategies", "ui", "app", "utils")
+
+
+def _node_has_lazy_import_marker(path: Path, lineno: int, end_lineno: int) -> bool:
+    """检查 import 语句行范围 [lineno, end_lineno] 内是否含 ``# lazy-import:`` 标记。
+
+    ruff format 会把含行尾注释的 import 多行化（注释落在末行），故按行范围扫描。
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return True  # 读取失败不阻断检查
+    return any(_LAZY_IMPORT_MARKER in lines[i] for i in range(lineno - 1, min(end_lineno, len(lines))))
+
+
+class _LazyImportWhitelistVisitor(ast.NodeVisitor):
+    """AST 遍历：收集函数体内禁止方向的跨层 import 缺 lazy-import 标记的错误。"""
+
+    def __init__(self, layer: str, forbidden: frozenset[str], py_file: Path, errors: list[str]) -> None:
+        self._layer = layer
+        self._forbidden = forbidden
+        self._py_file = py_file
+        self._errors = errors
+        self._in_function = False
+        self._in_type_checking = False
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._in_function = True
+        self.generic_visit(node)
+        self._in_function = False
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._in_function = True
+        self.generic_visit(node)
+        self._in_function = False
+
+    def visit_If(self, node: ast.If) -> None:
+        if isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+            # TYPE_CHECKING 块仅类型检查，非运行时依赖，豁免
+            self._in_type_checking = True
+            self.generic_visit(node)
+            self._in_type_checking = False
+        else:
+            self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self._check(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self._check(node)
+
+    def _check(self, node: ast.AST) -> None:
+        if not self._in_function or self._in_type_checking:
+            return
+        if isinstance(node, ast.Import):
+            targets = [alias.name.split(".")[0] for alias in node.names]
+        else:
+            # ImportFrom（node.module 可为 None，如 from . import x）
+            node_from = node.module or ""
+            targets = [node_from.split(".")[0]] if node.level == 0 and node_from else []
+        hit = [t for t in targets if t in self._forbidden]
+        if not hit:
+            return
+        end_lineno = getattr(node, "end_lineno", node.lineno)
+        if _node_has_lazy_import_marker(self._py_file, node.lineno, end_lineno):
+            return
+        rel = self._py_file.relative_to(ROOT).as_posix()
+        self._errors.append(
+            f"[lazy-import] {rel}:{node.lineno} 函数体内跨层 import '{', '.join(hit)}' "
+            f"缺 '# lazy-import: <原因>' 注释（review01-A2-2）"
+        )
+
+
+def check_R_lazy_import_whitelist() -> list[str]:
+    """review01-A2-2: 禁止方向的函数体内跨层 import 必须带 ``# lazy-import:`` 注释。
+
+    规则：函数体（含嵌套闭包）内的跨层 import，若 源层→目标层 属于禁止方向
+    （与 test_architecture_boundaries.py FORBIDDEN_IMPORTS 一致），必须带行尾
+    ``# lazy-import: <原因>`` 注释（显式白名单登记），否则报错。
+    ``if TYPE_CHECKING:`` 块内导入豁免（仅类型检查，非运行时依赖）。
+
+    补充：import-linter 契约 5/6 亦分析函数体内 import（ignore_imports 白名单），
+    二者双保险——本检查确保代码层面显式标注，契约确保新增违规被拦截。
+    """
+    errors: list[str] = []
+    for layer in _LAZY_IMPORT_SCAN_LAYERS:
+        layer_dir = ROOT / layer
+        if not layer_dir.is_dir():
+            continue
+        forbidden = _LAZY_IMPORT_FORBIDDEN_DIRECTIONS.get(layer, frozenset())
+        if not forbidden:
+            continue
+        for py_file in _iter_py_files(layer_dir):
+            tree = _parse_module(py_file)
+            if tree is None:
+                continue
+            _LazyImportWhitelistVisitor(layer, forbidden, py_file, errors).visit(tree)
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -846,6 +962,7 @@ def main() -> int:
         ("R_no_bare_ft_colors_in_ui", check_R_no_bare_ft_colors_in_ui()),
         ("R_no_bare_font_size_in_ui", check_R_no_bare_font_size_in_ui()),
         ("R_tushare_token_log", check_R_tushare_token_log()),
+        ("R_lazy_import_whitelist", check_R_lazy_import_whitelist()),
     ]
     all_errors: list[str] = []
     for _, errs in checks:
@@ -858,7 +975,7 @@ def main() -> int:
         return 1
 
     print(
-        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log）"
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist）"
     )
     return 0
 

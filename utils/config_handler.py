@@ -734,7 +734,9 @@ class ConfigHandler:
         # Priority 2: reconstruct from components
         host = ConfigHandler.get_typed("db_host", str, "")
         if host:
-            from data.persistence.db_config_service import DatabaseConfigService
+            from data.persistence.db_config_service import (
+                DatabaseConfigService,
+            )  # lazy-import: 打破 ConfigHandler ↔ DatabaseConfigService 循环依赖
 
             password = ConfigHandler.get_db_password()
             return DatabaseConfigService.build_url(
@@ -834,7 +836,9 @@ class ConfigHandler:
         ``config.DB_URL = embedded_url``（spec.md §1.4），由 ``get_db_url()``
         Priority 3 兜底返回。该例外不经过本方法，与本方法的"不持久化"承诺不冲突。
         """
-        from data.persistence.db_config_service import DatabaseConfigService
+        from data.persistence.db_config_service import (
+            DatabaseConfigService,
+        )  # lazy-import: 打破 ConfigHandler ↔ DatabaseConfigService 循环依赖
 
         db_url = DatabaseConfigService.build_url(
             host=host,
