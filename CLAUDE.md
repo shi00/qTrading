@@ -241,6 +241,11 @@ app → 编排所有层，仅被 main.py 调用
 
 > **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
 
+> **循环依赖治理现状（review01-A6）**：两条 MAJOR 结构性循环已通过依赖注入消除，不再靠延迟 import 压制——
+> - `CacheManager ↔ BaseDao`：已由中立模块 `data/persistence/engine_provider.py` 切断（review03-C11），`BaseDao._check_engine` 经 `engine_provider.is_disposed()` 查询引擎状态，不再反向查询 `CacheManager._instance`。
+> - `utils → strategies → services → utils`：已由夜间预测编排下沉到 `services/scheduled_jobs/nightly_prediction.py` 消除（review01-A2），SchedulerService 经 `register_job` 依赖注入（app 层注入 `AISelectionRunner`），不再感知具体策略类。
+> 剩余 `ConfigHandler ↔ DatabaseConfigService` 为合法循环打破（函数内 lazy import 带 `# lazy-import:` 注释 + 契约 5 白名单登记）；`TaskManager → CacheManager` 实为合法单向依赖（services → data），非循环。
+
 ### 4.2 core 层隔离原则
 
 `core/` 是架构核心层，只包含被所有层共享的基础设施 (目前含 `i18n` 与 `prompt_base`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
