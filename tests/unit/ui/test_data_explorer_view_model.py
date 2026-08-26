@@ -582,6 +582,58 @@ class TestStateManagement:
         vm.clear_error()
         assert vm.state.error_message is None
 
+    def test_clear_filter_resets_committed_and_draft(self, vm):
+        """UX-07: clear_filter 重置已提交 + 草稿全部过滤字段."""
+        vm._set_state(
+            filter_col="close",
+            filter_op=">",
+            filter_val="10",
+            filter_col_draft="close",
+            filter_op_draft=">",
+            filter_val_draft="10",
+        )
+        vm.clear_filter()
+        assert vm.state.filter_col is None
+        assert vm.state.filter_op == "="
+        assert vm.state.filter_val == ""
+        assert vm.state.filter_col_draft is None
+        assert vm.state.filter_op_draft == "="
+        assert vm.state.filter_val_draft == ""
+
+    def test_clear_filter_preserves_table_and_pagination(self, vm):
+        """UX-07: 保留当前表选择 — 不动 current_table/分页/排序."""
+        vm._set_state(
+            current_table="daily_quotes",
+            current_page=3,
+            page_size=50,
+            sort_col_index=2,
+            sort_asc=False,
+            filter_val_draft="10",
+        )
+        vm.clear_filter()
+        assert vm.state.current_table == "daily_quotes"
+        assert vm.state.current_page == 3
+        assert vm.state.page_size == 50
+        assert vm.state.sort_col_index == 2
+        assert vm.state.sort_asc is False
+        assert vm.state.filter_val == ""
+
+    def test_clear_filter_idempotent(self, vm):
+        """UX-07: 空状态 clear 不抛且状态不变."""
+        before = vm.state
+        vm.clear_filter()
+        assert vm.state == before
+
+    def test_clear_filter_single_notification(self, vm):
+        """UX-07: clear 仅触发一次订阅通知 (Mixin._set_state 单次)."""
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+        vm._set_state(filter_val_draft="10")
+        snapshots.clear()
+        vm.clear_filter()
+        assert len(snapshots) == 1
+        assert snapshots[0].filter_val == ""
+
     def test_set_table(self, vm):
         """set_table 替代直接属性写入(供 View 调用)。"""
         vm.set_table("daily_quotes")

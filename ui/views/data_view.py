@@ -512,6 +512,24 @@ def TableViewerTab(
         if page is not None:
             page.run_task(_do_query)
 
+    # UX-07 (P2-02): 清除筛选 — 公共零参核心 (按钮 on_click 与空态 CTA on_cta 共享).
+    def _clear_filter_and_query() -> None:
+        """清除过滤 + 回到第 1 页重查询 (保留当前表选择); 供清除按钮与空态 CTA 调用."""
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_clear_filter)
+
+    async def _do_clear_filter() -> None:
+        ensure_correlation_id()
+        UILogger.log_action("TableViewerTab", "Click", "btn_clear_filter")
+        vm.clear_filter()
+        try:
+            await vm.query_data(page=1)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            logger.error("[TableViewerTab] clear filter error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+
     def _on_refresh_click(e: ft.ControlEvent) -> None:
         page = _get_page()
         if page is not None:
@@ -670,6 +688,24 @@ def TableViewerTab(
         disabled=is_loading,
     )
 
+    # UX-07 (P2-02): 清除筛选 — 草稿任一非默认即可见 (清除后回到第 1 页重查询, 保留当前表选择).
+    # 公共零参核心: EmptyState.on_cta 为零参契约 (state_views), 按钮 on_click 经 lambda 适配.
+    has_filter_draft = bool(
+        state.filter_col_draft is not None or state.filter_op_draft != "=" or state.filter_val_draft != ""
+    )
+    btn_clear_filter = anchored(
+        EIDS.DATA.FILTER_CLEAR_BUTTON,
+        ft.IconButton(
+            ft.Icons.FILTER_ALT_OFF,
+            tooltip=I18n.get("data_filter_clear"),
+            on_click=safe_on_click(lambda _e: _clear_filter_and_query()),
+            icon_color=AppColors.TEXT_SECONDARY,
+            icon_size=AppStyles.FONT_SIZE_HEADLINE,
+            visible=has_filter_draft,
+            disabled=is_loading,
+        ),
+    )
+
     # 加载/空态 widget
     loading_widget = ft.Container(
         content=ft.Column(
@@ -727,6 +763,10 @@ def TableViewerTab(
             grid_content = EmptyState(
                 icon=ft.Icons.FILTER_ALT_OFF,
                 title=I18n.get("empty_filter_result"),
+                # UX-07: 一键清除筛选 (保留当前表选择); on_cta 零参契约 → 复用 _clear_filter_and_query
+                on_cta=_clear_filter_and_query,
+                cta_text=I18n.get("data_filter_clear"),
+                cta_icon=ft.Icons.CLEAR,
             )
         else:
             grid_content = EmptyState(
@@ -767,7 +807,7 @@ def TableViewerTab(
             ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),
             ft.Container(
                 content=ft.Row(
-                    [filter_col, filter_op, filter_val, btn_query, btn_refresh],
+                    [filter_col, filter_op, filter_val, btn_query, btn_clear_filter, btn_refresh],
                     spacing=5,
                 ),
                 padding=5,
