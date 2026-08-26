@@ -129,8 +129,8 @@ redlines:
 
   - id: R13
     title: 未注册 DAO
-    description: "新增 DAO 不在 CacheManager.__init__ 中实例化、不在 _create_engine 中更新 .engine 引用"
-    enforcement: "pre-commit（check_redlines.py，部分覆盖：__init__ 注册已检查，_create_engine engine 引用更新未自动检查）"
+    description: "新增 DAO 不在 CacheManager.__init__ 中实例化（engine 引用由 _DAO_REGISTRY 驱动循环同步，结构上不可漏改）"
+    enforcement: "pre-commit（check_redlines.py，覆盖 __init__ 注册维度）"
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE

@@ -302,6 +302,72 @@ class TestDaoCountConsistency:
         )
 
 
+_SINGLETON_LIFECYCLE_PATH = ROOT / "docs" / "architecture" / "singleton-lifecycle.md"
+
+
+def _actual_registered_singletons() -> frozenset[str]:
+    """导入全部 @register_singleton 模块（side-effect 注册）后返回 registry 类名集合。
+
+    与 tests/unit/test_singletons_isolation.py 的动态枚举模式一致：noqa: F401
+    的导入仅用于 side-effect 注册，不在测试中直接引用类名。
+    """
+    import data.cache.cache_manager  # noqa: F401 (side-effect 注册)
+    import data.data_processor  # noqa: F401 (side-effect 注册)
+    import data.domain_services.market_data_service  # noqa: F401 (side-effect 注册)
+    import data.external.akshare_concept_client  # noqa: F401 (side-effect 注册)
+    import data.external.tushare_client  # noqa: F401 (side-effect 注册)
+    import data.persistence.embedded_postgres.service  # noqa: F401 (side-effect 注册)
+    import data.persistence.metadata_manager  # noqa: F401 (side-effect 注册)
+    import services.ai_service  # noqa: F401 (side-effect 注册)
+    import services.embedded_pg_maintenance_service  # noqa: F401 (side-effect 注册)
+    import services.local_model_manager  # noqa: F401 (side-effect 注册)
+    import services.news_subscription_service  # noqa: F401 (side-effect 注册)
+    import services.task_manager  # noqa: F401 (side-effect 注册)
+    import strategies.all_strategies  # noqa: F401 (side-effect 注册)
+    import utils.scheduler_service  # noqa: F401 (side-effect 注册)
+    import utils.thread_pool  # noqa: F401 (side-effect 注册)
+
+    from utils.singleton_registry import get_registered_singletons
+
+    return frozenset(get_registered_singletons())
+
+
+def _documented_registered_singletons() -> frozenset[str]:
+    """从 singleton-lifecycle.md 注册单例表格提取文档声明的类名集合。"""
+    content = _read(_SINGLETON_LIFECYCLE_PATH)
+    section = content.split("**注册单例（", 1)[1].split("**非注册单例", 1)[0]
+    return frozenset(re.findall(r"^\| `(\w+)`", section, flags=re.M))
+
+
+class TestSingletonRegistryConsistency:
+    """G24: singleton-lifecycle.md 注册单例清单与 singleton_registry 实际注册动态比对。
+
+    防再漂移：新增/移除 @register_singleton 单例时，文档清单与总数声明由本测试强制同步。
+    """
+
+    def test_documented_registered_singletons_match_registry(self):
+        """文档注册单例类名集合与 singleton_registry 实际注册集合一致。"""
+        actual = _actual_registered_singletons()
+        documented = _documented_registered_singletons()
+        assert actual == documented, (
+            "singleton-lifecycle.md 注册单例清单与 singleton_registry 不一致。"
+            "新增/移除单例时必须同步更新 docs/architecture/singleton-lifecycle.md。"
+            f"\n仅在 registry 未在文档: {sorted(actual - documented)}"
+            f"\n仅在文档未在 registry: {sorted(documented - actual)}"
+        )
+
+    def test_declared_singleton_count_matches_registry(self):
+        """文档 '注册单例（@register_singleton，N 个）' 总数声明与实际注册数一致。"""
+        actual = len(_actual_registered_singletons())
+        content = _read(_SINGLETON_LIFECYCLE_PATH)
+        m = re.search(r"\*\*注册单例（`@register_singleton`，(\d+)\s*个）\*\*", content)
+        assert m, "singleton-lifecycle.md missing '注册单例（@register_singleton，N 个）' count declaration"
+        declared = int(m.group(1))
+        assert declared == actual, (
+            f"singleton-lifecycle.md declares {declared} registered singletons but singleton_registry has {actual}"
+        )
+
+
 class TestDocsConsistencyScript:
     """C5: scripts/check_docs_consistency.py 契约测试。
 
