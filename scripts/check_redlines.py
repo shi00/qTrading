@@ -429,8 +429,8 @@ def _extract_cache_manager_dao_instances(path: Path) -> set[str]:
 def check_R13() -> list[str]:
     """R13：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单。
 
-    仅检查 __init__ 实例化维度；_create_engine 中 .engine 引用更新维度未检查，
-    因其与 __init__ 实例化一一对应，违反 __init__ 维度即已触发 R13。
+    仅检查 __init__ 实例化维度；_create_engine 的 .engine 引用更新由 _DAO_REGISTRY
+    驱动循环同步（cache_manager.py），结构上不可漏改（review07-G19 与宪法 R13 描述一致）。
     """
     daos_dir = ROOT / "data" / "persistence" / "daos"
     cache_manager_path = ROOT / "data" / "cache" / "cache_manager.py"
@@ -501,12 +501,16 @@ _R15_EXEMPT_CLASSES = frozenset({"ConfigHandler", "ProxyManager"})
 
 
 def _is_singleton_class(node: ast.ClassDef) -> bool:
-    """判断类是否为单例模式：有 __new__ 方法 + (_instance 类属性 或 _reset_singleton 方法)。
+    """判断类是否为单例模式（review07-G19 扩展识别条件）。
 
-    识别信号组合避免误报：
+    原规则：__new__ + (_instance 类属性 或 _reset_singleton)。
+    G19 扩展：_instance 类属性 + (__new__ | _reset_singleton | 公开访问器) 任一组合。
+    公开访问器 = 不以 _ 开头的方法 def 且函数体引用 _instance（近似"公开获取方法"）。
+
+    组合判定避免误报：
     - 仅 __new__ 不够（任何不可变类型都可能有 __new__）
-    - 仅 _instance 不够（可能是普通类属性）
-    - __new__ + _reset_singleton 是单例的强信号
+    - 仅 _instance 不够（可能是普通类属性，需配合 __new__/_reset/公开访问器）
+    - 保留原规则命中面（__new__ + _reset_singleton，无显式 _instance 类属性）不丢失
     """
     has_new = any(isinstance(item, ast.FunctionDef) and item.name == "__new__" for item in node.body)
     has_instance_attr = any(
@@ -517,7 +521,17 @@ def _is_singleton_class(node: ast.ClassDef) -> bool:
         for item in node.body
     )
     has_reset = any(isinstance(item, ast.FunctionDef) and item.name == "_reset_singleton" for item in node.body)
-    return has_new and (has_instance_attr or has_reset)
+    has_public_accessor = any(
+        isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not item.name.startswith("_")
+        and any(isinstance(sub, ast.Attribute) and sub.attr == "_instance" for sub in ast.walk(item))
+        for item in node.body
+    )
+    # 原规则命中面（__new__ 单例，_instance 动态创建于 __new__）
+    legacy_hit = has_new and (has_instance_attr or has_reset)
+    # G19 扩展命中面：_instance 类属性 + 任一辅助信号（模块级事实单例 / 纯 get_instance 模式）
+    expanded_hit = has_instance_attr and (has_new or has_reset or has_public_accessor)
+    return legacy_hit or expanded_hit
 
 
 def check_R15() -> list[str]:
@@ -539,6 +553,11 @@ def check_R15() -> list[str]:
                 if not _is_singleton_class(node):
                     continue
                 if node.name in _R15_EXEMPT_CLASSES:
+                    continue
+                # G19 豁免：# not-a-singleton: <原因>（模块级常量持有者 / 普通 _instance 类属性误报对象）
+                if _line_has_noqa_marker(p, node.lineno, "# not-a-singleton:") or _line_has_noqa_marker(
+                    p, node.lineno - 1, "# not-a-singleton:"
+                ):
                     continue
                 decorators = _decorator_names(node)
                 if "register_singleton" not in decorators:

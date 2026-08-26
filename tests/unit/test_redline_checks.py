@@ -636,6 +636,35 @@ class TestR15PureFunction:
         node = _first_class_def("class Foo:\n    @classmethod\n    def _reset_singleton(cls):\n        pass\n")
         assert _is_singleton_class(node) is False
 
+    def test_instance_attr_with_public_accessor_detected(self):
+        """_instance 类属性 + 公开访问器（get_instance 引用 _instance）应识别（G19 扩展：模块级事实单例）。"""
+        node = _first_class_def(
+            "class MySingleton:\n"
+            "    _instance = None\n"
+            "    @classmethod\n"
+            "    def get_instance(cls):\n"
+            "        return cls._instance\n"
+        )
+        assert _is_singleton_class(node) is True
+
+    def test_instance_attr_with_reset_detected(self):
+        """_instance 类属性 + _reset_singleton（无 __new__）应识别（G19 扩展）。"""
+        node = _first_class_def(
+            "class MySingleton:\n"
+            "    _instance = None\n"
+            "    @classmethod\n"
+            "    def _reset_singleton(cls):\n"
+            "        cls._instance = None\n"
+        )
+        assert _is_singleton_class(node) is True
+
+    def test_private_method_not_accessor(self):
+        """仅私有方法（如 _init）引用 _instance 不视为公开访问器 → 不识别（避免常量持有类误报）。"""
+        node = _first_class_def(
+            "class MyStorage:\n    _instance = {}\n    def _init(self):\n        return self._instance\n"
+        )
+        assert _is_singleton_class(node) is False
+
 
 # ============================================================================
 # R16 纯函数测试 (review07-G20)
@@ -798,6 +827,47 @@ class TestRedlineIntegrationOnCurrentCodebase:
         """R15：当前代码库所有单例类使用 @register_singleton 装饰器。"""
         errors = check_R15()
         assert errors == [], "R15 violations found:\n  " + "\n  ".join(errors)
+
+    def test_check_R15_detects_unregistered_module_singleton(self, tmp_path, monkeypatch):
+        """R15（G19 扩展）：_instance + 公开访问器的未注册单例应被检出。"""
+        services_dir = tmp_path / "services"
+        services_dir.mkdir()
+        (services_dir / "test_mod.py").write_text(
+            "class FactSoftSingleton:\n"
+            "    _instance = None\n"
+            "    @classmethod\n"
+            "    def get_instance(cls):\n"
+            "        return cls._instance\n",
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R15()
+        assert any("FactSoftSingleton" in e for e in errors), "module-level singleton should be flagged:\n" + "\n".join(
+            errors
+        )
+
+    def test_check_R15_not_a_singleton_marker_exempts(self, tmp_path, monkeypatch):
+        """R15（G19 豁免）：# not-a-singleton: <原因> 标记类不被误报。"""
+        services_dir = tmp_path / "services"
+        services_dir.mkdir()
+        (services_dir / "test_mod.py").write_text(
+            "# not-a-singleton: 常量持有者，_instance 为普通类属性\n"
+            "class ConstantsHolder:\n"
+            "    _instance = {}\n"
+            "    @classmethod\n"
+            "    def get_constants(cls):\n"
+            "        return cls._instance\n",
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        errors = check_redlines.check_R15()
+        assert not any("ConstantsHolder" in e for e in errors), "not-a-singleton marker should exempt:\n" + "\n".join(
+            errors
+        )
 
     def test_check_R16_passes(self):
         """R16（部分）：当前代码库 ViewModel __init__ 无未豁免的已注册单例构造。"""
