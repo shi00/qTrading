@@ -847,12 +847,12 @@ class TestRedlinesYamlConsistency:
         import yaml
 
         from check_docs_consistency import (
-            EXCEPTIONS_YAML_PATH,
             REDLINES_YAML_PATH,
             check_redlines_yaml_consistency,
         )
 
-        # 将 R1 改为 INVARIANT (非 EXCEPTIONABLE), 但 exceptions.yml 仍引用 R1
+        # 将 R1 改为 INVARIANT (非 EXCEPTIONABLE), 且构造 exceptions.yml 引用 R1
+        # （review01-A3: 真实 exceptions.yml 已随 EX-0001 移除而置空，故测试构造自包含 fixture）
         data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
         for entry in data["redlines"]:
             if entry["id"] == "R1":
@@ -860,9 +860,30 @@ class TestRedlinesYamlConsistency:
         tmp_yml = tmp_path / "redlines_non_exceptionable.yml"
         tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
 
+        tmp_exc = tmp_path / "exceptions.yml"
+        tmp_exc.write_text(
+            yaml.safe_dump(
+                {
+                    "exceptions": [
+                        {
+                            "id": "EX-TEST-LINKAGE",
+                            "rule_id": "R1",
+                            "paths": ["ui/startup_views.py"],
+                            "reason": "test fixture",
+                            "owner": "test",
+                            "approved_by": "test",
+                            "removal_trigger": "test",
+                            "verification": "test",
+                        }
+                    ]
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
         monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
-        # 确保 exceptions.yml 存在 (真实文件)
-        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", EXCEPTIONS_YAML_PATH)
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", tmp_exc)
 
         errors = check_redlines_yaml_consistency()
         assert any("不是 EXCEPTIONABLE 规则" in e for e in errors), f"应报例外引用非 EXCEPTIONABLE 规则, got: {errors}"

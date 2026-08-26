@@ -5,43 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
-from enum import Enum, auto
-from typing import TYPE_CHECKING
 
 from app.bootstrap import check_onboarding_needed, initialize_services, reset_services_initialized
+from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
-if TYPE_CHECKING:
-    from app.bootstrap import EmbeddedPgStartupScenario
-
 logger = logging.getLogger(__name__)
-
-
-class StartupState(Enum):
-    LOADING = auto()
-    NEED_UPGRADE = auto()
-    UPGRADE_IN_PROGRESS = auto()
-    UPGRADE_SUCCESS = auto()
-    UPGRADE_FAILED = auto()
-    INIT_FAILED = auto()
-    NEED_ONBOARDING = auto()
-    READY = auto()
-
-
-@dataclass
-class StartupContext:
-    """Extra context passed alongside state transitions."""
-
-    error: str | None = None
-    detail: str | None = None
-    current_rev: str | None = None
-    head_rev: str | None = None
-    # UX 改进 spec §启动侧方案 A：embedded PG 启动场景，由 main.py 在
-    # prepare_database_runtime 之前 detect 后注入，供 LoadingView 显示差异化文案。
-    # None 表示 external 模式或未启用 embedded PG（显示原有 "Initializing..." 文案）。
-    embedded_pg_scenario: EmbeddedPgStartupScenario | None = None
 
 
 class StartupController:

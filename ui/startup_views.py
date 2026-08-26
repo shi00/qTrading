@@ -18,21 +18,37 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 import flet as ft
 
-# 架构例外 (§4.1): app 层应仅被 main.py 调用。此处的导入属于 main.py 启动流程
-# 的延伸 (main.py 装配 StartupView/LoadingView), 不是 ui 层的正常业务导入。
-# 已在 docs/governance/exceptions.yml (EX-0001) 集中登记。
-from app.bootstrap import EmbeddedPgStartupScenario
-from app.startup_controller import StartupContext, StartupController, StartupState
+# review01-A3: StartupState/StartupContext/EmbeddedPgStartupScenario 为纯类型，已下沉到
+# core.startup_types；StartupController 经 StartupControllerProtocol 解耦——ui 层不再
+# import app 层（契约 6），消除 exceptions.yml EX-0001 例外。
+from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
+
+
+class StartupControllerProtocol(Protocol):
+    """StartupController 最小接口（ui 层定义，app 层实现，解耦 ui→app 依赖）。
+
+    仅声明 ``StartupView`` 实际调用的成员；实现类
+    ``app.startup_controller.StartupController`` 通过结构子类型满足本协议。
+    """
+
+    async def upgrade(self) -> None: ...
+    async def proceed_after_upgrade_success(self) -> None: ...
+    def upgrade_exit(self) -> None: ...
+    async def upgrade_retry(self) -> None: ...
+    async def retry(self) -> None: ...
+    async def reconfigure(self) -> None: ...
+    def skip(self) -> None: ...
+    async def onboarding_complete(self) -> Any: ...
 
 
 def _get_page() -> ft.Page | None:
@@ -519,7 +535,7 @@ def _build_onboarding_view(on_complete: Callable[[], Any]) -> ft.Container:
 
 @ft.component
 def StartupView(
-    controller: StartupController,
+    controller: StartupControllerProtocol,
     bridge: _StartupBridge,
     run_task_fn: Callable[..., Any],
 ) -> ft.Control:
