@@ -26,17 +26,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 # Phase 2A.1 §3.2.10：距上次 probe 超过此阈值时启动期自动触发 probe
 _AUTO_PROBE_INTERVAL = timedelta(days=7)
 
-# Skeptic-MAJOR-2 修复：Flet Web 模式下每个浏览器 page 连接触发独立 main(page) 协程。
-# 第一次 main(page)（keep-alive context）已启动后台服务（scheduler/news/market_data/auto_probe），
-# 第二次 main(page)（e2e_page fixture 或用户刷新页面）若再次调用 initialize_services 会
-# 重复启动后台任务（TaskManager.init_db UPDATE task_history、auto_probe_task 等），
-# 导致竞态与资源泄漏。模块级 flag 保证 initialize_services 只执行一次副作用初始化。
-# reconfigure 路径需调用 reset_services_initialized() 重置 flag 以便重新初始化。
-_services_initialized = False
+# review01-A9: 原模块级 _services_initialized flag 在多 session 下不安全——
+# Flet Web 多 session 共享进程时，第二个 session 会重新构造 CacheManager 但
+# 模块级 flag 使 initialize_services 跳过，导致"引擎就绪、服务未启动"的不一致状态。
+# 已改为 per-StartupController 实例状态（由调用方传入 services_initialized 参数），
+# 模块级 flag 与 reset_services_initialized() 一并移除。
 
 # Skeptic-MAJOR-4 修复：atexit handler 线性泄漏。Flet Web 模式下每个 main(page) 调用
 # prepare_database_runtime，若 QTRADING_EMBEDDED_PG_URL_FILE 设置会无条件 atexit.register，
@@ -55,8 +52,11 @@ class InitResult(TypedDict):
     auto_probe_task: asyncio.Task | None
 
 
-async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
-    global _services_initialized
+async def initialize_services(
+    cache_manager,
+    show_toast_fn=None,
+    services_initialized: bool = False,
+) -> InitResult:
     from utils.correlation import ensure_correlation_id
 
     ensure_correlation_id()
@@ -64,11 +64,13 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     # review03-C15: 生产构建（非 E2E、非 DEBUG）下禁止关闭质量门控严格模式
     _validate_quality_gate_strictness()
 
-    # Skeptic-MAJOR-2 修复：Flet Web 模式下第二个 main(page) 调用时跳过重复初始化。
+    # review01-A9: 由调用方（StartupController per-session 实例）传入 services_initialized。
+    # 原模块级 flag 在多 session 下不安全——Flet Web 多 session 共享进程时，第二个 session
+    # 重新构造 CacheManager 但模块级 flag 跳过初始化，导致"引擎就绪、服务未启动"的不一致状态。
     # 单例服务（SchedulerService/NewsSubscriptionService/MarketDataService）自身有幂等 guard，
     # 但 TaskManager.init_db() 不幂等（每次 UPDATE task_history）、auto_probe_task 每次创建新 task。
-    # 第一次成功初始化后直接返回成功结果，避免重复副作用。
-    if _services_initialized:
+    # 同一 session 内重复调用时直接返回成功结果，避免重复副作用。
+    if services_initialized:
         logger.debug("[Bootstrap] services already initialized, skipping duplicate initialize_services call")
         return {
             "success": True,
@@ -204,9 +206,8 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
         auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
 
-    # Skeptic-MAJOR-2 修复：标记服务已初始化，防止后续 main(page) 重复调用
-    _services_initialized = True
-
+    # review01-A9: 不再由本模块写模块级 flag；调用方（StartupController per-session 实例）
+    # 根据 result["success"] 自行置位 _services_initialized。
     return {
         "success": True,
         "error": None,
@@ -215,16 +216,6 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         "head_rev": None,
         "auto_probe_task": auto_probe_task,
     }
-
-
-def reset_services_initialized() -> None:
-    """重置 _services_initialized flag，供 StartupController.reconfigure 调用。
-
-    reconfigure 会调 cache_manager.close() 重置 CacheManager 单例，
-    用户完成 onboarding 后需要重新执行 initialize_services。
-    """
-    global _services_initialized
-    _services_initialized = False
 
 
 def _register_scheduler_jobs() -> None:

@@ -180,6 +180,61 @@ class TestStartupInitServices:
         assert ctrl.state == StartupState.READY
         assert transitions[-1][0] == StartupState.READY
 
+    @pytest.mark.asyncio
+    async def test_init_services_passes_services_initialized_and_sets_after_success(self, controller):
+        """review01-A9: 首次初始化传 services_initialized=False，成功后再调用传 True。"""
+        ctrl, _ = controller
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+
+            await ctrl._init_services()  # 首次
+            first_kwargs = mock_init.call_args.kwargs
+            assert first_kwargs["services_initialized"] is False
+            assert ctrl._services_initialized is True
+
+            mock_init.reset_mock()
+            await ctrl._init_services()  # 同 session 二次调用
+            second_kwargs = mock_init.call_args.kwargs
+            assert second_kwargs["services_initialized"] is True
+
+    @pytest.mark.asyncio
+    async def test_init_services_failure_does_not_set_services_initialized(self, controller):
+        """review01-A9: 初始化失败不置位 per-session 状态，允许重试。"""
+        ctrl, _ = controller
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {
+                "success": False,
+                "error": "db_init_failed",
+                "detail": "connection refused",
+            }
+            await ctrl._init_services()
+
+        assert ctrl.state == StartupState.INIT_FAILED
+        assert ctrl._services_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_init_services_two_controllers_are_isolated(self, controller, state_recorder):
+        """review01-A9: 两个 controller 实例（per-session）状态相互隔离。"""
+        transitions, recorder = state_recorder
+        ctrl1, _ = controller
+        ctrl2 = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=recorder,
+            on_show_toast=MagicMock(),
+            on_exit=MagicMock(),
+        )
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            await ctrl1._init_services()  # ctrl1 初始化成功
+            mock_init.reset_mock()
+
+            # ctrl2 首次初始化仍应传 False（per-session 隔离，不受 ctrl1 影响）
+            await ctrl2._init_services()
+            assert mock_init.call_args.kwargs["services_initialized"] is False
+            assert ctrl1._services_initialized is True
+            assert ctrl2._services_initialized is True
+
 
 class TestStartupRetry:
     @pytest.mark.asyncio
@@ -212,6 +267,21 @@ class TestStartupReconfigure:
         mock_tpm.return_value.run_async.assert_awaited_once()
         assert ctrl.state == StartupState.NEED_ONBOARDING
         assert transitions[-1][0] == StartupState.NEED_ONBOARDING
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_resets_services_initialized(self, controller):
+        """review01-A9: reconfigure 重置 per-session 初始化状态，允许重新初始化。"""
+        ctrl, _ = controller
+        ctrl._services_initialized = True  # 模拟已初始化
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock()
+            await ctrl.reconfigure()
+
+        assert ctrl._services_initialized is False
 
     @pytest.mark.asyncio
     async def test_reconfigure_full_flow(self):

@@ -16,13 +16,12 @@ def _reset_all_singletons():
     """Reset all registered singletons before and after each unit test.
 
     Uses singleton_registry.reset_all_singletons() to ensure clean state.
-    Also resets ProxyManager (non-registered singleton per CLAUDE.md §4.3)
-    and bootstrap._services_initialized module-level flag (R7 测试状态污染：
-    Skeptic-MAJOR-2 幂等 guard 跨测试持久化会短路后续失败测试).
+    Also resets ProxyManager (non-registered singleton per CLAUDE.md §4.3).
+    review01-A9: bootstrap 模块级 _services_initialized flag 已移除（改为
+    StartupController per-session 实例状态），不再需要此处重置。
     Complements reset_config_cache and _reset_loop_local_fallback in the
     root conftest.py (which handle non-singleton state).
     """
-    from app.bootstrap import reset_services_initialized
     from utils.loop_local import clear_all_loop_locals
     from utils.proxy_manager import ProxyManager
     from utils.singleton_registry import reset_all_singletons
@@ -39,13 +38,11 @@ def _reset_all_singletons():
     import utils.singleton_registry as _sr
 
     _sr._graceful_shutdown_completed = False
-    reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()
     yield
     clear_all_loop_locals()
     _sr._graceful_shutdown_completed = False
-    reset_services_initialized()
     reset_all_singletons()
     ProxyManager._reset_singleton()
 

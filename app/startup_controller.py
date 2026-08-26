@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-from app.bootstrap import check_onboarding_needed, initialize_services, reset_services_initialized
+from app.bootstrap import check_onboarding_needed, initialize_services
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
@@ -42,6 +42,10 @@ class StartupController:
         # Phase 2A.1 Task 2A.1.9：保存 initialize_services 返回的 fire-and-forget
         # auto probe 任务，供 main.py 注册到 ShutdownCoordinator。
         self._auto_probe_task: asyncio.Task | None = None
+        # review01-A9: per-session 服务初始化状态（替代 bootstrap 模块级 flag）。
+        # StartupController 每次 run(page) 新建实例，此状态天然 per-session 隔离，
+        # 避免 Flet Web 多 session 共享进程时模块级 flag 导致"引擎就绪、服务未启动"。
+        self._services_initialized = False
 
     @property
     def state(self) -> StartupState:
@@ -83,7 +87,11 @@ class StartupController:
         self._transition(StartupState.LOADING)
         try:
             logger.info("[Startup] Calling initialize_services()...")
-            result = await initialize_services(self._cache_manager, show_toast_fn=self._on_show_toast)
+            result = await initialize_services(
+                self._cache_manager,
+                show_toast_fn=self._on_show_toast,
+                services_initialized=self._services_initialized,
+            )
             logger.info(
                 "[Startup] initialize_services() returned: success=%s, error=%s",
                 result.get("success"),
@@ -104,6 +112,8 @@ class StartupController:
         self._auto_probe_task = result.get("auto_probe_task")
 
         if result["success"]:
+            # review01-A9: per-session 置位初始化状态（替代 bootstrap 模块级 flag）
+            self._services_initialized = True
             from utils.thread_pool import TaskType, ThreadPoolManager
             from utils.config_handler import ConfigHandler
 
@@ -150,9 +160,9 @@ class StartupController:
         """User clicked Reconfigure: close DB, reset onboarding, show wizard."""
         self._transition(StartupState.LOADING)
         await self._cache_manager.close()
-        # Skeptic-MAJOR-2 配套：重置 _services_initialized flag，
+        # review01-A9: per-session 重置初始化状态（替代 bootstrap 模块级 flag），
         # 允许用户完成 onboarding 后重新执行 initialize_services。
-        reset_services_initialized()
+        self._services_initialized = False
         from utils.thread_pool import TaskType, ThreadPoolManager
         from utils.config_handler import ConfigHandler
 
