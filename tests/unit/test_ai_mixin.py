@@ -33,11 +33,25 @@ def _mock_ai_external_acknowledged_default_true():
     """Task 2.2: 默认所有 ai_mixin 测试视为已确认 AI 外发政策。
 
     现有测试不关心确认状态，默认 True 保持原行为。
-    专门测试未确认行为的用例在测试内显式 patch False 覆盖。
+    专门测试未确认行为的用例使用 ``_mock_ai_not_acknowledged`` fixture 覆盖。
     """
     with patch(
         "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
         return_value=True,
+    ):
+        yield
+
+
+@pytest.fixture
+def _mock_ai_not_acknowledged():
+    """review07-G1: 未确认 AI 外发政策的具名 fixture（安全门控的未确认路径专项覆盖）。
+
+    供专门测试「用户未同意外部 AI」分支的用例使用；autouse 默认 True 之外的
+    显式 opt-out 语义，防止未来新增用例误以为未确认路径已默认覆盖。
+    """
+    with patch(
+        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+        return_value=False,
     ):
         yield
 
@@ -743,7 +757,7 @@ class TestRunAiAnalysis:
                 await s.run_ai_analysis(candidates, context)
 
     @pytest.mark.asyncio
-    async def test_skips_and_prompts_when_not_acknowledged(self):
+    async def test_skips_and_prompts_when_not_acknowledged(self, _mock_ai_not_acknowledged):
         """Task 2.2: 未确认 AI 外发政策时，run_ai_analysis 应通过 on_progress
         显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。
 
@@ -756,13 +770,7 @@ class TestRunAiAnalysis:
         on_progress = MagicMock()
         dp = MagicMock()
         context = {"data_processor": dp, "on_progress": on_progress}
-        with (
-            patch("strategies.ai_mixin.AIService") as mock_ai,
-            patch(
-                "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
-                return_value=False,
-            ),
-        ):
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
             mock_ai.return_value = mock_ai_instance
