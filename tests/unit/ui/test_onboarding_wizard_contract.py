@@ -1099,6 +1099,42 @@ class TestOnboardingWizardComponentBody:
 
         # _do_language_change 通过 page.run_task 同步执行完成，不抛异常即覆盖
 
+    def test_language_select_failure_triggers_locale_rollback_refresh(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+        monkeypatch,
+    ):
+        """D17: save_language 失败 → 重设当前 locale 触发重渲染 (下拉刷新回旧值)."""
+        from unittest.mock import AsyncMock
+
+        import ui.views.onboarding_wizard as wizard_mod
+
+        # 拦截 I18n.set_locale 以便断言调用 (失败路径应重设当前值触发重渲染)
+        set_locale_mock = MagicMock()
+        monkeypatch.setattr(wizard_mod.I18n, "set_locale", set_locale_mock)
+
+        component = make_component(wizard_mod.OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        render_once(component)
+
+        # fake VM 的 save_language 返回 False (持久化失败)
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm.save_language = AsyncMock(return_value=False)
+
+        all_controls = _collect_controls(render_once(component))
+        dropdowns = [c for c in all_controls if isinstance(c, ft.Dropdown)]
+        assert len(dropdowns) >= 1
+        mock_event = MagicMock()
+        mock_event.control.value = "en_US"
+        dropdowns[0].on_select(mock_event)  # type: ignore[union-attr]
+
+        # run_task 同步执行 → 失败路径调用了 I18n.set_locale(当前 locale) 强制刷新
+        set_locale_mock.assert_called_once_with("zh_CN")
+        fake_vm.save_language.assert_awaited_once_with("en_US")
+
     def test_card_hover_triggers_set_hovered_card(
         self,
         mock_i18n_state,
