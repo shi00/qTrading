@@ -357,6 +357,26 @@ class _FakeScreenerViewModel:
     def update_strategy_desc(self, key: str | None, params: dict | None = None) -> None:
         self.method_calls.append(f"update_strategy_desc:{key}")
 
+    # --- D3: 策略参数草稿命令 (镜像真实 VM) ---
+
+    def init_strategy_params(self, strategy_key: str) -> None:
+        self.method_calls.append(f"init_strategy_params:{strategy_key}")
+        defaults: dict[str, Any] = {}
+        for p in self.get_strategy_params(strategy_key):
+            if p.get("name") == "ai_system_prompt":
+                defaults[p["name"]] = self.get_base_prompt(strategy_key) or p.get("default", "")
+            else:
+                defaults[p["name"]] = p.get("default")
+        self._set_state(strategy_params=defaults)
+
+    def set_strategy_param(self, name: str, value: Any) -> None:
+        self.method_calls.append(f"set_strategy_param:{name}:{value}")
+        self._set_state(strategy_params={**self._state.strategy_params, name: value})
+
+    def reset_strategy_params(self) -> None:
+        self.method_calls.append("reset_strategy_params")
+        self._set_state(strategy_params={})
+
     def get_strategy_params(self, key: str | None) -> list:
         return list(self._strategy_params)
 

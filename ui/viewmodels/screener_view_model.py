@@ -162,6 +162,9 @@ class ScreenerState:
     # View 渲染时翻译 (§3.2 VM 不感知 locale).
     strategy_desc: Message | None = None
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
+    # D3: 策略参数 (View 编辑中间态下沉 VM — 消除 View params_ref 双轨).
+    # 每次 set_strategy_param 生成新 dict (不可变快照), 切换策略时 init 重置.
+    strategy_params: dict[str, Any] = field(default_factory=dict)
     # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
@@ -412,6 +415,31 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         from strategies.strategy_prompts import get_base_prompt
 
         return get_base_prompt(strategy_key)
+
+    # --- D3: 策略参数草稿 (View 编辑中间态下沉 VM, 消除 View params_ref 双轨) ---
+
+    def init_strategy_params(self, strategy_key: str) -> None:
+        """初始化策略参数默认值 (原 View 两处重复逻辑内聚于此).
+
+        ai_system_prompt 用 get_base_prompt 映射; 其余参数用定义 default.
+        切换策略/深链进入时调用, 保证草稿与 selected_strategy 同步 (报告 04 D3).
+        """
+        params_def = self.get_strategy_params(strategy_key)
+        defaults: dict[str, Any] = {}
+        for p in params_def:
+            if p.get("name") == "ai_system_prompt":
+                defaults[p["name"]] = self.get_base_prompt(strategy_key) or p.get("default", "")
+            else:
+                defaults[p["name"]] = p.get("default")
+        self._set_state(strategy_params=defaults)
+
+    def set_strategy_param(self, name: str, value: Any) -> None:
+        """更新单个策略参数 (生成新 dict 保持不可变快照)."""
+        self._set_state(strategy_params={**self._state.strategy_params, name: value})
+
+    def reset_strategy_params(self) -> None:
+        """清空策略参数草稿 (策略取消选中时调用)."""
+        self._set_state(strategy_params={})
 
     async def reset_strategy_prompt(self, strategy_key: str) -> str:
         """重置策略 prompt 为默认值 (Phase 3.3: 从 View 迁入, 内聚到 VM).

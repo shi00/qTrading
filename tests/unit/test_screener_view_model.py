@@ -1611,6 +1611,71 @@ class TestScreenerViewModelUpdateStrategyDesc:
         assert vm.state.strategy_desc_color == "default"
 
 
+class TestScreenerViewModelStrategyParams:
+    """D3: 策略参数草稿下沉 VM — init/set/reset 三命令与不可变快照契约."""
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_init_strategy_params_sets_defaults(self, mock_dp, mock_sm, mock_rm):
+        """init_strategy_params: 非 ai 参数用定义 default, 保证草稿同步 selected_strategy."""
+        vm = ScreenerViewModel()
+        vm.get_strategy_params = MagicMock(
+            return_value=[
+                {"name": "top_n", "default": 50},
+                {"name": "ai_system_prompt", "default": ""},
+            ]
+        )
+        vm.get_base_prompt = MagicMock(return_value="base prompt text")
+
+        vm.init_strategy_params("value")
+
+        assert vm.state.strategy_params == {"top_n": 50, "ai_system_prompt": "base prompt text"}
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_init_strategy_params_ai_prompt_falls_back_to_default(self, mock_dp, mock_sm, mock_rm):
+        """init_strategy_params: base_prompt 为空时 ai_system_prompt 回退到 default."""
+        vm = ScreenerViewModel()
+        vm.get_strategy_params = MagicMock(
+            return_value=[
+                {"name": "ai_system_prompt", "default": "fallback"},
+            ]
+        )
+        vm.get_base_prompt = MagicMock(return_value="")
+
+        vm.init_strategy_params("value")
+
+        assert vm.state.strategy_params == {"ai_system_prompt": "fallback"}
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_strategy_param_updates_immutable_snapshot(self, mock_dp, mock_sm, mock_rm):
+        """set_strategy_param: 更新生成新 dict, 旧引用不受影响 (不可变快照)."""
+        vm = ScreenerViewModel()
+        vm._set_state(strategy_params={"top_n": 50, "pe": 10})
+        original = vm.state.strategy_params
+
+        vm.set_strategy_param("top_n", 100)
+
+        assert vm.state.strategy_params == {"top_n": 100, "pe": 10}
+        assert original == {"top_n": 50, "pe": 10}  # 旧快照未被原地修改
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_reset_strategy_params_clears_draft(self, mock_dp, mock_sm, mock_rm):
+        """reset_strategy_params: 取消选中策略时清空草稿."""
+        vm = ScreenerViewModel()
+        vm._set_state(strategy_params={"top_n": 50})
+
+        vm.reset_strategy_params()
+
+        assert vm.state.strategy_params == {}
+
+
 class TestScreenerViewModelSetHistoryViewingStatus:
     """R.2.6.3: set_history_viewing_status command — 历史查看状态迁入 VM state.
 

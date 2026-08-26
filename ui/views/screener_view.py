@@ -820,11 +820,11 @@ def ScreenerView(
     #                     R.2.6.3: status_msg/status_color 已迁入 VM state;
     #                     Task 3.2: progress_visible/run_disabled/export_disabled 改为派生;
     #                               历史树 rows/offset/has_more/loading 迁入 VM state.history_tree) ---
+    # --- 策略参数 (D3: 草稿下沉 VM, 消除 params_ref + _params_version 双轨) ---
+    # 参数值存 VM state.strategy_params (不可变快照), 更新经 vm.set_strategy_param;
+    # 切换策略经 vm.init_strategy_params 重置, 保证草稿与 selected_strategy 同步.
     detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
     pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
-    # params_version 触发重渲染; params_ref 持久化参数值 (避免 stale closure)
-    params_ref = ft.use_ref(lambda: {})
-    _params_version, bump_params = ft.use_state(0)
 
     # B14: slider 描述更新 debounce (asyncio.Task 引用)。
     desc_timer_ref = ft.use_ref(lambda: None)
@@ -892,17 +892,11 @@ def ScreenerView(
         vm.select_strategy(key)
         # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
         vm.update_strategy_desc(key)
-        # 默认参数
-        params_def = vm.get_strategy_params(key)
-        for p in params_def:
-            if p.get("name") == "ai_system_prompt":
-                typing.cast(dict, params_ref.current)[p["name"]] = vm.get_base_prompt(key) or p.get("default", "")
-            else:
-                typing.cast(dict, params_ref.current)[p["name"]] = p.get("default")
-        bump_params(_params_version + 1)
+        # D3: 初始化参数默认值 (VM 内聚, 保证草稿与 selected_strategy 同步)
+        vm.init_strategy_params(key)
         # 执行 (VM 在 run_strategy 开始时自动清空 stream_cards)
         try:
-            await vm.run_strategy(key, params=dict(params_ref.current or {}))
+            await vm.run_strategy(key, params=dict(vm.state.strategy_params))
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -932,17 +926,11 @@ def ScreenerView(
         vm.select_strategy(new_val)
         # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
         vm.update_strategy_desc(new_val)
-        # 初始化参数默认值
+        # D3: 初始化参数默认值 (VM 内聚); 取消选中时清空草稿
         if new_val:
-            params_def = vm.get_strategy_params(new_val)
-            for p in params_def:
-                if p.get("name") == "ai_system_prompt":
-                    typing.cast(dict, params_ref.current)[p["name"]] = vm.get_base_prompt(new_val) or p.get(
-                        "default", ""
-                    )
-                else:
-                    typing.cast(dict, params_ref.current)[p["name"]] = p.get("default")
-            bump_params(_params_version + 1)
+            vm.init_strategy_params(new_val)
+        else:
+            vm.reset_strategy_params()
 
     async def _on_run_click(e: ft.ControlEvent) -> None:
         UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={state.selected_strategy}")
@@ -950,7 +938,8 @@ def ScreenerView(
             return
         # Task 3.2: run_disabled 改为派生, VM run_strategy 内部设置 loading=True 自动禁用
         try:
-            await vm.run_strategy(state.selected_strategy, params=dict(params_ref.current or {}))
+            params = dict(vm.state.strategy_params)  # D3: VM state 最新快照 (消除 View 双轨)
+            await vm.run_strategy(state.selected_strategy, params=params)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -970,7 +959,10 @@ def ScreenerView(
         UILogger.log_action("ScreenerView", "Click", "btn_jump_backtest")
         if not state.selected_strategy:
             return
-        set_pending_prefill(state.selected_strategy, params=dict(params_ref.current or {}))
+        set_pending_prefill(
+            state.selected_strategy,
+            params=dict(vm.state.strategy_params),  # D3: VM state 最新快照
+        )
         page = _get_page()
         if page is not None:
             page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
@@ -1208,8 +1200,7 @@ def ScreenerView(
     # --- 参数面板 helper ---
 
     def _update_param(name: str, value) -> None:
-        params_ref.current = {**(params_ref.current or {}), name: value}
-        bump_params(_params_version + 1)
+        vm.set_strategy_param(name, value)  # D3: 参数草稿下沉 VM, state-driven 自动重渲染
 
     def _on_slider_value_change(name: str, val: float) -> None:
         # B14: 参数更新立即生效；仅描述更新 debounce 150ms（高频拖动不重复调 update_strategy_desc）。
@@ -1220,7 +1211,7 @@ def ScreenerView(
     async def _debounced_desc_update(strat) -> None:
         try:
             await asyncio.sleep(0.15)
-            vm.update_strategy_desc(strat, params=dict(params_ref.current or {}))
+            vm.update_strategy_desc(strat, params=dict(vm.state.strategy_params))
         except asyncio.CancelledError:
             raise  # R2: 取消传播
 
@@ -1260,7 +1251,7 @@ def ScreenerView(
         # Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
         # vm.save_strategy_prompt (返回 (success, error_key)), View 仅展示反馈.
         try:
-            prompt_val = (params_ref.current or {}).get("ai_system_prompt", "") or ""
+            prompt_val = (vm.state.strategy_params).get("ai_system_prompt", "") or ""
             success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
             page = _get_page()
             if page is None:
@@ -1435,7 +1426,7 @@ def ScreenerView(
             *build_params_panel(
                 state,
                 vm,
-                params_ref.current or {},
+                state.strategy_params,
                 _on_slider_value_change,
                 _update_param,
                 _on_save_prompt,

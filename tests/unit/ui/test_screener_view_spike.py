@@ -59,6 +59,8 @@ class FakeScreenerState:
     strategies_with_dep: dict = field(default_factory=dict)
     strategy_desc: Message | None = None
     strategy_desc_color: str = "default"
+    # D3: 策略参数草稿 (镜像 ScreenerState)
+    strategy_params: dict = field(default_factory=dict)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     status_action_key: str | None = None
     is_retrying: bool = False
