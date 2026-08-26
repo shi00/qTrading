@@ -1,7 +1,9 @@
 """红线自动化检查脚本（R4/R12/R13/R14/R15/R16 + UI 裸 ft.Colors 拦截 + Tushare token 日志脱敏）。
 
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
-- R4  SQL 注入：扫描 data/ 与 tests/ 目录下 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
+- R4  SQL 注入：扫描 data/services/strategies/app 与 tests/ 目录下 asyncpg 原生查询中的 %s 占位符
+  （必须用 $1, $2, ...）；补充检测"SQL 开头字面量 + %s"（绕过 1，ERROR + # noqa: R4）与 f-string
+  SQL 模板（绕过 2，WARNING）
 - R12 数据表未注册：对比 models.py 的 __tablename__ 与 data_dictionary.py 的 TABLE_DEFINITIONS
 - R13 DAO 未注册：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
@@ -23,6 +25,7 @@ rule_type=NEW_CODE（docs/governance/redlines.yml）：存量 8 处持有引用�
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import typing
 from collections.abc import Iterator
@@ -143,15 +146,131 @@ def _check_R4_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
 
 
 def check_R4() -> list[str]:
-    """R4：扫描 data/ 目录下所有 .py 文件中的 asyncpg 原生查询 %s 占位符。"""
+    """R4：扫描 data/ services/ strategies/ app/ 目录下所有 .py 文件中的 asyncpg 原生查询 %s 占位符。
+
+    review07-G18：扫描范围从仅 data/ 扩展至业务层全部目录（原绕过路径 3）。
+    """
     errors: list[str] = []
-    data_dir = ROOT / "data"
-    for p in _iter_py_files(data_dir):
-        tree = _parse_module(p)
-        if tree is None:
+    for dir_name in ("data", "services", "strategies", "app"):
+        target_dir = ROOT / dir_name
+        if not target_dir.exists():
             continue
-        errors.extend(_check_R4_in_tree(tree, p))
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            errors.extend(_check_R4_in_tree(tree, p))
     return errors
+
+
+# review07-G18: 补充检测 —— "以 SQL 关键字开头的字符串字面量 + %s"（绕过路径 1：SQL 存入变量）
+_SQL_KEYWORD_LEAD_RE = re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE)\b", re.IGNORECASE)
+_R4_NOQA_MARKER = "# noqa: R4"
+
+
+def _line_has_noqa_marker(path: Path, lineno: int, marker: str) -> bool:
+    """检查指定行是否带指定 # noqa 豁免标记。"""
+    try:
+        line = path.read_text(encoding="utf-8").splitlines()[lineno - 1]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return False
+    return marker in line
+
+
+def _R4_direct_query_constant_positions(tree: ast.Module) -> set[tuple[int, int]]:
+    """收集被 conn.<query>(<SQL 常量>) 直接传参规则命中的常量位置 (lineno, col_offset)，用于去重。"""
+    positions: set[tuple[int, int]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _ASYNCPG_QUERY_METHODS or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) and "%s" in first.value:
+            positions.add((first.lineno, first.col_offset))
+    return positions
+
+
+def _check_R4_literal_assignments_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查"以 SQL 关键字开头且含 %s"的字符串字面量（绕过路径 1：SQL 存入变量后执行）。
+
+    排除已由 _check_R4_in_tree 直接传参规则命中的常量（去重）；行尾 ``# noqa: R4`` 豁免。
+    """
+    errors: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        # 契约测试用临时文件构造 AST（不在 ROOT 下），fallback 到绝对路径显示
+        rel = source_path
+    positions = _R4_direct_query_constant_positions(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if (node.lineno, node.col_offset) in positions:
+            continue
+        if "%s" not in node.value or not _SQL_KEYWORD_LEAD_RE.search(node.value):
+            continue
+        if _line_has_noqa_marker(source_path, node.lineno, _R4_NOQA_MARKER):
+            continue
+        errors.append(
+            f"{rel}:{node.lineno}: R4 潜在 SQL 注入 — 字符串字面量以 SQL 关键字开头且含 %s 占位符"
+            f" (asyncpg 原生查询必须用 $1, $2, ...；若为合法日志/文案请加 {_R4_NOQA_MARKER} 豁免): {node.value[:80]!r}"
+        )
+    return errors
+
+
+def check_R4_literal_assignments() -> list[str]:
+    """R4 补充（review07-G18）：扫描业务层目录中"SQL 开头 + %s"的字符串字面量。"""
+    errors: list[str] = []
+    for dir_name in ("data", "services", "strategies", "app", "core", "utils", "ui"):
+        target_dir = ROOT / dir_name
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            errors.extend(_check_R4_literal_assignments_in_tree(tree, p))
+    return errors
+
+
+def _check_R4_fstring_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查"以 SQL 关键字开头"的 f-string 模板（绕过路径 2：f-string 拼接）。
+
+    WARNING 语义：DAO 层存在合法 SQL 模板 f-string（报告 03 C7），故不阻断，
+    仅提示人工确认拼接值已参数化。
+    """
+    warnings: list[str] = []
+    rel = source_path.relative_to(ROOT)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        consts = [v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+        joined = " ".join(consts)
+        if _SQL_KEYWORD_LEAD_RE.search(joined):
+            warnings.append(
+                f"{rel}:{node.lineno}: R4 f-string 以 SQL 关键字开头 — 合法 SQL 模板可忽略；"
+                f"若拼接外部输入须参数化 (asyncpg $1, $2, ...): {joined[:80]!r}"
+            )
+    return warnings
+
+
+def check_R4_fstring_sql() -> None:
+    """R4 补充（review07-G18）：f-string SQL 模板检测，WARNING 输出到 stderr（不阻断）。"""
+    warnings: list[str] = []
+    for dir_name in ("data", "services", "strategies", "app", "core", "utils", "ui"):
+        target_dir = ROOT / dir_name
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            warnings.extend(_check_R4_fstring_in_tree(tree, p))
+    if warnings:
+        print("[WARN] R4 f-string SQL 模板（合法用法可忽略，拼接外部输入须参数化）：", file=sys.stderr)
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
 
 
 # tests/ 目录扫描时跳过缓存与构建产物，但保留 tests 自身（复用 _SKIP_DIRS，移除 "tests" 以允许扫描）
@@ -1056,6 +1175,7 @@ def main() -> int:
     """运行全部红线检查，返回退出码。"""
     checks: list[tuple[str, list[str]]] = [
         ("R4 SQL 注入", check_R4()),
+        ("R4 潜在 SQL 字面量", check_R4_literal_assignments()),
         ("R4 SQL 注入 (tests)", check_R4_in_tests()),
         ("R12 数据表未注册", check_R12()),
         ("R13 DAO 未注册", check_R13()),
@@ -1067,6 +1187,8 @@ def main() -> int:
         ("R_tushare_token_log", check_R_tushare_token_log()),
         ("R_lazy_import_whitelist", check_R_lazy_import_whitelist()),
     ]
+    # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr
+    check_R4_fstring_sql()
     all_errors: list[str] = []
     for _, errs in checks:
         all_errors.extend(errs)
