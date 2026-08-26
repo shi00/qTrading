@@ -3,11 +3,11 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-08-13
+> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-08-26
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.1.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-08-13
+> - ruleset_version: 1.2.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-08-26
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
@@ -170,7 +170,7 @@
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
 | R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | 仅人工评审 |
 | R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
-| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化、不在 `_create_engine` 中更新 `.engine` 引用 | pre-commit（check_redlines.py，部分覆盖：`__init__` 注册已检查，`_create_engine` engine 引用更新未自动检查） |
+| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` 驱动循环同步，结构上不可漏改） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度） |
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | 可自动化待实现（AST 检查，暂缓：误报风险高） |
