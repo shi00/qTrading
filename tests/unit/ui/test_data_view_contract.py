@@ -33,6 +33,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 from ui.viewmodels import Message
@@ -615,25 +616,29 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         assert isinstance(result, ft.Column)
 
-    def test_mount_triggers_vm_subscribe(
+    def test_mount_does_not_subscribe_vm(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
     ):
-        """挂载后 VM.subscribe 被调用 (use_viewmodel hook 注册)。"""
+        """D13: 子组件不再 use_viewmodel(vm=) 自订阅 — 挂载后无 VM 订阅注册.
+
+        原行为（三重订阅）: 子组件挂载即 subscribe, 每次 _notify 触发三棵子树重渲染.
+        现契约（唯一订阅在父组件 DataExplorerView）: 子组件仅消费 props state, 零订阅.
+        """
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         _mount(component)
 
-        assert len(vm._subscribers) > 0
+        assert len(vm._subscribers) == 0
 
     def test_mount_registers_file_picker_in_services(
         self,
@@ -645,7 +650,7 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
 
@@ -662,7 +667,7 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(is_loading=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         rings = _find_by_type(result, ft.ProgressRing)
@@ -680,7 +685,7 @@ class TestTableViewerTabComponentBody:
         vm = _FakeDataExplorerViewModel(
             state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True)
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         # PaginatedTable 渲染为 Column, 不应有 ProgressRing (loading widget)
@@ -698,7 +703,7 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=(), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         rings = _find_by_type(result, ft.ProgressRing)
@@ -737,7 +742,7 @@ class TestTableViewerTabComponentBody:
                 tables_loaded=True,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         _mount(component)
 
         # 验证: EmptyState 被调用且 icon=FILTER_ALT_OFF (筛选无结果空态)
@@ -778,7 +783,7 @@ class TestTableViewerTabComponentBody:
                 tables_loaded=True,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         _mount(component)
 
         assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
@@ -815,7 +820,7 @@ class TestTableViewerTabComponentBody:
                 tables_loaded=True,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         _mount(component)
 
         assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
@@ -835,7 +840,7 @@ class TestTableViewerTabComponentBody:
         vm = _FakeDataExplorerViewModel(
             state=_FakeDataExplorerState(tables_list=("stock_basic", "daily_quotes"), tables_loaded=True)
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         dropdowns = _find_by_type(result, ft.Dropdown)
@@ -854,7 +859,7 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         prev_btn = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
@@ -872,7 +877,7 @@ class TestTableViewerTabComponentBody:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
@@ -885,20 +890,20 @@ class TestTableViewerTabComponentBody:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """外部 VM 模式: 卸载不 dispose VM (仅退订)。"""
+        """D13: 子组件纯 props (零订阅) — 不 dispose VM, 也无订阅需退订。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         _mount(component)
 
         assert vm.dispose_called is False
-        assert len(vm._subscribers) > 0
+        assert len(vm._subscribers) == 0, "D13: 子组件不注册 VM 订阅 (唯一订阅在父组件)"
 
         run_unmount_effects(component)
 
-        assert vm.dispose_called is False, "外部 VM 模式不应 dispose"
-        assert len(vm._subscribers) == 0, "卸载后退订"
+        assert vm.dispose_called is False, "子组件不 dispose VM (父组件管理生命周期)"
+        assert len(vm._subscribers) == 0
 
 
 # ============================================================================
@@ -919,24 +924,25 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         assert isinstance(result, ft.Column)
 
-    def test_mount_triggers_vm_subscribe(
+    def test_mount_does_not_subscribe_vm(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
     ):
+        """D13: SQLConsoleTab 不再 use_viewmodel(vm=) 自订阅 — 挂载后无 VM 订阅注册."""
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         _mount(component)
 
-        assert len(vm._subscribers) > 0
+        assert len(vm._subscribers) == 0
 
     def test_shows_empty_state_when_no_data(
         self,
@@ -948,7 +954,7 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         icons = _find_by_type(result, ft.Icon)
@@ -971,7 +977,7 @@ class TestSQLConsoleTabComponentBody:
             sql_result_rows=(SqlResultRow(values=(1,)), SqlResultRow(values=(2,))),
             sql_error=None,
         )
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         # empty_state should not be visible
@@ -992,7 +998,7 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         code_editors = _find_by_type(result, fce.CodeEditor)
@@ -1009,7 +1015,7 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         result, _ = _mount(component)
 
         outlined_btns = _find_by_type(result, ft.OutlinedButton)
@@ -1024,7 +1030,7 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         _mount(component)
 
         run_unmount_effects(component)
@@ -1171,7 +1177,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1197,7 +1203,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1223,7 +1229,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1247,7 +1253,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(
             state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
 
         # Capture on_sort callback via mock PaginatedTable
@@ -1288,7 +1294,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(
             state=_FakeDataExplorerState(table_columns=("ts_code", "name"), tables_loaded=True, total_rows=1)
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
 
         captured_on_sort: list = []
@@ -1323,7 +1329,7 @@ class TestTableViewerTabEventHandlers:
                 total_rows=150,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1347,7 +1353,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(
             state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True, current_page=1)
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1376,7 +1382,7 @@ class TestTableViewerTabEventHandlers:
                 total_rows=150,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1406,7 +1412,7 @@ class TestTableViewerTabEventHandlers:
                 page_size=50,
             )
         )
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1428,7 +1434,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1448,7 +1454,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1471,7 +1477,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"], "name": ["测试"]})
         vm.write_excel = AsyncMock(return_value=None)
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1512,7 +1518,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
         vm.write_excel = AsyncMock(return_value=None)
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1548,7 +1554,7 @@ class TestTableViewerTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame()  # empty
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1570,7 +1576,7 @@ class TestTableViewerTabEventHandlers:
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"], "name": ["测试"]})
         vm.write_csv = AsyncMock(return_value=None)
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1608,13 +1614,14 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(tables_loaded=False))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
-        # 模拟 init_tables 设 tables_loaded=True 后的重渲染, 触发 _load_initial_table
-        # _mount 的第二次 render_once 已将 deps 设为 [True,True], prev_deps 为 [False,True],
-        # 直接调 _run_render_effects 检测到 deps 变化并重调度 (不调 render_once 以免 prev_deps 被刷新)
-        component._run_render_effects()
+        # D13: 子组件纯 props — 模拟父组件以最新 VM state 重渲染 (取代原订阅回调注入) :
+        # init_tables 已将 VM state 推进到 tables_loaded=True, 更新 props 后 re-render
+        # 触发 _load_initial_table → load_table_schema/query_data
+        component.kwargs["state"] = vm.state
+        run_render_effects(component)
 
         calls = [c[0] for c in vm.method_calls]
         assert "init_tables" in calls
@@ -1631,7 +1638,7 @@ class TestTableViewerTabEventHandlers:
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(is_loading=True, tables_loaded=False))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
 
@@ -1660,7 +1667,7 @@ class TestSQLConsoleTabEventHandlers:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1687,7 +1694,7 @@ class TestSQLConsoleTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": True, "data": pd.DataFrame({"col1": [1]}), "error": None}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1722,7 +1729,7 @@ class TestSQLConsoleTabEventHandlers:
             raise RuntimeError("DB error")
 
         vm.execute_sql = _raise_sql  # type: ignore[method-assign]
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1748,7 +1755,7 @@ class TestSQLConsoleTabEventHandlers:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1770,7 +1777,7 @@ class TestSQLConsoleTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": True, "data": pd.DataFrame({"col1": [1, 2, 3]}), "error": None}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1795,7 +1802,7 @@ class TestSQLConsoleTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": True, "data": pd.DataFrame({"col1": list(range(200))}), "error": None}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1820,7 +1827,7 @@ class TestSQLConsoleTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": False, "data": None, "error": "syntax error"}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1845,7 +1852,7 @@ class TestSQLConsoleTabEventHandlers:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": False, "data": None, "error": "syntax error near FROM"}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -1986,12 +1993,13 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("schema error")
 
         vm.load_table_schema = _raising_schema  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
-        # 模拟 init_tables 设 tables_loaded=True 后的重渲染, 触发 _load_initial_table
+        # D13: 纯 props — 模拟父组件以最新 VM state 重渲染后触发 _load_initial_table
         # → _load_schema_and_data → load_table_schema 抛异常 → show_toast
-        component._run_render_effects()
+        component.kwargs["state"] = vm.state
+        run_render_effects(component)
 
         page.show_toast.assert_called_once()
 
@@ -2010,7 +2018,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("init error")
 
         vm.init_tables = _raising_init  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         _mount(component, page=page)
 
@@ -2031,7 +2039,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("query error")
 
         vm.query_data = _raising_query  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2053,7 +2061,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("refresh error")
 
         vm.query_data = _raising_query  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2078,7 +2086,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("sort error")
 
         vm.query_data = _raising_query  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
 
         captured_on_sort: list = []
@@ -2110,7 +2118,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("prev error")
 
         vm.query_data = _raising_query  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2134,7 +2142,7 @@ class TestTableViewerTabAsyncErrorPaths:
             raise RuntimeError("next error")
 
         vm.query_data = _raising_query  # type: ignore[method-assign]
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2154,7 +2162,7 @@ class TestTableViewerTabAsyncErrorPaths:
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
         vm.write_csv = AsyncMock(side_effect=RuntimeError("disk full"))
-        component = make_component(TableViewerTab, vm=vm)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2195,7 +2203,7 @@ class TestSQLConsoleTabAsyncErrorPaths:
 
         vm = _FakeDataExplorerViewModel()
         vm._sql_result = {"success": True, "data": pd.DataFrame(), "error": None}
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
@@ -2227,7 +2235,7 @@ class TestSQLConsoleTabAsyncErrorPaths:
             raise asyncio.CancelledError()
 
         vm.execute_sql = _cancelling_sql  # type: ignore[method-assign]
-        component = make_component(SQLConsoleTab, vm=vm)
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
 
