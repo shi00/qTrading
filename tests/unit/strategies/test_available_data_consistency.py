@@ -16,7 +16,15 @@ from services.ai_service import (
     AVAILABLE_DATA_LABELS,
     build_available_data_block,
 )
-from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
+from strategies.ai_context import (
+    PreFetchedContext,
+    _build_auxiliary_data_text,
+    _build_capital_flow_text,
+    _build_history_text,
+    _build_macro_context,
+    _build_multi_period_financials,
+)
+from strategies.ai_mixin import AIStrategyMixin
 from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
 
 pytestmark = pytest.mark.unit
@@ -197,7 +205,7 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        result = await mixin._build_multi_period_financials(
+        result = await _build_multi_period_financials(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -246,7 +254,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_multi_period_financials(
+        result = await _build_multi_period_financials(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -261,7 +269,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_financial_reports_history = _async_return(None)
 
         labels: list[str] = []
-        result = await mixin._build_multi_period_financials(
+        result = await _build_multi_period_financials(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -276,7 +284,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_financial_reports_history = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
-        result = await mixin._build_multi_period_financials(
+        result = await _build_multi_period_financials(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -308,7 +316,7 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        result = await mixin._build_multi_period_financials(
+        result = await _build_multi_period_financials(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -364,7 +372,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -418,7 +426,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -433,7 +441,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_fina_audit = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -474,7 +482,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -492,7 +500,7 @@ class TestInvariant3BuilderLabelEquivalence:
         prefetched = {"000001.SZ": {"sw_industry": "半导体Ⅱ"}}
 
         labels: list[str] = []
-        result_text, is_valid = await mixin._build_auxiliary_data_text(
+        result_text, is_valid = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             prefetched=prefetched,
@@ -511,7 +519,7 @@ class TestInvariant3BuilderLabelEquivalence:
         prefetched = {"000001.SZ": {"sw_industry": ""}}
 
         labels: list[str] = []
-        result_text, is_valid = await mixin._build_auxiliary_data_text(
+        result_text, is_valid = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             prefetched=prefetched,
@@ -546,7 +554,7 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        AIStrategyMixin._build_capital_flow_text(
+        _build_capital_flow_text(
             "000001.SZ",
             {"moneyflow_df": mf_df, "top_list_df": tl_df, "northbound_df": nb_df},
             labels_out=labels,
@@ -560,7 +568,7 @@ class TestInvariant3BuilderLabelEquivalence:
 
     def test_capital_flow_all_na_no_labels(self):
         labels: list[str] = []
-        result = AIStrategyMixin._build_capital_flow_text(
+        result = _build_capital_flow_text(
             "000001.SZ",
             {},
             labels_out=labels,
@@ -580,7 +588,7 @@ class TestInvariant3BuilderLabelEquivalence:
             }
         )
         labels: list[str] = []
-        result = AIStrategyMixin._build_capital_flow_text(
+        result = _build_capital_flow_text(
             "000001.SZ",
             {"moneyflow_df": mf_df},
             labels_out=labels,
@@ -591,8 +599,8 @@ class TestInvariant3BuilderLabelEquivalence:
     def test_capital_flow_exception_clears_labels(self):
         """异常路径必须清空 labels_out 并返回 I18n 哨兵。"""
         labels: list[str] = ["ai_label_main_flow"]  # 模拟部分注册后被异常清空
-        with patch("strategies.ai_mixin.safe_float", side_effect=RuntimeError("unexpected")):
-            result = AIStrategyMixin._build_capital_flow_text(
+        with patch("strategies.ai_context.capital_flow.safe_float", side_effect=RuntimeError("unexpected")):
+            result = _build_capital_flow_text(
                 "000001.SZ",
                 {"moneyflow_df": pd.DataFrame({"ts_code": ["000001.SZ"], "buy_lg_amount": [100]})},
                 labels_out=labels,
@@ -603,7 +611,7 @@ class TestInvariant3BuilderLabelEquivalence:
     def test_history_text_normal_registers_kline_label(self):
         """正常数据产出时注册 ai_label_kline。"""
         labels: list[str] = []
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             _make_minimal_history_df(),
             ts_code="000001.SZ",
             stock_name="测试",
@@ -626,7 +634,7 @@ class TestInvariant3BuilderLabelEquivalence:
             }
         )
         labels: list[str] = []
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             short_df,
             ts_code="000001.SZ",
             labels_out=labels,
@@ -637,7 +645,7 @@ class TestInvariant3BuilderLabelEquivalence:
     def test_history_text_empty_df_no_label(self):
         """空 DataFrame 不注册标签，返回 ai_history_insufficient 哨兵。"""
         labels: list[str] = []
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             pd.DataFrame(),
             ts_code="000001.SZ",
             labels_out=labels,
@@ -648,7 +656,7 @@ class TestInvariant3BuilderLabelEquivalence:
     def test_history_text_none_df_no_label(self):
         """None 不注册标签，返回 ai_history_insufficient 哨兵。"""
         labels: list[str] = []
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             typing.cast(pd.DataFrame, None),
             ts_code="000001.SZ",
             labels_out=labels,
@@ -660,10 +668,10 @@ class TestInvariant3BuilderLabelEquivalence:
         """异常路径清空 labels_out。"""
         labels: list[str] = ["ai_label_kline"]  # 模拟部分注册后被异常清空
         with patch(
-            "strategies.ai_mixin.TechnicalAnalysis._get_qfq_df",
+            "strategies.ai_context.history.TechnicalAnalysis._get_qfq_df",
             side_effect=RuntimeError("QFQ error"),
         ):
-            result = AIStrategyMixin._build_history_text(
+            result = _build_history_text(
                 _make_minimal_history_df(),
                 ts_code="000001.SZ",
                 labels_out=labels,
@@ -687,7 +695,7 @@ class TestInvariant3BuilderLabelEquivalence:
             }
         )
         labels: list[str] = []
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             na_df,
             ts_code="000001.SZ",
             labels_out=labels,
@@ -703,7 +711,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_macro_economy = _async_raise(RuntimeError("DB error"))
         mixin.cache.get_shibor_latest = _async_raise(RuntimeError("DB error"))
 
-        result = await mixin._build_macro_context(mixin.cache)
+        result = await _build_macro_context(mixin.cache)
         assert result == "", f"异常路径应返回空串，实际返回: {result!r}"
 
 
@@ -1459,7 +1467,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -1485,7 +1493,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result = await _build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,

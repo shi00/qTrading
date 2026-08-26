@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from strategies.ai_mixin import AIStrategyMixin
+from strategies.ai_context import _build_history_text
 import pytest
 
 
@@ -28,7 +28,7 @@ def test_ai_macro():
 
     df = pd.DataFrame(data)
 
-    result = AIStrategyMixin._build_history_text(df)
+    result = _build_history_text(df)
     assert isinstance(result, str)
     assert len(result) > 0
     print("AI STRATEGY PROMPT TEXT:")

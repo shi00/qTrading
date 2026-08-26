@@ -14,7 +14,11 @@ import unittest
 
 import pandas as pd
 
-from strategies.ai_mixin import AIStrategyMixin
+from strategies.ai_context import (
+    PreFetchedContext,
+    _build_history_text,
+    _get_limit_pct,
+)
 from strategies.oversold_strategy import OversoldStrategy
 import pytest
 
@@ -30,7 +34,6 @@ class TestBuildTurnoverContext(unittest.TestCase):
 
     def test_build_turnover_text_normal(self):
         """正常数据下换手率文本包含"当前换手率"/"5日均值"/"20日均值"/"趋势" """
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -57,7 +60,6 @@ class TestBuildTurnoverContext(unittest.TestCase):
 
     def test_build_turnover_text_empty(self):
         """空 DataFrame 返回"暂不可用" """
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.indicators = pd.DataFrame()
@@ -70,7 +72,6 @@ class TestBuildTurnoverContext(unittest.TestCase):
 
     def test_build_turnover_text_single_day(self):
         """只有 1 天数据时不应崩溃，正常计算当日换手率"""
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -100,7 +101,6 @@ class TestBuildSectorContext(unittest.TestCase):
 
     def test_build_sector_context_normal(self):
         """正常行业数据下文本包含行业名称和涨跌统计"""
-        from strategies.ai_mixin import PreFetchedContext
 
         sector_stats = {
             "电子": {"count": 10, "up_count": 3, "down_count": 7, "avg_pct_chg": -1.5},
@@ -120,7 +120,6 @@ class TestBuildSectorContext(unittest.TestCase):
 
     def test_build_sector_context_missing(self):
         """行业不存在时返回"暂无数据" """
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {}
@@ -188,7 +187,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(history_df, ts_code="000001.SZ", stock_name="测试股票")
+        result = _build_history_text(history_df, ts_code="000001.SZ", stock_name="测试股票")
 
         self.assertIn("🟢跌停", result)
 
@@ -244,7 +243,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(history_df, ts_code="300001.SZ", stock_name="创业板股票")
+        result = _build_history_text(history_df, ts_code="300001.SZ", stock_name="创业板股票")
 
         self.assertIn("🟢跌停", result)
 
@@ -300,7 +299,7 @@ class TestBuildHistoryTextLimitTag(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(history_df, ts_code="000001.SZ", stock_name="ST某某")
+        result = _build_history_text(history_df, ts_code="000001.SZ", stock_name="ST某某")
 
         self.assertIn("🟢跌停", result)
 
@@ -313,7 +312,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_short_history(self):
         """历史不足 60 天时的支撑位优雅降级处理"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -340,7 +338,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_full_calculation(self):
         """完整支撑位计算包含布林下轨和VWAC"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -389,7 +386,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_missing_history(self):
         """历史数据缺失时返回提示"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.history = {}
@@ -402,7 +398,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_invalid_close(self):
         """当前价格无效时返回提示"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -429,7 +424,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_with_adj_factor(self):
         """P1-18: 测试复权处理 - 跨除权除息日时使用复权价格计算VWAC"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -481,7 +475,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_qfq_calculation_correctness(self):
         """P1-18: 验证复权计算的正确性 - VWAC应使用复权价格而非原始价格"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -529,7 +522,6 @@ class TestBuildSupportContext(unittest.TestCase):
 
     def test_build_support_levels_adj_factor_zero_handling(self):
         """P1-18: 测试 adj_factor 为 0 时的处理"""
-        from strategies.ai_mixin import PreFetchedContext
 
         history_df = pd.DataFrame(
             [
@@ -627,7 +619,7 @@ class TestVolumeThresholdConsistency(unittest.TestCase):
 
     def test_volume_threshold_consistency(self):
         """两处 volume ratio 阈值一致 (均为 1.5)"""
-        from strategies.ai_mixin import AIStrategyMixin
+        from strategies.ai_context import _build_history_text
 
         history_df = pd.DataFrame(
             [
@@ -661,7 +653,7 @@ class TestVolumeThresholdConsistency(unittest.TestCase):
             ]
         )
 
-        result = AIStrategyMixin._build_history_text(
+        result = _build_history_text(
             history_df,
             ts_code="000001.SZ",
             stock_name="测试股票",
@@ -672,27 +664,27 @@ class TestVolumeThresholdConsistency(unittest.TestCase):
 
     def test_get_limit_pct_main_board(self):
         """主板涨跌停幅度为 10%"""
-        result = AIStrategyMixin._get_limit_pct("000001.SZ", "主板股票")
+        result = _get_limit_pct("000001.SZ", "主板股票")
         self.assertEqual(result, 10.0)
 
     def test_get_limit_pct_gem(self):
         """创业板涨跌停幅度为 20%"""
-        result = AIStrategyMixin._get_limit_pct("300001.SZ", "创业板股票")
+        result = _get_limit_pct("300001.SZ", "创业板股票")
         self.assertEqual(result, 20.0)
 
     def test_get_limit_pct_star(self):
         """科创板涨跌停幅度为 20%"""
-        result = AIStrategyMixin._get_limit_pct("688001.SH", "科创板股票")
+        result = _get_limit_pct("688001.SH", "科创板股票")
         self.assertEqual(result, 20.0)
 
     def test_get_limit_pct_st(self):
         """ST 股涨跌停幅度为 5%"""
-        result = AIStrategyMixin._get_limit_pct("000001.SZ", "ST某某")
+        result = _get_limit_pct("000001.SZ", "ST某某")
         self.assertEqual(result, 5.0)
 
     def test_get_limit_pct_bse(self):
         """北交所涨跌停幅度为 30%"""
-        result = AIStrategyMixin._get_limit_pct("830001.BJ", "北交所股票")
+        result = _get_limit_pct("830001.BJ", "北交所股票")
         self.assertEqual(result, 30.0)
 
 
@@ -704,7 +696,6 @@ class TestBuildMarketContext(unittest.TestCase):
 
     def test_build_market_context_normal(self):
         """正常大盘数据下文本包含指数信息和趋势"""
-        from strategies.ai_mixin import PreFetchedContext
 
         market_data = {
             "000001.SH": {"pct_chg": 1.5, "ma20": 3100.0, "trend": "多头趋势"},
@@ -725,7 +716,6 @@ class TestBuildMarketContext(unittest.TestCase):
 
     def test_build_market_context_with_trend(self):
         """大盘数据包含趋势判断"""
-        from strategies.ai_mixin import PreFetchedContext
 
         market_data = {
             "000001.SH": {"pct_chg": -2.5, "ma20": 3200.0, "trend": "空头趋势"},
@@ -741,7 +731,6 @@ class TestBuildMarketContext(unittest.TestCase):
 
     def test_build_market_context_empty(self):
         """大盘数据不可用时返回提示"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.market_context = {}
@@ -785,7 +774,6 @@ class TestPreFetchedContext(unittest.TestCase):
 
     def test_prefetched_context_defaults(self):
         """验证默认值正确初始化"""
-        from strategies.ai_mixin import PreFetchedContext
 
         ctx = PreFetchedContext()
 
@@ -803,7 +791,6 @@ class TestPreFetchedContext(unittest.TestCase):
 
     def test_prefetched_context_with_data(self):
         """验证数据赋值正确"""
-        from strategies.ai_mixin import PreFetchedContext
 
         ctx = PreFetchedContext(
             trade_date=datetime.date(2024, 3, 21),
@@ -822,7 +809,6 @@ class TestTurnoverEdgeCases(unittest.TestCase):
 
     def test_turnover_shrinking_trend(self):
         """持续缩量趋势检测"""
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -845,7 +831,6 @@ class TestTurnoverEdgeCases(unittest.TestCase):
 
     def test_turnover_expanding_trend(self):
         """近期放量趋势检测"""
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -868,7 +853,6 @@ class TestTurnoverEdgeCases(unittest.TestCase):
 
     def test_turnover_stock_not_in_indicators(self):
         """股票代码不在指标数据中"""
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -891,7 +875,6 @@ class TestTurnoverEdgeCases(unittest.TestCase):
 
     def test_turnover_nan_values(self):
         """换手率包含 NaN 值"""
-        from strategies.ai_mixin import PreFetchedContext
 
         indicators_df = pd.DataFrame(
             [
@@ -931,7 +914,6 @@ class TestSectorEdgeCases(unittest.TestCase):
 
     def test_sector_empty_industry(self):
         """行业字段为空"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {"电子": {"count": 10}}
@@ -943,7 +925,6 @@ class TestSectorEdgeCases(unittest.TestCase):
 
     def test_sector_stats_missing_fields(self):
         """行业统计缺少字段"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {"电子": {"count": 10}}
@@ -963,7 +944,6 @@ class TestMarketEdgeCases(unittest.TestCase):
 
     def test_market_context_cached_string(self):
         """使用缓存的大盘字符串"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.market_context_str = "缓存的大盘环境文本"
@@ -976,7 +956,6 @@ class TestMarketEdgeCases(unittest.TestCase):
 
     def test_market_context_non_dict_data(self):
         """大盘数据包含非字典类型"""
-        from strategies.ai_mixin import PreFetchedContext
 
         prefetched = PreFetchedContext()
         prefetched.market_context = {
