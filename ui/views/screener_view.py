@@ -288,18 +288,6 @@ def _render_strategy_desc(msg: Message | None) -> str:
     return text
 
 
-def _format_history_date(date_str) -> tuple[str, str]:
-    """格式化历史树日期: 返回 (display_date, internal_key)。"""
-    if isinstance(date_str, (datetime.date, datetime.datetime)):
-        display = date_str.strftime("%Y-%m-%d")
-        key = display
-    else:
-        s = str(date_str)
-        display = f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else s
-        key = s
-    return display, key
-
-
 # =============================================================================
 # D15: ScreenerView 子组件提取 — 纯函数接收 props, 无闭包/状态, 可独立测试
 # -----------------------------------------------------------------------------
