@@ -49,6 +49,8 @@ from ui.testing.e2e_ids import EIDS
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import (
     _MAX_LOG_CARDS,
+    HistoryTreeRow,
+    ScreenerState,
     ScreenerViewModel,
     StrategyDepRow,
     StreamCard,
@@ -296,6 +298,489 @@ def _format_history_date(date_str) -> tuple[str, str]:
         display = f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else s
         key = s
     return display, key
+
+
+# =============================================================================
+# D15: ScreenerView 子组件提取 — 纯函数接收 props, 无闭包/状态, 可独立测试
+# -----------------------------------------------------------------------------
+# 从 ScreenerView 巨型组件中拆出三个独立渲染单元 (报告 04 D15):
+#   - build_stream_card    流式/AI 占位卡 (state.stream_cards 逐卡渲染)
+#   - build_params_panel   策略参数面板 (含 build_param_control 单控件)
+#   - build_history_tree   历史树侧栏 (state.history_tree 派生)
+# 仅作机械搬移 + props 化, 不引入新抽象层 (宪法 §1.3 禁推测性设计).
+# =============================================================================
+
+
+def build_stream_card(card: StreamCard, on_retry: typing.Callable[[str], None]) -> ft.Container:
+    """构建单张流式/AI 占位卡 (D15: 从 ScreenerView._build_log_card 提取, props 化)."""
+    name = card.name
+    # UX-2.3: 错误状态分支（含重试按钮）
+    if card.error:
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                            ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.FONT_SIZE_TITLE),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Text(
+                        card.error,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.ERROR,
+                        no_wrap=False,
+                    ),
+                    ft.TextButton(
+                        icon=ft.Icons.REFRESH,
+                        content=I18n.get("ai_card_retry"),
+                        tooltip=I18n.get("ai_card_retry"),
+                        on_click=safe_on_click(lambda e, n=name: on_retry(n)),
+                    ),
+                ],
+                spacing=8,
+            ),
+            border=ft.Border.all(1, AppColors.ERROR),
+            border_radius=8,
+            padding=AppStyles.SPACING_LG,
+            bgcolor=AppColors.SURFACE,
+            margin=ft.Margin.only(bottom=10),
+        )
+    if card.is_analyzing:
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                            ft.ProgressRing(width=14, height=14, stroke_width=2),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Container(
+                        content=ft.Markdown(
+                            I18n.get("ai_card_analyzing"),
+                            selectable=True,
+                            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                            on_tap_link=safe_open_url,
+                        ),
+                        padding=ft.Padding.only(left=5, right=5),
+                    ),
+                ],
+                spacing=8,
+            ),
+            border=ft.Border.all(1, AppColors.DIVIDER),
+            border_radius=8,
+            padding=AppStyles.SPACING_LG,
+            bgcolor=AppColors.SURFACE,
+            margin=ft.Margin.only(bottom=10),
+        )
+
+    reasoning = card.reasoning
+    content = card.content
+    reasoning_visible = bool(reasoning)
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                ft.ExpansionTile(
+                    title=ft.Text(f"{I18n.get('ai_thinking')}..."),
+                    subtitle=ft.Text(
+                        I18n.get("ai_expand_reasoning"),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    controls=[
+                        ft.Container(
+                            content=ft.Markdown(
+                                reasoning,
+                                selectable=True,
+                                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                                code_theme="atom-one-dark",  # type: ignore[arg-type]
+                                on_tap_link=safe_open_url,
+                            ),
+                            padding=AppStyles.SPACING_SM,
+                            bgcolor=AppColors.BACKGROUND,
+                            border_radius=4,
+                        )
+                    ],
+                    expanded=True,
+                    visible=reasoning_visible,
+                ),
+                ft.Container(
+                    content=ft.Markdown(
+                        content,
+                        selectable=True,
+                        extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                        code_theme="atom-one-dark",  # type: ignore[arg-type]
+                        on_tap_link=safe_open_url,
+                    ),
+                    padding=ft.Padding.only(left=5, right=5),
+                ),
+            ],
+            spacing=10,
+        ),
+        border=ft.Border.all(1, AppColors.DIVIDER),
+        border_radius=8,
+        padding=AppStyles.SPACING_LG,
+        bgcolor=AppColors.SURFACE,
+        margin=ft.Margin.only(bottom=10),
+    )
+
+
+def build_param_control(
+    p: dict,
+    selected_strategy: str | None,
+    params: dict,
+    vm: ScreenerViewModel,
+    on_slider_change: typing.Callable[[str, float], None],
+    on_update: typing.Callable[[str, typing.Any], None],
+    on_save_prompt: typing.Callable[[str], None],
+    on_restore_prompt: typing.Callable[[str], None],
+) -> ft.Control | None:
+    """构建单个策略参数控件 (D15: 从 ScreenerView._build_param_control 提取, props 化)."""
+    label = I18n.get(p.get("label_key", p["name"]))
+    p_type = p.get("type", "number")
+    p_name = p["name"]
+
+    if p_type == "slider":
+        min_val = p.get("min", 0)
+        max_val = p.get("max", 100)
+        default = p.get("default", min_val)
+        step = p.get("step", 1)
+        current_val = params.get(p_name, default)
+        # NOTE: SliderInput 为 @ft.component 组件, 返回 Component wrapper (继承 BaseControl 而非
+        # flet.Control), 无 col/width 布局属性, 直接在 wrapper 上赋 col 不会随 patch 下发客户端,
+        # ResponsiveRow 默认按 col=12 布局 → 控件独占整行 → 参数面板变高 → table_card 视口高度
+        # 被挤压到 0 → 表格行不生成语义节点 (PR #373 回归 / PR #550 E2E 失败)。
+        # 修复: 外层包 Container 承载 width 与 col (Container 为 Control, 布局属性可正常下发)。
+        return ft.Container(
+            content=SliderInput(
+                label=label,
+                value=float(current_val),
+                min_val=float(min_val),
+                max_val=float(max_val),
+                step=float(step),
+                on_change=lambda v, n=p_name: on_slider_change(n, v),
+            ),
+            width=AppStyles.CONTROL_WIDTH_MD,
+        )
+
+    if p_type == "number":
+        current_val = params.get(p_name, p.get("default", ""))
+        return ft.TextField(
+            label=label,
+            value=str(current_val),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            dense=True,
+            border_color=AppColors.DIVIDER,
+            focused_border_color=AppColors.PRIMARY,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            on_change=lambda e, n=p_name: on_update(n, _parse_num(e.control.value if e and e.control else "")),
+        )
+
+    if p_type == "dropdown":
+        options = p.get("options", [])
+        current_val = params.get(p_name, p.get("default", ""))
+        return ft.Dropdown(
+            label=label,
+            value=str(current_val),
+            options=[ft.dropdown.Option(str(o)) for o in options],
+            dense=True,
+            border_color=AppColors.DIVIDER,
+            focused_border_color=AppColors.PRIMARY,
+            text_size=AppStyles.FONT_SIZE_BODY,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            on_select=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
+        )
+
+    if p_type == "textarea":
+        if p_name == "ai_system_prompt" and selected_strategy:
+            current_val = params.get(p_name) or vm.get_base_prompt(selected_strategy) or p.get("default", "")
+        else:
+            current_val = params.get(p_name, p.get("default", ""))
+        ctrl = ft.TextField(
+            label=label,
+            value=str(current_val),
+            multiline=True,
+            min_lines=6,
+            max_lines=15,
+            border_color=AppColors.DIVIDER,
+            focused_border_color=AppColors.PRIMARY,
+            text_size=AppStyles.FONT_SIZE_BODY_SM,
+            content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+            on_change=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
+        )
+        if p_name == "ai_system_prompt":
+            ctrl.label = None
+            # 面板仅在选中策略时渲染 (build_params_panel 先判空), 此处 selected_strategy 必非 None;
+            # or "" 仅为消除 pyright str|None→str 告警 (D15 props 化后参数类型为 str | None).
+            strat = selected_strategy or ""
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
+                                ft.Container(expand=True),
+                                ft.TextButton(
+                                    content=I18n.get("ai_save_prompt"),
+                                    icon=ft.Icons.SAVE,
+                                    style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                                    height=30,
+                                    on_click=lambda e, s=strat: on_save_prompt(s),
+                                ),
+                                ft.TextButton(
+                                    content=I18n.get("ai_reset_default"),
+                                    icon=ft.Icons.RESTORE,
+                                    style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+                                    height=30,
+                                    on_click=lambda e, s=strat: on_restore_prompt(s),
+                                ),
+                            ],
+                        ),
+                        ctrl,
+                    ],
+                    spacing=5,
+                ),
+                margin=ft.Margin.only(top=10, bottom=5),
+            )
+        return ft.Container(content=ctrl, margin=ft.Margin.only(top=10, bottom=5))
+
+    return None
+
+
+def build_params_panel(
+    state: ScreenerState,
+    vm: ScreenerViewModel,
+    params: dict,
+    on_slider_change: typing.Callable[[str, float], None],
+    on_update: typing.Callable[[str, typing.Any], None],
+    on_save_prompt: typing.Callable[[str], None],
+    on_restore_prompt: typing.Callable[[str], None],
+) -> list[ft.Control]:
+    """构建策略参数面板 (D15: 从 ScreenerView._build_params_panel 提取, props 化)."""
+    from ui.theme import PARAM_GROUP_ORDER
+
+    if not state.selected_strategy:
+        return []
+
+    params_def = vm.get_strategy_params(state.selected_strategy)
+    if not params_def:
+        return []
+
+    groups: dict[str, list] = {g: [] for g in PARAM_GROUP_ORDER}
+    custom_groups: dict[str, str | None] = {}
+    group_labels: dict[str, str | None] = {}
+
+    for p in params_def:
+        group = p.get("group", "default")
+        if group not in groups:
+            custom_groups[group] = p.get("group_label_key")
+            groups[group] = []
+        groups[group].append(p)
+        if group not in group_labels:
+            group_labels[group] = p.get("group_label_key")
+
+    # 参数面板改用 ResponsiveRow (12 列栅格) 承载控件, 避免 ft.Slider 置于
+    # ft.Row(wrap=True) (Flutter Wrap) 触发 Flet Web 端 Dart 类型错误
+    # (TypeError: ... is not a subtype of ...)。textarea 多行文本占满整行,
+    # 其余小控件(滑块/数字/下拉)按断点多列排布。
+    _PARAM_COL = {"sm": 12, "md": 6, "lg": 4}
+    _PARAM_COL_TEXTAREA = 12
+
+    def _build_controls(params_list: list[dict]) -> list[ft.Control]:
+        controls: list[ft.Control] = []
+        for p in params_list:
+            ctrl = build_param_control(
+                p,
+                state.selected_strategy,
+                params,
+                vm,
+                on_slider_change,
+                on_update,
+                on_save_prompt,
+                on_restore_prompt,
+            )
+            if ctrl is None:
+                continue
+            ctrl.col = _PARAM_COL_TEXTAREA if p.get("type") == "textarea" else _PARAM_COL
+            controls.append(ctrl)
+        return controls
+
+    rendered_groups: list[tuple[str, str, list[ft.Control]]] = []
+
+    for group_name in PARAM_GROUP_ORDER:
+        if group_name == "default":
+            continue
+        if groups[group_name]:
+            controls = _build_controls(groups[group_name])
+            if controls:
+                title = _resolve_group_title(group_name, group_labels.get(group_name))
+                rendered_groups.append((group_name, title, controls))
+
+    if groups["default"]:
+        controls = _build_controls(groups["default"])
+        if controls:
+            title = _resolve_group_title("default", group_labels.get("default"))
+            rendered_groups.append(("default", title, controls))
+
+    for group_name in custom_groups:
+        if groups[group_name]:
+            controls = _build_controls(groups[group_name])
+            if controls:
+                title = _resolve_group_title(group_name, custom_groups[group_name])
+                rendered_groups.append((group_name, title, controls))
+
+    result: list[ft.Control] = []
+    for group_name, title, controls in rendered_groups:
+        if group_name == "advanced":
+            continue
+        result.append(
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            title,
+                            size=AppStyles.FONT_SIZE_BODY,
+                            weight=ft.FontWeight.W_500,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                        ft.Divider(height=1, color=AppColors.DIVIDER),
+                        ft.ResponsiveRow(controls, spacing=15, run_spacing=15),
+                    ],
+                    spacing=8,
+                ),
+                padding=ft.Padding.all(12),
+                bgcolor=AppColors.SURFACE_VARIANT,
+                border_radius=8,
+                margin=ft.Margin.only(bottom=8),
+            )
+        )
+
+    if groups["advanced"]:
+        controls = _build_controls(groups["advanced"])
+        if controls:
+            result.append(
+                ft.ExpansionTile(
+                    title=ft.Text(
+                        I18n.get("ai_advanced_settings"), size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500
+                    ),
+                    subtitle=ft.Text(
+                        I18n.get("ai_advanced_settings_desc"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    controls=controls,
+                    collapsed_text_color=AppColors.TEXT_PRIMARY,
+                    text_color=AppColors.PRIMARY,
+                    expanded=False,
+                )
+            )
+
+    return result
+
+
+def build_history_tree(
+    rows: tuple[HistoryTreeRow, ...],
+    offset: int,
+    has_more: bool,
+    on_item_click: typing.Callable[[str, str | None, str | None], None],
+    on_load_more: typing.Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """构建历史树侧栏 (D15: 从 ScreenerView._build_history_tree 提取, props 化).
+
+    状态从 ``state.history_tree`` 派生 (Task 3.2 消除双轨, 不持有 use_state).
+    """
+    tree_controls: list[ft.Control] = []
+    if not rows:
+        tree_controls.append(
+            ft.Container(
+                content=ft.Text(
+                    I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=AppStyles.FONT_SIZE_BODY
+                ),
+                padding=AppStyles.SPACING_XL,
+            )
+        )
+    else:
+        first_expand = offset <= 5 and len(rows) <= 5
+        for idx, item in enumerate(rows):
+            display_date = item.display_date
+            d_key = item.d_key
+            total_cnt = item.total_cnt
+            strategies = item.strategies
+
+            subtiles: list[ft.Control] = [
+                ft.ListTile(
+                    leading=ft.Icon(ft.Icons.SELECT_ALL, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.ACCENT),
+                    title=ft.Text(
+                        f"{I18n.get('screener_all_strategies')} ({total_cnt})", size=AppStyles.FONT_SIZE_BODY
+                    ),
+                    on_click=lambda e, d=d_key: on_item_click(d, None, None),
+                    dense=True,
+                )
+            ]
+            for s in strategies:
+                strategy_display = translate_strategy_name(s.strategy_name)
+                run_suffix = f" [{s.run_id[:8]}]" if len(strategies) > 1 else ""
+                subtiles.append(
+                    ft.ListTile(
+                        leading=ft.Icon(
+                            ft.Icons.TRENDING_UP, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY
+                        ),
+                        title=ft.Text(f"{strategy_display}{run_suffix} ({s.cnt})", size=AppStyles.FONT_SIZE_BODY),
+                        on_click=lambda e, d=d_key, rid=s.run_id: on_item_click(d, None, rid),
+                        dense=True,
+                    )
+                )
+
+            tree_controls.append(
+                ft.ExpansionTile(
+                    title=ft.Text(display_date, size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500),
+                    subtitle=ft.Text(
+                        I18n.get("history_total").format(count=total_cnt),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    controls=subtiles,
+                    expanded=(first_expand and idx == 0),
+                    collapsed_icon_color=AppColors.TEXT_SECONDARY,
+                )
+            )
+
+    load_more_btn = ft.TextButton(
+        content=I18n.get("history_load_more"),
+        icon=ft.Icons.EXPAND_MORE,
+        on_click=safe_on_click(on_load_more),
+        visible=has_more,
+    )
+
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.Text(
+                        I18n.get("screener_mode_history"),
+                        weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY,
+                        size=AppStyles.FONT_SIZE_LG,
+                    ),
+                    padding=ft.Padding.only(left=12, top=10, bottom=5),
+                ),
+                ft.Divider(height=1, color=AppColors.DIVIDER),
+                ft.ListView(tree_controls, expand=True, spacing=0),
+                load_more_btn,
+            ],
+            spacing=0,
+            expand=True,
+        ),
+        bgcolor=ft.Colors.SURFACE,
+        border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
+    )
 
 
 @ft.component
@@ -849,237 +1334,6 @@ def ScreenerView(
     # 过滤无匹配时按钮仍可用 (全量数据可导出), 语义为 "有结果可导出"
     export_btn_disabled = not vm.has_export_data
 
-    # --- 构建参数面板 ---
-
-    def _build_param_control(p: dict) -> ft.Control | None:
-        """构建单个参数控件。"""
-        label = I18n.get(p.get("label_key", p["name"]))
-        p_type = p.get("type", "number")
-        p_name = p["name"]
-
-        if p_type == "slider":
-            min_val = p.get("min", 0)
-            max_val = p.get("max", 100)
-            default = p.get("default", min_val)
-            step = p.get("step", 1)
-            current_val = (params_ref.current or {}).get(p_name, default)
-            # NOTE: SliderInput 为 @ft.component 组件, 返回 Component wrapper (继承 BaseControl 而非
-            # flet.Control), 无 col/width 布局属性, 直接在 wrapper 上赋 col 不会随 patch 下发客户端,
-            # ResponsiveRow 默认按 col=12 布局 → 控件独占整行 → 参数面板变高 → table_card 视口高度
-            # 被挤压到 0 → 表格行不生成语义节点 (PR #373 回归 / PR #550 E2E 失败)。
-            # 修复: 外层包 Container 承载 width 与 col (Container 为 Control, 布局属性可正常下发)。
-            return ft.Container(
-                content=SliderInput(
-                    label=label,
-                    value=float(current_val),
-                    min_val=float(min_val),
-                    max_val=float(max_val),
-                    step=float(step),
-                    on_change=lambda v, n=p_name: _on_slider_value_change(n, v),
-                ),
-                width=AppStyles.CONTROL_WIDTH_MD,
-            )
-
-        if p_type == "number":
-            current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
-            return ft.TextField(
-                label=label,
-                value=str(current_val),
-                keyboard_type=ft.KeyboardType.NUMBER,
-                dense=True,
-                border_color=AppColors.DIVIDER,
-                focused_border_color=AppColors.PRIMARY,
-                text_size=AppStyles.FONT_SIZE_BODY,
-                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                width=AppStyles.CONTROL_WIDTH_MD,
-                on_change=lambda e, n=p_name: _update_param(n, _parse_num(e.control.value if e and e.control else "")),
-            )
-
-        if p_type == "dropdown":
-            options = p.get("options", [])
-            current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
-            return ft.Dropdown(
-                label=label,
-                value=str(current_val),
-                options=[ft.dropdown.Option(str(o)) for o in options],
-                dense=True,
-                border_color=AppColors.DIVIDER,
-                focused_border_color=AppColors.PRIMARY,
-                text_size=AppStyles.FONT_SIZE_BODY,
-                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                width=AppStyles.CONTROL_WIDTH_MD,
-                on_select=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
-            )
-
-        if p_type == "textarea":
-            if p_name == "ai_system_prompt" and state.selected_strategy:
-                current_val = (
-                    (params_ref.current or {}).get(p_name)
-                    or vm.get_base_prompt(state.selected_strategy)
-                    or p.get("default", "")
-                )
-            else:
-                current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
-            ctrl = ft.TextField(
-                label=label,
-                value=str(current_val),
-                multiline=True,
-                min_lines=6,
-                max_lines=15,
-                border_color=AppColors.DIVIDER,
-                focused_border_color=AppColors.PRIMARY,
-                text_size=AppStyles.FONT_SIZE_BODY_SM,
-                content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-                on_change=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
-            )
-            if p_name == "ai_system_prompt":
-                ctrl.label = None
-                return ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Row(
-                                [
-                                    ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
-                                    ft.Container(expand=True),
-                                    ft.TextButton(
-                                        content=I18n.get("ai_save_prompt"),
-                                        icon=ft.Icons.SAVE,
-                                        style=ft.ButtonStyle(color=AppColors.PRIMARY),
-                                        height=30,
-                                        on_click=lambda e, s=state.selected_strategy: _on_save_prompt(s),
-                                    ),
-                                    ft.TextButton(
-                                        content=I18n.get("ai_reset_default"),
-                                        icon=ft.Icons.RESTORE,
-                                        style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
-                                        height=30,
-                                        on_click=lambda e, s=state.selected_strategy: _on_restore_prompt(s),
-                                    ),
-                                ],
-                            ),
-                            ctrl,
-                        ],
-                        spacing=5,
-                    ),
-                    margin=ft.Margin.only(top=10, bottom=5),
-                )
-            return ft.Container(content=ctrl, margin=ft.Margin.only(top=10, bottom=5))
-
-        return None
-
-    def _build_params_panel() -> list[ft.Control]:
-        """构建策略参数面板。"""
-        from ui.theme import PARAM_GROUP_ORDER
-
-        if not state.selected_strategy:
-            return []
-
-        params_def = vm.get_strategy_params(state.selected_strategy)
-        if not params_def:
-            return []
-
-        groups: dict[str, list] = {g: [] for g in PARAM_GROUP_ORDER}
-        custom_groups: dict[str, str | None] = {}
-        group_labels: dict[str, str | None] = {}
-
-        for p in params_def:
-            group = p.get("group", "default")
-            if group not in groups:
-                custom_groups[group] = p.get("group_label_key")
-                groups[group] = []
-            groups[group].append(p)
-            if group not in group_labels:
-                group_labels[group] = p.get("group_label_key")
-
-        # 参数面板改用 ResponsiveRow (12 列栅格) 承载控件, 避免 ft.Slider 置于
-        # ft.Row(wrap=True) (Flutter Wrap) 触发 Flet Web 端 Dart 类型错误
-        # (TypeError: ... is not a subtype of ...)。textarea 多行文本占满整行,
-        # 其余小控件(滑块/数字/下拉)按断点多列排布。
-        _PARAM_COL = {"sm": 12, "md": 6, "lg": 4}
-        _PARAM_COL_TEXTAREA = 12
-
-        def _build_controls(params: list[dict]) -> list[ft.Control]:
-            controls: list[ft.Control] = []
-            for p in params:
-                ctrl = _build_param_control(p)
-                if ctrl is None:
-                    continue
-                ctrl.col = _PARAM_COL_TEXTAREA if p.get("type") == "textarea" else _PARAM_COL
-                controls.append(ctrl)
-            return controls
-
-        rendered_groups: list[tuple[str, str, list[ft.Control]]] = []
-
-        for group_name in PARAM_GROUP_ORDER:
-            if group_name == "default":
-                continue
-            if groups[group_name]:
-                controls = _build_controls(groups[group_name])
-                if controls:
-                    title = _resolve_group_title(group_name, group_labels.get(group_name))
-                    rendered_groups.append((group_name, title, controls))
-
-        if groups["default"]:
-            controls = _build_controls(groups["default"])
-            if controls:
-                title = _resolve_group_title("default", group_labels.get("default"))
-                rendered_groups.append(("default", title, controls))
-
-        for group_name in custom_groups:
-            if groups[group_name]:
-                controls = _build_controls(groups[group_name])
-                if controls:
-                    title = _resolve_group_title(group_name, custom_groups[group_name])
-                    rendered_groups.append((group_name, title, controls))
-
-        result: list[ft.Control] = []
-        for group_name, title, controls in rendered_groups:
-            if group_name == "advanced":
-                continue
-            result.append(
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                title,
-                                size=AppStyles.FONT_SIZE_BODY,
-                                weight=ft.FontWeight.W_500,
-                                color=AppColors.TEXT_PRIMARY,
-                            ),
-                            ft.Divider(height=1, color=AppColors.DIVIDER),
-                            ft.ResponsiveRow(controls, spacing=15, run_spacing=15),
-                        ],
-                        spacing=8,
-                    ),
-                    padding=ft.Padding.all(12),
-                    bgcolor=AppColors.SURFACE_VARIANT,
-                    border_radius=8,
-                    margin=ft.Margin.only(bottom=8),
-                )
-            )
-
-        if groups["advanced"]:
-            controls = _build_controls(groups["advanced"])
-            if controls:
-                result.append(
-                    ft.ExpansionTile(
-                        title=ft.Text(
-                            I18n.get("ai_advanced_settings"), size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500
-                        ),
-                        subtitle=ft.Text(
-                            I18n.get("ai_advanced_settings_desc"),
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                            color=AppColors.TEXT_SECONDARY,
-                        ),
-                        controls=controls,
-                        collapsed_text_color=AppColors.TEXT_PRIMARY,
-                        text_color=AppColors.PRIMARY,
-                        expanded=False,
-                    )
-                )
-
-        return result
-
     # --- 构建流式卡片控件 ---
 
     def _on_retry_click(name: str) -> None:
@@ -1089,217 +1343,7 @@ def ScreenerView(
         """
         vm.schedule_retry(name)
 
-    def _build_log_card(card: StreamCard) -> ft.Container:
-        """构建单张流式/AI 占位卡 (state-driven, 从 vm.state.stream_cards 渲染)。"""
-        name = card.name
-        # UX-2.3: 错误状态分支（含重试按钮）
-        if card.error:
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
-                                ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.FONT_SIZE_TITLE),
-                            ],
-                            spacing=8,
-                        ),
-                        ft.Text(
-                            card.error,
-                            size=AppStyles.FONT_SIZE_BODY_SM,
-                            color=AppColors.ERROR,
-                            no_wrap=False,
-                        ),
-                        ft.TextButton(
-                            icon=ft.Icons.REFRESH,
-                            content=I18n.get("ai_card_retry"),
-                            tooltip=I18n.get("ai_card_retry"),
-                            on_click=safe_on_click(lambda e, n=name: _on_retry_click(n)),
-                        ),
-                    ],
-                    spacing=8,
-                ),
-                border=ft.Border.all(1, AppColors.ERROR),
-                border_radius=8,
-                padding=AppStyles.SPACING_LG,
-                bgcolor=AppColors.SURFACE,
-                margin=ft.Margin.only(bottom=10),
-            )
-        if card.is_analyzing:
-            return ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
-                                ft.ProgressRing(width=14, height=14, stroke_width=2),
-                            ],
-                            spacing=8,
-                        ),
-                        ft.Container(
-                            content=ft.Markdown(
-                                I18n.get("ai_card_analyzing"),
-                                selectable=True,
-                                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                                on_tap_link=safe_open_url,
-                            ),
-                            padding=ft.Padding.only(left=5, right=5),
-                        ),
-                    ],
-                    spacing=8,
-                ),
-                border=ft.Border.all(1, AppColors.DIVIDER),
-                border_radius=8,
-                padding=AppStyles.SPACING_LG,
-                bgcolor=AppColors.SURFACE,
-                margin=ft.Margin.only(bottom=10),
-            )
-
-        reasoning = card.reasoning
-        content = card.content
-        reasoning_visible = bool(reasoning)
-        return ft.Container(
-            content=ft.Column(
-                [
-                    ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
-                    ft.ExpansionTile(
-                        title=ft.Text(f"{I18n.get('ai_thinking')}..."),
-                        subtitle=ft.Text(
-                            I18n.get("ai_expand_reasoning"),
-                            size=AppStyles.FONT_SIZE_CAPTION,
-                            color=AppColors.TEXT_SECONDARY,
-                        ),
-                        controls=[
-                            ft.Container(
-                                content=ft.Markdown(
-                                    reasoning,
-                                    selectable=True,
-                                    extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                                    code_theme="atom-one-dark",  # type: ignore[arg-type]
-                                    on_tap_link=safe_open_url,
-                                ),
-                                padding=AppStyles.SPACING_SM,
-                                bgcolor=AppColors.BACKGROUND,
-                                border_radius=4,
-                            )
-                        ],
-                        expanded=True,
-                        visible=reasoning_visible,
-                    ),
-                    ft.Container(
-                        content=ft.Markdown(
-                            content,
-                            selectable=True,
-                            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-                            code_theme="atom-one-dark",  # type: ignore[arg-type]
-                            on_tap_link=safe_open_url,
-                        ),
-                        padding=ft.Padding.only(left=5, right=5),
-                    ),
-                ],
-                spacing=10,
-            ),
-            border=ft.Border.all(1, AppColors.DIVIDER),
-            border_radius=8,
-            padding=AppStyles.SPACING_LG,
-            bgcolor=AppColors.SURFACE,
-            margin=ft.Margin.only(bottom=10),
-        )
-
     # --- 构建历史树控件 ---
-
-    def _build_history_tree() -> ft.Control:
-        """构建历史树侧栏 (Task 3.2: 从 state.history_tree.rows 派生, 不持有 use_state)."""
-        # Task 3.2: 历史树状态从 VM state 派生 (消除双轨状态)
-        history_tree_rows = state.history_tree.rows
-        history_tree_offset = state.history_tree.offset
-        history_load_more_visible = state.history_tree.has_more
-
-        tree_controls: list[ft.Control] = []
-        if not history_tree_rows:
-            tree_controls.append(
-                ft.Container(
-                    content=ft.Text(
-                        I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=AppStyles.FONT_SIZE_BODY
-                    ),
-                    padding=AppStyles.SPACING_XL,
-                )
-            )
-        else:
-            first_expand = history_tree_offset <= 5 and len(history_tree_rows) <= 5
-            for idx, item in enumerate(history_tree_rows):
-                display_date = item.display_date
-                d_key = item.d_key
-                total_cnt = item.total_cnt
-                strategies = item.strategies
-
-                subtiles: list[ft.Control] = [
-                    ft.ListTile(
-                        leading=ft.Icon(ft.Icons.SELECT_ALL, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.ACCENT),
-                        title=ft.Text(
-                            f"{I18n.get('screener_all_strategies')} ({total_cnt})", size=AppStyles.FONT_SIZE_BODY
-                        ),
-                        on_click=lambda e, d=d_key: _on_tree_item_click(d, run_id=None),
-                        dense=True,
-                    )
-                ]
-                for s in strategies:
-                    strategy_display = translate_strategy_name(s.strategy_name)
-                    run_suffix = f" [{s.run_id[:8]}]" if len(strategies) > 1 else ""
-                    subtiles.append(
-                        ft.ListTile(
-                            leading=ft.Icon(
-                                ft.Icons.TRENDING_UP, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY
-                            ),
-                            title=ft.Text(f"{strategy_display}{run_suffix} ({s.cnt})", size=AppStyles.FONT_SIZE_BODY),
-                            on_click=lambda e, d=d_key, rid=s.run_id: _on_tree_item_click(d, run_id=rid),
-                            dense=True,
-                        )
-                    )
-
-                tree_controls.append(
-                    ft.ExpansionTile(
-                        title=ft.Text(display_date, size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500),
-                        subtitle=ft.Text(
-                            I18n.get("history_total").format(count=total_cnt),
-                            size=AppStyles.FONT_SIZE_CAPTION,
-                            color=AppColors.TEXT_SECONDARY,
-                        ),
-                        controls=subtiles,
-                        expanded=(first_expand and idx == 0),
-                        collapsed_icon_color=AppColors.TEXT_SECONDARY,
-                    )
-                )
-
-        load_more_btn = ft.TextButton(
-            content=I18n.get("history_load_more"),
-            icon=ft.Icons.EXPAND_MORE,
-            on_click=safe_on_click(_on_load_more_history),
-            visible=history_load_more_visible,
-        )
-
-        return ft.Container(
-            content=ft.Column(
-                [
-                    ft.Container(
-                        content=ft.Text(
-                            I18n.get("screener_mode_history"),
-                            weight=ft.FontWeight.BOLD,
-                            color=AppColors.TEXT_PRIMARY,
-                            size=AppStyles.FONT_SIZE_LG,
-                        ),
-                        padding=ft.Padding.only(left=12, top=10, bottom=5),
-                    ),
-                    ft.Divider(height=1, color=AppColors.DIVIDER),
-                    ft.ListView(tree_controls, expand=True, spacing=0),
-                    load_more_btn,
-                ],
-                spacing=0,
-                expand=True,
-            ),
-            bgcolor=ft.Colors.SURFACE,
-            border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
-        )
 
     # --- 构建 UI ---
 
@@ -1388,7 +1432,15 @@ def ScreenerView(
                 visible=state.tier_hint is not None,
                 no_wrap=False,
             ),
-            *_build_params_panel(),
+            *build_params_panel(
+                state,
+                vm,
+                params_ref.current or {},
+                _on_slider_value_change,
+                _update_param,
+                _on_save_prompt,
+                _on_restore_prompt,
+            ),
         ],
         spacing=10,
         visible=is_realtime,
@@ -1594,7 +1646,7 @@ def ScreenerView(
         ),
         ft.Container(
             content=ft.Column(
-                [_build_log_card(c) for c in state.stream_cards],
+                [build_stream_card(c, _on_retry_click) for c in state.stream_cards],
                 expand=True,
                 spacing=4,
                 scroll=ft.ScrollMode.ALWAYS,
@@ -1639,7 +1691,13 @@ def ScreenerView(
         main_body = right_content
     else:
         main_body = ResizableSplitter(
-            left_content=_build_history_tree(),
+            left_content=build_history_tree(
+                state.history_tree.rows,
+                state.history_tree.offset,
+                state.history_tree.has_more,
+                _on_tree_item_click,
+                _on_load_more_history,
+            ),
             right_content=right_content,
             config_key="ui_splitter_screener_history",
             default_width=250,
