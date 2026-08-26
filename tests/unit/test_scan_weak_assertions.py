@@ -11,6 +11,7 @@
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from scan_weak_assertions import (  # noqa: E402 - sys.path 注入后导入
     WeakAssertion,
+    check_baseline_kpi,
     is_whitelisted,
     load_baseline,
     make_signature,
@@ -517,6 +519,65 @@ class TestBaselineShrink:
 # ============================================================================
 # --update-baseline 模式
 # ============================================================================
+
+
+class TestBaselineKpi:
+    """review07-G3: check_baseline_kpi 下降 KPI（WARNING 语义，不阻断）。"""
+
+    def _write_kpi_baseline(self, tmp_path: Path, *, total: int = 776, **overrides) -> Path:
+        data: dict = {
+            "version": 2,
+            "total": total,
+            "baseline_count": 776,
+            "target_total": 700,
+            "target_date": "2026-11-30",
+            "created_at": "2026-08-26",
+            "policy": "每季度下降不少于 10%（约 76 条），未达标时 CI 输出 WARNING（不阻断）",
+            "entries": [],
+        }
+        data.update(overrides)
+        path = tmp_path / "baseline.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_on_track_no_warning(self, tmp_path):
+        """目标日期当日：current 略高于起始，仍应在容差内无 warning。"""
+        path = self._write_kpi_baseline(tmp_path)
+        warnings = check_baseline_kpi(path, current_total=776, now=date(2026, 8, 26))
+        assert warnings == []
+
+    def test_behind_schedule_warns(self, tmp_path):
+        """过半时间段仍无下降 → 落后 → WARNING（不阻断语义由调用方保证）。"""
+        path = self._write_kpi_baseline(tmp_path)
+        # 2026-10-15 已过半：期望 ≈ 776 - (776-700)*0.5 ≈ 738
+        warnings = check_baseline_kpi(path, current_total=776, now=date(2026, 10, 15))
+        assert len(warnings) == 1
+        assert "下降进度落后" in warnings[0]
+
+    def test_tolerance_absorbs_small_drift(self, tmp_path):
+        """小幅波动（≤容差 10）不报警。"""
+        path = self._write_kpi_baseline(tmp_path, baseline_count=776)
+        # 2026-10-15 期望 ≈736（776-76*50/96），容差上限 746；当前 745 在容差内不报
+        warnings = check_baseline_kpi(path, current_total=745, now=date(2026, 10, 15))
+        assert warnings == []
+
+    def test_target_date_passed_checks_target(self, tmp_path):
+        """目标日期已过仍高于 target → WARNING。"""
+        path = self._write_kpi_baseline(tmp_path)
+        warnings = check_baseline_kpi(path, current_total=776, now=date(2026, 12, 15))
+        assert len(warnings) == 1
+
+    def test_no_kpi_fields_returns_empty(self, tmp_path):
+        """旧版 baseline（无 target_total 字段）兼容：返回空列表。"""
+        path = tmp_path / "baseline.json"
+        path.write_text(json.dumps({"version": 1, "total": 776, "entries": []}), encoding="utf-8")
+        warnings = check_baseline_kpi(path, current_total=776)
+        assert warnings == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        """baseline 文件不存在 → 空列表。"""
+        warnings = check_baseline_kpi(tmp_path / "nonexistent.json", current_total=776)
+        assert warnings == []
 
 
 class TestUpdateBaseline:
