@@ -249,6 +249,8 @@ class TestInitializeServices:
         mock_ss_instance.start.assert_called_once()
         mock_ns_instance.start.assert_awaited_once()
         mock_mds_instance.start.assert_awaited_once()
+        # review01-A8: 成功时 partial_state 标记 db/task_manager 已完成
+        assert result["partial_state"] == {"db_initialized": True, "task_manager_initialized": True}
 
     @pytest.mark.asyncio
     async def test_db_init_failed(self):
@@ -320,6 +322,8 @@ class TestInitializeServices:
         detail = result.get("detail", "")
         assert isinstance(detail, str)
         assert "tm error" in detail
+        # review01-A8: db 已初始化但 task_manager 失败
+        assert result["partial_state"] == {"db_initialized": True, "task_manager_initialized": False}
 
     @pytest.mark.asyncio
     async def test_db_upgrade_needed(self):
@@ -332,6 +336,8 @@ class TestInitializeServices:
         assert result["error"] == "db_upgrade_needed"
         assert result["current_rev"] == "abc123"
         assert result["head_rev"] == "def456"
+        # review01-A8: db 未初始化完成
+        assert result["partial_state"] == {"db_initialized": False}
 
 
 class TestMaybeAutoProbeOnStartup:

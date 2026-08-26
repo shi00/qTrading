@@ -17,11 +17,14 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import flet as ft
 
 from app.bootstrap import EmbeddedPgStartupScenario, mask_sensitive
+
+if TYPE_CHECKING:
+    from utils.shutdown import ShutdownCoordinator
 
 
 def _trace_log(msg: str) -> None:
@@ -61,6 +64,189 @@ from utils.log_decorators import UILogger
 from utils.proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
+
+
+class ApplicationSession:
+    """启动会话资源上下文管理器（review01-A8）。
+
+    封装启动期创建的会话资源（CacheManager 引擎、ShutdownCoordinator），
+    在启动流程抛异常时统一回滚，避免留下"数据库已迁移、引擎已就绪、
+    后台服务未启动"的部分初始化状态。
+
+    - 正常退出（__aexit__ 无异常）：不自动清理，交由 run() 注册到
+      ShutdownCoordinator 的正常关闭路径（window close / disconnect）处理。
+    - 异常退出（__aexit__ 有异常）：逆序释放——先 cancel 已注册任务并
+      coordinator 尽力清理，再 cache_manager.close() dispose 引擎。
+      已注册单例由各单例 _reset_singleton 在进程退出/测试重置时兜底，
+      此处聚焦引擎与后台任务这两个会泄漏跨会话资源的对象。
+    """
+
+    def __init__(self, page: ft.Page) -> None:
+        self._page = page
+        self.cache_manager: CacheManager | None = None
+        self.coordinator: ShutdownCoordinator | None = None
+
+    async def __aenter__(self) -> ApplicationSession:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        if exc_type is not None:
+            await self._rollback()
+        return False
+
+    async def _rollback(self) -> None:
+        """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。"""
+        if self.coordinator is not None:
+            try:
+                await self.coordinator.do_cleanup()
+            except Exception:
+                logger.exception("[App] Startup rollback: ShutdownCoordinator cleanup failed")
+        if self.cache_manager is not None:
+            try:
+                await self.cache_manager.close()
+            except Exception:
+                logger.exception("[App] Startup rollback: CacheManager close failed")
+
+
+async def _run_session(
+    session: ApplicationSession,
+    page: ft.Page,
+    scenario: EmbeddedPgStartupScenario | None,
+) -> None:
+    """执行启动编排主体（review01-A8 自 run() 提取）。
+
+    由 run() 的 ``async with ApplicationSession(page) as session`` 调用；
+    任何异常由 ApplicationSession.__aexit__ 统一回滚。
+    """
+    cache_manager = CacheManager()
+    session.cache_manager = cache_manager
+
+    from utils.shutdown import ShutdownCoordinator
+
+    coordinator = ShutdownCoordinator(page)
+    session.coordinator = coordinator
+
+    def _is_web_mode() -> bool:
+        return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
+
+    async def _perform_window_shutdown():
+        try:
+            await perform_window_shutdown(coordinator, page, is_web_mode_fn=_is_web_mode)
+        finally:
+            dialog_manager.shutdown_requested = False
+
+    def _trigger_shutdown() -> None:
+        page.run_task(_perform_window_shutdown)
+
+    dialog_manager = WindowDialogManager(
+        page,
+        on_shutdown_request=_trigger_shutdown,
+    )
+
+    def _show_close_confirm_dialog():
+        dialog = CloseConfirmDialog(dialog_manager._on_close_cancel, dialog_manager._on_close_confirm)
+        dialog_manager._show_close_confirm_dialog(dialog)
+
+    if not _is_web_mode():
+        page.window.prevent_close = True
+
+    async def _on_window_event(e):
+        logger.debug(
+            "[Main] Window event received. type=%s, close_confirm_visible=%s, shutdown_requested=%s",
+            getattr(e, "type", None),
+            dialog_manager.close_confirm_visible,
+            dialog_manager.shutdown_requested,
+        )
+        if e.type == ft.WindowEventType.CLOSE:
+            UILogger.log_action("MainWindow", action="close_request")
+            _show_close_confirm_dialog()
+
+    if not _is_web_mode():
+        page.window.on_event = _on_window_event
+
+    async def _on_disconnect(e):
+        await handle_disconnect(coordinator, cleanup_done_fn=lambda: coordinator.cleanup_done)
+
+    # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
+    # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
+    # 进程最终通过 proc.terminate() 清理。
+    if not is_e2e_mode():
+        page.on_disconnect = _on_disconnect
+
+    def on_error(e):
+        logger.error("[App] Unhandled UI Exception: %s", e, exc_info=True)
+
+    page.on_error = on_error
+
+    def show_toast(message, type="info", action_text=None, on_action=None):
+        # P2-10: action_text/on_action 透传 ToastManager.show (导出引导"打开文件夹")
+        page.toast.show(message, type, action_text=action_text, on_action=on_action)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
+
+    page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
+
+    # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
+
+    async def _perform_upgrade_exit():
+        """Cleanup and force exit after upgrade failure."""
+        await perform_upgrade_exit(coordinator, page, is_web_mode_fn=_is_web_mode)
+
+    def _on_show_toast(message_key, toast_type="info"):
+        """Wrap show_toast to resolve i18n keys before displaying."""
+        show_toast(I18n.get(message_key), toast_type)
+
+    bridge = _StartupBridge()
+    controller = StartupController(
+        cache_manager=cache_manager,
+        on_state_change=bridge.notify,
+        on_show_toast=_on_show_toast,
+        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
+        embedded_pg_scenario=scenario,
+    )
+
+    logger.info("[Main] Before page.render(RootView)")
+    _trace_log("[Main] Before page.render(RootView)")
+    try:
+        page.render(
+            RootView,
+            controller=controller,
+            bridge=bridge,
+            run_task_fn=page.run_task,
+        )
+    except Exception as render_exc:
+        _trace_log(f"[Main] page.render raised: {type(render_exc).__name__}: {render_exc}")
+        logger.exception("[Main] page.render(RootView) raised exception")
+        raise
+    _trace_log("[Main] After page.render(RootView)")
+    logger.info("[Main] After page.render(RootView)")
+
+    logger.info("[Main] Before ConfigHandler calls")
+    db_url = ConfigHandler.get_db_url()
+    token = ConfigHandler.get_token()
+    llm_api_key = ConfigHandler.get_llm_config().get("api_key")
+    onboarding_complete = ConfigHandler.is_onboarding_complete()
+    logger.info("[Main] After ConfigHandler calls")
+
+    masked_token = mask_sensitive(token)
+    masked_llm_key = mask_sensitive(llm_api_key)
+    logger.info(
+        "DB_URL configured: %s, Token='%s', API_Key='%s', Onboarding='%s'",
+        bool(db_url),
+        masked_token,
+        masked_llm_key,
+        onboarding_complete,
+    )
+
+    logger.info("[Main] Before controller.start()")
+    _trace_log("[Main] Before controller.start()")
+    await controller.start(db_url, token, llm_api_key, onboarding_complete)
+    _trace_log("[Main] After controller.start()")
+    logger.info("[Main] After controller.start()")
+
+    # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator
+    # （仅在 initialize_services 成功执行后非 None；onboarding 路径不创建 task）
+    auto_probe_task = controller.auto_probe_task
+    if auto_probe_task is not None and not auto_probe_task.done():
+        coordinator.register_task(auto_probe_task)
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:
@@ -422,130 +608,8 @@ async def run(page: ft.Page):
             )
         else:
             logger.info("[Main] Embedded DB URL ContextVar override active; no DATABASE_URL env var present")
-    cache_manager = CacheManager()
-
-    from utils.shutdown import ShutdownCoordinator
-
-    coordinator = ShutdownCoordinator(page)
-
-    def _is_web_mode() -> bool:
-        return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
-
-    async def _perform_window_shutdown():
-        try:
-            await perform_window_shutdown(coordinator, page, is_web_mode_fn=_is_web_mode)
-        finally:
-            dialog_manager.shutdown_requested = False
-
-    def _trigger_shutdown() -> None:
-        page.run_task(_perform_window_shutdown)
-
-    dialog_manager = WindowDialogManager(
-        page,
-        on_shutdown_request=_trigger_shutdown,
-    )
-
-    def _show_close_confirm_dialog():
-        dialog = CloseConfirmDialog(dialog_manager._on_close_cancel, dialog_manager._on_close_confirm)
-        dialog_manager._show_close_confirm_dialog(dialog)
-
-    if not _is_web_mode():
-        page.window.prevent_close = True
-
-    async def _on_window_event(e):
-        logger.debug(
-            "[Main] Window event received. type=%s, close_confirm_visible=%s, shutdown_requested=%s",
-            getattr(e, "type", None),
-            dialog_manager.close_confirm_visible,
-            dialog_manager.shutdown_requested,
-        )
-        if e.type == ft.WindowEventType.CLOSE:
-            UILogger.log_action("MainWindow", action="close_request")
-            _show_close_confirm_dialog()
-
-    if not _is_web_mode():
-        page.window.on_event = _on_window_event
-
-    async def _on_disconnect(e):
-        await handle_disconnect(coordinator, cleanup_done_fn=lambda: coordinator.cleanup_done)
-
-    # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
-    # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
-    # 进程最终通过 proc.terminate() 清理。
-    if not is_e2e_mode():
-        page.on_disconnect = _on_disconnect
-
-    def on_error(e):
-        logger.error("[App] Unhandled UI Exception: %s", e, exc_info=True)
-
-    page.on_error = on_error
-
-    def show_toast(message, type="info", action_text=None, on_action=None):
-        # P2-10: action_text/on_action 透传 ToastManager.show (导出引导"打开文件夹")
-        page.toast.show(message, type, action_text=action_text, on_action=on_action)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
-
-    page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
-
-    # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
-
-    async def _perform_upgrade_exit():
-        """Cleanup and force exit after upgrade failure."""
-        await perform_upgrade_exit(coordinator, page, is_web_mode_fn=_is_web_mode)
-
-    def _on_show_toast(message_key, toast_type="info"):
-        """Wrap show_toast to resolve i18n keys before displaying."""
-        show_toast(I18n.get(message_key), toast_type)
-
-    bridge = _StartupBridge()
-    controller = StartupController(
-        cache_manager=cache_manager,
-        on_state_change=bridge.notify,
-        on_show_toast=_on_show_toast,
-        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
-        embedded_pg_scenario=scenario,
-    )
-
-    logger.info("[Main] Before page.render(RootView)")
-    _trace_log("[Main] Before page.render(RootView)")
-    try:
-        page.render(
-            RootView,
-            controller=controller,
-            bridge=bridge,
-            run_task_fn=page.run_task,
-        )
-    except Exception as render_exc:
-        _trace_log(f"[Main] page.render raised: {type(render_exc).__name__}: {render_exc}")
-        logger.exception("[Main] page.render(RootView) raised exception")
-        raise
-    _trace_log("[Main] After page.render(RootView)")
-    logger.info("[Main] After page.render(RootView)")
-
-    logger.info("[Main] Before ConfigHandler calls")
-    db_url = ConfigHandler.get_db_url()
-    token = ConfigHandler.get_token()
-    llm_api_key = ConfigHandler.get_llm_config().get("api_key")
-    onboarding_complete = ConfigHandler.is_onboarding_complete()
-    logger.info("[Main] After ConfigHandler calls")
-
-    masked_token = mask_sensitive(token)
-    masked_llm_key = mask_sensitive(llm_api_key)
-    logger.info(
-        "DB_URL configured: %s, Token='%s', API_Key='%s', Onboarding='%s'",
-        bool(db_url),
-        masked_token,
-        masked_llm_key,
-        onboarding_complete,
-    )
-
-    logger.info("[Main] Before controller.start()")
-    _trace_log("[Main] Before controller.start()")
-    await controller.start(db_url, token, llm_api_key, onboarding_complete)
-    _trace_log("[Main] After controller.start()")
-    logger.info("[Main] After controller.start()")
-
-    # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator
-    # （仅在 initialize_services 成功执行后非 None；onboarding 路径不创建 task）
-    auto_probe_task = controller.auto_probe_task
-    if auto_probe_task is not None and not auto_probe_task.done():
-        coordinator.register_task(auto_probe_task)
+    async with ApplicationSession(page) as session:
+        # review01-A8: 启动编排（CacheManager 创建 → controller.start）全部包进
+        # ApplicationSession 上下文——任何异常（引擎构造 / page.render / controller.start）
+        # 都由 __aexit__ 统一回滚（释放引擎 + 后台任务），避免部分初始化状态残留。
+        await _run_session(session, page, scenario)

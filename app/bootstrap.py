@@ -50,6 +50,9 @@ class InitResult(TypedDict):
     # Phase 2A.1 §3.2.9：启动期自动 probe 任务（fire-and-forget），
     # 由 main.py 注册到 ShutdownCoordinator 以便关机时取消
     auto_probe_task: asyncio.Task | None
+    # review01-A8: 分阶段初始化完成情况，供调用方决定回滚粒度。
+    # 字段: db_initialized / task_manager_initialized / services_started(list[str]|None)。
+    partial_state: dict[str, bool] | None
 
 
 async def initialize_services(
@@ -79,6 +82,7 @@ async def initialize_services(
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
+            "partial_state": None,
         }
 
     try:
@@ -94,6 +98,7 @@ async def initialize_services(
             "current_rev": e.current_rev,
             "head_rev": e.head_rev,
             "auto_probe_task": None,
+            "partial_state": {"db_initialized": False},
         }
     except Exception as e:
         log_classified(
@@ -112,6 +117,7 @@ async def initialize_services(
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
+            "partial_state": {"db_initialized": False},
         }
 
     MetaDataManager.preload_aliases()
@@ -127,6 +133,7 @@ async def initialize_services(
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
+            "partial_state": {"db_initialized": False},
         }
 
     try:
@@ -150,6 +157,7 @@ async def initialize_services(
             "current_rev": None,
             "head_rev": None,
             "auto_probe_task": None,
+            "partial_state": {"db_initialized": True, "task_manager_initialized": False},
         }
 
     import os
@@ -215,6 +223,7 @@ async def initialize_services(
         "current_rev": None,
         "head_rev": None,
         "auto_probe_task": auto_probe_task,
+        "partial_state": {"db_initialized": True, "task_manager_initialized": True},
     }
 
 
