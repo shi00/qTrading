@@ -1,21 +1,19 @@
 import asyncio
 import datetime
 import logging
-import re
 import threading
 import typing
 from contextlib import asynccontextmanager
 
 import pandas as pd
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-import config
 from data.constants import get_health_depth_full_trade_days
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence import engine_provider
 
-# DAOs
+# DAOs（__init__ 显式实例化以满足 R13 静态检查；注册清单见 DaoRegistry）
 from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
@@ -38,8 +36,6 @@ from data.persistence.daos.top_inst_dao import TopInstDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
 from data.persistence.daos.sync_dao import SyncDao
 from data.sync.base import safe_error
-from utils.config_handler import ConfigHandler
-from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -53,35 +49,16 @@ from utils.singleton_registry import register_singleton
 
 from data.cache.cache_manager_delegations import CacheManagerDelegationMixin
 
+# review01-A4 Step2: 引擎生命周期与 DAO 注册清单拆分为组合对象
+from data.cache.dao_registry import DaoRegistry
+from data.cache.engine_manager import EngineManager
+
 
 @register_singleton
 class CacheManager(CacheManagerDelegationMixin):
     _instance = None
     _initialized = False
     _lock = threading.Lock()  # Thread-safe singleton
-
-    # DAO 注册表：单一权威列表，驱动 _create_engine 和 close 的循环同步。
-    # __init__ 中仍保留 17 行显式赋值以保持 R13 静态检查兼容性和 pyright 类型推断。
-    _DAO_REGISTRY: tuple[tuple[str, type[BaseDao]], ...] = (
-        ("stock_dao", StockDao),
-        ("quote_dao", QuoteDao),
-        ("financial_dao", FinancialDao),
-        ("sync_dao", SyncDao),
-        ("market_dao", MarketDao),
-        ("screener_dao", ScreenerDao),
-        ("macro_dao", MacroDao),
-        ("holder_dao", HolderDao),
-        ("backtest_dao", BacktestDAO),
-        ("top_inst_dao", TopInstDao),
-        ("stk_limit_dao", StkLimitDao),
-        ("pledge_detail_dao", PledgeDetailDao),
-        ("share_float_dao", ShareFloatDao),
-        ("stk_holdertrade_dao", StkHoldertradeDao),
-        ("sw_industry_classify_dao", SwIndustryClassifyDao),
-        ("sw_industry_member_dao", SwIndustryMemberDao),
-        ("express_dao", ExpressDao),
-        ("watchlist_dao", WatchlistDao),
-    )
 
     def __new__(cls):
         with cls._lock:
@@ -136,7 +113,11 @@ class CacheManager(CacheManagerDelegationMixin):
             if self.__class__._initialized:
                 return
 
-            connection_string = self._get_connection_string()
+            # review01-A4 Step2: 组合引擎生命周期与 DAO 注册清单（EngineManager / DaoRegistry）
+            self._engine_manager = EngineManager()
+            self._dao_registry = DaoRegistry()
+
+            connection_string = self._engine_manager.get_connection_string()
 
             self.engine: AsyncEngine | None = None
             self._disposed = False
@@ -174,44 +155,19 @@ class CacheManager(CacheManagerDelegationMixin):
 
             self._create_engine(connection_string)
             self.__class__._initialized = True
-            logger.debug("[CacheManager] Initialized with AsyncEngine: %s", self._sanitize_url(connection_string))
-
-    def _get_connection_string(self) -> str | None:
-        """Get database connection string from config."""
-        if hasattr(ConfigHandler, "get_db_url"):
-            url = ConfigHandler.get_db_url()
-            if url:
-                return url
-        return config.DB_URL
-
-    def _sanitize_url(self, url: str) -> str:
-        """Sanitize URL for logging (hide password)."""
-        if not url:
-            return "None"
-        return re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", url)
+            logger.debug(
+                "[CacheManager] Initialized with AsyncEngine: %s",
+                self._engine_manager.sanitize_url(connection_string),
+            )
 
     def _create_engine(self, connection_string: str):
-        """Create async engine and update DAO references."""
+        """Create async engine and update DAO references (delegate to EngineManager/DaoRegistry)."""
         self._disposed = False
-        # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫恢复可用状态
-        engine_provider.mark_disposed(False)
-
-        pool_config = get_db_pool_config()
-
-        self.engine = create_async_engine(
-            connection_string,
-            echo=False,
-            future=True,
-            **pool_config,
-        )
-        # review03-C11 Step2: 记录引擎引用（语义化标记，与 disposed 状态同临界区维护）
-        engine_provider.set_engine(self.engine)
-
-        # 由 _DAO_REGISTRY 驱动 DAO.engine 同步，消除 17 行重复手写赋值
-        for attr_name, _ in self._DAO_REGISTRY:
-            getattr(self, attr_name).engine = self.engine
-
-        logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
+        # EngineManager.create_engine 内部同步 engine_provider（mark_disposed/set_engine）
+        self._engine_manager.create_engine(connection_string)
+        self.engine = self._engine_manager.engine
+        # 由 DaoRegistry 驱动 DAO.engine 同步，消除 17 行重复手写赋值
+        self._dao_registry.sync_engines(self, self.engine)
 
     @property
     def _maintenance_event(self):
@@ -257,13 +213,11 @@ class CacheManager(CacheManagerDelegationMixin):
                 # review03-C11 Step2: 同步 engine_provider，DAO 侧 R5 守卫即时生效
                 engine_provider.mark_disposed(True)
                 if self.engine is not None:
-                    await self.engine.dispose()
-                    self.engine = None
-                    # review03-C11 Step2: 引擎引用已释放，同步清空 provider 标记
-                    engine_provider.set_engine(None)
-                    # 由 _DAO_REGISTRY 驱动 DAO.engine 清空，消除 17 行重复手写赋值
-                    for attr_name, _ in self._DAO_REGISTRY:
-                        getattr(self, attr_name).engine = None
+                    # review01-A4 Step2: 引擎 dispose + provider 引用清空委托 EngineManager
+                    await self._engine_manager.dispose()
+                    self.engine = self._engine_manager.engine  # None
+                    # 由 DaoRegistry 驱动 DAO.engine 清空，消除 17 行重复手写赋值
+                    self._dao_registry.sync_engines(self, self.engine)
                 # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
                 # 桌面模式下 close() 后进程退出，此重置不会被观测到；
                 # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -352,7 +306,7 @@ class CacheManager(CacheManagerDelegationMixin):
                 return
 
             if self.engine is None:
-                connection_string = self._get_connection_string()
+                connection_string = self._engine_manager.get_connection_string()
                 if not connection_string:
                     raise RuntimeError("Database URL not configured. Please complete the onboarding wizard first.")
                 self._create_engine(connection_string)

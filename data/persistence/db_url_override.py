@@ -3,7 +3,8 @@
 Provides an async-safe, thread-local way to temporarily override the database
 URL returned by ``ConfigHandler.get_db_url()``. The override is visible to any
 code that calls ``ConfigHandler.get_db_url()`` within the context — including
-``CacheManager._get_connection_string`` (used in tests to redirect to test DBs)
+``EngineManager.get_connection_string`` (review01-A4: 原 CacheManager._get_connection_string
+已移入 EngineManager；used in tests to redirect to test DBs)
 and Alembic's ``env.py`` fallback path.
 
 P3-M4-DbUrlOverride-Mock-In-Prod: previously this module used
