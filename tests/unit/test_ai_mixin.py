@@ -11,7 +11,18 @@ import pandas as pd
 
 from data.constants import attach_column_units
 from core.i18n import I18n
-from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
+from strategies.ai_context import (
+    PreFetchedContext,
+    _build_auxiliary_data_text,
+    _build_macro_context,
+    _build_capital_flow_text,
+    _build_financials_text,
+    _build_history_text,
+    _build_multi_period_financials,
+    _compute_technical_structure,
+    _get_limit_pct,
+)
+from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import safe_float
 
 pytestmark = pytest.mark.unit
@@ -162,13 +173,13 @@ class TestAIStrategyMixinSortForAI:
 
 class TestComputeTechnicalStructure:
     def test_empty_df(self):
-        result = AIStrategyMixin._compute_technical_structure(pd.DataFrame())
+        result = _compute_technical_structure(pd.DataFrame())
         assert result["ma_alignment"] == "数据不足"
         assert result["volume_trend"] == "数据不足"
         assert result["price_trend_5d"] == "数据不足"
 
     def test_none_history(self):
-        result = AIStrategyMixin._compute_technical_structure(None)
+        result = _compute_technical_structure(None)
         assert result["ma_alignment"] == "数据不足"
         assert result["volume_trend"] == "数据不足"
 
@@ -179,7 +190,7 @@ class TestComputeTechnicalStructure:
                 "close": [10.0],
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert result["ma_alignment"] == "数据不足"
 
     def test_sufficient_data(self):
@@ -190,7 +201,7 @@ class TestComputeTechnicalStructure:
                 "vol": [1000.0] * 25,
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df, 1.5)
+        result = _compute_technical_structure(df, 1.5)
         assert "ma_alignment" in result
         assert "volume_trend" in result
         assert "price_trend_5d" in result
@@ -203,7 +214,7 @@ class TestComputeTechnicalStructure:
                 "vol": [1000000 + i * 10000 for i in range(30)],
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert "多头排列" in result["ma_alignment"]
 
     def test_bearish_alignment(self):
@@ -214,7 +225,7 @@ class TestComputeTechnicalStructure:
                 "vol": [1000000 + i * 10000 for i in range(30)],
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert "空头排列" in result["ma_alignment"]
 
     def test_missing_volume_column(self):
@@ -224,7 +235,7 @@ class TestComputeTechnicalStructure:
                 "close": [10.0 + i * 0.1 for i in range(30)],
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert result["volume_trend"] == "数据不足"
 
     def test_zero_division_guard(self):
@@ -235,7 +246,7 @@ class TestComputeTechnicalStructure:
                 "vol": [0.0] * 30,
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert result["ma_alignment"] != "计算错误" or "数据不足" in result["ma_alignment"]
 
     def test_with_adj_factor(self):
@@ -247,7 +258,7 @@ class TestComputeTechnicalStructure:
                 "adj_factor": [1.0] * 30,
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
         assert result["ma_alignment"] != "数据不足"
 
     def test_nan_close_does_not_produce_nan_pct(self):
@@ -268,7 +279,7 @@ class TestComputeTechnicalStructure:
                 "vol": [1000000.0] * 30,
             }
         )
-        result = AIStrategyMixin._compute_technical_structure(df)
+        result = _compute_technical_structure(df)
 
         # F4-ST-003: 任何字段都不应含 "nan"
         for key, value in result.items():
@@ -277,34 +288,34 @@ class TestComputeTechnicalStructure:
 
 class TestGetLimitPct:
     def test_st_stock(self):
-        assert AIStrategyMixin._get_limit_pct("000001.SZ", "ST某某") == 5.0
+        assert _get_limit_pct("000001.SZ", "ST某某") == 5.0
 
     def test_star_st_stock(self):
-        assert AIStrategyMixin._get_limit_pct("000001.SZ", "*ST某某") == 5.0
+        assert _get_limit_pct("000001.SZ", "*ST某某") == 5.0
 
     def test_bse_stock(self):
-        assert AIStrategyMixin._get_limit_pct("830001.BJ") == 30.0
+        assert _get_limit_pct("830001.BJ") == 30.0
 
     def test_gem_stock(self):
-        assert AIStrategyMixin._get_limit_pct("300001.SZ") == 20.0
+        assert _get_limit_pct("300001.SZ") == 20.0
 
     def test_star_stock(self):
-        assert AIStrategyMixin._get_limit_pct("688001.SH") == 20.0
+        assert _get_limit_pct("688001.SH") == 20.0
 
     def test_main_board_sz(self):
-        assert AIStrategyMixin._get_limit_pct("000001.SZ") == 10.0
+        assert _get_limit_pct("000001.SZ") == 10.0
 
     def test_main_board_sh(self):
-        assert AIStrategyMixin._get_limit_pct("600001.SH") == 10.0
+        assert _get_limit_pct("600001.SH") == 10.0
 
 
 class TestBuildHistoryText:
     def test_empty_df(self):
-        result = AIStrategyMixin._build_history_text(pd.DataFrame())
+        result = _build_history_text(pd.DataFrame())
         assert result == I18n.get("ai_history_insufficient")
 
     def test_none_history(self):
-        result = AIStrategyMixin._build_history_text(None)
+        result = _build_history_text(None)
         assert result == I18n.get("ai_history_insufficient")
 
     def test_insufficient_data(self):
@@ -314,7 +325,7 @@ class TestBuildHistoryText:
                 "close": [10.0, 11.0],
             }
         )
-        result = AIStrategyMixin._build_history_text(df)
+        result = _build_history_text(df)
         assert result == I18n.get("ai_history_insufficient")
 
     def test_with_data(self):
@@ -326,7 +337,7 @@ class TestBuildHistoryText:
                 "pct_chg": [1.0] * 25,
             }
         )
-        result = AIStrategyMixin._build_history_text(df, ts_code="000001.SZ", stock_name="测试")
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="测试")
         assert len(result) > 0
 
     def test_valid_history(self):
@@ -338,7 +349,7 @@ class TestBuildHistoryText:
                 "pct_chg": [1.0] * 60,
             }
         )
-        result = AIStrategyMixin._build_history_text(df)
+        result = _build_history_text(df)
         assert "趋势与波动特征" in result
         assert "量价配合" in result
 
@@ -351,7 +362,7 @@ class TestBuildHistoryText:
                 "pct_chg": [1.0] * 57 + [9.9, 9.8, 10.0],
             }
         )
-        result = AIStrategyMixin._build_history_text(df, "000001.SZ", "测试股票")
+        result = _build_history_text(df, "000001.SZ", "测试股票")
         assert "涨停" in result
 
     def test_with_limit_down(self):
@@ -363,7 +374,7 @@ class TestBuildHistoryText:
                 "pct_chg": [-1.0] * 57 + [-9.9, -9.8, -10.0],
             }
         )
-        result = AIStrategyMixin._build_history_text(df, "000001.SZ", "测试股票")
+        result = _build_history_text(df, "000001.SZ", "测试股票")
         assert "跌停" in result
 
     def test_missing_pct_chg(self):
@@ -374,7 +385,7 @@ class TestBuildHistoryText:
                 "vol": [1000000 + i * 10000 for i in range(60)],
             }
         )
-        result = AIStrategyMixin._build_history_text(df)
+        result = _build_history_text(df)
         assert "趋势与波动特征" in result
 
     def test_with_adj_factor(self):
@@ -386,7 +397,7 @@ class TestBuildHistoryText:
                 "adj_factor": [1.0 + i * 0.001 for i in range(60)],
             }
         )
-        result = AIStrategyMixin._build_history_text(df)
+        result = _build_history_text(df)
         assert result != ""
 
     def test_nan_values_in_pct_chg(self):
@@ -398,7 +409,7 @@ class TestBuildHistoryText:
                 "pct_chg": [1.0] * 30 + [float("nan")] * 30,
             }
         )
-        result = AIStrategyMixin._build_history_text(df)
+        result = _build_history_text(df)
         assert result != ""
 
 
@@ -999,7 +1010,7 @@ class TestAIStrategyMixinAnalyzeSingle:
 
 class TestBuildCapitalFlowText:
     def test_no_data(self):
-        result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {})
+        result = _build_capital_flow_text("000001.SZ", {})
         assert "暂不可用" in result
 
     def test_moneyflow_with_data(self):
@@ -1013,7 +1024,7 @@ class TestBuildCapitalFlowText:
                 "net_mf_amount": [170.0],
             }
         )
-        result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df})
+        result = _build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df})
         assert "主力净流入" in result
 
     def test_moneyflow_no_stock(self):
@@ -1024,7 +1035,7 @@ class TestBuildCapitalFlowText:
                 "sell_lg_amount": [50.0],
             }
         )
-        result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df})
+        result = _build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df})
         assert "当日无记录" in result
 
     def test_top_list_with_data(self):
@@ -1035,8 +1046,8 @@ class TestBuildCapitalFlowText:
                 "net_amount": [5000.0],
             }
         )
-        with patch("strategies.ai_mixin.get_column_unit", return_value="wan_yuan"):
-            result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            result = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
         assert "龙虎榜" in result
 
     def test_northbound_with_data(self):
@@ -1047,7 +1058,7 @@ class TestBuildCapitalFlowText:
                 "ratio": [2.5],
             }
         )
-        result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {"northbound_df": nb_df})
+        result = _build_capital_flow_text("000001.SZ", {"northbound_df": nb_df})
         assert "北向持股" in result
 
     def test_northbound_no_stock(self):
@@ -1058,11 +1069,11 @@ class TestBuildCapitalFlowText:
                 "ratio": [2.5],
             }
         )
-        result = AIStrategyMixin._build_capital_flow_text("000001.SZ", {"northbound_df": nb_df})
+        result = _build_capital_flow_text("000001.SZ", {"northbound_df": nb_df})
         assert "当日无持股记录" in result
 
     def test_formats_top_list_net_amount_as_yuan_based_unit(self):
-        text = AIStrategyMixin._build_capital_flow_text(
+        text = _build_capital_flow_text(
             "000001.SZ",
             {
                 "moneyflow_df": pd.DataFrame(),
@@ -1080,7 +1091,7 @@ class TestBuildCapitalFlowText:
         assert "亿元" not in text
 
     def test_formats_moneyflow_amount_as_wan_yuan_based_unit(self):
-        text = AIStrategyMixin._build_capital_flow_text(
+        text = _build_capital_flow_text(
             "000001.SZ",
             {
                 "moneyflow_df": pd.DataFrame(
@@ -1111,7 +1122,7 @@ class TestBuildCapitalFlowText:
             ),
             {"net_amount": "wan_yuan"},
         )
-        text = AIStrategyMixin._build_capital_flow_text(
+        text = _build_capital_flow_text(
             "000001.SZ",
             {
                 "moneyflow_df": pd.DataFrame(),
@@ -1138,7 +1149,7 @@ class TestBuildCapitalFlowText:
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
             client = mock_tc.return_value
             client.is_api_covered_by_tier.return_value = True  # 档位覆盖，无 stale 标注
-            text = AIStrategyMixin._build_capital_flow_text(
+            text = _build_capital_flow_text(
                 "000001.SZ",
                 {"top_inst_df": ti_df},
                 labels_out=labels,
@@ -1150,7 +1161,7 @@ class TestBuildCapitalFlowText:
     def test_build_capital_flow_text_top_inst_empty_no_label(self):
         """Phase 3C：top_inst 段空 df 时不注入占位文本、不注册标签（§4.4.5）。"""
         labels: list[str] = []
-        text = AIStrategyMixin._build_capital_flow_text(
+        text = _build_capital_flow_text(
             "000001.SZ",
             {"top_inst_df": pd.DataFrame()},
             labels_out=labels,
@@ -1171,7 +1182,7 @@ class TestBuildCapitalFlowText:
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
             client = mock_tc.return_value
             client.is_api_covered_by_tier.return_value = False  # 档位不覆盖，stale 标注
-            text = AIStrategyMixin._build_capital_flow_text(
+            text = _build_capital_flow_text(
                 "000001.SZ",
                 {"top_inst_df": ti_df},
                 labels_out=labels,
@@ -1194,7 +1205,7 @@ class TestBuildFinancialsText:
             "total_mv": 500000.0,
             "dv_ttm": 3.0,
         }
-        result = AIStrategyMixin._build_financials_text(row)
+        result = _build_financials_text(row)
         assert "PE(TTM)" in result
         assert "PEG" in result
 
@@ -1204,29 +1215,27 @@ class TestBuildFinancialsText:
             "netprofit_yoy": -5.0,
             "total_mv": 500000.0,
         }
-        result = AIStrategyMixin._build_financials_text(row)
+        result = _build_financials_text(row)
         assert "N/A" in result
 
     def test_missing_data(self):
         row = {}
-        result = AIStrategyMixin._build_financials_text(row)
+        result = _build_financials_text(row)
         assert "PE(TTM)" in result
 
 
 class TestBuildMultiPeriodFinancials:
     @pytest.mark.asyncio
     async def test_empty_df(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
         assert "不足" not in result_text  # 不再返回翻译文本
 
     @pytest.mark.asyncio
     async def test_with_data(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame(
             {
                 "roe": [10.0, 12.0, 11.0],
@@ -1237,13 +1246,12 @@ class TestBuildMultiPeriodFinancials:
         )
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is True
         assert "ROE" in result_text
 
     @pytest.mark.asyncio
     async def test_with_cashflow(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame(
             {
                 "n_cashflow_act": [500.0],
@@ -1252,41 +1260,37 @@ class TestBuildMultiPeriodFinancials:
         )
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is True
         assert "现金流" in result_text
 
     @pytest.mark.asyncio
     async def test_prefetched_data(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame({"roe": [10.0, 12.0]})
         prefetched = {"000001.SZ": {"financial_history": df}}
         cache = MagicMock()
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache, prefetched=prefetched)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache, prefetched=prefetched)
         assert result_valid is True
         assert "ROE" in result_text
 
     @pytest.mark.asyncio
     async def test_exception(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(side_effect=Exception("DB error"))
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_none_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_cashflow_ratio(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame(
             {
                 "end_date": ["20231231", "20230930", "20230630", "20230331"],
@@ -1300,33 +1304,30 @@ class TestBuildMultiPeriodFinancials:
         )
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is True
         assert result_text is not None
 
     @pytest.mark.asyncio
     async def test_passes_as_of_date_to_cache(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame({"roe": [10.0]})
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        await s._build_multi_period_financials("000001.SZ", cache, as_of_date="20240701")
+        await _build_multi_period_financials("000001.SZ", cache, as_of_date="20240701")
         cache.get_financial_reports_history.assert_called_once_with("000001.SZ", periods=8, as_of_date="20240701")
 
     @pytest.mark.asyncio
     async def test_no_as_of_date_passes_none(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame({"roe": [10.0]})
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        await s._build_multi_period_financials("000001.SZ", cache)
+        await _build_multi_period_financials("000001.SZ", cache)
         cache.get_financial_reports_history.assert_called_once_with("000001.SZ", periods=8, as_of_date=None)
 
 
 class TestBuildAuxiliaryDataText:
     @pytest.mark.asyncio
     async def test_no_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1339,13 +1340,12 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_with_audit(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame({"audit_result": ["标准无保留意见"]}))
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1358,13 +1358,12 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "审计意见" in result_text
 
     @pytest.mark.asyncio
     async def test_with_pledge_high(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1377,14 +1376,13 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "质押比例" in result_text
         assert "⚠️" in result_text
 
     @pytest.mark.asyncio
     async def test_with_holdernumber(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1404,14 +1402,13 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "股东人数" in result_text
         assert "筹码集中" in result_text
 
     @pytest.mark.asyncio
     async def test_with_dividend(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1431,22 +1428,20 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "分红" in result_text
 
     @pytest.mark.asyncio
     async def test_exception(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=Exception("DB error"))
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_empty_all_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
         cache.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
@@ -1459,13 +1454,12 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=pd.DataFrame())
         cache.get_stk_holdertrade = AsyncMock(return_value=pd.DataFrame())
         cache.get_express = AsyncMock(return_value=pd.DataFrame())
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_high_pledge_warning(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1478,13 +1472,12 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "质押比例较高" in result_text
 
     @pytest.mark.asyncio
     async def test_holder_number_without_ratio(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1506,7 +1499,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "股东人数" in result_text
         assert "500,000" in result_text
@@ -1515,7 +1508,6 @@ class TestBuildAuxiliaryDataText:
 
     @pytest.mark.asyncio
     async def test_with_prefetched(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1542,13 +1534,12 @@ class TestBuildAuxiliaryDataText:
                 ),
             }
         }
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, prefetched)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, prefetched)
         assert result_valid is True
         assert result_text is not None
 
     @pytest.mark.asyncio
     async def test_passes_as_of_date_to_all_cache_calls(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1561,7 +1552,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        await s._build_auxiliary_data_text("000001.SZ", cache, as_of_date="20240701")
+        await _build_auxiliary_data_text("000001.SZ", cache, as_of_date="20240701")
         cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date="20240701")
         cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date="20240701")
         cache.get_dividend.assert_called_once_with("000001.SZ", as_of_date="20240701")
@@ -1572,7 +1563,6 @@ class TestBuildAuxiliaryDataText:
 
     @pytest.mark.asyncio
     async def test_no_as_of_date_passes_none(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1585,7 +1575,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_share_float_upcoming = AsyncMock(return_value=None)
         cache.get_stk_holdertrade = AsyncMock(return_value=None)
         cache.get_express = AsyncMock(return_value=None)
-        await s._build_auxiliary_data_text("000001.SZ", cache)
+        await _build_auxiliary_data_text("000001.SZ", cache)
         cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date=None)
         cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date=None)
         cache.get_dividend.assert_called_once_with("000001.SZ", as_of_date=None)
@@ -1595,7 +1585,6 @@ class TestBuildAuxiliaryDataText:
 
     @pytest.mark.asyncio
     async def test_holders_uses_ann_date_for_latest(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1616,7 +1605,7 @@ class TestBuildAuxiliaryDataText:
             }
         )
         cache.get_top10_holders = AsyncMock(return_value=holders_df)
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "股东B" in result_text
 
@@ -1629,7 +1618,6 @@ class TestBuildAuxiliaryDataText:
         仅注入 _format_forecast_section 输出。本测试 mock TushareClient 确保档位覆盖为 True，
         避免依赖默认 config 档位，保证测试稳定性。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1658,7 +1646,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # forecast API 在 points_2000 覆盖内 → 无 stale 标注
             client.is_api_covered_by_tier.return_value = True
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "业绩预告" in result_text
         assert "2024Q3" in result_text
@@ -1675,7 +1663,6 @@ class TestBuildAuxiliaryDataText:
         stale 前缀，仅注入 _format_pledge_detail_section 输出。本测试 mock TushareClient
         确保档位覆盖为 True，避免依赖默认 config 档位，保证测试稳定性。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1705,7 +1692,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # pledge_detail API 在 points_2000 覆盖内 → 无 stale 标注
             client.is_api_covered_by_tier.return_value = True
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "质押明细" in result_text
         assert "质押股数" in result_text
@@ -1725,7 +1712,6 @@ class TestBuildAuxiliaryDataText:
         本测试 mock TushareClient.is_api_covered_by_tier 返回 False，模拟 pledge_detail
         不在当前档位覆盖内（降级场景），验证 stale 标注 + 历史数据仍注入。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1755,7 +1741,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # pledge_detail API 不在 points_120 覆盖内 → stale 标注
             client.is_api_covered_by_tier.return_value = False
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         # stale 标注前缀
         assert "【数据停止更新，最后更新：2024-06-30】" in result_text
@@ -1774,7 +1760,6 @@ class TestBuildAuxiliaryDataText:
         stale 前缀，仅注入 _format_share_float_section 输出。本测试 mock TushareClient
         确保档位覆盖为 True，避免依赖默认 config 档位，保证测试稳定性。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1803,7 +1788,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # share_float API 在 points_5000 覆盖内 → 无 stale 标注
             client.is_api_covered_by_tier.return_value = True
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "限售解禁" in result_text
         assert "2024-08-15" in result_text
@@ -1819,7 +1804,6 @@ class TestBuildAuxiliaryDataText:
         本测试 mock TushareClient.is_api_covered_by_tier 返回 False，模拟 share_float
         不在当前档位覆盖内（降级场景），验证 stale 标注 + 历史数据仍注入。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1848,7 +1832,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # share_float API 不在 points_120 覆盖内 → stale 标注
             client.is_api_covered_by_tier.return_value = False
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         # stale 标注前缀（ann_date 为 2024-06-01）
         assert "【数据停止更新，最后更新：2024-06-01】" in result_text
@@ -1867,7 +1851,6 @@ class TestBuildAuxiliaryDataText:
         无 stale 前缀。本测试 mock TushareClient 确保档位覆盖为 True，避免依赖默认
         config 档位，保证测试稳定性。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1896,7 +1879,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # stk_holdertrade API 在 points_2000 覆盖内 → 无 stale 标注
             client.is_api_covered_by_tier.return_value = True
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "股东增减持" in result_text
         assert "2024-06-01" in result_text
@@ -1915,7 +1898,6 @@ class TestBuildAuxiliaryDataText:
         stk_holdertrade 不在当前档位覆盖内（降级场景），验证 stale 标注 + 历史数据
         仍注入。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1944,7 +1926,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # stk_holdertrade API 不在 points_120 覆盖内 → stale 标注
             client.is_api_covered_by_tier.return_value = False
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         # stale 标注前缀（ann_date 为 2024-06-01）
         assert "【数据停止更新，最后更新：2024-06-01】" in result_text
@@ -1963,7 +1945,6 @@ class TestBuildAuxiliaryDataText:
         无 stale 前缀。本测试 mock TushareClient 确保档位覆盖为 True，避免依赖默认
         config 档位，保证测试稳定性。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -1998,7 +1979,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # express API 在 points_2000 覆盖内 → 无 stale 标注
             client.is_api_covered_by_tier.return_value = True
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "业绩快报" in result_text
         # quarter 字符串从 end_date 推断：2024-09-30 → "2024Q3"
@@ -2023,7 +2004,6 @@ class TestBuildAuxiliaryDataText:
         本测试 mock TushareClient.is_api_covered_by_tier 返回 False，模拟
         express 不在当前档位覆盖内（降级场景），验证 stale 标注 + 历史数据仍注入。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=None)
         cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2051,7 +2031,7 @@ class TestBuildAuxiliaryDataText:
             client = mock_tc.return_value
             # express API 不在 points_120 覆盖内 → stale 标注
             client.is_api_covered_by_tier.return_value = False
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         # stale 标注前缀（ann_date 为 2024-10-15）
         assert "【数据停止更新，最后更新：2024-10-15】" in result_text
@@ -2065,16 +2045,14 @@ class TestBuildAuxiliaryDataText:
 class TestBuildMacroContext:
     @pytest.mark.asyncio
     async def test_no_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=None)
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert result == ""
 
     @pytest.mark.asyncio
     async def test_with_macro_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(
             return_value=pd.DataFrame(
@@ -2086,13 +2064,12 @@ class TestBuildMacroContext:
             )
         )
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert "M2" in result
         assert "CPI" in result
 
     @pytest.mark.asyncio
     async def test_with_shibor(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=None)
         cache.get_shibor_latest = AsyncMock(
@@ -2104,35 +2081,32 @@ class TestBuildMacroContext:
                 }
             )
         )
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert "Shibor" in result
 
     @pytest.mark.asyncio
     async def test_exception(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(side_effect=Exception("DB error"))
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert result == ""
 
     @pytest.mark.asyncio
     async def test_empty_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
         cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert result == ""
 
     @pytest.mark.asyncio
     async def test_with_both_macro_and_shibor(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame({"m2_yoy": [8.5], "cpi": [0.2], "ppi": [-2.5]}))
         cache.get_shibor_latest = AsyncMock(
             return_value=pd.DataFrame({"on_rate": [2.0], "week_1": [2.5], "month_3": [3.0]})
         )
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
         assert result is not None
         assert "宏观经济环境" in result
         assert "Shibor" in result
@@ -2140,7 +2114,6 @@ class TestBuildMacroContext:
     @pytest.mark.asyncio
     async def test_build_macro_context_includes_gdp(self):
         """Phase 2D §3.2.6：_build_macro_context 应注入 GDP 段落（含 quarter 字符串和三大产业）。"""
-        s = ConcreteStrategy()
         cache = MagicMock()
         # GDP 行：period 为季度末日 2024-12-31，含 GDP 字段
         cache.get_macro_economy = AsyncMock(
@@ -2155,7 +2128,7 @@ class TestBuildMacroContext:
             )
         )
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
 
         # GDP 段落应被注入
         assert "GDP" in result
@@ -2170,7 +2143,6 @@ class TestBuildMacroContext:
     @pytest.mark.asyncio
     async def test_build_macro_context_gdp_skipped_when_no_gdp_fields(self):
         """Phase 2D：当 macro 行无 GDP 字段（仅 m2 月度行）时，不注入 GDP 段落。"""
-        s = ConcreteStrategy()
         cache = MagicMock()
         # 仅 m2 月度行，无 GDP 字段
         cache.get_macro_economy = AsyncMock(
@@ -2184,7 +2156,7 @@ class TestBuildMacroContext:
             )
         )
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
 
         # m2 段落应被注入
         assert "M2" in result or "m2" in result.lower() or "8.50" in result
@@ -2199,7 +2171,6 @@ class TestBuildMacroContext:
         季度末日）。_build_macro_context 需分别定位 m2 行和 GDP 行，避免从 GDP 行
         读取 m2_yoy（NaN）导致 "nan%" 输出。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         # 模拟生产场景：2 行数据，月度行含 m2_yoy，GDP 行含 gdp_yoy
         cache.get_macro_economy = AsyncMock(
@@ -2224,7 +2195,7 @@ class TestBuildMacroContext:
             )
         )
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
 
         # m2 段落应正确注入（从 m2 行读取，非 GDP 行的 NaN）
         assert "8.50" in result  # m2_yoy
@@ -2246,7 +2217,6 @@ class TestBuildMacroContext:
         LPR 与 shibor 同表 shibor_daily，独立 stale 标注（shibor_lpr 代理 API）。
         shibor_lpr 在 points_120 覆盖内，正常注入（无 stale 标注）。
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=None)
         # shibor_latest 同时含 shibor 列 + LPR 列
@@ -2262,7 +2232,7 @@ class TestBuildMacroContext:
                 }
             )
         )
-        result = await s._build_macro_context(cache)
+        result = await _build_macro_context(cache)
 
         # shibor 段落应被注入
         assert "Shibor" in result
@@ -2349,28 +2319,25 @@ class TestAIStrategyMixinTimeoutHandling:
 class TestBuildMacroContextLookaheadGuard:
     @pytest.mark.asyncio
     async def test_build_macro_context_passes_as_of_date(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
         cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
         as_of = datetime.date(2024, 6, 1)
-        await s._build_macro_context(cache, as_of_date=as_of)
+        await _build_macro_context(cache, as_of_date=as_of)
         cache.get_macro_economy.assert_called_once_with(as_of_date=as_of)
         cache.get_shibor_latest.assert_called_once_with(as_of_date=as_of)
 
     @pytest.mark.asyncio
     async def test_build_macro_context_no_as_of_date_passes_none(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame())
         cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame())
-        await s._build_macro_context(cache)
+        await _build_macro_context(cache)
         cache.get_macro_economy.assert_called_once_with(as_of_date=None)
         cache.get_shibor_latest.assert_called_once_with(as_of_date=None)
 
     @pytest.mark.asyncio
     async def test_build_macro_context_no_future_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cutoff = datetime.date(2024, 6, 1)
         macro_df = pd.DataFrame(
@@ -2382,7 +2349,7 @@ class TestBuildMacroContextLookaheadGuard:
         )
         cache.get_macro_economy = AsyncMock(return_value=macro_df)
         cache.get_shibor_latest = AsyncMock(return_value=None)
-        result = await s._build_macro_context(cache, as_of_date=cutoff)
+        result = await _build_macro_context(cache, as_of_date=cutoff)
         assert "M2" in result
         cache.get_macro_economy.assert_called_once_with(as_of_date=cutoff)
 
@@ -2552,7 +2519,6 @@ class TestBuilderLabelsOut:
 
     @pytest.mark.asyncio
     async def test_multi_period_financials_labels_out_with_data(self):
-        s = ConcreteStrategy()
         df = pd.DataFrame(
             {
                 "roe": [10.0, 12.0],
@@ -2570,45 +2536,41 @@ class TestBuilderLabelsOut:
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
         labels: list[str] = []
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache, labels_out=labels)
         assert result_valid  # 有效数据
         assert result_text  # 非空
         assert len(labels) == 8  # 8 个子项全部注册
 
     @pytest.mark.asyncio
     async def test_multi_period_financials_labels_out_empty_df(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache, labels_out=labels)
         assert result_valid is False
         assert labels == []
 
     @pytest.mark.asyncio
     async def test_multi_period_financials_labels_out_exception(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(side_effect=RuntimeError("DB error"))
         labels: list[str] = []
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache, labels_out=labels)
         assert result_valid is False
         assert labels == []
 
     @pytest.mark.asyncio
     async def test_multi_period_financials_no_labels_out_backward_compat(self):
         """不传 labels_out 时行为不变。"""
-        s = ConcreteStrategy()
         df = pd.DataFrame({"roe": [10.0, 12.0]})
         cache = MagicMock()
         cache.get_financial_reports_history = AsyncMock(return_value=df)
-        result_text, result_valid = await s._build_multi_period_financials("000001.SZ", cache)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
         assert result_valid is True
         assert "ROE" in result_text
 
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_out_with_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": ["标准无保留"]})
@@ -2652,14 +2614,13 @@ class TestBuilderLabelsOut:
         cache.get_stk_holdertrade = AsyncMock(return_value=pd.DataFrame())
         cache.get_express = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result_valid  # 有效数据
         assert result_text  # 非空
         assert len(labels) == 6  # 6 个子项全部注册
 
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_out_no_data(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
         cache.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
@@ -2673,18 +2634,17 @@ class TestBuilderLabelsOut:
         cache.get_stk_holdertrade = AsyncMock(return_value=pd.DataFrame())
         cache.get_express = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result_valid is False
         assert labels == []
         assert result_text == ""
 
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_out_exception(self):
-        s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=RuntimeError("DB error"))
         labels: list[str] = []
-        result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result_valid is False
         assert labels == []
         assert result_text == ""
@@ -2703,7 +2663,7 @@ class TestBuilderLabelsOut:
         tl_df = pd.DataFrame({"ts_code": ["000001.SZ"], "reason": ["涨停"], "net_amount": [5000]})
         nb_df = pd.DataFrame({"ts_code": ["000001.SZ"], "vol": [100000], "ratio": [2.5]})
         labels: list[str] = []
-        AIStrategyMixin._build_capital_flow_text(
+        _build_capital_flow_text(
             "000001.SZ",
             {"moneyflow_df": mf_df, "top_list_df": tl_df, "northbound_df": nb_df},
             labels_out=labels,
@@ -2712,7 +2672,7 @@ class TestBuilderLabelsOut:
 
     def test_capital_flow_labels_out_no_data(self):
         labels: list[str] = []
-        AIStrategyMixin._build_capital_flow_text("000001.SZ", {}, labels_out=labels)
+        _build_capital_flow_text("000001.SZ", {}, labels_out=labels)
         assert labels == []
 
     def test_capital_flow_labels_out_no_record(self):
@@ -2727,13 +2687,13 @@ class TestBuilderLabelsOut:
             }
         )
         labels: list[str] = []
-        AIStrategyMixin._build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df}, labels_out=labels)
+        _build_capital_flow_text("000001.SZ", {"moneyflow_df": mf_df}, labels_out=labels)
         assert labels == []
 
     def test_capital_flow_labels_out_exception(self):
         labels: list[str] = ["ai_label_main_flow"]
-        with patch("strategies.ai_mixin.safe_float", side_effect=RuntimeError("unexpected")):
-            AIStrategyMixin._build_capital_flow_text(
+        with patch("strategies.ai_context.capital_flow.safe_float", side_effect=RuntimeError("unexpected")):
+            _build_capital_flow_text(
                 "000001.SZ",
                 {"moneyflow_df": pd.DataFrame({"ts_code": ["000001.SZ"], "buy_lg_amount": [100]})},
                 labels_out=labels,
@@ -2754,23 +2714,23 @@ class TestBuilderLabelsOut:
             }
         )
         labels: list[str] = []
-        AIStrategyMixin._build_history_text(df, ts_code="000001.SZ", labels_out=labels)
+        _build_history_text(df, ts_code="000001.SZ", labels_out=labels)
         assert "ai_label_kline" in labels
 
     def test_history_text_labels_out_empty(self):
         labels: list[str] = []
-        AIStrategyMixin._build_history_text(pd.DataFrame(), ts_code="000001.SZ", labels_out=labels)
+        _build_history_text(pd.DataFrame(), ts_code="000001.SZ", labels_out=labels)
         assert labels == []
 
     def test_history_text_labels_out_none(self):
         labels: list[str] = []
-        AIStrategyMixin._build_history_text(None, ts_code="000001.SZ", labels_out=labels)
+        _build_history_text(None, ts_code="000001.SZ", labels_out=labels)
         assert labels == []
 
     def test_financials_text_labels_out_with_data(self):
         """正常数据：labels_out 应包含 ai_label_valuation。"""
         labels: list[str] = []
-        result = AIStrategyMixin._build_financials_text(
+        result = _build_financials_text(
             {"pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6},
             labels_out=labels,
         )
@@ -2780,20 +2740,20 @@ class TestBuilderLabelsOut:
     def test_financials_text_labels_out_empty_row(self):
         """空 dict：fmt_val(None) 返回 N/A，parts 非空，仍注册 ai_label_valuation。"""
         labels: list[str] = []
-        result = AIStrategyMixin._build_financials_text({}, labels_out=labels)
+        result = _build_financials_text({}, labels_out=labels)
         assert "ai_label_valuation" in labels
         assert result
 
     def test_financials_text_labels_out_no_labels_out_backward_compat(self):
         """不传 labels_out：返回值不变，向后兼容。"""
-        result = AIStrategyMixin._build_financials_text({"pe_ttm": 10, "pb": 1})
+        result = _build_financials_text({"pe_ttm": 10, "pb": 1})
         assert result  # 非空，无异常
 
     def test_financials_text_labels_out_exception_clears(self):
         """异常路径：labels_out 应被清空，返回哨兵。"""
         labels: list[str] = ["ai_label_valuation"]  # 模拟部分注册后被异常清空
-        with patch("strategies.ai_mixin.fmt_val", side_effect=RuntimeError("unexpected")):
-            result = AIStrategyMixin._build_financials_text({"pe_ttm": 10}, labels_out=labels)
+        with patch("strategies.ai_context.financials.fmt_val", side_effect=RuntimeError("unexpected")):
+            result = _build_financials_text({"pe_ttm": 10}, labels_out=labels)
         assert result == I18n.get("ai_financial_insufficient")
         assert labels == []
 
@@ -2811,7 +2771,6 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
         original_locale = I18n.current_locale()
         try:
             I18n.set_locale("zh_CN")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_fina_audit = AsyncMock(return_value=None)
             cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2824,7 +2783,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_share_float_upcoming = AsyncMock(return_value=None)
             cache.get_stk_holdertrade = AsyncMock(return_value=None)
             cache.get_express = AsyncMock(return_value=None)
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is False
             assert result_text == ""
         finally:
@@ -2835,7 +2794,6 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
         original_locale = I18n.current_locale()
         try:
             I18n.set_locale("en_US")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_fina_audit = AsyncMock(return_value=None)
             cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2848,7 +2806,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_share_float_upcoming = AsyncMock(return_value=None)
             cache.get_stk_holdertrade = AsyncMock(return_value=None)
             cache.get_express = AsyncMock(return_value=None)
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is False
             assert result_text == ""
         finally:
@@ -2859,7 +2817,6 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
         original_locale = I18n.current_locale()
         try:
             I18n.set_locale("zh_CN")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame({"audit_result": ["标准无保留意见"]}))
             cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2872,7 +2829,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_share_float_upcoming = AsyncMock(return_value=None)
             cache.get_stk_holdertrade = AsyncMock(return_value=None)
             cache.get_express = AsyncMock(return_value=None)
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is True
             assert result_text  # 非空
             assert "审计意见" in result_text
@@ -2884,7 +2841,6 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
         original_locale = I18n.current_locale()
         try:
             I18n.set_locale("en_US")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame({"audit_result": ["Unqualified opinion"]}))
             cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2897,7 +2853,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_share_float_upcoming = AsyncMock(return_value=None)
             cache.get_stk_holdertrade = AsyncMock(return_value=None)
             cache.get_express = AsyncMock(return_value=None)
-            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is True
             assert result_text  # 非空
         finally:
@@ -2913,7 +2869,6 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
         try:
             # 先在 zh_CN 下构建一次（无数据）
             I18n.set_locale("zh_CN")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_fina_audit = AsyncMock(return_value=None)
             cache.get_fina_mainbz = AsyncMock(return_value=None)
@@ -2926,11 +2881,11 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_share_float_upcoming = AsyncMock(return_value=None)
             cache.get_stk_holdertrade = AsyncMock(return_value=None)
             cache.get_express = AsyncMock(return_value=None)
-            _, zh_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            _, zh_valid = await _build_auxiliary_data_text("000001.SZ", cache)
 
             # 切换到 en_US 后再构建一次（同样无数据）
             I18n.set_locale("en_US")
-            _, en_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            _, en_valid = await _build_auxiliary_data_text("000001.SZ", cache)
 
             # is_valid 标记在两种 locale 下一致（均为 False），不依赖翻译文本
             assert zh_valid == en_valid
@@ -2957,16 +2912,11 @@ class TestStructuredResultSentinel:
         dp = _make_mock_dp()
 
         # Mock _build_multi_period_financials 返回无效结果
-        with patch.object(
-            s,
-            "_build_multi_period_financials",
+        with patch(
+            "strategies.ai_mixin._build_multi_period_financials",
             AsyncMock(return_value=("", False)),
         ):
-            with patch.object(
-                s,
-                "_build_auxiliary_data_text",
-                AsyncMock(return_value=("", False)),
-            ):
+            with patch("strategies.ai_mixin._build_auxiliary_data_text", AsyncMock(return_value=("", False))):
                 ai_client = MagicMock()
                 ai_client.analyze_stock = AsyncMock(return_value={"score": 50, "summary": "test", "decision": "Hold"})
                 row = {"ts_code": "000001.SZ", "name": "测试", "close": 10.0}
@@ -2986,16 +2936,11 @@ class TestStructuredResultSentinel:
         s = ConcreteStrategy()
         dp = _make_mock_dp()
 
-        with patch.object(
-            s,
-            "_build_multi_period_financials",
+        with patch(
+            "strategies.ai_mixin._build_multi_period_financials",
             AsyncMock(return_value=("ROE: 12.5%", True)),
         ):
-            with patch.object(
-                s,
-                "_build_auxiliary_data_text",
-                AsyncMock(return_value=("", False)),
-            ):
+            with patch("strategies.ai_mixin._build_auxiliary_data_text", AsyncMock(return_value=("", False))):
                 ai_client = MagicMock()
                 ai_client.analyze_stock = AsyncMock(return_value={"score": 50, "summary": "test", "decision": "Hold"})
                 row = {"ts_code": "000001.SZ", "name": "测试", "close": 10.0}
@@ -3012,16 +2957,11 @@ class TestStructuredResultSentinel:
         s = ConcreteStrategy()
         dp = _make_mock_dp()
 
-        with patch.object(
-            s,
-            "_build_multi_period_financials",
+        with patch(
+            "strategies.ai_mixin._build_multi_period_financials",
             AsyncMock(return_value=("", False)),
         ):
-            with patch.object(
-                s,
-                "_build_auxiliary_data_text",
-                AsyncMock(return_value=("", False)),
-            ):
+            with patch("strategies.ai_mixin._build_auxiliary_data_text", AsyncMock(return_value=("", False))):
                 ai_client = MagicMock()
                 ai_client.analyze_stock = AsyncMock(return_value={"score": 50, "summary": "test", "decision": "Hold"})
                 row = {"ts_code": "000001.SZ", "name": "测试", "close": 10.0}
@@ -3037,14 +2977,12 @@ class TestStructuredResultSentinel:
         s = ConcreteStrategy()
         dp = _make_mock_dp()
 
-        with patch.object(
-            s,
-            "_build_multi_period_financials",
+        with patch(
+            "strategies.ai_mixin._build_multi_period_financials",
             AsyncMock(return_value=("", False)),
         ):
-            with patch.object(
-                s,
-                "_build_auxiliary_data_text",
+            with patch(
+                "strategies.ai_mixin._build_auxiliary_data_text",
                 AsyncMock(return_value=("- 审计意见: 标准无保留", True)),
             ):
                 ai_client = MagicMock()
@@ -3102,14 +3040,13 @@ class TestStructuredResultSentinel:
         try:
             # zh_CN 下无数据
             I18n.set_locale("zh_CN")
-            s = ConcreteStrategy()
             cache = MagicMock()
             cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
-            _, zh_valid = await s._build_multi_period_financials("000001.SZ", cache)
+            _, zh_valid = await _build_multi_period_financials("000001.SZ", cache)
 
             # en_US 下同样无数据
             I18n.set_locale("en_US")
-            _, en_valid = await s._build_multi_period_financials("000001.SZ", cache)
+            _, en_valid = await _build_multi_period_financials("000001.SZ", cache)
 
             assert zh_valid == en_valid
             assert zh_valid is False
@@ -3122,7 +3059,7 @@ class TestBuildStaleSection:
 
     def test_build_text_stale_annotation(self):
         """_build_stale_section 在 API 不在档位覆盖时返回 stale 前缀 + formatter(df)。"""
-        from strategies.ai_mixin import _build_stale_section
+        from strategies.ai_context import _build_stale_section
 
         df = pd.DataFrame({"ann_date": ["2024-01-15"], "value": [100.0]})
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
@@ -3134,7 +3071,7 @@ class TestBuildStaleSection:
 
     def test_build_text_no_stale_when_tier_covers(self):
         """_build_stale_section 在 API 在档位覆盖内时仅返回 formatter(df)（无 stale 标注）。"""
-        from strategies.ai_mixin import _build_stale_section
+        from strategies.ai_context import _build_stale_section
 
         df = pd.DataFrame({"ann_date": ["2024-01-15"], "value": [100.0]})
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
@@ -3146,7 +3083,7 @@ class TestBuildStaleSection:
 
     def test_build_text_stale_empty_db_returns_empty(self):
         """_build_stale_section 在 df 为空时返回空字符串（不注入）。"""
-        from strategies.ai_mixin import _build_stale_section
+        from strategies.ai_context import _build_stale_section
 
         df = pd.DataFrame()
         with patch("data.external.tushare_client.TushareClient"):
@@ -3160,7 +3097,6 @@ class TestBuildStaleSection:
         - points_120 档位下 macro 段落（cn_m，min_tier=points_2000）有 stale 标注
         - shibor 段落（min_tier=points_120）无 stale 标注
         """
-        s = ConcreteStrategy()
         cache = MagicMock()
         # macro 数据（m2/cpi/ppi 段落）
         macro_df = pd.DataFrame(
@@ -3186,7 +3122,7 @@ class TestBuildStaleSection:
             client = mock_tc.return_value
             # cn_m 不在 points_120 覆盖内 → stale 标注；shibor 在 points_120 覆盖内 → 无标注
             client.is_api_covered_by_tier.side_effect = lambda api, tier=None: api == "shibor"
-            result = await s._build_macro_context(cache)
+            result = await _build_macro_context(cache)
         # macro 段落应有 stale 标注（period "2024-06" 被 pd.to_datetime 解析为 2024-06-01）
         assert "【数据停止更新，最后更新：2024-06-01】" in result
         # shibor 段落内容存在（on rate=1.85）

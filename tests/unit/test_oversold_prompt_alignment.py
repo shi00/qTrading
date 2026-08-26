@@ -8,7 +8,7 @@ from typing import Any
 
 from services.ai_service import AIService, STRATEGY_CONTEXT_MAX_LEN
 from strategies.all_strategies import StrategyManager
-from strategies.ai_mixin import PreFetchedContext
+from strategies.ai_context import PreFetchedContext
 from strategies.oversold_strategy import OversoldStrategy
 from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
 
@@ -280,18 +280,10 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
         patch("data.persistence.review_manager.ReviewManager") as mock_review_manager,
         patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=5),
         patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
-        patch.object(
-            strategy,
-            "_build_multi_period_financials",
-            AsyncMock(return_value=("", False)),
-        ),
-        patch.object(
-            strategy,
-            "_build_auxiliary_data_text",
-            AsyncMock(return_value=("无辅助数据", False)),
-        ),
-        patch.object(strategy, "_build_macro_context", AsyncMock(return_value="")),
-        patch.object(strategy, "_build_history_text", return_value="近60日价格行为摘要"),
+        patch("strategies.ai_mixin._build_multi_period_financials", AsyncMock(return_value=("", False))),
+        patch("strategies.ai_mixin._build_auxiliary_data_text", AsyncMock(return_value=("无辅助数据", False))),
+        patch("strategies.ai_mixin._build_macro_context", AsyncMock(return_value="")),
+        patch("strategies.ai_mixin._build_history_text", return_value="近60日价格行为摘要"),
     ):
         result = await strategy.filter(context)
 
