@@ -302,6 +302,8 @@ def BacktestConfigPanel(
             border_color=AppColors.INPUT_BORDER,
             color=AppColors.INPUT_TEXT,
             on_change=safe_on_change(_on_initial_capital_change),
+            # D19: Enter 提交 → 触发运行回测 (表单主操作, 与 Run 按钮同 handler)
+            on_submit=safe_on_change(_on_run_click),
         ),
     )
 
@@ -334,6 +336,8 @@ def BacktestConfigPanel(
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
         on_change=safe_on_change(_on_max_positions_change),
+        # D19: Enter 提交 → 触发运行回测 (表单主操作, 与 Run 按钮同 handler)
+        on_submit=safe_on_change(_on_run_click),
     )
 
     # --- UX-05: 字段错误提示 (声明式常驻构造, visible 驱动; flet 0.86.5 无 TextField.error_text) ---

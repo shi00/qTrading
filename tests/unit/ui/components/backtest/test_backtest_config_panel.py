@@ -434,6 +434,15 @@ class TestOnRunClick:
         }
         assert set(config.keys()) == expected_keys
 
+    def test_enter_submit_triggers_run(self) -> None:
+        """D19: initial_capital 输入框 Enter (on_submit) → 触发 on_run_backtest."""
+        on_run, _, result, _ = _render_panel()
+        capital_input = _find_text_field(result, "i18n[backtest_initial_capital]")
+        on_submit = getattr(capital_input, "on_submit", None)
+        assert on_submit is not None, "initial_capital 输入应绑定 on_submit"  # noqa: weak-assertion on_submit 为后续 _invoke 调用的前置 guard
+        _invoke(on_submit, _make_event("1000000"))
+        on_run.assert_called_once()
+
     def test_run_click_with_default_state(self) -> None:
         """默认 state: initial_capital=1000000, rebalance=signal, max_positions=50。"""
         on_run, _, result, _ = _render_panel()
