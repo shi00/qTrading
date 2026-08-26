@@ -115,11 +115,16 @@ def _build_pages_stack(
     子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
 
     E2E 模式优化: ``E2E_TESTING=true`` 时只构造当前激活视图, 非激活视图用空
-    ``ft.Container`` 占位。根因: 多视图 VM 构造链 (DataSourceViewModel →
-    AIService → litellm import 18s+; ScreenerViewModel → DataProcessor;
-    DataExplorerViewModel → DataExplorerQueryClient 等) 在 MainThread 同步执行,
-    阻塞 Flet patch 下发导致 E2E 浏览器超时。E2E 测试不需要非激活视图的 VM 状态,
-    跳过是安全的 (与 home_view.py L142-154 E2E_TESTING 跳过范式一致)。
+    ``ft.Container`` 占位 (UX-06 实测: litellm 已由 ai_service._ensure_litellm_loaded
+    双层惰性移除 import 阻塞, 但非激活视图构造仍含单例注册表/策略注册表初始化 +
+    控件树构建 (机器负载相关, 本机 ~0.1-1.0s), 在 MainThread 同步执行会阻塞 Flet
+    patch 下发导致 E2E 浏览器超时)。E2E 测试不需要非激活视图的 VM 状态, 跳过是
+    安全的 (与 home_view._init_and_load 的 E2E_TESTING 跳过范式一致)。
+
+    冷启动性能基线 (UX-06, 本机 proxy 实测, 波动随机器负载): 依赖库 import
+    5.3-9.6s + 单例 ~0.46s + 全页渲染 ~0.1-1.0s; 低负载样本 ≈6.5-7s,
+    冷首启/高负载可能超 8s SLA (见 scripts/probe/startup_perf.py 与技术债
+    P3-UX06-Startup-SLA-E2E-Gap)。
 
     Args:
         current_tab: 当前激活的 NavTabs 值, 控制 visible prop。
@@ -132,7 +137,7 @@ def _build_pages_stack(
 
     def _make_content(view_factory, is_active: bool) -> ft.Control:
         # E2E 模式下非激活视图返回空 Container, 避免调用 view_factory() 触发 VM 构造链
-        # (DataSourceViewModel → AIService → litellm import 18s+ 等) 阻塞 Flet patch 下发
+        # (单例注册表/策略注册表初始化 + View 控件树构建, 负载相关 ~0.1-1.0s) 阻塞 Flet patch 下发
         if is_e2e and not is_active:
             return ft.Container(expand=True)
         return view_factory()

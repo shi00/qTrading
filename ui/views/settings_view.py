@@ -13,7 +13,7 @@
 - Issue #438: visited_tabs 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
   (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``app_layout._build_pages_stack``
   模式一致)。未访问 Tab 为空 Container, 避免首次构造触发 VM 构造链阻塞
-  (DataSourceViewModel → AIService → litellm import 18s+)。
+  (单例注册表 / 策略注册表初始化 + View 控件树构建)。
 """
 
 import logging
