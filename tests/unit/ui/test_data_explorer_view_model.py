@@ -488,6 +488,47 @@ class TestStateManagement:
         assert vm.state.filter_op == "LIKE"
         assert vm.state.filter_val == "000001"
 
+    def test_set_filter_draft(self, vm):
+        """D4: 草稿 setter 只更新草稿字段, 不动已提交过滤条件."""
+        vm.set_filter("ts_code", "=", "000001.SZ")
+        vm.set_filter_draft_col("close")
+        vm.set_filter_draft_op(">")
+        vm.set_filter_draft_val("10.5")
+        assert vm.state.filter_col_draft == "close"
+        assert vm.state.filter_op_draft == ">"
+        assert vm.state.filter_val_draft == "10.5"
+        # 已提交条件不受草稿影响 (双轨分离是 D4 修复目标)
+        assert vm.state.filter_col == "ts_code"
+        assert vm.state.filter_op == "="
+        assert vm.state.filter_val == "000001.SZ"
+
+    def test_commit_filter_applies_draft(self, vm):
+        """D4: commit_filter 将草稿提交为已生效条件."""
+        vm._set_state(table_columns=("ts_code", "close"))
+        vm.set_filter_draft_col("close")
+        vm.set_filter_draft_op(">")
+        vm.set_filter_draft_val("10.5")
+        vm.commit_filter()
+        assert vm.state.filter_col == "close"
+        assert vm.state.filter_op == ">"
+        assert vm.state.filter_val == "10.5"
+
+    def test_commit_filter_falls_back_to_first_column(self, vm):
+        """D4: 草稿列 None 时回退到表第一列 (与原 View effective_filter_col 一致)."""
+        vm._set_state(table_columns=("ts_code", "close"))
+        vm.set_filter_draft_val("000001")
+        vm.commit_filter()
+        assert vm.state.filter_col == "ts_code"
+        assert vm.state.filter_val == "000001"
+
+    def test_commit_filter_without_columns_leaves_none(self, vm):
+        """D4: 无表列时 commit_filter 不会误用 None/空列."""
+        vm._set_state(table_columns=())
+        vm.set_filter_draft_val("x")
+        vm.commit_filter()
+        assert vm.state.filter_col is None
+        assert vm.state.filter_val == "x"
+
     def test_set_sort(self, vm):
         vm._set_state(table_columns=("ts_code", "close"))
         vm.set_sort(1, False)
@@ -518,6 +559,9 @@ class TestStateManagement:
             filter_col="close",
             filter_op=">",
             filter_val="10",
+            filter_col_draft="close",
+            filter_op_draft=">",
+            filter_val_draft="10",
             error_message=Message("some error"),
         )
         vm.reset_table_state()
@@ -527,6 +571,10 @@ class TestStateManagement:
         assert vm.state.filter_col is None
         assert vm.state.filter_op == "="
         assert vm.state.filter_val == ""
+        # D4: 草稿随切表一并重置
+        assert vm.state.filter_col_draft is None
+        assert vm.state.filter_op_draft == "="
+        assert vm.state.filter_val_draft == ""
         assert vm.state.error_message is None
 
     def test_clear_error(self, vm):
