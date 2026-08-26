@@ -107,7 +107,7 @@ class TestCacheManagerSingletonIsolation:
     def test_cache_manager_reset_clears_instance(self):
         CacheManager._instance = None
         CacheManager._initialized = False
-        with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+        with patch("data.cache.engine_manager.ConfigHandler.get_db_url", return_value=None):
             CacheManager()
             assert CacheManager._instance is not None
             CacheManager._reset_singleton()
@@ -116,7 +116,7 @@ class TestCacheManagerSingletonIsolation:
     def test_cache_manager_reset_clears_initialized_flag(self):
         CacheManager._instance = None
         CacheManager._initialized = False
-        with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+        with patch("data.cache.engine_manager.ConfigHandler.get_db_url", return_value=None):
             CacheManager()
             assert CacheManager._initialized is True
             CacheManager._reset_singleton()
@@ -125,7 +125,7 @@ class TestCacheManagerSingletonIsolation:
     def test_cache_manager_returns_same_instance(self):
         CacheManager._instance = None
         CacheManager._initialized = False
-        with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+        with patch("data.cache.engine_manager.ConfigHandler.get_db_url", return_value=None):
             mgr1 = CacheManager()
             mgr2 = CacheManager()
             assert mgr1 is mgr2
@@ -136,7 +136,7 @@ class TestCacheManagerSingletonIsolation:
         CacheManager._initialized = False
         instances = []
 
-        with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+        with patch("data.cache.engine_manager.ConfigHandler.get_db_url", return_value=None):
 
             def create_instance():
                 CacheManager()

@@ -7,6 +7,8 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
+from data.cache.dao_registry import DaoRegistry
+from data.cache.engine_manager import EngineManager
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.financial_dao import FinancialDao
@@ -43,6 +45,11 @@ def _make_mgr():
     mgr._schema_initialized = False
     mgr._disposed = False
     mgr.engine = MagicMock(spec=AsyncEngine)
+    # review01-A4 Step2: 组合对象（__new__ 绕过 __init__，手动初始化）
+    mgr._engine_manager = EngineManager()
+    mgr._dao_registry = DaoRegistry()
+    # 同步引擎引用（生产路径由 _create_engine 同步；测试手动构造需保持一致）
+    mgr._engine_manager.engine = mgr.engine
     mgr.stock_dao = MagicMock(spec=StockDao)
     mgr.quote_dao = MagicMock(spec=QuoteDao)
     mgr.financial_dao = MagicMock(spec=FinancialDao)
@@ -73,8 +80,8 @@ def _make_mgr():
 
 
 class TestCacheManagerCreateEngine:
-    @patch("data.cache.cache_manager.create_async_engine")
-    @patch("data.cache.cache_manager.get_db_pool_config")
+    @patch("data.cache.engine_manager.create_async_engine")
+    @patch("data.cache.engine_manager.get_db_pool_config")
     def test_create_engine_defaults(
         self,
         mock_get_config,
@@ -104,8 +111,8 @@ class TestCacheManagerCreateEngine:
         )
         assert mgr.engine == mock_engine
 
-    @patch("data.cache.cache_manager.create_async_engine")
-    @patch("data.cache.cache_manager.get_db_pool_config")
+    @patch("data.cache.engine_manager.create_async_engine")
+    @patch("data.cache.engine_manager.get_db_pool_config")
     def test_create_engine_invalid_config(
         self,
         mock_get_config,
@@ -136,8 +143,8 @@ class TestCacheManagerCreateEngine:
             pool_pre_ping=True,
         )
 
-    @patch("data.cache.cache_manager.create_async_engine")
-    @patch("data.cache.cache_manager.get_db_pool_config")
+    @patch("data.cache.engine_manager.create_async_engine")
+    @patch("data.cache.engine_manager.get_db_pool_config")
     def test_create_engine_none_config(
         self,
         mock_get_config,
@@ -209,7 +216,7 @@ class TestCacheManagerInitDb:
         mgr = _make_mgr()
         mgr._schema_initialized = False
         mgr.engine = None
-        mgr._get_connection_string = MagicMock(return_value=None)
+        mgr._engine_manager.get_connection_string = MagicMock(return_value=None)
         mock_lock = AsyncMock()
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
@@ -227,7 +234,9 @@ class TestCacheManagerInitDb:
         mgr = _make_mgr()
         mgr._schema_initialized = False
         mgr.engine = None
-        mgr._get_connection_string = MagicMock(return_value="postgresql+asyncpg://user:pass@localhost/testdb")
+        mgr._engine_manager.get_connection_string = MagicMock(
+            return_value="postgresql+asyncpg://user:pass@localhost/testdb"
+        )
         mock_lock = AsyncMock()
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
@@ -349,6 +358,8 @@ class TestCacheManagerClose:
         mock_engine = MagicMock()
         mock_engine.dispose = AsyncMock()
         mgr.engine = mock_engine
+        # review01-A4 Step2: EngineManager 持有引擎引用（生产路径由 _create_engine 同步）
+        mgr._engine_manager.engine = mock_engine
         with (
             patch("utils.loop_local.get_loop_local") as mock_gll,
             patch("utils.loop_local.del_loop_local"),
@@ -386,6 +397,8 @@ class TestCacheManagerClose:
         mgr = _make_mgr()
         mgr.engine = MagicMock()
         mgr.engine.dispose = AsyncMock()
+        # review01-A4 Step2: EngineManager 持有引擎引用（同步）
+        mgr._engine_manager.engine = mgr.engine
         with (
             patch("utils.loop_local.get_loop_local") as mock_gll,
             patch("utils.loop_local.del_loop_local"),
@@ -1039,34 +1052,30 @@ class TestCacheManagerCheckTableHasData:
 
 
 class TestCacheManagerGetConnectionString:
+    """连接串获取逻辑（review01-A4 Step2 移入 EngineManager）。"""
+
     @patch("config.DB_URL", "postgresql+asyncpg://user:pass@localhost/fallbackdb")
     def test_fallback_to_config(self):
-        mgr = CacheManager.__new__(CacheManager)
-        with patch.object(CacheManager, "__init__", lambda self: None):
-            mgr._initialized = False
-            with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=None):
-                result = mgr._get_connection_string()
-                assert result == "postgresql+asyncpg://user:pass@localhost/fallbackdb"
+        em = EngineManager()
+        with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=None):
+            result = em.get_connection_string()
+            assert result == "postgresql+asyncpg://user:pass@localhost/fallbackdb"
 
     @patch("config.DB_URL", None)
     def test_no_url_available(self):
-        mgr = CacheManager.__new__(CacheManager)
-        with patch.object(CacheManager, "__init__", lambda self: None):
-            mgr._initialized = False
-            with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=None):
-                result = mgr._get_connection_string()
-                assert result is None
+        em = EngineManager()
+        with patch("utils.config_handler.ConfigHandler.get_db_url", return_value=None):
+            result = em.get_connection_string()
+            assert result is None
 
     def test_config_handler_has_url(self):
-        mgr = CacheManager.__new__(CacheManager)
-        with patch.object(CacheManager, "__init__", lambda self: None):
-            mgr._initialized = False
-            with patch(
-                "utils.config_handler.ConfigHandler.get_db_url",
-                return_value="postgresql://user:pass@host/db",
-            ):
-                result = mgr._get_connection_string()
-                assert result == "postgresql://user:pass@host/db"
+        em = EngineManager()
+        with patch(
+            "utils.config_handler.ConfigHandler.get_db_url",
+            return_value="postgresql://user:pass@host/db",
+        ):
+            result = em.get_connection_string()
+            assert result == "postgresql://user:pass@host/db"
 
 
 class TestCacheManagerPrefetchAuxiliaryData:
@@ -1251,7 +1260,7 @@ class TestCacheManagerMaintenanceEvent:
 
 
 class TestCacheManagerInit:
-    @patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None)
+    @patch("data.cache.engine_manager.ConfigHandler.get_db_url", return_value=None)
     @patch("config.DB_URL", None)
     def test_init_no_connection_string(self, mock_url):
         CacheManager._instance = None
@@ -1260,10 +1269,10 @@ class TestCacheManagerInit:
         assert mgr.engine is None
 
     @patch(
-        "data.cache.cache_manager.ConfigHandler.get_db_url",
+        "data.cache.engine_manager.ConfigHandler.get_db_url",
         return_value="postgresql+asyncpg://user:pass@localhost/testdb",
     )
-    @patch("data.cache.cache_manager.create_async_engine")
+    @patch("data.cache.engine_manager.create_async_engine")
     def test_init_with_connection_string(self, mock_create, mock_url):
         CacheManager._instance = None
         CacheManager._initialized = False
@@ -2164,19 +2173,18 @@ class TestCacheManagerNormalizeNewsItem:
 
 
 class TestCacheManagerSanitizeUrl:
+    """URL 脱敏逻辑（review01-A4 Step2 移入 EngineManager.sanitize_url 静态方法）。"""
+
     def test_empty_url(self):
-        mgr = CacheManager.__new__(CacheManager)
-        assert mgr._sanitize_url("") == "None"
+        assert EngineManager.sanitize_url("") == "None"
 
     def test_url_with_password(self):
-        mgr = CacheManager.__new__(CacheManager)
-        result = mgr._sanitize_url("postgresql://user:secret@localhost/db")
+        result = EngineManager.sanitize_url("postgresql://user:secret@localhost/db")
         assert "secret" not in result
         assert "****" in result
 
     def test_url_without_password(self):
-        mgr = CacheManager.__new__(CacheManager)
-        result = mgr._sanitize_url("postgresql+asyncpg://user@localhost/testdb")
+        result = EngineManager.sanitize_url("postgresql+asyncpg://user@localhost/testdb")
         assert "testdb" in result
 
 

@@ -40,7 +40,8 @@ class TestCacheManagerLifecycle:
 
         fake_url = "postgresql+asyncpg://test:test@localhost/test"
         with (
-            patch.object(cm, "_get_connection_string", return_value=fake_url),
+            # review01-A4 Step2: 连接串获取移入 EngineManager
+            patch.object(cm._engine_manager, "get_connection_string", return_value=fake_url),
             patch.object(cm, "_create_engine") as mock_create,
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):

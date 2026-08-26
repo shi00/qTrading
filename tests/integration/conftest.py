@@ -457,7 +457,9 @@ async def mvd_data(monkeypatch):
     # 避免 cache.engine 的 now() 返回本地时间导致 cooldown / next_retry_at 比较错误。
     # 生产环境已确认 PG 服务器时区为 UTC；本地测试 PG 默认 Asia/Shanghai 需覆盖。
     # 使用 asyncpg 原生 server_settings（非 event listener），与 create_test_engine 同源。
-    import data.cache.cache_manager as _cm_module
+    # review01-A4 Step2: get_db_pool_config 已移入 EngineManager（引擎生命周期模块）。
+    # patch engine_manager.get_db_pool_config 以覆盖 EngineManager.create_engine 的连接池配置。
+    import data.cache.engine_manager as _cm_module
 
     _original_get_db_pool_config = _cm_module.get_db_pool_config
 

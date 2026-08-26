@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_redlines import _extract_dao_classes  # noqa: E402 - sys.path 注入后导入
 from data.cache.cache_manager import CacheManager  # noqa: E402 - sys.path 注入后导入
+from data.cache.dao_registry import DaoRegistry  # noqa: E402 - review01-A4 Step2: 注册清单移入 DaoRegistry
 
 
 class TestCacheManagerDAORegistry:
@@ -31,6 +32,7 @@ class TestCacheManagerDAORegistry:
 
     修订方案 C：保留 __init__ 17 行显式赋值（pyright 推断 + R13 静态检查兼容），
     仅 _create_engine / close 由 _DAO_REGISTRY 驱动循环化。
+    review01-A4 Step2: _DAO_REGISTRY 移入 DaoRegistry，CacheManager 经 self._dao_registry 访问。
     """
 
     def test_dao_registry_covers_all_dao_files(self):
@@ -41,7 +43,7 @@ class TestCacheManagerDAORegistry:
         """
         daos_dir = ROOT / "data" / "persistence" / "daos"
         dao_class_names = set(_extract_dao_classes(daos_dir).keys())
-        registry_class_names = {cls.__name__ for _, cls in CacheManager._DAO_REGISTRY}
+        registry_class_names = {cls.__name__ for _, cls in DaoRegistry._DAO_REGISTRY}
         assert dao_class_names == registry_class_names, (
             f"_DAO_REGISTRY 与 daos/ 目录不一致："
             f"缺少 {dao_class_names - registry_class_names}，"
@@ -56,7 +58,7 @@ class TestCacheManagerDAORegistry:
         循环 setattr 会让 self.xxx_dao 推断为 Unknown，此测试守护显式赋值不被移除。
         """
         source = inspect.getsource(CacheManager.__init__)
-        for attr_name, _ in CacheManager._DAO_REGISTRY:
+        for attr_name, _ in DaoRegistry._DAO_REGISTRY:
             assert f"self.{attr_name} =" in source, (
                 f"__init__ 缺少 self.{attr_name} = 的显式赋值，pyright 无法推断类型，IDE 自动补全失效"
             )
@@ -69,7 +71,7 @@ class TestCacheManagerDAORegistry:
         """
         source = inspect.getsource(CacheManager.__init__)
         init_assign_count = sum(1 for line in source.splitlines() if "_dao = " in line and "self." in line)
-        assert init_assign_count == len(CacheManager._DAO_REGISTRY), (
+        assert init_assign_count == len(DaoRegistry._DAO_REGISTRY), (
             f"__init__ 显式赋值 {init_assign_count} 个 DAO，"
-            f"_DAO_REGISTRY 有 {len(CacheManager._DAO_REGISTRY)} 个，不一致"
+            f"_DAO_REGISTRY 有 {len(DaoRegistry._DAO_REGISTRY)} 个，不一致"
         )

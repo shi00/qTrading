@@ -78,7 +78,8 @@ async def embedded_pg_with_schema(real_embedded_pg: ConnectionInfo):
     注意：
     - ``auto_migrate=True`` 幂等：schema 已 upgrade head，``DatabaseMigrator.init_db``
       内部检查到 schema 与迁移头一致时不会重复迁移
-    - ``override_db_url`` 持续整个 session，保证 ``CacheManager._get_connection_string``
+    - ``override_db_url`` 持续整个 session，保证 ``EngineManager.get_connection_string``
+      （review01-A4：原 CacheManager._get_connection_string 已移入 EngineManager）
       返回 embedded URL（init_db 内部 ``_create_engine`` 时读取）
     """
     info = real_embedded_pg
