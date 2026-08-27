@@ -198,9 +198,9 @@ def ScreenerView():
 
 | Token | 值 | 语义场景 |
 |-------|-----|---------|
-| `FONT_SIZE_CAPTION` | 11 | 辅助说明 / 注释文字 |
-| `FONT_SIZE_BODY_SM` | 12 | 小号正文（表格 / 卡片内容） |
-| `FONT_SIZE_BODY` | 13 | 默认正文 |
+| `FONT_SIZE_CAPTION` | 12 | 辅助说明 / 注释文字（辅助文字不低于 12px，P2-07） |
+| `FONT_SIZE_BODY_SM` | 13 | 小号正文（表格 / 卡片内容） |
+| `FONT_SIZE_BODY` | 14 | 默认正文（基准 14px，P2-07；与 LG 同值退阶） |
 | `FONT_SIZE_LG` | 14 | 强调性正文 |
 | `FONT_SIZE_TITLE` | 16 | 标题 |
 | `FONT_SIZE_HEADLINE` | 20 | 大标题（区块 / 卡片标题） |

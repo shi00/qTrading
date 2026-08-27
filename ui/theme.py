@@ -479,20 +479,21 @@ class AppStyles:
     """应用组件样式工厂 — 全部使用语义 Token"""
 
     # --- Font Size Tokens (P1-1: 8 档字号, 消除魔术数字) ---
-    # 映射: 11→CAPTION, 12→BODY_SM, 13→BODY, 14→LG, 16→TITLE, 18→HEADLINE, 20→HEADLINE, 22→XL, 24→XL, 28→DISPLAY
+    # 映射: 12→CAPTION, 13→BODY_SM, 14→BODY/LG, 16→TITLE, 18→HEADLINE, 20→HEADLINE, 22→XL, 24→XL, 28→DISPLAY
     #
     # 字号使用规范 (Issue #445):
     #   页面主标题 → FONT_SIZE_XL (24) — 各视图顶部主标题
     #   区块标题   → FONT_SIZE_HEADLINE (20) — 卡片/区块标题
     #   重要正文   → FONT_SIZE_LG (14) — 强调性文字
-    #   普通正文   → FONT_SIZE_BODY (13) — 默认正文
-    #   小号正文   → FONT_SIZE_BODY_SM (12) — 表格/卡片内容
-    #   辅助说明   → FONT_SIZE_CAPTION (11) — 注释/说明文字
+    #   普通正文   → FONT_SIZE_BODY (14) — 默认正文 (P2-07: 13→14; 与 LG 同值退阶,
+    #               视觉差异由 fontWeight/icon 补足, 报告仅点名 3 token 提升)
+    #   小号正文   → FONT_SIZE_BODY_SM (13) — 表格/卡片内容 (P2-07: 12→13)
+    #   辅助说明   → FONT_SIZE_CAPTION (12) — 注释/说明文字 (P2-07: 11→12, 辅助文字不低于 12px)
     #   展示级数字 → FONT_SIZE_DISPLAY (28) — 仪表盘大数字
-    FONT_SIZE_CAPTION = 11  # 辅助说明文字
-    FONT_SIZE_BODY_SM = 12  # 小号正文 (表格/卡片)
-    FONT_SIZE_BODY = 13  # 正文 (默认)
-    FONT_SIZE_LG = 14  # 大号正文
+    FONT_SIZE_CAPTION = 12  # 辅助说明文字 (P2-07: ≥12px)
+    FONT_SIZE_BODY_SM = 13  # 小号正文 (表格/卡片)
+    FONT_SIZE_BODY = 14  # 正文 (默认, P2-07 基准 14px; 与 LG 同值退阶)
+    FONT_SIZE_LG = 14  # 大号正文 (强调性文字; 保持 14 不提升)
     FONT_SIZE_TITLE = 16  # 标题
     FONT_SIZE_HEADLINE = 20  # 大标题 (对话框/卡片标题)
     FONT_SIZE_XL = 24  # 特大标题
@@ -530,11 +531,13 @@ class AppStyles:
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
 
     # --- Dropdown 自适应宽度估算参数 (消除魔术数字) ---
-    # 基于 FONT_SIZE_BODY(13)/FONT_SIZE_LG(14) 下中文字符约 2 倍半角宽、半角约
-    # 9.5px 的经验估算; 若日后统一更换字体/字号需同步校准。
-    DROPDOWN_CHAR_WIDTH = 9.5  # 半角 ASCII 字符平均预估像素宽
+    # 基于 FONT_SIZE_LG(14) 下中文字符约 2 倍半角宽、半角约 9.5px 的经验估算。
+    # NOTE(lazy): 字符宽按 FONT_SIZE_LG(14) 校准, 与 BODY(13→14, P2-07) 提升解耦 —
+    # 下拉渲染字号为 LG, LG 未动故字宽不随 BODY 缩放. ceiling: 9.5 为 14px 经验值.
+    # upgrade: Flet/字体更换或下拉改用非 LG 字号渲染时按实际字号等比校准.
+    DROPDOWN_CHAR_WIDTH = 9.5  # 半角 ASCII 字符平均预估像素宽 (基于 FONT_SIZE_LG 14px)
     DROPDOWN_SELECTOR_PADDING = 75.0  # 内边距 + 下拉箭头 + 清除按钮固定像素保留
-    DROPDOWN_FULLWIDTH_WEIGHT = 1.75  # 全角/宽字符视觉宽度权重 (半角为 1.0)
+    DROPDOWN_FULLWIDTH_WEIGHT = 1.75  # 全角/宽字符视觉宽度权重 (半角为 1.0; 对 CJK 真实 2.0 低估 12.5%, 与字号无关)
 
     @staticmethod
     def calc_dropdown_width(
