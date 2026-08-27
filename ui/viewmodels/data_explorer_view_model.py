@@ -632,6 +632,22 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             filter_val=self._state.filter_val_draft,
         )
 
+    def clear_filter(self) -> None:
+        """UX-07 (P2-02): 清除已生效与草稿过滤条件 (保留当前表选择).
+
+        仅重置过滤相关字段, 不动分页/排序/当前表 — "保留当前表选择"
+        且清除后重查询由 View 经 page.run_task 调度 query_data 完成
+        (VM 命令同步仅改状态, 与 commit_filter 同模式).
+        """
+        self._set_state(
+            filter_col=None,
+            filter_op="=",
+            filter_val="",
+            filter_col_draft=None,
+            filter_op_draft="=",
+            filter_val_draft="",
+        )
+
     def set_sort(self, col_index: int | None, ascending: bool):
         """Set the current sort column index and direction."""
         if col_index is not None and not isinstance(col_index, int):

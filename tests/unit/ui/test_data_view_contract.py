@@ -508,6 +508,18 @@ class _FakeDataExplorerViewModel:
     def commit_filter(self) -> None:
         self.method_calls.append(("commit_filter", {}))
 
+    def clear_filter(self) -> None:
+        """UX-07: 清除过滤桩 (记录 method_calls; 状态由测试按需 replace)."""
+        self.method_calls.append(("clear_filter", {}))
+        self._set_state(
+            filter_col=None,
+            filter_op="=",
+            filter_val="",
+            filter_col_draft=None,
+            filter_op_draft="=",
+            filter_val_draft="",
+        )
+
     def set_sort(self, col_index: int | None, ascending: bool) -> None:
         self.method_calls.append(("set_sort", {"col_index": col_index, "ascending": ascending}))
 
@@ -2280,3 +2292,165 @@ def _has_terminal_icon(container: Any) -> bool:
         if isinstance(ctrl, ft.Icon) and getattr(ctrl, "icon", None) == ft.Icons.TERMINAL:
             return True
     return False
+
+
+# ============================================================================
+# UX-07 (P2-02): 数据筛选清除路径 — 清除按钮 + 空态一键清除 CTA
+# ============================================================================
+
+
+class TestTableViewerTabClearFilter:
+    """UX-07: 清除筛选按钮显隐 / 点击清除 + 重查询 / 空态 CTA (零参契约)。"""
+
+    def test_clear_filter_declarative_no_use_state(self) -> None:
+        """契约守护: 清除按钮为声明式常驻构造 (visible 驱动), 非 use_state 双源 (UX-05 同型)."""
+        from pathlib import Path
+
+        from ui.views import data_view as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "has_filter_draft" in source, "清除按钮显隐应从草稿状态派生"
+        assert "btn_clear_filter" in source and "visible=has_filter_draft" in source, (
+            "清除按钮应为声明式 visible 驱动 (无双源 use_state)"
+        )
+
+    @staticmethod
+    def _mount_with_draft(**draft: Any) -> tuple[Any, Any, Any]:
+        """挂载 TableViewerTab (默认草稿非空), 返回 (result, vm, component)。"""
+        from ui.views.data_view import TableViewerTab
+
+        state = _FakeDataExplorerState(**draft)
+        vm = _FakeDataExplorerViewModel(state=state)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        result, _ = _mount(component)
+        return result, vm, component
+
+    def test_clear_button_hidden_when_no_draft(self) -> None:
+        """默认草稿 (全部默认) → 清除按钮不可见。"""
+        result, _, _ = self._mount_with_draft()
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is None or btn.visible is False, "无草稿时清除按钮应隐藏"
+
+    @pytest.mark.parametrize(
+        "draft",
+        [
+            {"filter_val_draft": "abc"},
+            {"filter_op_draft": ">"},
+            {"filter_col_draft": "close"},
+        ],
+    )
+    def test_clear_button_visible_with_any_draft(self, draft: dict) -> None:
+        """任一草稿非默认 (val/op/col) → 清除按钮可见。"""
+        result, _, _ = self._mount_with_draft(**draft)
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None and btn.visible is True, f"草稿 {draft} 应显示清除按钮"
+
+    def test_clear_button_click_clears_and_queries(self) -> None:
+        """点击清除按钮 → vm.clear_filter + query_data(page=1) (side_effect 执行型)."""
+        result, vm, _ = self._mount_with_draft(filter_val_draft="abc")
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None
+        btn.on_click(MagicMock())
+        calls = [name for name, _ in vm.method_calls]
+        assert "clear_filter" in calls, "点击清除应调 vm.clear_filter"
+        assert ("query_data", {"page": 1}) in vm.method_calls, "清除后应回到第 1 页重查询"
+
+    def test_clear_button_click_query_error_logs_not_propagates(self, monkeypatch) -> None:
+        """清除后重查询抛非取消异常 → 记录 error 日志且不向外传播 (异常分支覆盖)."""
+        from ui.views import data_view as mod
+
+        result, vm, _ = self._mount_with_draft(filter_val_draft="abc")
+
+        async def _boom_query_data(**kwargs: Any) -> pd.DataFrame:
+            raise RuntimeError("clear filter boom")
+
+        monkeypatch.setattr(vm, "query_data", _boom_query_data)
+
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None and callable(btn.on_click), "应能找到清除按钮"
+        with patch.object(mod.logger, "error") as mock_err:
+            btn.on_click(MagicMock())  # 异常被内部捕获, 不应向外抛出
+        assert mock_err.call_count == 1, "应记录一次 error 日志"
+        assert "clear filter error" in mock_err.call_args[0][0]
+
+    def test_clear_button_click_query_cancelled_propagates(self, monkeypatch) -> None:
+        """清除后重查询抛 asyncio.CancelledError → R2: 必须重新抛出传播."""
+        result, vm, _ = self._mount_with_draft(filter_val_draft="abc")
+
+        async def _cancel_query_data(**kwargs: Any) -> pd.DataFrame:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(vm, "query_data", _cancel_query_data)
+
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None and callable(btn.on_click), "应能找到清除按钮"
+        with pytest.raises(asyncio.CancelledError):
+            btn.on_click(MagicMock())
+
+    def test_empty_state_has_clear_cta(self, monkeypatch) -> None:
+        """筛选无结果空态 → EmptyState 收到清除筛选 CTA props (on_cta/cta_text/cta_icon).
+
+        遵循既有 Task 8.5 空态断言范式: 子组件在测试渲染中不被展开,
+        用 mock 捕获 EmptyState 调用参数验证契约.
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured_calls: list[dict] = []
+
+        def _fake_empty_state(**kwargs: Any) -> Any:
+            captured_calls.append(kwargs)
+            return MagicMock(name="EmptyState")
+
+        monkeypatch.setattr(mod, "EmptyState", _fake_empty_state)
+
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code", "name"),
+                total_rows=0,
+                filter_col="ts_code",
+                filter_val="600000",
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        _mount(component)
+
+        assert len(captured_calls) >= 1, "应至少调用 EmptyState 1 次"
+        cta_calls = [c for c in captured_calls if c.get("on_cta") is not None]
+        assert cta_calls, "筛选无结果空态应传递 on_cta (一键清除 CTA)"
+        assert all(c.get("cta_text") for c in cta_calls), "CTA 文案应为 data_filter_clear 翻译"
+        assert all(c["cta_icon"] == ft.Icons.CLEAR for c in cta_calls), "CTA 图标应为 CLEAR (清除语义)"
+
+    def test_empty_state_cta_zero_arg_no_typeerror(self, monkeypatch) -> None:
+        """空态 CTA on_cta 为零参调用 (EmptyState 契约) — 调用不抛 TypeError 且走清除路径。"""
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured_calls: list[dict] = []
+
+        def _fake_empty_state(**kwargs: Any) -> Any:
+            captured_calls.append(kwargs)
+            return MagicMock(name="EmptyState")
+
+        monkeypatch.setattr(mod, "EmptyState", _fake_empty_state)
+
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code", "name"),
+                total_rows=0,
+                filter_col="ts_code",
+                filter_val="600000",
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        _mount(component)
+
+        on_cta = captured_calls[-1]["on_cta"]
+        assert on_cta is not None, "空态应提供 on_cta"
+        # 零参调用 (EmptyState 内部以 on_cta() 调用) — 不应抛 TypeError
+        on_cta()
+        calls = [name for name, _ in vm.method_calls]
+        assert "clear_filter" in calls, "空态 CTA 应触发清除路径 (零参契约无 TypeError)"
+        assert ("query_data", {"page": 1}) in vm.method_calls, "清除后应回到第 1 页重查询"

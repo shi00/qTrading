@@ -343,6 +343,7 @@
     "data_filter_col": "Filter Col",
     "data_filter_op": "Operator",
     "data_filter_val": "Value",
+    "data_filter_clear": "Clear filter",
     "data_export_current": "Export Page",
     "data_export_all": "Export All (CSV)",
     "data_export_excel": "Export Excel",

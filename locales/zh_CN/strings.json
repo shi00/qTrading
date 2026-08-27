@@ -268,6 +268,7 @@
     "data_filter_col": "过滤列",
     "data_filter_op": "操作符",
     "data_filter_val": "值",
+    "data_filter_clear": "清除筛选",
     "data_export_current": "导出当前页",
     "data_export_all": "导出全部 (CSV)",
     "data_export_excel": "导出 Excel",

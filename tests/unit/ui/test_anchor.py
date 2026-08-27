@@ -396,6 +396,12 @@ class TestEidsPr3Namespaces:
         assert eid_str == "e2e.data.query_button"
         assert kind == AnchorKind.INTERACTIVE
 
+    def test_data_clear_filter_button(self):
+        """UX-07 新增清除筛选按钮 EID (INTERACTIVE, 与 query_button 同型)."""
+        eid_str, kind = EIDS.DATA.FILTER_CLEAR_BUTTON
+        assert eid_str == "e2e.data.clear_filter_button"
+        assert kind == AnchorKind.INTERACTIVE
+
     def test_data_table_ready(self):
         """PR-478 新增 TABLE_READY EID (LABEL kind, 仅做存在性探测)."""
         eid_str, kind = EIDS.DATA.TABLE_READY
@@ -460,6 +466,7 @@ class TestEidsPr3NoPrefixNesting:
         EIDS.DATA.FILTER_OP_DROPDOWN[0],
         EIDS.DATA.FILTER_VALUE_INPUT[0],
         EIDS.DATA.QUERY_BUTTON[0],
+        EIDS.DATA.FILTER_CLEAR_BUTTON[0],  # UX-07: 手动追加 (守卫为显式枚举)
         EIDS.DATA.TABLE_READY[0],
         EIDS.BACKTEST.STRATEGY_DROPDOWN[0],
         EIDS.BACKTEST.CANCEL_BUTTON[0],
