@@ -24,6 +24,7 @@ import flet as ft
 from ui.components.flet_type_helpers import (
     get_control_value,
     safe_icon_str,
+    safe_on_change,
     safe_on_click,
     safe_on_select,
 )
@@ -465,6 +466,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=CONCURRENCY_MIN, max=CONCURRENCY_MAX),
         border_radius=8,
         on_change=lambda e: settings_vm.set_concurrency_value(e.control.value),
+        # UX-09 (P2-04): 单行主表单 Enter 提交 = 行内保存主动作 (与鼠标点击等价)
+        on_submit=safe_on_change(_on_save_concurrency),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -501,6 +504,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_POOL_MIN, max=DB_POOL_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_pool_size_value(e.control.value),
+        on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -518,6 +522,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_OVERFLOW_MIN, max=DB_OVERFLOW_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_db_overflow_value(e.control.value),
+        on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -535,6 +540,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_TIMEOUT_MIN, max=DB_TIMEOUT_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_db_timeout_value(e.control.value),
+        on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -552,6 +558,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=IO_WORKERS_MIN, max=IO_WORKERS_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_io_workers_value(e.control.value),
+        on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -569,6 +576,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("sys_hint_range_fmt", min=CPU_WORKERS_MIN, max=CPU_WORKERS_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_cpu_workers_value(e.control.value),
+        on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -583,6 +591,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_radius=8,
         multiline=False,
         on_change=lambda e: settings_vm.set_no_proxy_value(e.control.value),
+        on_submit=safe_on_change(_on_save_no_proxy),  # UX-09: Enter = 保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,

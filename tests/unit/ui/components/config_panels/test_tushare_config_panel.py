@@ -489,6 +489,7 @@ def _render_panel(
     show_save_button: bool = True,
     compact: bool = False,
     show_register_link: bool = True,
+    enable_enter_submit: bool = True,
     page: FakePage | None = None,
 ) -> tuple[_FakeTushareConfigPanelVM, FakePage, Any, Any]:
     """渲染 TushareConfigPanel, 返回 (vm, page, result, component)。
@@ -521,6 +522,7 @@ def _render_panel(
             show_save_button=show_save_button,
             compact=compact,
             show_register_link=show_register_link,
+            enable_enter_submit=enable_enter_submit,
         )
         run_mount_effects(component, page=page)
         result = render_once(component)
@@ -907,3 +909,40 @@ class TestTushareConfigPanelIsolation:
         tier_dd2 = _find_dropdown(result2, "sys_tier_label_in_token_panel")
         assert tier_dd1.value == "points_120"
         assert tier_dd2.value == "points_2000"
+
+
+# ============================================================================
+# UX-09 (P2-04): 单行主表单 Enter 提交 = 触发 vm.verify_token
+# ============================================================================
+
+
+class TestTushareConfigPanelOnSubmitEnter:
+    """UX-09: Token 单行 TextField Enter 提交（绑定 verify 主动作）。
+
+    enable_enter_submit=True (默认) 时 token 输入 ``on_submit`` 非空且触发
+    ``page.run_task(vm.verify_token)``；False 时 ``on_submit`` 为 None。
+    """
+
+    def test_default_binds_on_submit(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=True (默认): token 输入 on_submit 非空。"""
+        _, _, result, _ = _render_panel()
+        token_input = _find_text_field(result, "tushare_token_label")
+        # 存在性契约守卫, 绑定行为由 test_enter_submit_triggers_verify_token 覆盖
+        assert token_input.on_submit is not None  # noqa: weak-assertion 存在性守卫, 行为断言在触发用例覆盖
+
+    def test_enter_submit_triggers_verify_token(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """token on_submit → page.run_task(vm.verify_token)（与验证按钮等价）。"""
+        vm, page, result, _ = _render_panel()
+        token_input = _find_text_field(result, "tushare_token_label")
+        # 守卫 + 下行触发行为断言构成链式验证
+        assert token_input.on_submit is not None  # noqa: weak-assertion 守卫, 下行 run_task 断言为链式验证
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(token_input.on_submit, _make_event())
+        run_task.assert_called_once_with(vm.verify_token)
+
+    def test_enter_submit_disabled_sets_on_submit_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=False: token 输入 on_submit 为 None。"""
+        _, _, result, _ = _render_panel(enable_enter_submit=False)
+        token_input = _find_text_field(result, "tushare_token_label")
+        assert token_input.on_submit is None

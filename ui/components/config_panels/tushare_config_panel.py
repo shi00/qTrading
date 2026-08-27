@@ -19,6 +19,7 @@ import flet as ft
 
 from ui.components.flet_type_helpers import (
     get_control_value,
+    safe_on_change,
     safe_on_click,
     safe_on_select,
 )
@@ -129,6 +130,7 @@ def TushareConfigPanel(
     show_save_button: bool = True,
     compact: bool = False,
     show_register_link: bool = True,
+    enable_enter_submit: bool = True,
 ) -> ft.Control:
     """Tushare Token configuration panel (declarative).
 
@@ -143,6 +145,8 @@ def TushareConfigPanel(
         show_save_button: 是否显示保存按钮（default: True）
         compact: 是否使用紧凑布局（default: False）
         show_register_link: 是否显示注册链接（default: True）
+        enable_enter_submit: Token 输入框 Enter 提交开关（UX-09 P2-04；default: True；
+            设置页默认开启，wizard 传 False 避免 Enter 触发网络验证卡流程）
     """
     # --- Subscribe to VM state changes (外部 VM 模式，VM 生命周期由消费方管理) ---
     state, _ = use_viewmodel(vm=vm)
@@ -161,6 +165,8 @@ def TushareConfigPanel(
             can_reveal_password=True,
             value=state.token,
             on_change=lambda e: vm.update_token(e.control.value),
+            # UX-09 (P2-04): Enter 提交 = 验证 Token 主动作 (wizard 经 enable_enter_submit=False 关闭)
+            on_submit=safe_on_change(_on_verify_click_factory(vm)) if enable_enter_submit else None,
             border_color=AppColors.PRIMARY,
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
             width=AppStyles.CONTROL_WIDTH_LG if compact else None,

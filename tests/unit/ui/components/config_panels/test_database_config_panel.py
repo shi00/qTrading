@@ -84,6 +84,7 @@ def _render_panel_with_mocked_children(
     show_header: bool = True,
     compact: bool = False,
     show_save_button: bool = True,
+    enable_enter_submit: bool = True,
 ) -> tuple[MagicMock, MagicMock, Any, _FakeDatabaseConfigPanelVM]:
     """渲染 DatabaseConfigPanel, mock 子组件, 返回 (mock_external, mock_embedded, result, vm)。
 
@@ -112,6 +113,7 @@ def _render_panel_with_mocked_children(
             show_header=show_header,
             compact=compact,
             show_save_button=show_save_button,
+            enable_enter_submit=enable_enter_submit,
         )
         # run_mount_effects 内部已调用 render_once, 不再显式调用 (避免重复渲染)
         run_mount_effects(component, page=page)
@@ -195,13 +197,25 @@ class TestDatabaseConfigPanelRouting:
             compact=False,
             show_save_button=True,
         )
-        # run_mount_effects 内部首次渲染 = 1 次调用
+        # run_mount_effects 内部首次渲染 = 1 次调用 (enable_enter_submit 默认 True)
         mock_external.assert_called_once_with(
             vm=vm,
             show_header=True,
             compact=False,
             show_save_button=True,
+            enable_enter_submit=True,
         )
+
+    def test_external_mode_passes_enable_enter_submit_false(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UX-09: wizard 传 enable_enter_submit=False → 透传给 ExternalPgForm (关闭 Enter 提交)。"""
+        vm = _FakeDatabaseConfigPanelVM()
+        mock_external, _, _, _ = _render_panel_with_mocked_children(
+            embedded_mode=False,
+            vm=vm,
+            enable_enter_submit=False,
+        )
+        kwargs = mock_external.call_args.kwargs
+        assert kwargs["enable_enter_submit"] is False
 
     def test_embedded_mode_calls_embedded_status_card(
         self,

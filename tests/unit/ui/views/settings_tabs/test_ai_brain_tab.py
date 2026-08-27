@@ -1346,3 +1346,44 @@ class TestShowSavedSnack:
         show_snack = MagicMock()
         mod._show_saved_snack(show_snack)
         show_snack.assert_called_once_with("i18n[settings_verify_success]", color=AppColors.SUCCESS)
+
+
+# ============================================================================
+# UX-09 (P2-04): AI 设置单行主表单 Enter 提交 = on_submit 绑定 _on_save_ai
+# 多行 Prompt 维持 Enter 换行 (on_submit=None, 见方案 2.4 Flet 能力评估)
+# ============================================================================
+
+
+class TestEnterSubmit:
+    """UX-09: 单行 TextField Enter → 保存 AI 设置；多行 Prompt 不绑 on_submit。"""
+
+    _SINGLE_LINE_KEYS = (
+        "settings_max_candidates",
+        "settings_min_turnover",
+        "settings_ai_concurrency",
+        "settings_ai_news_concurrency",
+    )
+    _MULTILINE_KEYS = ("settings_ai_prompt", "settings_news_prompt")
+
+    def test_single_line_fields_have_on_submit_and_trigger_save(self, ai_brain_tab_env) -> None:
+        """4 个单行字段 on_submit 非空, Enter → _do_save_ai_settings (与保存按钮等价)。"""
+        env = ai_brain_tab_env
+        page = env["page"]
+        for key in self._SINGLE_LINE_KEYS:
+            field = _find_text_field_by_label(env, key)
+            assert isinstance(field, ft.TextField)
+            assert field.on_submit is not None, f"{key} 应绑定 on_submit"
+
+            page.run_task.reset_mock()
+            _invoke(field.on_submit, _make_event())
+            handler, args, _ = _await_run_task_handler(page)
+            assert handler.__name__ == "_do_save_ai_settings", f"{key} Enter 应触发保存"
+
+    def test_multiline_prompt_on_submit_is_none(self, ai_brain_tab_env) -> None:
+        """多行 Prompt 保持 Enter 换行 (on_submit=None) — 方案 2.4 登记守卫。"""
+        env = ai_brain_tab_env
+        for key in self._MULTILINE_KEYS:
+            field = _find_text_field_by_label(env, key)
+            assert isinstance(field, ft.TextField)
+            assert field.multiline is True
+            assert field.on_submit is None, f"{key} 多行 Enter 不应触发提交 (Ctrl+Enter 不可行登记)"

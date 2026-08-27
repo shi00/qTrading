@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import safe_on_click
+from ui.components.flet_type_helpers import safe_on_change, safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -84,6 +84,7 @@ def ExternalPgForm(
     show_header: bool = True,
     compact: bool = False,
     show_save_button: bool = True,
+    enable_enter_submit: bool = True,
 ) -> ft.Container:
     """External PostgreSQL 配置表单 (声明式)。
 
@@ -101,6 +102,8 @@ def ExternalPgForm(
         show_header: 是否显示 section headers (default: True)
         compact: 保留参数兼容消费方调用, 不影响布局
         show_save_button: 是否显示保存按钮 (default: True)
+        enable_enter_submit: 单行主表单 Enter 提交开关（UX-09 P2-04；default: True；
+            设置页默认开启，wizard 经 DatabaseConfigPanel 透传 False 避免 Enter 触发网络验证）
     """
     # --- Subscribe to VM state changes (外部 VM 模式) ---
     state, _ = use_viewmodel(vm=vm)
@@ -122,6 +125,8 @@ def ExternalPgForm(
         hint_text="localhost",
         value=state.host,
         on_change=lambda e: vm.update_host(e.control.value),
+        # UX-09 (P2-04): Enter 提交 = 测试连接主动作 (wizard 经 enable_enter_submit=False 关闭)
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,
     )
     db_port_input = ft.TextField(
         label=I18n.get("db_port"),
@@ -132,6 +137,7 @@ def ExternalPgForm(
         hint_text="5432",
         value=state.port,
         on_change=lambda e: vm.update_port(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,  # UX-09
     )
     db_user_input = ft.TextField(
         label=I18n.get("db_user"),
@@ -141,6 +147,7 @@ def ExternalPgForm(
         hint_text="postgres",
         value=state.user,
         on_change=lambda e: vm.update_user(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,  # UX-09
     )
     db_password_input = ft.TextField(
         label=I18n.get("db_password"),
@@ -151,6 +158,7 @@ def ExternalPgForm(
         label_style=ft.TextStyle(color=AppColors.PRIMARY),
         value=state.password,
         on_change=lambda e: vm.update_password(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,  # UX-09
     )
     db_name_input = ft.TextField(
         label=I18n.get("db_name"),
@@ -160,6 +168,7 @@ def ExternalPgForm(
         hint_text="astock",
         value=state.database,
         on_change=lambda e: vm.update_database(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,  # UX-09
     )
     db_create_checkbox = ft.Checkbox(
         label=I18n.get("db_create_if_not_exists"),

@@ -33,6 +33,7 @@ def DatabaseConfigPanel(
     show_header: bool = True,
     compact: bool = False,
     show_save_button: bool = True,
+    enable_enter_submit: bool = True,
 ) -> ft.Container:
     """Database 配置面板路由容器 (声明式, P3-9)。
 
@@ -50,6 +51,8 @@ def DatabaseConfigPanel(
         show_header: 是否显示 section headers (仅 external 模式生效)
         compact: 保留参数兼容消费方调用 (仅 external 模式生效)
         show_save_button: 是否显示保存按钮 (仅 external 模式生效)
+        enable_enter_submit: 单行主表单 Enter 提交开关 (UX-09 P2-04, 透传 ExternalPgForm:
+            设置页默认开启, wizard 传 False 避免 Enter 触发网络验证)
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
@@ -64,4 +67,5 @@ def DatabaseConfigPanel(
         show_header=show_header,
         compact=compact,
         show_save_button=show_save_button,
+        enable_enter_submit=enable_enter_submit,
     )
