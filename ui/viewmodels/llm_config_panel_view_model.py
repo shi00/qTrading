@@ -21,8 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
-from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION, LLM_PROVIDERS, is_recommended_model
@@ -83,7 +82,7 @@ class LLMConfigState:
     ai_external_acknowledged: bool = False
 
 
-class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[LLMConfigState]):
+class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
     """ViewModel for LLMConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -183,11 +182,6 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
             custom_model_options=custom_model_options,
             ai_external_acknowledged=ConfigHandler.is_ai_external_acknowledged(),
         )
-
-    def reload_config(self) -> None:
-        """重新从 ConfigHandler 加载配置到 state。"""
-        self._load_config_to_state()
-        self._notify()
 
     @staticmethod
     def _load_custom_model_history_from_config(provider_id: str, llm_config: dict) -> tuple[str, ...]:
@@ -339,9 +333,6 @@ class LLMConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[L
         return True, None
 
     # --- Status helpers ---
-
-    def _show_success(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="success")
 
     def _set_loading_state(self, loading: bool) -> None:
         if self._on_loading_change:

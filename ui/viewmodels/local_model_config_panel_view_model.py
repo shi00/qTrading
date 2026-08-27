@@ -21,8 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
-from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -54,7 +53,7 @@ class LocalModelConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
 
 
-class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[LocalModelConfigState]):
+class LocalModelConfigPanelViewModel(ConfigPanelViewModelBase[LocalModelConfigState]):
     """ViewModel for LocalModelConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -104,11 +103,6 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
             flash_attn=local_cfg.get("flash_attn", True),
         )
 
-    def reload_config(self) -> None:
-        """重新从 ConfigHandler 加载配置到 state。"""
-        self._load_config_to_state()
-        self._notify()
-
     # --- Update commands ---
 
     def update_model_path(self, value: str) -> None:
@@ -149,10 +143,6 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
     def update_flash_attn(self, value: bool) -> None:
         self._set_state(flash_attn=value)
         self._notify_on_change()
-
-    def _notify_on_change(self) -> None:
-        if self._on_change:
-            self._on_change()
 
     # --- get_config / set_config ---
 
@@ -221,11 +211,6 @@ class LocalModelConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModel
             )
 
         return True, None
-
-    # --- Status helpers ---
-
-    def _show_success(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="success")
 
     # --- async commands ---
 

@@ -21,8 +21,7 @@ from dataclasses import dataclass, replace
 
 from data.persistence.db_config_service import ConnectionStatus, DatabaseConfigService
 from ui.viewmodels import Message
-from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -55,7 +54,7 @@ class DatabaseConfigState:
     db_info: Message | None = None
 
 
-class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[DatabaseConfigState]):
+class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]):
     """ViewModel for DatabaseConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -101,11 +100,6 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
             database=db_config.get("database", "astock"),
         )
 
-    def reload_config(self) -> None:
-        """重新从 ConfigHandler 加载配置到 state。"""
-        self._load_config_to_state()
-        self._notify()
-
     # --- Mode / preference queries (View 通过 VM 访问, 避免直接 import ConfigHandler) ---
 
     @property
@@ -150,10 +144,6 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
     def update_create_if_not_exists(self, value: bool) -> None:
         self._set_state(create_if_not_exists=value)
         self._notify_on_change()
-
-    def _notify_on_change(self) -> None:
-        if self._on_change:
-            self._on_change()
 
     # --- get_config / set_config ---
 
@@ -204,11 +194,6 @@ class DatabaseConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMi
             return False, Message("wizard_err_db_required", {"default": "Database name is required"})
 
         return True, None
-
-    # --- Status helpers ---
-
-    def _show_success(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="success")
 
     # --- async commands ---
 

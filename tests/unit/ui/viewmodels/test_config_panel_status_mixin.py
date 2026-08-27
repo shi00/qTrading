@@ -1,13 +1,16 @@
-"""ConfigPanelStatusMixin 单元测试 (P3-Duplicate-VM-Helpers, Task 4.2 TDD)。
+"""ConfigPanelViewModelBase 单元测试 (P2-A12/A15 吸收 ConfigPanelStatusMixin)。
 
-验证 4 个 config panel VM 同构助手方法提取后的行为:
+原 P3-Duplicate-VM-Helpers (Task 4.2 TDD) 的 test_config_panel_status_mixin.py
+直接演进：ConfigPanelStatusMixin 被 ConfigPanelViewModelBase 泛型基类吸收，本文件
+改为验证基类提供的状态助手行为:
 - _show_error: 设置 status_type="error" + status_message
 - _show_warning: 设置 status_type="warning" + status_message
 - _show_info: 设置 status_type="info" + status_message
 - _raw_message: 将动态字符串包装为 Message(_RAW_MSG_KEY, {"default": text})
 
-mixin 依赖 ObservableViewModelMixin._set_state, 测试通过构造 dummy VM
-(同时继承 ConfigPanelStatusMixin + ObservableViewModelMixin) 验证行为不变。
+文件名保留 test_config_panel_status_mixin.py 以维持 weak_assertion_baseline.json
+的条目稳定（重命名会触发增量门禁误报）。基类继承 ObservableViewModelMixin, 测试
+通过构造 dummy VM (继承 ConfigPanelViewModelBase) 验证行为不变。
 """
 
 from __future__ import annotations
@@ -18,8 +21,7 @@ from dataclasses import dataclass
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin, _RAW_MSG_KEY
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase, _RAW_MSG_KEY
 
 pytestmark = pytest.mark.unit
 
@@ -39,13 +41,13 @@ class _DummyState:
 
 
 # ============================================================
-# Dummy VM: 同时继承 ConfigPanelStatusMixin + ObservableViewModelMixin
-# 验证 mixin 与 ObservableViewModelMixin 协作行为
+# Dummy VM: 继承 ConfigPanelViewModelBase
+# 验证基类与 ObservableViewModelMixin 协作行为
 # ============================================================
 
 
-class _DummyConfigVM(ConfigPanelStatusMixin, ObservableViewModelMixin[_DummyState]):
-    """测试用 VM: 验证 ConfigPanelStatusMixin 行为。"""
+class _DummyConfigVM(ConfigPanelViewModelBase[_DummyState]):
+    """测试用 VM: 验证 ConfigPanelViewModelBase 状态助手行为。"""
 
     def __init__(self) -> None:
         self._state = _DummyState()
@@ -157,7 +159,7 @@ class TestConfigPanelStatusMixinRawMessage:
 
     def test_raw_message_is_static_method(self):
         """_raw_message 是 staticmethod, 无需实例即可调用。"""
-        msg = ConfigPanelStatusMixin._raw_message("test")
+        msg = _DummyConfigVM._raw_message("test")
         assert isinstance(msg, Message)
         assert msg.params["default"] == "test"
 
