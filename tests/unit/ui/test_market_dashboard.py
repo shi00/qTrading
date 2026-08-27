@@ -199,15 +199,18 @@ class TestBuildIndexCard:
         # color 解析为 UP
         assert col.controls[2].color == AppColors.UP_RED
 
-    def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """空 info：value/change 显示 '--'。"""
+    def test_empty_info_shows_empty_placeholder(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UX-08: 无数据 info → 渲染 '暂无数据' 占位, 不渲染 change 行 (2 控件)."""
         from ui.components.market_dashboard import _build_index_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors
 
         card = _build_index_card("home_index_sh", MarketIndexRow())
 
         col = card.content
-        assert col.controls[1].value == "--"
-        assert col.controls[2].value == "--"
+        assert col.controls[1].value == I18n.get("home_index_empty")
+        assert col.controls[1].color == AppColors.TEXT_SECONDARY
+        assert len(col.controls) == 2, "无数据卡仅标题+占位 (无 change 行)"
 
     def test_missing_color_uses_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
         """info 无 color 字段 → _resolve_color(None) = TEXT_SECONDARY。"""
@@ -226,6 +229,38 @@ class TestBuildIndexCard:
         card = _build_index_card("home_index_sh", MarketIndexRow())
 
         assert card.col == {"xs": 6, "sm": 6, "md": 3, "lg": 3}
+
+
+class TestHasIndexData:
+    """UX-08: _has_index_data 判定 — 占位符全集识别 + 真实零值不误判。"""
+
+    def test_has_data_true(self) -> None:
+        from ui.components.market_dashboard import _has_index_data
+
+        assert _has_index_data(MarketIndexRow(value="1234.56")) is True
+
+    def test_has_data_false_single_dash(self) -> None:
+        """上游占位符单横线 '-' (market_data_service 产出) → 无数据."""
+        from ui.components.market_dashboard import _has_index_data
+
+        assert _has_index_data(MarketIndexRow(value="-")) is False
+
+    def test_has_data_false_double_dash(self) -> None:
+        """VM 缺键兜底 '--' → 无数据."""
+        from ui.components.market_dashboard import _has_index_data
+
+        assert _has_index_data(MarketIndexRow(value="--")) is False
+
+    def test_has_data_false_empty(self) -> None:
+        from ui.components.market_dashboard import _has_index_data
+
+        assert _has_index_data(MarketIndexRow(value="")) is False
+
+    def test_has_data_true_zero_value(self) -> None:
+        """真实零值 '0.00' 视为有数据 (验收: 无零值误读)."""
+        from ui.components.market_dashboard import _has_index_data
+
+        assert _has_index_data(MarketIndexRow(value="0.00")) is True
 
 
 class TestBuildHsgtCard:
@@ -417,6 +452,7 @@ class TestMarketDashboardBody:
     def test_partial_indices_fills_empty_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
         """indices 不足 3 个：缺失部分用 MarketIndexRow() 填充（仍渲染 4 张卡片）。"""
         from ui.components.market_dashboard import MarketDashboard
+        from ui.i18n import I18n
 
         indices = (MarketIndexRow(value="3000", change="+1%", color="RED"),)
         component = make_component(MarketDashboard, indices=indices)
@@ -425,6 +461,45 @@ class TestMarketDashboardBody:
 
         indices_row = result.controls[0]
         assert len(indices_row.controls) == 4
+        # UX-08: 补位卡无数据 → 显示占位文本 (标题 + 占位, 无 change 行)
+        missing_card = indices_row.controls[1]
+        missing_col = missing_card.content
+        assert missing_col.controls[1].value == I18n.get("home_index_empty")
+        assert len(missing_col.controls) == 2
+
+    def test_index_card_shows_empty_placeholder_when_no_data(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UX-08: 上游占位 '-' → 指数卡渲染"暂无数据"占位 (组件层回归)."""
+        from ui.components.market_dashboard import MarketDashboard
+        from ui.i18n import I18n
+
+        indices = (MarketIndexRow(value="-"), MarketIndexRow(value="1234.56", change="+0.5%"))
+        component = make_component(MarketDashboard, indices=indices)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        empty_card = indices_row.controls[0]
+        empty_col = empty_card.content
+        assert empty_col.controls[1].value == I18n.get("home_index_empty")
+        assert len(empty_col.controls) == 2
+        # 相邻有数据卡保持 3 控件 (value + change) 不受影响
+        data_card = indices_row.controls[1]
+        assert len(data_card.content.controls) == 3
+
+    def test_index_card_renders_zero_value_as_data(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UX-08: 真实零值 '0.00' → 组件层渲染零值 + change 行 (无零值误读)."""
+        from ui.components.market_dashboard import MarketDashboard
+
+        indices = (MarketIndexRow(value="0.00", change="0%", color="GREY"),)
+        component = make_component(MarketDashboard, indices=indices)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        card = indices_row.controls[0]
+        col = card.content
+        assert col.controls[1].value == "0.00"
+        assert len(col.controls) == 3
 
     def test_none_hsgt_renders_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
         """hsgt=None → HsgtRow() 默认值，渲染 '--'。"""
