@@ -33,7 +33,7 @@ dependencies = [
     "urllib3>=2.7.0",
     "numpy>=2.5.2",
     "pandas>=3.0.5",
-    "polars>=1.43.2",
+    "polars>=1.44.1",
     "pyarrow>=25.0.1",
     "pandas_market_calendars>=5.3.2",
     "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
@@ -42,18 +42,18 @@ dependencies = [
     "sqlalchemy>=2.0.52",
     "alembic>=1.19.1",
     "sqlparse>=0.6.0",
-    "litellm>=1.95.0",  # Upgrade to 1.95.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
-    "llama-cpp-python>=0.3.33",
+    "litellm>=1.98.0",  # Upgrade to 1.98.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
+    "llama-cpp-python>=0.3.35",
     "mplfinance>=0.12.10b0",
     "matplotlib>=3.11.1",
     "apscheduler>=3.11.3",
     "tzdata>=2026.2",
-    "pytz>=2026.2",
-    "python-dotenv>=1.2.2",
+    "pytz>=2026.3.post1",
+    "python-dotenv>=1.2.3",
     "keyring>=25.7.0",
-    "cryptography>=50.0.0",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0
+    "cryptography>=50.0.1",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1
     "readerwriterlock>=1.0.9",
-    "cachetools>=7.1.0",
+    "cachetools>=7.1.7",
     "pydantic>=2.11.0",
     "aiohttp>=3.14.3",  # Security: CVE-2026-69244/69243/59881 fixed in 3.14.3
     "pillow>=12.3.0",  # Security: PYSEC-2026-2253~2257 (decompression bomb + shell injection) fixed in 12.3.0
@@ -72,16 +72,16 @@ dev = [
     "ruff>=0.16.2",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
     "pyright>=1.1.411",
     "pandas-stubs>=3.0.5.260730",
-    "uv>=0.12.3",
+    "uv>=0.12.6",
     "pip-audit>=2.10.0",
-    "hypothesis>=6.165.2",
+    "hypothesis>=6.165.10",
     "syrupy>=4.0",
     "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
     "import-linter>=2.13",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
     "flet-mcp==0.86.5",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
-    "brotlicffi>=1.2.0.1",
+    "brotlicffi>=1.2.0.2",
     "playwright>=1.62.0",  # E2E browser automation for Flet desktop tests
 ]
 
