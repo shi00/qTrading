@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
 
@@ -136,3 +140,48 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
 
     surviving = [s for s in cur if s[3]]
     return "\n\n".join(s[3] for s in surviving), [s[0] for s in surviving]
+
+
+class TokenBudgetService:
+    """AIService Token 预算子模块（review01-A5b-2）。
+
+    承载 user 内容 token 预算计算（Issue #70）。持有 ``AIService`` 实例经
+    ``self._service`` 访问共享配置（``_litellm_config``），本模块不 import
+    ``services.ai_service`` 顶层符号以避免循环依赖。
+    """
+
+    def __init__(self, service: AIService) -> None:
+        self._service = service
+
+    def _compute_analysis_budget(self) -> int:
+        """计算 user 内容 token 预算（Issue #70）。
+
+        budget = max(1, primary_context - CONTEXT_RESERVE_TOKENS)。
+        以主模型 context 为基准（P2-3 决策）：长上下文主模型不被短 fallback 拖小，
+        真正解决 Issue #70"长上下文模型被过度裁剪"的痛点。
+        注意：failover 切到更短 context 的 fallback 模型时，本预算不会重算，
+        `_chat_completion_litellm` 仅就实际生效模型 context 记录溢出告警，不重裁。
+        残余风险（已接受）：短 fallback 模型可能收到超窗 prompt，依 provider 行为处置。
+        """
+        # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
+        # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
+        import services.ai_service as _ai
+
+        try:
+            failover_config = _ai.ConfigHandler.get_failover_config()
+        except Exception as exc:
+            # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
+            logger.warning(
+                "[AIService] Failover config read failed, using default context budget: %s",
+                _ai.DataSanitizer.sanitize_error(exc),
+            )
+            failover_config = {"primary": "", "fallbacks": []}
+        primary = failover_config.get("primary", "")
+        # _litellm_config 可能未初始化（如测试以 AIService.__new__ 构造）：
+        # 预算计算不应因此阻塞分析，缺失时按默认窗口处理。
+        llm_config = getattr(self._service, "_litellm_config", None) or {}
+        if primary:
+            primary_context = _get_model_context_window(llm_config, model_override=primary)
+        else:
+            primary_context = DEFAULT_CONTEXT_WINDOW
+        return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
