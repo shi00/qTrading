@@ -24,8 +24,7 @@ from dataclasses import dataclass, replace
 
 from data.constants import TUSHARE_POINT_TIERS
 from ui.viewmodels import Message
-from ui.viewmodels.config_panel_status_mixin import ConfigPanelStatusMixin
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -55,7 +54,7 @@ class TushareConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
 
 
-class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMixin[TushareConfigState]):
+class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
     """ViewModel for TushareConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -93,20 +92,11 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         tier = ConfigHandler.get_tushare_point_tier()
         self._state = replace(self._state, token=token, tier=tier)
 
-    def reload_config(self) -> None:
-        """重新从 ConfigHandler 加载配置到 state。"""
-        self._load_config_to_state()
-        self._notify()
-
     # --- Update commands ---
 
     def update_token(self, value: str) -> None:
         self._set_state(token=value)
         self._notify_on_change()
-
-    def _notify_on_change(self) -> None:
-        if self._on_change:
-            self._on_change()
 
     # --- get_config / set_config ---
 
@@ -133,9 +123,6 @@ class TushareConfigPanelViewModel(ConfigPanelStatusMixin, ObservableViewModelMix
         await ThreadPoolManager().run_async(TaskType.IO, webbrowser.open_new_tab, _TUSHARE_REGISTER_URL)
 
     # --- Status helpers ---
-
-    def _show_success(self, message: Message) -> None:
-        self._set_state(status_message=message, status_type="success")
 
     def _set_loading_state(self, loading: bool) -> None:
         """调 on_loading_change + 如果 show_internal_loading 则设置 is_verifying。"""

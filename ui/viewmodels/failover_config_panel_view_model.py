@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
-from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -126,7 +126,7 @@ def _load_failover_items_sync() -> list[FailoverItem]:
     return items
 
 
-class FailoverConfigPanelViewModel(ObservableViewModelMixin[FailoverConfigState]):
+class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]):
     """ViewModel for FailoverConfigPanel + ProviderCredentialDialog.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
