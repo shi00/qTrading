@@ -1111,6 +1111,7 @@ _R16_SINGLETON_CLASSES = frozenset(
         "MetaDataManager",
         "EmbeddedPostgresService",
         "EmbeddedPgMaintenanceService",
+        "AppColors",
     }
 )
 
