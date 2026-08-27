@@ -41,36 +41,59 @@ def _resolve_color(color_str: str | None) -> str:
     return AppColors.TEXT_SECONDARY
 
 
+# UX-08: 指数卡"无数据"占位符全集 — 上游 market_data_service 产出单横线 "-",
+# VM .get 缺键兜底 "--", 空串为防御. 真实零值 "0.00" 不在集内 (视为有数据).
+_EMPTY_INDEX_VALUES = frozenset({"", "--", "-"})
+
+
+def _has_index_data(info: MarketIndexRow) -> bool:
+    """UX-08: 指数卡是否有数据 — value 非占位符 (真实零值 "0.00" 视为有数据)."""
+    return info.value not in _EMPTY_INDEX_VALUES
+
+
 def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
-    """Build a single index card (SH/SZ/CYB) — pure function."""
+    """Build a single index card (SH/SZ/CYB) — pure function.
+
+    UX-08: 无数据 (value 为占位符) 时渲染"暂无数据"占位并省略 change 行 —
+    避免占位 '-' 与真实负值混淆 (报告 P2-08: 指数无数据仍渲染固定空卡).
+    无数据卡仅标题+占位 (2 控件), 不强制等高 (报告"不误读"优先, YAGNI).
+    """
     style = AppStyles.dashboard_card()
-    return ft.Container(
-        content=ft.Column(
-            [
-                anchored(
-                    _KPI_EIDS[title_key],
-                    ft.Text(
-                        I18n.get(title_key),
-                        size=AppStyles.FONT_SIZE_LG,
-                        color=AppColors.TEXT_SECONDARY,
-                        no_wrap=True,
-                    ),
-                ),
-                ft.Text(
-                    info.value,
-                    size=AppStyles.FONT_SIZE_HEADLINE,
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Text(
-                    info.change,
-                    size=AppStyles.FONT_SIZE_LG,
-                    weight=ft.FontWeight.BOLD,
-                    color=_resolve_color(info.color),
-                ),
-            ],
-            spacing=5,
+    has_data = _has_index_data(info)
+    value_text = ft.Text(
+        info.value if has_data else I18n.get("home_index_empty"),
+        size=AppStyles.FONT_SIZE_HEADLINE,
+        weight=ft.FontWeight.BOLD,
+        color=AppColors.TEXT_PRIMARY if has_data else AppColors.TEXT_SECONDARY,
+        no_wrap=True,  # 中文占位防折行 (卡宽窄, 单行保证)
+    )
+    change_controls = (
+        [
+            ft.Text(
+                info.change,
+                size=AppStyles.FONT_SIZE_LG,
+                weight=ft.FontWeight.BOLD,
+                color=_resolve_color(info.color),
+            )
+        ]
+        if has_data
+        else []
+    )
+    column_controls: list[ft.Control] = [
+        anchored(
+            _KPI_EIDS[title_key],
+            ft.Text(
+                I18n.get(title_key),
+                size=AppStyles.FONT_SIZE_LG,
+                color=AppColors.TEXT_SECONDARY,
+                no_wrap=True,
+            ),
         ),
+        value_text,
+        *change_controls,
+    ]
+    return ft.Container(
+        content=ft.Column(column_controls, spacing=5),
         padding=style["padding"],
         bgcolor=style["bgcolor"],
         border_radius=style["border_radius"],

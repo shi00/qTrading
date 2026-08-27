@@ -246,6 +246,7 @@
     "home_data_date": "数据日期: {date}",
     "home_data_updating": "数据更新中",
     "home_refresh": "刷新数据",
+    "home_index_empty": "暂无数据",
     "home_index_sh": "上证指数",
     "home_index_sz": "深证成指",
     "home_index_cyb": "创业板指",

@@ -314,6 +314,7 @@
     "home_data_date": "Data Date: {date}",
     "home_data_updating": "Updating",
     "home_refresh": "Refresh Data",
+    "home_index_empty": "No data",
     "home_index_sh": "SSE Index",
     "home_index_sz": "SZSE Index",
     "home_index_cyb": "ChiNext",
