@@ -19,6 +19,7 @@ import flet as ft
 
 from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.singleton_registry import register_singleton
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,7 @@ class AppColorsState(ft.Observable):
     theme_name: str = ThemeName.DARK
 
 
+@register_singleton
 class AppColors:
     """
     双层主题色管理器 (Dual-Layer Theme Color Manager)
@@ -389,6 +391,8 @@ class AppColors:
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
     _CURRENT_THEME_NAME = ThemeName.DARK
     _state: AppColorsState | None = None
+    # 类级状态单例占位（无实例概念）；R7 统一契约要求 _reset_singleton 后 _instance is None
+    _instance = None
 
     @classmethod
     def get_observable_state(cls) -> AppColorsState:
@@ -409,6 +413,26 @@ class AppColors:
             当前主题模式 (DARK / LIGHT)
         """
         return cls._CURRENT_THEME_MODE
+
+    @classmethod
+    def _reset_singleton(cls) -> None:
+        """Reset singleton for testing only. NEVER call in production.
+
+        AppColors 是类级状态（类属性 + classmethod），无实例概念。
+        register_singleton 注册后由 tests/unit/conftest.py 的 _reset_all_singletons
+        autouse fixture 在每个 unit 用例前后自动调用，将全部 Layer 2 颜色、
+        别名、当前主题与 Observable state 复位为 DARK 默认，根治跨测试状态泄漏。
+        """
+        preset = CUSTOM_COLOR_PRESETS[ThemeName.DARK]
+        for key, value in preset.items():
+            if hasattr(cls, key):
+                setattr(cls, key, value)
+        cls.TABLE_GRID_V = cls.TABLE_GRID
+        cls.TABLE_GRID_H = cls.TABLE_GRID
+        cls._CURRENT_THEME_NAME = ThemeName.DARK
+        cls._CURRENT_THEME_MODE = ft.ThemeMode.DARK
+        cls._state = None
+        cls._instance = None
 
     @classmethod
     def load_theme(cls, theme_name: str = ThemeName.DARK):
