@@ -75,7 +75,7 @@ dev = [
     "uv>=0.12.6",
     "pip-audit>=2.10.0",
     "hypothesis>=6.165.10",
-    "syrupy>=4.0",
+    "syrupy>=6.0.0",
     "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
     "import-linter>=2.13",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
     "flet-mcp==0.86.5",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
