@@ -17,7 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
@@ -82,19 +82,12 @@ class SchedulerService:
         except RuntimeError:
             logger.debug("[Scheduler] Event loop unavailable during %s, skipping graceful shutdown", context)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[Scheduler] Error during shutdown (%s) (%s): %s",
                 context,
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 

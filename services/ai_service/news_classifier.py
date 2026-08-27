@@ -17,7 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from utils.config_models import NEWS_CATEGORY_MAP
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 if TYPE_CHECKING:
@@ -156,29 +156,23 @@ class NewsClassifier:
             return result
         except Exception as local_e:
             # Local failed (not configured, crash, etc.)
-            error_info = classify_error(local_e, context="llm")
-            severity = classify_severity(local_e, context="llm")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
             # Log only if it wasn't just "not configured" (which is common)
             if "not installed" not in str(local_e) and "not configured" not in str(
                 local_e,
             ):
-                _log(
+                log_classified(
+                    logger,
+                    local_e,
+                    "llm",
                     "[AIService] Classify | Local failed, falling back to cloud (%s): %s",
-                    error_info["code"],
-                    _ai.DataSanitizer.sanitize_error(local_e),
                     exc_info=True,
                 )
             else:
-                _log(
+                log_classified(
+                    logger,
+                    local_e,
+                    "llm",
                     "[AIService] Classify | Local model unavailable, falling back to cloud (%s): %s",
-                    error_info["code"],
-                    _ai.DataSanitizer.sanitize_error(local_e),
                     exc_info=True,
                 )
 

@@ -11,7 +11,6 @@ from services.ai_service import (
     AIService,
     LITELLM_AVAILABLE,
     _check_reasoning_support,
-    _classify_api_error,
     STRATEGY_CONTEXT_MAX_LEN,
     VALID_RECOMMENDATIONS,
     _FREE_TEXT_MAX_LEN,
@@ -212,14 +211,6 @@ class TestCheckReasoningSupport:
         monkeypatch.setattr(ai_service, "litellm", None)
         result = _check_reasoning_support("deepseek-v4-pro")
         assert isinstance(result, bool)
-
-
-class TestClassifyApiError:
-    def test_returns_dict(self):
-        result = _classify_api_error(Exception("test"))
-        assert isinstance(result, dict)
-        assert "code" in result
-        assert "message_key" in result
 
 
 class TestStrategyContextMaxLen:

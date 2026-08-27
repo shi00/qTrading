@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from collections.abc import Callable
 
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import mark_graceful_shutdown_completed
 
@@ -320,19 +320,12 @@ class ShutdownCoordinator:
                 error=DataSanitizer.sanitize_error(ex),
             )
         except Exception as ex:
-            error_info = classify_error(ex, context="general")
-            severity = classify_severity(ex, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                ex,
+                "general",
                 "[Shutdown] %s failed (likely shutdown-related) (%s): %s",
                 name,
-                error_info["code"],
-                DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
             elapsed_ms = (time.perf_counter() - start) * 1000

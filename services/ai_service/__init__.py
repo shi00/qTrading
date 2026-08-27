@@ -50,7 +50,6 @@ from services.ai_service.litellm_client import (
     LITELLM_SET_TIMEOUT,
     LiteLLMClient,
     _check_reasoning_support,
-    _classify_api_error as _classify_api_error,
     _ensure_litellm_loaded as _ensure_litellm_loaded,
     _litellm_import_attempted as _litellm_import_attempted,
     acompletion as acompletion,
