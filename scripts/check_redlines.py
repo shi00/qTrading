@@ -1092,8 +1092,8 @@ def check_R_lazy_import_whitelist() -> list[str]:
 # R16: UI 阻塞主循环（部分守护：ViewModel __init__ 构造已注册单例检测）
 # ============================================================================
 
-# 已注册单例白名单（与 docs/architecture/singleton-lifecycle.md 注册清单一致；
-# 该清单由 tests/unit/test_docs_consistency.py TestSingletonRegistryConsistency 动态比对守护）
+# 已注册单例白名单（供 VM __init__ 构造单例检测；与 docs/architecture/singleton-lifecycle.md
+# 注册清单保持一致，但该白名单无自动化比对守护，新增注册单例须人工同步补充）
 _R16_SINGLETON_CLASSES = frozenset(
     {
         "CacheManager",
