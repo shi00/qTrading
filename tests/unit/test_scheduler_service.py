@@ -957,3 +957,25 @@ class TestAiConceptLogicClosure:
                 await factory("test_task")
             # 验证后续的 run_ai_concept_tagging 未执行（早退生效）
             mock_dp.run_ai_concept_tagging.assert_not_called()
+
+
+class TestSafeShutdownSchedulerGenericError:
+    """_safe_shutdown_scheduler 在 shutdown 抛非 RuntimeError 异常时走 log_classified 分支。
+
+    PR #640 diff-coverage 补覆盖：utils/scheduler_service.py L85。
+    """
+
+    @pytest.mark.asyncio
+    async def test_generic_error_log_via_log_classified(self, caplog):
+        import logging
+
+        scheduler = MagicMock()
+        scheduler.running = True
+        scheduler.shutdown.side_effect = ValueError("shutdown worker crashed")
+
+        with caplog.at_level(logging.WARNING, logger="utils.scheduler_service"):
+            SchedulerService._safe_shutdown_scheduler(scheduler, context="reset")
+
+        assert any(
+            "[Scheduler] Error during shutdown" in r.message for r in caplog.records
+        )
