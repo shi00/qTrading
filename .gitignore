@@ -143,6 +143,10 @@ pytest_e2e_tmp*.zip
 # 5.2 Embedded PostgreSQL 只读数据目录（E2E sidecar 运行产物，含二进制 dll/exe）
 **/embedded_pg_data_ro0/
 
+# 5.3 Sidecar 本地构建产物（cargo build 后拷贝至 sidecars/ 根，供打包；target/ 已由子目录 .gitignore 覆盖）
+/sidecars/*.exe
+/sidecars/*.exe.sha256
+
 # 6. Worktrees
 .worktrees/
 
