@@ -19,7 +19,7 @@ from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
@@ -101,20 +101,16 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[SwIndustrySync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[SwIndustrySync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[SwIndustrySync] Recoverable error (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error("[SwIndustrySync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -157,25 +153,16 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             await self._record_skipped_permission("sw_industry_classify")
             return pd.DataFrame()
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[SwIndustrySync] Classify | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[SwIndustrySync] Classify | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[SwIndustrySync] Classify | Recoverable error (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[SwIndustrySync] Classify | Operational error (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             result.errors.append(f"SwIndustry Classify: {safe_error(e)}")
             return pd.DataFrame()
 
@@ -233,32 +220,17 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     return
                 except Exception as e:
                     errors += 1
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[SwIndustrySync] Members | Skip (%s): %s (index_code=%s)",
+                        index_code,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[SwIndustrySync] Members | SYSTEM-LEVEL failure for index_code=%s: %s",
-                            index_code,
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
-                            index_code,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
-                            index_code,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
 
                     # S16：循环错误分支标记 partial 并记录 errors，避免部分成员
                     # fetch 失败时 status 仍为 success。system 级别已 raise，此处
@@ -315,25 +287,16 @@ class SwIndustrySyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[SwIndustrySync] Members | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[SwIndustrySync] Members | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[SwIndustrySync] Members | Recoverable error (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[SwIndustrySync] Members | Operational error (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             result.errors.append(f"SwIndustry Members: {safe_error(e)}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -350,32 +313,17 @@ class SwIndustrySyncStrategy(ISyncStrategy):
         except EngineDisposedError:  # pragma: no cover - 防御性守卫，EngineDisposedError 从 API 层抛出概率极低
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[SwIndustrySync] Failed to record skipped_permission status (%s): %s (table=%s)",
+                table_name,
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[SwIndustrySync] SYSTEM-LEVEL failure while recording skipped_permission for %s: %s",
-                    table_name,
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
-                    table_name,
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
-                    table_name,
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _save_members_checkpoint(self, all_dfs: list[pd.DataFrame]) -> bool:
@@ -402,27 +350,14 @@ class SwIndustrySyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[SwIndustrySync] Members | Checkpoint save failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[SwIndustrySync] Members | SYSTEM-LEVEL failure during checkpoint save: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[SwIndustrySync] Members | Checkpoint save failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[SwIndustrySync] Members | Checkpoint save failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             return False
