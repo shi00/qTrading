@@ -103,6 +103,7 @@ tmp_*.py
 tmp_*.zip
 tmp_*/
 /tmp/
+.tmp/
 ci_log_*.txt
 codeql_logs.txt
 e2e_reports.zip
