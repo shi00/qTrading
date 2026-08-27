@@ -226,16 +226,20 @@ class TestRunImplExceptionHandlers:
         with (
             patch("data.sync.sw_industry.classify_severity", return_value="system"),
             patch(
-                "data.sync.sw_industry.classify_error",
+                "utils.error_classifier.classify_error",
                 return_value={"code": "system", "message_key": "system_error"},
             ),
+            # log_classified 内部按 error_classifier 模块的 classify_severity 选择日志级别
+            patch("utils.error_classifier.classify_severity", return_value="system"),
             patch.object(strategy, "_sync_classify", side_effect=raise_system),
             caplog.at_level(logging.CRITICAL, logger="data.sync.sw_industry"),
         ):
             with pytest.raises(MemoryError):
                 await strategy._run_impl()
 
-        critical_logs = [r for r in caplog.records if "SYSTEM-LEVEL" in r.message]
+        # log_classified 对 system 异常用 critical 记录（排除 log_async_operation 装饰器
+        # 对 re-raise 异常额外记录的 "system failure after" critical 日志）
+        critical_logs = [r for r in caplog.records if r.levelno == logging.CRITICAL and "Run | failed" in r.message]
         assert len(critical_logs) == 1
 
     @pytest.mark.asyncio
@@ -251,9 +255,11 @@ class TestRunImplExceptionHandlers:
         with (
             patch("data.sync.sw_industry.classify_severity", return_value="recoverable"),
             patch(
-                "data.sync.sw_industry.classify_error",
+                "utils.error_classifier.classify_error",
                 return_value={"code": "timeout", "message_key": "recoverable_error"},
             ),
+            # log_classified 内部按 error_classifier 模块的 classify_severity 选择日志级别
+            patch("utils.error_classifier.classify_severity", return_value="recoverable"),
             patch.object(strategy, "_sync_classify", side_effect=raise_recoverable),
             caplog.at_level(logging.WARNING, logger="data.sync.sw_industry"),
         ):
@@ -262,7 +268,7 @@ class TestRunImplExceptionHandlers:
         assert result.status == "failed"
         assert "recoverable_error" in result.errors
         warning_logs = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("Recoverable" in r.message for r in warning_logs)
+        assert any("failed" in r.message for r in warning_logs)
 
     @pytest.mark.asyncio
     async def test_operational_exception_logs_error_and_status_failed(self, caplog):
@@ -277,9 +283,11 @@ class TestRunImplExceptionHandlers:
         with (
             patch("data.sync.sw_industry.classify_severity", return_value="operational"),
             patch(
-                "data.sync.sw_industry.classify_error",
+                "utils.error_classifier.classify_error",
                 return_value={"code": "operational", "message_key": "operational_error"},
             ),
+            # log_classified 内部按 error_classifier 模块的 classify_severity 选择日志级别
+            patch("utils.error_classifier.classify_severity", return_value="operational"),
             patch.object(strategy, "_sync_classify", side_effect=raise_operational),
             caplog.at_level(logging.ERROR, logger="data.sync.sw_industry"),
         ):
@@ -288,7 +296,7 @@ class TestRunImplExceptionHandlers:
         assert result.status == "failed"
         assert "operational_error" in result.errors
         error_logs = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert any("Operational" in r.message for r in error_logs)
+        assert any("failed" in r.message for r in error_logs)
 
 
 class TestSyncClassifyExceptions:
@@ -447,14 +455,9 @@ class TestSyncMembersExceptions:
             await strategy._sync_members(result, classify_df)
 
         assert any("SwIndustry Members" in err for err in result.errors)
-        # T29 标准化后：RuntimeError 默认归 operational → logger.error("Operational error ...")；
+        # review01-A13 收口后：RuntimeError 默认归 operational → log_classified 用 logger.error；
         # 测试同时接受 recoverable(warning) 与 operational(error) 两条分类路径。
-        warning_logs = [
-            r
-            for r in caplog.records
-            if "Members" in r.message
-            and ("⚠️" in r.message or "Recoverable error" in r.message or "Operational error" in r.message)
-        ]
+        warning_logs = [r for r in caplog.records if "Members" in r.message and "failed" in r.message]
         assert len(warning_logs) == 1
 
 
