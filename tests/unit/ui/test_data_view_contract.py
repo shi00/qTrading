@@ -2355,6 +2355,38 @@ class TestTableViewerTabClearFilter:
         assert "clear_filter" in calls, "点击清除应调 vm.clear_filter"
         assert ("query_data", {"page": 1}) in vm.method_calls, "清除后应回到第 1 页重查询"
 
+    def test_clear_button_click_query_error_logs_not_propagates(self, monkeypatch) -> None:
+        """清除后重查询抛非取消异常 → 记录 error 日志且不向外传播 (异常分支覆盖)."""
+        from ui.views import data_view as mod
+
+        result, vm, _ = self._mount_with_draft(filter_val_draft="abc")
+
+        async def _boom_query_data(**kwargs: Any) -> pd.DataFrame:
+            raise RuntimeError("clear filter boom")
+
+        monkeypatch.setattr(vm, "query_data", _boom_query_data)
+
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None and callable(btn.on_click), "应能找到清除按钮"
+        with patch.object(mod.logger, "error") as mock_err:
+            btn.on_click(MagicMock())  # 异常被内部捕获, 不应向外抛出
+        assert mock_err.call_count == 1, "应记录一次 error 日志"
+        assert "clear filter error" in mock_err.call_args[0][0]
+
+    def test_clear_button_click_query_cancelled_propagates(self, monkeypatch) -> None:
+        """清除后重查询抛 asyncio.CancelledError → R2: 必须重新抛出传播."""
+        result, vm, _ = self._mount_with_draft(filter_val_draft="abc")
+
+        async def _cancel_query_data(**kwargs: Any) -> pd.DataFrame:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(vm, "query_data", _cancel_query_data)
+
+        btn = _find_icon_button(result, ft.Icons.FILTER_ALT_OFF)
+        assert btn is not None and callable(btn.on_click), "应能找到清除按钮"
+        with pytest.raises(asyncio.CancelledError):
+            btn.on_click(MagicMock())
+
     def test_empty_state_has_clear_cta(self, monkeypatch) -> None:
         """筛选无结果空态 → EmptyState 收到清除筛选 CTA props (on_cta/cta_text/cta_icon).
 
