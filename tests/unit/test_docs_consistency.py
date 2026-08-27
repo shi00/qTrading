@@ -326,6 +326,7 @@ def _actual_registered_singletons() -> frozenset[str]:
     import strategies.all_strategies  # noqa: F401 (side-effect 注册)
     import utils.scheduler_service  # noqa: F401 (side-effect 注册)
     import utils.thread_pool  # noqa: F401 (side-effect 注册)
+    import ui.theme  # noqa: F401 (side-effect 注册)
 
     from utils.singleton_registry import get_registered_singletons
 

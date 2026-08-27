@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 import services.ai_service as ai_mod
+import services.ai_service.token_budget as token_budget
 from services.ai_service import (
     AIService,
     CONTEXT_RESERVE_TOKENS,
@@ -63,7 +64,7 @@ class TestEstimateTokens:
     def test_fallback_path_on_tiktoken_error_not_underestimate_cjk(self):
         """tiktoken 加载失败时回退 len(text)//1，CJK 字符不得被低估（每字至少 1 token）。"""
         with (
-            patch.object(ai_mod, "_tiktoken_enc_error", False),
+            patch.object(token_budget, "_tiktoken_enc_error", False),
             patch(
                 "builtins.__import__",
                 side_effect=ImportError("tiktoken unavailable"),
@@ -78,7 +79,7 @@ class TestEstimateTokens:
         with patch("builtins.__import__", side_effect=ImportError("offline")):
             _reset_token_estimator()
             _estimate_tokens("abc")
-            assert ai_mod._tiktoken_enc_error is True
+            assert token_budget._tiktoken_enc_error is True
             # 第二次：即使 import 恢复，仍走回退（error 已缓存，不再触发 import）
             with patch("builtins.__import__") as mock_imp:
                 assert _estimate_tokens("abc") == 3
@@ -88,9 +89,9 @@ class TestEstimateTokens:
         with patch("builtins.__import__", side_effect=ImportError("offline")):
             _reset_token_estimator()
             _estimate_tokens("abc")
-            assert ai_mod._tiktoken_enc_error is True
+            assert token_budget._tiktoken_enc_error is True
         _reset_token_estimator()
-        assert ai_mod._tiktoken_enc_error is False
+        assert token_budget._tiktoken_enc_error is False
 
 
 # ---------------------------------------------------------------------------

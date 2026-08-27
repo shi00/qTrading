@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 
@@ -602,6 +603,59 @@ def _format_issue(issue: WeakAssertion) -> str:
     return f"  {issue.rel_path}:L{issue.line_no} [{issue.issue_type}] {issue.detail}"
 
 
+# review07-G3: baseline 下降 KPI（防"776 条债务永久化"）
+# target: 从 created_at 到 target_date 线性插值期望上限；当前实际数超预期+容差时输出 WARNING（不阻断）
+_KPI_TOLERANCE = 10  # 容差：baseline 计数日常波动不报警
+
+
+def check_baseline_kpi(baseline_path: Path, current_total: int, now: date | None = None) -> list[str]:
+    """检查 baseline 下降进度是否达标（WARNING 语义，不改变退出码）。
+
+    Args:
+        baseline_path: baseline 文件路径。
+        current_total: 当前实际弱断言总数（本次扫描结果）。
+        now: 当前日期（注入便于测试）。
+
+    Returns:
+        warnings 列表（空 = 达标或未配置 KPI）。未配置 target_total/target_date/created_at
+        时返回空（旧版本 baseline 兼容）；日期不可解析时跳过。
+    """
+    try:
+        raw = json.loads(baseline_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return []
+        target_total = raw.get("target_total")
+        target_date_s = raw.get("target_date")
+        created_at_s = raw.get("created_at")
+        created_total = raw.get("baseline_count") or raw.get("total")
+        if target_total is None or target_date_s is None or created_at_s is None or created_total is None:
+            return []
+        target_total = int(target_total)
+        created_total = int(created_total)
+        created = date.fromisoformat(created_at_s)
+        target = date.fromisoformat(target_date_s)
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        return []
+
+    today = now or date.today()
+    total_span = (target - created).days
+    if total_span <= 0:
+        # 目标日期已过期：直接按目标值判定
+        expected = target_total
+    else:
+        elapsed = max(0.0, min(1.0, (today - created).days / total_span))
+        expected = created_total - (created_total - target_total) * elapsed
+
+    if current_total <= expected + _KPI_TOLERANCE:
+        return []
+
+    return [
+        "::warning::weak-assertion baseline 下降进度落后："
+        f"当前 {current_total} 条，期望 ≤{int(expected)}条（target {target_total} @ {target_date_s}；"
+        f"policy: 每季度下降不少于 10%）。请在触达的测试文件中顺手清理存量弱断言。"
+    ]
+
+
 def _run_advisory_or_strict(args: argparse.Namespace) -> int:
     """advisory / --strict 模式（向后兼容原行为）。"""
     root = Path(args.path)
@@ -666,6 +720,10 @@ def _run_base_mode(args: argparse.Namespace) -> int:
             f"✗ baseline 数量上升：当前 {current_total} > 旧 {old_total}"
             f"（ref={args.baseline_ref}）。baseline 只能下降不能上升。"
         )
+
+    # review07-G3: baseline 下降 KPI（WARNING 不阻断，输出到 stderr 供 CI 展示）
+    for kpi_warning in check_baseline_kpi(baseline_path, len(current)):
+        print(kpi_warning, file=sys.stderr)
 
     if not failed:
         print(f"✓ 增量门禁通过：当前 {len(current)} 处弱断言，baseline {len(baseline)} 处，无新增。")

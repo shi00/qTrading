@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_per_file_coverage import (  # noqa: E402 - sys.path 注入后导入
+    _report_layered,
     load_config,
     match_threshold,
 )
@@ -141,3 +142,37 @@ class TestMatchThreshold:
         threshold, prefix = match_threshold("services/foo.py", 80, [])
         assert threshold == 80
         assert prefix is None
+
+
+class TestReportLayered:
+    """review07-G14: _report_layered 分层达标率统计（不阻断，输出 stderr）。"""
+
+    def test_groups_and_counts(self, capsys):
+        files = {
+            "services/foo.py": {"summary": {"percent_covered": 92.0, "num_statements": 100, "missing_lines": 8}},
+            "services/bar.py": {"summary": {"percent_covered": 85.0, "num_statements": 100, "missing_lines": 15}},
+            "strategies/baz.py": {"summary": {"percent_covered": 95.0, "num_statements": 50, "missing_lines": 3}},
+            "core/corge.py": {"summary": {"percent_covered": 70.0, "num_statements": 20, "missing_lines": 6}},
+        }
+        layered = [("services/", 90), ("strategies/", 90)]
+        _report_layered(files, 80, layered)
+        err = capsys.readouterr().err
+        assert "::warning::[分层覆盖率]" in err
+        assert "services/    threshold=90%" in err
+        assert "1/2 达标" in err  # services 92/85 → 1 达标 1 未达标
+        assert "strategies/  threshold=90%" in err
+        assert "core/corge.py" in err  # (default) 组未达标样例
+        assert "(default)" in err
+
+    def test_all_pass_no_below_samples(self, capsys):
+        files = {
+            "services/foo.py": {"summary": {"percent_covered": 95.0, "num_statements": 100, "missing_lines": 5}},
+            "ui/bar.py": {"summary": {"percent_covered": 88.0, "num_statements": 40, "missing_lines": 4}},
+        }
+        layered = [("services/", 90), ("ui/", 85)]
+        _report_layered(files, 80, layered)
+        err = capsys.readouterr().err
+        assert "2/2 达标" not in err  # 不同组各自统计，无此总体行
+        assert "services/    threshold=90%  1/1 达标" in err
+        assert "ui/          threshold=85%  1/1 达标" in err
+        assert "未达标" not in err

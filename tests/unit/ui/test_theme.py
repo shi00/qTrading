@@ -114,6 +114,45 @@ class TestAppColorsLoadTheme:
         assert AppColors.TABLE_GRID_H == AppColors.TABLE_GRID
 
 
+class TestAppColorsResetSingleton:
+    """AppColors 类级状态单例 reset 契约（R7/R15）：污染后复位 DARK 基线。
+
+    由 tests/unit/conftest.py 的 _reset_all_singletons autouse fixture 间接调用，
+    此处显式守卫 _reset_singleton 逻辑，防止未来扩展颜色/别名时遗漏复位。
+    """
+
+    @patch(
+        "ui.theme.THEME_MODE_MAP",
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
+    )
+    def test_reset_restores_dark_baseline_after_pollution(self):
+        # 污染：切换到 LIGHT，触发 Observable state 通知
+        AppColors.load_theme(ThemeName.LIGHT)
+        assert AppColors._CURRENT_THEME_NAME == ThemeName.LIGHT
+        assert AppColors.get_observable_state().theme_name == ThemeName.LIGHT
+
+        AppColors._reset_singleton()
+
+        # Layer 2 颜色全部复位为 DARK preset
+        for key, value in CUSTOM_COLOR_PRESETS[ThemeName.DARK].items():
+            assert getattr(AppColors, key) == value
+        # 别名与当前主题复位
+        assert AppColors.TABLE_GRID_V == AppColors.TABLE_GRID
+        assert AppColors.TABLE_GRID_H == AppColors.TABLE_GRID
+        assert AppColors._CURRENT_THEME_NAME == ThemeName.DARK
+        assert AppColors._CURRENT_THEME_MODE == ft.ThemeMode.DARK
+        # Observable state 置空待惰性重建，重建回 DARK 默认
+        assert AppColors._state is None
+        assert AppColors.get_observable_state().theme_name == ThemeName.DARK
+        # 类级实例占位复位（R7 契约）
+        assert AppColors._instance is None
+
+
 class TestAppColorsObservable:
     """AppColorsState Observable 状态源断言（声明式组件自动重渲染基础）。"""
 

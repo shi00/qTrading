@@ -233,6 +233,9 @@ jobs:
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
 
+      - name: Report Layered Coverage (review07-G14, advisory)
+        run: python scripts/check_per_file_coverage.py --report
+
       - name: Check diff coverage
         run: |
           BASE="${{ github.event.pull_request.base.ref }}"
@@ -554,6 +557,9 @@ jobs:
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
+
+      - name: Report Layered Coverage (review07-G14, advisory)
+        run: python scripts/check_per_file_coverage.py --report
 
       - name: Validate installer smoke test scripts syntax (Phase 5)
         shell: pwsh

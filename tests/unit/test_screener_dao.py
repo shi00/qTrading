@@ -10,7 +10,7 @@ import pandas as pd
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.constants import REVIEW_STATUS_COMPLETED
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
 class TestScreenerDaoGetScreeningHistory:

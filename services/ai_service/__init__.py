@@ -12,7 +12,28 @@ from typing import Any
 import httpx
 import pandas as pd
 
-from core.i18n import I18n
+from services.ai_service.labels import (
+    AVAILABLE_DATA_LABELS as AVAILABLE_DATA_LABELS,
+    build_available_data_block,
+    filter_available_labels,
+    get_strategy_min_tier as get_strategy_min_tier,
+    validate_strategy_tier_coverage as validate_strategy_tier_coverage,
+)
+from services.ai_service.output import (
+    _FREE_TEXT_MAX_LEN as _FREE_TEXT_MAX_LEN,
+    VALID_RECOMMENDATIONS as VALID_RECOMMENDATIONS,
+    _sanitize_free_text as _sanitize_free_text,
+    validate_ai_analysis_response,
+)
+from services.ai_service.token_budget import (
+    CHAR_FALLBACK_TOKENS_DIV as CHAR_FALLBACK_TOKENS_DIV,
+    CONTEXT_RESERVE_TOKENS,
+    DEFAULT_CONTEXT_WINDOW,
+    _apply_context_budget,
+    _estimate_tokens,
+    _get_model_context_window,
+    _reset_token_estimator as _reset_token_estimator,
+)
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.config_models import NEWS_CATEGORY_MAP
@@ -33,13 +54,7 @@ acompletion: Any = None
 # 独立 import 重试哨兵：避免以 litellm=False 作哨兵与 `litellm is not None` 判空冲突。
 _litellm_import_attempted = False
 
-VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
 STRATEGY_CONTEXT_MAX_LEN = 1600
-# SEC-002: Free-text LLM output fields subject to length limit and control-char cleaning.
-_FREE_TEXT_MAX_LEN = 1000
-_FREE_TEXT_FIELDS = ("summary", "thinking", "ai_reason", "uncertainty_factors")
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
 # === Task 6.8: 魔法数字提取为模块级常量 (ARCH-m1 / CQ-m1) ===
 # LiteLLM 全局配置
 LITELLM_SET_TIMEOUT = 30.0
@@ -51,132 +66,6 @@ CONNECT_TIMEOUT = 5.0
 GLOBAL_CONTEXT_MAX_LEN = 2000
 HISTORY_CONTEXT_MAX_LEN = 3000
 NEWS_TEXT_MAX_LEN = 500
-# === Issue #70: 模型上下文感知的 Token 化全局预算 ===
-# 未知/自定义模型或无 provider 时的保守上下文窗口回退值。
-DEFAULT_CONTEXT_WINDOW = 128_000
-# 预算预留 token：覆盖 system_instruction + <strategy_rules> + 预期输出，并留安全余量。
-# 注意：不覆盖预算外的 <user_custom_instructions>（该块不受预算截断）。
-# 取值 8000：对常见 32k~128k 上下文模型，可为 user 内容保留足够余量。
-CONTEXT_RESERVE_TOKENS = 8000
-# 回退估算分母：无 tiktoken/离线时用 len(text)//1（保守，不低估 CJK）。
-CHAR_FALLBACK_TOKENS_DIV = 1
-
-_tiktoken_enc = None
-_tiktoken_enc_error = False
-
-
-def _reset_token_estimator() -> None:
-    """清除 tiktoken 模块缓存（测试隔离用，R7 合规）。"""
-    global _tiktoken_enc, _tiktoken_enc_error
-    _tiktoken_enc = None
-    _tiktoken_enc_error = False
-
-
-def _estimate_tokens(text) -> int:
-    """估算文本 token 数（Issue #70）。
-
-    - None/空文本 → 0
-    - 非 str（多模态 list content parts）递归求和其中 str 的 text 部分
-    - 惰性初始化 tiktoken cl100k_base；异常/离线回退 len(text)//CHAR_FALLBACK_TOKENS_DIV
-    """
-    global _tiktoken_enc, _tiktoken_enc_error
-    if text is None:
-        return 0
-    if isinstance(text, list):
-        return sum(_estimate_tokens(part.get("text")) for part in text if isinstance(part, dict))
-    if not isinstance(text, str):
-        return 0
-    if not text:
-        return 0
-    if not _tiktoken_enc_error:
-        try:
-            if _tiktoken_enc is None:
-                import tiktoken
-
-                _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
-            return len(_tiktoken_enc.encode(text))
-        except Exception:
-            _tiktoken_enc_error = True
-    return len(text) // CHAR_FALLBACK_TOKENS_DIV
-
-
-def _get_model_context_window(llm_config: dict, model_override: str | None = None) -> int:
-    """取生效模型的 context 窗口（Issue #70）。
-
-    解析优先级：
-    1. llm_config["custom_model_contexts"][provider][model]（per-model 覆盖，P2-2）
-    2. LLM_PROVIDERS 内置模型信息（get_model_info）
-    3. 回退 DEFAULT_CONTEXT_WINDOW（未知 / context<=0 / 自定义未声明）
-
-    处理 provider/model 前缀与 failover 生效模型（model_override 形如 "provider/model"）。
-    """
-    from utils.llm_providers import get_model_info
-
-    provider = llm_config.get("provider", "")
-    model = model_override or llm_config.get("model", "")
-    if "/" in model:
-        provider, model = model.split("/", 1)
-
-    # 1) per-model context 覆盖（P2-2）：自定义/未知模型可显式声明，运行时以此为准。
-    # 防御容错：provider 值若非 dict（如 list/str 等非法配置），忽略该覆盖不抛错。
-    override_map = llm_config.get("custom_model_contexts") or {}
-    provider_ctx = override_map.get(provider) or {}
-    override_ctx = provider_ctx.get(model) if isinstance(provider_ctx, dict) else None
-    if isinstance(override_ctx, int) and override_ctx > 0:
-        return override_ctx
-
-    # 2) 内置模型信息
-    context = get_model_info(provider, model).get("context", 0)
-    if isinstance(context, int) and context > 0:
-        return context
-
-    # 3) 保守回退
-    return DEFAULT_CONTEXT_WINDOW
-
-
-def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[str, list[str]]:
-    """全局 Token 预算分配（Issue #70）。
-
-    sections: (name, priority, is_truncatable, text, max_chars, min_chars)
-        - priority: 越小越重要；截断时优先裁 priority 数字大的可截断 section。
-        - is_truncatable: 是否允许被预算迭代削减。
-        - max_chars: 初始字符上限（None=不预截断）。
-        - min_chars: 迭代削减下限（0=可整体丢弃）。
-    返回 (join 后的有序文本, 存活 section 名列表)。不重写 XML 标签。
-    有限终止：无可减少 section（全部达 min / 不可截断）时停并 logger.warning 接受超限。
-    """
-    cur: list[list] = []
-    for name, priority, truncatable, text, max_chars, min_chars in sections:
-        if not text:
-            continue
-        if max_chars is not None and len(text) > max_chars:
-            text = text[:max_chars]
-        cur.append([name, priority, truncatable, text, min_chars])
-
-    def _total(secs: list[list]) -> int:
-        return sum(_estimate_tokens(s[3]) for s in secs)
-
-    if _total(cur) <= budget_tokens:
-        return "\n\n".join(s[3] for s in cur), [s[0] for s in cur]
-
-    # 迭代削减：优先裁优先级最低（priority 数字最大）的可截断 section；
-    # 在同一优先级内再裁 token 最大的，避免大体积高优先级段被先掏空。
-    while True:
-        reducible = [s for s in cur if s[2] and len(s[3]) > s[4]]
-        if not reducible:
-            logger.warning(
-                "[AIService] Budget still exceeded: no reducible section below min (accepting overage, ~%d tokens)",
-                _total(cur),
-            )
-            break
-        target = max(reducible, key=lambda s: (s[1], _estimate_tokens(s[3])))
-        new_len = max(target[4], round(len(target[3]) * 0.5))
-        target[3] = target[3][:new_len]
-        if _total(cur) <= budget_tokens:
-            break
-
-    surviving = [s for s in cur if s[3]]
-    return "\n\n".join(s[3] for s in surviving), [s[0] for s in surviving]
 
 
 # 默认并发数
@@ -195,349 +84,11 @@ ERROR_MESSAGE_TRUNCATE_LEN = 100
 NEWS_LIST_LIMIT = 5
 CONCEPTS_LIMIT = 8
 
-_AVAILABLE_DATA_LABEL_KEYS: set[str] = {
-    "ai_label_quote_snapshot",
-    "ai_label_tech",
-    "ai_label_global",
-    "ai_label_news",
-    "ai_label_kline",
-    "ai_label_learning",
-    "ai_label_strategy_ctx",
-    "ai_label_valuation",
-    # Phase 2A.1 §4.1 v1.6.0 P0-1 拆分：ai_label_macro → ai_label_shibor + ai_label_macro_full
-    "ai_label_shibor",
-    "ai_label_macro_full",
-    "ai_label_roe_trend",
-    "ai_label_gross_margin_trend",
-    "ai_label_revenue_growth_trend",
-    "ai_label_profit_growth_trend",
-    "ai_label_cf_profit_ratio",
-    "ai_label_goodwill_ratio",
-    "ai_label_monetary_capital",
-    "ai_label_accounts_receiv",
-    "ai_label_audit",
-    "ai_label_main_business",
-    "ai_label_dividend",
-    "ai_label_pledge",
-    # Phase 3B：股权质押明细（pledge_detail API，points_2000）
-    "ai_label_pledge_detail",
-    # Phase 3D：限售解禁（share_float API，points_5000）
-    "ai_label_share_float",
-    # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
-    "ai_label_holder_trade",
-    "ai_label_top_holder",
-    "ai_label_holder_count",
-    "ai_label_main_flow",
-    "ai_label_top_list",
-    "ai_label_northbound",
-    # Phase 3A：业绩预告（fina_forecast，forecast API，points_2000）
-    "ai_label_forecast",
-    # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
-    "ai_label_top_inst",
-    # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
-    "ai_label_sw_industry",
-    # Phase 3G §4.3.4：业绩快报（express API，points_2000）
-    "ai_label_express",
-}
-
-AVAILABLE_DATA_LABELS: frozenset[str] = frozenset(_AVAILABLE_DATA_LABEL_KEYS)
-
-
-def build_available_data_block(labels: list[str]) -> str:
-    """Render <available_data> block from label key strings.
-
-    Design decision (deviates from issue #41 spec v5 §2.2):
-    The spec defines AVAILABLE_DATA_LABELS as translated strings
-    ``{I18n.get(k) for k in _AVAILABLE_DATA_LABEL_KEYS}``, but the
-    actual pipeline uses **key strings** throughout (ai_mixin →
-    ai_service → this function) and only translates at render time.
-    This is intentionally better because:
-    1. Keys are locale-independent — tests compare keys vs keys.
-    2. Translation happens once at render, avoiding stale cached
-       translations if locale ever changes at runtime.
-    Do NOT change AVAILABLE_DATA_LABELS to translated strings unless
-    the entire pipeline is updated accordingly.
-    """
-    if not labels:
-        return ""
-
-    header = I18n.get("ai_available_data_header")
-    items = []
-    for label_key in labels:
-        if label_key not in _AVAILABLE_DATA_LABEL_KEYS:
-            logger.warning("[AIService] Unknown label key '%s' not in AVAILABLE_DATA_LABELS, skipping", label_key)
-            continue
-        display_text = I18n.get(label_key)
-        items.append(f"- {display_text}")
-    if not items:
-        return ""
-    return f"<available_data>\n{header}\n" + "\n".join(items) + "\n</available_data>"
-
-
-# Phase 2A.1 §4.1：AI 标签档位映射 + 过滤函数
-#
-# label key → (最低档位, required_apis)
-# required_apis 中的 API 必须 probe 验证可用（None = 未知，不阻塞）
-# 最低档位基于 _TIER_API_COVERAGE：label 数据来源 API 在该档位覆盖内
-#
-# v1.6.0 修订（P0-1）：拆分 `ai_label_macro` 为 `ai_label_shibor`（points_120，仅 shibor）
-# 与 `ai_label_macro_full`（points_2000，cn_m/cn_cpi/cn_ppi）。原因：原 `ai_label_macro`
-# min_tier=points_2000，降级到 points_120 时整体被 `filter_available_labels` 移除，
-# 但 §4.4.5 又声称"shibor 段落正常注入"——设计与实施矛盾。拆分后 shibor 段落独立过滤，
-# 降级时仍可注入；cn_m/cn_cpi/cn_ppi 段落按子段落 stale 标注（详见 §4.4.5）。
-# `_build_macro_context` 内部按各子段落对应 API 的 `is_api_covered_by_tier` 分别 stale 标注。
-#
-# v1.9.0 P1-7 + v1.10.0 P1-4 修订：注释项与 Phase 2A.1 实施脱节说明
-# Phase 2A.1 实施 filter_available_labels 时，_LABEL_TIER_MAP 只含已注册的 26 个标签
-# （本 map 中**非注释**的项）。注释状态的 ai_label_top_inst / ai_label_share_float /
-# ai_label_holder_trade / ai_label_sw_industry / ai_label_lpr / ai_label_express 等
-# 在各 Phase 3X 实施时**同步取消注释并注册**。
-# 由于 v1.9.0 P1-1 已将 filter_available_labels 改为 fail-fast（raise ValueError），
-# 若 Phase 2A.1 实施时 run_ai_analysis 传入注释状态的标签，会触发 raise。
-# 因此：
-# - Phase 2A.1 实施 _LABEL_TIER_MAP 时，注释项保持注释（不取消），AVAILABLE_DATA_LABELS
-#   也**不**含对应 key（Phase 2A.1 只调整 ai_label_macro → ai_label_shibor +
-#   ai_label_macro_full 的拆分）。
-# - **v1.10.0 P1-4 强制同步约束**：run_ai_analysis 内部硬编码的 available_data_labels
-#   列表（按策略类型构造）**必须只含 _LABEL_TIER_MAP 中当前已注册（非注释）的 key**。
-#   每个 Phase 3X 取消注释时，必须**同步**：
-#     ① 取消 _LABEL_TIER_MAP 中对应 key 的注释；
-#     ② 在 _AVAILABLE_DATA_LABEL_KEYS 新增对应 key；
-#     ③ 在 run_ai_analysis 内部对应策略的 available_data_labels 列表追加该 key；
-#     ④ 在 _build_*_text 新增对应数据预取逻辑。
-#   四者必须同一 PR 完成，避免 _AVAILABLE_DATA_LABEL_KEYS 含 key 但 _LABEL_TIER_MAP
-#   未注册导致 raise。
-_LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
-    # points_120 档位即可用（基础行情/日线/shibor）
-    "ai_label_quote_snapshot": ("points_120", frozenset({"daily", "daily_basic"})),
-    "ai_label_tech": ("points_120", frozenset({"daily"})),
-    "ai_label_kline": ("points_120", frozenset({"daily", "adj_factor"})),
-    "ai_label_valuation": ("points_120", frozenset({"daily_basic"})),
-    # v1.6.0 拆分：shibor 段落独立标签（points_120，仅依赖 shibor API）
-    # Phase 3G §4.3.4：required_apis 追加 shibor_lpr（LPR 与 shibor 同段落注入）
-    "ai_label_shibor": ("points_120", frozenset({"shibor", "shibor_lpr"})),
-    # v1.6.0 拆分：宏观完整段落（cn_m/cn_cpi/cn_ppi，points_2000）
-    # Phase 2D §3.2.6：cn_gdp 全链路补全，required_apis 追加 cn_gdp
-    "ai_label_macro_full": ("points_2000", frozenset({"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"})),
-    "ai_label_global": ("points_120", frozenset()),  # 无 API 依赖（新闻/外部）
-    "ai_label_news": ("points_120", frozenset()),  # 无 API 依赖
-    "ai_label_learning": ("points_120", frozenset()),  # 无 API 依赖
-    "ai_label_strategy_ctx": ("points_120", frozenset()),  # 无 API 依赖
-    # points_2000 档位可用（财务/股东/龙虎榜/概念/资金流/市场异动）
-    "ai_label_roe_trend": ("points_2000", frozenset({"fina_indicator"})),
-    "ai_label_gross_margin_trend": ("points_2000", frozenset({"fina_indicator"})),
-    "ai_label_revenue_growth_trend": ("points_2000", frozenset({"income"})),
-    "ai_label_profit_growth_trend": ("points_2000", frozenset({"income"})),
-    "ai_label_cf_profit_ratio": ("points_2000", frozenset({"cashflow", "income"})),
-    "ai_label_goodwill_ratio": ("points_2000", frozenset({"balancesheet"})),
-    "ai_label_monetary_capital": ("points_2000", frozenset({"balancesheet"})),
-    "ai_label_accounts_receiv": ("points_2000", frozenset({"balancesheet"})),
-    "ai_label_audit": ("points_2000", frozenset({"fina_audit"})),
-    "ai_label_main_business": ("points_2000", frozenset({"fina_mainbz"})),
-    "ai_label_dividend": ("points_2000", frozenset({"dividend"})),
-    # Phase 3B：pledge_stat（统计）与 pledge_detail（明细）拆分为独立标签，
-    # 避免 pledge_detail 不可用时连 pledge_stat 段落也消失
-    "ai_label_pledge": ("points_2000", frozenset({"pledge_stat"})),
-    "ai_label_pledge_detail": ("points_2000", frozenset({"pledge_detail"})),
-    "ai_label_top_holder": ("points_2000", frozenset({"top10_holders"})),
-    "ai_label_holder_count": ("points_2000", frozenset({"stk_holdernumber"})),
-    "ai_label_main_flow": ("points_2000", frozenset({"moneyflow", "moneyflow_hsgt"})),
-    # 仅依赖 top_list；top_inst 由独立标签 ai_label_top_inst 承载（§4.2.3），
-    # 不耦合进此处，否则 top_inst 不可用会误删 top_list 段落
-    "ai_label_top_list": ("points_2000", frozenset({"top_list"})),
-    "ai_label_northbound": ("points_2000", frozenset({"hk_hold"})),
-    # Phase 3A：业绩预告（forecast API，points_2000）
-    "ai_label_forecast": ("points_2000", frozenset({"forecast"})),
-    # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
-    # top_inst 独立标签，权限不足时仅此标签被过滤，不影响 ai_label_top_list（§4.2.3）
-    "ai_label_top_inst": ("points_2000", frozenset({"top_inst"})),
-    # Phase 3D：限售解禁（share_float API，points_5000）
-    "ai_label_share_float": ("points_5000", frozenset({"share_float"})),
-    # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
-    "ai_label_holder_trade": ("points_2000", frozenset({"stk_holdertrade"})),
-    # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
-    "ai_label_sw_industry": ("points_2000", frozenset({"index_classify", "index_member_all"})),
-    # 新增标签（Phase 3 追加时同步加入此 map）：
-    # "ai_label_lpr": ("points_120", frozenset({"shibor_lpr"})),  # Phase 3G（已合并到 ai_label_shibor）
-    # Phase 3G §4.3.4：业绩快报（express API，points_2000）
-    "ai_label_express": ("points_2000", frozenset({"express"})),
-    # "ai_label_cyq_perf": ("points_10000", frozenset({"cyq_perf"})),  # Phase 3H 需独立购买
-    # "ai_label_forecast_eps": ("points_10000", frozenset({"forecast_eps"})),  # Phase 3H 需独立购买
-}
-
-
-def filter_available_labels(
-    labels: list[str],
-    tier: str,
-    unavailable_apis: set[str],
-) -> list[str]:
-    """按档位 + probe 状态过滤 AI 标签。
-
-    Phase 2A.1 §4.1 实现：在 ``run_ai_analysis`` 调用 ``build_available_data_block``
-    之前过滤标签，使 ``<available_data>`` 区块只列当前档位 + probe 双层验证通过的标签。
-
-    Args:
-        labels: 原始 label key 列表
-        tier: 当前积分档位（points_120/2000/5000/10000/15000）
-        unavailable_apis: probe 验证不可用的 API 集合（``is_api_available() is False``）
-
-    Returns:
-        过滤后的 label key 列表（档位覆盖 ∧ probe 验证通过）
-
-    规则:
-        - label 不在 _LABEL_TIER_MAP → **raise ValueError**（v1.9.0 P1-1 修订）
-          v1.7.0 S5 原为"防御性兜底保留 + warning"，但与 §7.1 R14 红线扩展
-          （"新增 AI 标签必须同步注册到 _LABEL_TIER_MAP"）矛盾——保留 + warning 会让
-          漏注册标签静默通过档位过滤，AI 仍可能期待不存在的数据。改为 fail-fast，
-          强制开发者注册（未发布场景下无需向后兼容）。
-        - label 最低档位 > 当前档位 → 移除（档位不足）
-        - label required_apis 中有任一 API 不在档位覆盖内 → 移除（避免 ai_label_macro 类漏洞）
-        - label required_apis 中有任一 API 在 unavailable_apis → 移除（probe 失败）
-        - 其他 → 保留
-
-    Note:
-        延迟导入 TushareClient 避免循环依赖（ai_service 在 services/ 层，
-        TushareClient 在 data/ 层，data → services 反向依赖会被 R1 红线拦截；
-        但 services → data 正向依赖合法，仅在运行时按需导入以避免初始化期循环）。
-    """
-    from data.external.tushare_client import TushareClient
-
-    client = TushareClient()
-    tier_order = client.get_tier_order(tier)
-    filtered = []
-    for label in labels:
-        tier_info = _LABEL_TIER_MAP.get(label)
-        if tier_info is None:
-            # v1.9.0 P1-1 修订：未注册标签 fail-fast（R14 红线扩展强制注册）
-            raise ValueError(f"Label {label} not in _LABEL_TIER_MAP, must register (R14 红线扩展，见 §7.1)")
-        min_tier, required_apis = tier_info
-        # 第一层：档位覆盖检查
-        if client.get_tier_order(min_tier) > tier_order:
-            continue
-        # 第二层：required_apis 必须在档位覆盖内（避免 ai_label_macro 类漏洞）
-        if not all(client.is_api_covered_by_tier(api, tier) for api in required_apis):
-            continue
-        # 第三层：probe 验证检查
-        if required_apis & unavailable_apis:
-            continue
-        filtered.append(label)
-    return filtered
-
-
-# Phase 2A.1 §4.4.6：策略档位适用性提示（非阻断式 UX 增强）
-#
-# 策略 key -> 建议最低档位。低于此档位时 UI 提示，但不阻断。
-# 与 _LABEL_TIER_MAP 同处集中管理 tier 相关映射。
-_STRATEGY_MIN_TIER: dict[str, str] = {
-    # points_120：纯量价/技术，daily 即可支撑
-    "oversold": "points_120",
-    "volume_breakout": "points_120",
-    # points_2000：基本面 / 资金流 / 龙虎榜 / 北向 / 综合策略
-    "value": "points_2000",
-    "growth": "points_2000",
-    "dividend": "points_2000",
-    "cashflow": "points_2000",
-    "large_pe": "points_2000",
-    "northbound_holding": "points_2000",
-    "northbound_flow": "points_2000",
-    "institutional": "points_2000",
-    "block_trade": "points_2000",
-    "ai_active": "points_2000",
-}
-
-
-def get_strategy_min_tier(strategy_key: str) -> str:
-    """返回策略建议最低档位；未登记策略默认 points_120，避免误报。
-
-    Phase 2A.1 §4.4.6：用于 ``screener_view._on_strategy_change`` 在策略选择时
-    显示非阻断提示（当前档位低于建议档位时提示 AI 置信度可能偏低）。
-    """
-    return _STRATEGY_MIN_TIER.get(strategy_key, "points_120")
-
-
-def validate_strategy_tier_coverage(registered_keys: set[str]) -> None:
-    """启动期校验已注册策略是否都在 _STRATEGY_MIN_TIER 中登记。
-
-    Phase 2A.1 §4.4.6 v1.10.0 P2-2：避免新增策略时忘记在 _STRATEGY_MIN_TIER 登记
-    导致 UX 静默退化（提示缺失）。**不 raise**（避免阻断启动），仅 warning 提示。
-
-    分层说明（R1 红线）：services/ 不可导入 strategies/（反向依赖禁止），因此
-    由 app/bootstrap.py 调用方查询 ``StrategyManager().strategies.keys()`` 后
-    注入 ``registered_keys`` 参数（app/ 可同时引用 services/ 和 strategies/）。
-    """
-    for key in registered_keys:
-        if key not in _STRATEGY_MIN_TIER:
-            logger.warning(
-                "[AIService] strategy '%s' not in _STRATEGY_MIN_TIER, tier hint will default to points_120",
-                key,
-            )
-
 
 class AIServiceUnavailableError(Exception):
     """P1-12: 所有 LLM 供应商都不可用时抛出"""
 
     pass
-
-
-def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
-    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output.
-
-    UX-2.2: max_len 可配置。None 时读 ConfigHandler.get_ai_free_text_max_len()。
-    """
-    if not isinstance(value, str):
-        return value
-    if max_len is None:
-        # 延迟导入避免循环依赖
-        from utils.config_handler import ConfigHandler
-
-        max_len = ConfigHandler.get_ai_free_text_max_len()
-    cleaned = _CONTROL_CHARS_RE.sub("", value)
-    if len(cleaned) > max_len:
-        logger.warning(
-            "[AIService] Output validation: free-text field truncated from %d to %d chars",
-            len(cleaned),
-            max_len,
-        )
-        cleaned = cleaned[:max_len]
-    return cleaned
-
-
-def validate_ai_analysis_response(response: dict) -> dict:
-    if not isinstance(response, dict):
-        return {"error": "Invalid response type", "score": 0}
-
-    score = response.get("score")
-    if score is not None:
-        try:
-            score = float(score)
-            if not (0 <= score <= 100):
-                logger.warning("[AIService] Output validation: score out of range [0,100]: %s", score)
-                score = max(0, min(100, score))
-            response["score"] = score
-        except (ValueError, TypeError):
-            logger.warning("[AIService] Output validation: invalid score type: %s", score)
-            response["score"] = 0
-
-    recommendation = response.get("recommendation")
-    if recommendation is not None:
-        rec_lower = str(recommendation).lower().strip()
-        if rec_lower not in VALID_RECOMMENDATIONS:
-            logger.warning("[AIService] Output validation: unexpected recommendation: %s", recommendation)
-            response["recommendation"] = "neutral"
-        else:
-            response["recommendation"] = rec_lower
-
-    # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
-    # UX-2.2: 读一次配置避免每字段重复读
-    from utils.config_handler import ConfigHandler
-
-    free_text_max_len = ConfigHandler.get_ai_free_text_max_len()
-    for field in _FREE_TEXT_FIELDS:
-        val = response.get(field)
-        if isinstance(val, str):
-            response[field] = _sanitize_free_text(val, max_len=free_text_max_len)
-
-    return response
 
 
 def _ensure_litellm_loaded() -> bool:
