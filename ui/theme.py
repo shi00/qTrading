@@ -78,6 +78,7 @@ class ThemeColors(TypedDict):
     TABLE_CELL_NUMERIC: str
     TABLE_BORDER: str
     TABLE_GRID: str
+    CARD_BG: str  # P2-8: 卡片/面板背景色 (纳入 CUSTOM_COLOR_PRESETS, 随主题切换)
     INPUT_BG: str
     INPUT_BORDER: str
     INPUT_TEXT: str
@@ -106,6 +107,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_CELL_NUMERIC": "#FFFFFF",
         "TABLE_BORDER": "#333333",
         "TABLE_GRID": "#2C2C2C",
+        "CARD_BG": "#1E1E1E",  # 面板背景 (取表格 ODD 行底色, 与 Table 区协调)
         "INPUT_BG": "#2D2D2D",
         "INPUT_BORDER": "#424242",
         "INPUT_TEXT": "#FFFFFF",
@@ -134,6 +136,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_CELL_NUMERIC": "#212121",
         "TABLE_BORDER": "#EEEEEE",
         "TABLE_GRID": "#EEEEEE",
+        "CARD_BG": "#FFFFFF",  # 面板背景 (Light 取白)
         "INPUT_BG": "#FFFFFF",
         "INPUT_BORDER": "#BDBDBD",
         "INPUT_TEXT": "#212121",
@@ -156,6 +159,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_CELL_NUMERIC": "#F8FAFC",
         "TABLE_BORDER": "#334155",
         "TABLE_GRID": "#1E293B",
+        "CARD_BG": "#1E293B",  # 面板背景 (取表格 ODD 行底色)
         "INPUT_BG": "#334155",
         "INPUT_BORDER": "#475569",
         "INPUT_TEXT": "#F8FAFC",
@@ -178,6 +182,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_CELL_NUMERIC": "#BD93F9",  # Purple
         "TABLE_BORDER": "#6272A4",  # Comment (Grey-ish)
         "TABLE_GRID": "#6272A4",
+        "CARD_BG": "#282A36",  # 面板背景 (取表格 ODD 行底色)
         "INPUT_BG": "#44475A",
         "INPUT_BORDER": "#6272A4",
         "INPUT_TEXT": "#F8F8F2",
