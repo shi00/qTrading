@@ -1,0 +1,52 @@
+name: Docs Consistency CI
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/workflows/docs-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-docs-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs-check:
+    name: Docs Consistency Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+
+      - name: Run docs consistency script (docs-consistency hook 等价检查)
+        run: python scripts/check_docs_consistency.py
+
+      - name: Run docs consistency contract tests
+        run: python -m pytest tests/unit/test_docs_consistency.py -v --tb=short
