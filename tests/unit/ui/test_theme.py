@@ -397,7 +397,7 @@ class TestLayer1Layer2NameSeparation:
         """Layer 2 业务色必须在 4 主题 CUSTOM_COLOR_PRESETS 中均有定义 (随主题切换)."""
         _, layer2 = self._classify_appcolors_attrs()
         # 排除 TABLE_GRID_V/TABLE_GRID_H 等别名 (load_theme 中手动同步)
-        aliases = {"TABLE_GRID_V", "TABLE_GRID_H", "CARD_BG"}
+        aliases = {"TABLE_GRID_V", "TABLE_GRID_H"}
         # TABLE_ROW_HOVER 4 主题 preset 补值属于批次 3 P2-8, 批次 1 暂排除
         pending_batch3 = {"TABLE_ROW_HOVER"}
         layer2_non_alias = layer2 - aliases - pending_batch3
