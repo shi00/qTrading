@@ -414,7 +414,7 @@ class TestRunAlembicUpgradeErrorClassification:
 
     @pytest.mark.asyncio
     async def test_upgrade_failure_uses_error_classifier(self):
-        """Migration failure should use classify_error and classify_severity."""
+        """Migration failure should use log_classified and re-raise."""
         mock_engine = MagicMock()
         mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
@@ -430,22 +430,19 @@ class TestRunAlembicUpgradeErrorClassification:
                     mock_instance.run_async = AsyncMock(side_effect=OSError("connection lost"))
 
                     with patch(
-                        "data.persistence.db_migrator.classify_error",
+                        "data.persistence.db_migrator.log_classified",
                         return_value={
                             "code": "refused",
                             "message_key": "db_err_refused",
                         },
-                    ) as mock_classify:
-                        with patch(
-                            "data.persistence.db_migrator.classify_severity",
-                            return_value="recoverable",
-                        ) as mock_severity:
-                            with pytest.raises(OSError, match="connection lost"):
-                                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                    ) as mock_log_classified:
+                        with pytest.raises(OSError, match="connection lost"):
+                            await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
-                            # Verify error classifiers were called
-                            mock_classify.assert_called_once()
-                            mock_severity.assert_called_once()
+                        # Verify log_classified was called with db context and original error
+                        call_args = mock_log_classified.call_args.args
+                        assert call_args[2] == "db"
+                        assert isinstance(call_args[1], OSError)
 
 
 class TestRunAlembicUpgradePostVerification:

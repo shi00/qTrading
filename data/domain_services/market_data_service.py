@@ -19,7 +19,7 @@ import pandas as pd
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
@@ -226,24 +226,12 @@ class MarketDataService:
             logger.warning("[MarketDataService] Cancelled during fetch.")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            if severity == "system":
-                logger.critical(
-                    "[MarketDataService] SYSTEM-LEVEL failure: %s",
-                    DataSanitizer.sanitize_error(e),
-                )
-            elif severity == "recoverable":
-                logger.warning(
-                    "[MarketDataService] Recoverable error (%s): %s",
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
-                )
-            else:
-                logger.error(
-                    "[MarketDataService] Operational error: %s",
-                    DataSanitizer.sanitize_error(e),
-                )
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[MarketDataService] Fetch failed (%s): %s",
+            )
             logger.debug("[MarketDataService] Fetch error traceback", exc_info=True)
 
     @log_async_operation(

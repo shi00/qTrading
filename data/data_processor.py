@@ -23,7 +23,7 @@ from data.sync.sw_industry import SwIndustrySyncStrategy
 from core.i18n import I18n, Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
@@ -619,28 +619,22 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
         except Exception as e:
-            # D2: 接入 classify_error + classify_severity 区分 system 与 recoverable/operational。
+            # D2: 接入 classify_severity + log_classified 区分 system 与 recoverable/operational。
             # system 级（DB 连接失败、MemoryError 等）raise 传播至 initialize_system
             # except 块；recoverable/operational 级（网络错误、限流、数据格式错误等）
             # 降级返回 0。注：调用方 initialize_system 在 stock_count==0 时会 abort
             # 整个 phase（baseline 行为，D2 未改变），故 recoverable/operational 错误
             # 实际会触发 abort。
-            safe = safe_error(e)
-            error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
-            if severity == "system":
-                logger.error(
-                    "[DataProcessor] Sync Basic | ❌ System error (%s): %s",
-                    error_info["code"],
-                    safe,
-                    exc_info=True,
-                )
-                raise
-            logger.warning(
-                "[DataProcessor] Sync Basic | ⚠️ Recoverable/operational error (%s): %s",
-                error_info["code"],
-                safe,
+            log_classified(
+                logger,
+                e,
+                "db",
+                "[DataProcessor] Sync Basic | Sync failed (%s): %s",
+                exc_info=True,
             )
+            if severity == "system":
+                raise
             return 0
         finally:
             with self._sync_lock:
@@ -760,26 +754,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return count
 
         except Exception as e:
-            # D2: 接入 classify_error + classify_severity 区分 system 与 recoverable/operational。
+            # D2: 接入 classify_severity + log_classified 区分 system 与 recoverable/operational。
             # system 级（DB 连接失败、MemoryError 等）raise 传播；recoverable/operational
             # 级（网络错误、限流、数据格式错误等）降级返回 0。调用方 initialize_system
             # 未检查 sync_concepts 返回值，故 recoverable/operational 错误不打断初始化流程。
-            safe = safe_error(e)
-            error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
-            if severity == "system":
-                logger.error(
-                    "[DataProcessor] Sync Concepts | ❌ System error (%s): %s",
-                    error_info["code"],
-                    safe,
-                    exc_info=True,
-                )
-                raise
-            logger.warning(
-                "[DataProcessor] Sync Concepts | ⚠️ Recoverable/operational error (%s): %s",
-                error_info["code"],
-                safe,
+            log_classified(
+                logger,
+                e,
+                "db",
+                "[DataProcessor] Sync Concepts | Sync failed (%s): %s",
+                exc_info=True,
             )
+            if severity == "system":
+                raise
             return 0
 
     async def prepare_market_data(self):

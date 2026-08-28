@@ -625,6 +625,15 @@ class TestGetEffectiveTradeDate:
         assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
+    async def test_l1_system_error_propagates(self):
+        """system 级异常（PermissionError）经 log_classified 记录后直接传播，不回退到 synced（L83-85 raise）。"""
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_error=PermissionError("permission denied"), synced_date=datetime.date(2024, 6, 14))
+        with pytest.raises(PermissionError, match="permission denied"):
+            await get_effective_trade_date(proc)
+
+    @pytest.mark.asyncio
     async def test_all_sources_unavailable_raises(self):
         from data.domain_services.trade_calendar_service import TradeDateUnavailableError, get_effective_trade_date
 

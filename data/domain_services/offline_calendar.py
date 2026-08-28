@@ -5,8 +5,7 @@ import typing
 import pandas as pd
 from pandas_market_calendars import get_calendar
 
-from utils.error_classifier import classify_error, classify_severity, log_classified
-from utils.sanitizers import DataSanitizer
+from utils.error_classifier import log_classified
 
 logger = logging.getLogger(__name__)
 
@@ -68,19 +67,12 @@ class OfflineCalendar:
             return not schedule.empty
 
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "general",
                 "[OfflineCalendar] is_trading_day check failed for %s (%s): %s",
                 date_obj,
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return False
