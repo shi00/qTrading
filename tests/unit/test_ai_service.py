@@ -2716,7 +2716,9 @@ class TestStockAnalysisPromptDumpFailure:
         svc = _make_svc_with_cloud()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         svc._get_prompt_dump_dir = MagicMock(side_effect=OSError("cannot write prompt dump"))
-        fake_get_setting = lambda k, d=False: True if k == "ai_prompt_dump_enabled" else d
+
+        def fake_get_setting(k, d=False):
+            return True if k == "ai_prompt_dump_enabled" else d
 
         with (
             patch("services.ai_service.stock_analysis.logger.isEnabledFor", return_value=True),

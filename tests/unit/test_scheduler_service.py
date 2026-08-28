@@ -976,6 +976,4 @@ class TestSafeShutdownSchedulerGenericError:
         with caplog.at_level(logging.WARNING, logger="utils.scheduler_service"):
             SchedulerService._safe_shutdown_scheduler(scheduler, context="reset")
 
-        assert any(
-            "[Scheduler] Error during shutdown" in r.message for r in caplog.records
-        )
+        assert any("[Scheduler] Error during shutdown" in r.message for r in caplog.records)
