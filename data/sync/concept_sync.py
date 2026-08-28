@@ -396,29 +396,16 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[AIConceptTagSync] SYSTEM-LEVEL failure while loading fresh pending: %s",
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
                     fresh_pending = []
 
             pending = retry_pending + fresh_pending
@@ -495,32 +482,17 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     raise
                 except Exception as e:
                     failed.append(f"{ts_code}: {safe_error(e)}")
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[AIConceptTagSync] Failed (%s): %s (ts_code=%s)",
+                        ts_code,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[AIConceptTagSync] SYSTEM-LEVEL failure for %s: %s",
-                            ts_code,
-                            DataSanitizer.sanitize_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[AIConceptTagSync] Failed for %s (%s): %s",
-                            ts_code,
-                            error_info["code"],
-                            DataSanitizer.sanitize_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[AIConceptTagSync] Failed for %s (%s): %s",
-                            ts_code,
-                            error_info["code"],
-                            DataSanitizer.sanitize_error(e),
-                            exc_info=True,
-                        )
                     # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
                     try:
                         await stock_dao.upsert_ai_concept_failure(ts_code, name, DataSanitizer.sanitize_error(e))
@@ -529,32 +501,17 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     except EngineDisposedError:
                         raise
                     except Exception as fe:
-                        fe_info = classify_error(fe, context="general")
-                        fe_sev = classify_severity(fe, context="general")
-                        if fe_sev == "system":
-                            logger.critical(
-                                "[AIConceptTagSync] SYSTEM-LEVEL failure while persisting failure for %s: %s",
-                                ts_code,
-                                DataSanitizer.sanitize_error(fe),
-                                exc_info=True,
-                            )
+                        severity = classify_severity(fe, context="general")
+                        log_classified(
+                            logger,
+                            fe,
+                            "general",
+                            "[AIConceptTagSync] Failed to persist failure (%s): %s (ts_code=%s)",
+                            ts_code,
+                            exc_info=True,
+                        )
+                        if severity == "system":
                             raise
-                        elif fe_sev == "recoverable":
-                            logger.warning(
-                                "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
-                                ts_code,
-                                fe_info["code"],
-                                DataSanitizer.sanitize_error(fe),
-                                exc_info=True,
-                            )
-                        else:
-                            logger.error(
-                                "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
-                                ts_code,
-                                fe_info["code"],
-                                DataSanitizer.sanitize_error(fe),
-                                exc_info=True,
-                            )
 
             if self._check_cancelled(result):
                 return result
@@ -574,32 +531,17 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         except EngineDisposedError:
                             raise
                         except Exception as fe:
-                            fe_info = classify_error(fe, context="general")
-                            fe_sev = classify_severity(fe, context="general")
-                            if fe_sev == "system":
-                                logger.critical(
-                                    "[AIConceptTagSync] SYSTEM-LEVEL failure while clearing failure record for %s: %s",
-                                    ts_code,
-                                    safe_error(fe),
-                                    exc_info=True,
-                                )
+                            severity = classify_severity(fe, context="general")
+                            log_classified(
+                                logger,
+                                fe,
+                                "general",
+                                "[AIConceptTagSync] Failed to clear failure record (%s): %s (ts_code=%s)",
+                                ts_code,
+                                exc_info=True,
+                            )
+                            if severity == "system":
                                 raise
-                            elif fe_sev == "recoverable":
-                                logger.warning(
-                                    "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
-                                    ts_code,
-                                    fe_info["code"],
-                                    safe_error(fe),
-                                    exc_info=True,
-                                )
-                            else:
-                                logger.error(
-                                    "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
-                                    ts_code,
-                                    fe_info["code"],
-                                    safe_error(fe),
-                                    exc_info=True,
-                                )
 
             if failed:
                 result.status = SyncStatus.PARTIAL.value
@@ -616,29 +558,16 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as fe:
-                fe_info = classify_error(fe, context="general")
-                fe_sev = classify_severity(fe, context="general")
-                if fe_sev == "system":
-                    logger.critical(
-                        "[AIConceptTagSync] SYSTEM-LEVEL failure while cleaning expired failures: %s",
-                        safe_error(fe),
-                        exc_info=True,
-                    )
+                severity = classify_severity(fe, context="general")
+                log_classified(
+                    logger,
+                    fe,
+                    "general",
+                    "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
+                    exc_info=True,
+                )
+                if severity == "system":
                     raise
-                elif fe_sev == "recoverable":
-                    logger.warning(
-                        "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
-                        fe_info["code"],
-                        safe_error(fe),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
-                        fe_info["code"],
-                        safe_error(fe),
-                        exc_info=True,
-                    )
 
             logger.info(
                 "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
@@ -655,12 +584,16 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[AIConceptTagSync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[AIConceptTagSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[AIConceptTagSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
