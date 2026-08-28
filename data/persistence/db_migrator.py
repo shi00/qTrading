@@ -21,7 +21,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 from data.sync.base import safe_error
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -250,22 +250,13 @@ class DatabaseMigrator:
             logger.warning("[DatabaseMigrator] Migration cancelled during shutdown.")
             raise  # R2: CancelledError must propagate for graceful shutdown
         except Exception as e:
-            error_info = classify_error(e, context="db")
-            severity = classify_severity(e, context="db")
-            if severity == "system":
-                logger.critical(
-                    "[DatabaseMigrator] SYSTEM-LEVEL migration failure (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[DatabaseMigrator] Migration failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
+            log_classified(
+                logger,
+                e,
+                "db",
+                "[DatabaseMigrator] Migration failed (%s): %s",
+                exc_info=True,
+            )
             raise
 
         # 升级后验证版本是否到达 head（不在 try/except 内，

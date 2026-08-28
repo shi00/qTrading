@@ -13,7 +13,7 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_date
 
@@ -97,21 +97,16 @@ class ReviewManager:
             logger.warning("[Review] Cancelled during index bulk pre-fetch.")
             raise
         except Exception as exc:
-            error_info = classify_error(exc, context="db")
             severity = classify_severity(exc, context="db")
-            if severity == "system":
-                logger.critical(
-                    "[Review] SYSTEM-LEVEL failure in index bulk pre-fetch (%s): %s",
-                    error_info["code"],
-                    safe_error(exc),
-                    exc_info=True,
-                )
-                raise
-            logger.warning(
+            log_classified(
+                logger,
+                exc,
+                "db",
                 "[Review] Failed to bulk pre-fetch index quotes (%s): %s",
-                error_info["code"],
-                safe_error(exc),
+                exc_info=True,
             )
+            if severity == "system":
+                raise
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
@@ -181,25 +176,18 @@ class ReviewManager:
                                 except (ValueError, TypeError, KeyError):
                                     index_cache[trade_date_str] = None
                         except Exception as exc:
-                            error_info = classify_error(exc, context="db")
                             severity = classify_severity(exc, context="db")
-                            if severity == "system":
-                                logger.critical(
-                                    "[Review] SYSTEM-LEVEL failure in cache index lookup for %s on %s (%s): %s",
-                                    index_code,
-                                    trade_date_str,
-                                    error_info["code"],
-                                    safe_error(exc),
-                                    exc_info=True,
-                                )
-                                raise
-                            logger.warning(
+                            log_classified(
+                                logger,
+                                exc,
+                                "db",
                                 "[Review] Cache index lookup failed for %s on %s (%s): %s",
                                 index_code,
                                 trade_date_str,
-                                error_info["code"],
-                                safe_error(exc),
+                                exc_info=True,
                             )
+                            if severity == "system":
+                                raise
                             index_cache[trade_date_str] = None
 
                     index_pct = index_cache.get(trade_date_str)
@@ -283,21 +271,16 @@ class ReviewManager:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
             raise
         except Exception as e:
-            error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
-            if severity == "system":
-                logger.critical(
-                    "[Review] SYSTEM-LEVEL error fetching pending predictions (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-                raise
-            logger.error(
+            log_classified(
+                logger,
+                e,
+                "db",
                 "[Review] Error fetching pending predictions (%s): %s",
-                error_info["code"],
-                safe_error(e),
+                exc_info=True,
             )
+            if severity == "system":
+                raise
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -370,21 +353,16 @@ class ReviewManager:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
             raise
         except Exception as e:
-            error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
-            if severity == "system":
-                logger.critical(
-                    "[Review] SYSTEM-LEVEL error fetching learning context (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-                raise
-            logger.warning(
+            log_classified(
+                logger,
+                e,
+                "db",
                 "[Review] Error fetching learning context (%s): %s",
-                error_info["code"],
-                safe_error(e),
+                exc_info=True,
             )
+            if severity == "system":
+                raise
             # Non-blocking: return empty context on error
 
         # Build XML
