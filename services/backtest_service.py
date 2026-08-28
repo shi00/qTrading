@@ -19,7 +19,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from core.i18n import Message
@@ -165,19 +165,12 @@ class BacktestService:
             instance.key = strategy_key  # type: ignore[attr-defined]  # 动态打标，pre-existing 行为
             return instance
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
-                "[BacktestService] Failed to instantiate strategy %s (%s): %s",
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[BacktestService] Failed to instantiate strategy (%s): %s (strategy=%s)",
                 strategy_key,
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return None

@@ -274,20 +274,13 @@ class TaskManager:
             except Exception as e:
                 consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
                 self._subscriber_error_counts[cb] = consecutive_errors
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e)
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
-                    "[TaskManager] Subscriber callback failed (consecutive: %s/%s) (%s): %s",
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[TaskManager] Subscriber callback failed (%s): %s (consecutive=%s, max=%s)",
                     consecutive_errors,
                     self._MAX_SUBSCRIBER_ERRORS,
-                    error_info["code"],
-                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 if consecutive_errors >= self._MAX_SUBSCRIBER_ERRORS:

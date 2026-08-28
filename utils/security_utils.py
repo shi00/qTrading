@@ -12,7 +12,7 @@ import typing
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from config import APP_ROOT
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -402,20 +402,13 @@ class SecurityManager:
         try:
             shutil.copy2(src, dst)
         except Exception as e:
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e)
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
-                "Failed to copy %s to %s (%s): %s",
+            log_classified(
+                logger,
+                e,
+                "general",
+                "Failed to copy file (%s): %s (src=%s, dst=%s)",
                 src,
                 dst,
-                error_info["code"],
-                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
