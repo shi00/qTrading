@@ -23,7 +23,7 @@ def make_ctx():
     ctx.processor.trade_calendar = MagicMock()
     ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
     ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240101", "20240614"])
-    ctx.cache.get_stock_basic = AsyncMock(
+    ctx.cache.stock_dao.get_stock_basic = AsyncMock(
         return_value=pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
@@ -31,25 +31,25 @@ def make_ctx():
             }
         )
     )
-    ctx.cache.get_completed_step4_stocks = AsyncMock(return_value=set())
+    ctx.cache.sync_dao.get_completed_step4_stocks = AsyncMock(return_value=set())
     ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
-    ctx.cache.get_sync_status = AsyncMock(return_value=None)
-    ctx.cache.clear_step4_sync_status = AsyncMock()
-    ctx.cache.save_financial_reports = AsyncMock(return_value=1)
-    ctx.cache.mark_stock_step4_completed = AsyncMock()
-    ctx.cache.update_sync_status = AsyncMock()
+    ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value=None)
+    ctx.cache.sync_dao.clear_step4_sync_status = AsyncMock()
+    ctx.cache.financial_dao.save_financial_reports = AsyncMock(return_value=1)
+    ctx.cache.sync_dao.mark_stock_step4_completed = AsyncMock()
+    ctx.cache.sync_dao.update_sync_status = AsyncMock()
     # Async context manager for financial_transaction (used by _run_full_sync)
     mock_tx_conn = AsyncMock()
     ctx.cache.financial_transaction = MagicMock()
     ctx.cache.financial_transaction.return_value.__aenter__ = AsyncMock(return_value=mock_tx_conn)
     ctx.cache.financial_transaction.return_value.__aexit__ = AsyncMock(return_value=None)
-    ctx.cache.save_fina_forecast = AsyncMock(return_value=1)
-    ctx.cache.save_dividend = AsyncMock(return_value=1)
-    ctx.cache.save_repurchase = AsyncMock(return_value=1)
-    ctx.cache.save_fina_mainbz = AsyncMock(return_value=1)
-    ctx.cache.save_fina_audit = AsyncMock(return_value=1)
+    ctx.cache.financial_dao.save_fina_forecast = AsyncMock(return_value=1)
+    ctx.cache.financial_dao.save_dividend = AsyncMock(return_value=1)
+    ctx.cache.financial_dao.save_repurchase = AsyncMock(return_value=1)
+    ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=1)
+    ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=1)
     # Phase 3G §4.3.4：express save mock
-    ctx.cache.save_express = AsyncMock(return_value=1)
+    ctx.cache.express_dao.save_express = AsyncMock(return_value=1)
     ctx.cache.engine = MagicMock()
     ctx.cache.engine.begin = MagicMock()
     mock_conn = AsyncMock()
@@ -100,7 +100,7 @@ class TestFinancialSyncRun:
     async def test_incremental_sync_reports_progress_done(self):
         """D7: 增量 sync 的 progress_sync_done 上报 Message({'day': ...}) 而非已翻译字符串。"""
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(
             return_value={
                 "last_sync_date": datetime.datetime(2024, 6, 1),
             }
@@ -118,7 +118,7 @@ class TestFinancialSyncRun:
     @pytest.mark.asyncio
     async def test_full_sync_first_run(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(return_value=None)
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
@@ -126,7 +126,7 @@ class TestFinancialSyncRun:
     @pytest.mark.asyncio
     async def test_incremental_sync(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(
             return_value={
                 "last_sync_date": datetime.datetime(2024, 6, 1),
             }
@@ -139,7 +139,7 @@ class TestFinancialSyncRun:
     @pytest.mark.asyncio
     async def test_no_stocks(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": [], "list_status": []}))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": [], "list_status": []}))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result.status == "failed"
@@ -201,7 +201,7 @@ class TestFinancialSyncGetEffectiveTradeDate:
     async def test_exception_fallback(self):
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -210,7 +210,7 @@ class TestFinancialSyncGetEffectiveTradeDate:
     async def test_none_return_falls_back_to_synced_data(self):
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -235,7 +235,7 @@ class TestFinancialSyncRunModes:
     @pytest.mark.asyncio
     async def test_run_exception(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("unexpected"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=RuntimeError("unexpected"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result.status == "failed"
@@ -244,7 +244,7 @@ class TestFinancialSyncRunModes:
     async def test_incremental_with_disclosure_dates(self):
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -322,8 +322,8 @@ class TestFinancialSyncFetchComprehensive:
         ctx.api.get_fina_audit = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 2, "end_date": ["20240331"] * 2})
         )
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=3)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=2)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=3)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=2)
         # core 表：income 正常，balance 缺 end_date 列导致 pd.merge 抛 KeyError
         ctx.api.get_income = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
@@ -357,14 +357,14 @@ class TestFinancialSyncRepair:
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.repair_financial_data(["000001.SZ"])
         assert isinstance(result, int)
-        ctx.cache.save_financial_reports.assert_awaited()
+        ctx.cache.financial_dao.save_financial_reports.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_repair_returns_actual_saved_count(self):
         ctx = make_ctx()
-        ctx.cache.save_financial_reports = AsyncMock(return_value=5)
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=2)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=1)
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(return_value=5)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=2)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=1)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.repair_financial_data(["000001.SZ"])
         assert result > 0
@@ -380,7 +380,7 @@ class TestFinancialSyncRepair:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.repair_financial_data(["000001.SZ"])
-        ctx.cache.save_financial_reports.assert_not_awaited()
+        ctx.cache.financial_dao.save_financial_reports.assert_not_awaited()
         assert result == 0
 
     @pytest.mark.asyncio
@@ -398,7 +398,7 @@ class TestFinancialSyncRepair:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         await strategy.repair_financial_data(["000001.SZ"])
-        saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+        saved_df = ctx.cache.financial_dao.save_financial_reports.call_args[0][0]
         for col in FINANCIAL_REPORT_SCHEMA_COLS:
             assert col in saved_df.columns, f"Missing column: {col}"
 
@@ -409,7 +409,7 @@ class TestFinancialSyncRepair:
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
         await strategy.repair_financial_data(["000001.SZ"])
-        saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+        saved_df = ctx.cache.financial_dao.save_financial_reports.call_args[0][0]
         assert list(saved_df.columns) == FINANCIAL_REPORT_SCHEMA_COLS
 
 
@@ -486,7 +486,7 @@ class TestFinancialSyncCorporateActions:
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date([])
-        ctx.cache.update_sync_status.assert_not_called()
+        ctx.cache.sync_dao.update_sync_status.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_with_dates(self):
@@ -509,7 +509,7 @@ class TestFinancialSyncCorporateActions:
         """Phase 3G §4.3.4：_sync_corporate_actions_by_date 覆盖 express 表。
 
         验证 express 在 FINANCIAL_BATCH_TABLES 中且其 save_func 被正确路由到
-        ctx.cache.save_express。
+        ctx.cache.express_dao.save_express。
         """
         from data.constants import FINANCIAL_BATCH_TABLES
 
@@ -536,7 +536,7 @@ class TestFinancialSyncCorporateActions:
         await strategy._sync_corporate_actions_by_date(["20241015"])
 
         # 验证 save_express 被调用
-        ctx.cache.save_express.assert_awaited()
+        ctx.cache.express_dao.save_express.assert_awaited()
 
 
 class TestFinancialSyncGatherTolerance:
@@ -596,7 +596,7 @@ class TestFinancialSyncCancelledError:
     @pytest.mark.asyncio
     async def test_cancelled_error_reraises(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=asyncio.CancelledError())
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=asyncio.CancelledError())
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(asyncio.CancelledError):
             await strategy.run(force=True)
@@ -606,7 +606,7 @@ class TestFinancialSyncIncompleteStocks:
     @pytest.mark.asyncio
     async def test_incomplete_stocks_removed_from_synced(self):
         ctx = make_ctx()
-        ctx.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ"})
+        ctx.cache.sync_dao.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ"})
         ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value={"000001.SZ"})
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
@@ -617,7 +617,7 @@ class TestFinancialSyncAllStocksSynced:
     @pytest.mark.asyncio
     async def test_all_synced_with_progress_callback(self):
         ctx = make_ctx()
-        ctx.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
+        ctx.cache.sync_dao.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
         ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
@@ -658,14 +658,14 @@ class TestFinancialSyncFullSyncErrorPaths:
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result is not None
-        ctx.cache.mark_stock_step4_completed.assert_not_awaited()
+        ctx.cache.sync_dao.mark_stock_step4_completed.assert_not_awaited()
 
 
 class TestFinancialSyncFullSyncProgress:
     @pytest.mark.asyncio
     async def test_progress_callback_with_enough_stocks(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": [f"00000{i}.SZ" for i in range(10)],
@@ -687,8 +687,8 @@ class TestFinancialSyncFullSyncProgress:
         ctx.api.get_fina_audit = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
         )
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=5)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=3)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=5)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=3)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result is not None
@@ -704,14 +704,14 @@ class TestFinancialSyncIncrementalPaths:
             strategy._shutdown_event.set()
             return {"last_sync_date": datetime.datetime(2024, 6, 1)}
 
-        ctx.cache.get_sync_status = AsyncMock(side_effect=set_shutdown_and_return)
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(side_effect=set_shutdown_and_return)
         result = await strategy.run()
         assert result is not None
 
     @pytest.mark.asyncio
     async def test_incremental_date_parse_string(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": "2024-06-01 00:00:00"})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": "2024-06-01 00:00:00"})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -720,7 +720,7 @@ class TestFinancialSyncIncrementalPaths:
     @pytest.mark.asyncio
     async def test_incremental_date_parse_fallback(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": "invalid-date"})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": "invalid-date"})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -730,7 +730,7 @@ class TestFinancialSyncIncrementalPaths:
     async def test_incremental_no_dates_to_sync(self):
         ctx = make_ctx()
         now = get_now()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
@@ -738,7 +738,7 @@ class TestFinancialSyncIncrementalPaths:
     @pytest.mark.asyncio
     async def test_incremental_with_progress_callback(self):
         ctx = make_ctx()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 6, 1)})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 6, 1)})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
@@ -751,7 +751,7 @@ class TestFinancialSyncIncrementalWithDisclosure:
     async def test_incremental_with_aux_updates(self):
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -767,8 +767,8 @@ class TestFinancialSyncIncrementalWithDisclosure:
         ctx.api.get_fina_audit = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
         )
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=5)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=3)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=5)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=3)
         strategy = FinancialSyncStrategy(ctx)
         with patch("data.sync.financial.ConfigHandler") as mock_cfg:
             mock_cfg.get_max_batch_rows.return_value = 100
@@ -780,7 +780,7 @@ class TestFinancialSyncIncrementalWithDisclosure:
     async def test_incremental_fetch_error_continues(self):
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -881,9 +881,9 @@ class TestFinancialSyncCorporateActionsErrorPaths:
                 cfg["api"],
                 AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
             )
-        ctx.cache.save_fina_forecast = AsyncMock(return_value=None)
-        ctx.cache.save_dividend = AsyncMock(return_value=None)
-        ctx.cache.save_repurchase = AsyncMock(return_value=None)
+        ctx.cache.financial_dao.save_fina_forecast = AsyncMock(return_value=None)
+        ctx.cache.financial_dao.save_dividend = AsyncMock(return_value=None)
+        ctx.cache.financial_dao.save_repurchase = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
 
@@ -892,8 +892,8 @@ class TestFinancialSyncFetchAuxPaths:
     @pytest.mark.asyncio
     async def test_fetch_aux_save_returns_none_uses_len(self):
         ctx = make_ctx()
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=None)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=None)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=None)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=None)
         ctx.api.get_fina_mainbz = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
         )
@@ -1151,7 +1151,7 @@ class TestFinancialSyncEngineDisposed:
         test_ai_concept_tagging.py::TestEngineDisposedE2E 对齐。
         """
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(EngineDisposedError):
             await strategy.run(force=True)
@@ -1177,7 +1177,7 @@ class TestFinancialSyncClassifyError:
     @pytest.mark.asyncio
     async def test_system_error_reraises(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=MemoryError("OOM"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=MemoryError("OOM"))
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(MemoryError):
             await strategy.run(force=True)
@@ -1185,7 +1185,7 @@ class TestFinancialSyncClassifyError:
     @pytest.mark.asyncio
     async def test_recoverable_error_status_failed(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=ConnectionError("network reset"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=ConnectionError("network reset"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result.status == "failed"
@@ -1193,7 +1193,7 @@ class TestFinancialSyncClassifyError:
     @pytest.mark.asyncio
     async def test_operational_error_status_failed(self):
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=ValueError("bad value"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=ValueError("bad value"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True)
         assert result.status == "failed"
@@ -1239,7 +1239,7 @@ class TestFinancialSyncPartialFailure:
         """When some stocks' API calls fail during full sync, the sync should
         continue processing remaining stocks and preserve successfully fetched data."""
         ctx = make_ctx()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -1286,9 +1286,9 @@ class TestFinancialSyncPartialFailure:
         assert result is not None
         assert isinstance(result, SyncResult)
         # Successfully fetched data should be saved (for non-failing stocks)
-        assert ctx.cache.save_financial_reports.await_count >= 1
+        assert ctx.cache.financial_dao.save_financial_reports.await_count >= 1
         # The failing stock should not be marked complete
-        mark_calls = ctx.cache.mark_stock_step4_completed.call_args_list
+        mark_calls = ctx.cache.sync_dao.mark_stock_step4_completed.call_args_list
         marked_codes = {c[0][0] for c in mark_calls}
         assert failing_stock not in marked_codes
         # Non-failing stocks should be marked complete
@@ -1328,7 +1328,7 @@ class TestFinancialSyncPeakSeasonAdjustment:
         """peak 披露季时 _run_incremental_sync 应进入 _is_peak_disclosure_season 分支并记日志。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         with (
@@ -1351,7 +1351,7 @@ class TestFinancialSyncProgressCallbackBoundary:
         """处理股票数达到 5 的倍数时应触发 stock-phase 进度回调。"""
         ctx = make_ctx()
         # 6 个股票 → completed_count=5 时触发一次（0→80% 段）
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": [f"00000{i}.SZ" for i in range(6)],
@@ -1372,7 +1372,7 @@ class TestFinancialSyncProgressCallbackBoundary:
         """股票数 < 5 时 stock-phase 不触发进度回调（但 batch-phase 仍会触发）。"""
         ctx = make_ctx()
         # 3 个股票 → completed_count 不会到 5
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -1392,7 +1392,7 @@ class TestFinancialSyncProgressCallbackBoundary:
     async def test_all_synced_progress_callback_boundary(self):
         """所有股票已同步且无 pending 时，progress_callback 应被调用一次（100%）。"""
         ctx = make_ctx()
-        ctx.cache.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
+        ctx.cache.sync_dao.get_completed_step4_stocks = AsyncMock(return_value={"000001.SZ", "000002.SZ"})
         ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
@@ -1413,7 +1413,7 @@ class TestFinancialSyncIncrementalBoundaries:
         """last_sync_date 为今天时，dates_to_sync 为空，早返回且不调用 disclosure_date。"""
         ctx = make_ctx()
         now = get_now()
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -1426,7 +1426,7 @@ class TestFinancialSyncIncrementalBoundaries:
         """last_sync_date 为昨天时，生成 dates_to_sync 并调用 disclosure_date。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -1439,7 +1439,7 @@ class TestFinancialSyncIncrementalBoundaries:
         """disclosure_date 返回数据但 drop_duplicates 后 target_list 为空时 continue。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         # 返回无 ts_code/end_date 列的 df → drop_duplicates 后 to_dict 为空
         ctx.api.get_disclosure_date = AsyncMock(return_value=pd.DataFrame({"other_col": ["x"]}))
         strategy = FinancialSyncStrategy(ctx)
@@ -1521,7 +1521,7 @@ class TestFinancialSyncCorporateActionsExtended:
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20231231", "20240101"])
         # 2 天 × 4 表 = 8 次 update_sync_status
-        assert ctx.cache.update_sync_status.await_count >= 8
+        assert ctx.cache.sync_dao.update_sync_status.await_count >= 8
 
     @pytest.mark.asyncio
     async def test_multiple_companies_same_date_saved(self):
@@ -1535,8 +1535,8 @@ class TestFinancialSyncCorporateActionsExtended:
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
         # 每个 save 函数应被调用且传入含 2 行的 df
-        ctx.cache.save_fina_forecast.assert_awaited()
-        saved_df = ctx.cache.save_fina_forecast.call_args[0][0]
+        ctx.cache.financial_dao.save_fina_forecast.assert_awaited()
+        saved_df = ctx.cache.financial_dao.save_fina_forecast.call_args[0][0]
         assert len(saved_df) == 2
 
     @pytest.mark.asyncio
@@ -1550,8 +1550,8 @@ class TestFinancialSyncCorporateActionsExtended:
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
         # 每天 4 个表，row_count=0
-        assert ctx.cache.update_sync_status.await_count >= 4
-        for call in ctx.cache.update_sync_status.call_args_list:
+        assert ctx.cache.sync_dao.update_sync_status.await_count >= 4
+        for call in ctx.cache.sync_dao.update_sync_status.call_args_list:
             # call_args: (table_name, date_obj, row_count)
             assert call[0][2] == 0
 
@@ -1572,7 +1572,9 @@ class TestFinancialSyncCorporateActionsExtended:
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
         # 应有 skipped_permission 状态调用
-        skipped_calls = [c for c in ctx.cache.update_sync_status.call_args_list if "skipped_permission" in str(c)]
+        skipped_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.call_args_list if "skipped_permission" in str(c)
+        ]
         assert len(skipped_calls) >= 4
 
     @pytest.mark.asyncio
@@ -1617,18 +1619,18 @@ class TestFinancialSyncRepairScenarios:
         result = await strategy.repair_financial_data(["000001.SZ"])
         assert isinstance(result, int)
         # 应有 save 调用（历史季度）
-        ctx.cache.save_financial_reports.assert_awaited()
+        ctx.cache.financial_dao.save_financial_reports.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_repair_history_period_data_saved(self):
         """历史 period 数据应被正确保存（验证 period 循环覆盖历史）。"""
         ctx = make_ctx()
-        ctx.cache.save_financial_reports = AsyncMock(return_value=3)
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(return_value=3)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.repair_financial_data(["000001.SZ", "000002.SZ"])
         assert result > 0
         # 多股票 × 多 period 应多次调用 save
-        assert ctx.cache.save_financial_reports.await_count >= 2
+        assert ctx.cache.financial_dao.save_financial_reports.await_count >= 2
 
     @pytest.mark.asyncio
     async def test_repair_progress_callback_invoked(self):
@@ -1833,7 +1835,7 @@ class TestFinancialSyncEngineDisposedExtended:
                 raise EngineDisposedError("disposed")
 
         disposed_dt = _DisposedDate(2024, 6, 1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": disposed_dt})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": disposed_dt})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(EngineDisposedError):
@@ -1849,7 +1851,7 @@ class TestFinancialSyncEngineDisposedExtended:
         修复后：batch_results 循环优先检查 EngineDisposedError 并 re-raise。
         """
         ctx = make_ctx()
-        ctx.cache.save_financial_reports = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(EngineDisposedError):
             await strategy.run(force=True)
@@ -1863,7 +1865,7 @@ class TestFinancialSyncIncrementalErrorPaths:
         """save_financial_reports 抛异常时 sync_one_target 应继续处理。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -1873,7 +1875,7 @@ class TestFinancialSyncIncrementalErrorPaths:
                 }
             )
         )
-        ctx.cache.save_financial_reports = AsyncMock(side_effect=RuntimeError("save failed"))
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=RuntimeError("save failed"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
@@ -1883,7 +1885,7 @@ class TestFinancialSyncIncrementalErrorPaths:
         """增量 sync 中 aux 表有数据时应更新 sync_status。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -1899,13 +1901,15 @@ class TestFinancialSyncIncrementalErrorPaths:
         ctx.api.get_fina_audit = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
         )
-        ctx.cache.save_fina_mainbz = AsyncMock(return_value=5)
-        ctx.cache.save_fina_audit = AsyncMock(return_value=3)
+        ctx.cache.financial_dao.save_fina_mainbz = AsyncMock(return_value=5)
+        ctx.cache.financial_dao.save_fina_audit = AsyncMock(return_value=3)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
         # 应有 fina_mainbz / fina_audit 的 update_sync_status 调用
-        aux_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] in ("fina_mainbz", "fina_audit")]
+        aux_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.call_args_list if c[0][0] in ("fina_mainbz", "fina_audit")
+        ]
         assert len(aux_calls) >= 2
 
     @pytest.mark.asyncio
@@ -1913,7 +1917,7 @@ class TestFinancialSyncIncrementalErrorPaths:
         """增量 batch 中任务异常应记 warning 日志。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -1967,7 +1971,7 @@ class TestFinancialSyncFullSyncErrorPathsExtended:
         """batch 循环中 shutdown_event 被设置时应 break。"""
         ctx = make_ctx()
         # 多股票多 batch
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": [f"00000{i}.SZ" for i in range(15)],
@@ -2003,7 +2007,7 @@ class TestRunIncrementalSyncCancellation:
         """日级循环中 shutdown_event 被设置时应 break，不再处理后续日期。"""
         ctx = make_ctx()
         three_days_ago = get_now() - datetime.timedelta(days=3)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
 
         call_count = 0
 
@@ -2029,7 +2033,7 @@ class TestRunIncrementalSyncCancellation:
         """shutdown_event 未设置时应处理所有日期。"""
         ctx = make_ctx()
         three_days_ago = get_now() - datetime.timedelta(days=3)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -2051,7 +2055,7 @@ class TestRunIncrementalSyncCancellation:
         ctx = make_ctx()
         # 触发增量同步路径（非 force=True）
         three_days_ago = get_now() - datetime.timedelta(days=3)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": three_days_ago})
 
         # 11 stocks 单日 → 3 batches（_BATCH_SIZE=5）
         n_stocks = 11
@@ -2092,8 +2096,8 @@ class TestRunIncrementalSyncCancellation:
         # 验证：第一个 batch (5 stocks) 完成后 shutdown 触发，后续 batch 未处理
         # 旧实现：33 saves（3 days × 11 stocks）
         # 新实现：≤5 saves（仅第一个 batch of day 1，day 2/3 被 day loop 拦截）
-        assert ctx.cache.save_financial_reports.await_count <= 5, (
-            f"Expected ≤5 saves (first batch only), got {ctx.cache.save_financial_reports.await_count}"
+        assert ctx.cache.financial_dao.save_financial_reports.await_count <= 5, (
+            f"Expected ≤5 saves (first batch only), got {ctx.cache.financial_dao.save_financial_reports.await_count}"
         )
 
 
@@ -2117,7 +2121,7 @@ class TestProcessOneStockCancellation:
         result = await strategy.run(force=True)
         assert result is not None
         # save_financial_reports 不应被调用（shutdown_event 在 fetch 后设置）
-        ctx.cache.save_financial_reports.assert_not_awaited()
+        ctx.cache.financial_dao.save_financial_reports.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_db_transaction_skipped_on_shutdown(self):
@@ -2134,7 +2138,7 @@ class TestProcessOneStockCancellation:
 
         strategy._fetch_comprehensive_financial_data = fetch_and_shutdown
         await strategy.run(force=True)
-        ctx.cache.mark_stock_step4_completed.assert_not_awaited()
+        ctx.cache.sync_dao.mark_stock_step4_completed.assert_not_awaited()
 
 
 class TestDedupFinancialDfUpdateFlag:
@@ -2226,7 +2230,7 @@ class TestIncrementalBatchStatus:
         """
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -2236,11 +2240,13 @@ class TestIncrementalBatchStatus:
                 }
             )
         )
-        ctx.cache.save_financial_reports = AsyncMock(side_effect=PermissionError("permission denied"))
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=PermissionError("permission denied"))
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
-        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        status_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.call_args_list if c[0][0] == "financial_reports"
+        ]
         assert len(status_calls) >= 1
         failed_calls = [c for c in status_calls if c.kwargs.get("status") == "failed"]
         assert len(failed_calls) >= 1
@@ -2250,7 +2256,7 @@ class TestIncrementalBatchStatus:
         """部分 batch 任务失败（day_saved>0）时 status="partial"。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -2283,11 +2289,13 @@ class TestIncrementalBatchStatus:
                 raise PermissionError("permission denied for 000001.SZ")
             return 1
 
-        ctx.cache.save_financial_reports = AsyncMock(side_effect=selective_save)
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=selective_save)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
-        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        status_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.call_args_list if c[0][0] == "financial_reports"
+        ]
         assert len(status_calls) >= 1
         partial_calls = [c for c in status_calls if c.kwargs.get("status") == "partial"]
         assert len(partial_calls) >= 1
@@ -2297,7 +2305,7 @@ class TestIncrementalBatchStatus:
         """全部成功时不传 status 参数（默认 "success"）。"""
         ctx = make_ctx()
         yesterday = get_now() - datetime.timedelta(days=1)
-        ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -2307,11 +2315,13 @@ class TestIncrementalBatchStatus:
                 }
             )
         )
-        ctx.cache.save_financial_reports = AsyncMock(return_value=1)
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(return_value=1)
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
         assert result is not None
-        status_calls = [c for c in ctx.cache.update_sync_status.call_args_list if c[0][0] == "financial_reports"]
+        status_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.call_args_list if c[0][0] == "financial_reports"
+        ]
         assert len(status_calls) >= 1
         # 默认调用不传 status kwarg
         no_status_calls = [c for c in status_calls if "status" not in c.kwargs]

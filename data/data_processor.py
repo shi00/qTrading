@@ -512,7 +512,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return True, "force=True"
 
         try:
-            status = await self.cache.get_sync_status("financial_reports")
+            status = await self.cache.sync_dao.get_sync_status("financial_reports")
             if status is None or not isinstance(status, dict) or not status.get("last_sync_date"):
                 return True, I18n.get("status_never_synced")
 
@@ -593,12 +593,12 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                         len(df_all),
                     )
 
-            count = await self.cache.save_stock_basic(df_all)
+            count = await self.cache.stock_dao.save_stock_basic(df_all)
             if count > 0:
                 active_count = len(df_all[df_all["list_status"] == "L"])
                 delisted_count = len(df_all[df_all["list_status"] == "D"])
                 total_count = count
-                await self.cache.update_sync_status(
+                await self.cache.sync_dao.update_sync_status(
                     "stock_basic",
                     get_now().date(),  # type: ignore[arg-type]
                     total_count,
@@ -744,7 +744,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             full_df = full_df[["ts_code", "concept_name", "concept_id"]].drop_duplicates()
 
             # Atomic overwrite (refresh)
-            count = await self.cache.overwrite_concepts(full_df)
+            count = await self.cache.stock_dao.overwrite_concepts(full_df)
             self._quality_tier = None
             self._health_cache = {"time": 0, "data": None}
             logger.info(
@@ -783,7 +783,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         if latest != today_date:
             return latest
 
-        cached_date = await self.cache.get_latest_trade_date()
+        cached_date = await self.cache.quote_dao.get_latest_trade_date()
         if cached_date is not None and cached_date != today_date:
             await self.sync_daily_market_snapshot(today_date)
 
@@ -848,7 +848,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return indices
 
             async def get_hsgt():
-                df = await self.cache.get_moneyflow_hsgt(trade_date=date)
+                df = await self.cache.market_dao.get_moneyflow_hsgt(trade_date=date)
 
                 if df is None or df.empty:
                     df = await self.api.get_moneyflow_hsgt(trade_date=date)  # type: ignore[arg-type]
@@ -889,10 +889,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return None
 
     async def get_screening_data(self, trade_date=None):
-        return await self.cache.get_screening_data(trade_date)
+        return await self.cache.screener_dao.get_screening_data(trade_date)
 
     async def get_fundamental_screening_data(self, trade_date=None):
-        return await self.cache.get_fundamental_screening_data(trade_date)
+        return await self.cache.screener_dao.get_fundamental_screening_data(trade_date)
 
     async def initialize_system(self, progress_callback=None, quick=False):
         """
@@ -1113,7 +1113,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         rough_start = end - datetime.timedelta(days=int(days * 2.0))
         all_dates = await self.trade_calendar.get_trade_dates(start_date=rough_start, end_date=end)
         start = all_dates[-days] if len(all_dates) >= days else (all_dates[0] if all_dates else rough_start)
-        return await self.cache.get_daily_quotes(
+        return await self.cache.quote_dao.get_daily_quotes(
             ts_code=ts_code,
             start_date=start,
             end_date=end,
@@ -1194,7 +1194,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             latest_closed_trade_date = await self.trade_calendar.get_latest_trade_date()
             context_trade_date = self._normalize_context_trade_date(latest_closed_trade_date)
             if context_trade_date is None:
-                cache_date = await self.cache.get_latest_trade_date()
+                cache_date = await self.cache.quote_dao.get_latest_trade_date()
                 if cache_date is not None:
                     context_trade_date = self._normalize_context_trade_date(cache_date)
         screening_data = await self.get_screening_data(context_trade_date)
@@ -1235,11 +1235,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         }
 
         auxiliary_tables = {
-            "northbound_data": self.cache.get_northbound,
-            "northbound_flow_data": self.cache.get_moneyflow_hsgt,
-            "moneyflow_data": self.cache.get_moneyflow,
-            "top_list": self.cache.get_top_list,
-            "block_trade": self.cache.get_block_trade,
+            "northbound_data": self.cache.quote_dao.get_northbound,
+            "northbound_flow_data": self.cache.market_dao.get_moneyflow_hsgt,
+            "moneyflow_data": self.cache.quote_dao.get_moneyflow,
+            "top_list": self.cache.quote_dao.get_top_list,
+            "block_trade": self.cache.quote_dao.get_block_trade,
         }
 
         all_aux_ready = True

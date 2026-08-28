@@ -74,7 +74,7 @@ async def _sync_wrapper_save_daily_quotes(cache: CacheManager, df: pd.DataFrame)
     """
     result = SyncResult()
     try:
-        await cache.save_daily_quotes(df)
+        await cache.quote_dao.save_daily_quotes(df)
         result.status = SyncStatus.SUCCESS
     except asyncio.CancelledError:
         result.status = SyncStatus.CANCELLED
@@ -99,7 +99,7 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         engine_provider.mark_disposed(True)
         df = _make_daily_quotes_df()
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
-            await self.cache.save_daily_quotes(df)
+            await self.cache.quote_dao.save_daily_quotes(df)
 
     async def test_save_stock_basic_raises_when_disposed(self):
         """DB disposed 时 save_stock_basic 抛 EngineDisposedError（覆盖另一写路径）。"""
@@ -107,7 +107,7 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         self.cache._disposed = True
         engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
-            await self.cache.save_stock_basic(_make_stock_basic_df())
+            await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df())
 
     async def test_sync_wrapper_reraises_engine_disposed(self, caplog):
         """sync wrapper 在 EngineDisposedError 时记录日志并 raise（R5 传播）。
@@ -140,7 +140,7 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         # 触发 EngineDisposedError，构造子任务 failed result
         sub_result = SyncResult()
         try:
-            await self.cache.save_daily_quotes(_make_daily_quotes_df())
+            await self.cache.quote_dao.save_daily_quotes(_make_daily_quotes_df())
         except EngineDisposedError:
             sub_result.status = SyncStatus.FAILED
             sub_result.errors.append("Engine disposed during sync")
@@ -164,23 +164,23 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
 
     async def test_get_stock_basic_raises_when_disposed(self):
         """DB disposed 时读操作抛 EngineDisposedError（R5 守卫）。"""
-        await self.cache.save_stock_basic(_make_stock_basic_df())
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df())
         # 模拟 DB 断开
         # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
         engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
-            await self.cache.get_stock_basic()
+            await self.cache.stock_dao.get_stock_basic()
 
     async def test_get_screening_data_raises_when_disposed(self):
         """DB disposed 时 get_screening_data 抛 EngineDisposedError（覆盖 screening 读路径）。"""
-        await self.cache.save_stock_basic(_make_stock_basic_df())
-        await self.cache.save_daily_quotes(_make_daily_quotes_df())
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df())
+        await self.cache.quote_dao.save_daily_quotes(_make_daily_quotes_df())
         # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
         engine_provider.mark_disposed(True)
         with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：验证 disposed 时读路径抛 EngineDisposedError，raises 本身即充分断言
-            await self.cache.get_screening_data(trade_date=_RECENT.strftime("%Y%m%d"))
+            await self.cache.screener_dao.get_screening_data(trade_date=_RECENT.strftime("%Y%m%d"))
 
     async def test_ui_degradation_wrapper_catches_and_returns_flag(self, caplog):
         """UI service 层 catch EngineDisposedError → 返回降级标志 + 空数据。
@@ -190,14 +190,14 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         - 记录降级日志
         - 返回空 DataFrame + degraded=True 标志
         """
-        await self.cache.save_stock_basic(_make_stock_basic_df())
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df())
         # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
         engine_provider.mark_disposed(True)
 
         async def _ui_get_stock_basic_with_degradation() -> tuple[pd.DataFrame, bool]:
             try:
-                df = await self.cache.get_stock_basic()
+                df = await self.cache.stock_dao.get_stock_basic()
                 return df, False
             except EngineDisposedError as e:
                 logger.warning("[UI] DB 不可用，返回降级提示: %s", e)
@@ -217,7 +217,7 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         但 PostgreSQL 数据库本身未停止，数据仍在。通过独立 engine 验证。
         """
         # 通过 CacheManager 写入数据
-        await self.cache.save_stock_basic(_make_stock_basic_df(ts_code="600519.SH"))
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df(ts_code="600519.SH"))
         # 模拟 DB 不可用
         # review03-C11: disposed 状态查询已迁移到 engine_provider，测试同步置位以保证 DAO 侧 R5 守卫生效
         self.cache._disposed = True
@@ -225,7 +225,7 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
 
         # CacheManager 读会抛 EngineDisposedError
         with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：raises 后续 independent_engine 已验证缓存命中，scanner 跨块识别受限
-            await self.cache.get_stock_basic()
+            await self.cache.stock_dao.get_stock_basic()
 
         # 独立 engine（同一 DB）可读到数据 — 缓存命中
         independent_engine = create_test_engine(TEST_DB_URL, echo=False)
@@ -273,8 +273,8 @@ class TestDBRecoveryResyncConsistency(TestDatabaseBase):
     async def test_data_consistent_after_reinit(self):
         """重建引擎后，DB 中的数据仍可读到且一致。"""
         # 写入数据
-        await self.cache.save_stock_basic(_make_stock_basic_df(ts_code="600519.SH"))
-        df_before = await self.cache.get_stock_basic()
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df(ts_code="600519.SH"))
+        df_before = await self.cache.stock_dao.get_stock_basic()
         ts_codes_before = set(df_before["ts_code"].tolist())
 
         # close → init_db(force=True) 重建
@@ -282,7 +282,7 @@ class TestDBRecoveryResyncConsistency(TestDatabaseBase):
         await self.cache.init_db(force=True, auto_migrate=True)
 
         # 重建后读数据，验证一致性
-        df_after = await self.cache.get_stock_basic()
+        df_after = await self.cache.stock_dao.get_stock_basic()
         ts_codes_after = set(df_after["ts_code"].tolist())
 
         assert ts_codes_before == ts_codes_after
@@ -291,7 +291,7 @@ class TestDBRecoveryResyncConsistency(TestDatabaseBase):
     async def test_save_after_reinit_succeeds(self):
         """重建引擎后，新数据可正常写入（DB 已恢复）。"""
         # 初始写入
-        await self.cache.save_stock_basic(_make_stock_basic_df(ts_code="000001.SZ"))
+        await self.cache.stock_dao.save_stock_basic(_make_stock_basic_df(ts_code="000001.SZ"))
 
         # close → init_db(force=True) 重建
         await self.cache.close()
@@ -299,10 +299,10 @@ class TestDBRecoveryResyncConsistency(TestDatabaseBase):
 
         # 重建后写入新数据
         df_new = _make_stock_basic_df(ts_code="600519.SH")
-        await self.cache.save_stock_basic(df_new)
+        await self.cache.stock_dao.save_stock_basic(df_new)
 
         # 验证新数据可读
-        df = await self.cache.get_stock_basic()
+        df = await self.cache.stock_dao.get_stock_basic()
         ts_codes = set(df["ts_code"].tolist())
         assert "000001.SZ" in ts_codes
         assert "600519.SH" in ts_codes

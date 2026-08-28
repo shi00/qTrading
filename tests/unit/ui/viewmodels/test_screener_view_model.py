@@ -635,7 +635,7 @@ class TestHistoryTreeOffsetProgression:
 
         with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
-            mock_cache.get_history_tree = AsyncMock(return_value=df_30)
+            mock_cache.screener_dao.get_history_tree = AsyncMock(return_value=df_30)
 
             # 第一次加载 (append=False, offset 从 0 开始)
             await vm.load_history_tree(append=False)
@@ -664,7 +664,7 @@ class TestHistoryTreeOffsetProgression:
 
         with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
-            mock_cache.get_history_tree = AsyncMock(return_value=df_10)
+            mock_cache.screener_dao.get_history_tree = AsyncMock(return_value=df_10)
 
             await vm.load_history_tree(append=False)
             assert vm.state.history_tree.has_more is False  # len(df)=10 < 30

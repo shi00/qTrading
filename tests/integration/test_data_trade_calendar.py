@@ -63,7 +63,7 @@ class TestTradeCalendarService(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     # ==========================================================
     # Core Method Tests
@@ -148,7 +148,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         self.assertEqual(len(result), 5)
         self.mock_api.get_trade_cal.assert_called_once()
 
-        cached_df = await self.cache.get_trade_cal(start, end, is_open="1")
+        cached_df = await self.cache.stock_dao.get_trade_cal(start, end, is_open="1")
         self.assertIsNotNone(cached_df)
         self.assertEqual(len(cached_df), 5)
 
@@ -306,7 +306,7 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     # ==========================================================
     # Edge Case: Empty/Invalid Ranges
@@ -454,8 +454,8 @@ class TestTradeCalendarServiceOffline(TestDatabaseBase):
 
     async def asyncSetUp(self):
         self.mock_cache = MagicMock()
-        self.mock_cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        self.mock_cache.save_trade_cal = AsyncMock()
+        self.mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        self.mock_cache.stock_dao.save_trade_cal = AsyncMock()
         self.mock_cache.count_trade_days = AsyncMock(side_effect=Exception("DB error"))
 
         self.mock_api = MagicMock()
@@ -511,7 +511,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_is_trading_day_db_exception_fallback(self):
         """Test is_trading_day handles DB exceptions gracefully."""
-        self.service._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
 
         result = await self.service.is_trading_day(datetime.date(2024, 3, 21))
 
@@ -519,7 +519,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_get_trade_dates_db_exception_fallback(self):
         """Test get_trade_dates handles DB exceptions with offline fallback."""
-        self.service._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("DB connection failed"))
 
         result = await self.service.get_trade_dates(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
@@ -531,7 +531,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_is_trading_day_api_exception_fallback(self):
         """Test is_trading_day handles API exceptions with offline fallback."""
-        self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
         self.service._api.get_trade_cal = AsyncMock(side_effect=Exception("API timeout"))
 
         result = await self.service.is_trading_day(datetime.date(2024, 3, 21))
@@ -540,7 +540,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_get_trade_dates_api_exception_fallback(self):
         """Test get_trade_dates handles API exceptions with offline fallback."""
-        self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
         self.service._api.get_trade_cal = AsyncMock(side_effect=Exception("API timeout"))
 
         result = await self.service.get_trade_dates(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
@@ -553,8 +553,8 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_api_data_persistence_failure_does_not_affect_result(self):
         """Test that persistence failure doesn't affect the returned result."""
-        self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
-        self.service._cache.save_trade_cal = AsyncMock(side_effect=Exception("Write failed"))
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        self.service._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=Exception("Write failed"))
 
         api_df = pd.DataFrame(
             {
@@ -575,7 +575,7 @@ class TestTradeCalendarServiceErrorHandling(TestDatabaseBase):
 
     async def test_get_trade_dates_malformed_api_data(self):
         """Test get_trade_dates handles malformed API data gracefully."""
-        self.service._cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        self.service._cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
 
         malformed_df = pd.DataFrame(
             {
@@ -620,7 +620,7 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_concurrent_get_latest_trade_date_no_race(self):
         """Test concurrent calls to get_latest_trade_date don't cause race conditions."""
@@ -686,7 +686,7 @@ class TestTradeCalendarServiceBatch(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_get_trade_dates_batch(self):
         """Test get_trade_dates_batch returns correct results for multiple ranges."""
@@ -786,7 +786,7 @@ class TestTradeCalendarServiceHolidays(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_spring_festival_not_trading(self):
         """Test Spring Festival dates are not trading days."""
@@ -886,7 +886,7 @@ class TestTradeCalendarServiceYearBoundary(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_cross_year_get_trade_dates(self):
         """Test get_trade_dates across year boundary."""
@@ -966,7 +966,7 @@ class TestTradeCalendarServicePersistence(TestDatabaseBase):
 
         await self.service.get_trade_dates(start, end)
 
-        cached_df = await self.cache.get_trade_cal(start, end)
+        cached_df = await self.cache.stock_dao.get_trade_cal(start, end)
         self.assertIsNotNone(cached_df)
         self.assertEqual(len(cached_df), 5)
 
@@ -981,7 +981,7 @@ class TestTradeCalendarServicePersistence(TestDatabaseBase):
         start = datetime.date(2024, 3, 18)
         end = datetime.date(2024, 3, 22)
 
-        self.service._cache.save_trade_cal = AsyncMock(side_effect=Exception("DB write failed"))
+        self.service._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=Exception("DB write failed"))
 
         api_df = pd.DataFrame(
             {
@@ -1033,7 +1033,7 @@ class TestTradeCalendarServiceCacheTTL(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_cache_ttl_prevents_repeated_queries(self):
         """Test that cache TTL prevents repeated database queries."""
@@ -1097,7 +1097,7 @@ class TestTradeCalendarServiceDatabaseTypes(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_date_object_passed_to_db(self):
         """Test that native date objects are passed to database queries."""
@@ -1173,7 +1173,7 @@ class TestTradeCalendarServiceIntegration(TestDatabaseBase):
             current += datetime.timedelta(days=1)
 
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_get_trade_cal_df_returns_dataframe(self):
         """Test that get_trade_cal_df returns a DataFrame."""
@@ -1273,7 +1273,7 @@ class TestEnsureCalendarRange(TestDatabaseBase):
             )
             current += datetime.timedelta(days=1)
         df = pd.DataFrame(dates)
-        await self.cache.save_trade_cal(df)
+        await self.cache.stock_dao.save_trade_cal(df)
 
     async def test_ensure_calendar_range_bulk_sync(self):
         """ensure_calendar_range 应一次性写入交易日和非交易日。"""
@@ -1296,11 +1296,11 @@ class TestEnsureCalendarRange(TestDatabaseBase):
         result = await self.service.ensure_calendar_range(start, end)
         self.assertTrue(result)
 
-        all_df = await self.cache.get_trade_cal(start, end)
+        all_df = await self.cache.stock_dao.get_trade_cal(start, end)
         self.assertEqual(len(all_df), 31)
 
-        trading_df = await self.cache.get_trade_cal(start, end, is_open="1")
-        non_trading_df = await self.cache.get_trade_cal(start, end, is_open="0")
+        trading_df = await self.cache.stock_dao.get_trade_cal(start, end, is_open="1")
+        non_trading_df = await self.cache.stock_dao.get_trade_cal(start, end, is_open="0")
         self.assertGreater(len(trading_df), 0)
         self.assertGreater(len(non_trading_df), 0)
         self.assertEqual(len(trading_df) + len(non_trading_df), 31)

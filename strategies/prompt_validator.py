@@ -87,7 +87,7 @@ async def check_multi_period_data(field: str) -> bool:
     cache = CacheManager()
 
     try:
-        all_stocks_df = await cache.get_stock_basic()
+        all_stocks_df = await cache.stock_dao.get_stock_basic()
         if all_stocks_df is None or all_stocks_df.empty:
             sample_codes = ["000001.SZ"]
         else:
@@ -130,7 +130,7 @@ async def check_field_exists(field: str) -> bool:
     cache = CacheManager()
 
     try:
-        all_stocks_df = await cache.get_stock_basic()
+        all_stocks_df = await cache.stock_dao.get_stock_basic()
         if all_stocks_df is None or all_stocks_df.empty:
             sample_codes = ["000001.SZ"]
         else:

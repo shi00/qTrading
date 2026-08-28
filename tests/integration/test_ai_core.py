@@ -282,7 +282,7 @@ class TestBacktestIntegration:
     @pytest.fixture
     def mock_cache(self):
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 [
                     {
@@ -297,12 +297,12 @@ class TestBacktestIntegration:
                 ]
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         cache.get_concepts = AsyncMock(return_value={})
         cache.prefetch_auxiliary_data = AsyncMock(return_value={})
 
@@ -318,7 +318,7 @@ class TestBacktestIntegration:
                 "pct_chg": [-1.0] * 60,
             }
         )
-        cache.get_daily_quotes = AsyncMock(return_value=history_df)
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_df)
         return cache
 
     @pytest.fixture

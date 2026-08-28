@@ -140,7 +140,7 @@ class HealthCheckMixin:
                           completeness is unavailable; use check_data_health for GOLD.)
         """
         try:
-            sync_records = await self.cache.get_sync_status()
+            sync_records = await self.cache.sync_dao.get_sync_status()
 
             # _read_db returns a pandas DataFrame
             if sync_records is None or not isinstance(sync_records, pd.DataFrame) or sync_records.empty:
@@ -168,7 +168,7 @@ class HealthCheckMixin:
             # Fast verification: if sync_status is missing or stale, double check actual table MAX(date)
             try:
                 if not latest_quote_date:
-                    db_max_date = await self.cache.get_latest_trade_date()
+                    db_max_date = await self.cache.quote_dao.get_latest_trade_date()
                     if db_max_date:
                         latest_quote_date = str(db_max_date)
             except Exception as e:
@@ -207,7 +207,7 @@ class HealthCheckMixin:
                         "[DataProcessor] FastCheck | Metadata points to stale, fallback to deep sweep...",
                     )
                     try:
-                        db_max_date = await self.cache.get_latest_trade_date()
+                        db_max_date = await self.cache.quote_dao.get_latest_trade_date()
                         if db_max_date:
                             latest_dt = parse_date(str(db_max_date), "%Y%m%d")
                             days_lag = (get_now() - latest_dt).days
@@ -377,7 +377,7 @@ class HealthCheckMixin:
             except Exception as e:
                 logger.debug("[DataProcessor] Health | API trade_cal cross-check skipped: %s", e)
 
-            local_dates = await self.cache.get_cached_trade_dates()
+            local_dates = await self.cache.quote_dao.get_cached_trade_dates()
 
             # 1. Market Health
             last_local = sorted(list(local_dates))[-1] if local_dates else None
@@ -527,7 +527,7 @@ class HealthCheckMixin:
             avg_fund = None
             fin_lag_days = None
             try:
-                latest_td = await self.cache.get_latest_trade_date()
+                latest_td = await self.cache.quote_dao.get_latest_trade_date()
                 if latest_td:
                     fc = await self.cache.get_field_completeness(latest_td)
                     if fc:
@@ -536,7 +536,7 @@ class HealthCheckMixin:
             except Exception as e:
                 logger.debug("[DataProcessor] HealthCheck | Field completeness check skipped: %s", e)
             try:
-                sync_records = await self.cache.get_sync_status()
+                sync_records = await self.cache.sync_dao.get_sync_status()
                 if isinstance(sync_records, pd.DataFrame) and not sync_records.empty:
                     fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
                     if not fin_info.empty:
@@ -630,7 +630,7 @@ class HealthCheckMixin:
 
         try:
             # 1. Select Sample
-            basics = await self.cache.get_stock_basic()
+            basics = await self.cache.stock_dao.get_stock_basic()
             if basics is None or basics.empty:
                 return {"score": 0, "tier": 0, "details": {}}
 
@@ -690,7 +690,7 @@ class HealthCheckMixin:
                     "[DataProcessor] QualityScan | ⚠️ Trade calendar void, continuity skipped.",
                 )
 
-            batch_df = await self.cache.get_daily_quotes(
+            batch_df = await self.cache.quote_dao.get_daily_quotes(
                 ts_code_list=sample,
                 start_date=start_date_obj,
                 end_date=end_date_obj,
@@ -752,7 +752,7 @@ class HealthCheckMixin:
             # 5. Fundamental Field Completeness
             fundamental_completeness = {}
             try:
-                latest_td = await self.cache.get_latest_trade_date()
+                latest_td = await self.cache.quote_dao.get_latest_trade_date()
                 if latest_td:
                     fundamental_completeness = await self.cache.get_field_completeness(latest_td)
             except Exception as e:
@@ -769,7 +769,7 @@ class HealthCheckMixin:
             fin_recency_ok = False
             fin_lag_days = None
             try:
-                sync_records = await self.cache.get_sync_status()
+                sync_records = await self.cache.sync_dao.get_sync_status()
                 if isinstance(sync_records, pd.DataFrame) and not sync_records.empty:
                     fin_info = sync_records[sync_records["table_name"] == "financial_reports"]
                     if not fin_info.empty:

@@ -223,7 +223,7 @@ class TestHomeViewModelNewsData:
         vm = HomeViewModel()
         vm.processor = MagicMock()
         vm.processor.cache = MagicMock()
-        vm.processor.cache.get_market_news = AsyncMock()
+        vm.processor.cache.market_dao.get_market_news = AsyncMock()
         return vm
 
     @pytest.mark.asyncio
@@ -235,7 +235,7 @@ class TestHomeViewModelNewsData:
                 "content": [f"内容{i}" for i in range(20)],
             }
         )
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         result, has_more = await vm.refresh_news()
 
@@ -247,7 +247,7 @@ class TestHomeViewModelNewsData:
     @pytest.mark.asyncio
     async def test_refresh_news_empty(self, vm):
         """刷新新闻为空"""
-        vm.processor.cache.get_market_news = AsyncMock(return_value=pd.DataFrame())
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
 
         result, has_more = await vm.refresh_news()
 
@@ -269,7 +269,7 @@ class TestHomeViewModelNewsData:
             }
         )
 
-        vm.processor.cache.get_market_news = AsyncMock(side_effect=[page1, page2])
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=[page1, page2])
 
         await vm.refresh_news()
         new_batch, has_more = await vm.load_next_page()
@@ -288,7 +288,7 @@ class TestHomeViewModelNewsData:
             }
         )
 
-        vm.processor.cache.get_market_news = AsyncMock(return_value=page1)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
 
         await vm.refresh_news()
         new_batch, has_more = await vm.load_next_page()
@@ -319,11 +319,11 @@ class TestHomeViewModelNewsData:
             }
         )
 
-        vm.processor.cache.get_market_news = AsyncMock(return_value=page1)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
 
         await vm.refresh_news()
 
-        vm.processor.cache.get_market_news = AsyncMock(return_value=page2)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page2)
 
         task = asyncio.create_task(vm.load_next_page())
 
@@ -335,7 +335,7 @@ class TestHomeViewModelNewsData:
     @pytest.mark.asyncio
     async def test_fetch_news_batch_error(self, vm):
         """新闻获取错误"""
-        vm.processor.cache.get_market_news = AsyncMock(side_effect=Exception("Database Error"))
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=Exception("Database Error"))
 
         result = await vm._fetch_news_batch(0)
 
@@ -404,7 +404,7 @@ class TestHomeViewModelStateManagement:
         from services.news_subscription_service import NewsUpdateType
 
         mock_news = pd.DataFrame({"content": [f"news{i}" for i in range(5)]})
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         await vm._on_news_service_update(NewsUpdateType.INITIAL)
 
@@ -489,7 +489,7 @@ class TestHomeViewModelPagination:
                 "title": [f"新闻{i}" for i in range(20)],
             }
         )
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         await vm.refresh_news()
 
@@ -503,7 +503,7 @@ class TestHomeViewModelPagination:
                 "title": [f"新闻{i}" for i in range(15)],
             }
         )
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         await vm.refresh_news()
 
@@ -516,7 +516,7 @@ class TestHomeViewModelPagination:
         page2 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20, 40)]})
         page3 = pd.DataFrame({"title": [f"新闻{i}" for i in range(40, 55)]})
 
-        vm.processor.cache.get_market_news = AsyncMock(side_effect=[page1, page2, page3])
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=[page1, page2, page3])
 
         await vm.refresh_news()
         assert vm.state.has_more_news is True
@@ -531,16 +531,16 @@ class TestHomeViewModelPagination:
     async def test_pagination_offset_calculation(self, vm):
         """分页偏移计算"""
         mock_news = pd.DataFrame({"title": ["test"]})
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         await vm._fetch_news_batch(0)
-        vm.processor.cache.get_market_news.assert_called_with(limit=20, offset=0)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=0)
 
         await vm._fetch_news_batch(1)
-        vm.processor.cache.get_market_news.assert_called_with(limit=20, offset=20)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=20)
 
         await vm._fetch_news_batch(5)
-        vm.processor.cache.get_market_news.assert_called_with(limit=20, offset=100)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=100)
 
 
 class TestHomeViewModelConcurrency:
@@ -558,7 +558,7 @@ class TestHomeViewModelConcurrency:
     async def test_concurrent_refresh(self, vm):
         """并发刷新"""
         mock_news = pd.DataFrame({"title": ["test"]})
-        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         results = await asyncio.gather(
             vm.refresh_news(),
@@ -573,7 +573,7 @@ class TestHomeViewModelConcurrency:
         page1 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20)]})
         page2 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20, 40)]})
 
-        vm.processor.cache.get_market_news = AsyncMock(side_effect=[page1, page2])
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=[page1, page2])
 
         await vm.refresh_news()
         gen1 = vm._load_generation

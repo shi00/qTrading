@@ -397,7 +397,7 @@ class NewsSubscriptionService:
                         item,
                         default_source="CLS",
                     )
-                    await self.cache.save_market_news(normalized, wait=True)
+                    await self.cache.market_dao.save_market_news(normalized, wait=True)
 
                     await self._notify_listeners(
                         update_type=NewsUpdateType.TAG_UPDATE,
@@ -577,7 +577,7 @@ class NewsSubscriptionService:
                                 item,
                                 default_source="CLS",
                             )
-                            await self.cache.save_market_news(normalized)
+                            await self.cache.market_dao.save_market_news(normalized)
 
                             await self._safe_queue_put(item)  # type: ignore[misc]
 
@@ -625,7 +625,7 @@ class NewsSubscriptionService:
                                 "source": "CLS",
                             },
                         )
-                        await self.cache.save_market_news(normalized, wait=True)
+                        await self.cache.market_dao.save_market_news(normalized, wait=True)
 
                         await self._safe_queue_put(item)  # type: ignore[misc]
 

@@ -312,7 +312,7 @@ class MacroSyncStrategy(ISyncStrategy):
                         latest_period = parse_date(latest_period, "%Y%m").date()
                     else:
                         latest_period = parse_date(latest_period).date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "macro_economy",
                     latest_period,
                     count or 0,
@@ -329,7 +329,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     latest_period = parse_date(str(latest)).date() if isinstance(latest, str) else latest
                 else:
                     latest_period = get_now().date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "macro_economy",
                     latest_period,
                     0,
@@ -539,7 +539,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug("[MacroSync] Shibor | Saved %s records", count)
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "shibor_daily",
                     today,
                     count or 0,
@@ -560,7 +560,7 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append("Shibor: permission denied")
             try:
                 today = await self._get_effective_trade_date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "shibor_daily",
                     today,
                     0,
@@ -662,7 +662,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     )
 
                     if df is not None and not df.empty:
-                        count = await self.context.cache.save_index_weights(df)
+                        count = await self.context.cache.market_dao.save_index_weights(df)
                         if count:
                             iw_saved += count
                             result.added += count
@@ -690,7 +690,7 @@ class MacroSyncStrategy(ISyncStrategy):
                     result.status = SyncStatus.PARTIAL.value
                     result.errors.append(f"index_code={idx_code}: {safe_error(e)}")
 
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "index_weight",
                 today_date,
                 iw_saved,
@@ -705,7 +705,7 @@ class MacroSyncStrategy(ISyncStrategy):
             )
             try:
                 today_date = await self._get_effective_trade_date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "index_weight",
                     today_date,
                     0,

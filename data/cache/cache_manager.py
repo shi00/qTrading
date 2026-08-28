@@ -47,15 +47,13 @@ logger = logging.getLogger(__name__)
 
 from utils.singleton_registry import register_singleton
 
-from data.cache.cache_manager_delegations import CacheManagerDelegationMixin
-
 # review01-A4 Step2: 引擎生命周期与 DAO 注册清单拆分为组合对象
 from data.cache.dao_registry import DaoRegistry
 from data.cache.engine_manager import EngineManager
 
 
 @register_singleton
-class CacheManager(CacheManagerDelegationMixin):
+class CacheManager:
     _instance = None
     _initialized = False
     _lock = threading.Lock()  # Thread-safe singleton

@@ -31,7 +31,7 @@ def _make_ctx(**overrides):
     ctx = MagicMock(spec=SyncContext)
     ctx.cache = MagicMock()
     ctx.cache.engine = MagicMock()
-    ctx.cache.update_sync_status = AsyncMock(return_value=None)
+    ctx.cache.sync_dao.update_sync_status = AsyncMock(return_value=None)
     ctx.api = MagicMock()
     ctx.processor = None
     for key, value in overrides.items():
@@ -529,25 +529,25 @@ class TestRecordSkippedPermission:
 
     @pytest.mark.asyncio
     async def test_calls_update_sync_status_with_skipped_permission(self):
-        """正常路径：调用 cache.update_sync_status 写入 skipped_permission 状态。"""
+        """正常路径：调用 cache.sync_dao.update_sync_status 写入 skipped_permission 状态。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx, mock_record_skipped=False)
 
         await strategy._record_skipped_permission("sw_industry_classify")
 
-        ctx.cache.update_sync_status.assert_awaited_once()
-        call_kwargs = ctx.cache.update_sync_status.call_args.kwargs
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
+        call_kwargs = ctx.cache.sync_dao.update_sync_status.call_args.kwargs
         assert call_kwargs["status"] == "skipped_permission"
         # SYNC_RESULT_SKIPPED_PERMISSION 常量为大写（data/constants.py）
         assert call_kwargs["last_result_status"] == "SKIPPED_PERMISSION"
         # 第一个位置参数是表名
-        assert ctx.cache.update_sync_status.call_args.args[0] == "sw_industry_classify"
+        assert ctx.cache.sync_dao.update_sync_status.call_args.args[0] == "sw_industry_classify"
 
     @pytest.mark.asyncio
     async def test_exception_swallowed_and_logged_debug(self, caplog):
         """update_sync_status 抛错：debug 日志，不传播异常。"""
         ctx = _make_ctx()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=RuntimeError("db down"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("db down"))
         strategy = _wire_strategy(ctx, mock_record_skipped=False)
 
         with caplog.at_level(logging.DEBUG, logger="data.sync.sw_industry"):
@@ -590,7 +590,7 @@ class TestSyncMembersCheckpoint:
         # checkpoint 应被调用一次（累积行数 > 阈值）
         assert strategy.member_dao.save_sw_industry_member.await_count >= 1
         # 循环结束后 all_dfs 为空（已 checkpoint），走 total_rows > 0 分支
-        ctx.cache.update_sync_status.assert_awaited()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_checkpoint_not_triggered_below_threshold(self):

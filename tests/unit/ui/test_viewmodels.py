@@ -283,18 +283,18 @@ class TestHomeViewModelFetchNewsBatch:
 
     @pytest.mark.asyncio
     async def test_success_fetches_via_processor_cache(self, home_vm, mock_processor):
-        """成功路径: _ensure_processor 返回实例后调 processor.cache.get_market_news."""
+        """成功路径: _ensure_processor 返回实例后调 processor.cache.market_dao.get_market_news."""
         home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
-        mock_processor.cache.get_market_news = AsyncMock(return_value=pd.DataFrame({"c": ["x"]}))
+        mock_processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame({"c": ["x"]}))
         batch = await home_vm._fetch_news_batch(1)
-        mock_processor.cache.get_market_news.assert_awaited_once_with(limit=home_vm.PAGE_SIZE, offset=20)
+        mock_processor.cache.market_dao.get_market_news.assert_awaited_once_with(limit=home_vm.PAGE_SIZE, offset=20)
         assert batch is not None
 
     @pytest.mark.asyncio
     async def test_error_returns_none(self, home_vm, mock_processor):
         """异常路径: cache 抛异常 → 记录日志并返回 None (不吞没 CancelledError)."""
         home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
-        mock_processor.cache.get_market_news = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_processor.cache.market_dao.get_market_news = AsyncMock(side_effect=RuntimeError("boom"))
         batch = await home_vm._fetch_news_batch(0)
         assert batch is None
 
@@ -302,7 +302,7 @@ class TestHomeViewModelFetchNewsBatch:
     async def test_cancelled_error_propagates(self, home_vm, mock_processor):
         """R2: CancelledError 必须传播, 不被 except Exception 吞没."""
         home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
-        mock_processor.cache.get_market_news = AsyncMock(side_effect=asyncio.CancelledError)
+        mock_processor.cache.market_dao.get_market_news = AsyncMock(side_effect=asyncio.CancelledError)
         with pytest.raises(asyncio.CancelledError):
             await home_vm._fetch_news_batch(0)
 
@@ -1067,7 +1067,7 @@ class TestScreenerViewModelLoadHistoryTree:
         )
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_tree = AsyncMock(return_value=df)
+            cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_tree()
 
@@ -1089,7 +1089,7 @@ class TestScreenerViewModelLoadHistoryTree:
     async def test_with_empty_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_tree = AsyncMock(return_value=pd.DataFrame())
+            cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=pd.DataFrame())
             MockCM.return_value = cm_instance
             await screener_vm.load_history_tree()
 
@@ -1100,7 +1100,7 @@ class TestScreenerViewModelLoadHistoryTree:
     async def test_with_none_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_tree = AsyncMock(return_value=None)
+            cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_tree()
 
@@ -1113,11 +1113,11 @@ class TestScreenerViewModelLoadHistoryTree:
         screener_vm._set_state(history_tree=replace(screener_vm.state.history_tree, offset=10))
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_tree = AsyncMock(return_value=None)
+            cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_tree(append=True)
 
-        cm_instance.get_history_tree.assert_awaited_once_with(offset=10)
+        cm_instance.screener_dao.get_history_tree.assert_awaited_once_with(offset=10)
 
 
 class TestScreenerViewModelLoadHistoryData:
@@ -1126,7 +1126,7 @@ class TestScreenerViewModelLoadHistoryData:
 
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_records = AsyncMock(return_value=df)
+            cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16")
 
@@ -1139,7 +1139,7 @@ class TestScreenerViewModelLoadHistoryData:
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"]})
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_records = AsyncMock(return_value=df)
+            cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16")
 
@@ -1148,7 +1148,7 @@ class TestScreenerViewModelLoadHistoryData:
     async def test_with_empty_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_records = AsyncMock(return_value=pd.DataFrame())
+            cm_instance.screener_dao.get_history_records = AsyncMock(return_value=pd.DataFrame())
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16")
 
@@ -1159,7 +1159,7 @@ class TestScreenerViewModelLoadHistoryData:
     async def test_with_none_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_records = AsyncMock(return_value=None)
+            cm_instance.screener_dao.get_history_records = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16")
 
@@ -1170,11 +1170,11 @@ class TestScreenerViewModelLoadHistoryData:
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"]})
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
-            cm_instance.get_history_records = AsyncMock(return_value=df)
+            cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16", strategy_name="momentum", run_id="r1")
 
-        cm_instance.get_history_records.assert_awaited_once_with("2026-05-16", "momentum", "r1")
+        cm_instance.screener_dao.get_history_records.assert_awaited_once_with("2026-05-16", "momentum", "r1")
 
 
 class TestScreenerViewModelExportResults:

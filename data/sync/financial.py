@@ -139,7 +139,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 should_full_sync = True
                 logger.debug("[FinancialSync] Strategy | Full Sync (force=True)")
             else:
-                status = await self.context.cache.get_sync_status("financial_reports")
+                status = await self.context.cache.sync_dao.get_sync_status("financial_reports")
                 if not status or not status.get("last_sync_date"):
                     should_full_sync = True
                     logger.debug("[FinancialSync] Strategy | Full Sync (first run)")
@@ -218,10 +218,10 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.debug(
                 "[FinancialSync] FullSync | Force mode: Clearing previous sync status...",
             )
-            await self.context.cache.clear_step4_sync_status()
+            await self.context.cache.sync_dao.clear_step4_sync_status()
 
         # 1. Get Stock List
-        df_basic = await self.context.cache.get_stock_basic()
+        df_basic = await self.context.cache.stock_dao.get_stock_basic()
         if df_basic.empty:
             logger.error(
                 "[FinancialSync] FullSync | ❌ No stocks found. Run Stock Basic sync first.",
@@ -240,7 +240,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(concurrency)
 
         # 3. Data-as-State Resume Logic
-        synced_stocks = await self.context.cache.get_completed_step4_stocks(
+        synced_stocks = await self.context.cache.sync_dao.get_completed_step4_stocks(
             sync_version=1,
         )
 
@@ -362,11 +362,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                         has_actual_data = df_merged is not None and not df_merged.empty
                         if has_actual_data:
                             async with self.context.cache.financial_transaction() as tx_conn:
-                                await self.context.cache.save_financial_reports(
+                                await self.context.cache.financial_dao.save_financial_reports(
                                     df_merged[FINANCIAL_REPORT_SCHEMA_COLS],  # type: ignore[optional-subscript]
                                     conn=tx_conn,
                                 )
-                                await self.context.cache.mark_stock_step4_completed(
+                                await self.context.cache.sync_dao.mark_stock_step4_completed(
                                     ts_code,
                                     sync_version=1,
                                     conn=tx_conn,
@@ -442,7 +442,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Update sync status for aux tables (after all stocks processed)
         today = get_now().date()
         if total_mainbz_rows > 0:
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "fina_mainbz",
                 today,
                 total_mainbz_rows,
@@ -450,7 +450,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.debug("[FinancialSync] fina_mainbz total: %s", total_mainbz_rows)
 
         if total_audit_rows > 0:
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "fina_audit",
                 today,
                 total_audit_rows,
@@ -481,7 +481,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         total_mainbz_rows = 0
         total_audit_rows = 0
 
-        status = await self.context.cache.get_sync_status("financial_reports")
+        status = await self.context.cache.sync_dao.get_sync_status("financial_reports")
         last_sync_str = status.get("last_sync_date")
 
         try:
@@ -581,7 +581,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 if col not in df.columns:
                                     df[col] = None
 
-                            count = await self.context.cache.save_financial_reports(
+                            count = await self.context.cache.financial_dao.save_financial_reports(
                                 df[FINANCIAL_REPORT_SCHEMA_COLS],
                             )
                             if count > 0:
@@ -638,7 +638,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
             if day_has_error and day_saved == 0:
                 # 全部失败：标记 failed，不推进 last_sync_date 以便下次重试
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "financial_reports",
                     day_date,
                     0,
@@ -646,14 +646,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
             elif day_has_error:
                 # 部分失败：标记 partial，仍推进 last_sync_date
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "financial_reports",
                     day_date,
                     day_saved,
                     status="partial",
                 )
             else:
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "financial_reports",
                     day_date,
                     day_saved,
@@ -669,7 +669,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Update sync status for aux tables (after all stocks processed)
         today = get_now().date()
         if total_mainbz_rows > 0:
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "fina_mainbz",
                 today,
                 total_mainbz_rows,
@@ -677,7 +677,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.debug("[FinancialSync] fina_mainbz total: %s", total_mainbz_rows)
 
         if total_audit_rows > 0:
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "fina_audit",
                 today,
                 total_audit_rows,
@@ -719,11 +719,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                     row_count = 0
                     if df is not None and not df.empty:
                         save_map = {
-                            "fina_forecast": self.context.cache.save_fina_forecast,
+                            "fina_forecast": self.context.cache.financial_dao.save_fina_forecast,
                             # Phase 3G §4.3.4：业绩快报（参考 forecast 模式）
-                            "express": self.context.cache.save_express,
-                            "dividend": self.context.cache.save_dividend,
-                            "repurchase": self.context.cache.save_repurchase,
+                            "express": self.context.cache.express_dao.save_express,
+                            "dividend": self.context.cache.financial_dao.save_dividend,
+                            "repurchase": self.context.cache.financial_dao.save_repurchase,
                         }
 
                         save_func = save_map.get(table_name)
@@ -738,7 +738,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             )
 
                     date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
                         row_count,
@@ -752,7 +752,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         table_name,
                     )
                     date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
                         0,
@@ -899,7 +899,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             aux_tasks = [
                 fetch_aux(
                     api.get_fina_mainbz,
-                    self.context.cache.save_fina_mainbz,
+                    self.context.cache.financial_dao.save_fina_mainbz,
                     ts_code=ts_code,
                     period=period,
                     start_date=start_date,
@@ -907,7 +907,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 ),
                 fetch_aux(
                     api.get_fina_audit,
-                    self.context.cache.save_fina_audit,
+                    self.context.cache.financial_dao.save_fina_audit,
                     ts_code=ts_code,
                     start_date=start_date,
                     end_date=end_date,
@@ -1060,7 +1060,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             if col not in merged_df.columns:
                                 merged_df[col] = None
                         saved = (
-                            await self.context.cache.save_financial_reports(
+                            await self.context.cache.financial_dao.save_financial_reports(
                                 merged_df[FINANCIAL_REPORT_SCHEMA_COLS],
                             )
                             or 0

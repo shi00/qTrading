@@ -63,8 +63,8 @@ class TestGetPendingPredictions(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
-        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -77,7 +77,7 @@ class TestGetPendingPredictions(unittest.TestCase):
 
 
 class TestReviewManagerIndexDailyType(unittest.TestCase):
-    """H-4: cache.get_index_daily must receive datetime.date, not string."""
+    """H-4: cache.quote_dao.get_index_daily must receive datetime.date, not string."""
 
     def _make_manager_with_pending(self, mock_cache, mock_api):
         from data.persistence.review_manager import ReviewManager
@@ -94,8 +94,8 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
                 }
             ]
         )
-        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240318")
-        mock_cache.get_trade_cal = AsyncMock(
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240318")
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "cal_date": [
@@ -117,7 +117,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
         mock_cache.screener_dao.update_prediction_result = AsyncMock()
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -130,7 +130,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache.get_index_daily_range = AsyncMock(return_value=None)
         mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         manager = ReviewManager()
@@ -146,9 +146,9 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            call_kwargs = mock_cache.get_index_daily.await_args.kwargs
+            call_kwargs = mock_cache.quote_dao.get_index_daily.await_args.kwargs
             assert isinstance(call_kwargs["trade_date"], datetime.date), (
-                f"H-4: cache.get_index_daily must receive datetime.date, got {type(call_kwargs['trade_date'])}"
+                f"H-4: cache.quote_dao.get_index_daily must receive datetime.date, got {type(call_kwargs['trade_date'])}"
             )
 
         asyncio.run(run_test())
@@ -158,7 +158,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
         mock_cache = MagicMock()
         mock_api = MagicMock()
         manager = self._make_manager_with_pending(mock_cache, mock_api)
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
 
         async def run_test():
             await manager.run_review()
@@ -176,7 +176,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
         mock_cache = MagicMock()
         mock_api = MagicMock()
         manager = self._make_manager_with_pending(mock_cache, mock_api)
-        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("cache exploded"))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=RuntimeError("cache exploded"))
 
         async def run_test():
             with self.assertLogs("data.persistence.review_manager", level="WARNING") as cm:
@@ -197,8 +197,8 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
-        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -219,7 +219,7 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
 
         mock_cache_instance = MagicMock()
         mock_cache_instance.screener_dao = mock_screener_dao
-        mock_cache_instance.get_latest_trade_date = AsyncMock(side_effect=Exception("DB error"))
+        mock_cache_instance.quote_dao.get_latest_trade_date = AsyncMock(side_effect=Exception("DB error"))
         mock_cache.return_value = mock_cache_instance
 
         manager = ReviewManager()
@@ -488,8 +488,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
         return pd.DataFrame({"id": ids, "ts_code": ts_codes, "trade_date": trade_dates})
 
     def _setup_cache_with_pending(self, mock_cache_instance, pending_df=None):
-        mock_cache_instance.get_latest_trade_date = AsyncMock(return_value="20240320")
-        mock_cache_instance.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240320")
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
         if pending_df is None:
             pending_df = self._make_pending_df()
         mock_cache_instance.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
@@ -499,7 +499,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """Alpha > 0.5 时标记为 WIN"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -509,7 +509,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -530,7 +530,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """Alpha < -0.5 时标记为 LOSS"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -540,7 +540,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -561,7 +561,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """|Alpha| <= 0.5 时标记为 DRAW"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -571,7 +571,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [0.8]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [0.8]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -592,7 +592,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """T+5 涨幅应使用分析日到第 5 个交易日的累计涨幅"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"] * 6,
@@ -609,7 +609,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -631,7 +631,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """T+1 数据缺失时不更新"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -641,7 +641,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -659,7 +659,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """无行情数据时跳过"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -676,7 +676,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """指数数据获取失败时跳过记录以避免标签污染"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -686,7 +686,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=None)
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=None)
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -712,7 +712,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.get_daily_quotes.assert_not_called()
+            mock_cache_instance.quote_dao.get_daily_quotes.assert_not_called()
 
         asyncio.run(run_test())
 
@@ -723,7 +723,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_cache_instance,
             pending_df=self._make_pending_df(trade_dates=["20240310"]),
         )
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -733,7 +733,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -758,7 +758,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 trade_dates=["20240315", "20240315"],
             ),
         )
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
@@ -768,7 +768,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -786,7 +786,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """run_review 应调用 get_index_daily_range 进行批量预获取"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -805,7 +805,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
@@ -825,7 +825,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """批量预获取成功后，循环内不应再调用 get_index_daily"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -844,7 +844,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
@@ -853,7 +853,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.get_index_daily.assert_not_called()
+            mock_cache_instance.quote_dao.get_index_daily.assert_not_called()
             mock_api_instance.get_index_daily.assert_not_called()
 
         asyncio.run(run_test())
@@ -862,7 +862,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         """批量预获取失败时，应降级到逐日查询"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
-        mock_cache_instance.get_daily_quotes = AsyncMock(
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -873,7 +873,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(side_effect=RuntimeError("bulk fetch failed"))
-        mock_cache_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
 
         mock_api_instance = MagicMock()
         mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
@@ -882,7 +882,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.get_index_daily.assert_called_once()
+            mock_cache_instance.quote_dao.get_index_daily.assert_called_once_with(
+                ts_code="000001.SH", trade_date=datetime.date(2024, 3, 18)
+            )
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
 
         asyncio.run(run_test())

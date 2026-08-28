@@ -218,7 +218,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(
                 return_value=[
@@ -241,7 +241,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
@@ -266,7 +266,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
@@ -291,7 +291,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
@@ -316,7 +316,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
@@ -330,7 +330,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             svc._notify_listeners = AsyncMock()
             await svc._fetch_and_notify()
             svc._notify_listeners.assert_not_called()
-            svc.cache.save_market_news.assert_not_called()
+            svc.cache.market_dao.save_market_news.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
@@ -342,7 +342,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
         mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
@@ -358,7 +358,9 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             await svc._fetch_and_notify()
             # 两条归一化后均变为 `看 详情 "测试"`（URL 去除、空白折叠、实体解码），hash 一致
             # reversed 先处理 item2，item1 命中 _seen_hashes 去重，仅入库 1 条
-            svc.cache.save_market_news.assert_called_once()
+            svc.cache.market_dao.save_market_news.assert_called_once_with(
+                mock_cache.normalize_news_item.return_value, wait=True
+            )
 
 
 class TestNewsSubscriptionServiceSeenHashes:
@@ -558,7 +560,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         alert_cb = MagicMock()
         svc._alert_listeners.add(alert_cb)
@@ -582,7 +584,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
 
         async def slow_alert(msg):
@@ -615,7 +617,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         alert_cb = MagicMock(side_effect=Exception("alert error"))
         svc._alert_listeners.add(alert_cb)
@@ -649,7 +651,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         svc._running = True
         svc.processing_queue = asyncio.Queue(maxsize=10)
         await svc.processing_queue.put({"content": ""})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc._notify_listeners = AsyncMock()
         svc._generate_tags = AsyncMock(return_value="tag")
         loop_task = asyncio.create_task(svc._processing_loop())
@@ -667,7 +669,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         svc._running = True
         svc.processing_queue = asyncio.Queue(maxsize=10)
         await svc.processing_queue.put({"content": "test news content"})
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         svc._notify_listeners = AsyncMock()
         svc._generate_tags = AsyncMock(return_value="tag")
@@ -677,7 +679,9 @@ class TestNewsSubscriptionServiceProcessingLoop:
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await loop_task
-        svc.cache.save_market_news.assert_called_once()
+        svc.cache.market_dao.save_market_news.assert_called_once_with(
+            mock_cache_cls.normalize_news_item.return_value, wait=True
+        )
 
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
@@ -754,7 +758,7 @@ class TestNewsSubscriptionServiceInitialSync:
         svc._last_news_time = None
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         svc._notify_listeners = AsyncMock()
         svc._safe_queue_put = AsyncMock()
@@ -1215,7 +1219,7 @@ class TestNewsSubscriptionServiceFetchAlertSyncListener:
         svc._last_news_time = "10:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         called = [False]
 
@@ -1244,7 +1248,7 @@ class TestNewsSubscriptionServiceFetchNewItemsNotify:
         svc._last_news_time = "10:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
-        svc.cache.save_market_news = AsyncMock()
+        svc.cache.market_dao.save_market_news = AsyncMock()
         svc.cache.normalize_news_item = MagicMock(return_value={"content": "test"})
         with (
             patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,

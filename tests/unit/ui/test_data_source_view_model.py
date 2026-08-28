@@ -76,6 +76,7 @@ def mock_cache():
     with patch("ui.viewmodels.data_source_view_model.CacheManager") as cls:
         instance = MagicMock(spec=CacheManager)
         instance.clear_all_cache = AsyncMock()
+        instance.sync_dao = MagicMock()
         cls.return_value = instance
         yield instance
 
@@ -461,7 +462,7 @@ class TestDataSourceViewModelFullDailySync:
     ):
         """Task 8.2: SyncResult.skipped > 0 时发射 snack_sync_skipped_fmt."""
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10, skipped=5))
-        mock_cache.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
@@ -477,7 +478,7 @@ class TestDataSourceViewModelFullDailySync:
     ):
         """Task 8.2: skipped_permission 表存在时发射 snack_sync_permission_skipped_fmt."""
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
-        mock_cache.get_sync_status = AsyncMock(
+        mock_cache.sync_dao.get_sync_status = AsyncMock(
             return_value=pd.DataFrame(
                 {"table_name": ["a", "b", "c"], "status": ["success", "skipped_permission", "skipped_permission"]}
             )
@@ -495,7 +496,7 @@ class TestDataSourceViewModelFullDailySync:
     ):
         """Task 8.2: skipped=0 且无 skipped_permission 时不发射额外 snack."""
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
-        mock_cache.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
@@ -515,7 +516,7 @@ class TestDataSourceViewModelFullDailySync:
         outer except asyncio.CancelledError 发射 settings_msg_sync_cancelled snack → finally 重置 sync busy.
         """
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
-        mock_cache.get_sync_status = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_cache.sync_dao.get_sync_status = AsyncMock(side_effect=asyncio.CancelledError())
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
@@ -537,7 +538,7 @@ class TestDataSourceViewModelFullDailySync:
     ):
         """L405-406: get_sync_status 抛普通 Exception 时降级为 debug 日志, 不影响主流程."""
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
-        mock_cache.get_sync_status = AsyncMock(side_effect=RuntimeError("sync_status query failed"))
+        mock_cache.sync_dao.get_sync_status = AsyncMock(side_effect=RuntimeError("sync_status query failed"))
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)

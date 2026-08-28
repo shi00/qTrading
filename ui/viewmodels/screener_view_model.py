@@ -1524,7 +1524,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """
         cache = CacheManager()
         offset = self._state.history_tree.offset if append else 0
-        df = await cache.get_history_tree(offset=offset)
+        df = await cache.screener_dao.get_history_tree(offset=offset)
         if df is None or df.empty:
             if not append:
                 # 重置 rows (切换到 HISTORY 模式后无数据)
@@ -1609,7 +1609,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._set_state(loading=True)
         try:
             cache = CacheManager()
-            df = await cache.get_history_records(trade_date, strategy_name, run_id)
+            df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
             if df is not None and not df.empty:
                 self._full_results = df
             else:

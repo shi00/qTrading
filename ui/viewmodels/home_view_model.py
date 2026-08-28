@@ -355,7 +355,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         try:
             processor = await self._ensure_processor()
             offset = page * self.PAGE_SIZE
-            return await processor.cache.get_market_news(
+            return await processor.cache.market_dao.get_market_news(
                 limit=self.PAGE_SIZE,
                 offset=offset,
             )

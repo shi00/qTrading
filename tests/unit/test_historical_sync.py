@@ -21,25 +21,25 @@ def make_ctx():
     ctx.processor.trade_calendar = MagicMock()
     ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
     ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614", "20240613"])
-    ctx.cache.check_data_exists = AsyncMock(return_value=False)
+    ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=False)
     ctx.cache.get_cached_dates_for_table = AsyncMock(return_value=set())
     ctx.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={})
     ctx.cache.get_bulk_expected_stock_counts = AsyncMock(return_value={})
-    ctx.cache.save_daily_quotes = AsyncMock(return_value=10)
-    ctx.cache.save_daily_indicators = AsyncMock(return_value=10)
-    ctx.cache.save_limit_list = AsyncMock(return_value=5)
-    ctx.cache.save_suspend_d = AsyncMock(return_value=2)
-    ctx.cache.save_margin_daily = AsyncMock(return_value=3)
-    ctx.cache.save_moneyflow = AsyncMock(return_value=4)
-    ctx.cache.save_northbound = AsyncMock(return_value=5)
-    ctx.cache.save_moneyflow_hsgt = AsyncMock(return_value=2)
-    ctx.cache.save_top_list = AsyncMock(return_value=1)
+    ctx.cache.quote_dao.save_daily_quotes = AsyncMock(return_value=10)
+    ctx.cache.market_dao.save_daily_indicators = AsyncMock(return_value=10)
+    ctx.cache.quote_dao.save_limit_list = AsyncMock(return_value=5)
+    ctx.cache.quote_dao.save_suspend_d = AsyncMock(return_value=2)
+    ctx.cache.quote_dao.save_margin_daily = AsyncMock(return_value=3)
+    ctx.cache.quote_dao.save_moneyflow = AsyncMock(return_value=4)
+    ctx.cache.quote_dao.save_northbound = AsyncMock(return_value=5)
+    ctx.cache.market_dao.save_moneyflow_hsgt = AsyncMock(return_value=2)
+    ctx.cache.quote_dao.save_top_list = AsyncMock(return_value=1)
     ctx.cache.save_top_inst = AsyncMock(return_value=0)
     ctx.cache.save_stk_limit = AsyncMock(return_value=0)
-    ctx.cache.save_block_trade = AsyncMock(return_value=1)
-    ctx.cache.save_index_daily = AsyncMock(return_value=3)
-    ctx.cache.save_index_dailybasic = AsyncMock(return_value=3)
-    ctx.cache.update_sync_status = AsyncMock()
+    ctx.cache.quote_dao.save_block_trade = AsyncMock(return_value=1)
+    ctx.cache.quote_dao.save_index_daily = AsyncMock(return_value=3)
+    ctx.cache.quote_dao.save_index_dailybasic = AsyncMock(return_value=3)
+    ctx.cache.sync_dao.update_sync_status = AsyncMock()
     ctx.api.get_daily_quotes = AsyncMock(
         return_value=pd.DataFrame(
             {
@@ -118,7 +118,7 @@ class TestHistoricalSyncDailySnapshot:
     @pytest.mark.asyncio
     async def test_cache_hit_skip(self):
         ctx = make_ctx()
-        ctx.cache.check_data_exists = AsyncMock(return_value=True)
+        ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=True)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14))
         assert result is True
@@ -201,7 +201,7 @@ class TestHistoricalSyncMoneyflow:
     async def test_moneyflow_save_count_zero(self):
         ctx = make_ctx()
         ctx.api.get_moneyflow = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
-        ctx.cache.save_moneyflow = AsyncMock(return_value=0)
+        ctx.cache.quote_dao.save_moneyflow = AsyncMock(return_value=0)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_moneyflow(datetime.date(2024, 6, 14))
         assert result == 0
@@ -210,7 +210,7 @@ class TestHistoricalSyncMoneyflow:
     async def test_moneyflow_save_count_none(self):
         ctx = make_ctx()
         ctx.api.get_moneyflow = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
-        ctx.cache.save_moneyflow = AsyncMock(return_value=None)
+        ctx.cache.quote_dao.save_moneyflow = AsyncMock(return_value=None)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_moneyflow(datetime.date(2024, 6, 14))
         assert result is None
@@ -295,7 +295,7 @@ class TestHistoricalSyncNorthbound:
         ctx.api.get_hk_hold = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
         )
-        ctx.cache.save_northbound = AsyncMock(return_value=0)
+        ctx.cache.quote_dao.save_northbound = AsyncMock(return_value=0)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_northbound(datetime.date(2024, 6, 14))
         assert result == 0
@@ -306,7 +306,7 @@ class TestHistoricalSyncNorthbound:
         ctx.api.get_hk_hold = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
         )
-        ctx.cache.save_northbound = AsyncMock(return_value=None)
+        ctx.cache.quote_dao.save_northbound = AsyncMock(return_value=None)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_northbound(datetime.date(2024, 6, 14))
         assert result is None
@@ -383,7 +383,7 @@ class TestHistoricalSyncGetEffectiveTradeDate:
         """review03-C14: L1 日历服务异常 → 回退到已同步行情最大日期。"""
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -395,7 +395,7 @@ class TestHistoricalSyncGetEffectiveTradeDate:
 
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=None)
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         strategy = HistoricalSyncStrategy(ctx)
         with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
             await strategy._get_effective_trade_date()
@@ -447,7 +447,7 @@ class TestHistoricalSyncRunExtended:
     async def test_run_with_cached_dates(self):
         ctx = make_ctx()
         ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
-        ctx.cache.check_data_exists = AsyncMock(return_value=True)
+        ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=True)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.run(days=5)
         assert result is not None
@@ -612,7 +612,7 @@ class TestHistoricalSyncDailySnapshotExtended:
     @pytest.mark.asyncio
     async def test_save_if_ok_non_critical_save_exception(self):
         ctx = make_ctx()
-        ctx.cache.save_limit_list = AsyncMock(side_effect=Exception("save err"))
+        ctx.cache.quote_dao.save_limit_list = AsyncMock(side_effect=Exception("save err"))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
@@ -621,7 +621,7 @@ class TestHistoricalSyncDailySnapshotExtended:
     async def test_save_if_ok_critical_save_exception_does_not_raise(self):
         """S8: 单个 critical 表 save 失败不再 raise，仅记错误并返回 True。"""
         ctx = make_ctx()
-        ctx.cache.save_daily_quotes = AsyncMock(side_effect=Exception("critical save err"))
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(side_effect=Exception("critical save err"))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
@@ -663,7 +663,7 @@ class TestHistoricalSyncDailySnapshotExtended:
         ctx.api.get_hk_hold = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
         )
-        ctx.cache.save_northbound = AsyncMock(side_effect=Exception("save north err"))
+        ctx.cache.quote_dao.save_northbound = AsyncMock(side_effect=Exception("save north err"))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
@@ -679,7 +679,7 @@ class TestHistoricalSyncDailySnapshotExtended:
     @pytest.mark.asyncio
     async def test_safe_update_status_save_failed(self):
         ctx = make_ctx()
-        ctx.cache.save_limit_list = AsyncMock(side_effect=Exception("save fail"))
+        ctx.cache.quote_dao.save_limit_list = AsyncMock(side_effect=Exception("save fail"))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
@@ -687,7 +687,7 @@ class TestHistoricalSyncDailySnapshotExtended:
     @pytest.mark.asyncio
     async def test_verify_data_integrity_mismatch(self):
         ctx = make_ctx()
-        ctx.cache.save_daily_quotes = AsyncMock(return_value=5)
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(return_value=5)
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(
             datetime.date(2024, 6, 14), force=True, sync_result=SyncResult()
@@ -712,7 +712,7 @@ class TestHistoricalSyncDailySnapshotExtended:
                 }
             )
         )
-        ctx.cache.save_daily_quotes = AsyncMock(return_value=18)
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(return_value=18)
         strategy = HistoricalSyncStrategy(ctx)
         sr = SyncResult()
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
@@ -736,7 +736,7 @@ class TestHistoricalSyncDailySnapshotExtended:
                 }
             )
         )
-        ctx.cache.save_daily_quotes = AsyncMock(return_value=96)
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(return_value=96)
         strategy = HistoricalSyncStrategy(ctx)
         sr = SyncResult()
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
@@ -763,7 +763,7 @@ class TestHistoricalSyncDailySnapshotExtended:
                 }
             )
         )
-        ctx.cache.save_daily_quotes = AsyncMock(return_value=19)
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(return_value=19)
         strategy = HistoricalSyncStrategy(ctx)
         sr = SyncResult()
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
@@ -789,7 +789,7 @@ class TestHistoricalSyncDailySnapshotExtended:
                 }
             )
         )
-        ctx.cache.save_moneyflow = AsyncMock(return_value=18)
+        ctx.cache.quote_dao.save_moneyflow = AsyncMock(return_value=18)
         strategy = HistoricalSyncStrategy(ctx)
         sr = SyncResult()
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
@@ -906,7 +906,7 @@ class TestHistoricalSyncTopInst:
         ctx.api.get_top_inst.assert_awaited_once_with(trade_date=datetime.date(2024, 6, 14))
         ctx.cache.save_top_inst.assert_awaited_once()
         # sync_status 表名应为 "top_inst"
-        update_calls = ctx.cache.update_sync_status.await_args_list
+        update_calls = ctx.cache.sync_dao.update_sync_status.await_args_list
         table_names = [call.args[0] for call in update_calls]
         assert "top_inst" in table_names
 
@@ -953,7 +953,7 @@ class TestHistoricalSyncStkLimit:
         ctx.api.get_stk_limit.assert_awaited_once_with(trade_date=datetime.date(2024, 6, 14))
         ctx.cache.save_stk_limit.assert_awaited_once()
         # sync_status 表名应为 "stk_limit"
-        update_calls = ctx.cache.update_sync_status.await_args_list
+        update_calls = ctx.cache.sync_dao.update_sync_status.await_args_list
         table_names = [call.args[0] for call in update_calls]
         assert "stk_limit" in table_names
 
@@ -1264,7 +1264,7 @@ class TestSyncDailyMarketSnapshotCancellation:
         ctx.api.get_daily_quotes = AsyncMock(side_effect=set_shutdown_after_fetch)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is False
-        ctx.cache.save_daily_quotes.assert_not_awaited()
+        ctx.cache.quote_dao.save_daily_quotes.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_shutdown_after_critical_saves_returns_false(self):
@@ -1276,10 +1276,10 @@ class TestSyncDailyMarketSnapshotCancellation:
             strategy._shutdown_event.set()
             return 10
 
-        ctx.cache.save_daily_indicators = AsyncMock(side_effect=set_shutdown_after_basic)
+        ctx.cache.market_dao.save_daily_indicators = AsyncMock(side_effect=set_shutdown_after_basic)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is False
-        ctx.cache.save_limit_list.assert_not_awaited()
+        ctx.cache.quote_dao.save_limit_list.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_shutdown_before_northbound_returns_false(self):
@@ -1295,10 +1295,10 @@ class TestSyncDailyMarketSnapshotCancellation:
             strategy._shutdown_event.set()
             return 3
 
-        ctx.cache.save_index_dailybasic = AsyncMock(side_effect=set_shutdown_after_index_basic)
+        ctx.cache.quote_dao.save_index_dailybasic = AsyncMock(side_effect=set_shutdown_after_index_basic)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is False
-        ctx.cache.update_sync_status.assert_not_awaited()
+        ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
 
 
 class TestCriticalTableErrorIsolation:
@@ -1312,18 +1312,18 @@ class TestCriticalTableErrorIsolation:
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
-        ctx.cache.save_daily_indicators.assert_awaited()
+        ctx.cache.market_dao.save_daily_indicators.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_basic_save_failure_continues_sync(self):
         """basic save 失败，quotes 成功，不 raise，返回 True，sync_status 仍更新"""
         ctx = make_ctx()
-        ctx.cache.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
+        ctx.cache.market_dao.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
         # 验证 basic 被标记为 save_failed（方法执行到 sync_status 更新阶段）
-        update_calls = ctx.cache.update_sync_status.await_args_list
+        update_calls = ctx.cache.sync_dao.update_sync_status.await_args_list
         basic_calls = [c for c in update_calls if c.args[0] == "daily_indicators"]
         assert len(basic_calls) > 0
         assert basic_calls[0].kwargs.get("status") == "save_failed"
@@ -1342,8 +1342,8 @@ class TestCriticalTableErrorIsolation:
     async def test_all_critical_save_failures_raises(self):
         """quotes 和 basic save 都失败，raise RuntimeError 触发 circuit breaker"""
         ctx = make_ctx()
-        ctx.cache.save_daily_quotes = AsyncMock(side_effect=Exception("quotes save err"))
-        ctx.cache.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
+        ctx.cache.quote_dao.save_daily_quotes = AsyncMock(side_effect=Exception("quotes save err"))
+        ctx.cache.market_dao.save_daily_indicators = AsyncMock(side_effect=Exception("basic save err"))
         strategy = HistoricalSyncStrategy(ctx)
         with pytest.raises(RuntimeError, match="All critical tables"):
             await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
@@ -1373,7 +1373,7 @@ class TestFetchIndicesPermissionError:
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
-        update_calls = ctx.cache.update_sync_status.await_args_list
+        update_calls = ctx.cache.sync_dao.update_sync_status.await_args_list
         index_calls = [c for c in update_calls if c.args[0] == "index_daily"]
         assert len(index_calls) > 0
         assert index_calls[0].kwargs.get("status") == "skipped_permission"
@@ -1397,7 +1397,7 @@ class TestFetchIndicesPermissionError:
         strategy = HistoricalSyncStrategy(ctx)
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result is True
-        update_calls = ctx.cache.update_sync_status.await_args_list
+        update_calls = ctx.cache.sync_dao.update_sync_status.await_args_list
         index_calls = [c for c in update_calls if c.args[0] == "index_daily"]
         assert len(index_calls) > 0
         assert index_calls[0].kwargs.get("status") == "skipped_permission"

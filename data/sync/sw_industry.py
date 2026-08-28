@@ -135,7 +135,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             combined = pd.concat(frames, ignore_index=True)
             count = await self.classify_dao.save_sw_industry_classify(combined)
             result.added += count if count else 0
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "sw_industry_classify",
                 get_now().date(),
                 count or 0,
@@ -260,7 +260,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     errors,
                     total,
                 )
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "sw_industry_member",
                     get_now().date(),
                     total_rows,
@@ -273,7 +273,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 combined = combined.drop_duplicates(subset=["ts_code", "index_code"])
             count = await self.member_dao.save_sw_industry_member(combined)
             result.added += count if count else 0
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "sw_industry_member",
                 get_now().date(),
                 count or 0,
@@ -303,7 +303,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
     async def _record_skipped_permission(self, table_name: str) -> None:
         """记录 skipped_permission 状态到 sync_status 表，便于 UI 展示降级提示。"""
         try:
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 table_name,
                 get_now().date(),
                 0,

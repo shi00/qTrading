@@ -153,7 +153,7 @@ async def test_oversold(strategies_ctx):
             }
         )
     history_df = pd.DataFrame(history_data)
-    cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+    cache_mock.quote_dao.get_daily_quotes = AsyncMock(return_value=history_df)
     dp_mock.cache = cache_mock
     ctx = strategies_ctx.context.copy()
     ctx["data_processor"] = dp_mock
@@ -185,7 +185,7 @@ async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
     history_df = pd.DataFrame(history_data)
 
     cache_mock = MagicMock()
-    cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+    cache_mock.quote_dao.get_daily_quotes = AsyncMock(return_value=history_df)
     dp_mock.cache = cache_mock
 
     ctx = strategies_ctx.context.copy()

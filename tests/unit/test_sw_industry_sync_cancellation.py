@@ -25,7 +25,7 @@ def _make_ctx(**overrides):
     ctx = MagicMock(spec=SyncContext)
     ctx.cache = MagicMock()
     ctx.cache.engine = MagicMock()
-    ctx.cache.update_sync_status = AsyncMock(return_value=None)
+    ctx.cache.sync_dao.update_sync_status = AsyncMock(return_value=None)
     ctx.api = MagicMock()
     ctx.processor = None
     for key, value in overrides.items():

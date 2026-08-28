@@ -78,7 +78,7 @@ class TestCheckMultiPeriodData:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_no_stock_basic(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(return_value=None)
         mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"roe": [10.0]}))
         mock_cm_cls.return_value = mock_cache
         result = await check_multi_period_data("roe")
@@ -88,7 +88,7 @@ class TestCheckMultiPeriodData:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_with_stock_basic(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
         )
         mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"roe": [10.0, 12.0]}))
@@ -100,7 +100,7 @@ class TestCheckMultiPeriodData:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_all_empty(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(return_value=None)
         mock_cache.get_financial_reports_history = AsyncMock(return_value=None)
         mock_cm_cls.return_value = mock_cache
         result = await check_multi_period_data("roe")
@@ -132,7 +132,7 @@ class TestPromptValidatorLazyLoading:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_exception(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
         mock_cm_cls.return_value = mock_cache
         result = await check_multi_period_data("roe")
         assert result is False
@@ -143,7 +143,7 @@ class TestCheckFieldExists:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_field_present(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(return_value=None)
         mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"n_cashflow_act": [500.0]}))
         mock_cm_cls.return_value = mock_cache
         result = await check_field_exists("n_cashflow_act")
@@ -153,7 +153,7 @@ class TestCheckFieldExists:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_field_absent(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(return_value=None)
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(return_value=None)
         mock_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame({"other_field": [1.0]}))
         mock_cm_cls.return_value = mock_cache
         result = await check_field_exists("n_cashflow_act")
@@ -163,7 +163,7 @@ class TestCheckFieldExists:
     @patch("data.cache.cache_manager.CacheManager")
     async def test_exception(self, mock_cm_cls):
         mock_cache = MagicMock()
-        mock_cache.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
+        mock_cache.stock_dao.get_stock_basic = AsyncMock(side_effect=Exception("DB error"))
         mock_cm_cls.return_value = mock_cache
         result = await check_field_exists("n_cashflow_act")
         assert result is False

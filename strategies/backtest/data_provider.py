@@ -118,13 +118,13 @@ class BacktestDataProvider:
         try:
             # 并行查询所有数据
             results = await asyncio.gather(
-                self.cache.get_screening_data_range(start_str, end_str),
-                self.cache.get_fundamental_screening_data_range(start_str, end_str),
-                self.cache.get_northbound_range(start_str, end_str),
-                self.cache.get_moneyflow_hsgt_range(start_str, end_str),
-                self.cache.get_moneyflow_range(start_str, end_str),
-                self.cache.get_top_list_range(start_str, end_str),
-                self.cache.get_block_trade_range(start_str, end_str),
+                self.cache.screener_dao.get_screening_data_range(start_str, end_str),
+                self.cache.screener_dao.get_fundamental_screening_data_range(start_str, end_str),
+                self.cache.quote_dao.get_northbound_range(start_str, end_str),
+                self.cache.market_dao.get_moneyflow_hsgt_range(start_str, end_str),
+                self.cache.quote_dao.get_moneyflow_range(start_str, end_str),
+                self.cache.quote_dao.get_top_list_range(start_str, end_str),
+                self.cache.quote_dao.get_block_trade_range(start_str, end_str),
                 return_exceptions=True,
             )
 
@@ -287,11 +287,11 @@ class BacktestDataProvider:
 
         # 3. 加载辅助表
         auxiliary_tables = {
-            "northbound_data": self.cache.get_northbound,
-            "northbound_flow_data": self.cache.get_moneyflow_hsgt,
-            "moneyflow_data": self.cache.get_moneyflow,
-            "top_list": self.cache.get_top_list,
-            "block_trade": self.cache.get_block_trade,
+            "northbound_data": self.cache.quote_dao.get_northbound,
+            "northbound_flow_data": self.cache.market_dao.get_moneyflow_hsgt,
+            "moneyflow_data": self.cache.quote_dao.get_moneyflow,
+            "top_list": self.cache.quote_dao.get_top_list,
+            "block_trade": self.cache.quote_dao.get_block_trade,
         }
 
         all_aux_ready = True
@@ -338,7 +338,7 @@ class BacktestDataProvider:
         try:
             if self.data_processor is not None:
                 return await self.data_processor.get_screening_data(trade_date)
-            return await self.cache.get_screening_data(trade_date)
+            return await self.cache.screener_dao.get_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
@@ -363,7 +363,7 @@ class BacktestDataProvider:
         try:
             if self.data_processor is not None:
                 return await self.data_processor.get_fundamental_screening_data(trade_date)
-            return await self.cache.get_fundamental_screening_data(trade_date)
+            return await self.cache.screener_dao.get_fundamental_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出基本面筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
@@ -393,7 +393,7 @@ class BacktestDataProvider:
             {ts_code: {"delist_date": date | None}}
         """
         try:
-            stock_basic_df = await self.cache.get_stock_basic()
+            stock_basic_df = await self.cache.stock_dao.get_stock_basic()
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出股票元数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(

@@ -446,7 +446,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
         hsgt_df.empty = False
         hsgt_df.iloc = [MagicMock()]
         hsgt_df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
-        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=hsgt_df)
+        svc.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=hsgt_df)
 
         mock_news.get_hot_concepts = AsyncMock(return_value=[{"name": "AI", "change": "+3%", "color": "red"}])
 
@@ -480,7 +480,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
         svc.api = mock_tc
 
         svc._get_indices_batch = AsyncMock(side_effect=Exception("DB error"))
-        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
         mock_news.get_hot_concepts = AsyncMock(return_value=[])
 
@@ -519,7 +519,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
             }
         )
         svc.cache.get_index_daily_range = AsyncMock(return_value=index_df)
-        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
         mock_news.get_hot_concepts = AsyncMock(return_value=[])
 
@@ -560,7 +560,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
             }
         )
         svc.cache.get_index_daily_range = AsyncMock(return_value=index_df)
-        svc.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        svc.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         svc.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
 
         # First call: hot concepts succeeds
@@ -765,7 +765,7 @@ class TestMarketDataServiceGetHsgt:
         df.empty = False
         df.iloc = [MagicMock()]
         df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
-        mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
         svc = MarketDataService()
         result = await svc._get_hsgt("20240614")
         assert result["color"] == "red"
@@ -781,7 +781,7 @@ class TestMarketDataServiceGetHsgt:
         df.empty = False
         df.iloc = [MagicMock()]
         df.iloc[0].get = lambda k: -50.0 if k == "north_money" else 0
-        mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
         svc = MarketDataService()
         result = await svc._get_hsgt("20240614")
         assert result["color"] == "green"
@@ -793,7 +793,7 @@ class TestMarketDataServiceGetHsgt:
     async def test_empty_returns_grey(self, mock_tc, mock_cache_cls, mock_api):
         mock_cache = MagicMock()
         mock_cache_cls.return_value = mock_cache
-        mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         mock_api_inst = MagicMock()
         mock_api_inst.get_moneyflow_hsgt = AsyncMock(return_value=None)
         mock_tc.return_value = mock_api_inst
@@ -814,7 +814,7 @@ class TestMarketDataServiceGetHsgt:
         df.empty = False
         df.iloc = [MagicMock()]
         df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
-        mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
 
         with patch(
             "data.domain_services.market_data_service.get_column_unit",

@@ -99,7 +99,7 @@ async def test_no_data_processor():
 async def test_trade_date_string_parse():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -114,7 +114,7 @@ async def test_trade_date_string_parse():
 async def test_trade_date_dash_format():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -142,7 +142,7 @@ async def test_trade_date_invalid_string():
 async def test_trade_date_date_object():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -156,7 +156,7 @@ async def test_trade_date_date_object():
 async def test_no_trade_date_auto_resolve():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {"screening_data": snapshot, "data_processor": dp, "params": {}}
     await s._math_filter(context, 14, 30, 1.5)
@@ -177,7 +177,7 @@ async def test_no_start_date_fallback():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
     dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -191,7 +191,7 @@ async def test_no_start_date_fallback():
 async def test_no_historical_data():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -206,7 +206,7 @@ async def test_no_historical_data():
 async def test_quality_gate_error_reraises():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(side_effect=QualityGateError("quality too low"))
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=QualityGateError("quality too low"))
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -221,7 +221,7 @@ async def test_quality_gate_error_reraises():
 async def test_generic_exception_reraises():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(side_effect=ValueError("test error"))
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=ValueError("test error"))
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
     context = {
         "screening_data": snapshot,
@@ -251,7 +251,7 @@ async def test_rsi_filter_with_data():
         "pct_chg": [-0.5] * n_days,
     }
     history_pdf = pd.DataFrame(history_data)
-    dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_pdf)
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = {
         "screening_data": snapshot,
@@ -281,7 +281,7 @@ async def test_rsi_filter_no_candidates():
         "pct_chg": [0.5] * n_days,
     }
     history_pdf = pd.DataFrame(history_data)
-    dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_pdf)
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [13.0]})
     context = {
         "screening_data": snapshot,
@@ -891,7 +891,7 @@ async def test_math_filter_run_async_called_with_cpu_task_type():
     """_math_filter should call run_async(TaskType.CPU, ...) for the CPU pipeline."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
 
@@ -908,7 +908,7 @@ async def test_math_filter_from_pandas_offloaded_to_thread_pool():
     """pl.from_pandas must run inside the run_async callable, not in the event loop (R16)."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
 
@@ -941,7 +941,7 @@ async def test_math_filter_merge_offloaded_to_thread_pool():
     """pd.merge must run inside the run_async callable, not in the event loop (R16)."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
 
@@ -979,7 +979,7 @@ async def test_math_filter_sort_values_offloaded_to_thread_pool():
     """DataFrame.sort_values must run inside the run_async callable, not in the event loop (R16)."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
 
@@ -1015,7 +1015,7 @@ async def test_math_filter_cancelled_error_propagates():
     """CancelledError raised by run_async must propagate, not be swallowed by except Exception (R2)."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
     context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
 
@@ -1031,7 +1031,7 @@ async def test_math_filter_result_columns_and_sort_preserved():
     """After offload, result must keep expected columns and remain sorted by RSI ascending."""
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
-    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
     snapshot = pd.DataFrame(
         {
             "ts_code": ["000001.SZ"],

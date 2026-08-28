@@ -72,10 +72,10 @@ def _make_mock_dp(*, is_cancelled: bool = False, trade_date: str | None = None) 
     dp.is_cancelled = MagicMock(return_value=is_cancelled)
     dp.cache = MagicMock()
     dp.cache.get_concepts = AsyncMock(return_value={})
-    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_top_inst_batch = AsyncMock(return_value=pd.DataFrame())
     dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
     dp.cache.get_macro_economy = AsyncMock(return_value=None)
@@ -531,10 +531,10 @@ class TestRunAiAnalysis:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         context = {"data_processor": dp, "trade_date": "20240118"}
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.0]})
         with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -545,9 +545,9 @@ class TestRunAiAnalysis:
             )
             mock_ai.return_value = mock_ai_instance
             await s.run_ai_analysis(candidates, context)
-            dp.cache.get_moneyflow.assert_awaited_once_with(trade_date="20240118")
-            dp.cache.get_top_list.assert_awaited_once_with(trade_date="20240118")
-            dp.cache.get_northbound.assert_awaited_once_with(trade_date="20240118")
+            dp.cache.quote_dao.get_moneyflow.assert_awaited_once_with(trade_date="20240118")
+            dp.cache.quote_dao.get_top_list.assert_awaited_once_with(trade_date="20240118")
+            dp.cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240118")
 
     @pytest.mark.asyncio
     async def test_with_cancellation(self):
@@ -575,10 +575,10 @@ class TestRunAiAnalysis:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         context = {"data_processor": dp}
         candidates = pd.DataFrame(
             {
@@ -621,10 +621,10 @@ class TestRunAiAnalysis:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
         context = {"data_processor": dp, "_disable_ai": False}
         with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -645,10 +645,10 @@ class TestRunAiAnalysis:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
         context = {"data_processor": dp}
         with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -669,10 +669,10 @@ class TestRunAiAnalysis:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
         context = {"data_processor": dp, "trade_date": "20240118", "is_backtest": True}
 
@@ -706,7 +706,7 @@ class TestRunAiAnalysis:
         s = ConcreteStrategy()
         dp = _make_mock_dp()
         # get_daily_quotes 抛异常，触发 except 块
-        dp.cache.get_daily_quotes = AsyncMock(side_effect=RuntimeError("DB connection lost"))
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=RuntimeError("DB connection lost"))
         context = {"data_processor": dp, "trade_date": "20240118"}
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
 
@@ -2297,9 +2297,9 @@ def make_mock_dp():
     )
     dp.cache = MagicMock()
     dp.cache.get_concepts = AsyncMock(return_value={})
-    dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    dp.cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_northbound_holding = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_northbound_flow = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_financial_summary = AsyncMock(return_value=None)
@@ -2416,10 +2416,10 @@ class TestRunAiAnalysisConcurrency:
         dp.is_cancelled = MagicMock(return_value=False)
         dp.cache = MagicMock()
         dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
         dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
         dp.get_latest_trade_date = AsyncMock(return_value="20240118")
         return {"data_processor": dp}
