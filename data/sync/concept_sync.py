@@ -458,11 +458,9 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             succeeded_codes: list[str] = []
 
             for ts_code, name in pending:
-                if self._cancelled:
-                    result.status = SyncStatus.CANCELLED.value
-                    break
-                if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
-                    result.status = SyncStatus.CANCELLED.value
+                # 基类 _check_cancelled 统一处理 _cancelled 标志 + context.cancel_event 同步，
+                # 命中时已设置 result.status=CANCELLED，无需在循环内重复双层检查。
+                if self._check_cancelled(result):
                     break
 
                 try:
@@ -639,7 +637,8 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
         )
         try:
             while not llm_task.done():
-                if hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                # cancel_event 非 None 在此分支已由上方提前 return 保证，必有 is_set
+                if cancel_event.is_set():
                     llm_task.cancel()
                     # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
                     # T7/L4/L3 fix: 记录原始异常便于调试，不覆盖外层 CancelledError（见 _suppress_task_error）
