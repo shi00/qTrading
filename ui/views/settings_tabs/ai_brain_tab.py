@@ -324,8 +324,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         text_size=AppStyles.FONT_SIZE_BODY_SM,
         hint_text=I18n.get("settings_news_prompt_hint"),
         on_change=lambda e: ai_settings_vm.set_news_prompt_value(e.control.value),
-        # NOTE(lazy): 同 ai_prompt_input — 无 Ctrl+Enter 提交 (UX-09 P2-04, 见上行三要素).
-        # upgrade: Flet 提供带修饰键的提交事件时恢复.
+        # NOTE(lazy): 同 ai_prompt_input — 无 Ctrl+Enter 提交 (UX-09 P2-04, 与上行三要素一致).
+        # ceiling: 保存走显式"保存 AI 设置"按钮.
+        # upgrade: Flet 提供带修饰键的提交事件 (如 on_submit 携带 modifierFlags) 时恢复.
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
