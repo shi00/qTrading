@@ -937,6 +937,60 @@ class TestReviewManagerRunReviewIndexApiFallback:
         await rm.run_review()
         rm._update_result.assert_not_called()
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_inner_index_lookup_system_error_critical_log(self, mock_cm, mock_tc, caplog):
+        """内层 index lookup（L178-191）的 system 级异常（PermissionError）走 critical 日志。
+
+        与 test_cache_exception_falls_to_none 对照：RuntimeError 为 operational 级，降级为
+        index_cache=None 继续循环；PermissionError 经 classify_severity 判为 "system"，
+        log_classified 以 CRITICAL 记录（L180-188）并 raise（L189-190）。该 raise 被行级
+        handler（L232-233）吞没，run_review 正常完成且不更新结果——此处以 critical 日志
+        强断言 system 路径已实际执行（覆盖 L189-190）。
+        """
+        import logging
+
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        # 显式 mock get_index_daily_range 返回空 DataFrame，避免 MagicMock await 抛 TypeError 副作用
+        mock_cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.get_index_daily = AsyncMock(side_effect=PermissionError("permission denied"))
+        rm._update_result = AsyncMock()
+
+        with caplog.at_level(logging.CRITICAL, logger="data.persistence.review_manager"):
+            await rm.run_review()
+
+        # system 级异常经 log_classified 以 CRITICAL 记录（证明 L178-190 路径执行）
+        assert any(
+            r.levelno >= logging.CRITICAL and "Cache index lookup failed" in r.getMessage() for r in caplog.records
+        ), "system 级异常未走 critical 日志路径"
+        # raise 被行级 handler 吞没，run_review 正常完成，无结果更新
+        rm._update_result.assert_not_called()
+
 
 class TestReviewManagerRunReviewLossLabel:
     @pytest.mark.asyncio
