@@ -12,12 +12,12 @@ import time
 import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
-from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season, safe_error
+from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.loop_local import get_loop_local
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -166,17 +166,16 @@ class FinancialSyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[FinancialSync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[FinancialSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[FinancialSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
-                )
-            else:
-                logger.error("[FinancialSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -344,32 +343,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                         raise
                     except Exception as e:
                         has_error = True
-                        error_info = classify_error(e, context="general")
                         severity = classify_severity(e, context="general")
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[FinancialSync] StockSync | Failed (%s): %s for %s",
+                            ts_code,
+                            exc_info=True,
+                        )
                         if severity == "system":
-                            logger.critical(
-                                "[FinancialSync] StockSync | SYSTEM-LEVEL failure for %s: %s",
-                                ts_code,
-                                safe_error(e),
-                                exc_info=True,
-                            )
                             raise
-                        elif severity == "recoverable":
-                            logger.warning(
-                                "[FinancialSync] StockSync | Failed for %s (%s): %s",
-                                ts_code,
-                                error_info["code"],
-                                safe_error(e),
-                                exc_info=True,
-                            )
-                        else:
-                            logger.error(
-                                "[FinancialSync] StockSync | Failed for %s (%s): %s",
-                                ts_code,
-                                error_info["code"],
-                                safe_error(e),
-                                exc_info=True,
-                            )
 
                     if self._shutdown_event.is_set():
                         return
@@ -400,32 +384,17 @@ class FinancialSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[FinancialSync] StockSync | Failed (%s): %s for %s",
+                    ts_code,
+                    exc_info=True,
+                )
                 if severity == "system":
-                    logger.critical(
-                        "[FinancialSync] StockSync | SYSTEM-LEVEL failure for %s: %s",
-                        ts_code,
-                        safe_error(e),
-                        exc_info=True,
-                    )
                     raise
-                elif severity == "recoverable":
-                    logger.warning(
-                        "[FinancialSync] StockSync | Failed for %s (%s): %s",
-                        ts_code,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[FinancialSync] StockSync | Failed for %s (%s): %s",
-                        ts_code,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
 
             # Per-stock progress update (advance progress bar for processed stocks)
             if processed:
@@ -527,29 +496,16 @@ class FinancialSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[FinancialSync] Date parse | SYSTEM-LEVEL failure: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             start_date_dt = get_now() - datetime.timedelta(days=30)
 
         today_dt = get_now()
@@ -633,35 +589,18 @@ class FinancialSyncStrategy(ISyncStrategy):
                     except EngineDisposedError:
                         raise
                     except Exception as e:
-                        error_info = classify_error(e, context="general")
                         severity = classify_severity(e, context="general")
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[FinancialSync] Incremental | Failed (%s): %s for %s period=%s",
+                            ts_code,
+                            period,
+                            exc_info=True,
+                        )
                         if severity == "system":
-                            logger.critical(
-                                "[FinancialSync] Incremental | SYSTEM-LEVEL failure for %s period=%s: %s",
-                                ts_code,
-                                period,
-                                safe_error(e),
-                                exc_info=True,
-                            )
                             raise
-                        elif severity == "recoverable":
-                            logger.warning(
-                                "[FinancialSync] Incremental | Failed %s period=%s (%s): %s",
-                                ts_code,
-                                period,
-                                error_info["code"],
-                                safe_error(e),
-                                exc_info=True,
-                            )
-                        else:
-                            logger.error(
-                                "[FinancialSync] Incremental | Failed %s period=%s (%s): %s",
-                                ts_code,
-                                period,
-                                error_info["code"],
-                                safe_error(e),
-                                exc_info=True,
-                            )
 
                 return result
 
@@ -821,35 +760,18 @@ class FinancialSyncStrategy(ISyncStrategy):
                         last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                     )
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[FinancialSync] BatchSync | Failed (%s): %s for %s on %s",
+                        table_name,
+                        date_str,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[FinancialSync] BatchSync | SYSTEM-LEVEL failure for %s on %s: %s",
-                            table_name,
-                            date_str,
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[FinancialSync] BatchSync | Failed %s on %s (%s): %s",
-                            table_name,
-                            date_str,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[FinancialSync] BatchSync | Failed %s on %s (%s): %s",
-                            table_name,
-                            date_str,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
 
         # Iterate per-date (not all-at-once) to avoid task explosion
         # M7.6: corporate actions 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
@@ -955,32 +877,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
                 return 0
             except Exception as e:
-                error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[FinancialSync] Fetch | Failed to fetch aux table (%s): %s for %s",
+                    ts_code,
+                    exc_info=True,
+                )
                 if severity == "system":
-                    logger.critical(
-                        "[FinancialSync] Fetch | SYSTEM-LEVEL failure for aux table on %s: %s",
-                        ts_code,
-                        safe_error(e),
-                        exc_info=True,
-                    )
                     raise
-                elif severity == "recoverable":
-                    logger.warning(
-                        "[FinancialSync] Fetch | Failed to fetch aux table on %s (%s): %s",
-                        ts_code,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[FinancialSync] Fetch | Failed to fetch aux table on %s (%s): %s",
-                        ts_code,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
                 return 0
 
         # data-P1-6: 预初始化 aux_counts，确保 except 块能返回已保存的 aux 行数
@@ -1083,32 +990,17 @@ class FinancialSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[FinancialSync] Fetch | Comprehensive data failed (%s): %s for %s",
+                ts_code,
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[FinancialSync] Fetch | SYSTEM-LEVEL failure for %s: %s",
-                    ts_code,
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[FinancialSync] Fetch | Comprehensive data failed for %s (%s): %s",
-                    ts_code,
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[FinancialSync] Fetch | Comprehensive data failed for %s (%s): %s",
-                    ts_code,
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             return None, aux_counts
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -1185,34 +1077,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[FinancialSync] Repair | Failed (%s): %s for %s period=%s",
+                        ts_code,
+                        period,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[FinancialSync] Repair | SYSTEM-LEVEL failure for %s period=%s: %s",
-                            ts_code,
-                            period,
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[FinancialSync] Repair | Failed for %s period=%s (%s): %s",
-                            ts_code,
-                            period,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[FinancialSync] Repair | Failed for %s period=%s (%s): %s",
-                            ts_code,
-                            period,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
 
         return total_saved
