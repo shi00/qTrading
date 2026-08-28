@@ -23,7 +23,7 @@ from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.stock_dao import StockDao
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from utils.async_utils import gather_return_exceptions_propagating_cancel
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 
@@ -127,7 +127,6 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                         except EngineDisposedError:
                             raise
                         except Exception as e:
-                            error_info = classify_error(e, context="general")
                             severity = classify_severity(e, context="general")
                             if severity == "system":
                                 logger.critical(
@@ -139,45 +138,27 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                 raise
                             if attempt < _AKSHARE_MAX_RETRIES - 1:
                                 delay = _AKSHARE_RETRY_BASE_DELAY * (2**attempt)
-                                if severity == "recoverable":
-                                    logger.warning(
-                                        "[AKShareConceptSync] Retry %s attempt %d (%s): %s",
-                                        board_name,
-                                        attempt + 1,
-                                        error_info["code"],
-                                        safe_error(e),
-                                        exc_info=True,
-                                    )
-                                else:
-                                    logger.error(
-                                        "[AKShareConceptSync] Retry %s attempt %d (%s): %s",
-                                        board_name,
-                                        attempt + 1,
-                                        error_info["code"],
-                                        safe_error(e),
-                                        exc_info=True,
-                                    )
+                                log_classified(
+                                    logger,
+                                    e,
+                                    "general",
+                                    "[AKShareConceptSync] Retry (%s): %s (board=%s, attempt=%d)",
+                                    board_name,
+                                    attempt + 1,
+                                    exc_info=True,
+                                )
                                 await asyncio.sleep(delay)
                             else:
                                 failed_boards.append(f"{board_name}: {safe_error(e)}")
-                                if severity == "recoverable":
-                                    logger.warning(
-                                        "[AKShareConceptSync] Failed board %s after %d retries (%s): %s",
-                                        board_name,
-                                        _AKSHARE_MAX_RETRIES,
-                                        error_info["code"],
-                                        safe_error(e),
-                                        exc_info=True,
-                                    )
-                                else:
-                                    logger.error(
-                                        "[AKShareConceptSync] Failed board %s after %d retries (%s): %s",
-                                        board_name,
-                                        _AKSHARE_MAX_RETRIES,
-                                        error_info["code"],
-                                        safe_error(e),
-                                        exc_info=True,
-                                    )
+                                log_classified(
+                                    logger,
+                                    e,
+                                    "general",
+                                    "[AKShareConceptSync] Failed board (%s): %s (board=%s, retries=%d)",
+                                    board_name,
+                                    _AKSHARE_MAX_RETRIES,
+                                    exc_info=True,
+                                )
 
             # Phase 2F + S7: 循环体按时间维度（每 2 秒）检查 _check_cancelled。
             # 旧实现每 200 条 board 检查一次，单 board 最坏 7s+，最坏 1000s 才响应取消，远超 2s 红线。
@@ -219,12 +200,16 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[AKShareConceptSync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[AKShareConceptSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[AKShareConceptSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -315,12 +300,16 @@ class LimitListSyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[LimitListSync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[LimitListSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[LimitListSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -382,29 +371,16 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
+                    exc_info=True,
+                )
                 if severity == "system":
-                    logger.critical(
-                        "[AIConceptTagSync] SYSTEM-LEVEL failure while loading retry queue: %s",
-                        safe_error(e),
-                        exc_info=True,
-                    )
                     raise
-                elif severity == "recoverable":
-                    logger.warning(
-                        "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
                 retry_pending = []
 
             retry_codes = {ts_code for ts_code, _ in retry_pending}

@@ -28,7 +28,7 @@ from data.external.tushare_client import TushareAPIPermissionError, TushareClien
 from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, to_date
@@ -147,29 +147,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as qe:
-                    error_info = classify_error(qe, context="general")
                     severity = classify_severity(qe, context="general")
+                    log_classified(
+                        logger,
+                        qe,
+                        "general",
+                        "[HistoricalSync] Report | Failed to collect quality scores (%s): %s",
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[HistoricalSync] Report | SYSTEM-LEVEL failure during quality scores collection: %s",
-                            safe_error(qe),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[HistoricalSync] Report | Failed to collect quality scores (%s): %s",
-                            error_info["code"],
-                            safe_error(qe),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[HistoricalSync] Report | Failed to collect quality scores (%s): %s",
-                            error_info["code"],
-                            safe_error(qe),
-                            exc_info=True,
-                        )
 
         except asyncio.CancelledError:
             result.status = "cancelled"
@@ -180,17 +167,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
             result.errors.append("Engine disposed during sync")
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            error_info = log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] Run | failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical("[HistoricalSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
-                )
-            else:
-                logger.error("[HistoricalSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -227,29 +213,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] Calendar | SYSTEM-LEVEL failure during trade calendar retrieval: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             trade_dates = []
 
         if not trade_dates:
@@ -274,29 +247,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] Config | SYSTEM-LEVEL failure loading integrity config: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             QUALITY_THRESHOLD = 80
 
         effective_synced_tables = TushareClient().get_effective_synced_tables(self.SYNCED_TABLES)
@@ -375,29 +335,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as qe:
-                    error_info = classify_error(qe, context="general")
                     severity = classify_severity(qe, context="general")
+                    log_classified(
+                        logger,
+                        qe,
+                        "general",
+                        "[HistoricalSync] QualityCheck | Failed (%s): %s",
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[HistoricalSync] QualityCheck | SYSTEM-LEVEL failure: %s",
-                            safe_error(qe),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[HistoricalSync] QualityCheck | Failed (%s): %s",
-                            error_info["code"],
-                            safe_error(qe),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[HistoricalSync] QualityCheck | Failed (%s): %s",
-                            error_info["code"],
-                            safe_error(qe),
-                            exc_info=True,
-                        )
 
             original_count = len(trade_dates)
             trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
@@ -413,29 +360,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] Resume | ⚠️ Cache check failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] Resume | SYSTEM-LEVEL failure during cache check: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Resume | ⚠️ Cache check failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] Resume | ⚠️ Cache check failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
 
         total_days = len(trade_dates)
         concurrency_factor, _ = _get_seasonal_adjustments()
@@ -497,32 +431,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[HistoricalSync] DaySync | ⚠️ Failed (%s): %s for %s",
+                        date_obj,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[HistoricalSync] DaySync | SYSTEM-LEVEL failure for %s: %s",
-                            date_obj,
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
-                    elif severity == "recoverable":
-                        logger.warning(
-                            "[HistoricalSync] DaySync | ⚠️ Failed %s (%s): %s",
-                            date_obj,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[HistoricalSync] DaySync | ⚠️ Failed %s (%s): %s",
-                            date_obj,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
                     async with counter_lock:
                         consecutive_failures += 1
                         failed_dates.append(date_obj)
@@ -599,32 +518,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         except EngineDisposedError:
                             raise
                         except Exception as retry_e:
-                            error_info = classify_error(retry_e, context="general")
                             severity = classify_severity(retry_e, context="general")
+                            log_classified(
+                                logger,
+                                retry_e,
+                                "general",
+                                "[HistoricalSync] Retry | ⚠️ Failed (%s): %s for %s",
+                                date,
+                                exc_info=True,
+                            )
                             if severity == "system":
-                                logger.critical(
-                                    "[HistoricalSync] Retry | SYSTEM-LEVEL failure for %s: %s",
-                                    date,
-                                    safe_error(retry_e),
-                                    exc_info=True,
-                                )
                                 raise
-                            elif severity == "recoverable":
-                                logger.warning(
-                                    "[HistoricalSync] Retry | ⚠️ Failed %s (%s): %s",
-                                    date,
-                                    error_info["code"],
-                                    safe_error(retry_e),
-                                    exc_info=True,
-                                )
-                            else:
-                                logger.error(
-                                    "[HistoricalSync] Retry | ⚠️ Failed %s (%s): %s",
-                                    date,
-                                    error_info["code"],
-                                    safe_error(retry_e),
-                                    exc_info=True,
-                                )
                             failed_list.append(date)
 
                 # Batch Retry
@@ -719,35 +623,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.debug("[HistoricalSync] DaySync | PERMISSION_DENIED for %s (skipped): %s", name, safe_error(e))
                 return (key, None, "permission_denied")
             except Exception as e:
-                error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[HistoricalSync] DaySync | ⚠️ Fetch %s failed (%s): %s for %s",
+                    name,
+                    trade_date,
+                    exc_info=True,
+                )
                 if severity == "system":
-                    logger.critical(
-                        "[HistoricalSync] DaySync | SYSTEM-LEVEL failure fetching %s for %s: %s",
-                        name,
-                        trade_date,
-                        safe_error(e),
-                        exc_info=True,
-                    )
                     raise
-                elif severity == "recoverable":
-                    logger.warning(
-                        "[HistoricalSync] DaySync | ⚠️ Fetch %s failed for %s (%s): %s",
-                        name,
-                        trade_date,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[HistoricalSync] DaySync | ⚠️ Fetch %s failed for %s (%s): %s",
-                        name,
-                        trade_date,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
                 return (key, None, e)
 
         async def fetch_indices():
@@ -769,32 +656,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[HistoricalSync] DaySync | ⚠️ Fetch indices failed (%s): %s for %s",
+                    trade_date,
+                    exc_info=True,
+                )
                 if severity == "system":
-                    logger.critical(
-                        "[HistoricalSync] DaySync | SYSTEM-LEVEL failure fetching indices for %s: %s",
-                        trade_date,
-                        safe_error(e),
-                        exc_info=True,
-                    )
                     raise
-                elif severity == "recoverable":
-                    logger.warning(
-                        "[HistoricalSync] DaySync | ⚠️ Fetch indices failed for %s (%s): %s",
-                        trade_date,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
-                else:
-                    logger.error(
-                        "[HistoricalSync] DaySync | ⚠️ Fetch indices failed for %s (%s): %s",
-                        trade_date,
-                        error_info["code"],
-                        safe_error(e),
-                        exc_info=True,
-                    )
                 return ("index", None, e)
 
         # Launch
@@ -878,25 +750,19 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    error_info = classify_error(e, context="general")
                     severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[HistoricalSync] DaySync | ⚠️ Save %s failed (%s): %s, "
+                        "continuing other tables (S8: error isolation)",
+                        key,
+                        exc_info=True,
+                    )
                     if severity == "system":
-                        logger.critical(
-                            "[HistoricalSync] DaySync | SYSTEM-LEVEL failure saving %s: %s",
-                            key,
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         raise
                     if critical:
-                        logger.error(
-                            "[HistoricalSync] DaySync | ❌ Critical save failed for %s (%s): %s, "
-                            "continuing other tables (S8: error isolation)",
-                            key,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
                         # S8: critical 表 save 失败不 raise，返回 SAVE_FAILED 让其他表继续同步；
                         # 仅当所有 critical 表都失败时才在方法末尾 raise 触发 circuit breaker
                         return {
@@ -905,22 +771,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "success": False,
                             "result_status": SYNC_RESULT_SAVE_FAILED,
                         }
-                    if severity == "recoverable":
-                        logger.warning(
-                            "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed (%s): %s, skipping sync_status update",
-                            key,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(
-                            "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed (%s): %s, skipping sync_status update",
-                            key,
-                            error_info["code"],
-                            safe_error(e),
-                            exc_info=True,
-                        )
                     return {
                         "saved": None,
                         "fetched": fetched_count,
@@ -1054,29 +904,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical) (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] DaySync | SYSTEM-LEVEL failure during northbound save: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical) (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical) (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
             north_result = {"saved": None, "fetched": 0, "success": False}
 
         async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | datetime.date | None):
@@ -1236,29 +1073,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] MoneyFlow | SYSTEM-LEVEL failure during standalone sync: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
         return 0
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
@@ -1286,27 +1110,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HistoricalSync] Northbound | ⚠️ Standalone sync failed (%s): %s",
+                exc_info=True,
+            )
             if severity == "system":
-                logger.critical(
-                    "[HistoricalSync] Northbound | SYSTEM-LEVEL failure during standalone sync: %s",
-                    safe_error(e),
-                    exc_info=True,
-                )
                 raise
-            elif severity == "recoverable":
-                logger.warning(
-                    "[HistoricalSync] Northbound | ⚠️ Standalone sync failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
-            else:
-                logger.error(
-                    "[HistoricalSync] Northbound | ⚠️ Standalone sync failed (%s): %s",
-                    error_info["code"],
-                    safe_error(e),
-                    exc_info=True,
-                )
         return 0
