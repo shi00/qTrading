@@ -15,6 +15,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import ast
 import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -187,6 +188,108 @@ class TestOnboardingWizardContract:
     def test_uses_step_configs(self):
         """DoD: 必须使用 STEP_CONFIGS 驱动导航按钮。"""
         assert "STEP_CONFIGS" in _raw_source(), "必须使用 STEP_CONFIGS 驱动 8 步状态机"
+
+
+# ============================================================================
+# UX-09 (P2-04): wizard 关闭 4 个 config panel 的 Enter 提交
+# ============================================================================
+
+
+class TestWizardPanelsDisableEnterSubmit:
+    """UX-09: OnboardingWizard 消费 4 个 config panel 时传 ``enable_enter_submit=False``。
+
+    wizard 首次配置流程中, Enter 不应触发网络验证（卡流程）, 故 4 处面板调用
+    必须显式 ``enable_enter_submit=False``, 使各 panel 的 ``on_submit`` 为 None。
+    用 AST 精确断言关键字参数实际值为 ``False``（非字符串/弱断言）。
+    """
+
+    _PANEL_NAMES = (
+        "DatabaseConfigPanel",
+        "TushareConfigPanel",
+        "LLMConfigPanel",
+        "LocalModelConfigPanel",
+    )
+
+    def _panel_calls(self):
+        """AST 提取 4 个 config panel 函数调用的关键字参数。"""
+        tree = ast.parse(_raw_source())
+        panel_calls: dict[str, dict[str, ast.AST]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self._PANEL_NAMES:
+                kwargs: dict[str, ast.AST] = {}
+                for kw in node.keywords:
+                    if kw.arg is not None:
+                        kwargs[kw.arg] = kw.value
+                panel_calls[node.func.id] = kwargs
+        return panel_calls
+
+    def test_all_four_panels_passed_enable_enter_submit_false(self):
+        """4 个 panel 调用均存在且传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        assert set(calls.keys()) == set(self._PANEL_NAMES), f"wizard 应消费 4 个 panel, 实际 {set(calls.keys())}"
+        for name in self._PANEL_NAMES:
+            kwargs = calls[name]
+            assert "enable_enter_submit" in kwargs, f"{name} 应传 enable_enter_submit=False"
+            val = kwargs["enable_enter_submit"]
+            assert isinstance(val, ast.Constant)
+            assert val.value is False, f"{name}.enable_enter_submit 应为 False"
+
+    def test_database_panel_disable_enter_submit(self):
+        """AST: DatabaseConfigPanel 传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        val = calls["DatabaseConfigPanel"]["enable_enter_submit"]
+        assert isinstance(val, ast.Constant)
+        assert val.value is False
+
+    def test_tushare_panel_disable_enter_submit(self):
+        """AST: TushareConfigPanel 传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        val = calls["TushareConfigPanel"]["enable_enter_submit"]
+        assert isinstance(val, ast.Constant)
+        assert val.value is False
+
+    def test_llm_panel_disable_enter_submit(self):
+        """AST: LLMConfigPanel 传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        val = calls["LLMConfigPanel"]["enable_enter_submit"]
+        assert isinstance(val, ast.Constant)
+        assert val.value is False
+
+    def test_local_model_panel_disable_enter_submit(self):
+        """AST: LocalModelConfigPanel 传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        val = calls["LocalModelConfigPanel"]["enable_enter_submit"]
+        assert isinstance(val, ast.Constant)
+        assert val.value is False
+
+
+class TestWizardScheduleStepEnterSubmit:
+    """UX-09: schedule step 时间 TextField Enter 提交绑定 ``on_enter_next``。
+
+    ``_build_schedule_step`` 始终将时间输入 ``on_submit`` 绑定到 ``on_enter_next``
+    （wizard 传 ``_on_next``, 即下一步主动作）；运行时行为见 ComponentBody 测试。
+    """
+
+    def test_time_field_on_submit_bound_to_on_enter_next(self):
+        """源码: 时间 TextField on_submit 与 on_enter_next 绑定。"""
+        src = _raw_source()
+        assert "on_submit=safe_on_change(on_enter_next) if on_enter_next else None" in src
+
+    def test_schedule_step_wired_to_on_next(self):
+        """AST: ``_build_schedule_step`` 调用第 5 个位置参数为 ``_on_next``。
+
+        即 schedule 时间输入 Enter 提交 = 下一步主动作（wizard 传 ``_on_next``）。
+        """
+        tree = ast.parse(_raw_source())
+        call = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_build_schedule_step"
+        )
+        assert len(call.args) == 5
+        fifth = call.args[4]
+        assert isinstance(fifth, ast.Name)
+        assert fifth.id == "_on_next"
 
 
 # ============================================================================
@@ -1161,6 +1264,37 @@ class TestOnboardingWizardComponentBody:
                 break
 
         # 不抛异常即覆盖 _on_card_hover 路径
+
+    def test_step6_schedule_time_enter_submit_triggers_next(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """UX-09: step 6 schedule 时间输入 on_submit → 触发 wizard 下一步 (vm.next_step)。
+
+        时间 TextField ``on_submit`` 绑定 ``_on_next`` → ``page.run_task(_next_step)``
+        → ``await onboarding_vm.next_step()``（与下一步按钮等价）。
+        """
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=6)
+
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        result = render_once(component)
+
+        all_controls = _collect_controls(result)
+        time_fields = [c for c in all_controls if isinstance(c, ft.TextField)]
+        assert len(time_fields) == 1, "step 6 应仅含 schedule 时间输入 1 个 TextField"
+        time_field = time_fields[0]
+        # 守卫 + 下行触发/next_step 行为断言构成链式验证
+        assert time_field.on_submit is not None  # noqa: weak-assertion 守卫, 下行 on_submit/next_step 断言为链式验证
+
+        time_field.on_submit(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_submit as 0-arg, but runtime passes event]
+        fake_vm.next_step.assert_awaited_once_with()
 
     def test_show_snack_with_no_page(self, monkeypatch):
         """_show_snack 在 page 不可用时安全降级（不抛异常）。"""

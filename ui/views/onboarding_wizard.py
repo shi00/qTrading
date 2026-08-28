@@ -39,6 +39,7 @@ from ui.components.flet_type_helpers import (
     get_control_value,
     safe_controls,
     safe_icon,
+    safe_on_change,
     safe_on_click,
     safe_on_hover,
     safe_on_select,
@@ -420,6 +421,8 @@ def _build_database_step(database_vm: DatabaseConfigPanelViewModel) -> ft.Contro
                 compact=True,
                 show_save_button=False,
                 show_header=False,
+                # UX-09 (P2-04): wizard 关闭 Enter 提交 — 避免首次配置触发网络验证卡流程
+                enable_enter_submit=False,
             ),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -450,6 +453,7 @@ def _build_token_step(tushare_vm: TushareConfigPanelViewModel) -> ft.Control:
                 compact=True,
                 show_save_button=False,
                 show_register_link=True,
+                enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
             ),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -480,6 +484,7 @@ def _build_cloud_ai_step(llm_vm: LLMConfigPanelViewModel) -> ft.Control:
                     vm=llm_vm,
                     compact=True,
                     show_save_button=False,
+                    enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
                 ),
                 padding=AppStyles.SPACING_SM,
                 border_radius=8,
@@ -515,6 +520,7 @@ def _build_local_model_step(local_model_vm: LocalModelConfigPanelViewModel) -> f
                     show_save_button=False,
                     compact=True,
                     show_internal_loading=False,
+                    enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
                 ),
                 padding=AppStyles.SPACING_SM,
                 border_radius=8,
@@ -635,6 +641,7 @@ def _build_schedule_step(
     on_schedule_enabled_change: Callable[[bool], None],
     schedule_time: str,
     on_schedule_time_change: Callable[[str], None],
+    on_enter_next: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.Control:
     """Step 6: Schedule (D15: 从 OnboardingWizard step==6 分支提取)."""
     return ft.Column(
@@ -677,6 +684,8 @@ def _build_schedule_step(
                         border_color=AppColors.PRIMARY,
                         label_style=ft.TextStyle(color=AppColors.PRIMARY),
                         on_change=lambda e: on_schedule_time_change(e.control.value),
+                        # UX-09 (P2-04): 单行时间输入 Enter 提交 = 下一步主动作
+                        on_submit=safe_on_change(on_enter_next) if on_enter_next else None,
                     )
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
@@ -1035,6 +1044,7 @@ def OnboardingWizard(
             lambda v: set_schedule_enabled(v),
             schedule_time,
             lambda v: set_schedule_time(v),
+            _on_next,  # UX-09: schedule 时间输入 Enter 提交 = 下一步
         )
     else:
         step_content = _build_complete_step()

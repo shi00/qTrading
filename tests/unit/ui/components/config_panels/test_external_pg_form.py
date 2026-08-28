@@ -115,6 +115,7 @@ def _render_form(
     show_header: bool = True,
     compact: bool = False,
     show_save_button: bool = True,
+    enable_enter_submit: bool = True,
     page: FakePage | None = None,
 ) -> tuple[_FakeDatabaseConfigPanelVM, FakePage, Any, Any]:
     """渲染 ExternalPgForm, 返回 (vm, page, result, component)。"""
@@ -143,6 +144,7 @@ def _render_form(
             show_header=show_header,
             compact=compact,
             show_save_button=show_save_button,
+            enable_enter_submit=enable_enter_submit,
         )
         run_mount_effects(component, page=page)
         result = render_once(component)
@@ -354,3 +356,44 @@ class TestExternalPgFormVMLifecycle:
         vm.dispose = _spy_dispose  # type: ignore[method-assign]
         run_unmount_effects(component)
         assert dispose_called == []
+
+
+# ============================================================================
+# UX-09 (P2-04): 单行主表单 Enter 提交 = 触发 vm.test_connection
+# ============================================================================
+
+
+class TestExternalPgFormOnSubmitEnter:
+    """UX-09: 外部 PG 单行 TextField Enter 提交（5 字段绑定 test 主动作）。
+
+    enable_enter_submit=True (默认) 时 host/port/user/password/database 的 ``on_submit``
+    非空且触发 ``page.run_task(vm.test_connection)``；False 时 ``on_submit`` 为 None。
+    """
+
+    _ENTER_SUBMIT_LABELS = ("db_host", "db_port", "db_user", "db_password", "db_name")
+
+    def test_default_binds_on_submit_on_all_fields(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=True (默认): 5 字段 on_submit 非空。"""
+        _, _, result, _ = _render_form()
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            # 存在性契约守卫, 绑定行为由 test_enter_submit_triggers_test_connection 覆盖
+            assert field.on_submit is not None  # noqa: weak-assertion 存在性守卫, 行为断言在触发用例覆盖
+
+    def test_enter_submit_triggers_test_connection(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """host on_submit → page.run_task(vm.test_connection)（与测试按钮等价）。"""
+        vm, page, result, _ = _render_form()
+        host_field = _find_text_field(result, "db_host")
+        # 守卫 + 下行触发行为断言构成链式验证
+        assert host_field.on_submit is not None  # noqa: weak-assertion 守卫, 下行 run_task 断言为链式验证
+        run_task = cast(MagicMock, cast(Any, page).run_task)
+        run_task.reset_mock()
+        _invoke(host_field.on_submit, _make_event())
+        run_task.assert_called_once_with(vm.test_connection)
+
+    def test_enter_submit_disabled_sets_on_submit_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=False: 5 字段 on_submit 均为 None。"""
+        _, _, result, _ = _render_form(enable_enter_submit=False)
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            assert field.on_submit is None, f"{label} on_submit 应为 None"

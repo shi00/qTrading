@@ -278,6 +278,7 @@ def LLMConfigPanel(
     show_save_button: bool = True,
     compact: bool = False,
     show_register_link: bool = True,
+    enable_enter_submit: bool = True,
 ) -> ft.Control:
     """LLM Configuration panel (declarative).
 
@@ -292,6 +293,8 @@ def LLMConfigPanel(
         show_save_button: 是否显示保存按钮（default: True）
         compact: 是否使用紧凑布局（default: False）
         show_register_link: 是否显示注册链接（default: True）
+        enable_enter_submit: 单行主表单 Enter 提交开关（UX-09 P2-04；default: True；
+            设置页默认开启，wizard 传 False 避免 Enter 触发网络验证卡流程）
     """
     # --- Subscribe to VM state changes (外部 VM 模式，VM 生命周期由消费方管理) ---
     state, _ = use_viewmodel(vm=vm)
@@ -337,6 +340,8 @@ def LLMConfigPanel(
         visible=not state.is_azure,
         read_only=state.base_url_read_only,
         on_change=lambda e: vm.update_base_url(e.control.value),
+        # UX-09 (P2-04): Enter 提交 = 测试连接主动作 (wizard 经 enable_enter_submit=False 关闭)
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,
     )
 
     api_key_input = ft.TextField(
@@ -346,6 +351,7 @@ def LLMConfigPanel(
         value=state.api_key,
         width=input_width,
         on_change=lambda e: vm.update_api_key(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,
     )
 
     azure_resource_input = ft.TextField(
@@ -354,6 +360,7 @@ def LLMConfigPanel(
         visible=state.is_azure,
         width=input_width,
         on_change=lambda e: vm.update_azure_resource(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,
     )
 
     azure_deployment_input = ft.TextField(
@@ -362,6 +369,7 @@ def LLMConfigPanel(
         visible=state.is_azure,
         width=input_width,
         on_change=lambda e: vm.update_azure_deployment(e.control.value),
+        on_submit=safe_on_change(_on_test_click_factory(vm)) if enable_enter_submit else None,
     )
 
     azure_version_input = ft.Dropdown(

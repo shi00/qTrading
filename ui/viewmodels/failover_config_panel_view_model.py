@@ -312,6 +312,8 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
 
         R16：on_test_connection 回调由消费方注入，通常是 async-native HTTP。
         """
+        if self._state.dialog_is_testing:
+            return  # UX-09 (P2-04): 连发 Enter/双击防重入 (与按钮 disabled 语义一致)
         provider = self._state.dialog_provider
         model = self._state.dialog_custom_model or self._state.dialog_model
         base_url = self._state.dialog_base_url or ""
@@ -354,6 +356,8 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
 
         R16：ConfigHandler 同步 IO 通过 ThreadPoolManager offload。
         """
+        if self._state.dialog_is_saving:
+            return  # UX-09 (P2-04): 连发 Enter 防重入 (TextField 不受 disabled 保护, VM 层统一守卫)
         provider = self._state.dialog_provider
         model = self._state.dialog_custom_model or self._state.dialog_model
         base_url = self._state.dialog_base_url or ""

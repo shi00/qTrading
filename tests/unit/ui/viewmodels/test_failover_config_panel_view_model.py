@@ -426,6 +426,23 @@ class TestTestCredential:
         assert vm.state.dialog_is_testing is False
 
     @pytest.mark.asyncio
+    async def test_test_credential_testing_reentry_guarded(
+        self, mock_test_connection, mock_config_handler, mock_thread_pool
+    ):
+        """UX-09 (P2-04): dialog_is_testing 期间连发 test 被拒绝。"""
+        mock_test_connection.return_value = {"success": True}
+        vm = _make_vm(mock_test_connection)
+        vm._set_state(
+            dialog_provider="deepseek",
+            dialog_model="deepseek-chat",
+            dialog_api_key="sk-test",
+            dialog_is_testing=True,
+        )
+        await vm.test_credential()
+        mock_test_connection.assert_not_awaited()
+        assert vm.state.dialog_is_testing is True  # 守卫不改变状态
+
+    @pytest.mark.asyncio
     async def test_test_credential_failure_with_detail(
         self, mock_test_connection, mock_config_handler, mock_thread_pool
     ):
@@ -525,6 +542,25 @@ class TestConfirmCredential:
         assert vm.state.dialog_open is False
         mock_config_handler.save_provider_credential.assert_called_once()
         mock_config_handler.save_config.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_confirm_credential_saving_reentry_guarded(
+        self, mock_test_connection, mock_config_handler, mock_thread_pool
+    ):
+        """UX-09 (P2-04): dialog_is_saving 期间连发 confirm 被拒绝（TextField 不受 disabled 保护）。"""
+        vm = _make_vm(mock_test_connection)
+        vm._set_state(
+            dialog_open=True,
+            dialog_is_edit=False,
+            dialog_provider="qwen",
+            dialog_model="qwen3.6-plus",
+            dialog_api_key="sk-new",
+            dialog_is_saving=True,
+        )
+        await vm.confirm_credential()
+        mock_config_handler.save_provider_credential.assert_not_called()
+        mock_config_handler.save_config.assert_not_called()
+        assert vm.state.dialog_is_saving is True  # 守卫不改变状态
 
     @pytest.mark.asyncio
     async def test_confirm_credential_add_new_without_api_key_warns(

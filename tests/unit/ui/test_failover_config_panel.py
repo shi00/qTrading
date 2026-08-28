@@ -852,3 +852,69 @@ class TestFailoverConfigPanelBody:
         _trigger_callback(up_btns[1].on_click, MagicMock())
         # 应触发 vm.move_item(index=1, direction=-1)
         assert any(call[0] == vm.move_item and call[1] == (1, -1) for call in run_task_calls)
+
+
+# ============================================================================
+# UX-09 (P2-04): ProviderCredentialDialog 单行 Enter 提交 = 确认凭据
+# ============================================================================
+
+
+class TestProviderCredentialDialogOnSubmitEnter:
+    """UX-09: 凭据对话框单行 TextField Enter 提交 = confirm_credential 主动作。
+
+    dialog_open=True 渲染时, custom_model/base_url/api_key 3 字段的 ``on_submit``
+    非空且触发 ``page.run_task(vm.confirm_credential)``（与确认按钮等价）。
+    """
+
+    _SUBMIT_FIELD_COUNT = 3  # custom_model / base_url / api_key
+
+    def _render_open_dialog(self, page):
+        """渲染 dialog_open=True 的 ProviderCredentialDialog，返回 vm。"""
+        vm = _FakeFailoverVM(
+            state=FailoverConfigState(
+                dialog_open=True,
+                dialog_provider="deepseek",
+                dialog_model="deepseek-v4-pro",
+                dialog_api_key="sk-xxx",
+            )
+        )
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(ProviderCredentialDialog, vm=vm)
+            run_mount_effects(component, page=page)
+            render_once(component)
+        return vm
+
+    def _dialog_text_fields(self, page):
+        """从 dialog overlay 收集全部 TextField（custom_model/base_url/api_key）。
+
+        ``_make_failover_patches`` 将 I18n 替换为裸 MagicMock，``I18n.get`` 返回
+        MagicMock 而非字面 label key，故按类型收集后断言数量（3 个自提交字段）。
+        """
+        assert len(page._dialogs.controls) == 1, "dialog_open=True 应注册 1 个 AlertDialog"
+        dialog = page._dialogs.controls[0]
+        fields = [c for c in _collect_controls(dialog) if isinstance(c, ft.TextField)]
+        assert len(fields) == self._SUBMIT_FIELD_COUNT
+        return fields
+
+    def test_dialog_open_fields_bind_on_submit(self, mock_i18n_state, mock_app_colors_state):
+        """dialog_open=True: 3 字段 on_submit 非空。"""
+        page = FakePage()
+        page.run_task = MagicMock()  # type: ignore[method-assign]
+        self._render_open_dialog(page)
+        for field in self._dialog_text_fields(page):
+            # 存在性契约守卫, 绑定行为由 test_enter_submit_triggers_confirm_credential 覆盖
+            assert field.on_submit is not None  # noqa: weak-assertion 存在性守卫, 行为断言在触发用例覆盖
+
+    def test_enter_submit_triggers_confirm_credential(self, mock_i18n_state, mock_app_colors_state):
+        """custom_model/base_url/api_key Enter → page.run_task(vm.confirm_credential)。"""
+        page = FakePage()
+        page.run_task = MagicMock()  # type: ignore[method-assign]
+        vm = self._render_open_dialog(page)
+        for field in self._dialog_text_fields(page):
+            # 守卫触发为主断言, 行为等价由下行 run_task 断言构成链式验证
+            assert field.on_submit is not None  # noqa: weak-assertion 守卫, 下行 run_task 断言为链式验证
+            page.run_task.reset_mock()
+            _trigger_callback(field.on_submit, MagicMock())
+            page.run_task.assert_called_once_with(vm.confirm_credential)

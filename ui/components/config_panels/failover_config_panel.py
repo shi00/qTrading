@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import safe_on_click
+from ui.components.flet_type_helpers import safe_on_change, safe_on_click
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -208,6 +208,8 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         width=AppStyles.CONTROL_WIDTH_LG,
         hint_text=I18n.get("failover_custom_model_hint"),
         on_change=lambda e: vm.update_dialog_custom_model(e.control.value),
+        # UX-09 (P2-04): 对话框内 Enter 提交 = 确认保存凭据主动作
+        on_submit=safe_on_change(_run_task_no_args(vm.confirm_credential)),
     )
 
     base_url_input = ft.TextField(
@@ -216,6 +218,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         width=AppStyles.CONTROL_WIDTH_LG,
         hint_text=I18n.get("failover_base_url_hint"),
         on_change=lambda e: vm.update_dialog_base_url(e.control.value),
+        on_submit=safe_on_change(_run_task_no_args(vm.confirm_credential)),  # UX-09
     )
 
     api_key_input = ft.TextField(
@@ -225,6 +228,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         password=True,
         can_reveal_password=True,
         on_change=lambda e: vm.update_dialog_api_key(e.control.value),
+        on_submit=safe_on_change(_run_task_no_args(vm.confirm_credential)),  # UX-09
     )
 
     # --- Dialog status display ---

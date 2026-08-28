@@ -453,6 +453,7 @@ def _render_panel(
     show_save_button: bool = False,
     compact: bool = False,
     show_internal_loading: bool = True,
+    enable_enter_submit: bool = True,
     page: FakePage | None = None,
 ) -> tuple[_FakeLocalModelConfigPanelVM, FakePage, Any, Any]:
     """渲染 LocalModelConfigPanel, 返回 (vm, page, result, component)。
@@ -482,6 +483,7 @@ def _render_panel(
             show_save_button=show_save_button,
             compact=compact,
             show_internal_loading=show_internal_loading,
+            enable_enter_submit=enable_enter_submit,
         )
         run_mount_effects(component, page=page)
         result = render_once(component)
@@ -1183,3 +1185,44 @@ class TestLocalModelConfigPanelIsolation:
         run_unmount_effects(component)
 
         run_task.assert_called_once_with(vm.cancel_verification)
+
+
+# ============================================================================
+# UX-09 (P2-04): 单行主表单 Enter 提交 = 触发 vm.verify_model
+# ============================================================================
+
+
+class TestLocalModelConfigPanelOnSubmitEnter:
+    """UX-09: 本地模型单行 TextField Enter 提交（2 字段绑定 verify 主动作）。
+
+    enable_enter_submit=True (默认) 时 model_path/timeout 的 ``on_submit`` 非空
+    且触发 ``page.run_task(vm.verify_model)``；False 时 ``on_submit`` 为 None。
+    """
+
+    _ENTER_SUBMIT_LABELS = ("settings_local_model_path", "settings_local_ai_timeout")
+
+    def test_default_binds_on_submit_on_all_fields(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=True (默认): model_path/timeout on_submit 非空。"""
+        _, _, result, _ = _render_panel()
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            # 存在性契约守卫, 绑定行为由 test_enter_submit_triggers_verify_model 覆盖
+            assert field.on_submit is not None  # noqa: weak-assertion 存在性守卫, 行为断言在触发用例覆盖
+
+    def test_enter_submit_triggers_verify_model(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """model_path on_submit → page.run_task(vm.verify_model)（与验证按钮等价）。"""
+        vm, page, result, _ = _render_panel()
+        model_path = _find_text_field(result, "settings_local_model_path")
+        # 守卫 + 下行触发行为断言构成链式验证
+        assert model_path.on_submit is not None  # noqa: weak-assertion 守卫, 下行 run_task 断言为链式验证
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(model_path.on_submit, _make_event())
+        run_task.assert_called_once_with(vm.verify_model)
+
+    def test_enter_submit_disabled_sets_on_submit_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=False: model_path/timeout on_submit 均为 None。"""
+        _, _, result, _ = _render_panel(enable_enter_submit=False)
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            assert field.on_submit is None, f"{label} on_submit 应为 None"

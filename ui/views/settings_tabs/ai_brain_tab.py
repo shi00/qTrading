@@ -31,7 +31,7 @@ from ui.components.config_panels.failover_config_panel import FailoverConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.confirm_dialog import ConfirmDialog
-from ui.components.flet_type_helpers import safe_on_click
+from ui.components.flet_type_helpers import safe_on_change, safe_on_click
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -254,6 +254,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("ai_hint_default").format(val=30),
         tooltip=I18n.get("settings_hint_ai_cost"),
         on_change=lambda e: ai_settings_vm.set_max_candidates_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -266,6 +267,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("ai_hint_default").format(val=2.0),
         tooltip=I18n.get("settings_hint_turnover"),
         on_change=lambda e: ai_settings_vm.set_min_turnover_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -278,6 +280,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("ai_hint_default").format(val=5),
         tooltip=I18n.get("settings_hint_ai_model"),
         on_change=lambda e: ai_settings_vm.set_ai_concurrency_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -290,6 +293,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("ai_hint_default").format(val=1),
         tooltip=I18n.get("settings_hint_ai_news_concurrency"),
         on_change=lambda e: ai_settings_vm.set_news_concurrency_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -303,6 +307,10 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         text_size=AppStyles.FONT_SIZE_BODY_SM,
         hint_text=I18n.get("settings_ai_prompt_hint"),
         on_change=lambda e: ai_settings_vm.set_ai_prompt_value(e.control.value),
+        # NOTE(lazy): 多行 Prompt 无 Ctrl+Enter 提交 (UX-09 P2-04) — Flet on_submit 无修饰键信息,
+        # KeyboardListener 组合 hack 与 IME 冲突风险高 YAGNI. ceiling: 保存走显式"保存 AI 设置"按钮.
+        # upgrade: Flet 提供带修饰键的提交事件 (如 on_submit 携带 modifierFlags) 或 KeyboardListener 方案
+        # 经 IME 场景验证可行时恢复.
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -316,6 +324,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         text_size=AppStyles.FONT_SIZE_BODY_SM,
         hint_text=I18n.get("settings_news_prompt_hint"),
         on_change=lambda e: ai_settings_vm.set_news_prompt_value(e.control.value),
+        # NOTE(lazy): 同 ai_prompt_input — 无 Ctrl+Enter 提交 (UX-09 P2-04, 与上行三要素一致).
+        # ceiling: 保存走显式"保存 AI 设置"按钮.
+        # upgrade: Flet 提供带修饰键的提交事件 (如 on_submit 携带 modifierFlags) 时恢复.
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,

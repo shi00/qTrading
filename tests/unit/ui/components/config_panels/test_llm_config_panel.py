@@ -791,6 +791,7 @@ def _render_panel(
     show_save_button: bool = True,
     compact: bool = False,
     show_register_link: bool = True,
+    enable_enter_submit: bool = True,
     page: FakePage | None = None,
 ) -> tuple[_FakeLLMConfigPanelVM, FakePage, Any, Any]:
     """渲染 LLMConfigPanel, 返回 (vm, page, result, component)。
@@ -821,6 +822,7 @@ def _render_panel(
             show_save_button=show_save_button,
             compact=compact,
             show_register_link=show_register_link,
+            enable_enter_submit=enable_enter_submit,
         )
         run_mount_effects(component, page=page)
         result = render_once(component)
@@ -1495,3 +1497,53 @@ class TestLLMConfigPanelIsolation:
         provider_dd2 = _find_dropdown(result2, "llm_select_provider")
         assert provider_dd1.value == "deepseek"
         assert provider_dd2.value == "qwen"
+
+
+# ============================================================================
+# UX-09 (P2-04): 单行主表单 Enter 提交 = 触发 vm.verify_connection
+# ============================================================================
+
+
+class TestLLMConfigPanelOnSubmitEnter:
+    """UX-09: LLM 配置单行 TextField Enter 提交（4 字段绑定 verify 主动作）。
+
+    enable_enter_submit=True (默认) 时 base_url/api_key/azure_resource/azure_deployment
+    的 ``on_submit`` 非空且触发 ``page.run_task(vm.verify_connection)``；
+    False 时 ``on_submit`` 为 None（wizard 避免 Enter 触发网络验证卡流程）。
+    """
+
+    _ENTER_SUBMIT_LABELS = (
+        "llm_base_url",
+        "llm_api_key",
+        "llm_azure_resource_name",
+        "llm_azure_deployment_name",
+    )
+
+    def test_default_binds_on_submit_on_all_fields(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=True (默认): 4 字段 on_submit 非空。"""
+        state = LLMConfigState(is_azure=True, provider="azure")
+        _, _, result, _ = _render_panel(state=state)
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            assert isinstance(field, ft.TextField)
+            # 存在性契约守卫, 绑定行为由 test_enter_submit_triggers_verify_connection 覆盖
+            assert field.on_submit is not None  # noqa: weak-assertion 存在性守卫, 行为断言在触发用例覆盖
+
+    def test_enter_submit_triggers_verify_connection(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """base_url on_submit → page.run_task(vm.verify_connection)（与测试按钮等价）。"""
+        vm, page, result, _ = _render_panel()
+        base_url = _find_text_field(result, "llm_base_url")
+        # 守卫 + 下行触发行为断言构成链式验证
+        assert base_url.on_submit is not None  # noqa: weak-assertion 守卫, 下行 run_task 断言为链式验证
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(base_url.on_submit, _make_event())
+        run_task.assert_called_once_with(vm.verify_connection)
+
+    def test_enter_submit_disabled_sets_on_submit_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """enable_enter_submit=False: 4 字段 on_submit 均为 None。"""
+        state = LLMConfigState(is_azure=True, provider="azure")
+        _, _, result, _ = _render_panel(state=state, enable_enter_submit=False)
+        for label in self._ENTER_SUBMIT_LABELS:
+            field = _find_text_field(result, label)
+            assert field.on_submit is None, f"{label} on_submit 应为 None"

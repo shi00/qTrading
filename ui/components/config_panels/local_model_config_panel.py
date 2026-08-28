@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import safe_on_click
+from ui.components.flet_type_helpers import safe_on_change, safe_on_click
 from ui.components.slider_input import SliderInput
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
@@ -127,6 +127,7 @@ def LocalModelConfigPanel(
     show_save_button: bool = False,
     compact: bool = False,
     show_internal_loading: bool = True,
+    enable_enter_submit: bool = True,
 ) -> ft.Container:
     """Local model configuration panel (declarative).
 
@@ -141,6 +142,8 @@ def LocalModelConfigPanel(
         show_save_button: 是否显示保存按钮（default: False）
         compact: 是否使用紧凑布局（wizard 用，default: False）
         show_internal_loading: 是否显示内部 loading 指示器（default: True）
+        enable_enter_submit: 单行主表单 Enter 提交开关（UX-09 P2-04；default: True；
+            设置页默认开启，wizard 传 False 避免 Enter 触发网络验证卡流程）
     """
     # --- Subscribe to VM state changes (外部 VM 模式，VM 生命周期由消费方管理) ---
     state, _ = use_viewmodel(vm=vm)
@@ -188,6 +191,8 @@ def LocalModelConfigPanel(
         expand=True,
         hint_text="C:/path/to/model.gguf",
         on_change=lambda e: vm.update_model_path(e.control.value),
+        # UX-09 (P2-04): Enter 提交 = 验证模型主动作 (wizard 经 enable_enter_submit=False 关闭)
+        on_submit=safe_on_change(_on_verify_click_factory(vm)) if enable_enter_submit else None,
     )
 
     btn_select_file = ft.OutlinedButton(
@@ -204,6 +209,7 @@ def LocalModelConfigPanel(
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text="300",
         on_change=lambda e: vm.update_timeout(e.control.value),
+        on_submit=safe_on_change(_on_verify_click_factory(vm)) if enable_enter_submit else None,  # UX-09
     )
 
     threads_input = SliderInput(

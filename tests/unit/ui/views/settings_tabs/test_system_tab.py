@@ -1548,3 +1548,72 @@ class TestDoSaveVMExceptionPaths:
         ):
             asyncio.run(handler(*args))
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+
+# ============================================================================
+# UX-09 (P2-04): 单行主表单 Enter 提交 = on_submit 绑定行/组保存主动作
+# ============================================================================
+
+
+class TestOnSubmitEnter:
+    """UX-09: 单行 TextField Enter 提交与按钮点击走同一保存路径（行为等价）。"""
+
+    def test_enter_submit_concurrency_invokes_save(self, system_tab_env) -> None:
+        """concurrency_input Enter → _do_save_concurrency (与保存按钮等价)。"""
+        env = system_tab_env
+        field = _find_text_field_by_label(env, "settings_concurrency")
+        assert isinstance(field, ft.TextField)
+        assert field.on_submit is not None
+        env["page"].run_task.reset_mock()
+
+        _invoke(field.on_submit, _make_event())
+
+        handler, args, _ = _await_run_task_handler(env["page"])
+        assert inspect.iscoroutinefunction(handler)
+        assert handler.__name__ == "_do_save_concurrency"
+        assert len(args) == 1  # concurrency_value
+
+    def test_enter_submit_db_pool_invokes_save(self, system_tab_env) -> None:
+        """pool_size/db_overflow/db_timeout Enter → _do_save_db_pool (组保存)。"""
+        env = system_tab_env
+        for label_key in ("settings_db_pool", "settings_db_overflow", "settings_db_timeout"):
+            field = _find_text_field_by_label(env, label_key)
+            assert isinstance(field, ft.TextField)
+            assert field.on_submit is not None, f"{label_key} 应绑定 on_submit"
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_db_pool").on_submit, _make_event())
+
+        handler, args, _ = _await_run_task_handler(env["page"])
+        assert handler.__name__ == "_do_save_db_pool"
+        assert len(args) == 3  # pool_size / overflow / timeout
+
+    def test_enter_submit_thread_pool_invokes_save(self, system_tab_env) -> None:
+        """io/cpu_workers Enter → _do_save_thread_pool (组保存)。"""
+        env = system_tab_env
+        for label_key in ("sys_pool_io", "sys_pool_cpu"):
+            field = _find_text_field_by_label(env, label_key)
+            assert isinstance(field, ft.TextField)
+            assert field.on_submit is not None, f"{label_key} 应绑定 on_submit"
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_submit, _make_event())
+
+        handler, args, _ = _await_run_task_handler(env["page"])
+        assert handler.__name__ == "_do_save_thread_pool"
+        assert len(args) == 2  # io / cpu
+
+    def test_enter_submit_no_proxy_invokes_save(self, system_tab_env) -> None:
+        """no_proxy_input Enter → _do_save_no_proxy (与保存按钮等价)。"""
+        env = system_tab_env
+        fields = _get_text_fields(env)
+        no_proxy_field = fields[-1]  # no_proxy_input 无 label, 为最后一个 TextField
+        assert isinstance(no_proxy_field, ft.TextField)
+        assert no_proxy_field.on_submit is not None
+        env["page"].run_task.reset_mock()
+
+        _invoke(no_proxy_field.on_submit, _make_event())
+
+        handler, args, _ = _await_run_task_handler(env["page"])
+        assert handler.__name__ == "_do_save_no_proxy"
+        assert len(args) == 1  # no_proxy_value
