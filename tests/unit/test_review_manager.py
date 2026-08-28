@@ -124,7 +124,7 @@ class TestReviewManagerRunReview:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_not_called()
@@ -148,7 +148,7 @@ class TestReviewManagerRunReview:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -158,7 +158,7 @@ class TestReviewManagerRunReview:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "pct_chg": [2.0],
@@ -436,8 +436,8 @@ class TestReviewManagerGetPendingPredictions:
     async def test_with_latest_date(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240615")
-        mock_cache.get_trade_cal = AsyncMock(
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240615")
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "cal_date": [
@@ -473,7 +473,7 @@ class TestReviewManagerGetPendingPredictions:
     async def test_no_latest_date(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
         rm = ReviewManager()
@@ -487,7 +487,7 @@ class TestReviewManagerGetPendingPredictions:
     async def test_error(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(side_effect=Exception("DB Error"))
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=Exception("DB Error"))
         rm = ReviewManager()
         rm.cache = mock_cache
         result = await rm._get_pending_predictions()
@@ -501,8 +501,8 @@ class TestReviewManagerDateThresholdNormalization:
     async def test_date_threshold_is_date_type_with_trade_cal(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        mock_cache.get_trade_cal = AsyncMock(
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame({"cal_date": ["20240606", "20240607", "20240610"]})
         )
         mock_cache.screener_dao = MagicMock()
@@ -520,7 +520,7 @@ class TestReviewManagerDateThresholdNormalization:
     async def test_date_threshold_is_date_type_without_trade_cal(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
         rm = ReviewManager()
@@ -551,7 +551,7 @@ class TestReviewManagerIndexCacheNaN:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -562,7 +562,7 @@ class TestReviewManagerIndexCacheNaN:
             )
         )
         nan_df = pd.DataFrame({"pct_chg": [float("nan")]})
-        mock_cache.get_index_daily = AsyncMock(return_value=nan_df)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=nan_df)
         rm._update_result = AsyncMock()
         await rm.run_review()
         if rm._update_result.called:
@@ -590,7 +590,7 @@ class TestReviewManagerIndexCacheNaN:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -600,7 +600,7 @@ class TestReviewManagerIndexCacheNaN:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         rm._update_result = AsyncMock()
         await rm.run_review()
 
@@ -625,7 +625,7 @@ class TestReviewManagerT1RowBoundary:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -635,7 +635,7 @@ class TestReviewManagerT1RowBoundary:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         assert not rm._update_result.called
@@ -661,7 +661,7 @@ class TestReviewManagerRunReviewNoQuotesForStock:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000002.SZ"],
@@ -696,7 +696,7 @@ class TestReviewManagerRunReviewNoT0Row:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -747,8 +747,8 @@ class TestReviewManagerRunReviewT5Calculation:
                 "pct_chg": [1.0, 5.0, 4.76, -1.82, -5.56, -3.92, -3.06],
             }
         )
-        mock_cache.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -784,8 +784,8 @@ class TestReviewManagerRunReviewTimestampDate:
                 "pct_chg": [1.0, 5.0],
             }
         )
-        mock_cache.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -811,7 +811,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -821,7 +821,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         mock_api = MagicMock()
         mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.5]}))
         rm.api = mock_api
@@ -848,7 +848,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -858,7 +858,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         mock_api = MagicMock()
         mock_api.get_index_daily = AsyncMock(return_value=None)
         rm.api = mock_api
@@ -885,7 +885,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -895,7 +895,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         mock_api = MagicMock()
         mock_api.get_index_daily = AsyncMock(side_effect=ValueError("bad data"))
         rm.api = mock_api
@@ -922,7 +922,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -932,7 +932,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("cache error"))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=RuntimeError("cache error"))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_not_called()
@@ -966,7 +966,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -978,7 +978,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
         )
         # 显式 mock get_index_daily_range 返回空 DataFrame，避免 MagicMock await 抛 TypeError 副作用
         mock_cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
-        mock_cache.get_index_daily = AsyncMock(side_effect=PermissionError("permission denied"))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=PermissionError("permission denied"))
         rm._update_result = AsyncMock()
 
         with caplog.at_level(logging.CRITICAL, logger="data.persistence.review_manager"):
@@ -1012,7 +1012,7 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1022,7 +1022,7 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1049,7 +1049,7 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1059,7 +1059,7 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1091,7 +1091,7 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1101,7 +1101,7 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1131,7 +1131,7 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1141,7 +1141,7 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1173,7 +1173,7 @@ class TestReviewManagerCustomThresholds:
             )
         )
         # alpha = 2.0 - 1.6 = 0.4 -> WIN with threshold 0.3, DRAW with default 0.5
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1183,7 +1183,7 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.6]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.6]}))
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1212,7 +1212,7 @@ class TestReviewManagerRunReviewExceptionInRow:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1222,7 +1222,7 @@ class TestReviewManagerRunReviewExceptionInRow:
                 }
             )
         )
-        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("DB error"))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=RuntimeError("DB error"))
         rm._update_result = AsyncMock()
         await rm.run_review()
 
@@ -1234,8 +1234,10 @@ class TestReviewManagerGetPendingPredictionsEdgeCases:
     async def test_trade_cal_less_than_10_rows(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240615")
-        mock_cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614", "20240615"]}))
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240615")
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20240614", "20240615"]})
+        )
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
         rm = ReviewManager()
@@ -1249,8 +1251,8 @@ class TestReviewManagerGetPendingPredictionsEdgeCases:
     async def test_trade_cal_none(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240615")
-        mock_cache.get_trade_cal = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240615")
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=None)
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
         rm = ReviewManager()
@@ -1264,8 +1266,8 @@ class TestReviewManagerGetPendingPredictionsEdgeCases:
     async def test_trade_cal_empty(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(return_value="20240615")
-        mock_cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240615")
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pd.DataFrame())
         rm = ReviewManager()
@@ -1424,7 +1426,7 @@ class TestReviewManagerEngineDisposedErrorR5:
     async def test_get_pending_predictions_propagates_engine_disposed(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         rm = ReviewManager()
         rm.cache = mock_cache
         with pytest.raises(EngineDisposedError):
@@ -1516,7 +1518,7 @@ class TestReviewManagerSystemLevelError:
     async def test_get_pending_predictions_propagates_system_error(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
-        mock_cache.get_latest_trade_date = AsyncMock(side_effect=PermissionError("permission denied"))
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=PermissionError("permission denied"))
         rm = ReviewManager()
         rm.cache = mock_cache
         with pytest.raises(PermissionError, match="permission denied") as exc_info:
@@ -1552,7 +1554,7 @@ class TestReviewManagerR9Sanitization:
         """触发 run_review 内 warning 路径（L195-202），断言日志不含明文 token。
 
         路径：mock_cache.get_index_daily_range 返回空 DataFrame（确定性走到 row 循环）→
-        mock_cache.get_index_daily 抛 RuntimeError 含 api_key=sk-... →
+        mock_cache.quote_dao.get_index_daily 抛 RuntimeError 含 api_key=sk-... →
         L196 warning logger 调用 → safe_error 脱敏。
         """
         import logging
@@ -1572,7 +1574,7 @@ class TestReviewManagerR9Sanitization:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
@@ -1585,7 +1587,9 @@ class TestReviewManagerR9Sanitization:
         # 显式 mock get_index_daily_range 返回空 DataFrame，避免 MagicMock await 抛 TypeError 副作用
         mock_cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
         # 异常消息含 api_key=sk-... 敏感字段，验证 safe_error 将其替换为 api_key=***
-        mock_cache.get_index_daily = AsyncMock(side_effect=RuntimeError("DB error: api_key=sk-test-secret-123"))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            side_effect=RuntimeError("DB error: api_key=sk-test-secret-123")
+        )
         rm._update_result = AsyncMock()
 
         with caplog.at_level(logging.WARNING, logger="data.persistence.review_manager"):
@@ -1630,7 +1634,7 @@ class TestReviewManagerR9Sanitization:
                 }
             )
         )
-        mock_cache.get_daily_quotes = AsyncMock(
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],

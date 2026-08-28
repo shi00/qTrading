@@ -25,7 +25,7 @@ class TestBacktestDataProvider:
     def mock_cache(self) -> MagicMock:
         """Mock CacheManager，返回符合 ScreenerDao SQL 结构的数据。"""
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -44,7 +44,7 @@ class TestBacktestDataProvider:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -59,11 +59,11 @@ class TestBacktestDataProvider:
                 }
             )
         )
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
@@ -96,7 +96,7 @@ class TestBacktestDataProvider:
 
     @pytest.mark.asyncio
     async def test_build_context_filters_suspended_stocks(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(
+        mock_cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -119,7 +119,7 @@ class TestBacktestDataProvider:
 
     @pytest.mark.asyncio
     async def test_build_context_handles_missing_is_tradable(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(
+        mock_cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -139,7 +139,7 @@ class TestBacktestDataProvider:
 
     @pytest.mark.asyncio
     async def test_build_context_handles_empty_screening_data(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -194,7 +194,7 @@ class TestBacktestDataProvider:
         注意：退市股票过滤逻辑在 ScreenerDao.get_screening_data() 的 SQL 中实现，
         BacktestDataProvider 只是调用该方法获取数据。
         """
-        mock_cache.get_screening_data = AsyncMock(
+        mock_cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -245,13 +245,13 @@ class TestBacktestDataProviderWithProcessor:
     @pytest.fixture
     def mock_cache_for_processor(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
@@ -329,13 +329,13 @@ class TestBacktestQualityProxy:
     async def test_proxy_reused_across_build_context_calls(self) -> None:
         """验证 BacktestDataProvider 复用 proxy 实例。"""
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache)
         assert provider._quality_proxy is not None
@@ -357,7 +357,7 @@ class TestBacktestQualityProxy:
     async def test_preload_range_success(self) -> None:
         """验证 preload_range 成功读取数据并在 build_context 中进行内存切片。"""
         cache = MagicMock()
-        cache.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -367,12 +367,12 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache)
         await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
@@ -381,7 +381,7 @@ class TestBacktestQualityProxy:
         assert "screening_data" in provider._preloaded
 
         # 验证 build_context 时是否直接从预加载数据中切片，而不触发 daily 查询
-        cache.get_screening_data.assert_not_called()
+        cache.screener_dao.get_screening_data.assert_not_called()
 
         ctx = await provider.build_context(date(2024, 1, 2))
         screening_data = ctx.get("screening_data")
@@ -393,16 +393,16 @@ class TestBacktestQualityProxy:
         """验证在预加载抛出异常时，能够优雅降级回单日查询逻辑。"""
         cache = MagicMock()
         # 范围查询抛出异常
-        cache.get_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
-        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
         # 单日查询正常
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -412,12 +412,12 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache)
         await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
@@ -428,7 +428,7 @@ class TestBacktestQualityProxy:
 
         # 触发 build_context 时应执行 daily get_screening_data
         ctx = await provider.build_context(date(2024, 1, 2))
-        cache.get_screening_data.assert_called_once_with("20240102")
+        cache.screener_dao.get_screening_data.assert_called_once_with("20240102")
         assert len(ctx.get("screening_data")) == 1
 
     @pytest.mark.asyncio
@@ -438,13 +438,13 @@ class TestBacktestQualityProxy:
 
         cache = MagicMock()
         # 模拟其中一个方法抛出 CancelledError
-        cache.get_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
-        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache)
         with pytest.raises(asyncio.CancelledError):
@@ -462,7 +462,7 @@ class TestBacktestQualityProxy:
         # 预加载应该没有初始化 (为 None)
         assert provider._preloaded is None
         # 应无范围方法调用
-        cache.get_screening_data_range.assert_not_called()
+        cache.screener_dao.get_screening_data_range.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_preload_range_default_limit_is_366(self) -> None:
@@ -475,7 +475,7 @@ class TestBacktestQualityProxy:
     async def test_preload_range_custom_limit_allows_wider_range(self) -> None:
         """验证自定义 preload_max_days=730 允许超过 366 但小于 730 天的范围预加载。"""
         cache = MagicMock()
-        cache.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -485,12 +485,12 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache, preload_max_days=730)
 
@@ -499,8 +499,8 @@ class TestBacktestQualityProxy:
 
         # 预加载应正常初始化（不为 None）
         assert provider._preloaded is not None
-        # 范围查询应被调用
-        cache.get_screening_data_range.assert_called_once()
+        # 范围查询应被调用（验证归一化后的日期参数）
+        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515")
 
     @pytest.mark.asyncio
     async def test_preload_range_custom_limit_skips_when_exceeded(self) -> None:
@@ -513,7 +513,7 @@ class TestBacktestQualityProxy:
 
         # 预加载应被跳过 (为 None)
         assert provider._preloaded is None
-        cache.get_screening_data_range.assert_not_called()
+        cache.screener_dao.get_screening_data_range.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_preload_range_robust_date_handling(self) -> None:
@@ -522,7 +522,7 @@ class TestBacktestQualityProxy:
         import numpy as np
 
         # 返回含有 None/NaT 的非法数据
-        cache.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -532,12 +532,12 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(cache)
         await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
@@ -555,7 +555,7 @@ class TestBacktestDataProviderAuxiliaryTables:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -566,7 +566,7 @@ class TestBacktestDataProviderAuxiliaryTables:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -576,11 +576,11 @@ class TestBacktestDataProviderAuxiliaryTables:
                 }
             )
         )
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame({"data": [1]}))
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"data": [2]}))
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame({"data": [3]}))
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame({"data": [4]}))
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame({"data": [5]}))
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame({"data": [1]}))
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"data": [2]}))
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame({"data": [3]}))
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame({"data": [4]}))
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame({"data": [5]}))
         return cache
 
     @pytest.mark.asyncio
@@ -597,7 +597,7 @@ class TestBacktestDataProviderAuxiliaryTables:
 
     @pytest.mark.asyncio
     async def test_auxiliary_table_failure_sets_ready_false(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_northbound = AsyncMock(side_effect=Exception("network error"))
+        mock_cache.quote_dao.get_northbound = AsyncMock(side_effect=Exception("network error"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -610,7 +610,7 @@ class TestBacktestDataProviderAuxiliaryTables:
 
     @pytest.mark.asyncio
     async def test_auxiliary_table_returns_none(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_northbound = AsyncMock(return_value=None)
+        mock_cache.quote_dao.get_northbound = AsyncMock(return_value=None)
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -622,7 +622,7 @@ class TestBacktestDataProviderAuxiliaryTables:
 
     @pytest.mark.asyncio
     async def test_auxiliary_table_empty_dataframe(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -638,7 +638,7 @@ class TestBacktestDataProviderFundamentalData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -649,7 +649,7 @@ class TestBacktestDataProviderFundamentalData:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -659,16 +659,16 @@ class TestBacktestDataProviderFundamentalData:
                 }
             )
         )
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
     async def test_fundamental_data_with_is_tradable(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_fundamental_screening_data = AsyncMock(
+        mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -690,7 +690,7 @@ class TestBacktestDataProviderFundamentalData:
 
     @pytest.mark.asyncio
     async def test_fundamental_data_none(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_fundamental_screening_data = AsyncMock(return_value=None)
+        mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -702,7 +702,7 @@ class TestBacktestDataProviderFundamentalData:
 
     @pytest.mark.asyncio
     async def test_fundamental_data_empty(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -715,18 +715,18 @@ class TestBacktestDataProviderScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
     async def test_screening_data_get_failure(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(side_effect=Exception("db error"))
+        mock_cache.screener_dao.get_screening_data = AsyncMock(side_effect=Exception("db error"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -738,7 +738,7 @@ class TestBacktestDataProviderScreeningData:
 
     @pytest.mark.asyncio
     async def test_screening_data_returns_none(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(return_value=None)
+        mock_cache.screener_dao.get_screening_data = AsyncMock(return_value=None)
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -765,7 +765,7 @@ class TestBacktestDataProviderDiagnostics:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -776,12 +776,12 @@ class TestBacktestDataProviderDiagnostics:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
@@ -812,7 +812,7 @@ class TestBacktestDataProviderDiagnostics:
 
     @pytest.mark.asyncio
     async def test_suspended_filtered_count_in_diagnostics(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(
+        mock_cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -836,7 +836,7 @@ class TestBacktestDataProviderBuildContext:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -847,12 +847,12 @@ class TestBacktestDataProviderBuildContext:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
@@ -868,18 +868,18 @@ class TestBacktestDataProviderGetScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
     async def test_get_screening_data_exception(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_screening_data = AsyncMock(side_effect=Exception("connection refused"))
+        mock_cache.screener_dao.get_screening_data = AsyncMock(side_effect=Exception("connection refused"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -892,7 +892,7 @@ class TestBacktestDataProviderGetFundamentalScreeningData:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -903,17 +903,17 @@ class TestBacktestDataProviderGetFundamentalScreeningData:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
     async def test_get_fundamental_screening_data_exception(self, mock_cache: MagicMock) -> None:
-        mock_cache.get_fundamental_screening_data = AsyncMock(side_effect=Exception("db timeout"))
+        mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(side_effect=Exception("db timeout"))
 
         provider = BacktestDataProvider(mock_cache)
 
@@ -929,7 +929,7 @@ class TestGetStockMeta:
     async def test_get_stock_meta_returns_delist_date(self) -> None:
         """get_stock_meta 返回 {ts_code: {"delist_date": date | None}} 结构"""
         cache = MagicMock()
-        cache.get_stock_basic = AsyncMock(
+        cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -950,7 +950,7 @@ class TestGetStockMeta:
     async def test_get_stock_meta_empty_df(self) -> None:
         """stock_basic 为空时返回空 dict"""
         cache = MagicMock()
-        cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
+        cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
         provider = BacktestDataProvider(cache)
 
         meta = await provider.get_stock_meta()
@@ -960,7 +960,7 @@ class TestGetStockMeta:
     async def test_get_stock_meta_load_failure(self) -> None:
         """加载失败时返回空 dict 并不抛异常"""
         cache = MagicMock()
-        cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("db error"))
+        cache.stock_dao.get_stock_basic = AsyncMock(side_effect=RuntimeError("db error"))
         provider = BacktestDataProvider(cache)
 
         meta = await provider.get_stock_meta()
@@ -970,7 +970,7 @@ class TestGetStockMeta:
     async def test_get_stock_meta_timestamp_converted_to_date(self) -> None:
         """Timestamp 类型的 delist_date 被转换为 datetime.date"""
         cache = MagicMock()
-        cache.get_stock_basic = AsyncMock(
+        cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000004.SZ"],
@@ -1002,7 +1002,7 @@ class TestR9SanitizationGuard:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
         cache = MagicMock()
-        cache.get_screening_data = AsyncMock(
+        cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -1013,18 +1013,18 @@ class TestR9SanitizationGuard:
                 }
             )
         )
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
         return cache
 
     @pytest.mark.asyncio
     async def test_diagnostics_error_sanitizes_secrets(self, mock_cache: MagicMock) -> None:
         """辅助表 fetch 异常时 diagnostics['table_status'][key]['error'] 不含明文密码"""
-        mock_cache.get_northbound = AsyncMock(side_effect=Exception(self._SECRET_URL))
+        mock_cache.quote_dao.get_northbound = AsyncMock(side_effect=Exception(self._SECRET_URL))
 
         provider = BacktestDataProvider(mock_cache)
         context = await provider.build_context(date(2024, 1, 2))

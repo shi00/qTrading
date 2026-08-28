@@ -163,10 +163,10 @@ class TestBacktestAIContextIntegration:
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(side_effect=track_pre_fetch)
-            mock_dp_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.prefetch_auxiliary_data = AsyncMock(return_value={})
             mock_data_processor_for_backtest.cache = mock_dp_cache
 
@@ -229,10 +229,10 @@ class TestBacktestAIContextIntegration:
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
-            mock_dp_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.prefetch_auxiliary_data = AsyncMock(return_value={})
             mock_data_processor_for_backtest.cache = mock_dp_cache
 
@@ -294,10 +294,10 @@ class TestBacktestAIContextIntegration:
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
-            mock_dp_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.prefetch_auxiliary_data = AsyncMock(return_value={})
             mock_dp_cache.get_financial_reports_history = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
@@ -380,10 +380,10 @@ class TestBacktestAIContextIntegration:
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
-            mock_dp_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.prefetch_auxiliary_data = AsyncMock(return_value={})
             mock_data_processor_for_backtest.cache = mock_dp_cache
 
@@ -446,10 +446,10 @@ class TestBacktestAIContextIntegration:
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
-            mock_dp_cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-            mock_dp_cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+            mock_dp_cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
             mock_dp_cache.prefetch_auxiliary_data = AsyncMock(return_value={})
             mock_data_processor_for_backtest.cache = mock_dp_cache
 

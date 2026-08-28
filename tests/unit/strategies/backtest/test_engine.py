@@ -614,7 +614,7 @@ class TestGetTradeDates:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_trade_cal = AsyncMock(return_value=None)
+        engine.cache.stock_dao.get_trade_cal = AsyncMock(return_value=None)
 
         with pytest.raises(ValueError, match="No trade dates found"):
             await engine._get_trade_dates()
@@ -630,7 +630,7 @@ class TestGetTradeDates:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        engine.cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
 
         with pytest.raises(ValueError, match="No trade dates found"):
             await engine._get_trade_dates()
@@ -646,7 +646,7 @@ class TestLoadQuotes:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_daily_quotes = AsyncMock(return_value=None)
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=None)
 
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
 
@@ -664,7 +664,7 @@ class TestLoadQuotes:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.cache = MagicMock()
-        engine.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
 
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
 
@@ -872,7 +872,7 @@ class TestEnrichSuspendStatus:
     async def test_no_suspend_data_returns_all_tradable(self):
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_suspend_d = AsyncMock(return_value=None)
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=None)
 
         quotes_df = pl.DataFrame(
             {
@@ -894,7 +894,7 @@ class TestEnrichSuspendStatus:
 
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         quotes_df = pl.DataFrame(
             {
@@ -924,7 +924,7 @@ class TestEnrichSuspendStatus:
                 "suspend_type": ["S"],
             }
         )
-        engine.cache.get_suspend_d = AsyncMock(return_value=suspend_pd)
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=suspend_pd)
 
         quotes_df = pl.DataFrame(
             {
@@ -947,7 +947,7 @@ class TestEnrichSuspendStatus:
 
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_suspend_d = AsyncMock(side_effect=Exception("DB error"))
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(side_effect=Exception("DB error"))
 
         quotes_df = pl.DataFrame(
             {
@@ -984,7 +984,7 @@ class TestEnrichLimitStatus:
     async def test_no_limit_data_returns_none_limit_status(self):
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_limit_list = AsyncMock(return_value=None)
+        engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=None)
 
         quotes_df = pl.DataFrame(
             {
@@ -1013,7 +1013,7 @@ class TestEnrichLimitStatus:
                 "limit_type": ["U"],
             }
         )
-        engine.cache.get_limit_list = AsyncMock(return_value=limit_pd)
+        engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=limit_pd)
 
         quotes_df = pl.DataFrame(
             {
@@ -1035,7 +1035,7 @@ class TestEnrichLimitStatus:
     async def test_exception_creates_warning(self):
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_limit_list = AsyncMock(side_effect=Exception("DB error"))
+        engine.cache.quote_dao.get_limit_list = AsyncMock(side_effect=Exception("DB error"))
 
         quotes_df = pl.DataFrame(
             {
@@ -1525,7 +1525,7 @@ class TestR9SanitizationGuard:
         """_enrich_suspend_status 异常时 DataWarning.error_message 不含明文密码"""
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_suspend_d = AsyncMock(side_effect=Exception(self._SECRET_URL))
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(side_effect=Exception(self._SECRET_URL))
 
         quotes_df = pl.DataFrame(
             {
@@ -1547,7 +1547,7 @@ class TestR9SanitizationGuard:
         """_enrich_limit_status 异常时 DataWarning.error_message 不含明文密码"""
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.get_limit_list = AsyncMock(side_effect=Exception(self._SECRET_URL))
+        engine.cache.quote_dao.get_limit_list = AsyncMock(side_effect=Exception(self._SECRET_URL))
 
         quotes_df = pl.DataFrame(
             {

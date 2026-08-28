@@ -58,7 +58,7 @@ class TestHolderSyncGetEffectiveTradeDate:
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("test error"))
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -73,7 +73,7 @@ class TestHolderSyncStkHoldernumber:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_num": [100]})
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_holder_number = AsyncMock()
+        ctx.cache.holder_dao.save_holder_number = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_stk_holdernumber("20240331")
         assert result == 1
@@ -111,7 +111,7 @@ class TestHolderSyncTop10Holders:
     async def test_no_stock_list(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=None)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=None)
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_top10_holders("20240331")
         assert result == -1
@@ -120,7 +120,7 @@ class TestHolderSyncTop10Holders:
     async def test_empty_stock_list(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_top10_holders("20240331")
         assert result == -1
@@ -129,7 +129,7 @@ class TestHolderSyncTop10Holders:
     async def test_all_already_synced(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value={"000001.SZ"})
         result = await strategy._sync_top10_holders("20240331")
@@ -139,8 +139,10 @@ class TestHolderSyncTop10Holders:
     async def test_with_data(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -158,10 +160,10 @@ class TestHolderSyncCancelReturnsMinusOne:
     async def test_top10_holders_cancelled_returns_minus_one(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -179,7 +181,7 @@ class TestHolderSyncCancelReturnsMinusOne:
         ctx.cache.engine = MagicMock()
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy.cancel()
         result = await strategy._sync_pledge_stat()
@@ -211,7 +213,7 @@ class TestHolderSyncSaveTop10Checkpoint:
     async def test_success(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
@@ -221,7 +223,7 @@ class TestHolderSyncSaveTop10Checkpoint:
     async def test_error(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock(side_effect=Exception("DB error"))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=Exception("DB error"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
@@ -266,7 +268,7 @@ class TestHolderSyncPledgeStat:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         result = await strategy._sync_pledge_stat()
@@ -332,7 +334,7 @@ class TestHolderSyncRun:
     async def test_basic_run(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -346,7 +348,7 @@ class TestHolderSyncRun:
     async def test_cancelled_run(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
         strategy._sync_top10_holders = AsyncMock(return_value=20)
@@ -430,7 +432,7 @@ class TestHolderSyncStrategyGetEffectiveTradeDate:
         ctx = MagicMock(spec=SyncContext)
         mock_processor = MagicMock()
         mock_processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-        mock_processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        mock_processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         ctx.processor = mock_processor
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
@@ -461,7 +463,7 @@ class TestHolderSyncSyncPledgeStat:
             )
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         count, date = await strategy._sync_pledge_stat()
         assert count >= 0
@@ -519,7 +521,7 @@ class TestHolderSyncSyncPledgeStat:
             nonlocal saved_df
             saved_df = df
 
-        ctx.cache.save_pledge_stat = AsyncMock(side_effect=capture_save)
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock(side_effect=capture_save)
         strategy = HolderSyncStrategy(ctx)
         count, date = await strategy._sync_pledge_stat()
         assert count == 2
@@ -558,7 +560,7 @@ class TestHolderSyncSyncPledgeStat:
             nonlocal saved_df
             saved_df = df
 
-        ctx.cache.save_pledge_stat = AsyncMock(side_effect=capture_save)
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock(side_effect=capture_save)
         strategy = HolderSyncStrategy(ctx)
         count, date = await strategy._sync_pledge_stat()
         assert count == 1
@@ -645,7 +647,7 @@ class TestHolderSyncSyncStkHoldernumber:
             )
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_holder_number = AsyncMock()
+        ctx.cache.holder_dao.save_holder_number = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_stk_holdernumber("20240331")
         assert result == 1
@@ -683,7 +685,7 @@ class TestHolderSyncSyncTop10Holders:
     async def test_no_stocks(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_top10_holders("20240331")
         assert result == -1
@@ -692,7 +694,7 @@ class TestHolderSyncSyncTop10Holders:
     async def test_all_already_synced(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -708,14 +710,14 @@ class TestHolderSyncSyncTop10Holders:
     async def test_with_data(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                 }
             )
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame(
@@ -805,7 +807,7 @@ class TestHolderSyncGetEffectiveTradeDateNone:
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -816,7 +818,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_stk_holdernumber_error_accumulates(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
@@ -829,7 +831,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_top10_holders_error_accumulates(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -842,7 +844,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_pledge_stat_error_accumulates(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -855,7 +857,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_max_errors_sets_partial(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
@@ -868,7 +870,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_cancelled_during_run(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -892,7 +894,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_top_level_exception(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(side_effect=RuntimeError("unexpected"))
@@ -903,7 +905,7 @@ class TestHolderSyncRunErrorPaths:
     async def test_pledge_stat_zero_count_no_update(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -918,10 +920,10 @@ class TestHolderSyncTop10ErrorPaths:
     async def test_consecutive_errors_abort(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(10)]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("API error"))
         strategy = HolderSyncStrategy(ctx)
@@ -933,7 +935,7 @@ class TestHolderSyncTop10ErrorPaths:
     async def test_rate_limit_error_counted(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": [
@@ -947,7 +949,7 @@ class TestHolderSyncTop10ErrorPaths:
                 }
             )
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("每分钟最多访问"))
         strategy = HolderSyncStrategy(ctx)
@@ -959,7 +961,7 @@ class TestHolderSyncTop10ErrorPaths:
     async def test_outer_exception_returns_minus_one(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("DB error"))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=RuntimeError("DB error"))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_top10_holders("20240331")
         assert result == -1
@@ -971,8 +973,8 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         codes = [f"{i:06d}.SZ" for i in range(1, 250)]
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -988,8 +990,8 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         codes = [f"{i:06d}.SZ" for i in range(1, 10)]
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         big_df = pd.DataFrame(
             {
@@ -1009,8 +1011,8 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         codes = [f"{i:06d}.SZ" for i in range(1, 250)]
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -1081,7 +1083,7 @@ class TestHolderSyncPledgeStatErrorPaths:
 
         ctx.api.get_pledge_stat = AsyncMock(side_effect=mock_pledge)
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
@@ -1215,7 +1217,7 @@ class TestR5EngineDisposedReraises:
         """_save_top10_checkpoint 在 save 抛 EngineDisposedError 时必须 raise。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         with pytest.raises(EngineDisposedError) as exc_info:
@@ -1227,7 +1229,9 @@ class TestR5EngineDisposedReraises:
         """_sync_top10_holders 在 per-stock 迭代中 EngineDisposedError 必须从外层 raise。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
@@ -1250,7 +1254,7 @@ class TestR5EngineDisposedReraises:
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
@@ -1266,7 +1270,7 @@ class TestR5EngineDisposedReraises:
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         with pytest.raises(EngineDisposedError) as exc_info:
@@ -1282,7 +1286,7 @@ class TestR5EngineDisposedReraises:
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         with pytest.raises(EngineDisposedError) as exc_info:
@@ -1297,7 +1301,7 @@ class TestR2CancelledErrorReraises:
     async def test_run_reraises_cancelled_error(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
 
@@ -1318,7 +1322,7 @@ class TestRunImplFullSuccessPaths:
         """全部 5 张表都成功时，update_sync_status 应被调用 7 次（含 share_float / stk_holdertrade）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         # 2 个季度 → stk_holdernumber + top10_holders 各 2 次，pledge/share/holdertrade 各 1 次
         strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331", "20231231"])
@@ -1331,14 +1335,14 @@ class TestRunImplFullSuccessPaths:
         assert result.status == "success"
         assert result.added == 70  # (10+20)*2 + 5 + 3 + 2
         # 2 季度 stk_holdernumber + 2 季度 top10 + pledge + share_float + holdertrade = 7
-        assert ctx.cache.update_sync_status.await_count == 7
+        assert ctx.cache.sync_dao.update_sync_status.await_count == 7
 
     @pytest.mark.asyncio
     async def test_share_float_zero_count_skips_update(self):
         """share_float count=0 时不触发 update_sync_status（覆盖 elif count > 0 分支）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
         strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
@@ -1349,7 +1353,7 @@ class TestRunImplFullSuccessPaths:
         result = await strategy._run_impl()
         assert result.status == "success"
         # 仅 stk_holdernumber + top10 触发 update
-        assert ctx.cache.update_sync_status.await_count == 2
+        assert ctx.cache.sync_dao.update_sync_status.await_count == 2
 
 
 class TestRunImplSystemSeverityReraises:
@@ -1359,7 +1363,7 @@ class TestRunImplSystemSeverityReraises:
     async def test_system_severity_reraises(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
 
@@ -1382,12 +1386,12 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_stk_holdernumber = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_stk_holdernumber("20240331")
         assert result == -1
-        ctx.cache.update_sync_status.assert_awaited_once()
-        args = ctx.cache.update_sync_status.await_args
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
+        args = ctx.cache.sync_dao.update_sync_status.await_args
         assert args is not None
         assert args.kwargs.get("status") == "skipped_permission" or args.args[3] == "skipped_permission"
 
@@ -1396,26 +1400,26 @@ class TestTushareAPIPermissionPaths:
         """_sync_one_table 在 TushareAPIPermissionError 时记录 skipped_permission 并返回 -1。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         save_func = AsyncMock()
         api_func = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
         assert result == -1
-        ctx.cache.update_sync_status.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_one_table_permission_denied_no_end_date(self):
         """_sync_one_table 在 end_date=None 时不写 update_sync_status（覆盖 if end_date 分支）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         save_func = AsyncMock()
         api_func = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_one_table(api_func, save_func, "test_table", None)
         assert result == -1
-        ctx.cache.update_sync_status.assert_not_awaited()
+        ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_denied(self):
@@ -1429,13 +1433,13 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_pledge_stat = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
         assert count == -1
         # inner except 捕获，不走 outer TushareAPIPermissionError handler
-        ctx.cache.update_sync_status.assert_not_awaited()
+        ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_outer_permission_denied(self):
@@ -1450,13 +1454,15 @@ class TestTushareAPIPermissionPaths:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock(
+            side_effect=TushareAPIPermissionError("test_api", "no perm")
+        )
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
         assert count == -1
-        ctx.cache.update_sync_status.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_share_float_permission_denied(self):
@@ -1465,12 +1471,12 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_share_float()
         assert count == -1
-        ctx.cache.update_sync_status.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdertrade_permission_denied(self):
@@ -1479,12 +1485,12 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_stk_holdertrade()
         assert count == -1
-        ctx.cache.update_sync_status.assert_awaited_once()
+        ctx.cache.sync_dao.update_sync_status.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_recording_failure(self):
@@ -1499,8 +1505,10 @@ class TestTushareAPIPermissionPaths:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
         )
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
-        ctx.cache.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock(
+            side_effect=TushareAPIPermissionError("test_api", "no perm")
+        )
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
@@ -1513,7 +1521,7 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_share_float = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_share_float()
@@ -1526,7 +1534,7 @@ class TestTushareAPIPermissionPaths:
         ctx.api = MagicMock()
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=TushareAPIPermissionError("test_api", "no perm"))
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("recording failed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_stk_holdertrade()
@@ -1665,7 +1673,7 @@ class TestSaveTop10CheckpointSeverityBranches:
         """system severity（MemoryError）必须 raise。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock(side_effect=MemoryError("oom"))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         with pytest.raises(MemoryError) as exc_info:
@@ -1677,7 +1685,7 @@ class TestSaveTop10CheckpointSeverityBranches:
         """recoverable severity（OSError with network）应返回 False（不 raise）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock(side_effect=OSError("network down"))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=OSError("network down"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
@@ -1688,7 +1696,7 @@ class TestSaveTop10CheckpointSeverityBranches:
         """operational severity（普通 ValueError）应返回 False。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
@@ -1751,7 +1759,7 @@ class TestSyncPledgeStatSeverityBranches:
         ctx = MagicMock()
         ctx.api = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         call_count = 0
 
         async def mock_pledge(end_date):
@@ -1872,7 +1880,9 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
         """per-stock 迭代中 system severity（MemoryError）必须 raise。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
@@ -1886,12 +1896,12 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
         """覆盖 4 种 rate-limit 错误字符串都被识别（每分钟最多访问 / 抱歉 / 频次超限 / 429）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000006.SZ"]}
             )
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         # 前 4 次抛不同 rate-limit 字符串，第 5 次成功，第 6 次普通错误
         errors = [
@@ -1918,10 +1928,10 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
         """连续 5 次错误（非 rate-limit）后应 abort 并返回 -1。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 8)]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
@@ -1943,10 +1953,10 @@ class TestSyncTop10HoldersCancelDuringIteration:
         """在迭代中途 cancel 后，下次循环顶部 break，未处理的 ts_code 不再调 API。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 6)]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         api_call_count = 0
 
@@ -1975,8 +1985,10 @@ class TestSyncTop10HoldersCancelDuringIteration:
         """cancel 在循环开始前已设置时，第一次迭代即 break，返回 -1。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2029,7 +2041,7 @@ class TestSyncPledgeStatDataScenarios:
             nonlocal saved_df
             saved_df = df
 
-        ctx.cache.save_pledge_stat = AsyncMock(side_effect=capture_save)
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock(side_effect=capture_save)
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
@@ -2058,7 +2070,7 @@ class TestSyncPledgeStatDataScenarios:
 
         ctx.api.get_pledge_stat = AsyncMock(side_effect=mock_pledge)
         ctx.cache = MagicMock()
-        ctx.cache.save_pledge_stat = AsyncMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_pledge_stat()
@@ -2227,7 +2239,7 @@ class TestGetEffectiveTradeDateSeverityBranches:
         ctx = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=OSError("network down"))
-        ctx.processor.cache.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
         assert result == datetime.date(2024, 6, 14)
@@ -2252,7 +2264,7 @@ class TestRunImplRecoverableErrorPath:
         """recoverable severity 应记 warning 并设置 status=failed，不 raise。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
 
@@ -2291,10 +2303,10 @@ class TestSyncTop10HoldersCancellation:
         """在迭代中途触发 _shutdown_event 后，下次循环顶部 break。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 6)]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         api_call_count = 0
 
@@ -2322,8 +2334,10 @@ class TestSyncTop10HoldersCancellation:
         """shutdown_event 在循环开始前已设置时，第一次迭代即 break，返回 -1。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2343,7 +2357,7 @@ class TestSyncTop10HoldersCancellation:
         """_run_impl 开始时必须 clear _shutdown_event，避免上次 cancel 残留。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = HolderSyncStrategy(ctx)
         # 模拟上次运行残留的 shutdown_event
         strategy._shutdown_event.set()
@@ -2370,10 +2384,10 @@ class TestSyncTop10HoldersPartialFailure:
         """部分股票失败时，result.status 应为 partial，result.errors 含失败 ts_code。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "FAIL.SZ", "000004.SZ"]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2400,8 +2414,10 @@ class TestSyncTop10HoldersPartialFailure:
         """无失败时，result.status 应保持 success。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2420,8 +2436,10 @@ class TestSyncTop10HoldersPartialFailure:
         """result=None 时不应崩溃，保持原有行为（仅返回 count）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ", "FAIL.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "FAIL.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2441,10 +2459,10 @@ class TestSyncTop10HoldersPartialFailure:
         """连续错误 abort 时返回 -1，不应标记 partial（由 _run_impl 通过 errors 计数处理）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 8)]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
@@ -2462,10 +2480,10 @@ class TestSyncTop10HoldersPartialFailure:
         """多个失败股票都应记录到 result.errors。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL1.SZ", "OK2.SZ", "FAIL2.SZ", "OK3.SZ"]})
         )
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2492,10 +2510,12 @@ class TestSyncTop10HoldersPartialFailure:
         部分失败时最终 status 应为 partial。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
-        ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL.SZ", "OK2.SZ"]}))
-        ctx.cache.save_top10_holders = AsyncMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL.SZ", "OK2.SZ"]})
+        )
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
         ctx.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
 
         async def mock_api(ts_code, period):

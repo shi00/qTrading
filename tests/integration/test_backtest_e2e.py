@@ -47,7 +47,7 @@ def mock_cache() -> MagicMock:
             "is_open": ["1", "1", "1"],
         }
     )
-    cache.get_trade_cal = AsyncMock(return_value=cal_df)
+    cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
     quotes_data = []
     for i, d in enumerate(trade_dates):
@@ -67,7 +67,7 @@ def mock_cache() -> MagicMock:
                 }
             )
     quotes_df = pd.DataFrame(quotes_data)
-    cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
 
     screening_data = []
     for i, d in enumerate(trade_dates):
@@ -81,7 +81,7 @@ def mock_cache() -> MagicMock:
                     "turnover_rate": 3.5 + i * 0.5,
                 }
             )
-    cache.get_screening_data = AsyncMock(
+    cache.screener_dao.get_screening_data = AsyncMock(
         return_value=pd.DataFrame(screening_data),
         side_effect=lambda trade_date: (
             pd.DataFrame([row for row in screening_data if row["trade_date"] == trade_date])
@@ -102,24 +102,24 @@ def mock_cache() -> MagicMock:
         )
     cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame(index_data))
 
-    cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-    cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-    cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+    cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+    cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
     # Range preloading mocks to support the optimized preload path in E2E tests
-    cache.get_screening_data_range = AsyncMock(return_value=pd.DataFrame(screening_data))
-    cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
-    cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+    cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame(screening_data))
+    cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+    cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
 
     return cache
 
@@ -258,7 +258,7 @@ class TestBacktestE2E:
                 "is_open": ["1", "1", "1"],
             }
         )
-        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+        cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
         quotes_data = []
         adj_factors = [2.0, 2.0, 1.0]
@@ -278,7 +278,7 @@ class TestBacktestE2E:
                 }
             )
         quotes_df = pd.DataFrame(quotes_data)
-        cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
 
         screening_data = [
             {
@@ -307,7 +307,7 @@ class TestBacktestE2E:
         def get_screening_data_side_effect(trade_date):
             return pd.DataFrame([row for row in screening_data if row["trade_date"] == trade_date])
 
-        cache.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
 
         cache.get_index_daily_range = AsyncMock(
             return_value=pd.DataFrame(
@@ -320,14 +320,14 @@ class TestBacktestE2E:
             )
         )
 
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
 
         strategy = SimpleTestStrategy()
 
@@ -394,7 +394,7 @@ class TestBacktestE2E:
                 "is_open": ["1", "1", "1"],
             }
         )
-        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+        cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
         quotes_df = pd.DataFrame(
             {
@@ -410,9 +410,9 @@ class TestBacktestE2E:
                 "is_tradable": [True],
             }
         )
-        cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
 
-        cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
 
         cache.get_index_daily_range = AsyncMock(
             return_value=pd.DataFrame(
@@ -425,15 +425,15 @@ class TestBacktestE2E:
             )
         )
 
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         class EmptyStrategy(BaseStrategy):
             required_context_keys = ()
@@ -467,7 +467,7 @@ class TestBacktestHandCalculated:
                 "is_open": ["1", "1"],
             }
         )
-        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+        cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
         quotes_data = [
             {
@@ -495,7 +495,7 @@ class TestBacktestHandCalculated:
                 "is_tradable": True,
             },
         ]
-        cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
 
         screening_data = [
             {
@@ -517,7 +517,7 @@ class TestBacktestHandCalculated:
         def get_screening_data_side_effect(trade_date):
             return pd.DataFrame([row for row in screening_data if row["trade_date"] == trade_date])
 
-        cache.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
 
         cache.get_index_daily_range = AsyncMock(
             return_value=pd.DataFrame(
@@ -530,15 +530,15 @@ class TestBacktestHandCalculated:
             )
         )
 
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         return cache
 
@@ -601,7 +601,7 @@ class TestBacktestHandCalculated:
                 "is_open": ["1", "1", "1"],
             }
         )
-        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+        cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
         quotes_data = [
             {
@@ -641,7 +641,7 @@ class TestBacktestHandCalculated:
                 "is_tradable": True,
             },
         ]
-        cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame(quotes_data))
 
         screening_data = [
             {
@@ -670,7 +670,7 @@ class TestBacktestHandCalculated:
         def get_screening_data_side_effect(trade_date):
             return pd.DataFrame([row for row in screening_data if row["trade_date"] == trade_date])
 
-        cache.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=get_screening_data_side_effect)
 
         cache.get_index_daily_range = AsyncMock(
             return_value=pd.DataFrame(
@@ -683,15 +683,15 @@ class TestBacktestHandCalculated:
             )
         )
 
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         config = BacktestConfig(
             start_date=date(2024, 1, 2),

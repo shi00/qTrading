@@ -54,10 +54,10 @@ async def test_capital_data_uses_context_trade_date(mock_i18n, mock_news, mock_a
 
     cache = MagicMock()
     cache.get_concepts = AsyncMock(return_value={})
-    cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
     dp = MagicMock()
     dp.cache = cache
@@ -69,9 +69,9 @@ async def test_capital_data_uses_context_trade_date(mock_i18n, mock_news, mock_a
 
     await mixin.run_ai_analysis(candidates_df, context)
 
-    cache.get_moneyflow.assert_awaited_once_with(trade_date="20240315")
-    cache.get_top_list.assert_awaited_once_with(trade_date="20240315")
-    cache.get_northbound.assert_awaited_once_with(trade_date="20240315")
+    cache.quote_dao.get_moneyflow.assert_awaited_once_with(trade_date="20240315")
+    cache.quote_dao.get_top_list.assert_awaited_once_with(trade_date="20240315")
+    cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240315")
     dp.get_latest_trade_date.assert_not_awaited()
 
 
@@ -96,10 +96,10 @@ async def test_capital_data_falls_back_to_latest(mock_i18n, mock_news, mock_ai):
 
     cache = MagicMock()
     cache.get_concepts = AsyncMock(return_value={})
-    cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
     dp = MagicMock()
     dp.cache = cache
@@ -112,9 +112,9 @@ async def test_capital_data_falls_back_to_latest(mock_i18n, mock_news, mock_ai):
     await mixin.run_ai_analysis(candidates_df, context)
 
     dp.get_latest_trade_date.assert_awaited_once()
-    cache.get_moneyflow.assert_awaited_once_with(trade_date="20240430")
-    cache.get_top_list.assert_awaited_once_with(trade_date="20240430")
-    cache.get_northbound.assert_awaited_once_with(trade_date="20240430")
+    cache.quote_dao.get_moneyflow.assert_awaited_once_with(trade_date="20240430")
+    cache.quote_dao.get_top_list.assert_awaited_once_with(trade_date="20240430")
+    cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240430")
 
 
 def test_normalize_trade_date_handles_various_types():
@@ -148,10 +148,10 @@ async def test_kline_history_end_date_aligned_with_context_trade_date(mock_i18n,
 
     cache = MagicMock()
     cache.get_concepts = AsyncMock(return_value={})
-    cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
     dp = MagicMock()
     dp.cache = cache
@@ -163,7 +163,7 @@ async def test_kline_history_end_date_aligned_with_context_trade_date(mock_i18n,
 
     await mixin.run_ai_analysis(candidates_df, context)
 
-    all_calls = cache.get_daily_quotes.call_args_list
+    all_calls = cache.quote_dao.get_daily_quotes.call_args_list
     call_kwargs = all_calls[-1].kwargs if all_calls else {}
     assert call_kwargs.get("end_date") == datetime.date(2024, 3, 15), (
         f"S-2: K-line end_date must equal context trade_date, got {call_kwargs.get('end_date')}"
@@ -201,10 +201,10 @@ async def test_kline_history_cache_key_includes_trade_date(mock_i18n, mock_news,
 
     cache = MagicMock()
     cache.get_concepts = AsyncMock(return_value={})
-    cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
     dp = MagicMock()
     dp.cache = cache
@@ -243,10 +243,10 @@ async def test_kline_history_cache_key_changes_with_trade_date(mock_i18n, mock_n
 
     cache = MagicMock()
     cache.get_concepts = AsyncMock(return_value={})
-    cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-    cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-    cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-    cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
 
     dp = MagicMock()
     dp.cache = cache
@@ -257,6 +257,6 @@ async def test_kline_history_cache_key_changes_with_trade_date(mock_i18n, mock_n
     await mixin.run_ai_analysis(candidates_df, {"trade_date": "20240315", "data_processor": dp})
     await mixin.run_ai_analysis(candidates_df, {"trade_date": "20240316", "data_processor": dp})
 
-    assert cache.get_daily_quotes.await_count == 2, (
-        f"M-1: different trade_date should trigger separate history fetches, got {cache.get_daily_quotes.await_count}"
+    assert cache.quote_dao.get_daily_quotes.await_count == 2, (
+        f"M-1: different trade_date should trigger separate history fetches, got {cache.quote_dao.get_daily_quotes.await_count}"
     )

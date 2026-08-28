@@ -60,7 +60,7 @@ class ReviewManager:
         all_codes = pending_df["ts_code"].unique().tolist()
         min_pred_date = str(pending_df["trade_date"].min())
 
-        bulk_quotes = await self.cache.get_daily_quotes(
+        bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
             ts_code_list=all_codes,
             start_date=min_pred_date,
         )
@@ -155,7 +155,9 @@ class ReviewManager:
 
                     if trade_date_str not in index_cache:
                         try:
-                            df_idx = await self.cache.get_index_daily(ts_code=index_code, trade_date=t1_date_obj)
+                            df_idx = await self.cache.quote_dao.get_index_daily(
+                                ts_code=index_code, trade_date=t1_date_obj
+                            )
                             if df_idx is not None and not df_idx.empty:
                                 raw_pct = df_idx.iloc[0]["pct_chg"]
                                 index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) is True else None
@@ -245,13 +247,13 @@ class ReviewManager:
         Uses trade calendar for accurate lookback instead of natural days.
         """
         try:
-            end_date = await self.cache.get_latest_trade_date()
+            end_date = await self.cache.quote_dao.get_latest_trade_date()
             if not end_date:
                 date_threshold = (get_now() - datetime.timedelta(days=14)).date()
             else:
                 end_dt = parse_date(str(end_date))
                 start_dt = end_dt - datetime.timedelta(days=30)
-                trade_cal_df = await self.cache.get_trade_cal(
+                trade_cal_df = await self.cache.stock_dao.get_trade_cal(
                     start_date=start_dt.strftime("%Y%m%d"),
                     end_date=end_dt.strftime("%Y%m%d"),
                     is_open="1",

@@ -590,7 +590,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         if not force:
             # Check ALL synced tables exist before skipping
             # This ensures data integrity - only skip if all tables have data
-            if await self.context.cache.check_data_exists(trade_date):
+            if await self.context.cache.quote_dao.check_data_exists(trade_date):
                 logger.debug("[HistoricalSync] DaySync | Cache hit for %s, skipping.", trade_date)
                 return True
 
@@ -783,7 +783,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             return {"saved": 0, "fetched": fetched_count, "success": True, "result_status": SYNC_RESULT_EMPTY}
 
         # 1. Quotes (Critical)
-        quotes_rows = await save_if_ok("quotes", cache.save_daily_quotes, critical=True)
+        quotes_rows = await save_if_ok("quotes", cache.quote_dao.save_daily_quotes, critical=True)
 
         # Yield control between heavy table saves
         await asyncio.sleep(0)
@@ -825,7 +825,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # 3. Basic / Daily Indicators (Critical)
         basic_rows = await save_if_ok(
             "basic",
-            cache.save_daily_indicators,
+            cache.market_dao.save_daily_indicators,
             critical=True,
         )
 
@@ -837,11 +837,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
             return False
 
         # 4. Others (Non-critical, can fail silently or log)
-        limit_result = await save_if_ok("limit", cache.save_limit_list)
-        suspend_result = await save_if_ok("suspend", cache.save_suspend_d)
+        limit_result = await save_if_ok("limit", cache.quote_dao.save_limit_list)
+        suspend_result = await save_if_ok("suspend", cache.quote_dao.save_suspend_d)
         await asyncio.sleep(0)
-        margin_result = await save_if_ok("margin", cache.save_margin_daily)
-        lhb_result = await save_if_ok("lhb", cache.save_top_list)
+        margin_result = await save_if_ok("margin", cache.quote_dao.save_margin_daily)
+        lhb_result = await save_if_ok("lhb", cache.quote_dao.save_top_list)
         lhb_inst_result = await save_if_ok("lhb_inst", cache.save_top_inst)
         stk_limit_result = await save_if_ok("stk_limit", cache.save_stk_limit)
         await asyncio.sleep(0)
@@ -849,12 +849,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         if self._shutdown_event.is_set():
             logger.debug("[HistoricalSync] DaySync | Shutdown during non-critical saves for %s", trade_date)
             return False
-        block_result = await save_if_ok("block", cache.save_block_trade)
-        mf_result = await save_if_ok("mf", cache.save_moneyflow)
+        block_result = await save_if_ok("block", cache.quote_dao.save_block_trade)
+        mf_result = await save_if_ok("mf", cache.quote_dao.save_moneyflow)
         await asyncio.sleep(0)
-        hsgt_result = await save_if_ok("hsgt_flow", cache.save_moneyflow_hsgt)
-        index_result = await save_if_ok("index", cache.save_index_daily)
-        index_basic_result = await save_if_ok("index_basic", cache.save_index_dailybasic)
+        hsgt_result = await save_if_ok("hsgt_flow", cache.market_dao.save_moneyflow_hsgt)
+        index_result = await save_if_ok("index", cache.quote_dao.save_index_daily)
+        index_basic_result = await save_if_ok("index_basic", cache.quote_dao.save_index_dailybasic)
 
         # Yield before northbound special processing
         await asyncio.sleep(0)
@@ -885,7 +885,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             filtered_count,
                         )
                 if not df_north.empty:
-                    north_rows = await cache.save_northbound(df_north)
+                    north_rows = await cache.quote_dao.save_northbound(df_north)
                     north_result = {
                         "saved": north_rows if north_rows is not None else len(df_north),
                         "fetched": len(df_north),
@@ -923,7 +923,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             # Handle permission denied - mark as skipped_permission, not as failure
             if error_type == "permission_denied" or result_status == SYNC_RESULT_SKIPPED_PERMISSION:
-                await cache.update_sync_status(
+                await cache.sync_dao.update_sync_status(
                     table_name,
                     trade_date,
                     0,
@@ -943,7 +943,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         table_name,
                         trade_date,
                     )
-                await cache.update_sync_status(
+                await cache.sync_dao.update_sync_status(
                     table_name,
                     trade_date,
                     saved or 0,
@@ -952,7 +952,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 )
             else:
                 is_save_failed = result_status == SYNC_RESULT_SAVE_FAILED
-                await cache.update_sync_status(
+                await cache.sync_dao.update_sync_status(
                     table_name,
                     trade_date or get_now().date(),
                     0,
@@ -1059,9 +1059,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
         try:
             df = await self.context.api.get_moneyflow(trade_date=trade_date)
             if df is not None and not df.empty:
-                count = await self.context.cache.save_moneyflow(df)
+                count = await self.context.cache.quote_dao.save_moneyflow(df)
                 if count is not None and count > 0:
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         "moneyflow_daily",
                         trade_date,
                         count,
@@ -1096,9 +1096,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 df = df[df["ts_code"].astype(str).str.endswith((".SH", ".SZ"))]
                 if not df.empty:
-                    count = await self.context.cache.save_northbound(df)
+                    count = await self.context.cache.quote_dao.save_northbound(df)
                     if count is not None and count > 0:
-                        await self.context.cache.update_sync_status(
+                        await self.context.cache.sync_dao.update_sync_status(
                             "northbound_holding",
                             trade_date,
                             count,

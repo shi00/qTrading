@@ -41,8 +41,8 @@ class TestRunReviewE2E(unittest.TestCase):
 
         manager = ReviewManager.__new__(ReviewManager)
         manager.cache = MagicMock()
-        manager.cache.get_latest_trade_date = AsyncMock(return_value="20240318")
-        manager.cache.get_trade_cal = AsyncMock(
+        manager.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240318")
+        manager.cache.stock_dao.get_trade_cal = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "cal_date": [
@@ -64,8 +64,8 @@ class TestRunReviewE2E(unittest.TestCase):
         manager.cache.screener_dao = MagicMock()
         manager.cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
         manager.cache.screener_dao.update_prediction_result = AsyncMock()
-        manager.cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
-        manager.cache.get_index_daily = AsyncMock(return_value=index_df)
+        manager.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        manager.cache.quote_dao.get_index_daily = AsyncMock(return_value=index_df)
         manager.api = MagicMock()
         manager.api.get_index_daily = AsyncMock(return_value=index_df)
         manager.alpha_win_threshold = 0.5
@@ -136,7 +136,7 @@ class TestRunReviewE2E(unittest.TestCase):
             }
         )
         manager = self._make_manager(pending_df, quotes_df, None)
-        manager.cache.get_index_daily = AsyncMock(return_value=None)
+        manager.cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         manager.api.get_index_daily = AsyncMock(return_value=None)
 
         asyncio.run(manager.run_review())

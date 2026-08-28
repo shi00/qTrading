@@ -310,7 +310,7 @@ class TestMacroSyncSyncMacroMonthly:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
         strategy = MacroSyncStrategy(ctx)
@@ -341,7 +341,7 @@ class TestMacroSyncSyncMacroMonthly:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(
             return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0], "m2_yoy": [5.0]})
@@ -385,7 +385,7 @@ class TestMacroSyncSyncMacroMonthly:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0]}))
         ctx.api.get_cn_gdp = AsyncMock(side_effect=TushareAPIPermissionError("cn_gdp", "no permission"))
@@ -409,7 +409,7 @@ class TestMacroSyncSyncShiborDaily:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "shibor": [2.0]}))
         strategy = MacroSyncStrategy(ctx)
@@ -462,7 +462,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         # R17（迁移 0015）：TushareClient._COLUMN_RENAMES 将 date/on/1w/3m 重命名为 record_date/on_rate/week_1/month_3
         # mock 直接返回重命名后的 DataFrame（模拟 _handle_api_call 自动重命名后的结果）
@@ -521,7 +521,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [1.8]}))
         ctx.api.get_shibor_lpr = AsyncMock(side_effect=TushareAPIPermissionError("shibor_lpr", "denied"))
@@ -555,7 +555,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-01")
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         result = SyncResult()
@@ -569,8 +569,8 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=1)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=1)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
         strategy = MacroSyncStrategy(ctx)
@@ -590,8 +590,8 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=3)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
         strategy = MacroSyncStrategy(ctx)
@@ -603,8 +603,7 @@ class TestMacroSyncSyncIndexWeights:
             )
             result = SyncResult()
             await strategy._sync_index_weights(result)
-            ctx.cache.update_sync_status.assert_called_once()
-            call_args = ctx.cache.update_sync_status.call_args
+            call_args = ctx.cache.sync_dao.update_sync_status.call_args
             assert call_args[0][0] == "index_weight"
             assert call_args[0][2] == 21
 
@@ -615,8 +614,8 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=2)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"index_code": ["399300.SZ"]}))
         strategy = MacroSyncStrategy(ctx)
@@ -629,7 +628,7 @@ class TestMacroSyncSyncIndexWeights:
             result = SyncResult()
             result.added = 100
             await strategy._sync_index_weights(result)
-            call_args = ctx.cache.update_sync_status.call_args
+            call_args = ctx.cache.sync_dao.update_sync_status.call_args
             assert call_args[0][2] == 14
 
     @pytest.mark.asyncio
@@ -646,8 +645,8 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=2)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.cancel_event = None  # 直接通过 _cancelled 标志触发，与基类 _check_cancelled 兼容
 
@@ -678,9 +677,9 @@ class TestMacroSyncSyncIndexWeights:
         # 取消信号在第一个 index fetch 后触发，循环应在下一次 _check_cancelled 时 return
         assert result.status == "cancelled"
         # 关键断言：取消时不应调用 update_sync_status（与 sibling 方法一致）
-        ctx.cache.update_sync_status.assert_not_called()
+        ctx.cache.sync_dao.update_sync_status.assert_not_called()
         # 已 fetch 的部分应已落库（幂等可重入，下次同步可继续）
-        ctx.cache.save_index_weights.assert_awaited_once()
+        ctx.cache.market_dao.save_index_weights.assert_awaited_once()
         assert result.added == 2
 
     @pytest.mark.asyncio
@@ -702,8 +701,8 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=2)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.cancel_event = None
 
         call_count = [0]
@@ -739,9 +738,9 @@ class TestMacroSyncSyncIndexWeights:
         # partial 失败的错误记录应保留（不被 cancel 抹除）
         assert any(f"index_code={failed_idx_code}:" in err for err in result.errors)
         # 取消时不应调用 update_sync_status
-        ctx.cache.update_sync_status.assert_not_called()
+        ctx.cache.sync_dao.update_sync_status.assert_not_called()
         # 第二个 index 的数据应已落库
-        ctx.cache.save_index_weights.assert_awaited_once()
+        ctx.cache.market_dao.save_index_weights.assert_awaited_once()
         assert result.added == 2
 
     @pytest.mark.asyncio
@@ -988,8 +987,8 @@ class TestMacroSyncIndexWeightCounterIsolation:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=3)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(
             return_value=pd.DataFrame({"index_code": ["000001.SH"], "con_code": ["600000.SH"]}),
@@ -1004,7 +1003,7 @@ class TestMacroSyncIndexWeightCounterIsolation:
             result = SyncResult()
             result.added = 50
             await strategy._sync_index_weights(result)
-            call_args = ctx.cache.update_sync_status.call_args
+            call_args = ctx.cache.sync_dao.update_sync_status.call_args
             assert call_args[0][0] == "index_weight"
             expected_iw_count = 3 * len(MAJOR_INDICES)
             assert call_args[0][2] == expected_iw_count
@@ -1133,7 +1132,7 @@ class TestMacroSyncTusharePermissionError:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(side_effect=TushareAPIPermissionError("macro_data", "Permission denied"))
         strategy = MacroSyncStrategy(ctx)
@@ -1143,8 +1142,7 @@ class TestMacroSyncTusharePermissionError:
         await strategy._sync_macro_monthly(result)
         assert len(result.errors) == 1
         assert "permission denied" in result.errors[0].lower()
-        ctx.cache.update_sync_status.assert_called_once()
-        call_kwargs = ctx.cache.update_sync_status.call_args
+        call_kwargs = ctx.cache.sync_dao.update_sync_status.call_args
         assert call_kwargs[1].get("status") == "skipped_permission"
 
     @pytest.mark.asyncio
@@ -1152,7 +1150,7 @@ class TestMacroSyncTusharePermissionError:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(side_effect=TushareAPIPermissionError("shibor", "Permission denied"))
         strategy = MacroSyncStrategy(ctx)
@@ -1174,7 +1172,7 @@ class TestMacroSyncTusharePermissionError:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(side_effect=TushareAPIPermissionError("index_weight", "Permission denied"))
         strategy = MacroSyncStrategy(ctx)
@@ -1197,7 +1195,7 @@ class TestMacroSyncTusharePermissionError:
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(
             side_effect=TushareAPIPermissionError("index_weight", "Permission denied")
         )
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         result = SyncResult()
@@ -1211,7 +1209,7 @@ class TestMacroSyncShiborDateParsing:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]}))
         strategy = MacroSyncStrategy(ctx)
@@ -1232,8 +1230,8 @@ class TestMacroSyncIndexWeightsIndividualError:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=5)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=5)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
         call_count = 0
 
@@ -1265,8 +1263,8 @@ class TestMacroSyncIndexWeightsIndividualError:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
         call_count = 0
 
@@ -1306,8 +1304,8 @@ class TestSyncIndexWeightsPartialFailure:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=3)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
         call_count = 0
         failed_idx_code = MAJOR_INDICES[0]
@@ -1351,8 +1349,8 @@ class TestSyncIndexWeightsPartialFailure:
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
         ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        ctx.cache.save_index_weights = AsyncMock(return_value=2)
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(
             return_value=pd.DataFrame({"index_code": ["000001.SH"]}),
@@ -1437,7 +1435,7 @@ class TestMacroSyncMonthlyWithSkippedPermission:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(side_effect=TushareAPIPermissionError("macro_data", "Permission denied"))
         strategy = MacroSyncStrategy(ctx)
@@ -1452,7 +1450,7 @@ class TestMacroSyncMonthlyWithSkippedPermission:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock(side_effect=Exception("Status update failed"))
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=Exception("Status update failed"))
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(side_effect=TushareAPIPermissionError("shibor", "Permission denied"))
         strategy = MacroSyncStrategy(ctx)
@@ -1538,7 +1536,7 @@ class TestMacroSyncMonthlyUsesYyyymm:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202406"], "m2": [100.0]}))
         strategy = MacroSyncStrategy(ctx)
@@ -1576,7 +1574,7 @@ class TestMacroSyncPartialFailure:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(side_effect=RuntimeError("Macro API error"))
         ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]}))
@@ -1616,7 +1614,7 @@ class TestLprWeekendPersistence:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         # shibor 数据：工作日 2024-06-14（周五）
         ctx.api.get_shibor = AsyncMock(
@@ -1671,7 +1669,7 @@ class TestLprWeekendPersistence:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [1.8]}))
         ctx.api.get_shibor_lpr = AsyncMock(return_value=pd.DataFrame())
@@ -1705,7 +1703,7 @@ class TestMacroSyncCancellationPoints:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
-        ctx.cache.update_sync_status = AsyncMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
@@ -1863,7 +1861,7 @@ class TestMacroSyncCancellationPoints:
         strategy, cancel_event = self._make_strategy_with_cancel_event()
         strategy.context.cache.market_dao = MagicMock()
         strategy.context.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
-        strategy.context.cache.save_index_weights = AsyncMock(return_value=1)
+        strategy.context.cache.market_dao.save_index_weights = AsyncMock(return_value=1)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
 
         # 在 _get_effective_trade_date 返回后、循环前设置取消

@@ -174,14 +174,14 @@ class TestDataProcessorShouldSyncFinancials:
     @pytest.mark.asyncio
     async def test_never_synced(self):
         dp = _make_dp()
-        dp.cache.get_sync_status = AsyncMock(return_value=None)
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value=None)
         result, reason = await dp.should_sync_financials()
         assert result is True
 
     @pytest.mark.asyncio
     async def test_no_last_sync_date(self):
         dp = _make_dp()
-        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": None})
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": None})
         result, reason = await dp.should_sync_financials()
         assert result is True
 
@@ -189,7 +189,7 @@ class TestDataProcessorShouldSyncFinancials:
     async def test_recent_sync(self):
         dp = _make_dp()
         recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
-        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
         with patch(
             "data.data_processor.get_now",
             return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
@@ -201,7 +201,7 @@ class TestDataProcessorShouldSyncFinancials:
     async def test_old_sync(self):
         dp = _make_dp()
         old = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=35)
-        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
         with patch(
             "data.data_processor.get_now",
             return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
@@ -212,7 +212,7 @@ class TestDataProcessorShouldSyncFinancials:
     @pytest.mark.asyncio
     async def test_exception_returns_true(self):
         dp = _make_dp()
-        dp.cache.get_sync_status = AsyncMock(side_effect=Exception("db error"))
+        dp.cache.sync_dao.get_sync_status = AsyncMock(side_effect=Exception("db error"))
         result, reason = await dp.should_sync_financials()
         assert result is True
 
@@ -250,8 +250,8 @@ class TestDataProcessorSyncStockBasic:
             }
         )
         dp.api.get_stock_basic_all = AsyncMock(return_value=df)
-        dp.cache.save_stock_basic = AsyncMock(return_value=2)
-        dp.cache.update_sync_status = AsyncMock()
+        dp.cache.stock_dao.save_stock_basic = AsyncMock(return_value=2)
+        dp.cache.sync_dao.update_sync_status = AsyncMock()
         dp.clear_cancel()
         with patch(
             "data.data_processor.get_now",
@@ -265,7 +265,7 @@ class TestDataProcessorSyncStockBasic:
         dp = _make_dp()
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
         dp.api.get_stock_basic_all = AsyncMock(return_value=df)
-        dp.cache.save_stock_basic = AsyncMock(return_value=0)
+        dp.cache.stock_dao.save_stock_basic = AsyncMock(return_value=0)
         dp.clear_cancel()
         with patch(
             "data.data_processor.get_now",
@@ -357,7 +357,7 @@ class TestDataProcessorSyncConcepts:
             }
         )
         dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
-        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
         dp.clear_cancel()
         # P3-SyncConcepts-Dual-RateLimit: fetch_one 不再使用 wait_for，
         # 改用纯 is_cancelled() check（O(1) flag 读取，无等待语义）。
@@ -373,7 +373,7 @@ class TestDataProcessorSyncConcepts:
         df_c = pd.DataFrame({"code": ["TS1"]})
         dp.api.get_concept_list = AsyncMock(return_value=df_c)
         dp.api.get_concept_detail_by_id = AsyncMock()
-        dp.cache.overwrite_concepts = AsyncMock(return_value=0)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=0)
         # 在 fetch_one 进入前 set cancel_event
         dp._get_cancel_event().set()
         result = await dp.sync_concepts()
@@ -407,14 +407,14 @@ class TestDataProcessorSyncConcepts:
             return detail_df
 
         dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_api_then_set_cancel)
-        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
         dp.clear_cancel()
-        # R2 红线契约：CancelledError 必须传播。强化断言：cancel 后 cache.overwrite_concepts
+        # R2 红线契约：CancelledError 必须传播。强化断言：cancel 后 cache.stock_dao.overwrite_concepts
         # 不应被调用（cancel 优先于保存），证明 CancelledError 在 gather 传播后立即 raise，
         # 未进入保存分支。
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；后续 overwrite_concepts.assert_not_called 已强断言
             await dp.sync_concepts()
-        dp.cache.overwrite_concepts.assert_not_called()
+        dp.cache.stock_dao.overwrite_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sync_concepts_cancel_within_2s_during_blocked_api_call(self):
@@ -439,7 +439,7 @@ class TestDataProcessorSyncConcepts:
             await asyncio.Event().wait()
 
         dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_blocking_detail)
-        dp.cache.overwrite_concepts = AsyncMock()
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock()
         dp.clear_cancel()
 
         task = asyncio.create_task(dp.sync_concepts())
@@ -448,7 +448,7 @@ class TestDataProcessorSyncConcepts:
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion weak_raises_only  # [reason: body 内无法插入 assert（期望异常会提前终止 body）；已在 with 后补强断言验证取消后未落库]
             await asyncio.wait_for(task, timeout=2.0)
         # 强断言：取消后 sync_concepts 未走到落库（overwrite_concepts 未被调用）
-        dp.cache.overwrite_concepts.assert_not_called()
+        dp.cache.stock_dao.overwrite_concepts.assert_not_called()
         assert dp.is_cancelled()
 
     @pytest.mark.asyncio
@@ -524,7 +524,7 @@ class TestDataProcessorSyncConcepts:
         # 改用整体 sync_concepts 调用并测量耗时，单个 concept 应在 100ms 内完成）
         df_c = pd.DataFrame({"code": ["TS1"]})
         dp.api.get_concept_list = AsyncMock(return_value=df_c)
-        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
 
         start = time.monotonic()
         result = await dp.sync_concepts()
@@ -601,13 +601,13 @@ class TestDataProcessorSyncConcepts:
             return detail_df
 
         dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_api_with_engine_disposed)
-        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
         dp.clear_cancel()
 
         with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 红线契约仅验证 EngineDisposedError 类型传播即可，无有意义 message 可 match；后续 overwrite_concepts.assert_not_called 已强断言
             await dp.sync_concepts()
         # 验证：EngineDisposedError 在保存前抛出，未触发 overwrite_concepts
-        dp.cache.overwrite_concepts.assert_not_called()
+        dp.cache.stock_dao.overwrite_concepts.assert_not_called()
 
 
 class TestDataProcessorInitData:
@@ -683,7 +683,7 @@ class TestDataProcessorPrepareMarketData:
         dp = _make_dp()
         today = datetime.date(2024, 6, 14)
         dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=today)
-        dp.cache.get_latest_trade_date = AsyncMock(return_value=today)
+        dp.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=today)
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             result = await dp.prepare_market_data()
             assert result == today
@@ -724,7 +724,7 @@ class TestDataProcessorGetMarketOverview:
             }
         )
         dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
-        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
         with patch(
             "data.data_processor.NewsFetcher.get_hot_concepts",
@@ -757,7 +757,7 @@ class TestDataProcessorGetMarketOverview:
             }
         )
         dp.api.get_index_daily = AsyncMock(return_value=api_df)
-        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
         with patch(
             "data.data_processor.NewsFetcher.get_hot_concepts",
@@ -795,9 +795,10 @@ class TestDataProcessorGetStockHistory:
         dp.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
         )
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         await dp.get_stock_history("000001.SZ", days=365, end_date="20240614")
-        dp.cache.get_daily_quotes.assert_called_once()
+        daily_call = dp.cache.quote_dao.get_daily_quotes.call_args
+        assert daily_call.kwargs["ts_code"] == "000001.SZ"
 
     @pytest.mark.asyncio
     async def test_with_end_date_date(self):
@@ -806,9 +807,10 @@ class TestDataProcessorGetStockHistory:
         dp.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
         )
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         await dp.get_stock_history("000001.SZ", end_date=datetime.date(2024, 6, 14))
-        dp.cache.get_daily_quotes.assert_called_once()
+        daily_call = dp.cache.quote_dao.get_daily_quotes.call_args
+        assert daily_call.kwargs["ts_code"] == "000001.SZ"
 
     @pytest.mark.asyncio
     async def test_no_end_date(self):
@@ -817,10 +819,11 @@ class TestDataProcessorGetStockHistory:
         dp.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
         )
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")
-            dp.cache.get_daily_quotes.assert_called_once()
+            daily_call = dp.cache.quote_dao.get_daily_quotes.call_args
+            assert daily_call.kwargs["ts_code"] == "000001.SZ"
 
     @pytest.mark.asyncio
     async def test_end_date_exception_fallback(self):
@@ -829,10 +832,11 @@ class TestDataProcessorGetStockHistory:
         dp.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
         )
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")
-            dp.cache.get_daily_quotes.assert_called_once()
+            daily_call = dp.cache.quote_dao.get_daily_quotes.call_args
+            assert daily_call.kwargs["ts_code"] == "000001.SZ"
 
     @pytest.mark.asyncio
     async def test_latest_trade_date_none_falls_back_to_today(self):
@@ -842,10 +846,10 @@ class TestDataProcessorGetStockHistory:
         dp.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
         )
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")
-        dp.cache.get_daily_quotes.assert_called_once_with(
+        dp.cache.quote_dao.get_daily_quotes.assert_called_once_with(
             ts_code="000001.SZ",
             start_date=datetime.date(2024, 1, 2),
             end_date=datetime.date(2024, 6, 14),
@@ -886,7 +890,7 @@ class TestDataProcessorPrepareScreeningContext:
     async def test_basic_context(self):
         dp = _make_dp()
         dp._quality_tier = 3
-        dp.cache.get_screening_data = AsyncMock(
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -895,14 +899,14 @@ class TestDataProcessorPrepareScreeningContext:
                 }
             )
         )
-        dp.cache.get_fundamental_screening_data = AsyncMock(
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True]})
         )
-        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        dp.cache.get_top_list = AsyncMock(return_value=None)
-        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
         result = await dp.prepare_screening_context(trade_date="20240614")
         assert "screening_data" in result
         assert "_diagnostics" in result
@@ -911,7 +915,7 @@ class TestDataProcessorPrepareScreeningContext:
     async def test_with_suspended_stocks(self):
         dp = _make_dp()
         dp._quality_tier = 3
-        dp.cache.get_screening_data = AsyncMock(
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -920,12 +924,12 @@ class TestDataProcessorPrepareScreeningContext:
                 }
             )
         )
-        dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
-        dp.cache.get_northbound = AsyncMock(return_value=None)
-        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        dp.cache.get_moneyflow = AsyncMock(return_value=None)
-        dp.cache.get_top_list = AsyncMock(return_value=None)
-        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
         result = await dp.prepare_screening_context(trade_date="20240614")
         assert len(result["screening_data"]) == 1
 
@@ -934,7 +938,7 @@ class TestDataProcessorPrepareScreeningContext:
         dp = _make_dp()
         dp._quality_tier = None
         dp._assign_basic_tier = AsyncMock()
-        dp.cache.get_screening_data = AsyncMock(
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -943,12 +947,12 @@ class TestDataProcessorPrepareScreeningContext:
                 }
             )
         )
-        dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
-        dp.cache.get_northbound = AsyncMock(return_value=None)
-        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        dp.cache.get_moneyflow = AsyncMock(return_value=None)
-        dp.cache.get_top_list = AsyncMock(return_value=None)
-        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
         await dp.prepare_screening_context(trade_date="20240614")
         dp._assign_basic_tier.assert_called_once()
 
@@ -1272,9 +1276,9 @@ class TestDataProcessorGetFundamentalScreeningData:
     async def test_delegates_to_cache(self):
         proc = DataProcessor.__new__(DataProcessor)
         proc.cache = MagicMock()
-        proc.cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        proc.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
         await proc.get_fundamental_screening_data("20240614")
-        proc.cache.get_fundamental_screening_data.assert_called_once_with("20240614")
+        proc.cache.screener_dao.get_fundamental_screening_data.assert_called_once_with("20240614")
 
 
 class TestDataProcessorGetScreeningData:
@@ -1282,9 +1286,9 @@ class TestDataProcessorGetScreeningData:
     async def test_delegates_to_cache(self):
         proc = DataProcessor.__new__(DataProcessor)
         proc.cache = MagicMock()
-        proc.cache.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        proc.cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
         await proc.get_screening_data("20240614")
-        proc.cache.get_screening_data.assert_called_once_with("20240614")
+        proc.cache.screener_dao.get_screening_data.assert_called_once_with("20240614")
 
 
 class TestDataProcessorInit:

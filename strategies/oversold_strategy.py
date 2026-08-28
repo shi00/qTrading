@@ -353,7 +353,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
         try:
             valid_codes = snapshot_df["ts_code"].tolist()
-            history_pdf = await dp.cache.get_daily_quotes(
+            history_pdf = await dp.cache.quote_dao.get_daily_quotes(
                 start_date=start_date_obj,
                 end_date=end_date_obj,
                 ts_code_list=valid_codes,

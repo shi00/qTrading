@@ -48,7 +48,7 @@ async def get_effective_trade_date(processor: Any) -> datetime.date:
     优先级：
       1. ``processor.trade_calendar.get_latest_trade_date()``
          （内部已按 DB trade_cal → Tushare API → 离线日历 依次兜底）；
-      2. 已同步数据最大交易日：``processor.cache.get_latest_trade_date()``
+      2. 已同步数据最大交易日：``processor.cache.quote_dao.get_latest_trade_date()``
          （daily_quotes.MAX(trade_date)，一定是真实交易日）；
       3. 全部不可得 → 抛 ``TradeDateUnavailableError``（可操作提示），
          绝不回退到 ``get_now().date()``（避免时区/非交易日导致的错误同步窗口）。
@@ -87,7 +87,7 @@ async def get_effective_trade_date(processor: Any) -> datetime.date:
     cache = getattr(processor, "cache", None)
     if cache is not None:
         try:
-            latest = await cache.get_latest_trade_date()  # quote_dao: daily_quotes.MAX(trade_date)
+            latest = await cache.quote_dao.get_latest_trade_date()  # quote_dao: daily_quotes.MAX(trade_date)
             if latest is not None:
                 if isinstance(latest, datetime.date):
                     return latest
@@ -195,7 +195,7 @@ class TradeCalendarService:
             return False
 
         try:
-            await self._cache.save_trade_cal(df)
+            await self._cache.stock_dao.save_trade_cal(df)
             logger.debug("[TradeCalendarService] Persisted %s calendar records to DB", len(df))
             return True
         except asyncio.CancelledError:
@@ -342,12 +342,12 @@ class TradeCalendarService:
             return False
 
         try:
-            df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj, is_open="1")
+            df = await self._cache.stock_dao.get_trade_cal(start_date=date_obj, end_date=date_obj, is_open="1")
             if df is not None and not df.empty:
                 return True
 
             if df is not None and len(df) == 0:
-                df = await self._cache.get_trade_cal(start_date=date_obj, end_date=date_obj)
+                df = await self._cache.stock_dao.get_trade_cal(start_date=date_obj, end_date=date_obj)
                 if df is not None and not df.empty:
                     return df["is_open"].iloc[0] == 1
 
@@ -402,7 +402,7 @@ class TradeCalendarService:
             return []
 
         try:
-            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open="1")
+            df = await self._cache.stock_dao.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open="1")
             if df is not None and not df.empty:
                 # 数据完整性快速校验：日期跨度 vs 记录数
                 # 3年约730个交易日，如果记录数远低于预期跨度的交易日密度，说明数据不完整
@@ -509,7 +509,7 @@ class TradeCalendarService:
             return None
 
         try:
-            result = await self._cache.get_start_date_by_trade_days(end_obj, trade_days)
+            result = await self._cache.stock_dao.get_start_date_by_trade_days(end_obj, trade_days)
             if result is not None:
                 return result
 
@@ -778,7 +778,7 @@ class TradeCalendarService:
         end_obj = self._to_date(end_date)
 
         try:
-            df = await self._cache.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=is_open)
+            df = await self._cache.stock_dao.get_trade_cal(start_date=start_obj, end_date=end_obj, is_open=is_open)
             if df is not None and not df.empty:
                 return df
 

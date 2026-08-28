@@ -156,7 +156,7 @@ class TestOversoldVolumeThreshold:
         strategy = OversoldStrategy()
         dp = MagicMock()
         dp.cache = MagicMock()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=__import__("pandas").DataFrame(history_pdf))
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=__import__("pandas").DataFrame(history_pdf))
         dp.trade_calendar = MagicMock()
         dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
         dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=trade_dates[0])

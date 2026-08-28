@@ -410,7 +410,7 @@ class AIStrategyMixin:
             bulk_history_df = self._history_cache.get(cache_key)
 
             if bulk_history_df is None:
-                bulk_history_df = await dp.cache.get_daily_quotes(  # type: ignore[union-attr]
+                bulk_history_df = await dp.cache.quote_dao.get_daily_quotes(  # type: ignore[union-attr]
                     ts_code_list=all_ts_codes,
                     start_date=start_date,
                     end_date=end_date,
@@ -457,19 +457,19 @@ class AIStrategyMixin:
 
         if trade_date:
             try:
-                moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
+                moneyflow_df = await dp.cache.quote_dao.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch moneyflow: %s", DataSanitizer.sanitize_error(e))
 
             try:
-                top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
+                top_list_df = await dp.cache.quote_dao.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch top_list: %s", DataSanitizer.sanitize_error(e))
 
             try:
-                northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
+                northbound_df = await dp.cache.quote_dao.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))

@@ -167,7 +167,7 @@ class VectorBacktestEngine:
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_trade_dates(self) -> list[date]:
-        cal_df = await self.cache.get_trade_cal(
+        cal_df = await self.cache.stock_dao.get_trade_cal(
             start_date=self.config.start_date.strftime("%Y%m%d"),
             end_date=self.config.end_date.strftime("%Y%m%d"),
             is_open="1",
@@ -191,7 +191,7 @@ class VectorBacktestEngine:
         start_str = trade_dates[0].strftime("%Y%m%d")
         end_str = trade_dates[-1].strftime("%Y%m%d")
 
-        quotes_pd = await self.cache.get_daily_quotes(
+        quotes_pd = await self.cache.quote_dao.get_daily_quotes(
             start_date=start_str,
             end_date=end_str,
         )
@@ -254,7 +254,7 @@ class VectorBacktestEngine:
         这是为了避免在撮合层重复加载完整的 screening_data（包含大量不需要的字段）。
         """
         try:
-            suspend_pd = await self.cache.get_suspend_d(
+            suspend_pd = await self.cache.quote_dao.get_suspend_d(
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -306,7 +306,7 @@ class VectorBacktestEngine:
         涨跌停数据来自 limit_list 表，用于撮合层判断是否可买卖。
         """
         try:
-            limit_list_pd = await self.cache.get_limit_list(
+            limit_list_pd = await self.cache.quote_dao.get_limit_list(
                 start_date=start_date,
                 end_date=end_date,
             )

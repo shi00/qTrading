@@ -420,7 +420,7 @@ class MarketDataService:
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_hsgt(self, date: str) -> dict:
         """获取北向资金数据 - 优先从缓存获取，缓存无数据时调用 API"""
-        df = await self.cache.get_moneyflow_hsgt(trade_date=date)
+        df = await self.cache.market_dao.get_moneyflow_hsgt(trade_date=date)
 
         if df is None or df.empty:
             df = await self.api.get_moneyflow_hsgt(trade_date=date)

@@ -15,6 +15,7 @@ pytestmark = pytest.mark.unit
 
 def _make_service(cache_return=None, api_return=None, offline_return=None, cache_return_no_filter=None):
     mock_cache = MagicMock()
+    mock_cache.stock_dao = MagicMock()
 
     async def _get_trade_cal(**kwargs):
         if kwargs.get("is_open") in (1, "1"):
@@ -23,11 +24,10 @@ def _make_service(cache_return=None, api_return=None, offline_return=None, cache
             return cache_return_no_filter
         return cache_return
 
-    mock_cache.get_trade_cal = AsyncMock(side_effect=_get_trade_cal)
-    mock_cache.save_trade_cal = AsyncMock()
+    mock_cache.stock_dao.get_trade_cal = AsyncMock(side_effect=_get_trade_cal)
+    mock_cache.stock_dao.save_trade_cal = AsyncMock()
     mock_cache.get_trade_cal_range = AsyncMock(return_value=(None, None))
-    mock_cache.get_start_date_by_trade_days = AsyncMock(return_value=None)
-    mock_cache.stock_dao = MagicMock()
+    mock_cache.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value=None)
     mock_cache.stock_dao.count_trade_days = AsyncMock(return_value=5)
 
     mock_api = MagicMock()
@@ -100,12 +100,12 @@ class TestEnsureDataPersisted:
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         result = await svc._ensure_data_persisted(df)
         assert result is True
-        svc._cache.save_trade_cal.assert_called_once()
+        svc._cache.stock_dao.save_trade_cal.assert_called_once_with(df)
 
     @pytest.mark.asyncio
     async def test_persist_failure(self):
         svc = _make_service()
-        svc._cache.save_trade_cal = AsyncMock(side_effect=Exception("DB error"))
+        svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=Exception("DB error"))
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         result = await svc._ensure_data_persisted(df)
         assert result is False
@@ -214,7 +214,7 @@ class TestIsTradingDay:
     @pytest.mark.asyncio
     async def test_db_exception_fallback(self):
         svc = _make_service()
-        svc._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB error"))
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("DB error"))
         svc._offline = MagicMock()
         svc._offline.is_trading_day = MagicMock(return_value=True)
         result = await svc.is_trading_day("20240614")
@@ -268,7 +268,7 @@ class TestGetTradeDates:
     @pytest.mark.asyncio
     async def test_exception_falls_to_offline(self):
         svc = _make_service()
-        svc._cache.get_trade_cal = AsyncMock(side_effect=Exception("DB error"))
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("DB error"))
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(return_value=["20240614"])
         result = await svc.get_trade_dates("20240614", "20240614")
@@ -293,7 +293,7 @@ class TestCountTradeDays:
         svc = _make_service()
         svc._cache.stock_dao.count_trade_days = AsyncMock(side_effect=Exception("DAO error"))
         df = pd.DataFrame({"cal_date": ["20240614", "20240615"], "is_open": [1, 1]})
-        svc._cache.get_trade_cal = AsyncMock(return_value=df)
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(return_value=df)
         result = await svc.count_trade_days("20240614", "20240615")
         assert result == 2
 
@@ -314,7 +314,7 @@ class TestGetStartDateByTradeDays:
     @pytest.mark.asyncio
     async def test_from_cache(self):
         svc = _make_service()
-        svc._cache.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 1, 15))
+        svc._cache.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 1, 15))
         result = await svc.get_start_date_by_trade_days("20240614", 120)
         assert result == datetime.date(2024, 1, 15)
 
@@ -328,8 +328,8 @@ class TestGetStartDateByTradeDays:
     @pytest.mark.asyncio
     async def test_exception_fallback(self):
         svc = _make_service()
-        svc._cache.get_start_date_by_trade_days = AsyncMock(side_effect=Exception("error"))
-        svc._cache.get_trade_cal = AsyncMock(side_effect=Exception("error"))
+        svc._cache.stock_dao.get_start_date_by_trade_days = AsyncMock(side_effect=Exception("error"))
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("error"))
         result = await svc.get_start_date_by_trade_days("20240614", 120)
         assert result is not None
 
@@ -591,9 +591,9 @@ class TestGetEffectiveTradeDate:
             trade_calendar.get_latest_trade_date = AsyncMock(return_value=calendar_date)
         cache = MagicMock()
         if synced_error is not None:
-            cache.get_latest_trade_date = AsyncMock(side_effect=synced_error)
+            cache.quote_dao.get_latest_trade_date = AsyncMock(side_effect=synced_error)
         else:
-            cache.get_latest_trade_date = AsyncMock(return_value=synced_date)
+            cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=synced_date)
         return MagicMock(trade_calendar=trade_calendar, cache=cache)
 
     @pytest.mark.asyncio
@@ -689,7 +689,7 @@ class TestGetTradeCalDf:
     @pytest.mark.asyncio
     async def test_exception_returns_empty(self):
         svc = _make_service()
-        svc._cache.get_trade_cal = AsyncMock(side_effect=Exception("error"))
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("error"))
         svc._api.get_trade_cal = AsyncMock(side_effect=Exception("error"))
         result = await svc.get_trade_cal_df(start_date="20240614", end_date="20240614")
         assert isinstance(result, pd.DataFrame)

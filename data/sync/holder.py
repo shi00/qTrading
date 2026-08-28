@@ -115,7 +115,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     result.added += count
                     if not self._cancelled:
                         qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
-                        await self.context.cache.update_sync_status(
+                        await self.context.cache.sync_dao.update_sync_status(
                             "stk_holdernumber",
                             qe_date,
                             count,
@@ -131,7 +131,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     result.added += count
                     if not self._cancelled:
                         qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
-                        await self.context.cache.update_sync_status(
+                        await self.context.cache.sync_dao.update_sync_status(
                             "top10_holders",
                             qe_date,
                             count,
@@ -146,7 +146,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 elif count > 0:
                     result.added += count
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         "pledge_stat",
                         actual_date or await self._get_effective_trade_date(),
                         count,
@@ -158,7 +158,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 elif count > 0:
                     result.added += count
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         "share_float",
                         actual_date or await self._get_effective_trade_date(),
                         count,
@@ -170,7 +170,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     errors += 1
                 elif count > 0:
                     result.added += count
-                    await self.context.cache.update_sync_status(
+                    await self.context.cache.sync_dao.update_sync_status(
                         "stk_holdertrade",
                         actual_date or await self._get_effective_trade_date(),
                         count,
@@ -228,7 +228,7 @@ class HolderSyncStrategy(ISyncStrategy):
         try:
             df = await self.context.api.get_stk_holdernumber(enddate=enddate)
             if df is not None and not df.empty:
-                await self.context.cache.save_holder_number(df)
+                await self.context.cache.holder_dao.save_holder_number(df)
                 logger.debug(
                     "[HolderSync] Table | stk_holdernumber enddate=%s: %s records",
                     enddate,
@@ -244,7 +244,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 "[HolderSync] ⛔ Permission denied for stk_holdernumber",
             )
             qe_date = datetime.datetime.strptime(enddate, "%Y%m%d").date()
-            await self.context.cache.update_sync_status(
+            await self.context.cache.sync_dao.update_sync_status(
                 "stk_holdernumber",
                 qe_date,
                 0,
@@ -281,7 +281,7 @@ class HolderSyncStrategy(ISyncStrategy):
         Returns total row count on success, -1 on error.
         """
         try:
-            stock_df = await self.context.cache.get_stock_basic()
+            stock_df = await self.context.cache.stock_dao.get_stock_basic()
             if stock_df is None or stock_df.empty:
                 logger.warning("[HolderSync] No stock list available for top10_holders sync")
                 return -1
@@ -414,7 +414,7 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if all_dfs:
                 combined = pd.concat(all_dfs, ignore_index=True)
-                await self.context.cache.save_top10_holders(combined)
+                await self.context.cache.holder_dao.save_top10_holders(combined)
                 logger.info(
                     "[HolderSync] Table | top10_holders period=%s: saved final batch of %s records",
                     period,
@@ -502,7 +502,7 @@ class HolderSyncStrategy(ISyncStrategy):
         """
         try:
             combined = pd.concat(all_dfs, ignore_index=True)
-            await self.context.cache.save_top10_holders(combined)
+            await self.context.cache.holder_dao.save_top10_holders(combined)
             logger.info(
                 "[HolderSync] top10_holders | Checkpoint saved: %s records for period=%s",
                 len(combined),
@@ -577,7 +577,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             if end_date:
                 qe_date = datetime.datetime.strptime(end_date, "%Y%m%d").date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     table_name,
                     qe_date,
                     0,
@@ -652,7 +652,7 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 # pledge_stat API does not return ann_date; do NOT synthesize it
                 # to avoid lookahead bias in as_of queries (see MD-001).
-                await self.context.cache.save_pledge_stat(df)
+                await self.context.cache.financial_dao.save_pledge_stat(df)
                 logger.debug("[HolderSync] Table | pledge_stat: %s records", len(df))
                 return len(df), actual_end_date
 
@@ -670,7 +670,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             try:
                 today = await self._get_effective_trade_date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "pledge_stat",
                     today,
                     0,
@@ -750,7 +750,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             try:
                 today = await self._get_effective_trade_date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "share_float",
                     today,
                     0,
@@ -829,7 +829,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             try:
                 today = await self._get_effective_trade_date()
-                await self.context.cache.update_sync_status(
+                await self.context.cache.sync_dao.update_sync_status(
                     "stk_holdertrade",
                     today,
                     0,

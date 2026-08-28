@@ -44,7 +44,7 @@ class TestBacktestService:
                 "is_open": ["1"] * len(trade_dates),
             }
         )
-        cache.get_trade_cal = AsyncMock(return_value=cal_df)
+        cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal_df)
 
         quotes_df = pd.DataFrame(
             {
@@ -67,7 +67,7 @@ class TestBacktestService:
                 "is_tradable": [True, True, True, True, True, True],
             }
         )
-        cache.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
 
         benchmark_df = pd.DataFrame(
             {
@@ -79,12 +79,12 @@ class TestBacktestService:
         )
         cache.get_index_daily_range = AsyncMock(return_value=benchmark_df)
 
-        cache.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
-        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
-        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_daily_indicators = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
 
         backtest_dao = MagicMock()
         backtest_dao.save_result = AsyncMock(return_value=1)
