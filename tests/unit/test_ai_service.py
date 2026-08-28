@@ -11,7 +11,6 @@ from services.ai_service import (
     AIService,
     LITELLM_AVAILABLE,
     _check_reasoning_support,
-    _classify_api_error,
     STRATEGY_CONTEXT_MAX_LEN,
     VALID_RECOMMENDATIONS,
     _FREE_TEXT_MAX_LEN,
@@ -212,14 +211,6 @@ class TestCheckReasoningSupport:
         monkeypatch.setattr(ai_service, "litellm", None)
         result = _check_reasoning_support("deepseek-v4-pro")
         assert isinstance(result, bool)
-
-
-class TestClassifyApiError:
-    def test_returns_dict(self):
-        result = _classify_api_error(Exception("test"))
-        assert isinstance(result, dict)
-        assert "code" in result
-        assert "message_key" in result
 
 
 class TestStrategyContextMaxLen:
@@ -2678,3 +2669,75 @@ class TestFilterAvailableLabelsAndStrategyTier:
         assert "不得因 stale 数据存在而拒绝分析" in _UNIVERSAL_RULES
         # 不得用于趋势判断
         assert "不得将该数据用于趋势" in _UNIVERSAL_RULES
+
+
+class TestStockAnalysisFilterLabelsGenericException:
+    """PR #640 diff-coverage 补覆盖：stock_analysis.py L387 filter_available_labels 泛型异常兜底。"""
+
+    @pytest.mark.asyncio
+    async def test_filter_labels_generic_exception_logs_fallback(self, caplog):
+        import logging
+
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with (
+            patch(
+                "services.ai_service.stock_analysis.filter_available_labels",
+                side_effect=RuntimeError("probe exploded"),
+            ),
+            patch("data.external.tushare_client.TushareClient") as mock_tc,
+            patch(
+                "services.ai_service.ConfigHandler.get_tushare_point_tier",
+                return_value="points_120",
+            ),
+            patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"),
+        ):
+            mock_tc.return_value.get_tier_apis.return_value = []
+            mock_tc.return_value.is_api_available.return_value = True
+            with caplog.at_level(logging.WARNING, logger="services.ai_service.stock_analysis"):
+                result = await svc.analyze_stock(
+                    stock_info={"ts_code": "000001.SZ", "concepts": []},
+                    tech_info={},
+                    news_list=[],
+                    strategy_key="oversold",
+                )
+        # 兜底后继续执行，不因过滤失败而阻塞分析
+        assert result["score"] == 50
+        assert any("filter_available_labels failed" in r.message for r in caplog.records)
+
+
+class TestStockAnalysisPromptDumpFailure:
+    """PR #640 diff-coverage 补覆盖：stock_analysis.py L485 prompt dump 写文件失败分支。"""
+
+    @pytest.mark.asyncio
+    async def test_prompt_dump_write_failure_logs(self, caplog):
+        import logging
+
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._get_prompt_dump_dir = MagicMock(side_effect=OSError("cannot write prompt dump"))
+
+        def fake_get_setting(k, d=False):
+            return True if k == "ai_prompt_dump_enabled" else d
+
+        with (
+            patch("services.ai_service.stock_analysis.logger.isEnabledFor", return_value=True),
+            patch("services.ai_service.ConfigHandler.get_setting", side_effect=fake_get_setting),
+            patch(
+                "services.ai_service.ConfigHandler.get_tushare_point_tier",
+                return_value="points_120",
+            ),
+            patch("data.external.tushare_client.TushareClient") as mock_tc,
+            patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"),
+        ):
+            mock_tc.return_value.get_tier_apis.return_value = []
+            mock_tc.return_value.is_api_available.return_value = True
+            with caplog.at_level(logging.WARNING, logger="services.ai_service.stock_analysis"):
+                result = await svc.analyze_stock(
+                    stock_info={"ts_code": "000001.SZ", "concepts": []},
+                    tech_info={},
+                    news_list=[],
+                    strategy_key="oversold",
+                )
+        assert result["score"] == 50
+        assert any("Failed to dump prompt to file" in r.message for r in caplog.records)

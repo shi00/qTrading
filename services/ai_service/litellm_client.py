@@ -127,19 +127,12 @@ def _check_reasoning_support(model: str) -> bool:
         try:
             return _ai.litellm.utils.supports_reasoning(model=model)
         except Exception as exc:
-            error_info = classify_error(exc, context="general")
-            severity = classify_severity(exc, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                exc,
+                "general",
                 "[AIService] supports_reasoning check failed (%s) for %s: %s, using LLM_PROVIDERS fallback",
-                error_info["code"],
                 model,
-                _ai.DataSanitizer.sanitize_error(exc),
                 exc_info=True,
             )
 
@@ -158,19 +151,6 @@ def _check_reasoning_support(model: str) -> bool:
                 if model_lower == model_id_lower:
                     return True
     return False
-
-
-def _classify_api_error(e: Exception) -> dict:
-    """
-    Classify API errors into structured error info with i18n keys.
-
-    Returns:
-        {"code": str, "message_key": str} where message_key can be
-        translated via I18n.get() or get_error_message() in the UI layer.
-    """
-    from utils.error_classifier import classify_error as _classify_error
-
-    return _classify_error(e, context="llm")
 
 
 class LiteLLMClient:
@@ -424,18 +404,11 @@ class LiteLLMClient:
                     _flush_content_buf()
                     _flush_reasoning_buf()
                 except Exception as flush_err:
-                    error_info = classify_error(flush_err, context="general")
-                    severity = classify_severity(flush_err, context="general")
-                    if severity == "system":
-                        _log = logger.critical
-                    elif severity == "recoverable":
-                        _log = logger.warning
-                    else:
-                        _log = logger.error
-                    _log(
-                        "[AIService] Failed to flush chunk buffer after stream (%s): %s",
-                        error_info["code"],
+                    log_classified(
+                        logger,
                         flush_err,
+                        "general",
+                        "[AIService] Failed to flush chunk buffer after stream (%s): %s",
                         exc_info=True,
                     )
 
@@ -710,10 +683,6 @@ class LiteLLMClient:
         """
         Verify API connection by sending a minimal request.
         """
-        # 经组合根模块属性访问 DataSanitizer：保证测试
-        # patch("services.ai_service.DataSanitizer") 生效。
-        import services.ai_service as _ai
-
         if not self._service.is_cloud_available():
             return False
 
@@ -727,18 +696,11 @@ class LiteLLMClient:
             )
             return True
         except Exception as e:
-            error_info = classify_error(e, context="llm")
-            severity = classify_severity(e, context="llm")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            log_classified(
+                logger,
+                e,
+                "llm",
                 "[AIService] Verify | ❌ Connection verification failed (%s): %s",
-                error_info["code"],
-                _ai.DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             logger.debug("[AIService] Verify | Connection verification traceback:", exc_info=True)
@@ -876,18 +838,11 @@ class LiteLLMClient:
             return result
 
         except Exception as e:
-            error_info = _classify_api_error(e)
-            severity = classify_severity(e, context="llm")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
+            error_info = log_classified(
+                logger,
+                e,
+                "llm",
                 "[AIService] TestConn | Test connection failed (%s): %s",
-                error_info["code"],
-                _ai.DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return {

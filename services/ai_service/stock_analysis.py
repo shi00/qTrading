@@ -28,7 +28,7 @@ from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAUL
 from services.ai_service.output import validate_ai_analysis_response
 from services.ai_service.token_budget import _apply_context_budget
 from services.local_model_manager import LocalInferenceTimeoutError
-from utils.error_classifier import classify_error, classify_severity, log_classified
+from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 if TYPE_CHECKING:
@@ -384,18 +384,11 @@ class StockAnalysisService:
             raise
         except Exception as exc:
             # 过滤失败不应阻塞 AI 分析（labels 已含全部 key，AI 按 prompt 契约兜底）
-            error_info = classify_error(exc, context="general")
-            severity = classify_severity(exc, context="general")
-            if severity == "system":
-                _log = logger.critical
-            elif severity == "recoverable":
-                _log = logger.warning
-            else:
-                _log = logger.error
-            _log(
-                "[AIService] filter_available_labels failed (%s), using unfiltered labels: %s",
-                error_info["code"],
+            log_classified(
+                logger,
                 exc,
+                "general",
+                "[AIService] filter_available_labels failed (%s), using unfiltered labels: %s",
                 exc_info=True,
             )
 
@@ -489,18 +482,11 @@ class StockAnalysisService:
                     dump_file,
                 )
             except Exception as e:
-                error_info = classify_error(e, context="general")
-                severity = classify_severity(e, context="general")
-                if severity == "system":
-                    _log = logger.critical
-                elif severity == "recoverable":
-                    _log = logger.warning
-                else:
-                    _log = logger.error
-                _log(
-                    "[AIService] Analyze | Failed to dump prompt to file (%s): %s",
-                    error_info["code"],
+                log_classified(
+                    logger,
                     e,
+                    "general",
+                    "[AIService] Analyze | Failed to dump prompt to file (%s): %s",
                     exc_info=True,
                 )
 
