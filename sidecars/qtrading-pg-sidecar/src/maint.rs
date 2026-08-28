@@ -1790,7 +1790,8 @@ mod tests {
             "postgres",
             &password,
             "CREATE DATABASE qtrading;",
-            Duration::from_secs(10),
+            // 与生产 restore 路径（`Duration::from_secs(30)`）对齐，避免 CI 慢机上的 10s 超时 flaky
+            Duration::from_secs(30),
         )
         .await
         .expect("CREATE DATABASE qtrading failed");
@@ -1836,7 +1837,8 @@ mod tests {
             "postgres",
             &password,
             "CREATE DATABASE qtrading;",
-            Duration::from_secs(10),
+            // 与生产 restore 路径（`Duration::from_secs(30)`）对齐，避免 CI 慢机上的 10s 超时 flaky
+            Duration::from_secs(30),
         )
         .await
         .expect("CREATE DATABASE qtrading failed");
