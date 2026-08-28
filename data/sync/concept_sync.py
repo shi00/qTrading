@@ -357,7 +357,8 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 return result
 
             stock_dao = self.context.cache.stock_dao
-            cancel_event = getattr(self.context, "cancel_event", None)
+            # SyncContext 保证 cancel_event 字段存在（默认 None），与基类 _check_cancelled 直接访问一致
+            cancel_event = self.context.cancel_event
             # 配置在循环内不变，提到循环外读取一次即可（避免每个标的重复读 config）
             search_engine = self.context.config.get_ai_concept_search_engine()
 
@@ -426,11 +427,9 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             succeeded_codes: list[str] = []
 
             for ts_code, name in pending:
-                if self._cancelled:
-                    result.status = SyncStatus.CANCELLED.value
-                    break
-                if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
-                    result.status = SyncStatus.CANCELLED.value
+                # 基类 _check_cancelled 统一处理 _cancelled 标志 + context.cancel_event 同步，
+                # 命中时已设置 result.status=CANCELLED，无需在循环内重复双重检查。
+                if self._check_cancelled(result):
                     break
 
                 try:
@@ -643,7 +642,8 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
         )
         try:
             while not llm_task.done():
-                if hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                # cancel_event 非 None 在此分支已由上方提前 return 保证，必有 is_set
+                if cancel_event.is_set():
                     llm_task.cancel()
                     # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
                     # T7 fix: 记录 llm_task 的原始异常（如有），便于调试；不改变 suppress 行为
