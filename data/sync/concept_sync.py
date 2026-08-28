@@ -70,6 +70,65 @@ def _to_ts_code(code: str) -> str:
     return f"{code}.SZ"
 
 
+async def _guarded[T](
+    coro: typing.Awaitable[T],
+    *,
+    log_msg: str,
+    ts_code: str | None = None,
+    default: T,
+) -> T:
+    """统一异常守卫：执行协程并处理标准三分支异常。
+
+    - ``asyncio.CancelledError`` 原样传播（R2）
+    - ``EngineDisposedError`` 原样传播（R5）
+    - 其他异常经 ``log_classified`` 记录（日志级别按严重度选择）；
+      ``system`` 级 re-raise，其余降级返回 ``default``。
+
+    协程对象在调用点创建，参数立即绑定（无延迟捕获问题）；守卫内部
+    才 ``await`` 执行。review01-A11：收敛 AIConceptTagSync 内重复的
+    「CancelledError/EngineDisposedError/Exception 三分支」样板。
+    """
+    try:
+        return await coro
+    except asyncio.CancelledError:
+        raise
+    except EngineDisposedError:
+        raise
+    except Exception as e:
+        severity = classify_severity(e, context="general")
+        if ts_code is None:
+            log_classified(logger, e, "general", log_msg, exc_info=True)
+        else:
+            log_classified(logger, e, "general", log_msg, ts_code, exc_info=True)
+        if severity == "system":
+            raise
+        return default
+
+
+async def _suppress_task_error(llm_task: asyncio.Task, *, label: str) -> None:
+    """await 并 suppress ``llm_task`` 的异常，仅记录调试日志（取消清理路径）。
+
+    不 raise：避免覆盖外层 CancelledError 传播（R2）。内部取消被 suppress，
+    非取消异常仅记录分类信息便于调试。review01-A11：收敛
+    ``_cancellable_llm_call`` 内两处重复的取消清理样板。
+    """
+    try:
+        await llm_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as llm_err:
+        llm_info = classify_error(llm_err, context="general")
+        llm_sev = classify_severity(llm_err, context="general")
+        logger.debug(
+            "[AIConceptTagSync] llm_task suppressed %s (%s/%s): %r",
+            label,
+            llm_info["code"],
+            llm_sev,
+            DataSanitizer.sanitize_error(llm_err),
+            exc_info=True,
+        )
+
+
 class AKShareConceptSyncStrategy(ISyncStrategy):
     """Sync East-Money concept boards and constituents via AKShare.
 
@@ -363,25 +422,11 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
 
             # 错题本优先重试：先从失败队列拉取（max_retry + cooldown 过滤）
             # EngineDisposedError 必须传播（R5），不可作为可恢复错误吞掉
-            retry_pending: list[tuple[str, str]] = []
-            try:
-                retry_pending = await stock_dao.get_ai_concept_failures_for_retry(batch_size)
-            except asyncio.CancelledError:
-                raise
-            except EngineDisposedError:
-                raise
-            except Exception as e:
-                severity = classify_severity(e, context="general")
-                log_classified(
-                    logger,
-                    e,
-                    "general",
-                    "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
-                    exc_info=True,
-                )
-                if severity == "system":
-                    raise
-                retry_pending = []
+            retry_pending: list[tuple[str, str]] = await _guarded(
+                stock_dao.get_ai_concept_failures_for_retry(batch_size),
+                log_msg="[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
+                default=[],
+            )
 
             retry_codes = {ts_code for ts_code, _ in retry_pending}
 
@@ -389,24 +434,11 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             fresh_pending: list[tuple[str, str]] = []
             remaining = max(0, batch_size - len(retry_pending))
             if remaining > 0:
-                try:
-                    fresh_pending = await stock_dao.get_stocks_without_ai_concepts(remaining, [])
-                except asyncio.CancelledError:
-                    raise
-                except EngineDisposedError:
-                    raise
-                except Exception as e:
-                    severity = classify_severity(e, context="general")
-                    log_classified(
-                        logger,
-                        e,
-                        "general",
-                        "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
-                        exc_info=True,
-                    )
-                    if severity == "system":
-                        raise
-                    fresh_pending = []
+                fresh_pending = await _guarded(
+                    stock_dao.get_stocks_without_ai_concepts(remaining, []),
+                    log_msg="[AIConceptTagSync] Failed to load fresh pending (%s): %s",
+                    default=[],
+                )
 
             pending = retry_pending + fresh_pending
 
@@ -494,24 +526,12 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     if severity == "system":
                         raise
                     # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
-                    try:
-                        await stock_dao.upsert_ai_concept_failure(ts_code, name, DataSanitizer.sanitize_error(e))
-                    except asyncio.CancelledError:
-                        raise
-                    except EngineDisposedError:
-                        raise
-                    except Exception as fe:
-                        severity = classify_severity(fe, context="general")
-                        log_classified(
-                            logger,
-                            fe,
-                            "general",
-                            "[AIConceptTagSync] Failed to persist failure (%s): %s (ts_code=%s)",
-                            ts_code,
-                            exc_info=True,
-                        )
-                        if severity == "system":
-                            raise
+                    await _guarded(
+                        stock_dao.upsert_ai_concept_failure(ts_code, name, DataSanitizer.sanitize_error(e)),
+                        log_msg="[AIConceptTagSync] Failed to persist failure (%s): %s (ts_code=%s)",
+                        ts_code=ts_code,
+                        default=0,
+                    )
 
             if self._check_cancelled(result):
                 return result
@@ -524,24 +544,12 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             if succeeded_codes:
                 for ts_code in succeeded_codes:
                     if ts_code in retry_codes:
-                        try:
-                            await stock_dao.clear_ai_concept_failure(ts_code)
-                        except asyncio.CancelledError:
-                            raise
-                        except EngineDisposedError:
-                            raise
-                        except Exception as fe:
-                            severity = classify_severity(fe, context="general")
-                            log_classified(
-                                logger,
-                                fe,
-                                "general",
-                                "[AIConceptTagSync] Failed to clear failure record (%s): %s (ts_code=%s)",
-                                ts_code,
-                                exc_info=True,
-                            )
-                            if severity == "system":
-                                raise
+                        await _guarded(
+                            stock_dao.clear_ai_concept_failure(ts_code),
+                            log_msg="[AIConceptTagSync] Failed to clear failure record (%s): %s (ts_code=%s)",
+                            ts_code=ts_code,
+                            default=0,
+                        )
 
             if failed:
                 result.status = SyncStatus.PARTIAL.value
@@ -549,25 +557,13 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
 
             # T5 fix: 清理已达 max_retry 的错题本记录，避免无限累积。
             # 放在主流程末尾、错题本写入/清除之后，确保本批次处理的记录状态先稳定。
-            try:
-                expired = await stock_dao.delete_expired_failures()
-                if expired > 0:
-                    logger.info("[AIConceptTagSync] Cleaned %d expired failure records", expired)
-            except asyncio.CancelledError:
-                raise
-            except EngineDisposedError:
-                raise
-            except Exception as fe:
-                severity = classify_severity(fe, context="general")
-                log_classified(
-                    logger,
-                    fe,
-                    "general",
-                    "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
-                    exc_info=True,
-                )
-                if severity == "system":
-                    raise
+            expired = await _guarded(
+                stock_dao.delete_expired_failures(),
+                log_msg="[AIConceptTagSync] Failed to clean expired failures (%s): %s",
+                default=0,
+            )
+            if expired > 0:
+                logger.info("[AIConceptTagSync] Cleaned %d expired failure records", expired)
 
             logger.info(
                 "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
@@ -646,25 +642,8 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 if hasattr(cancel_event, "is_set") and cancel_event.is_set():
                     llm_task.cancel()
                     # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
-                    # T7 fix: 记录 llm_task 的原始异常（如有），便于调试；不改变 suppress 行为
-                    # L4 fix: 补充 exc_info=True 保留完整 traceback
-                    # L3 fix: 不在此处 raise，避免覆盖外层 CancelledError；异常链通过 logger.debug 记录
-                    try:
-                        await llm_task
-                    except asyncio.CancelledError:
-                        pass  # 内部取消被 suppress，外层 raise 传播外层 CancelledError（R2）
-                    except Exception as llm_err:
-                        # 不 raise：避免覆盖外层 CancelledError 传播（R2）。
-                        # classify_error/classify_severity 仅用于记录分类，不改控制流。
-                        llm_info = classify_error(llm_err, context="general")
-                        llm_sev = classify_severity(llm_err, context="general")
-                        logger.debug(
-                            "[AIConceptTagSync] llm_task suppressed during cancel (%s/%s): %r",
-                            llm_info["code"],
-                            llm_sev,
-                            DataSanitizer.sanitize_error(llm_err),
-                            exc_info=True,
-                        )
+                    # T7/L4/L3 fix: 记录原始异常便于调试，不覆盖外层 CancelledError（见 _suppress_task_error）
+                    await _suppress_task_error(llm_task, label="during cancel")
                     raise asyncio.CancelledError("task cancelled by user (cancel_event set in ai concept sync)")
                 try:
                     # shield 防止外部 cancel 传播到 LLM task 内部前被 wait_for 吞掉
@@ -680,22 +659,6 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             if not llm_task.done():
                 llm_task.cancel()
                 # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
-                # T7 fix: 同上，记录原始异常便于调试
-                # L3/L4 fix: 同上，保留 traceback；不覆盖外层 CancelledError
-                try:
-                    await llm_task
-                except asyncio.CancelledError:
-                    pass  # 内部取消被 suppress
-                except Exception as llm_err:
-                    # 不 raise：避免覆盖外层 CancelledError 传播（R2）。
-                    # classify_error/classify_severity 仅用于记录分类，不改控制流。
-                    llm_info = classify_error(llm_err, context="general")
-                    llm_sev = classify_severity(llm_err, context="general")
-                    logger.debug(
-                        "[AIConceptTagSync] llm_task suppressed during outer cancel (%s/%s): %r",
-                        llm_info["code"],
-                        llm_sev,
-                        DataSanitizer.sanitize_error(llm_err),
-                        exc_info=True,
-                    )
+                # T7/L3/L4 fix: 记录原始异常便于调试，不覆盖外层 CancelledError（见 _suppress_task_error）
+                await _suppress_task_error(llm_task, label="during outer cancel")
             raise
