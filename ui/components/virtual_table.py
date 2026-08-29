@@ -29,13 +29,15 @@ from typing import Any
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_controls
+from ui.i18n import I18n
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import Eid
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
-ROW_HEIGHT = 30
+# UX-11 (P2-03): 行高 30→32 — WCAG 2.2 24px 最低目标之上, 缓解高频点击与系统缩放
+ROW_HEIGHT = 32
 HEADER_HEIGHT = 35
 MIN_TABLE_WIDTH = 800
 MIN_COL_WIDTH = 60
@@ -43,6 +45,13 @@ MAX_COL_WIDTH = 600
 DRAG_INTERVAL = 16
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
+
+# NOTE(lazy): UX-11 (P2-03) 键盘契约降级 — Flet 0.86.5 无表格 focus/grid 键盘遍历
+# (无 Focus 控件; DataTable 无 on_key; KeyboardListener 无 focus 遍历), 键盘用户无方向键
+# 行导航与 Enter 打开详情入口 (行点击详情仅鼠标/触屏可达); 本次仅提供排序表头语义状态朗读
+# (Semantics 三态) + 行高 32. ceiling: 排序方向可感知, 完整键盘导航不可用.
+# upgrade: Flet 提供表格 focus/grid 能力, 或 KeyboardListener 组合方案经 E2E 验证可行时
+# (作为独立任务恢复), 评估控件级实现后再解除.
 
 
 # --- 纯函数 (排序逻辑, 供单元测试覆盖) ---
@@ -170,8 +179,9 @@ def _build_header(
 ) -> list[ft.Control]:
     """构建表头单元格 (theme-dependent)。
 
-    on_sort 非空时用 GestureDetector(on_tap) 包裹（与行一致），生成 flt-tappable
-    语义属性。Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
+    on_sort 非空时用 Semantics(GestureDetector(on_tap)) 包裹（UX-11: 排序状态三态语义标注,
+    读屏可感知升/降/可排序；与行一致生成 flt-tappable 语义属性）。
+    Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
     导致列头文本从语义树消失 + anchor 不可定位。
 
     drag_handlers 非空时, 每个 header 单元格右缘叠加 6px 拖拽把手 (G4), 用
@@ -183,9 +193,18 @@ def _build_header(
     controls: list[ft.Control] = []
     for col in columns:
         col_id = str(col["id"])
-        label = str(col.get("label", col_id))
+        base_label = str(col.get("label", col_id))
+        label = base_label
         if sort_col == col_id:
             label += " ↑" if sort_asc else " ↓"
+        if on_sort is not None:
+            # UX-11 (P2-03): 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
+            if sort_col == col_id and sort_asc:
+                state_desc = I18n.get("table_sort_asc")
+            elif sort_col == col_id:
+                state_desc = I18n.get("table_sort_desc")
+            else:
+                state_desc = I18n.get("table_sort_action")
         text = ft.Text(
             label,
             weight=ft.FontWeight.BOLD,
@@ -199,6 +218,19 @@ def _build_header(
             padding=ft.Padding.only(left=8, right=8),
         )
         if on_sort is not None:
+            # 语义挂 `Text.semantics_label` 而非嵌套 `ft.Semantics`:
+            # E2E CI 实证 (PR #655) 在 anchored(COMPLEX, container=True) 与 GestureDetector 之间
+            # 插入带 label 的 Semantics 会在 Flutter 语义树生成独立 role=button 节点, 使 EID
+            # 前缀与 role=button 归因分离, AnchorPage role_filter="button" 前缀匹配失败
+            # (anchor_page.py _wait_for_text_anchor). Text.semantics_label 只改 Text 节点的读屏
+            # 标签, 不产生额外语义边界, anchored→GestureDetector 按 PoC A7 正常合并为单
+            # role=button 节点, textContent = EID\n语义, EID 保持前缀, 排序状态由该 label 朗读.
+            # 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排.
+            # label 含 ↑/↓ 箭头: E2E test_screener_sort_by_column 语义断言以
+            # "pct_chg (涨跌幅) ↑" 作为朗读锚点 (aria-label* 子串匹配); CanvasKit 无 DOM 文本,
+            # 语义节点 label 即读屏文本, 故语义串须保留箭头以兼容既有 E2E 锚点.
+            sep = I18n.get("table_sort_sep")
+            text.semantics_label = f"{label}{sep}{state_desc}"
             gesture = ft.GestureDetector(
                 content=content,
                 on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),
