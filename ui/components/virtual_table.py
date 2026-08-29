@@ -193,9 +193,18 @@ def _build_header(
     controls: list[ft.Control] = []
     for col in columns:
         col_id = str(col["id"])
-        label = str(col.get("label", col_id))
+        base_label = str(col.get("label", col_id))
+        label = base_label
         if sort_col == col_id:
             label += " ↑" if sort_asc else " ↓"
+        if on_sort is not None:
+            # UX-11 (P2-03): 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
+            if sort_col == col_id and sort_asc:
+                state_desc = I18n.get("table_sort_asc")
+            elif sort_col == col_id:
+                state_desc = I18n.get("table_sort_desc")
+            else:
+                state_desc = I18n.get("table_sort_action")
         text = ft.Text(
             label,
             weight=ft.FontWeight.BOLD,
@@ -209,31 +218,19 @@ def _build_header(
             padding=ft.Padding.only(left=8, right=8),
         )
         if on_sort is not None:
-            # UX-11 (P2-03): 排序表头 Semantics 三态标注 — 读屏可感知排序方向与可交互性.
-            # 不设 container=True / button=True: E2E CI 实证 (PR #655) 双层 Semantics 破坏
-            # COMPLEX 锚点定位 — button=True(虽注释称对 GD 引擎忽略)仍使内层生成独立
-            # role=button 节点, textContent 只含语义 label, 使外层 anchored(container=True,
-            # label=EID) 节点的 role=button 归因丢失; AnchorPage role_filter="button" 前缀
-            # 匹配失败 (anchor_page.py _wait_for_text_anchor). 去掉 button/container 后,
-            # 排序语义 SLabel 并入外层 anchored 节点, textContent = EID\n语义\n显示文本
-            # (PoC A7 单点合并路径), EID 仍为 textContent 前缀, 读屏语义由 label 保证.
-            if sort_col == col_id and sort_asc:
-                state_desc = I18n.get("table_sort_asc")
-            elif sort_col == col_id:
-                state_desc = I18n.get("table_sort_desc")
-            else:
-                state_desc = I18n.get("table_sort_action")
-            # UX-11 (P2-03) 对抗检视: 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排;
-            # tooltip 移除 — label 已承载读屏语义, 同串 tooltip 冗余且并入语义树增加双重朗读风险
-            # (仅 label 符合方案验收, tooltip 非本特性所需).
+            # 语义挂 `Text.semantics_label` 而非嵌套 `ft.Semantics`:
+            # E2E CI 实证 (PR #655) 在 anchored(COMPLEX, container=True) 与 GestureDetector 之间
+            # 插入带 label 的 Semantics 会在 Flutter 语义树生成独立 role=button 节点, 使 EID
+            # 前缀与 role=button 归因分离, AnchorPage role_filter="button" 前缀匹配失败
+            # (anchor_page.py _wait_for_text_anchor). Text.semantics_label 只改 Text 节点的读屏
+            # 标签, 不产生额外语义边界, anchored→GestureDetector 按 PoC A7 正常合并为单
+            # role=button 节点, textContent = EID\n语义, EID 保持前缀, 排序状态由该 label 朗读.
+            # 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排.
             sep = I18n.get("table_sort_sep")
-            semantics_label = f"{label}{sep}{state_desc}"
-            gesture = ft.Semantics(
-                label=semantics_label,
-                content=ft.GestureDetector(
-                    content=content,
-                    on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),
-                ),
+            text.semantics_label = f"{base_label}{sep}{state_desc}"
+            gesture = ft.GestureDetector(
+                content=content,
+                on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),
             )
             if col_anchor is not None:
                 gesture = anchored(col_anchor(col_id), gesture)

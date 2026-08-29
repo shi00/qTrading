@@ -103,6 +103,20 @@ def _noop(e):
     return None
 
 
+def _sort_header_text(headers, col_index):
+    """UX-11: 可排序表头读屏语义挂 Text.semantics_label (不嵌套 Semantics).
+
+    结构 (col_anchor=None): headers[i].content (GestureDetector) →
+    .content (Container) → .content (Text, 承载 semantics_label)。
+    返回该 Text，调用方断言 semantics_label。
+    """
+    gesture = headers[col_index].content
+    assert isinstance(gesture, ft.GestureDetector)
+    text = gesture.content.content
+    assert isinstance(text, ft.Text)
+    return text
+
+
 def _fake_drag_handlers():
     """构造每列 a no-op (start, update, end) handler 的 dict。"""
     return {str(col["id"]): (_noop, _noop, _noop) for col in _make_columns()}
@@ -204,23 +218,24 @@ class TestBuildHeader:
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), None, True, on_sort)
         for h in headers:
-            # UX-11: on_sort 非空时 content 是 Semantics(内层 GestureDetector(on_tap=handler))
-            assert isinstance(h.content, ft.Semantics)
-            assert callable(h.content.content.on_tap)
+            # UX-11: on_sort 非空时 content 是 GestureDetector(on_tap=handler),
+            # 其 content 内层是 Container(Text), 读屏语义挂 Text.semantics_label。
+            assert isinstance(h.content, ft.GestureDetector)
+            assert callable(h.content.on_tap)
 
     def test_on_sort_handler_invokes_callback_with_new_asc(self):
         """点击列头应调用 on_sort(col_id, new_asc=True)（新列默认升序）。"""
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), "name", False, on_sort)
         # 点击 pct_chg（新列）→ on_sort("pct_chg", True)
-        headers[2].content.content.on_tap(MagicMock())
+        headers[2].content.on_tap(MagicMock())
         on_sort.assert_called_once_with("pct_chg", True)
 
     def test_on_sort_handler_same_column_toggles(self):
         """点击当前排序列 → 翻转方向。"""
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), "pct_chg", True, on_sort)
-        headers[2].content.content.on_tap(MagicMock())
+        headers[2].content.on_tap(MagicMock())
         on_sort.assert_called_once_with("pct_chg", False)
 
     def test_header_text_uses_table_header_text_color(self):
@@ -231,47 +246,47 @@ class TestBuildHeader:
 
 
 class TestBuildHeaderSemantics:
-    """UX-11 (P2-03): 排序表头 Semantics 三态语义标注 — 排序方向可被辅助技术感知。
+    """UX-11 (P2-03): 排序表头读屏语义三态标注 — 排序方向可被辅助技术感知。
 
-    断言不依赖中文字面量: 期望值用 I18n.get(key) 同源构造 (mock_i18n_state 不 patch I18n.get,
-    解析真实 strings.json 默认 zh_CN), 翻译变化自动跟随。
+    读屏语义挂 `Text.semantics_label`（而非嵌套 ft.Semantics）：E2E CI 实证嵌套
+    Semantics 阻断 anchored COMPLEX 锚点 fold（PR #655），故表头结构为
+    GestureDetector→Container→Text，状态文案在 Text.semantics_label。
+    断言不依赖中文字面量: 期望值用 I18n.get(key) 同源构造 (mock_i18n_state 不 patch
+    I18n.get, 解析真实 strings.json 默认 zh_CN), 翻译变化自动跟随。
     """
 
     def test_ascending_column_semantics_label(self, mock_i18n_state) -> None:
-        """当前排序列升序 → Semantics.label 含 table_sort_asc 文案。"""
+        """当前排序列升序 → Text.semantics_label 含 table_sort_asc 文案。"""
         from ui.i18n import I18n
 
         headers = _build_header(_make_columns(), "pct_chg", True, MagicMock())
-        sem = headers[2].content
-        assert isinstance(sem, ft.Semantics)
-        assert sem.label is not None
-        assert I18n.get("table_sort_asc") in sem.label
+        text = _sort_header_text(headers, 2)
+        assert text.semantics_label is not None  # noqa: weak-assertion pyright 收窄 Optional[str], 下方 in 依赖非空
+        assert I18n.get("table_sort_asc") in text.semantics_label
 
     def test_descending_column_semantics_label(self, mock_i18n_state) -> None:
-        """当前排序列降序 → Semantics.label 含 table_sort_desc 文案。"""
+        """当前排序列降序 → Text.semantics_label 含 table_sort_desc 文案。"""
         from ui.i18n import I18n
 
         headers = _build_header(_make_columns(), "pct_chg", False, MagicMock())
-        sem = headers[2].content
-        assert isinstance(sem, ft.Semantics)
-        assert sem.label is not None
-        assert I18n.get("table_sort_desc") in sem.label
-        assert I18n.get("table_sort_asc") not in sem.label
+        text = _sort_header_text(headers, 2)
+        assert text.semantics_label is not None
+        assert I18n.get("table_sort_desc") in text.semantics_label
+        assert I18n.get("table_sort_asc") not in text.semantics_label
 
     def test_non_sorted_sortable_column_semantics_label(self, mock_i18n_state) -> None:
-        """非当前可排序列 → Semantics.label 含 table_sort_action, 不含方向词。"""
+        """非当前可排序列 → Text.semantics_label 含 table_sort_action, 不含方向词。"""
         from ui.i18n import I18n
 
         headers = _build_header(_make_columns(), "pct_chg", True, MagicMock())
-        sem = headers[0].content  # ts_code 非当前列
-        assert isinstance(sem, ft.Semantics)
-        assert sem.label is not None
-        assert I18n.get("table_sort_action") in sem.label
-        assert I18n.get("table_sort_asc") not in sem.label
-        assert I18n.get("table_sort_desc") not in sem.label
+        text = _sort_header_text(headers, 0)  # ts_code 非当前列
+        assert text.semantics_label is not None
+        assert I18n.get("table_sort_action") in text.semantics_label
+        assert I18n.get("table_sort_asc") not in text.semantics_label
+        assert I18n.get("table_sort_desc") not in text.semantics_label
 
     def test_no_sort_table_header_plain_container(self, mock_i18n_state) -> None:
-        """on_sort=None (只读表格) → 表头保持 Container, 不包 Semantics。"""
+        """on_sort=None (只读表格) → 表头保持 Container, 不包排序语义。"""
         headers = _build_header(_make_columns(), None, True, None)
         assert all(not isinstance(h.content, ft.Semantics) for h in headers)
 
