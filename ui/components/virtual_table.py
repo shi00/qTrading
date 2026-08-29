@@ -226,8 +226,11 @@ def _build_header(
             # 标签, 不产生额外语义边界, anchored→GestureDetector 按 PoC A7 正常合并为单
             # role=button 节点, textContent = EID\n语义, EID 保持前缀, 排序状态由该 label 朗读.
             # 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排.
+            # label 含 ↑/↓ 箭头: E2E test_screener_sort_by_column 语义断言以
+            # "pct_chg (涨跌幅) ↑" 作为朗读锚点 (aria-label* 子串匹配); CanvasKit 无 DOM 文本,
+            # 语义节点 label 即读屏文本, 故语义串须保留箭头以兼容既有 E2E 锚点.
             sep = I18n.get("table_sort_sep")
-            text.semantics_label = f"{base_label}{sep}{state_desc}"
+            text.semantics_label = f"{label}{sep}{state_desc}"
             gesture = ft.GestureDetector(
                 content=content,
                 on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),
