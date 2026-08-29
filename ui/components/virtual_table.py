@@ -210,9 +210,13 @@ def _build_header(
         )
         if on_sort is not None:
             # UX-11 (P2-03): 排序表头 Semantics 三态标注 — 读屏可感知排序方向与可交互性.
-            # 不设 container=True: 保留与 E2E anchored(COMPLEX) 节点的合并可能 (PoC A7 —
-            # Semantics 与 GestureDetector 合并为单节点, label 落 textContent; container 会阻断合并).
-            # button=True 对 GestureDetector 为引擎忽略 (e2e_ids.py 自证), 语义可达性由 label 文本保证.
+            # 不设 container=True / button=True: E2E CI 实证 (PR #655) 双层 Semantics 破坏
+            # COMPLEX 锚点定位 — button=True(虽注释称对 GD 引擎忽略)仍使内层生成独立
+            # role=button 节点, textContent 只含语义 label, 使外层 anchored(container=True,
+            # label=EID) 节点的 role=button 归因丢失; AnchorPage role_filter="button" 前缀
+            # 匹配失败 (anchor_page.py _wait_for_text_anchor). 去掉 button/container 后,
+            # 排序语义 SLabel 并入外层 anchored 节点, textContent = EID\n语义\n显示文本
+            # (PoC A7 单点合并路径), EID 仍为 textContent 前缀, 读屏语义由 label 保证.
             if sort_col == col_id and sort_asc:
                 state_desc = I18n.get("table_sort_asc")
             elif sort_col == col_id:
@@ -225,7 +229,6 @@ def _build_header(
             sep = I18n.get("table_sort_sep")
             semantics_label = f"{label}{sep}{state_desc}"
             gesture = ft.Semantics(
-                button=True,
                 label=semantics_label,
                 content=ft.GestureDetector(
                     content=content,
