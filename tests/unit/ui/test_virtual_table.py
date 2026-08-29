@@ -32,6 +32,7 @@ from ui.components.virtual_table import (
     MIN_COL_WIDTH,
     MIN_TABLE_WIDTH,
     PaginatedTable,
+    ROW_HEIGHT,
     _ColWidthsCache,
     _clamp_width,
     _col_width,
@@ -165,6 +166,10 @@ class TestClampWidth:
     def test_constants_values(self):
         assert MIN_COL_WIDTH == 60
         assert MAX_COL_WIDTH == 600
+
+    def test_row_height_meets_minimum(self):
+        """UX-11 (P2-03): 行高 30→32, 高于 WCAG 2.2 的 24px 最低目标并预留余量 (Plans 验收 ≥32)。"""
+        assert ROW_HEIGHT == 32
 
 
 class TestColWidthsCache:
