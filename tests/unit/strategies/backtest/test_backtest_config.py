@@ -177,6 +177,7 @@ def _make_result(**overrides) -> BacktestResult:
         skipped_orders=pl.DataFrame(),
         metrics={"total_return": 0.01, "sharpe_ratio": 1.5},
         ic_series=pl.Series([0.02]),
+        ic_dates=pl.Series(dtype=pl.Date),
         period_stats=pl.DataFrame(),
         data_warnings=(),
         failed_signal_dates=(),

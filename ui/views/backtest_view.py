@@ -229,8 +229,13 @@ def BacktestView(active: bool = True) -> ft.Container:
             metrics=state.metrics,
             trades=state.trades,
             nav_curve=state.nav_curve,
+            nav_dates=state.nav_dates,
+            benchmark_curve=state.benchmark_curve,
             ic_series=state.ic_series,
+            ic_dates=state.ic_dates,
             period_stats=state.period_stats,
+            strategy_name=state.strategy_name,
+            benchmark_name=state.benchmark_name,
         )
 
     return ft.Container(

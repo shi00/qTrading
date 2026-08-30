@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -109,6 +109,40 @@ def _to_period_stats_rows(period_df: Any) -> tuple[tuple[str, float, float, floa
     )
 
 
+def _to_date_strings(dates: Sequence[date | str] | None) -> tuple[str, ...]:
+    """统一 date/str 为 ``%Y-%m-%d`` 字符串元组 (UX-12 图表横轴日期)。
+
+    处理对象: polars Date 列 ``.to_list()`` 产出的 ``datetime.date``、原生 ``date``、
+    以及已是 ``%Y-%m-%d`` 或透明裸串的 ``str`` (str 输入直接透传, 不二次格式化)。
+    空/None 输入返回空元组。
+    """
+    if not dates:
+        return ()
+    out: list[str] = []
+    for d in dates:
+        if d is None:
+            continue
+        out.append(d if isinstance(d, str) else d.strftime("%Y-%m-%d"))
+    return tuple(out)
+
+
+def _build_benchmark_curve(nav0: float, returns: Sequence[float]) -> tuple[float, ...]:
+    """递推构造基准相对净值曲线 (UX-12 基准对比系列, 与净值曲线同起点对齐)。
+
+    bench[0] = nav0 (与策略净值首点显式对齐锚点);
+    bench[i] = bench[i-1] * (1 + returns[i]) (i >= 1)。
+
+    ``returns`` 为基准日收益序列, 与净值曲线等长 (索引相互对齐交易日);
+    空输入返回空元组。返回长度恒等于 ``len(returns)``。
+    """
+    if not returns:
+        return ()
+    curve = [nav0]
+    for r in returns[1:]:
+        curve.append(curve[-1] * (1.0 + r))
+    return tuple(curve)
+
+
 @dataclass(frozen=True)
 class BacktestState:
     """BacktestViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
@@ -143,6 +177,13 @@ class BacktestState:
     period_stats: tuple[tuple[str, float, float, float], ...] = ()
     # 已脱敏的错误详情 (Task 11.4): run_backtest 失败时由 DataSanitizer.sanitize_error 产出
     error_detail: str | None = None
+    # UX-12 (P2-05): 净值曲线横轴日期 (``%Y-%m-%d`` 字符串) / 基准相对净值曲线 / IC 横轴日期
+    nav_dates: tuple[str, ...] = ()
+    benchmark_curve: tuple[float, ...] = ()
+    ic_dates: tuple[str, ...] = ()
+    # UX-12 (P2-05): 回测文本摘要的数据来源 (策略名 / 基准代码), 供可复制摘要行
+    strategy_name: str | None = None
+    benchmark_name: str | None = None
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -347,6 +388,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             ic_series=(),
             period_stats=(),
             error_detail=None,
+            nav_dates=(),
+            benchmark_curve=(),
+            ic_dates=(),
+            strategy_name=None,
+            benchmark_name=None,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -372,13 +418,28 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     cancel_check=_cancel_check,
                 )
 
+                # UX-12: 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)
+                nav_ns = result.nav_curve
+                nav_dates = _to_date_strings(nav_ns["trade_date"].to_list() if not nav_ns.is_empty() else None)
+                nav_values = nav_ns["nav"].to_list()
+                bench_returns = result.benchmark_returns.to_list() if result.benchmark_returns is not None else []
+                benchmark_curve: tuple[float, ...] = ()
+                if nav_values and len(bench_returns) == len(nav_values):
+                    benchmark_curve = _build_benchmark_curve(float(nav_values[0]), bench_returns)
+                ic_dates = _to_date_strings(result.ic_dates.to_list() if result.ic_dates is not None else None)
+
                 # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(
                     metrics=tuple(result.metrics.items()),
                     trades=_to_trade_rows(result.trades),
-                    nav_curve=tuple(float(v) for v in result.nav_curve["nav"].to_list()),
+                    nav_curve=tuple(float(v) for v in nav_values),
                     ic_series=tuple(float(v) for v in result.ic_series.to_list()),
                     period_stats=_to_period_stats_rows(result.period_stats),
+                    nav_dates=nav_dates,
+                    benchmark_curve=benchmark_curve,
+                    ic_dates=ic_dates,
+                    strategy_name=result.strategy_name,
+                    benchmark_name=result.config.benchmark_code,
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),
@@ -400,6 +461,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     progress_message=None,
                     status_message=Message("backtest_cancelled"),
                     status_color="warning",
+                    nav_dates=(),
+                    benchmark_curve=(),
+                    ic_dates=(),
+                    strategy_name=None,
+                    benchmark_name=None,
                 )
                 raise
             except Exception as e:
@@ -419,6 +485,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     status_message=Message("backtest_failed"),
                     status_color="error",
                     error_detail=DataSanitizer.sanitize_error(e),
+                    nav_dates=(),
+                    benchmark_curve=(),
+                    ic_dates=(),
+                    strategy_name=None,
+                    benchmark_name=None,
                 )
                 raise
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
@@ -123,6 +123,10 @@ class BacktestResult:
     executed_at: datetime
     duration_ms: int
 
+    # UX-12 (P2-05): IC 序列对应的信号日期（仅内存透传，不持久化）。
+    # 置于 dataclass 末尾并带默认值，避免破坏既有测试/调用方的关键字构造点。
+    ic_dates: pl.Series = field(default_factory=lambda: pl.Series(dtype=pl.Date))
+
     def with_warnings(self, warnings: list[str] | tuple[str, ...]) -> BacktestResult:
         warnings_tuple = tuple(warnings) if isinstance(warnings, list) else warnings
         return BacktestResult(
@@ -143,6 +147,7 @@ class BacktestResult:
             run_id=self.run_id,
             executed_at=self.executed_at,
             duration_ms=self.duration_ms,
+            ic_dates=self.ic_dates,
         )
 
     def to_persist_dict(self) -> dict:

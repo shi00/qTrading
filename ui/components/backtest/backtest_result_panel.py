@@ -212,7 +212,31 @@ def _build_empty_content() -> ft.Column:
     )
 
 
-def _build_nav_chart(nav_curve: tuple[float, ...]) -> ft.Container:
+def _legend_item(color: str, label: str) -> ft.Row:
+    """自绘图例项 (色块 + 文本) — UX-12 图表图例. flet_charts 无内置图例."""
+    return ft.Row(
+        controls=[
+            ft.Container(width=12, height=12, bgcolor=color, border_radius=2),
+            ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
+        ],
+        spacing=6,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_nav_chart(
+    nav_curve: tuple[float, ...],
+    nav_dates: tuple[str, ...] = (),
+    benchmark_curve: tuple[float, ...] = (),
+) -> ft.Container:
+    """净值/基准对比折线图（UX-12 语境增强）.
+
+    - 底轴: 日期自定义 labels（``nav_dates``）；空则回退序号自动标签。
+    - 左轴: 净值单位标题。
+    - 折线 hover 明细: 日期 + 系列名 + 千分位净值。
+    - 基准: ``benchmark_curve`` 非空且长度等于 ``nav_curve`` 时才渲染虚线段系列。
+    - 顶部自绘图例（策略/基准色块 + 文本）。
+    """
     if not nav_curve:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_nav_data"), color=AppColors.TEXT_SECONDARY),
@@ -220,20 +244,70 @@ def _build_nav_chart(nav_curve: tuple[float, ...]) -> ft.Container:
             expand=True,
         )
 
+    has_dates = bool(nav_dates)
+    axis_labels = [fch.ChartAxisLabel(value=i, label=d) for i, d in enumerate(nav_dates)]
+
+    strategy_legend = I18n.get("backtest_chart_legend_strategy")
+    strategy_points = []
+    for i, v in enumerate(nav_curve):
+        kwargs = {"x": i, "y": float(v)}
+        if has_dates and i < len(nav_dates):
+            kwargs["tooltip"] = f"{nav_dates[i]} {strategy_legend}: {v:,.0f}"
+        strategy_points.append(fch.LineChartDataPoint(**kwargs))
+
     chart_data = [
         fch.LineChartData(
-            points=[fch.LineChartDataPoint(x=i, y=float(v)) for i, v in enumerate(nav_curve)],
+            points=strategy_points,
             color=AppColors.PRIMARY,
             stroke_width=2,
         )
     ]
 
-    container = ft.Container(
-        content=fch.LineChart(
+    # 基准系列: 仅当非空且长度一致才渲染（数据异常时退化不渲染，避免错位）
+    if benchmark_curve and len(benchmark_curve) == len(nav_curve):
+        benchmark_legend = I18n.get("backtest_chart_legend_benchmark")
+        benchmark_points = []
+        for i, v in enumerate(benchmark_curve):
+            kwargs = {"x": i, "y": float(v)}
+            if has_dates and i < len(nav_dates):
+                kwargs["tooltip"] = f"{nav_dates[i]} {benchmark_legend}: {v:,.0f}"
+            benchmark_points.append(fch.LineChartDataPoint(**kwargs))
+        chart_data.append(
+            fch.LineChartData(
+                points=benchmark_points,
+                color=AppColors.TEXT_SECONDARY,
+                stroke_width=1.5,
+                dash_pattern=[6, 4],
+            )
+        )
+
+    legend_items: list[ft.Control] = [_legend_item(AppColors.PRIMARY, strategy_legend)]
+    if len(chart_data) > 1:
+        legend_items.append(_legend_item(AppColors.TEXT_SECONDARY, I18n.get("backtest_chart_legend_benchmark")))
+
+    chart_content: list[ft.Control] = [
+        ft.Row(controls=legend_items, spacing=16),
+        fch.LineChart(
             data_series=chart_data,
             border=ft.Border.all(1, AppColors.DIVIDER),
-            left_axis=fch.ChartAxis(label_size=50),
-            bottom_axis=fch.ChartAxis(label_size=40),
+            left_axis=fch.ChartAxis(
+                title=ft.Text(I18n.get("backtest_chart_axis_nav_value")),
+                label_size=50,
+            ),
+            bottom_axis=fch.ChartAxis(
+                title=ft.Text(I18n.get("backtest_chart_axis_date")),
+                labels=axis_labels,
+                label_size=40,
+            ),
+            tooltip=fch.LineChartTooltip(),
+            expand=True,
+        ),
+    ]
+
+    container = ft.Container(
+        content=ft.Column(
+            controls=chart_content,
+            spacing=8,
             expand=True,
         ),
         padding=AppStyles.SPACING_LG,
@@ -345,7 +419,15 @@ def _build_trades_table(
     )
 
 
-def _build_ic_chart(ic_series: tuple[float, ...]) -> ft.Container:
+def _build_ic_chart(
+    ic_series: tuple[float, ...],
+    ic_dates: tuple[str, ...] = (),
+) -> ft.Container:
+    """IC 柱状图（UX-12 语境增强）.
+
+    - 左轴: IC 值标题；底轴: 日期 label（``ic_dates``；空则序号）。
+    - 每根柱加 hover 明细: 日期 + IC 值。
+    """
     if not ic_series:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_ic_data"), color=AppColors.TEXT_SECONDARY),
@@ -353,28 +435,80 @@ def _build_ic_chart(ic_series: tuple[float, ...]) -> ft.Container:
             expand=True,
         )
 
+    axis_labels = [fch.ChartAxisLabel(value=i, label=d) for i, d in enumerate(ic_dates)]
+    has_dates = bool(ic_dates)
+
     bars = []
     for i, ic in enumerate(ic_series):
         color = AppColors.SUCCESS if ic > 0 else AppColors.ERROR if ic < 0 else AppColors.TEXT_SECONDARY
-        bars.append(
-            fch.BarChartGroup(
-                x=i,
-                rods=[fch.BarChartRod(from_y=0, to_y=float(ic), color=color, width=8)],
-            )
-        )
+        rod_kwargs = {"from_y": 0, "to_y": float(ic), "color": color, "width": 8}
+        if has_dates and i < len(ic_dates):
+            rod_kwargs["tooltip"] = f"{ic_dates[i]} IC: {ic:.4f}"
+        bars.append(fch.BarChartGroup(x=i, rods=[fch.BarChartRod(**rod_kwargs)]))
 
     container = ft.Container(
         content=fch.BarChart(
             groups=bars,
             border=ft.Border.all(1, AppColors.DIVIDER),
-            left_axis=fch.ChartAxis(label_size=50),
-            bottom_axis=fch.ChartAxis(label_size=40),
+            left_axis=fch.ChartAxis(
+                title=ft.Text(I18n.get("backtest_chart_axis_ic_value")),
+                label_size=50,
+            ),
+            bottom_axis=fch.ChartAxis(
+                title=ft.Text(I18n.get("backtest_chart_axis_date")),
+                labels=axis_labels,
+                label_size=40,
+            ),
             expand=True,
         ),
         padding=AppStyles.SPACING_LG,
         expand=True,
     )
     return container
+
+
+def _build_chart_summary(
+    strategy_name: str | None,
+    benchmark_name: str | None,
+    nav_dates: tuple[str, ...],
+    nav_curve: tuple[float, ...],
+    metrics: dict,
+) -> ft.Text:
+    """回测文本摘要（UX-12，可选中复制）.
+
+    聚合数据来源/回测区间/期初·期末净值/总收益/最大回撤。
+    仅复用 metrics 已计算字段、nav_curve/nav_dates，不新增计算。
+    返回 ``selectable=True`` 的 ``ft.Text`` 供用户复制。
+    """
+    lines = [
+        I18n.get(
+            "backtest_chart_summary_source",
+            strategy=strategy_name or "-",
+            benchmark=benchmark_name or "-",
+        )
+    ]
+    if nav_dates:
+        lines.append(
+            I18n.get(
+                "backtest_chart_summary_range",
+                start=nav_dates[0],
+                end=nav_dates[-1],
+            )
+        )
+    if nav_curve:
+        lines.append(I18n.get("backtest_chart_summary_start_nav", nav=f"{nav_curve[0]:,.0f}"))
+        lines.append(I18n.get("backtest_chart_summary_end_nav", nav=f"{nav_curve[-1]:,.0f}"))
+    if "total_return" in metrics:
+        lines.append(I18n.get("backtest_chart_summary_total_return", value=f"{metrics['total_return'] * 100:.2f}%"))
+    if "max_drawdown" in metrics:
+        lines.append(I18n.get("backtest_chart_summary_max_dd", value=f"{metrics['max_drawdown'] * 100:.2f}%"))
+
+    return ft.Text(
+        value="\n".join(lines),
+        selectable=True,
+        size=AppStyles.FONT_SIZE_CAPTION,
+        color=AppColors.TEXT_SECONDARY,
+    )
 
 
 def _build_monthly_table(
@@ -430,8 +564,13 @@ def _build_content(
     metrics: tuple[tuple[str, float], ...],
     trades: tuple[TradeRow, ...],
     nav_curve: tuple[float, ...],
+    nav_dates: tuple[str, ...],
+    benchmark_curve: tuple[float, ...],
     ic_series: tuple[float, ...],
+    ic_dates: tuple[str, ...],
     period_stats: tuple[tuple[str, float, float, float], ...],
+    strategy_name: str | None,
+    benchmark_name: str | None,
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -441,6 +580,8 @@ def _build_content(
 
     D11: 消费渲染就绪 props（metrics/trades/nav_curve/ic_series/period_stats），
     不再接收 BacktestResult 领域对象。
+    UX-12: 附加 nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name；
+    净值 Tab 顶部加可复制文本摘要。
     """
     # V1 三件套：selected_index/on_change 在 ft.Tabs 上（ft.TabBar 无这两个参数，
     # 仅有 on_click/on_hover；Flet 0.85.3 API 已验证）
@@ -470,9 +611,29 @@ def _build_content(
                         ft.TabBarView(
                             expand=True,
                             controls=[
-                                _build_nav_chart(nav_curve),
+                                ft.Column(
+                                    expand=True,
+                                    controls=safe_controls(
+                                        [
+                                            ft.Text(
+                                                I18n.get("backtest_chart_summary_title"),
+                                                size=AppStyles.FONT_SIZE_TITLE,
+                                                weight=ft.FontWeight.BOLD,
+                                                color=AppColors.TEXT_PRIMARY,
+                                            ),
+                                            _build_chart_summary(
+                                                strategy_name,
+                                                benchmark_name,
+                                                nav_dates,
+                                                nav_curve,
+                                                dict(metrics),
+                                            ),
+                                            _build_nav_chart(nav_curve, nav_dates, benchmark_curve),
+                                        ]
+                                    ),
+                                ),
                                 _build_trades_table(trades, trades_page, set_trades_page),
-                                _build_ic_chart(ic_series),
+                                _build_ic_chart(ic_series, ic_dates),
                                 _build_monthly_table(period_stats),
                             ],
                         ),
@@ -490,8 +651,13 @@ def BacktestResultPanel(
     metrics: tuple[tuple[str, float], ...] = (),
     trades: tuple[TradeRow, ...] = (),
     nav_curve: tuple[float, ...] = (),
+    nav_dates: tuple[str, ...] = (),
+    benchmark_curve: tuple[float, ...] = (),
     ic_series: tuple[float, ...] = (),
+    ic_dates: tuple[str, ...] = (),
     period_stats: tuple[tuple[str, float, float, float], ...] = (),
+    strategy_name: str | None = None,
+    benchmark_name: str | None = None,
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
@@ -504,6 +670,8 @@ def BacktestResultPanel(
     Args:
         metrics/trades/nav_curve/ic_series/period_stats: BacktestState 渲染就绪字段
             （D11 拆解，源自 BacktestResult；全部为空时显示空状态）
+        nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name:
+            UX-12 图表语境素材（日期横轴/基准曲线/文本摘要数据来源）。
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
@@ -519,8 +687,13 @@ def BacktestResultPanel(
             metrics,
             trades,
             nav_curve,
+            nav_dates,
+            benchmark_curve,
             ic_series,
+            ic_dates,
             period_stats,
+            strategy_name,
+            benchmark_name,
             trades_page,
             set_trades_page,
             selected_tab,

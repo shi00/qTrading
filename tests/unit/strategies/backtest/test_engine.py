@@ -139,7 +139,7 @@ class TestCalcICSeries:
         )
         quotes_df = pl.DataFrame()
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_missing_execution_quotes_skips_ic(self):
@@ -162,7 +162,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_missing_next_rebalance_quotes_skips_ic(self):
@@ -186,7 +186,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_insufficient_signal_quotes_skips_ic(self):
@@ -210,7 +210,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_valid_ic_calculation(self):
@@ -254,7 +254,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # i=0: signal_date=2024-1-2 有 3 只信号 → 计算 IC; i=1: signal_date=2024-1-3 无信号 → 跳过
         assert ic_series.len() == 1
         assert not math.isnan(ic_series[0])
@@ -1436,7 +1436,7 @@ class TestVectorizationEquivalence:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
         # F3-03: 2 有效信号日 (2024-1-2, 2024-1-3) → 2 个 IC; 2024-1-4 无信号 → 跳过
         assert ic_series.len() == 2
@@ -1466,7 +1466,7 @@ class TestVectorizationEquivalence:
             }
         )
 
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
         # F3-03: 无信号日跳过，1 只股票 < 3 也跳过 → 空 IC 序列
         assert ic_series.len() == 0
