@@ -19,6 +19,7 @@ from data.sync.macro import (
 )
 from data.sync.base import SyncContext, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.domain_services.trade_calendar_service import TradeDateUnavailableError
 from data.external.tushare_client import TushareAPIPermissionError
 
 pytestmark = pytest.mark.unit
@@ -66,26 +67,30 @@ class TestMacroSyncGetEffectiveTradeDate:
         assert result == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
-    async def test_fallback_on_error(self):
+    async def test_fallback_to_synced_data(self):
+        """review03-C14: 一级交易日历失败 → 二级已同步行情最大日期兜底。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("test error"))
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
         strategy = MacroSyncStrategy(ctx)
         result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2024, 6, 13)
 
     @pytest.mark.asyncio
-    async def test_none_return_falls_back_to_today(self):
+    async def test_unavailable_raises(self):
+        """review03-C14: 交易日历与已同步数据均不可得 → 抛 TradeDateUnavailableError（不猜本地日期）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        ctx.processor.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
         strategy = MacroSyncStrategy(ctx)
-        result = await strategy._get_effective_trade_date()
-        assert isinstance(result, datetime.date)
+        with pytest.raises(TradeDateUnavailableError, match="无法确定有效交易日"):
+            await strategy._get_effective_trade_date()
 
 
 class TestMacroSyncMergeMacroData:
