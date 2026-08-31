@@ -76,3 +76,32 @@ class TestEngineManager:
         assert em.engine is None
         # dispose 后 provider 引擎引用清空（disposed 布尔标记由组合根 CacheManager.close 维护）
         assert engine_provider._engine is None
+
+
+class TestEngineProviderEngineScopedIsDisposed:
+    """is_disposed 须按引擎身份判定（集成测试 flaky 根因回归）。
+
+    engine_provider 追踪的是 CacheManager 独占管理的**受管引擎**（``_engine``；
+    ``set_engine`` 在 EngineManager.create_engine 时登记）。全局 ``_disposed``
+    只应影响该受管引擎；注入的独立引擎（如集成测试的 test_engine）即使全局
+    标志遗留为 True，也不得被误判为 disposed。
+    """
+
+    def test_global_disposed_only_affects_managed_engine(self):
+        _reset_provider()
+        managed, injected = object(), object()
+        engine_provider.set_engine(managed)
+        engine_provider.mark_disposed(True)
+        assert engine_provider.is_disposed(managed) is True
+        assert engine_provider.is_disposed(injected) is False
+
+    def test_unregistered_engine_with_stale_global_disposed_is_false(self):
+        _reset_provider()
+        injected = object()
+        engine_provider.mark_disposed(True)  # 无受管引擎时遗留的全局 disposed 标志
+        assert engine_provider.is_disposed(injected) is False
+
+    def test_no_engine_falls_back_to_global_flag(self):
+        _reset_provider()
+        engine_provider.mark_disposed(True)
+        assert engine_provider.is_disposed() is True
