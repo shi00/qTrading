@@ -18,6 +18,7 @@ import threading
 from collections.abc import Callable
 from types import TracebackType
 
+from utils.error_classifier import classify_severity
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,8 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
     """
     sys.excepthook 替代实现
 
-    捕获主线程未处理异常，脱敏后记录 CRITICAL 日志。
+    捕获主线程未处理异常，脱敏后记录日志。级别由 classify_severity 决定：
+    system→critical / recoverable→warning（防止可恢复网络错误污染 CRITICAL 信号）/ 其他→error。
     特殊处理：
     - KeyboardInterrupt: INFO 日志，正常退出
     - SystemExit(0): 忽略
@@ -54,8 +56,15 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
             )
             return
 
+        severity = classify_severity(value)  # type: ignore[arg-type]
+        if severity == "system":
+            log_level = logger.critical
+        elif severity == "recoverable":
+            log_level = logger.warning
+        else:
+            log_level = logger.error
         sanitized_msg = DataSanitizer.sanitize_error(value)  # type: ignore[arg-type]
-        logger.critical(
+        log_level(
             "[SysExcepthook] Unhandled exception in main thread: %s: %s",
             exctype.__name__,
             sanitized_msg,

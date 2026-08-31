@@ -44,7 +44,7 @@ from strategies.ai_context import (
 )
 from utils.async_utils import gather_for_shutdown_cleanup, gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, classify_severity
+from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
@@ -369,29 +369,38 @@ class AIStrategyMixin:
                 rm = ReviewManager()
                 as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
                 history_context = await rm.get_learning_context(as_of=as_of)
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning(
-                    "[AIStrategyMixin] Failed to pre-fetch learning context: %s",
-                    DataSanitizer.sanitize_error(e),
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch learning context: %s: %s",
                 )
 
         global_context = ""
         if self.should_include_global_context():
             try:
                 global_context = await NewsFetcher.get_us_major_moves(as_of=news_as_of)
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", DataSanitizer.sanitize_error(e))
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to fetch global context: %s: %s",
+                )
 
         # --- Pre-fetch Concepts for all candidates (N+1 optimization) ---
         concepts_map = {}
         all_ts_codes = candidates_df["ts_code"].tolist()
         try:
             concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[AIStrategyMixin] Failed to pre-fetch concepts: %s", DataSanitizer.sanitize_error(e))
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Failed to pre-fetch concepts: %s: %s",
+            )
 
         # --- Ultimate Pipeline: Bulk History DB Query & Async News Task Pipelining (Fixing N+1) ---
         prefetched_history = {}
@@ -436,9 +445,13 @@ class AIStrategyMixin:
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", DataSanitizer.sanitize_error(e))
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Ultimate Pipeline init failed: %s: %s",
+            )
 
         # --- Batch Pre-Fetch: Capital Flow Data (Moneyflow, TopList, Northbound) ---
         # Fetch once for the trade date, filter per-stock in the loop (0ms per stock)
@@ -446,9 +459,13 @@ class AIStrategyMixin:
         try:
             if trade_date is None:
                 trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore[union-attr]
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[AIStrategyMixin] Failed to get latest trade date: %s", DataSanitizer.sanitize_error(e))
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Failed to get latest trade date: %s: %s",
+            )
 
         moneyflow_df = pd.DataFrame()
         top_list_df = pd.DataFrame()
@@ -458,28 +475,44 @@ class AIStrategyMixin:
         if trade_date:
             try:
                 moneyflow_df = await dp.cache.quote_dao.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[AIStrategyMixin] Failed to pre-fetch moneyflow: %s", DataSanitizer.sanitize_error(e))
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch moneyflow: %s: %s",
+                )
 
             try:
                 top_list_df = await dp.cache.quote_dao.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[AIStrategyMixin] Failed to pre-fetch top_list: %s", DataSanitizer.sanitize_error(e))
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch top_list: %s: %s",
+                )
 
             try:
                 northbound_df = await dp.cache.quote_dao.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch northbound: %s: %s",
+                )
 
             # Phase 3C：top_inst 龙虎榜机构席位预取（auxiliary 数据，权限不足时由 _build_stale_section 标注）
             try:
                 top_inst_df = await dp.cache.get_top_inst_batch(all_ts_codes, as_of_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[AIStrategyMixin] Failed to pre-fetch top_inst: %s", DataSanitizer.sanitize_error(e))
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch top_inst: %s: %s",
+                )
 
         logger.info(
             "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d, top_inst=%d",
@@ -494,9 +527,13 @@ class AIStrategyMixin:
         try:
             auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes, as_of_date=trade_date)
             logger.info("[AIStrategyMixin] Pre-fetched auxiliary data for %d stocks", len(auxiliary_data))
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s", DataSanitizer.sanitize_error(e))
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s: %s",
+            )
 
         # --- Bundle all pre-fetched data into PreFetchedContext ---
         prefetched = PreFetchedContext(
@@ -528,9 +565,13 @@ class AIStrategyMixin:
         # D7: Prefetch macro_context once before concurrent loop to avoid thundering herd
         try:
             prefetched.macro_context = await _build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[AIStrategyMixin] Failed to prefetch macro context: %s", DataSanitizer.sanitize_error(e))
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Failed to prefetch macro context: %s: %s",
+            )
 
         # --- Concurrent Analysis ---
         concurrency = ConfigHandler.get_ai_max_concurrent_analysis()
@@ -618,9 +659,11 @@ class AIStrategyMixin:
                 completed += 1
                 if isinstance(res, Exception):
                     # UX-2.3: on_card_error 已在 analyze_one 内调用, 此处仅日志
-                    error_info = classify_error(res, context="general")
-                    logger.error(
-                        "[AIStrategyMixin] Task error (%s): %s", error_info["code"], DataSanitizer.sanitize_error(res)
+                    log_classified(
+                        logger,
+                        res,
+                        "llm",
+                        "[AIStrategyMixin] Task error (%s: %s)",
                     )
                 elif isinstance(res, dict):
                     final_rows.append(res)
@@ -737,7 +780,13 @@ class AIStrategyMixin:
         except Exception as e:
             if on_card_error:
                 on_card_error(name_str, DataSanitizer.sanitize_error(e))
-            logger.error("[AIStrategyMixin] retry_single failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] retry_single failed (%s: %s)",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:
@@ -880,10 +929,13 @@ class AIStrategyMixin:
                     block_text, block_valid = builder(row, prefetched)
                     if block_valid and block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
-                # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 上下文构建异常. upgrade: 策略层重构时统一走 classify_error.
                 except Exception as e:
-                    logger.warning(
-                        "[AIStrategyMixin] Context builder '%s' failed: %s", name, DataSanitizer.sanitize_error(e)
+                    log_classified(
+                        logger,
+                        e,
+                        "llm",
+                        "[AIStrategyMixin] Context builder failed (%s: %s): name=%s",
+                        name,
                     )
 
             if custom_context_blocks:
@@ -985,18 +1037,22 @@ class AIStrategyMixin:
         except asyncio.CancelledError:
             raise
         except (ConnectionError, TimeoutError, httpx.TimeoutException) as e:
-            logger.error(
-                "[AIStrategyMixin] Network error for %s: %s",
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Network error (%s: %s) for %s",
                 row.get("ts_code", "?"),
-                DataSanitizer.sanitize_error(e),
             )
             raise
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出单股 AI 分析异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.error(
-                "[AIStrategyMixin] Analysis failed for %s: %s",
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Analysis failed (%s: %s) for %s",
                 row.get("ts_code", "?"),
-                DataSanitizer.sanitize_error(e),
+                exc_info=True,
             )
             logger.debug("[AIStrategyMixin] Analysis failed traceback:", exc_info=True)
             return None

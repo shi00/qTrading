@@ -27,12 +27,13 @@ pytestmark = pytest.mark.unit
 class TestSysExcepthook:
     """测试 sys.excepthook 实现"""
 
-    def test_value_error_logs_critical(self, caplog: pytest.LogCaptureFixture) -> None:
-        """普通异常应记录 CRITICAL 级别"""
+    def test_value_error_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """普通异常应记录 ERROR 级别 (E6: 不再用 CRITICAL 冲刷信号)"""
         with caplog.at_level(logging.DEBUG):
             _sys_excepthook(ValueError, ValueError("test error"), None)
 
-        assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        assert all(r.levelno != logging.CRITICAL for r in caplog.records)
         assert any("ValueError" in r.message for r in caplog.records)
 
     def test_keyboard_interrupt_logs_info(self, caplog: pytest.LogCaptureFixture) -> None:

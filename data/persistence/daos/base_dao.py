@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from data.persistence import engine_provider
-from utils.error_classifier import classify_error
+from utils.error_classifier import classify_error, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
@@ -555,11 +555,12 @@ class BaseDao:
             # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
             # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
             if is_shared_conn:
-                logger.error(
-                    "[%s] Write Error on shared conn (%.1fms, suppress_errors ignored): %s\nSQL: %s...",
-                    self.__class__.__name__,
-                    elapsed,
+                log_classified(
+                    logger,
                     e,
+                    "db",
+                    "[BaseDao] Write Error on shared conn (%s: %s, %.1fms, suppress_errors ignored)\nSQL: %s...",
+                    elapsed,
                     sql[:200],
                     exc_info=True,
                 )
@@ -568,18 +569,20 @@ class BaseDao:
                 ) from e
 
             if suppress_errors:
-                logger.warning(
-                    "[%s] Write Error (%.1fms, suppressed): %s",
-                    self.__class__.__name__,
-                    elapsed,
+                log_classified(
+                    logger,
                     e,
+                    "db",
+                    "[BaseDao] Write Error (%s: %s, %.1fms, suppressed)",
+                    elapsed,
                 )
             else:
-                logger.error(
-                    "[%s] Write Error (%.1fms): %s\nSQL: %s...",
-                    self.__class__.__name__,
-                    elapsed,
+                log_classified(
+                    logger,
                     e,
+                    "db",
+                    "[BaseDao] Write Error (%s: %s, %.1fms)\nSQL: %s...",
+                    elapsed,
                     sql[:200],
                     exc_info=True,
                 )
@@ -794,31 +797,34 @@ class BaseDao:
             # 若吞没异常，调用方无法感知事务损坏，可能 commit 部分写入导致数据不一致。
             # 调用方负责事务生命周期（如 _guarded_begin），异常必须传播以触发回滚。
             if is_shared_conn:
-                logger.error(
-                    "[%s] UPSERT Error on shared conn (%.1fms, suppress_errors ignored) on %s: %s",
-                    self.__class__.__name__,
+                log_classified(
+                    logger,
+                    e,
+                    "db",
+                    "[BaseDao] UPSERT Error on shared conn (%s: %s, %.1fms, suppress_errors ignored) on %s",
                     elapsed,
                     table_name,
-                    e,
                     exc_info=True,
                 )
                 raise
 
             if suppress_errors:
-                logger.warning(
-                    "[%s] UPSERT Error (%.1fms, suppressed) on %s: %s",
-                    self.__class__.__name__,
+                log_classified(
+                    logger,
+                    e,
+                    "db",
+                    "[BaseDao] UPSERT Error (%s: %s, %.1fms, suppressed) on %s",
                     elapsed,
                     table_name,
-                    e,
                 )
             else:
-                logger.error(
-                    "[%s] UPSERT Error (%.1fms) on %s: %s",
-                    self.__class__.__name__,
+                log_classified(
+                    logger,
+                    e,
+                    "db",
+                    "[BaseDao] UPSERT Error (%s: %s, %.1fms) on %s",
                     elapsed,
                     table_name,
-                    e,
                     exc_info=True,
                 )
             if not suppress_errors:
@@ -916,11 +922,12 @@ class BaseDao:
                 )
                 raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
-            logger.warning(
-                "[%s] Read Error (%.1fms): %s",
-                self.__class__.__name__,
-                elapsed,
+            log_classified(
+                logger,
                 e,
+                "db",
+                "[BaseDao] Read Error (%s: %s, %.1fms)",
+                elapsed,
             )
             if not suppress_errors:
                 raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
@@ -1035,11 +1042,12 @@ class BaseDao:
                 )
                 raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
-            logger.warning(
-                "[%s] Read Error (%.1fms): %s",
-                self.__class__.__name__,
-                elapsed,
+            log_classified(
+                logger,
                 e,
+                "db",
+                "[BaseDao] Read Error (%s: %s, %.1fms)",
+                elapsed,
             )
             if not suppress_errors:
                 raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
