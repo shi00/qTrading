@@ -25,6 +25,7 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
+from data.sync.errors import InitSyncError
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -33,10 +34,6 @@ if TYPE_CHECKING:
     from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
-
-
-class InitSyncError(Exception):
-    """Raised when init sync fails with a known generic error (e.g. report is None)."""
 
 
 @dataclass(frozen=True)
