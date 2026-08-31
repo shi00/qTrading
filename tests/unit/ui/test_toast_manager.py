@@ -218,6 +218,74 @@ class TestToastManagerAPI:
 
 
 # ============================================================================
+# 4B. ToastManager 无状态化 (review05-E15 / R15)
+# ============================================================================
+
+
+class TestToastManagerStateless:
+    """E15: ToastManager 去事实单例化，不再持有实例级可变状态。
+
+    进程级可变状态（_next_id/_is_stopping/队列）驻留模块级并可由
+    ``_reset_state_for_test`` 重置，实例仅保留 ``page`` 依赖引用。
+    """
+
+    def _make_page(self):
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        return page
+
+    def test_instance_holds_no_mutable_state(self):
+        """实例不应有 _next_id/_is_stopping/_lock 等可变状态属性 (E15 无状态化)。"""
+        manager = ToastManager(self._make_page())
+        assert not hasattr(manager, "_next_id")
+        assert not hasattr(manager, "_is_stopping")
+        assert not hasattr(manager, "_lock")
+        assert hasattr(manager, "page")  # 唯一保留的是 page 依赖引用
+
+    def test_module_show_accepts_explicit_page(self):
+        """模块级 show(page, ...) 显式依赖 page，添加 toast 到全局 state。"""
+        page = self._make_page()
+        tm_module.show(page, "explicit message", toast_type="info")
+
+        state = get_global_state()
+        assert len(state.toasts) == 1
+        assert state.toasts[0].message == "explicit message"
+
+    def test_instances_share_module_level_state(self):
+        """不同实例与模块级函数共用同一队列/计数器（不残留各自实例状态）。"""
+        page = self._make_page()
+        ToastManager(page).show("a")
+        ToastManager(page).show("b")
+        tm_module.show(page, "c")  # 与实例路径共用同一队列/计数器
+
+        state = get_global_state()
+        assert len(state.toasts) == 3
+        ids = [t.id for t in state.toasts]
+        assert len(set(ids)) == 3  # id 全局唯一
+        assert ids == [1, 2, 3]
+
+    def test_reset_state_for_test_resets_counters(self):
+        """_reset_state_for_test 重置 _next_id/_is_stopping，避免跨测试残留 (R7)。"""
+        page = self._make_page()
+        tm_module.show(page, "x")
+        tm_module._is_stopping = True
+        assert tm_module._next_id == 1
+        assert tm_module._is_stopping is True
+
+        tm_module._reset_state_for_test()
+        assert tm_module._next_id == 0
+        assert tm_module._is_stopping is False
+
+    def test_module_show_ignores_stopping(self):
+        """模块级 show 在 _is_stopping 时静默忽略。"""
+        page = self._make_page()
+        tm_module._is_stopping = True
+        tm_module.show(page, "should not appear")
+        state = get_global_state()
+        assert len(state.toasts) == 0
+
+
+# ============================================================================
 # 5. show() 行为契约
 # ============================================================================
 
@@ -266,7 +334,7 @@ class TestShowBehavior:
         """stop_all 后 show() 不应添加 toast。"""
         page = self._make_page()
         manager = ToastManager(page)
-        manager._is_stopping = True
+        tm_module._is_stopping = True  # E15: 停止标志现为模块级
         manager.show("should not appear")
 
         state = get_global_state()
@@ -350,7 +418,7 @@ class TestStopAll:
 
         await manager.stop_all()
 
-        assert manager._is_stopping is True
+        assert tm_module._is_stopping is True  # E15: 停止标志现为模块级
 
     @pytest.mark.asyncio
     async def test_stop_all_is_idempotent(self):
@@ -361,7 +429,7 @@ class TestStopAll:
         await manager.stop_all()
         await manager.stop_all()
 
-        assert manager._is_stopping is True
+        assert tm_module._is_stopping is True  # E15: 停止标志现为模块级
 
     @pytest.mark.asyncio
     async def test_stop_all_cancels_active_tasks(self):
@@ -391,7 +459,7 @@ class TestStopAll:
 
         await manager.stop_all()  # 不应抛出
 
-        assert manager._is_stopping is True
+        assert tm_module._is_stopping is True  # E15: 停止标志现为模块级
 
     @pytest.mark.asyncio
     async def test_stop_all_cancels_awaits_concurrent_future(self):
@@ -1170,17 +1238,22 @@ class TestR7ResetStateForTest:
     """R7: _reset_state_for_test 行为 + autouse fixture 调用验证。"""
 
     def test_reset_state_for_test_clears_state(self):
-        """_reset_state_for_test 清空全局 _state。"""
-        # 先创建 state
+        """_reset_state_for_test 清空全局 _state、_next_id、_is_stopping。"""
+        # 先创建 state 并设置模块级可变状态
         page = MagicMock()
         page.controls = [MagicMock()]
         manager = ToastManager(page)
         manager.show("test")
         assert tm_module._state is not None
+        tm_module._is_stopping = True
+        assert tm_module._next_id == 1
+        assert tm_module._is_stopping is True
 
         # 重置
         tm_module._reset_state_for_test()
         assert tm_module._state is None
+        assert tm_module._next_id == 0
+        assert tm_module._is_stopping is False
 
     def test_reset_state_for_test_clears_active_tasks(self):
         """_reset_state_for_test 清空 _active_tasks 集合。"""

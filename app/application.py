@@ -53,7 +53,7 @@ from app.window_lifecycle import (
 )
 from data.cache.cache_manager import CacheManager
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
-from ui.components.toast_manager import ToastManager, ToastManagerView
+from ui.components.toast_manager import ToastManager, ToastManagerView, show as toast_show
 from ui.i18n import I18n
 from ui.startup_views import StartupView, _StartupBridge
 from ui.theme import apply_page_theme
@@ -179,8 +179,8 @@ async def _run_session(
     page.on_error = on_error
 
     def show_toast(message, type="info", action_text=None, on_action=None):
-        # P2-10: action_text/on_action 透传 ToastManager.show (导出引导"打开文件夹")
-        page.toast.show(message, type, action_text=action_text, on_action=on_action)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
+        # P2-10: action_text/on_action 透传（导出引导"打开文件夹"）；显式传入 page（review05-E15 无状态化）
+        toast_show(page, message, type, action_text=action_text, on_action=on_action)
 
     page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
 
