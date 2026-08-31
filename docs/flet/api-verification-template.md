@@ -58,7 +58,7 @@
 - **需更新文件**:
   - [x] docs/flet/canvaskit-rendering-e2e-guide.md（去除版本硬编码，改为以 pyproject.toml 为准）
   - [x] docs/flet/upgrade-checklist.md（新增 §3.9 CanvasKit 语义树行为验证）
-  - [x] docs/debt/known-technical-debt.md（P3-WinE2E-Skip 条目追加 engineRevision 变更说明）
+  - [x] docs/debt/known-technical-debt.md（Windows E2E skipif 相关条目追加 engineRevision 变更说明；该条目已在 review07 清理归档删除）
 - **核验人**: AI 助手 (GLM-5.2)
 
 ### Flet 0.86 升级核验 @ 0.86 最新补丁 (2026-07-27)

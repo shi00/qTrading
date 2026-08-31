@@ -1,6 +1,6 @@
 """``--run-windows-skip`` CLI 选项：临时移除 skipif markers 用于 Windows 复验.
 
-P3-WinE2E-Skip 技术债复验专用：在 ``windows-skip-revalidation`` CI job 中通过
+Windows E2E skipif 复验专用：在 ``windows-skip-revalidation`` CI job 中通过
 ``--run-windows-skip`` CLI 标志临时取消 8 个 Windows skipif 用例的 skipif 装饰器，
 使其实际运行以判断 Flet 0.86.2 下问题是否仍存在.
 
@@ -26,7 +26,7 @@ def add_windows_skip_option(parser: pytest.Parser) -> None:
         default=False,
         help=(
             "Temporarily remove @pytest.mark.skipif markers for Windows E2E revalidation "
-            "(P3-WinE2E-Skip). Only use in windows-skip-revalidation CI job."
+            "(Windows E2E skipif). Only use in windows-skip-revalidation CI job."
         ),
     )
 
@@ -44,7 +44,7 @@ def strip_windows_skipif(config: pytest.Config, items: list[pytest.Item]) -> int
     Note:
         移除所有 skipif markers 而非仅 ``sys.platform == "win32"`` 条件的.
         这是安全决策：``--run-windows-skip`` 仅在 ``windows-skip-revalidation`` CI job
-        中使用，该 job 仅运行 8 个 P3-WinE2E-Skip 用例文件，无其他 skipif markers.
+        中使用，该 job 仅运行 8 个 Windows E2E skipif 用例文件，无其他 skipif markers.
         未来扩展 test_targets 时需确保所有被收集的用例都应被 un-skip，避免误 un-skip
         其他 skipif 用例（如 Python 版本 skipif / 依赖缺失 skipif）.
     """
