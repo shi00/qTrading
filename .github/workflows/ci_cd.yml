@@ -731,6 +731,28 @@ jobs:
         run: |
           python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
 
+      - name: Run E2E smoke subset (Linux only, review07 G16)
+        # review07 G16 平台盲区补充：Linux PR 此前仅跑 1 个 E2E 文件，44 个用例主路径
+        # 只在 Windows 验证。复用本 job 已构建的真实 sidecar（embedded 模式）追加
+        # 启动/导航/基础交互 smoke 用例，覆盖 Windows 之外的主路径渲染。
+        # 用例均已在 Windows 全量 E2E（PR 阻断门禁）长期通过，平台无关。
+        if: matrix.os == 'linux'
+        env:
+          QTRADING_DATABASE_MODE: embedded
+          SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
+          SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
+          E2E_TIMEOUT_MULTIPLIER: "2.0"
+        shell: bash
+        run: |
+          python -m pytest \
+            tests/e2e/test_smoke.py::test_app_boots_and_shows_nav \
+            tests/e2e/test_navigation.py::test_switch_to_settings \
+            tests/e2e/test_navigation.py::test_switch_to_screener \
+            tests/e2e/test_home_flow.py::test_home_view_loads \
+            tests/e2e/test_screener_anchor_smoke.py::test_screener_anchor_dom_present \
+            tests/e2e/test_screener_anchor_smoke.py::test_screener_anchor_click_strategy_dropdown_opens \
+            -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
