@@ -245,42 +245,37 @@ class TestBaseDaoReadDb:
 
 
 class TestSlowQueryThresholdConstants:
-    """Q-P2-7: Slow query thresholds should be defined as module-level constants,
-    not hardcoded magic numbers."""
+    """Q-P2-7 / review05-E18: Slow query thresholds should live in a single
+    authoritative source (PerfThreshold), not hardcoded magic numbers or a
+    parallel constant system in base_dao."""
 
-    def test_slow_write_threshold_exists(self):
+    def test_dao_thresholds_defined_in_perf_threshold(self):
+        from utils.log_decorators import PerfThreshold
+
+        assert PerfThreshold.DAO_READ_MS == 500
+        assert PerfThreshold.DAO_WRITE_MS == 2000
+        assert PerfThreshold.DAO_UPSERT_MS == 2000
+
+    def test_base_dao_no_parallel_threshold_constants(self):
         import data.persistence.daos.base_dao as base_dao_mod
 
-        assert hasattr(base_dao_mod, "_SLOW_WRITE_THRESHOLD_MS")
-        assert base_dao_mod._SLOW_WRITE_THRESHOLD_MS == 2000
+        assert not hasattr(base_dao_mod, "_SLOW_READ_THRESHOLD_MS")
+        assert not hasattr(base_dao_mod, "_SLOW_WRITE_THRESHOLD_MS")
+        assert not hasattr(base_dao_mod, "_SLOW_UPSERT_THRESHOLD_MS")
 
-    def test_slow_read_threshold_exists(self):
-        import data.persistence.daos.base_dao as base_dao_mod
-
-        assert hasattr(base_dao_mod, "_SLOW_READ_THRESHOLD_MS")
-        assert base_dao_mod._SLOW_READ_THRESHOLD_MS == 500
-
-    def test_slow_upsert_threshold_exists(self):
-        import data.persistence.daos.base_dao as base_dao_mod
-
-        assert hasattr(base_dao_mod, "_SLOW_UPSERT_THRESHOLD_MS")
-        assert base_dao_mod._SLOW_UPSERT_THRESHOLD_MS == 2000
-
-    def test_write_db_uses_constant_not_magic_number(self):
-        import data.persistence.daos.base_dao as base_dao_mod
+    def test_base_dao_uses_perf_threshold_not_magic_number(self):
         import inspect
 
-        source = inspect.getsource(base_dao_mod.BaseDao._write_db)
-        assert "_SLOW_WRITE_THRESHOLD_MS" in source
-        assert "if elapsed > 2000" not in source
+        from data.persistence.daos.base_dao import BaseDao
 
-    def test_read_db_uses_constant_not_magic_number(self):
-        import data.persistence.daos.base_dao as base_dao_mod
-        import inspect
-
-        source = inspect.getsource(base_dao_mod.BaseDao._read_db)
-        assert "_SLOW_READ_THRESHOLD_MS" in source
-        assert "if elapsed > 500" not in source
+        for method_name in ("_write_db", "_read_db", "_save_upsert"):
+            method = getattr(BaseDao, method_name)
+            source = inspect.getsource(method)
+            # 引用 PerfThreshold 而非硬编码魔法数 / 原模块级常量
+            assert "PerfThreshold.DAO_" in source
+            assert "if elapsed > 500" not in source
+            assert "if elapsed > 2000" not in source
+            assert "_SLOW_" not in source
 
 
 class TestNullProtectedDefaultsFalse:

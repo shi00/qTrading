@@ -38,9 +38,6 @@ _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 # review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
 _LONG_TX_ROW_THRESHOLD = 20_000
-_SLOW_WRITE_THRESHOLD_MS = 2000
-_SLOW_READ_THRESHOLD_MS = 500
-_SLOW_UPSERT_THRESHOLD_MS = 2000
 
 
 class BaseDao:
@@ -518,7 +515,7 @@ class BaseDao:
                     await tx_conn.exec_driver_sql(sql, params)
 
             elapsed = (time.perf_counter() - start_time) * 1000
-            if elapsed > _SLOW_WRITE_THRESHOLD_MS:
+            if elapsed > PerfThreshold.DAO_WRITE_MS:
                 logger.warning(
                     "[%s] Slow Write (%.1fms): %s...",
                     self.__class__.__name__,
@@ -753,7 +750,7 @@ class BaseDao:
                             total_written += len(chunk)
 
             elapsed = (time.perf_counter() - start_time) * 1000
-            if elapsed > _SLOW_UPSERT_THRESHOLD_MS:
+            if elapsed > PerfThreshold.DAO_UPSERT_MS:
                 logger.warning(
                     "[%s] Slow UPSERT (%.1fms, %s rows): %s",
                     self.__class__.__name__,
@@ -945,7 +942,7 @@ class BaseDao:
         )
 
         elapsed = (time.perf_counter() - start_time) * 1000
-        if elapsed > _SLOW_READ_THRESHOLD_MS:
+        if elapsed > PerfThreshold.DAO_READ_MS:
             logger.warning(
                 "[%s] Slow Read (%.1fms, %s rows): %s...",
                 self.__class__.__name__,
@@ -1004,7 +1001,7 @@ class BaseDao:
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000
-                if elapsed > _SLOW_READ_THRESHOLD_MS:
+                if elapsed > PerfThreshold.DAO_READ_MS:
                     logger.warning(
                         "[%s] Slow Read (%.1fms, %s rows): %s...",
                         self.__class__.__name__,
