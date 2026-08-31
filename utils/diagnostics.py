@@ -121,12 +121,29 @@ class SystemDiagnosticsCollector:
                 )
                 health_info = {"status": "red", "error": DataSanitizer.sanitize_error(e)}
 
+            # 运行时指标聚合（review05-E19）：读取进程内 MetricsRegistry 快照并序列化输出
+            from utils.metrics import metrics_registry  # lazy-import: 诊断采集时才触达指标注册表实例
+
+            metrics_snapshot = metrics_registry.snapshot()
+            metrics_info = {
+                op: {
+                    "count": s.count,
+                    "error_count": s.error_count,
+                    "total_ms": round(s.total_ms, 3),
+                    "max_ms": round(s.max_ms, 3),
+                    "avg_ms": round(s.total_ms / s.count, 3) if s.count else 0.0,
+                    "error_codes": dict(s.error_codes),
+                }
+                for op, s in metrics_snapshot.items()
+            }
+
             # 整合所有状态到一个 json 中
             diagnostics_summary = {
                 "system": system_info,
                 "thread_pool": thread_pool_info,
                 "tasks": task_info,
                 "config": sanitized_config,
+                "metrics": metrics_info,
                 "health": health_info,
             }
 
