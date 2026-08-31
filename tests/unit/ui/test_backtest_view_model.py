@@ -19,6 +19,8 @@ from ui.viewmodels.backtest_view_model import (
     BacktestState,
     BacktestViewModel,
     TradeRow,
+    _build_benchmark_curve,
+    _to_date_strings,
     consume_pending_prefill,
     set_pending_prefill,
 )
@@ -406,8 +408,10 @@ class TestBacktestViewModelRunBacktest:
         mock_result.metrics = {"sharpe_ratio": 1.5, "total_return": 0.1}
         mock_result.trades = pl.DataFrame()
         mock_result.period_stats = pl.DataFrame()
-        mock_result.nav_curve = pl.DataFrame({"nav": [1.0, 1.1]})
+        mock_result.nav_curve = pl.DataFrame({"trade_date": [date(2024, 1, 2), date(2024, 1, 3)], "nav": [1.0, 1.1]})
         mock_result.ic_series = pl.Series([0.1, 0.2])
+        mock_result.ic_dates = pl.Series([date(2024, 1, 2), date(2024, 1, 3)], dtype=pl.Date)
+        mock_result.benchmark_returns = pl.Series([0.0, 0.1])
         vm.service.run_backtest = AsyncMock(return_value=mock_result)
         return vm, mock_result
 
@@ -448,6 +452,10 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.metrics == (("sharpe_ratio", 1.5), ("total_return", 0.1))
         assert vm.state.nav_curve == (1.0, 1.1)
         assert vm.state.ic_series == (0.1, 0.2)
+        # UX-12: 横轴日期与基准曲线正确透传/构造
+        assert vm.state.nav_dates == ("2024-01-02", "2024-01-03")
+        assert vm.state.ic_dates == ("2024-01-02", "2024-01-03")
+        assert vm.state.benchmark_curve == (1.0, 1.1)
         assert vm.state.is_running is False
         assert vm.state.status_color == "success"
         assert vm.state.error_detail is None
@@ -462,7 +470,14 @@ class TestBacktestViewModelRunBacktest:
             progress_cb = kwargs.get("progress_callback")
             if progress_cb:
                 progress_cb(0.5, Message("halfway"))
-            return MagicMock(duration_ms=500, metrics={"sharpe_ratio": 2.0})
+            return MagicMock(
+                duration_ms=500,
+                metrics={"sharpe_ratio": 2.0},
+                nav_curve=pl.DataFrame({"trade_date": [], "nav": []}),
+                ic_series=pl.Series([]),
+                ic_dates=pl.Series([], dtype=pl.Date),
+                benchmark_returns=pl.Series([]),
+            )
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
 
@@ -896,7 +911,14 @@ class TestBacktestViewModelCoverageGaps:
             assert captured_cancel_check is not None
             result = captured_cancel_check()
             assert result is False
-            return MagicMock(duration_ms=100, metrics={"sharpe_ratio": 1.0})
+            return MagicMock(
+                duration_ms=100,
+                metrics={"sharpe_ratio": 1.0},
+                nav_curve=pl.DataFrame({"trade_date": [], "nav": []}),
+                ic_series=pl.Series([]),
+                ic_dates=pl.Series([], dtype=pl.Date),
+                benchmark_returns=pl.Series([]),
+            )
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
 
@@ -1279,3 +1301,47 @@ class TestSplitterWidthPersistence:
                 assert task.cancelled()
 
         asyncio.run(_run_test())
+
+
+class TestBacktestChartHelpers:
+    """UX-12 (P2-05): 图表语境辅助纯函数测试。"""
+
+    def test_to_date_strings_date_input(self):
+        """date 对象格式化为 %Y-%m-%d。"""
+        assert _to_date_strings([date(2024, 1, 2), date(2024, 3, 15)]) == ("2024-01-02", "2024-03-15")
+
+    def test_to_date_strings_str_input_passthrough(self):
+        """str 输入透明透传（不二次格式化）。"""
+        assert _to_date_strings(["2024-01-02", "20240103"]) == ("2024-01-02", "20240103")
+
+    def test_to_date_strings_empty_and_none(self):
+        """空/None 输入返回空元组；None 元素被跳过。"""
+        assert _to_date_strings([]) == ()
+        assert _to_date_strings(None) == ()
+        assert _to_date_strings([date(2024, 1, 2), None]) == ("2024-01-02",)
+
+    def test_to_date_strings_polars_date_column(self):
+        """polars Date 列 to_list() (datetime.date) 统一格式化。"""
+        pl_dates = pl.Series([date(2024, 1, 2), date(2024, 1, 3)], dtype=pl.Date)
+        assert _to_date_strings(pl_dates.to_list()) == ("2024-01-02", "2024-01-03")
+
+    def test_build_benchmark_curve_zero_returns_is_flat(self):
+        """全 0 收益 → 恒等曲线 = nav0 全程（与净值曲线对齐锚点）。"""
+        assert _build_benchmark_curve(1_000_000.0, [0.0, 0.0, 0.0]) == (1_000_000.0, 1_000_000.0, 1_000_000.0)
+
+    def test_build_benchmark_curve_increasing_returns(self):
+        """递增序列数值正确（首项收益被跳过，因 bench[0] 已锚定 nav0）。"""
+        # returns=[0.0, 0.1, 0.2] → bench=[nav0, nav0*1.1, nav0*1.1*1.2]
+        curve = _build_benchmark_curve(100.0, [0.0, 0.1, 0.2])
+        assert len(curve) == 3
+        assert curve[0] == pytest.approx(100.0)
+        assert curve[1] == pytest.approx(110.0)
+        assert curve[2] == pytest.approx(132.0)
+
+    def test_build_benchmark_curve_empty_returns(self):
+        """空收益序列返回空元组。"""
+        assert _build_benchmark_curve(100.0, []) == ()
+
+    def test_build_benchmark_curve_single_return(self):
+        """单元素收益序列返回 len=1（仅锚点）。"""
+        assert _build_benchmark_curve(100.0, [0.0]) == (100.0,)

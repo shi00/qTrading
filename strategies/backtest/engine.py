@@ -116,7 +116,7 @@ class VectorBacktestEngine:
         if progress_callback:
             progress_callback(0.8, Message("backtest_progress_calc_metrics"))
 
-        ic_series = self._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = self._calc_ic_series(signals, quotes_df, trade_dates)
 
         benchmark_returns = self._calc_benchmark_returns(benchmark_df, trade_dates)
 
@@ -157,6 +157,7 @@ class VectorBacktestEngine:
             skipped_orders=skipped_orders,
             metrics=metrics,
             ic_series=ic_series,
+            ic_dates=pl.Series(ic_dates, dtype=pl.Date),
             period_stats=period_stats,
             run_id=run_id,
             executed_at=datetime.datetime.now(),
@@ -575,7 +576,7 @@ class VectorBacktestEngine:
         signals: pl.DataFrame,
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
-    ) -> pl.Series:
+    ) -> tuple[pl.Series, list[date]]:
         """
         计算 IC 序列（持有期对齐版本）。
 
@@ -583,9 +584,13 @@ class VectorBacktestEngine:
         1. 根据 rebalance_freq 确定持有期
         2. forward_return = 执行价到下一次调仓执行价的收益
         3. 使用复权价格计算收益（qfq_close）
+
+        UX-12 (P2-05): 返回 ``(ic_values, ic_dates)``，``ic_dates[i]`` 为
+        ``ic_values[i]`` 对应的信号日期（即 ``trade_dates[i]``，非执行日期），
+        供 IC 图横轴显示日期。
         """
         if signals.is_empty():
-            return pl.Series([], dtype=pl.Float64)
+            return pl.Series([], dtype=pl.Float64), []
 
         # PERF-C2: Pre-group by date via partition_by to avoid O(N*M) loop filters.
         # Unpack tuple keys (k[0]) to plain date values for direct .get(date) lookup.
@@ -601,6 +606,7 @@ class VectorBacktestEngine:
         )
 
         ic_values = []
+        ic_dates = []
 
         for i, signal_date in enumerate(trade_dates[:-1]):
             execution_date = trade_dates[i + 1]
@@ -644,8 +650,10 @@ class VectorBacktestEngine:
                 forward_return["fwd_ret"],
             )
             ic_values.append(ic)
+            ic_dates.append(signal_date)  # UX-12: 与 ic 同步记录信号日期（trade_dates[i]）
 
-        return pl.Series(ic_values, dtype=pl.Float64)
+        assert len(ic_values) == len(ic_dates)
+        return pl.Series(ic_values, dtype=pl.Float64), ic_dates
 
     def _get_next_rebalance_date(
         self,

@@ -98,6 +98,12 @@ class _FakeBacktestViewModel:
             ic_series: Any = ()
             period_stats: Any = ()
             error_detail: Any = None
+            # UX-12 (P2-05): 与 BacktestState 新增字段同步 (图表语境 + 可复制摘要来源)
+            nav_dates: Any = ()
+            benchmark_curve: Any = ()
+            ic_dates: Any = ()
+            strategy_name: Any = None
+            benchmark_name: Any = None
 
         self._state = _State()
         # D2: 模拟 VM 初始化装配策略 + 默认选中首个
@@ -621,8 +627,13 @@ class TestStatusRendering:
             metrics=fake_metrics,
             trades=(trade_mock,),
             nav_curve=(1.0,),
+            nav_dates=(),
+            benchmark_curve=(),
             ic_series=(0.1,),
+            ic_dates=(),
             period_stats=(),
+            strategy_name=None,
+            benchmark_name=None,
         )
 
     def test_status_color_mapping_error(self, backtest_view_env) -> None:
@@ -830,8 +841,13 @@ class TestBacktestViewErrorState:
             metrics=(("total_return", 0.1),),
             trades=(trade_mock,),
             nav_curve=(),
+            nav_dates=(),
+            benchmark_curve=(),
             ic_series=(),
+            ic_dates=(),
             period_stats=(),
+            strategy_name=None,
+            benchmark_name=None,
         )
 
     def test_no_strategy_error_does_not_trigger_error_state(self, backtest_view_empty_env) -> None:

@@ -22,6 +22,7 @@ import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.components.backtest.backtest_result_panel import (
+    _build_chart_summary,
     _build_empty_content,
     _build_ic_chart,
     _build_metrics_section,
@@ -33,6 +34,7 @@ from ui.components.backtest.backtest_result_panel import (
     _get_color_for_value,
     _metric_card,
 )
+from ui.i18n import I18n
 from ui.theme import AppColors
 from ui.viewmodels.backtest_view_model import _to_period_stats_rows, _to_trade_rows
 
@@ -244,8 +246,9 @@ class TestBuildNavChart:
             mock_i18n.return_value = "mock_text"
             container = _build_nav_chart((1_000_000.0, 1_010_000.0))
 
-        assert isinstance(container, ft.Container)
-        assert isinstance(container.content, fch.LineChart)
+        # UX-12: content 变为 Column（图例行 + LineChart）；LineChart 在 controls[1]
+        assert isinstance(container.content, ft.Column)
+        assert isinstance(container.content.controls[1], fch.LineChart)
 
     def test_build_nav_chart_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
@@ -344,6 +347,85 @@ class TestBuildIcChart:
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
+
+
+class TestBacktestChartContext:
+    """UX-12 (P2-05): 图表语境增强（日期横轴/轴标题/图例/基准/摘要）.
+
+    用真实 ``I18n.get(key)`` 同源比对（不 patch 为 mock 文本），
+    断言与实现采用同一取值路径，避免退化弱断言。
+    """
+
+    def test_nav_chart_date_labels_and_axis_title(self) -> None:
+        """底轴含日期 labels；底/左轴 title 与真实 i18n 同源。"""
+        container = _build_nav_chart((100.0, 110.0), ("2024-01-02", "2024-01-03"))
+        chart = container.content.controls[1]
+        assert isinstance(chart, fch.LineChart)
+        assert chart.bottom_axis.labels[0].label == "2024-01-02"
+        assert chart.bottom_axis.labels[1].value == 1
+        assert chart.bottom_axis.title.value == I18n.get("backtest_chart_axis_date")
+        assert chart.left_axis.title.value == I18n.get("backtest_chart_axis_nav_value")
+
+    def test_nav_chart_strategy_tooltip_contains_date_and_series(self) -> None:
+        """单系列 hover 明细包含日期与策略图例文本（同源 i18n）。"""
+        container = _build_nav_chart((100.0, 110.0), ("2024-01-02", "2024-01-03"))
+        chart = container.content.controls[1]
+        point = chart.data_series[0].points[0]
+        assert point.tooltip == f"2024-01-02 {I18n.get('backtest_chart_legend_strategy')}: 100"
+
+    def test_nav_chart_single_series_without_benchmark(self) -> None:
+        """无基准 → 单系列，图例仅策略一项。"""
+        container = _build_nav_chart((100.0, 110.0), ("2024-01-02", "2024-01-03"))
+        chart = container.content.controls[1]
+        legend_row = container.content.controls[0]
+        assert len(chart.data_series) == 1
+        assert len(legend_row.controls) == 1
+
+    def test_nav_chart_two_series_when_benchmark_present(self) -> None:
+        """基准与净值等长 → 双系列 + 双图例（策略/基准）。"""
+        container = _build_nav_chart(
+            (100.0, 110.0),
+            ("2024-01-02", "2024-01-03"),
+            (100.0, 108.0),
+        )
+        chart = container.content.controls[1]
+        legend_row = container.content.controls[0]
+        assert len(chart.data_series) == 2
+        assert len(legend_row.controls) == 2
+        # 基准系列为虚线段
+        assert chart.data_series[1].dash_pattern == [6, 4]
+
+    def test_nav_chart_benchmark_len_mismatch_dropped(self) -> None:
+        """基准长度与净值不一致（数据异常）→ 不渲染基准，图例仅策略。"""
+        container = _build_nav_chart((100.0, 110.0), ("a", "b"), (100.0,))
+        chart = container.content.controls[1]
+        assert len(chart.data_series) == 1
+        assert len(container.content.controls[0].controls) == 1
+
+    def test_ic_chart_date_labels_and_tooltip(self) -> None:
+        """IC 图底轴日期 labels、轴 title、rod hover 明细（真实 i18n 同源）。"""
+        container = _build_ic_chart((0.02, -0.01), ("2024-01-02", "2024-01-03"))
+        chart = container.content
+        assert isinstance(chart, fch.BarChart)
+        assert chart.bottom_axis.labels[0].label == "2024-01-02"
+        assert chart.bottom_axis.title.value == I18n.get("backtest_chart_axis_date")
+        assert chart.left_axis.title.value == I18n.get("backtest_chart_axis_ic_value")
+        assert "2024-01-02" in str(chart.groups[0].rods[0].tooltip)
+
+    def test_chart_summary_selectable_and_content(self) -> None:
+        """摘要可选中且内容与真实 i18n 同源（来源/总收益/最大回撤）。"""
+        text = _build_chart_summary(
+            "test_strategy",
+            "000300.SH",
+            ("2024-01-02", "2024-01-31"),
+            (100.0, 110.0),
+            {"total_return": 0.1, "max_drawdown": 0.05},
+        )
+        assert isinstance(text, ft.Text)
+        assert text.selectable is True
+        assert I18n.get("backtest_chart_summary_source", strategy="test_strategy", benchmark="000300.SH") in text.value
+        assert I18n.get("backtest_chart_summary_total_return", value="10.00%") in text.value
+        assert I18n.get("backtest_chart_summary_max_dd", value="5.00%") in text.value
 
 
 class TestBuildMonthlyTable:

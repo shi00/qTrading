@@ -759,7 +759,7 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.8, 21.2, 31.5],
             }
         )
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/2 有信号 → 1 个 IC；signal_date=1/3 无信号 → 跳过
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -879,7 +879,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/8 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -985,7 +985,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/29 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -1012,5 +1012,5 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.2, 10.7],
             }
         )
-        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert len(ic_series) == 0
