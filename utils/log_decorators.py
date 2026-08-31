@@ -32,6 +32,13 @@ class PerfThreshold:
     AI_INFERENCE = 15000  # 本地大模型推理计算
     GLOBAL_INIT = 15000  # 全局大动作
 
+    # review05-E18: DAO 三原语慢操作阈值（原 base_dao 内联常量上收，单一权威源）。
+    # 不同于通用 DB_SINGLE_QUERY/DB_BULK_IO——DAO 单次写/批量 upsert 含结果集处理与
+    # 参数绑定，量级与纯单查询不同，故以此为独立命名常量而非引用通用档位。
+    DAO_READ_MS = 500  # _read_db 单次读原语
+    DAO_WRITE_MS = 2000  # _write_sql 单次写原语
+    DAO_UPSERT_MS = 2000  # _save_upsert 批量 upsert 原语
+
 
 class UILogger:
     """UI 交互动作全量埋点专用日志"""
