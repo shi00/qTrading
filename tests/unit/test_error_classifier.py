@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from core.errors import AppError, ErrorInfo
 from core.i18n import Message
 from utils.error_classifier import (
     classify_error,
@@ -877,3 +878,45 @@ class TestClassifySeverityEngineDisposed:
         for ctx in ("general", "token", "llm", "db", "chart"):
             e = EngineDisposedError("test")
             assert classify_severity(e, context=ctx) == "system", f"context={ctx} 应识别为 system"
+
+
+class TestClassifyErrorAppError:
+    """review05-E3: AppError 首分支 —— 结构化异常语义由异常自身携带，
+    classify_error / classify_severity 无需再事后推断。"""
+
+    def test_app_error_first_branch_returns_info(self):
+        e = AppError(ErrorInfo(code="auth_failed", message_key="llm_err_auth_failed"))
+        result = classify_error(e, context="token")  # 即便 token 上下文也走首分支
+        assert result["code"] == "auth_failed"
+        assert result["message_key"] == "llm_err_auth_failed"
+
+    def test_app_error_retryable_flag_preserved(self):
+        e = AppError(ErrorInfo(code="rate_limit", message_key="llm_err_rate_limit", retryable=True))
+        result = classify_error(e)
+        assert result.get("retryable") is True
+
+    def test_app_error_format_args_preserved(self):
+        e = AppError(
+            ErrorInfo(
+                code="not_found",
+                message_key="db_err_not_found",
+                format_args={"database": "app"},
+            )
+        )
+        result = classify_error(e, context="db")
+        assert result["format_args"] == {"database": "app"}
+
+    def test_app_error_stays_operational_by_default(self):
+        # AppError 不含 recoverable/system 信号时默认 operational
+        e = AppError(ErrorInfo(code="bad_input", message_key="common_err_unknown"))
+        assert classify_severity(e) == "operational"
+
+    def test_app_error_recoverable_code_maps_to_recoverable(self):
+        e = AppError(ErrorInfo(code="timeout", message_key="common_err_timeout", retryable=True))
+        assert classify_severity(e, context="general") == "recoverable"
+
+    def test_app_error_subclass_attr_info(self):
+        # to_error_info 与 to_dict 结构与 classify_error 返回兼容
+        e = AppError(ErrorInfo(code="network", message_key="llm_err_network"))
+        assert e.info.code == "network"
+        assert isinstance(e.to_error_info(), dict)
