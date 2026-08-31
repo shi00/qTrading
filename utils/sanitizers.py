@@ -175,6 +175,23 @@ class DataSanitizer:
         return text
 
     @staticmethod
+    def sanitize_paths(text: str) -> str:
+        """对给定文本应用 Windows/Unix 路径脱敏，将路径替换为 <PATH>。
+
+        与 sanitize_error 中的路径脱敏行为一致，用于独立处理
+        traceback 等包含完整文件路径（可能含用户名）的日志文本。
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            Windows/Unix 路径已被替换为 <PATH> 的文本
+        """
+        text = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", text)
+        text = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", text)
+        return text
+
+    @staticmethod
     def sanitize_error(exception: Exception | str, show_traceback: bool = False) -> str:
         """
         异常信息脱敏
