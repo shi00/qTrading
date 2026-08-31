@@ -920,3 +920,33 @@ class TestClassifyErrorAppError:
         e = AppError(ErrorInfo(code="network", message_key="llm_err_network"))
         assert e.info.code == "network"
         assert isinstance(e.to_error_info(), dict)
+
+
+class TestClassifyErrorFallbackDebugLog:
+    """review05-E1: 字符串匹配兜底需留 debug 日志，开发期暴露缺失的类型化分支。"""
+
+    def test_message_matching_logs_debug(self, caplog):
+        import utils.error_classifier as ec
+
+        ec._MESSAGE_MATCH_LOG_EMITTED.clear()
+        with caplog.at_level(logging.DEBUG, logger="utils.error_classifier"):
+            classify_error(Exception("timeout occurred"), context="general")
+        assert "fell back to message matching" in caplog.text
+        assert "Exception" in caplog.text
+
+    def test_fallback_log_dedups_by_type_and_context(self, caplog):
+        import utils.error_classifier as ec
+
+        ec._MESSAGE_MATCH_LOG_EMITTED.clear()
+        with caplog.at_level(logging.DEBUG, logger="utils.error_classifier"):
+            classify_error(Exception("timeout"), context="general")
+            classify_error(Exception("timeout again"), context="general")  # 同 type+context 不重复
+        assert caplog.text.count("fell back to message matching") == 1
+
+    def test_app_error_skips_fallback_log(self, caplog):
+        import utils.error_classifier as ec
+
+        ec._MESSAGE_MATCH_LOG_EMITTED.clear()
+        with caplog.at_level(logging.DEBUG, logger="utils.error_classifier"):
+            classify_error(AppError(ErrorInfo(code="timeout", message_key="common_err_timeout")))
+        assert "fell back to message matching" not in caplog.text
