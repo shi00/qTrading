@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from core.errors import AppError
 from core.i18n import Message
 
 SYSTEM_LEVEL_EXCEPTIONS = (
@@ -161,6 +162,10 @@ def classify_severity(e: Exception, context: str = "general") -> str:
 
 
 def classify_error(e: Exception, context: str = "general") -> dict:
+    # review05-E3: AppError 携带结构化信息，语义无需事后推断，直接返回。
+    if isinstance(e, AppError):
+        return e.to_error_info()
+
     error_str = str(e).lower()
     error_type = type(e).__name__
 
