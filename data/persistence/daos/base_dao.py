@@ -63,7 +63,8 @@ class BaseDao:
             )
         # review03-C11 Step2: disposed 状态查询从 CacheManager._instance 迁移到
         # engine_provider（解除 data/persistence → data/cache 反向运行时查询）。
-        if engine_provider.is_disposed():
+        # 按引擎身份判定：仅受管引擎受全局 disposed 影响，独立注入引擎不受影响。
+        if engine_provider.is_disposed(self.engine):
             suffix = f", {context} rejected." if context else "."
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed{suffix} Call CacheManager.init_db() to reinitialize."

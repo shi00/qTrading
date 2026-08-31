@@ -34,9 +34,17 @@ def mark_disposed(flag: bool) -> None:
         _disposed = flag
 
 
-def is_disposed() -> bool:
-    """引擎是否已释放（供 _check_engine 等 R5 守卫查询）。"""
+def is_disposed(engine: Any | None = None) -> bool:
+    """引擎是否已释放（供 _check_engine 等 R5 守卫查询）。
+
+    ``_disposed`` 追踪的是 CacheManager 独占管理的**受管引擎**（``set_engine``
+    登记）。按引擎身份判定：仅当查询的 engine 是受管引擎且全局标记为 disposed
+    时才返回 True；独立注入的引擎（如测试引擎）即使全局标记遗留为 True 也不得
+    误判。未指定 engine 时回退到全局标记（兼容无受管引擎的调用方）。
+    """
     with _lock:
+        if engine is not None:
+            return _disposed and engine is _engine
         return _disposed
 
 
