@@ -12,8 +12,6 @@
   ``tests/unit/ui/test_system_tab_contract.py``
 - ``ft.Control.page.fget``: ``tests/unit/ui/conftest.py`` 与
   ``tests/integration/conftest.py`` 的 V1 page 兼容桩（monkeypatch fget）
-- ``PubSubClient``: ``tests/unit/ui/test_spike_pubsub_runtask_pattern.py``
-  （R.5.1 关注 ``unsubscribe_topic`` session-scoped 语义）
 - ``Observable, ObservableList``: ``scripts/spike_ui_debt/spike_observable.py``
 
 验证手段：``import`` + ``hasattr()`` + ``inspect.signature()``。

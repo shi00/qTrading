@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "total": 776,
+  "total": 774,
   "entries": [
     {
       "file": "integration/test_ai_concept_tagging.py",
@@ -365,13 +365,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TimeoutError):"
-    },
-    {
-      "file": "integration/test_spike_pubsub_runtask.py",
-      "line": 82,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "        spy_subscribe.assert_called_once()"
     },
     {
       "file": "integration/test_task_manager_ai_service.py",
@@ -4096,13 +4089,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_spike_pubsub_runtask_pattern.py",
-      "line": 67,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "    with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_startup_views.py",
