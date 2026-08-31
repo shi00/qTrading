@@ -12,8 +12,8 @@
 关键约束:
 - 禁 xFail (DoD 11 + user_profile 强制约束)
 - i18n key 来自 EmbeddedStatusCardViewModel: embedded_pg_ready / embedded_pg_no_config_needed
-- Windows skipif 已移除: P3-WinE2E-Skip 复验通过 (CI run 30138544395 + 30145028141, 11/11 通过率 100%)
-- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif (详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip)
+- Windows skipif 已移除: 复验通过 (CI run 30138544395 + 30145028141, 11/11)
+- 反向回滚条件: M=10 PR 内 flaky 失败 ≥2 次则恢复 skipif
 """
 
 import pytest

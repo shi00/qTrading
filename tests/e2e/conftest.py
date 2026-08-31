@@ -289,11 +289,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
     修复：强制 E2E 测试用 session loop，与 session-scope async fixtures 共享 loop。
 
-    P3-WinE2E-Skip 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
+    Windows E2E skipif 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
     skipif 用例的 skipif markers，使其在 Windows runner 上实际运行以复验 Flet 0.86.2
     下问题是否仍存在。详见 ``tests/e2e/_windows_skip.py``.
     """
-    # P3-WinE2E-Skip 复验：--run-windows-skip 时移除 skipif markers
+    # Windows E2E skipif 复验：--run-windows-skip 时移除 skipif markers
     unskipped = strip_windows_skipif(config, items)
     if unskipped > 0:
         logger.info("[E2E] --run-windows-skip: un-skipped %d Windows skipif items", unskipped)

@@ -1,4 +1,4 @@
-"""Unit tests for tests.e2e._windows_skip helper (P3-WinE2E-Skip revalidation).
+"""Unit tests for tests.e2e._windows_skip helper (Windows E2E skipif).
 
 Tests the --run-windows-skip CLI option behavior:
 - Default (no flag): skipif markers preserved
@@ -101,7 +101,7 @@ class TestStripWindowsSkipif:
         assert item.own_markers[0].name == "e2e"
 
     def test_simulate_8_win_e2e_skip_cases(self) -> None:
-        """Simulate the 8 P3-WinE2E-Skip use cases: all have skipif, all un-skipped."""
+        """Simulate the 8 Windows E2E skipif use cases: all have skipif, all un-skipped."""
         config = _mock_config(run_windows_skip=True)
         # 8 items each with skipif (mirrors the 8 Windows E2E skipif use cases)
         items = [_MockItem(["skipif", "e2e"]) for _ in range(8)]
