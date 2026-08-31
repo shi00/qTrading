@@ -426,6 +426,7 @@ def build_param_control(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
+    prompt_error: str = "",
 ) -> ft.Control | None:
     """构建单个策略参数控件 (D15: 从 ScreenerView._build_param_control 提取, props 化)."""
     label = I18n.get(p.get("label_key", p["name"]))
@@ -501,6 +502,9 @@ def build_param_control(
             focused_border_color=AppColors.PRIMARY,
             text_size=AppStyles.FONT_SIZE_BODY_SM,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+            error=(prompt_error or None)
+            if p_name == "ai_system_prompt"
+            else None,  # D19: AI prompt 校验失败 inline 错误
             on_change=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
         )
         if p_name == "ai_system_prompt":
@@ -550,6 +554,7 @@ def build_params_panel(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
+    prompt_error: str = "",
 ) -> list[ft.Control]:
     """构建策略参数面板 (D15: 从 ScreenerView._build_params_panel 提取, props 化)."""
     from ui.theme import PARAM_GROUP_ORDER
@@ -593,6 +598,7 @@ def build_params_panel(
                 on_update,
                 on_save_prompt,
                 on_restore_prompt,
+                prompt_error,  # D19: 透传 AI prompt inline 错误
             )
             if ctrl is None:
                 continue
@@ -813,6 +819,9 @@ def ScreenerView(
     # 切换策略经 vm.init_strategy_params 重置, 保证草稿与 selected_strategy 同步.
     detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
     pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
+
+    # D19: AI system prompt 保存校验失败的 inline 错误 (纯 UI 显示态, 校验逻辑仍在 VM)。
+    prompt_error, set_prompt_error = ft.use_state("")
 
     # B14: slider 描述更新 debounce (asyncio.Task 引用)。
     desc_timer_ref = ft.use_ref(lambda: None)
@@ -1189,6 +1198,9 @@ def ScreenerView(
 
     def _update_param(name: str, value) -> None:
         vm.set_strategy_param(name, value)  # D3: 参数草稿下沉 VM, state-driven 自动重渲染
+        # D19: 用户编辑 AI system prompt 时清除 inline 错误 (编辑后重新保存会重新校验)
+        if name == "ai_system_prompt" and prompt_error:
+            set_prompt_error("")
 
     def _on_slider_value_change(name: str, val: float) -> None:
         # B14: 参数更新立即生效；仅描述更新 debounce 150ms（高频拖动不重复调 update_strategy_desc）。
@@ -1245,6 +1257,7 @@ def ScreenerView(
             if page is None:
                 return
             if success:
+                set_prompt_error("")  # D19: 成功保存时清除 inline 错误
                 UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
                 _safe_show_toast(page, I18n.get("ai_settings_saved"), "success")
             else:
@@ -1254,7 +1267,8 @@ def ScreenerView(
                 msg = I18n.get(error_key, error_key)
                 if error_key == "prompt_err_length":
                     msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                _safe_show_toast(page, msg, "warning")
+                # D19: 客户端校验失败 → inline 错误 (持续显示在被校验字段旁, 优于会消失的 SnackBar)
+                set_prompt_error(msg)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -1421,6 +1435,7 @@ def ScreenerView(
                 _update_param,
                 _on_save_prompt,
                 _on_restore_prompt,
+                prompt_error,  # D19: AI prompt inline 错误透传
             ),
         ],
         spacing=10,
