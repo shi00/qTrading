@@ -11,7 +11,23 @@ from utils.time_utils import get_now
 LOG_DIR = os.path.join(config.APP_ROOT, "logs")
 
 
-class JSONFormatter(logging.Formatter):
+class _SanitizingFormatter(logging.Formatter):
+    """对 exc_info 输出的 traceback 做文件路径脱敏的 logging.Formatter。
+
+    覆写 formatException 使 exc_info=True 输出的文本（含完整文件路径、
+    可能含系统用户名）中的路径被替换为 <PATH>。文本与 JSON 两种格式均复用。
+
+    __init__ 透传 logging.Formatter，无额外初始化参数。
+    """
+
+    def formatException(self, ei):
+        res = super().formatException(ei)
+        from utils.sanitizers import DataSanitizer
+
+        return DataSanitizer.sanitize_paths(res)
+
+
+class JSONFormatter(_SanitizingFormatter):
     """
     JSON formatter for structured logging.
     Outputs logs in JSON format suitable for centralized log systems
@@ -45,7 +61,7 @@ def _get_formatter(use_json: bool = False) -> logging.Formatter:
     """
     if use_json:
         return JSONFormatter(datefmt="%Y-%m-%d %H:%M:%S")
-    return logging.Formatter(
+    return _SanitizingFormatter(
         "%(asctime)s [%(levelname)s] [%(correlation_id)s] [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
