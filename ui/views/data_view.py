@@ -149,20 +149,28 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _safe_show_toast(
+def _show_toast(
     page: ft.Page,
     msg: str,
     msg_type: str = "info",
     action_text: str | None = None,
     on_action: typing.Callable[[], None] | None = None,
 ) -> None:
-    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。
+    """显式调用页面统一 Toast 组件 (application.py 挂载 ``page.toast``)。
+
+    替代原 ``_safe_show_toast`` 依赖 ``page.show_toast`` 动态挂载的 getattr 兜底
+    (review05-E20): 统一经 ``ToastManager.show`` (``page.toast.show``) 显式呈现,
+    View 层不吞业务失败 (MVVM 规范)。
+    - 调用方已确保 ``page`` 非 None (``_get_page()`` 守卫)。
 
     P2-10: action_text/on_action 透传 (导出成功"打开文件夹"按钮)。
     """
-    show_toast = typing.cast(typing.Any, page).show_toast
-    if show_toast is not None:
-        show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
+    page.toast.show(  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+        msg,
+        msg_type,
+        action_text=action_text,
+        on_action=on_action,
+    )
 
 
 def _format_cell_value(val: object, col_name: str) -> str:
@@ -346,7 +354,7 @@ def TableViewerTab(
             logger.error("[TableViewerTab] load_schema error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
+                _show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     async def _init_tables() -> None:
         if not active or state.tables_loaded:
@@ -359,7 +367,7 @@ def TableViewerTab(
             logger.error("[TableViewerTab] init_tables error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
+                _show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     async def _load_initial_table() -> None:
         if not active or not state.tables_loaded:
@@ -374,7 +382,7 @@ def TableViewerTab(
             logger.error("[TableViewerTab] initial load error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
+                _show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
     ft.use_effect(_init_tables, dependencies=[state.tables_loaded, active])
@@ -400,6 +408,9 @@ def TableViewerTab(
             raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] query error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     async def _do_refresh() -> None:
         ensure_correlation_id()
@@ -410,6 +421,9 @@ def TableViewerTab(
             raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] refresh error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     async def _do_sort_query() -> None:
         try:
@@ -418,6 +432,9 @@ def TableViewerTab(
             raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] sort query error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     async def _do_prev_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_prev_page")
@@ -428,6 +445,9 @@ def TableViewerTab(
                 raise  # R2: 必须传播
             except Exception as e:
                 logger.error("[TableViewerTab] prev page error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+                page = _get_page()
+                if page is not None:
+                    _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     async def _do_next_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_next_page")
@@ -439,6 +459,9 @@ def TableViewerTab(
                 raise  # R2: 必须传播
             except Exception as e:
                 logger.error("[TableViewerTab] next page error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+                page = _get_page()
+                if page is not None:
+                    _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     async def _export_data(format_: str, current_page: bool = True) -> None:
         scope = "current_page" if current_page else "all"
@@ -448,7 +471,7 @@ def TableViewerTab(
             if df.empty:
                 page = _get_page()
                 if page is not None:
-                    _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
+                    _show_toast(page, I18n.get("data_export_no_data"), "error")
                 return
             suffix = f"_p{state.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
@@ -472,7 +495,7 @@ def TableViewerTab(
                     page = _get_page()
                     if page is not None:
                         # P2-10: 导出成功 toast 附"打开文件夹" action
-                        _safe_show_toast(
+                        _show_toast(
                             page,
                             msg,
                             "success",
@@ -481,14 +504,12 @@ def TableViewerTab(
                         )
                         # Phase 6.3 (FR-UX-006): 截断警告 toast (导出全部且达到上限)
                         if not current_page and len(df) >= MAX_EXPORT_ROWS:
-                            _safe_show_toast(
-                                page, I18n.get("data_export_truncated_warning"), "warning"
-                            )  # pragma: no cover
+                            _show_toast(page, I18n.get("data_export_truncated_warning"), "warning")  # pragma: no cover
                 except Exception as ex:
                     logger.error("Export write failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
                     page = _get_page()
                     if page is not None:
-                        _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                        _show_toast(page, I18n.get("data_export_fail"), "error")
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -496,7 +517,7 @@ def TableViewerTab(
             logger.debug("Export failed traceback", exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                _show_toast(page, I18n.get("data_export_fail"), "error")
 
     # --- 同步事件 handler (调度 page.run_task) ---
     def _on_table_changed(e: ft.ControlEvent) -> None:
@@ -529,6 +550,9 @@ def TableViewerTab(
             raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] clear filter error: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            page = _get_page()
+            if page is not None:
+                _show_toast(page, I18n.get("data_err_fetch"), "error")
 
     def _on_refresh_click(e: ft.ControlEvent) -> None:
         page = _get_page()

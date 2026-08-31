@@ -549,7 +549,7 @@ def _make_fake_page() -> FakePage:
             _run_async_coro(result)
 
     page.run_task = MagicMock(side_effect=_run_task)  # type: ignore[method-assign]
-    page.show_toast = MagicMock()  # type: ignore[method-assign]
+    page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
     page.pubsub = MagicMock()  # type: ignore[method-assign]
     return page
 
@@ -1532,7 +1532,7 @@ class TestTableViewerTabEventHandlers:
         # 验证 write_excel 被调用 (而非 write_csv) 且 filepath 正确
         vm.write_excel.assert_called_once_with(ANY, filepath)
         # 验证成功 toast
-        toast_args = page.show_toast.call_args
+        toast_args = page.toast.show.call_args
         assert toast_args[0][1] == "success"
 
     def test_export_excel_save_file_uses_xlsx_extension(
@@ -1591,7 +1591,9 @@ class TestTableViewerTabEventHandlers:
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
         popup_menus[0].items[0].on_click(MagicMock())
 
-        page.show_toast.assert_called_once()
+        # 验证空数据导出 error toast (data_export_no_data)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_export_with_data_writes_csv(
         self,
@@ -1624,9 +1626,8 @@ class TestTableViewerTabEventHandlers:
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
         popup_menus[0].items[0].on_click(MagicMock())
 
-        page.show_toast.assert_called_once()
         # Verify success toast
-        toast_args = page.show_toast.call_args
+        toast_args = page.toast.show.call_args
         assert toast_args[0][1] == "success"
 
     def test_init_tables_triggers_when_not_loaded(
@@ -2031,7 +2032,9 @@ class TestTableViewerTabAsyncErrorPaths:
         component.kwargs["state"] = vm.state
         run_render_effects(component)
 
-        page.show_toast.assert_called_once()
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_init_tables_handles_exception(
         self,
@@ -2052,7 +2055,9 @@ class TestTableViewerTabAsyncErrorPaths:
         page = _make_fake_page()
         _mount(component, page=page)
 
-        page.show_toast.assert_called_once()
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_do_query_handles_exception(
         self,
@@ -2060,7 +2065,7 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_do_query: vm.query_data 抛 Exception → 兜底捕获 (不传播)。"""
+        """_do_query: vm.query_data 抛 Exception → 兜底捕获 + 显式 toast (data_err_fetch)。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
@@ -2074,7 +2079,11 @@ class TestTableViewerTabAsyncErrorPaths:
         result, page = _mount(component, page=page)
 
         btn_query = _find_icon_button(result, ft.Icons.SEARCH)
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
         btn_query.on_click(MagicMock())  # 不抛异常
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_do_refresh_handles_exception(
         self,
@@ -2082,7 +2091,7 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_do_refresh: vm.query_data 抛 Exception → 兜底捕获。"""
+        """_do_refresh: vm.query_data 抛 Exception → 兜底捕获 + 显式 toast。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
@@ -2096,7 +2105,11 @@ class TestTableViewerTabAsyncErrorPaths:
         result, page = _mount(component, page=page)
 
         btn_refresh = _find_icon_button(result, ft.Icons.REFRESH)
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
         btn_refresh.on_click(MagicMock())
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_do_sort_query_handles_exception(
         self,
@@ -2104,7 +2117,7 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_do_sort_query: vm.query_data 抛 Exception → 兜底捕获。"""
+        """_do_sort_query: vm.query_data 抛 Exception → 兜底捕获 + 显式 toast。"""
         from ui.views.data_view import TableViewerTab
 
         # Task 8.5: total_rows>0 才渲染 PaginatedTable (total_rows=0 显示空态)
@@ -2129,7 +2142,11 @@ class TestTableViewerTabAsyncErrorPaths:
             _mount(component, page=page)
 
         on_sort = captured_on_sort[-1]
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
         on_sort("ts_code", False)  # 不抛异常
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_do_prev_page_handles_exception(
         self,
@@ -2137,7 +2154,7 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_do_prev_page: vm.query_data 抛 Exception → 兜底捕获。"""
+        """_do_prev_page: vm.query_data 抛 Exception → 兜底捕获 + 显式 toast。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(
@@ -2153,7 +2170,11 @@ class TestTableViewerTabAsyncErrorPaths:
         result, page = _mount(component, page=page)
 
         btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
         btn_prev.on_click(MagicMock())
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_do_next_page_handles_exception(
         self,
@@ -2161,7 +2182,7 @@ class TestTableViewerTabAsyncErrorPaths:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_do_next_page: vm.query_data 抛 Exception → 兜底捕获。"""
+        """_do_next_page: vm.query_data 抛 Exception → 兜底捕获 + 显式 toast。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(
@@ -2177,7 +2198,11 @@ class TestTableViewerTabAsyncErrorPaths:
         result, page = _mount(component, page=page)
 
         btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
         btn_next.on_click(MagicMock())
+        # 验证 error toast (用户可见反馈)
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error"
 
     def test_export_csv_write_failure_shows_error_toast(
         self,
@@ -2209,8 +2234,7 @@ class TestTableViewerTabAsyncErrorPaths:
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
         popup_menus[0].items[0].on_click(MagicMock())
 
-        page.show_toast.assert_called()
-        toast_args = page.show_toast.call_args
+        toast_args = page.toast.show.call_args
         assert toast_args[0][1] == "error"
 
 
