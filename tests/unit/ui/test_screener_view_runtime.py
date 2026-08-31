@@ -2131,8 +2131,12 @@ class TestDoSavePromptAsync:
     vm.save_strategy_prompt, 测试 patch 目标改为 fake_vm.save_strategy_prompt.
     """
 
-    def test_invalid_prompt_shows_warning(self, screener_view_with_params_env) -> None:
-        """vm.save_strategy_prompt 返回 (False, warning) → show_toast(warning)."""
+    def test_invalid_prompt_shows_inline_error(self, screener_view_with_params_env) -> None:
+        """vm.save_strategy_prompt 返回 (False, warning) → AI prompt 字段 inline 错误 (D19).
+
+        D19: 校验失败不再走会消失的 SnackBar toast, 改为持续显示在被校验字段下方
+        (TextField.error), 符合表单交互惯例。
+        """
         env = screener_view_with_params_env
         page = env["page"]
         fake_vm = env["fake_vm"]
@@ -2159,9 +2163,18 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值 (P2-7: ⚠ emoji 前缀删除)
-            page.show_toast.assert_called_once_with(
-                "i18n[prompt_err_length]", "warning", action_text=None, on_action=None
+            # D19: 校验失败 → inline 错误 (代替 warning toast), Warning SnackBar 不应再出现
+            page.show_toast.assert_not_called()
+
+            # 重渲染后, ai_system_prompt 文本域 error 应显示翻译后的错误消息
+            _rerender(env)
+            inline_errors = [
+                c
+                for c in _walk_all_controls(env["result"])
+                if isinstance(c, ft.TextField) and getattr(c, "multiline", False) and getattr(c, "error", None)
+            ]
+            assert any(c.error == "i18n[prompt_err_length]" for c in inline_errors), (
+                "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:

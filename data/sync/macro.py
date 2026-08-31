@@ -166,32 +166,14 @@ class MacroSyncStrategy(ISyncStrategy):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
-        """Prefer the latest closed trade date for default sync windows."""
-        try:
-            trade_date = await self.context.processor.trade_calendar.get_latest_trade_date()  # type: ignore[union-attr]
-            if trade_date is None:
-                logger.warning("[MacroSync] get_latest_trade_date returned None, falling back to today.")
-            elif isinstance(trade_date, datetime.datetime):
-                return trade_date.date()
-            elif isinstance(trade_date, datetime.date):
-                return trade_date
-            elif trade_date:
-                parsed = parse_date(str(trade_date))
-                return parsed.date() if hasattr(parsed, "date") else parsed
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            severity = classify_severity(e, context="general")
-            log_classified(
-                logger,
-                e,
-                "general",
-                "[MacroSync] Effective trade date fallback (%s): %s",
-                exc_info=True,
-            )
-            if severity == "system":
-                raise
-        return get_now().date()
+        """Prefer the latest closed trade date for default sync windows.
+
+        review03-C14: 委托共享回退链（交易日历服务 → 已同步行情最大日期 → 显式抛错），
+        不再回退到本地日历日。
+        """
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        return await get_effective_trade_date(getattr(self.context, "processor", None))
 
     @log_async_operation(
         operation_name="MacroSyncStrategy.run",

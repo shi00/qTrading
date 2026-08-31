@@ -103,8 +103,6 @@ async def test_wizard_forward_then_back(wizard_page):
     await wizard_page.expect_text(welcome_guide)
 
 
-# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题。
-# 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 # embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
 # （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
 # embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
@@ -140,11 +138,9 @@ async def test_wizard_db_validation_failure(wizard_page):
     assert not await wizard_page.has_text(token_title)
 
 
-# Tech debt: P3-WinE2E-Skip — Windows CI 环境 CanvasKit 中文字体网络加载失败致 textbox a11y 节点未渲染。
-# 复验证据：CI run 30145028141 no-sidecar matrix FAILED，fill_textbox 在 wait_for(state='attached') 阶段超时。
-# 根因分析：见 docs/debt/known-technical-debt.md P3-WinE2E-Skip 条目（归档文档已随 docs 清理删除）
-# 替代覆盖：tests/integration/test_onboarding_wizard_integration.py
-# 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
+# 历史背景:Windows CI 环境 CanvasKit 中文字体网络加载曾致 textbox a11y 节点未渲染
+# （Windows E2E skip 已解禁移除），外部 DB 校验失败流程改由集成测试替代覆盖:
+#   tests/integration/test_onboarding_wizard_integration.py
 # embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
 # （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
 # embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），

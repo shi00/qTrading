@@ -885,3 +885,67 @@ class TestPIISanitization:
         text = "价格: 1381234 (仅7位)"
         result = DataSanitizer._sanitize_pii_text(text)
         assert "1381234" in result
+
+
+class TestSanitizePaths:
+    """review05-E9: sanitize_paths 对文本中的 Windows/Unix 路径脱敏"""
+
+    def test_windows_path(self):
+        """Windows 路径替换为 <PATH>，含用户名路径不泄露"""
+        text = "Error in C:\\Users\\admin\\app\\file.py at line 5"
+        result = DataSanitizer.sanitize_paths(text)
+        assert "C:\\Users\\admin\\app\\file.py" not in result
+        assert "<PATH>" in result
+
+    def test_unix_path(self):
+        """Unix 绝对路径替换为 <PATH>"""
+        text = "Error in /home/admin/app/file.py at line 5"
+        result = DataSanitizer.sanitize_paths(text)
+        assert "/home/admin/app/file.py" not in result
+        assert "<PATH>" in result
+
+    def test_multiple_paths(self):
+        """同一文本中多个路径均被替换"""
+        text = "D:\\src\\main.py and /opt/proj/lib.py"
+        result = DataSanitizer.sanitize_paths(text)
+        assert result.count("<PATH>") == 2
+
+    def test_no_path_unchanged(self):
+        """无路径文本不做替换"""
+        text = "no path here, just text"
+        assert DataSanitizer.sanitize_paths(text) == text
+
+
+class TestFormatterPathSanitization:
+    """review05-E9: Formatter.formatException 输出的 traceback 中路径被替换为 <PATH>"""
+
+    @staticmethod
+    def _raise_and_capture():
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            import sys
+
+            return sys.exc_info()
+
+    def test_text_formatter_sanitizes_traceback_path(self):
+        import os
+
+        from utils.logger import _SanitizingFormatter
+
+        ei = self._raise_and_capture()
+        out = _SanitizingFormatter().formatException(ei)
+        assert "Traceback" in out
+        assert os.path.abspath(__file__) not in out, f"测试文件路径泄漏进 traceback: {out}"
+        assert "<PATH>" in out
+
+    def test_json_formatter_sanitizes_traceback_path(self):
+        import os
+
+        from utils.logger import JSONFormatter
+
+        ei = self._raise_and_capture()
+        out = JSONFormatter().formatException(ei)
+        assert "Traceback" in out
+        assert os.path.abspath(__file__) not in out, f"测试文件路径泄漏进 traceback: {out}"
+        assert "<PATH>" in out

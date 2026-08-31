@@ -641,7 +641,8 @@ class AIStrategyMixin:
             )
         finally:
             # F4-ST-001: 无论正常完成、CancelledError 或异常，都清理 news_tasks
-            # _cancel_orphan_news_tasks 内部用 asyncio.gather(return_exceptions=True)（不 raise），finally 中安全
+            # _cancel_orphan_news_tasks 内部用 gather_for_shutdown_cleanup（清理语义，
+            # 吞内部 CancelledError、不抛普通异常），finally 中安全
             await self._cancel_orphan_news_tasks(prefetched)
 
         if not final_rows:
