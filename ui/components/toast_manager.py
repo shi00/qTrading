@@ -6,8 +6,9 @@
 变更要点:
 - ``ToastCard`` 从 ft.Container 子类改为 ``@ft.component def ToastCard(data, on_dismiss)``
   + ``use_state`` (hover/expanded/dismissing) + ``use_effect`` (timer 生命周期)
-- ``ToastManager`` 保留为普通类（命令式 API 外壳），不再继承 ft.Control，
-  不再调命令式挂载/更新/生命周期钩子（改由声明式渲染 + use_effect 驱动）
+- ``ToastManager`` 已去单例化（review05-E15）：不再持有实例级可变状态，
+  核心逻辑为无状态模块级函数 ``show(page, ...)`` / ``stop_all()``（显式依赖 page）；
+  保留仅为 ``page.toast`` 动态挂载的薄壳（避免 utils→ui 反向依赖），不残留跨测试状态
 - toast 队列通过 ``ToastManagerState`` (Observable) 驱动 ``ToastManagerView`` 重渲染
 - asyncio 任务生命周期用 ``use_effect(setup, [], cleanup=cleanup)`` 管理
 - R2: ``_run_timer`` 中 ``except asyncio.CancelledError: raise``；
@@ -99,6 +100,13 @@ class ToastManagerState(ft.Observable):
 _state: ToastManagerState | None = None
 _state_lock = threading.Lock()
 
+# 进程级可变状态（review05-E15）:
+# 原状态置于 ToastManager 实例（_next_id/_is_stopping/_lock），跨测试残留成 R15 缺口。
+# 现全部提升为模块级，由 _reset_state_for_test 重置，实例不再持有可变状态。
+_next_id: int = 0
+_is_stopping: bool = False
+_mutation_lock = threading.Lock()
+
 
 def get_global_state() -> ToastManagerState:
     """获取全局 ToastManagerState 单例。"""
@@ -133,15 +141,18 @@ def _register_task(
 
 
 def _reset_state_for_test() -> None:
-    """测试隔离：重置全局 state 和任务集合。
+    """测试隔离：重置全局 state、任务集合与进程级可变状态（E15）。
 
     单元测试 autouse fixture 调用，避免跨测试泄漏。
     """
-    global _state
+    global _state, _next_id, _is_stopping
     with _state_lock:
         _state = None
     with _active_tasks_lock:
         _active_tasks.clear()
+    with _mutation_lock:
+        _next_id = 0
+        _is_stopping = False
 
 
 # ============================================================================
@@ -180,30 +191,121 @@ def _resolve_color_icon(toast_type: str) -> tuple[str, str]:
 
 
 # ============================================================================
-# 命令式 API 外壳
+# 无状态 API（显式依赖 page）
 # ============================================================================
+
+# 进程级可变状态（_next_id/_is_stopping/_mutation_lock）定义于上方"全局状态"节。
+# 以下均为无状态模块级函数：唯一动态依赖经 ``page`` 显式传入，不隐式持有跨调用状态。
+
+
+def show(
+    page: ft.Page | None,
+    message: str,
+    toast_type: str = "info",
+    duration: int = 10,
+    action_text: str | None = None,
+    on_action: Callable[[], None] | None = None,
+) -> None:
+    """显示 toast 通知（无状态，显式依赖 page）。
+
+    Args:
+        page: 目标页面（调用方显式传入，不在实例/闭包中持有）
+        message: 显示文本
+        toast_type: 'info' / 'success' / 'error' / 'warning'
+        duration: 自动消失秒数
+        action_text: 操作按钮文本 (P2-10); None 时不显示按钮
+        on_action: 操作按钮回调 (P2-10); action_text 非空时必填
+    """
+    global _next_id
+    if page is None or _is_stopping:
+        return
+
+    # 防御：空 page.controls 时挂载动画 overlay 会崩溃 Flet Dart 渲染器
+    if not page.controls:
+        logger.warning(
+            "[ToastManager] Suppressed toast notification because page has no controls: %s",
+            message,
+        )
+        return
+
+    color, icon = _resolve_color_icon(toast_type)
+
+    # P2-10: action toast 用更长 duration (30s), 给用户足够时间点击操作
+    if action_text is not None:
+        duration = 30
+
+    # _mutation_lock 保护 id 自增 + 队列读改写原子性（get_global_state 用 _state_lock，异锁嵌套安全）
+    with _mutation_lock:
+        _next_id += 1
+        new_toast = ToastData(
+            id=_next_id,
+            message=message,
+            icon=icon,
+            color=color,
+            duration=duration,
+            action_text=action_text,
+            on_action=on_action,
+        )
+        state = get_global_state()
+        new_list = [*state.toasts, new_toast]
+        # 限制最大数量，移除最旧
+        while len(new_list) > MAX_TOAST_COUNT:
+            new_list.pop(0)
+        # dataclass __setattr__ 触发 _notify → ToastManagerView 重渲染
+        state.toasts = new_list
+
+
+def _remove_toast(toast_id: int) -> None:
+    """从队列移除指定 toast（供 ToastCard dismiss 回调）。"""
+    state = get_global_state()
+    state.toasts = [t for t in state.toasts if t.id != toast_id]
+
+
+async def stop_all() -> None:
+    """优雅停机：取消所有活动任务并清空队列。
+
+    幂等，可多次调用。使用 ``gather_for_shutdown_cleanup`` 等待所有任务
+    清理完成（CancelledError 视为预期结果，不重新抛出）。
+    """
+    global _is_stopping
+    _is_stopping = True
+
+    with _active_tasks_lock:
+        tasks_snapshot = list(_active_tasks)
+
+    valid_tasks = [
+        t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future, concurrent.futures.Future))
+    ]
+    for task in valid_tasks:
+        if not task.done():
+            task.cancel()
+
+    if valid_tasks:
+        # concurrent.futures.Future 需桥接为 asyncio.Future 才可被 gather 收集
+        watchers = [asyncio.wrap_future(t) if isinstance(t, concurrent.futures.Future) else t for t in valid_tasks]
+        await gather_for_shutdown_cleanup(*watchers)
+
+    state = get_global_state()
+    state.toasts = []
 
 
 class ToastManager:
-    """命令式 API 外壳，操作全局 ``ToastManagerState``。
+    """无状态 ``page.toast`` 挂载壳（review05-E15 去单例化）。
 
-    保留 ``.show()`` / ``.stop_all()`` API 供 main.py / startup_views.py /
-    shutdown.py 调用。消费方需将 ``ToastManagerView()`` 挂载到 ``page.overlay``
-    才能显示 toast（声明式渲染，本 phase 不改 main.py）。
+    进程内唯一可变状态（``_next_id`` / ``_is_stopping`` / toast 队列）全部驻留本模块，
+    由 ``_reset_state_for_test`` 重置，实例只保留 ``page`` 一个依赖引用，不持有
+    跨调用/跨测试残留的类级或实例级可变状态（即不再作为"事实单例"承载状态）。
 
-    Thread Safety:
-    - ``show()`` / ``_remove_toast()`` / ``stop_all()`` 通过 ``_lock`` 保护
-        ``_next_id`` 与 ``_is_stopping``
-    - ``_active_tasks`` 由 module-level ``_active_tasks_lock`` 保护
+    本壳仅作 ``page.toast = ToastManager(page)`` 动态挂载的薄委托：``shutdown.py``
+    （utils 层）经 ``getattr(page, "toast", None).stop_all()`` 访问到进程级停机能力，
+    避免 utils→ui 反向依赖（import-linter 契约 5）。首选用模块级无状态函数
+    ``show(page, ...)`` / ``stop_all()``（显式传 page）。
     """
 
     MAX_TOAST_COUNT = MAX_TOAST_COUNT
 
     def __init__(self, page: ft.Page | None = None):
         self.page = page
-        self._lock = threading.Lock()
-        self._is_stopping = False
-        self._next_id = 0
 
     def show(
         self,
@@ -213,83 +315,16 @@ class ToastManager:
         action_text: str | None = None,
         on_action: Callable[[], None] | None = None,
     ) -> None:
-        """显示 toast 通知。
-
-        Args:
-            message: 显示文本
-            toast_type: 'info' / 'success' / 'error' / 'warning'
-            duration: 自动消失秒数
-            action_text: 操作按钮文本 (P2-10); None 时不显示按钮
-            on_action: 操作按钮回调 (P2-10); action_text 非空时必填
-        """
-        if not self.page or self._is_stopping:
-            return
-
-        # 防御：空 page.controls 时挂载动画 overlay 会崩溃 Flet Dart 渲染器
-        if not self.page.controls:
-            logger.warning(
-                "[ToastManager] Suppressed toast notification because page has no controls: %s",
-                message,
-            )
-            return
-
-        color, icon = _resolve_color_icon(toast_type)
-
-        # P2-10: action toast 用更长 duration (30s), 给用户足够时间点击操作
-        if action_text is not None:
-            duration = 30
-
-        with self._lock:
-            self._next_id += 1
-            new_toast = ToastData(
-                id=self._next_id,
-                message=message,
-                icon=icon,
-                color=color,
-                duration=duration,
-                action_text=action_text,
-                on_action=on_action,
-            )
-            state = get_global_state()
-            new_list = [*state.toasts, new_toast]
-            # 限制最大数量，移除最旧
-            while len(new_list) > self.MAX_TOAST_COUNT:
-                new_list.pop(0)
-            # dataclass __setattr__ 触发 _notify → ToastManagerView 重渲染
-            state.toasts = new_list
+        """委托模块级 ``show(self.page, ...)``。"""
+        show(self.page, message, toast_type, duration, action_text, on_action)
 
     def _remove_toast(self, toast_id: int) -> None:
-        """从队列移除指定 toast（供 ToastCard dismiss 回调）。"""
-        with self._lock:
-            state = get_global_state()
-            state.toasts = [t for t in state.toasts if t.id != toast_id]
+        """委托模块级 ``_remove_toast``。"""
+        _remove_toast(toast_id)
 
     async def stop_all(self) -> None:
-        """优雅停机：取消所有活动任务并清空队列。
-
-        幂等，可多次调用。使用 ``gather_for_shutdown_cleanup`` 等待所有任务
-        清理完成（CancelledError 视为预期结果，不重新抛出）。
-        """
-        self._is_stopping = True
-
-        with _active_tasks_lock:
-            tasks_snapshot = list(_active_tasks)
-
-        valid_tasks = [
-            t for t in tasks_snapshot if isinstance(t, (asyncio.Task, asyncio.Future, concurrent.futures.Future))
-        ]
-        for task in valid_tasks:
-            if not task.done():
-                task.cancel()
-
-        if valid_tasks:
-            # concurrent.futures.Future 需桥接为 asyncio.Future 才可被 gather 收集
-            watchers = [asyncio.wrap_future(t) if isinstance(t, concurrent.futures.Future) else t for t in valid_tasks]
-            await gather_for_shutdown_cleanup(*watchers)
-
-        with self._lock:
-            state = get_global_state()
-            state.toasts = []
+        """委托模块级 ``stop_all``。"""
+        await stop_all()
 
 
 # ============================================================================

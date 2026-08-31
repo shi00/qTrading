@@ -27,6 +27,7 @@ import flet as ft
 # import app 层（契约 6），消除 exceptions.yml EX-0001 例外。
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
+from ui.components.toast_manager import show as toast_show
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from utils.sanitizers import DataSanitizer
@@ -622,8 +623,8 @@ def StartupView(
         async def on_news_alert(msg: str) -> None:
             try:
                 page = ft.context.page
-                if page is not None and hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
-                    page.toast.show(msg, toast_type="info")  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
+                if page is not None:
+                    toast_show(page, msg, toast_type="info")  # review05-E15: 无状态化，显式传 page
             except RuntimeError:
                 pass
 
