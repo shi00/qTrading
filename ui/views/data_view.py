@@ -270,6 +270,170 @@ def _ceil_div(n: int, d: int) -> int:
     return -(-n // d) if d > 0 else 1
 
 
+# ----------------------------------------------------------------------------
+# TableViewerTab 渲染段 builder (D15: 从 TableViewerTab 提取, props 化)
+# ----------------------------------------------------------------------------
+
+
+def _build_loading_widget() -> ft.Container:
+    """构建加载中占位面板 (TableViewerTab 加载ing + 兜底两分支共用)."""
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.ProgressRing(
+                        width=48,
+                        height=48,
+                        stroke_width=4,
+                        color=AppColors.PRIMARY,
+                    ),
+                    padding=AppStyles.SPACING_XL,
+                    border_radius=50,
+                    bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
+                ),
+                ft.Container(height=16),
+                ft.Text(
+                    I18n.get("data_loading"),
+                    size=AppStyles.FONT_SIZE_TITLE,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Text(
+                    I18n.get("data_loading_hint"),
+                    size=AppStyles.FONT_SIZE_BODY,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
+        ),
+        alignment=ft.Alignment.CENTER,
+        expand=True,
+        padding=AppStyles.EMPTY_STATE_PADDING,
+        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.SHADOW),
+        border_radius=12,
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
+    )
+
+
+def _build_grid_content(
+    state: DataExplorerState,
+    *,
+    is_loading: bool,
+    rows_data: list[dict[str, str]],
+    columns_spec: list[dict[str, object]],
+    sort_col_id: str | None,
+    sort_asc: bool,
+    on_retry_load: typing.Callable[[], None],
+    on_clear_filter: typing.Callable[[], None],
+    on_sort: typing.Callable[[str, bool], None],
+) -> ft.Control:
+    """构建表格区三态内容 (error > loading > table > loading placeholder).
+
+    D15: 提取自 TableViewerTab 的 748-785 行条件渲染段, 纯 props 纯函数。
+    区分「表无数据」与「筛选无结果」空态; 筛选无结果时提供一键清除 CTA。
+    """
+    # 表格区域: P1-3 批次 2 三态 (error > loading > table > loading placeholder)
+    if state.error_message is not None:
+        return ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("error_state_load_failed_title"),
+            message=I18n.get("error_state_load_failed_message"),
+            on_retry=on_retry_load,
+            retry_text=I18n.get("common_retry"),
+        )
+    if is_loading:
+        return _build_loading_widget()
+    if state.table_columns and state.total_rows == 0:
+        # Task 8.5: 数据页空态引导 — 区分「表无数据」与「筛选无结果」
+        filter_applied = bool(state.filter_col and state.filter_val)
+        if filter_applied:
+            return EmptyState(
+                icon=ft.Icons.FILTER_ALT_OFF,
+                title=I18n.get("empty_filter_result"),
+                # UX-07: 一键清除筛选 (保留当前表选择); on_cta 零参契约 → on_clear_filter
+                on_cta=on_clear_filter,
+                cta_text=I18n.get("data_filter_clear"),
+                cta_icon=ft.Icons.CLEAR,
+            )
+        return EmptyState(
+            icon=ft.Icons.INBOX,
+            title=I18n.get("empty_table_hint"),
+        )
+    if state.table_columns:
+        return PaginatedTable(
+            rows=rows_data,
+            columns=columns_spec,
+            sort_col=sort_col_id,
+            sort_asc=sort_asc,
+            on_sort=on_sort,
+        )
+    return _build_loading_widget()
+
+
+def _build_freshness_label(state: DataExplorerState) -> ft.Text:
+    """构建数据新鲜度标签 (Phase 6.4 FR-UX-006: 滞后 >3 日显示警告色)."""
+    # Phase 6.4 (FR-UX-006): 数据新鲜度标签 (滞后 >3 日显示警告色)
+    if state.data_latest_date:
+        freshness_color = AppColors.ERROR if state.data_lag_days > 3 else AppColors.TEXT_SECONDARY  # pragma: no cover
+        return ft.Text(
+            I18n.get("data_freshness_label", date=state.data_latest_date, days=state.data_lag_days),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=freshness_color,
+            weight=ft.FontWeight.W_500 if state.data_lag_days > 3 else ft.FontWeight.NORMAL,
+        )
+    return ft.Text(
+        I18n.get("data_freshness_no_data"),
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.TEXT_HINT,
+    )
+
+
+def _build_pagination_bar(
+    state: DataExplorerState,
+    on_prev_page: typing.Callable[[ft.ControlEvent], None],
+    on_next_page: typing.Callable[[ft.ControlEvent], None],
+) -> ft.Container:
+    """构建分页栏 (TableViewerTab footer)."""
+    total_pages = _ceil_div(state.total_rows, state.page_size)
+    return ft.Container(
+        content=ft.Row(
+            safe_controls(
+                [
+                    ft.Text(
+                        I18n.get("data_total_rows").format(count=state.total_rows),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Container(expand=True),
+                    ft.IconButton(
+                        ft.Icons.CHEVRON_LEFT,
+                        on_click=safe_on_click(on_prev_page),
+                        disabled=state.is_loading or state.current_page <= 1,
+                        tooltip=I18n.get("common_prev_page"),
+                    ),
+                    ft.Text(
+                        I18n.get("data_page_num").format(
+                            current=state.current_page,
+                            total=total_pages,
+                        )
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CHEVRON_RIGHT,
+                        on_click=safe_on_click(on_next_page),
+                        disabled=state.is_loading or state.current_page >= total_pages,
+                        tooltip=I18n.get("common_next_page"),
+                    ),
+                ]
+            ),
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        ),
+        padding=ft.Padding.symmetric(horizontal=20, vertical=5),
+        bgcolor=AppColors.SURFACE,
+        border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
+    )
+
+
 # ============================================================================
 # TableViewerTab
 # ============================================================================
@@ -580,7 +744,6 @@ def TableViewerTab(
 
     # --- 派生渲染数据 ---
     is_loading = state.is_loading
-    total_pages = _ceil_div(state.total_rows, state.page_size)
     sort_col_id = (
         state.table_columns[state.sort_col_index]
         if state.sort_col_index is not None and 0 <= state.sort_col_index < len(state.table_columns)
@@ -706,99 +869,24 @@ def TableViewerTab(
         ),
     )
 
-    # 加载/空态 widget
-    loading_widget = ft.Container(
-        content=ft.Column(
-            [
-                ft.Container(
-                    content=ft.ProgressRing(
-                        width=48,
-                        height=48,
-                        stroke_width=4,
-                        color=AppColors.PRIMARY,
-                    ),
-                    padding=AppStyles.SPACING_XL,
-                    border_radius=50,
-                    bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
-                ),
-                ft.Container(height=16),
-                ft.Text(
-                    I18n.get("data_loading"),
-                    size=AppStyles.FONT_SIZE_TITLE,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Text(
-                    I18n.get("data_loading_hint"),
-                    size=AppStyles.FONT_SIZE_BODY,
-                    color=AppColors.TEXT_SECONDARY,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=4,
-        ),
-        alignment=ft.Alignment.CENTER,
-        expand=True,
-        padding=AppStyles.EMPTY_STATE_PADDING,
-        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.SHADOW),
-        border_radius=12,
-        border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
-    )
+    # 加载/空态 widget 由 _build_grid_content 内部构建 (D15: _build_loading_widget, loading + 兜底共用)
 
     # 表格区域: P1-3 批次 2 三态 (error > loading > table > loading placeholder)
-    if state.error_message is not None:
-        grid_content = ErrorState(
-            icon=ft.Icons.ERROR_OUTLINE,
-            title=I18n.get("error_state_load_failed_title"),
-            message=I18n.get("error_state_load_failed_message"),
-            on_retry=_on_retry_load,
-            retry_text=I18n.get("common_retry"),
-        )
-    elif is_loading:
-        grid_content = loading_widget
-    elif state.table_columns and state.total_rows == 0:
-        # Task 8.5: 数据页空态引导 — 区分「表无数据」与「筛选无结果」
-        filter_applied = bool(state.filter_col and state.filter_val)
-        if filter_applied:
-            grid_content = EmptyState(
-                icon=ft.Icons.FILTER_ALT_OFF,
-                title=I18n.get("empty_filter_result"),
-                # UX-07: 一键清除筛选 (保留当前表选择); on_cta 零参契约 → 复用 _clear_filter_and_query
-                on_cta=_clear_filter_and_query,
-                cta_text=I18n.get("data_filter_clear"),
-                cta_icon=ft.Icons.CLEAR,
-            )
-        else:
-            grid_content = EmptyState(
-                icon=ft.Icons.INBOX,
-                title=I18n.get("empty_table_hint"),
-            )
-    elif state.table_columns:
-        grid_content = PaginatedTable(
-            rows=rows_data,
-            columns=columns_spec,
-            sort_col=sort_col_id,
-            sort_asc=state.sort_asc,
-            on_sort=_on_sort,
-        )
-    else:
-        grid_content = loading_widget
+    # D15: 提取至 _build_grid_content (纯 props), 消除组件内深层条件分支
+    grid_content = _build_grid_content(
+        state,
+        is_loading=is_loading,
+        rows_data=rows_data,
+        columns_spec=columns_spec,
+        sort_col_id=sort_col_id,
+        sort_asc=state.sort_asc,
+        on_retry_load=_on_retry_load,
+        on_clear_filter=_clear_filter_and_query,
+        on_sort=_on_sort,
+    )
 
-    # Phase 6.4 (FR-UX-006): 数据新鲜度标签 (滞后 >3 日显示警告色)
-    if state.data_latest_date:
-        freshness_color = AppColors.ERROR if state.data_lag_days > 3 else AppColors.TEXT_SECONDARY  # pragma: no cover
-        freshness_label = ft.Text(  # pragma: no cover
-            I18n.get("data_freshness_label", date=state.data_latest_date, days=state.data_lag_days),
-            size=AppStyles.FONT_SIZE_BODY_SM,
-            color=freshness_color,
-            weight=ft.FontWeight.W_500 if state.data_lag_days > 3 else ft.FontWeight.NORMAL,
-        )
-    else:
-        freshness_label = ft.Text(
-            I18n.get("data_freshness_no_data"),
-            size=AppStyles.FONT_SIZE_BODY_SM,
-            color=AppColors.TEXT_HINT,
-        )
+    # Phase 6.4 (FR-UX-006): 数据新鲜度标签 (滞后 >3 日显示警告色) — D15: _build_freshness_label
+    freshness_label = _build_freshness_label(state)
 
     # 工具栏
     toolbar_content = ft.Row(
@@ -855,43 +943,8 @@ def TableViewerTab(
         spacing=0,
     )
 
-    # 分页栏
-    pagination_bar = ft.Container(
-        content=ft.Row(
-            safe_controls(
-                [
-                    ft.Text(
-                        I18n.get("data_total_rows").format(count=state.total_rows),
-                        size=AppStyles.FONT_SIZE_BODY_SM,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    ft.Container(expand=True),
-                    ft.IconButton(
-                        ft.Icons.CHEVRON_LEFT,
-                        on_click=safe_on_click(_on_prev_page),
-                        disabled=is_loading or state.current_page <= 1,
-                        tooltip=I18n.get("common_prev_page"),
-                    ),
-                    ft.Text(
-                        I18n.get("data_page_num").format(
-                            current=state.current_page,
-                            total=total_pages,
-                        )
-                    ),
-                    ft.IconButton(
-                        ft.Icons.CHEVRON_RIGHT,
-                        on_click=safe_on_click(_on_next_page),
-                        disabled=is_loading or state.current_page >= total_pages,
-                        tooltip=I18n.get("common_next_page"),
-                    ),
-                ]
-            ),
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-        ),
-        padding=ft.Padding.symmetric(horizontal=20, vertical=5),
-        bgcolor=AppColors.SURFACE,
-        border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
-    )
+    # 分页栏 (D15: 提取至 _build_pagination_bar)
+    pagination_bar = _build_pagination_bar(state, _on_prev_page, _on_next_page)
 
     # PR-478 修复: TABLE_READY 信号 (LABEL kind, 仅做存在性探测).
     # 仅在 tables_loaded + table_columns 非空 + is_loading=False 时渲染.
