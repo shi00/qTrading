@@ -235,7 +235,8 @@ source_modules = ["utils"]
 forbidden_modules = ["data", "services", "strategies", "ui", "app"]
 ignore_imports = [
     # config_handler ↔ db_config_service 循环打破（A2 标注 lazy-import，保留）
-    "utils.config_handler -> data.persistence.db_config_service",
+    # review05-E11：该 lazy import 随按域拆分迁至 utils/config/db.py
+    "utils.config.db -> data.persistence.db_config_service",
     # diagnostics 采集时访问业务单例（A2 评估下沉到 services/diagnostics）
     "utils.diagnostics -> data.data_processor",
     "utils.diagnostics -> services.task_manager",
