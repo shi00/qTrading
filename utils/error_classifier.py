@@ -25,6 +25,8 @@ from typing import Any
 from core.errors import AppError
 from core.i18n import Message
 
+logger = logging.getLogger(__name__)
+
 SYSTEM_LEVEL_EXCEPTIONS = (
     MemoryError,
     SystemExit,
@@ -161,6 +163,20 @@ def classify_severity(e: Exception, context: str = "general") -> str:
     return "operational"
 
 
+# review05-E1: 记录「异常类型未命中 isinstance/type 分支、转而依赖字符串匹配」的信号。
+# 用 (context, type) 去重，避免同一异常类型高频出现刷日志；仅 debug 级别——
+# 生产不出、开发期可见，用于发现哪些类型尚缺结构化/类型化分类分支。
+_MESSAGE_MATCH_LOG_EMITTED: set[str] = set()
+
+
+def _note_message_fallback(e: Exception, context: str) -> None:
+    key = f"{context}:{type(e).__name__}"
+    if key in _MESSAGE_MATCH_LOG_EMITTED:
+        return
+    _MESSAGE_MATCH_LOG_EMITTED.add(key)
+    logger.debug("[Classify] fell back to message matching for %s (context=%s)", type(e).__name__, context)
+
+
 def classify_error(e: Exception, context: str = "general") -> dict:
     # review05-E3: AppError 携带结构化信息，语义无需事后推断，直接返回。
     if isinstance(e, AppError):
@@ -170,6 +186,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
     error_type = type(e).__name__
 
     if context == "token":
+        _note_message_fallback(e, context)
         if "token" in error_str and ("invalid" in error_str or "not set" in error_str):
             return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
         # HTTP auth failure status codes (Tushare returns 403 for bad token)
@@ -219,6 +236,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         if isinstance(e, (ConnectionError, OSError)):
             return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
 
+        _note_message_fallback(e, context)
         if "insufficient_quota" in error_str or "quota" in error_str or "402" in error_str:
             return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota", "should_retry": False}
         if "content policy" in error_str or "content violation" in error_str:
@@ -319,6 +337,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             }
         if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.exceptions.PostgresConnectionError):
             return {"code": "refused", "message_key": "db_err_refused"}
+        _note_message_fallback(e, context)
         if "password" in error_str or "authentication" in error_str:
             return {"code": "auth", "message_key": "db_err_auth"}
         if "timeout" in error_str:
@@ -357,6 +376,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "unknown", "message_key": "db_err_unknown"}
 
     if context == "chart":
+        _note_message_fallback(e, context)
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message_key": "detail_err_chart_timeout"}
         if "connection" in error_str or "network" in error_str or "connect" in error_str:
@@ -378,6 +398,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
     if error_type == "OSError" and ("disk" in error_str or "space" in error_str):
         return {"code": "disk_space", "message_key": "common_err_disk_space"}
 
+    _note_message_fallback(e, context)
     if "timeout" in error_str or "timed out" in error_str:
         return {"code": "timeout", "message_key": "common_err_timeout"}
     if "connection" in error_str or "network" in error_str or "connect" in error_str:
