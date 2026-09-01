@@ -32,7 +32,8 @@ ENV_FALLBACK_MAP = {
 }
 
 # NOTE(lazy): 配置敏感键集合供 set_typed / load_config_with_validation 脱敏使用。
-# 同时被领域模块经 ``cfg.SENSITIVE_KEYS`` 引用。upgrade: 无。
+# 同时被领域模块经 ``cfg.SENSITIVE_KEYS`` 引用。ceiling: 新增敏感配置键时需手动并入
+# 此集合，可能遗漏. upgrade: 由配置 schema/元数据自动推导敏感键集合.
 SENSITIVE_KEYS = frozenset({"ts_token", "db_password", "db_password_encrypted", "ai_api_key"})
 
 
