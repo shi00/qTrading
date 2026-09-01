@@ -829,6 +829,50 @@ class TestRunAiAnalysis:
             # 强断言：验证传入的是 PreFetchedContext 实例（含 news_tasks 字段）
             assert isinstance(mock_cancel.call_args.args[0], PreFetchedContext)
 
+    @pytest.mark.asyncio
+    async def test_prefetch_external_failures_degrades_gracefully(self):
+        """预取阶段的各类外部失败应被逐个吞没（log_classified 后降级），不阻断整体分析。
+
+        覆盖 run_ai_analysis 中 learning context / global context / moneyflow /
+        top_list / northbound / macro context 预取失败的 except 分支。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        # 资金流预取失败（trade_date 有值时进入对应分支）
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(side_effect=RuntimeError("moneyflow down"))
+        dp.cache.quote_dao.get_top_list = AsyncMock(side_effect=RuntimeError("top_list down"))
+        dp.cache.quote_dao.get_northbound = AsyncMock(side_effect=RuntimeError("northbound down"))
+        # 需要 trade_date 在 dp.get_latest_trade_date 不可用时可用（此处显式给定）
+        dp.get_latest_trade_date = AsyncMock(return_value="20240118")
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(side_effect=RuntimeError("global down")),
+            ),
+            patch(
+                "strategies.ai_mixin._build_macro_context",
+                new=AsyncMock(side_effect=RuntimeError("macro down")),
+            ),
+            patch(
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new=AsyncMock(side_effect=RuntimeError("learning down")),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # 各预取失败均被吞没，整体仍应返回降级结果而不抛异常
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
 
 class TestCancelOrphanNewsTasks:
     @pytest.mark.asyncio
@@ -1014,6 +1058,23 @@ class TestAIStrategyMixinAnalyzeSingle:
         prefetched = PreFetchedContext()
         result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
         assert result["score"] == 0
+
+    @pytest.mark.asyncio
+    async def test_analyze_context_builder_failure_logged(self, mock_strategy, mock_dp, mock_ai_client):
+        """context builder 抛异常时应被 log_classified 吞没，不阻断后续分析。
+
+        覆盖 _mixin_analyze_single 中 builder 调用的 except 分支。
+        """
+
+        def _exploding_builder(row, prefetched):
+            raise RuntimeError("builder boom")
+
+        mock_strategy.register_context_builder("boom", _exploding_builder)
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext()
+        # 不应抛异常，异常在 builder 调用处被吞没
+        result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
+        assert result is not None
 
 
 class TestBuildCapitalFlowText:
