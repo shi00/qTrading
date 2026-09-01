@@ -194,6 +194,9 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
             return False
 
         self._set_state(is_verifying=True)
+        # 进入验证态即输出可感知提示「验证中」（供面板即时反馈 + E2E confirm 信号），
+        # 网络结果到达后由 _show_success/_show_error 覆盖。
+        self._show_warning(Message("tushare_verifying_in_progress"))
         self._set_loading_state(True)
 
         try:

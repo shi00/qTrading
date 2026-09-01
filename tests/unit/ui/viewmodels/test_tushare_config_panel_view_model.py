@@ -334,6 +334,39 @@ class TestVerifyToken:
         assert vm.state.status_message.key == "tushare_verifying_in_progress"
 
     @pytest.mark.asyncio
+    async def test_verify_token_entering_verifying_shows_progress_warning(self, mock_config_handler, mock_thread_pool):
+        """首次点击进入验证态即输出「验证中」warning 文本（E2E confirm 信号）。"""
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)  # needs_probe = False
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler)
+            vm.update_token("valid_token")
+
+            # 在 verify_token 内部置 is_verifying=True 后、网络结果返回前捕获中间状态：
+            # 让 trade_cal 首次调用时暂停（passthrough 同步执行，此处改为抛出受控
+            # 中断来观察中间状态）。
+            original_trade_cal = mock_pro.trade_cal
+
+            def _paused_trade_cal(*args, **kwargs):
+                # 第一次调用时记录中间状态后正常返回，模拟网络结果到达
+                assert vm.state.status_type == "warning"
+                assert vm.state.status_message is not None
+                assert vm.state.status_message.key == "tushare_verifying_in_progress"
+                assert vm.state.is_verifying is True
+                return original_trade_cal(*args, **kwargs)
+
+            mock_pro.trade_cal = MagicMock(side_effect=_paused_trade_cal)
+            result = await vm.verify_token()
+
+        assert result is True
+        assert vm.state.is_verifying is False
+
+    @pytest.mark.asyncio
     async def test_verify_token_success_no_probe(self, mock_config_handler, mock_thread_pool):
         mock_pro = _make_mock_pro_api()
         mock_client = MagicMock()

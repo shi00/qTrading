@@ -16,6 +16,7 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 
 import asyncio
 import logging
+import time
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -260,11 +261,19 @@ class SettingsPage:
             await self.ap.click(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
 
         async def _confirm() -> bool:
-            if await self.page.has_text(verifying_text):
-                return True
-            for k in error_keys:
-                if await self.page.has_text(I18n.get(k)):
+            # 短轮询等待「验证中」warning 文本（评审 F1 教训：把渲染延迟与真吞区分开）。
+            # VM.verify_token 进入 is_verifying 即输出 tushare_verifying_in_progress，
+            # CanvasKit 下该文本经 Flet 重渲染需数帧；单次 has_text 会把渲染延迟误判为
+            # "未触发"而重复点击。此处轮询 2s：命中即确认点击已触发，不重复点击。
+            # 同时检测验证结果错误文本（网络失败路径，覆盖 verify_token 已快速失败场景）。
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if await self.page.has_text(verifying_text):
                     return True
+                for k in error_keys:
+                    if await self.page.has_text(I18n.get(k)):
+                        return True
+                await self.page.wait_for_timeout(100)
             return False
 
         await retry_until_triggered(_interact, _confirm)
