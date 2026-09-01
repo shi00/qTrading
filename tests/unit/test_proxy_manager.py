@@ -8,6 +8,7 @@ import os
 from unittest.mock import patch
 
 from utils.proxy_manager import ProxyManager
+from utils.sanitizers import DataSanitizer
 import pytest
 
 
@@ -336,3 +337,52 @@ class TestProxyManagerLitellmEnvContext:
                 assert "tushare.pro" in os.environ.get("NO_PROXY", "")
 
             assert os.environ["HTTP_PROXY"] == "http://proxy:3128"
+
+
+class TestProxyManagerRegistersProxyCredentials:
+    """F11（检视 06）：认证代理 URL 的凭据须注册进 DataSanitizer，确保脱敏兜底。"""
+
+    def setup_method(self):
+        # DataSanitizer 非单例，测试间手动重置，避免 R7 状态污染
+        DataSanitizer._reset_known_secrets()
+
+    def test_registers_authenticated_proxy_credentials(self):
+        ProxyManager._register_proxy_credentials("http://user:s3cret@proxy:8080")
+        known = DataSanitizer._known_secrets.copy()
+        assert "http://user:s3cret@proxy:8080" in known
+        assert "user:s3cret" in known
+
+    def test_ignores_proxy_without_credentials(self):
+        DataSanitizer._reset_known_secrets()
+        ProxyManager._register_proxy_credentials("http://proxy:8080")
+        assert len(DataSanitizer._known_secrets) == 0
+
+    def test_ignores_empty_url(self):
+        DataSanitizer._reset_known_secrets()
+        ProxyManager._register_proxy_credentials("")
+        assert len(DataSanitizer._known_secrets) == 0
+
+    def test_get_httpx_proxy_config_registers_credentials(self):
+        ProxyManager._no_proxy_domains = set()
+        ProxyManager._initialized = True
+        with patch.dict(
+            os.environ,
+            {"HTTPS_PROXY": "http://user:s3cret@proxy:8080"},
+            clear=False,
+        ):
+            ProxyManager.get_httpx_proxy_config()
+        known = DataSanitizer._known_secrets.copy()
+        assert "http://user:s3cret@proxy:8080" in known
+        assert "user:s3cret" in known
+
+    def test_sanitize_dict_masks_authenticated_proxy_url(self):
+        # 非敏感 key（proxy）下的 URL 走 _known_secrets 精确替换兜底（R9）。
+        # 集合迭代顺序不确定，完整 URL 与 userinfo 谁先替换都可能，只断言密码已隐藏。
+        ProxyManager._register_proxy_credentials("http://user:s3cret@proxy:8080")
+        out = DataSanitizer.sanitize_dict({"proxy": "http://user:s3cret@proxy:8080"})
+        assert "s3cret" not in out["proxy"]
+
+    def test_sanitize_error_masks_authenticated_proxy_url(self):
+        ProxyManager._register_proxy_credentials("http://user:s3cret@proxy:8080")
+        msg = DataSanitizer.sanitize_error(RuntimeError("proxy http://user:s3cret@proxy:8080 failed"))
+        assert "s3cret" not in msg

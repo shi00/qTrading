@@ -1,10 +1,12 @@
 import logging
 import os
+import re
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,37 @@ class ProxyManager:
             return ProxyManager._no_proxy_domains.copy()
 
     @staticmethod
+    def _register_proxy_credentials(proxy_url: str) -> None:
+        """Register credentials embedded in an authenticated proxy URL with DataSanitizer.
+
+        认证代理 URL（http://user:pass@host:port）内含密码。仅靠 sanitize_error 的
+        URL-credentials 正则不足：sanitize_dict/sanitize_args 对非敏感 key（如 proxy）
+        下的 URL 不会正则去码。此处把完整 URL 与其 userinfo 前缀注册进 `_known_secrets`，
+        使日志脱敏走精确替换兜底（R9）。
+        """
+        if not proxy_url:
+            return
+        match = re.match(r"(?:[a-z][a-z0-9+.\-]*)://([^/@\s]+)@", proxy_url, re.IGNORECASE)
+        if not match:
+            # 无 user:pass@ 认证信息时无需注册（host/port 非敏感，注册会污染 _known_secrets）
+            return
+        DataSanitizer.register_secret(proxy_url)
+        DataSanitizer.register_secret(match.group(1))
+
+    @staticmethod
+    def _resolve_proxy_env() -> tuple[str, str]:
+        """Read HTTP_PROXY/HTTPS_PROXY (upper+lower) and register embedded credentials.
+
+        Returns:
+            (http_proxy, https_proxy)。
+        """
+        http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
+        https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+        ProxyManager._register_proxy_credentials(http_proxy)
+        ProxyManager._register_proxy_credentials(https_proxy)
+        return http_proxy, https_proxy
+
+    @staticmethod
     def get_no_proxy_string() -> str:
         """Return the NO_PROXY domains as a comma-separated string."""
         domains = ProxyManager.get_no_proxy_domains()
@@ -161,8 +194,7 @@ class ProxyManager:
         no_proxy 域，走代理即可. upgrade: httpx 恢复显式 no_proxy 支持或项目出现
         需绕代理的外部域时.
         """
-        http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
-        https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+        http_proxy, https_proxy = ProxyManager._resolve_proxy_env()
 
         if not http_proxy and not https_proxy:
             return {}
@@ -191,8 +223,7 @@ class ProxyManager:
             result["NO_PROXY"] = no_proxy_str
             result["no_proxy"] = no_proxy_str
 
-        http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
-        https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+        http_proxy, https_proxy = ProxyManager._resolve_proxy_env()
 
         if http_proxy:
             result["HTTP_PROXY"] = http_proxy
@@ -211,8 +242,7 @@ class ProxyManager:
         Returns:
             Dict with 'proxies' key for requests, or None if no proxy needed.
         """
-        http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("http_proxy", ""))
-        https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+        http_proxy, https_proxy = ProxyManager._resolve_proxy_env()
 
         if not http_proxy and not https_proxy:
             return None
