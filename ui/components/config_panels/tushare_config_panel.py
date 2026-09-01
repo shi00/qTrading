@@ -193,12 +193,15 @@ def TushareConfigPanel(
         disabled=state.is_verifying,
     )
 
-    verify_button = ft.Button(
-        content=I18n.get("tushare_verify"),
-        icon=ft.Icons.VERIFIED_USER_OUTLINED,
-        on_click=safe_on_click(_on_verify_click_factory(vm)),
-        style=AppStyles.secondary_button(),
-        disabled=state.is_verifying,
+    verify_button = anchored(
+        EIDS.TUSHARE.VERIFY_BUTTON,
+        ft.Button(
+            content=I18n.get("tushare_verify"),
+            icon=ft.Icons.VERIFIED_USER_OUTLINED,
+            on_click=safe_on_click(_on_verify_click_factory(vm)),
+            style=AppStyles.secondary_button(),
+            disabled=state.is_verifying,
+        ),
     )
 
     save_button = ft.Button(

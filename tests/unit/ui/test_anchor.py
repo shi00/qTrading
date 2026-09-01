@@ -448,6 +448,12 @@ class TestEidsPr3Namespaces:
         assert eid_str == "e2e.wizard.token_input"
         assert kind == AnchorKind.INPUT
 
+    def test_tushare_verify_button(self):
+        """PR669 新增 TUSHARE.VERIFY_BUTTON EID（INTERACTIVE 类，CanvasKit 稳定点击）."""
+        eid_str, kind = EIDS.TUSHARE.VERIFY_BUTTON
+        assert eid_str == "e2e.tushare.verify_button"
+        assert kind == AnchorKind.INTERACTIVE
+
 
 class TestEidsPr3NoPrefixNesting:
     """PR-3 新增 EIDS 前缀嵌套冲突守护（附录 A 命名规范）.

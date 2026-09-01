@@ -230,6 +230,14 @@ class SettingsPage:
         """选择日志级别下拉项（通过 anchor）。"""
         await self.ap.select_option(EIDS.SETTINGS.LOG_LEVEL_DROPDOWN, option_text, timeout_ms=timeout_ms)
 
+    async def click_tushare_verify(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 Tushare 面板"验证 Token"按钮（通过 anchor）。
+
+        CanvasKit 下 click_button 的 fallback 定位偶发不触发 Flutter 回调，
+        改用 AnchorPage INTERACTIVE 路径的 bbox 中心鼠标点击（PR669 E2E 修复）。
+        """
+        await self.ap.click(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
+
 
 class DataPage:
     """数据浏览器页 Page Object，封装 3 个 Dropdown + 过滤值 TextField + 查询按钮的 anchor 操作。"""

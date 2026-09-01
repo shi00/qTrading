@@ -155,6 +155,18 @@ class _WizardIds:
     TOKEN_INPUT: Eid = ("e2e.wizard.token_input", AnchorKind.INPUT)
 
 
+class _TushareIds:
+    """Tushare 配置面板 anchor 命名空间（设置 data tab 与 onboarding wizard 复用）。
+
+    VERIFY_BUTTON: ``ft.Button`` 标准交互控件（AnchorKind.INTERACTIVE）。
+    CanvasKit 下经 ``anchored()`` 的 ``button=True`` 生成 ``flt-semantics[aria-label=EID]``
+    独立节点 + 内层 ``flt-tappable``，AnchorPage 走稳定的 bbox 中心鼠标点击
+    （PR669 E2E 修复：非 anchor 的 click_button fallback 点击偶发不触发 Flutter 回调）。
+    """
+
+    VERIFY_BUTTON: Eid = ("e2e.tushare.verify_button", AnchorKind.INTERACTIVE)
+
+
 class _NavIds:
     """导航栏 anchor 命名空间 (PR-4 Task 4.0/4.1)。
 
@@ -223,6 +235,7 @@ class EIDS:
     DATA = _DataIds
     BACKTEST = _BacktestIds
     WIZARD = _WizardIds
+    TUSHARE = _TushareIds
     NAV = _NavIds
     HOME = _HomeIds
     TASK_CENTER = _TaskCenterIds
