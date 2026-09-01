@@ -1298,6 +1298,45 @@ class TestBaseDaoSaveUpsertExtended:
             assert result == -1
 
     @pytest.mark.asyncio
+    async def test_upsert_error_not_suppressed_raises(self):
+        """P1-3: suppress_errors=False 且无共享连接（conn=None）时，UPSERT 失败应记录日志后抛异常。
+
+        覆盖 else 分支（suppress_errors=False 时的 log_classified + raise）。
+        """
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("Upsert failed")
+        mock_engine = _setup_mock_engine_begin(mock_conn)
+        mock_table = MagicMock()
+        mock_table.columns = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "a"
+        mock_table.c = {"a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            with pytest.raises(Exception, match="Upsert failed"):
+                await dao._save_upsert(
+                    pd.DataFrame({"a": [1]}),
+                    "test_table",
+                    ["a"],
+                    ["a"],
+                    suppress_errors=False,
+                )
+
+    @pytest.mark.asyncio
     async def test_upsert_error_with_conn_ignores_suppress_errors(self):
         """P1-3: 共享事务连接（conn is not None）时，suppress_errors=True 被忽略，异常必须传播。
 
