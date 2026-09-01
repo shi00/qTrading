@@ -345,6 +345,41 @@ def get_provider_credential(provider: str, fallback_to_global: bool = True) -> d
     }
 
 
+def purge_legacy_key_if_safe() -> bool:
+    """F3（检视 06）：安全清理 legacy 明文密钥文件（``.secret.key`` 家族）。
+
+    前置判定：仅当配置中已无任何仍需该密钥解密的 AES 加密字段时，才调用
+    ``SecurityManager.purge_legacy_key_files()`` 删除文件；否则保留文件并返回
+    ``False``，避免导致既有加密值不可解密（数据丢失）。
+
+    "仍需该密钥"判定：配置文件（经 load_config）中下列任一敏感字段非空，
+    即视为仍需密钥解密，不删除——
+    - ``ts_token`` / ``ai_api_key`` / ``db_password_encrypted``（顶层加密字段）
+    - ``llm_provider_credentials.*.api_key_encrypted``（各供应商加密字段）
+
+    Returns:
+        True 若已删除 legacy 密钥文件；False 若无需删除或存在仍需密钥的加密字段。
+    """
+    if not cfg.SecurityManager.has_legacy_key_files():
+        return False
+
+    config = cfg.ConfigHandler.load_config()
+    if config.get("ts_token") or config.get("db_password_encrypted") or config.get("ai_api_key"):
+        cfg.logger.info("[Secrets] Legacy key files kept: config still references AES-encrypted fields")
+        return False
+
+    provider_credentials = config.get("llm_provider_credentials", {}) or {}
+    for cred in provider_credentials.values():
+        if isinstance(cred, dict) and cred.get("api_key_encrypted"):
+            cfg.logger.info("[Secrets] Legacy key files kept: provider credential still AES-encrypted")
+            return False
+
+    removed = cfg.SecurityManager.purge_legacy_key_files()
+    if removed:
+        cfg.logger.info("[Secrets] Removed legacy plaintext key files (.secret.key family) after credentials migrated")
+    return removed
+
+
 def validate_failover_credentials() -> list[str]:
     """校验 failover 配置的凭证完整性。
 

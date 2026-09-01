@@ -236,6 +236,39 @@ class SecurityManager:
         return os.path.exists(_LEGACY_MARKER)
 
     @classmethod
+    def has_legacy_key_files(cls) -> bool:
+        """Whether legacy plaintext key files (.secret.key family) exist on disk."""
+        return os.path.exists(cls.KEY_FILE) or os.path.exists(cls.KEY_FILE_BAK)
+
+    @classmethod
+    def purge_legacy_key_files(cls) -> bool:
+        """Delete legacy plaintext key files and reset the in-memory key cache.
+
+        前置条件（调用方保证）：配置中已无任何仍需该密钥解密的 AES 加密字段，
+        或解密能力已迁移到 keyring / 环境变量。否则删除会导致既有加密值不可解密
+        （数据丢失）。满足前置条件时才调用；本方法不做数据残留判定，只负责删除。
+
+        Returns:
+            True 若有任一 legacy 密钥文件被删除，否则 False。
+        """
+        removed = False
+        for path in (cls.KEY_FILE, cls.KEY_FILE_BAK, _LEGACY_MARKER):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed = True
+                except OSError as e:
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "Failed to remove legacy key file (%s): %s",
+                        exc_info=True,
+                    )
+        cls._key = None
+        return removed
+
+    @classmethod
     def _ensure_legacy_marker(cls):
         """Create a marker file when using file-based key to aid future migration."""
         if not os.path.exists(_LEGACY_MARKER):

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
+from utils.security_utils import SecurityManager
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ class SystemSettingsState:
     cpu_workers_value: str = "4"
     no_proxy_value: str = ""
     is_saving: bool = False
+    # F3（检视 06）：仍在使用 legacy 明文密钥文件（.secret.key 家族）时为 True，
+    # View 据此在设置页显示安全告警（过渡期提示，引导迁移到 keyring / 环境变量）。
+    using_legacy_key: bool = False
 
 
 class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
@@ -116,6 +120,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             io_workers_value=str(ConfigHandler.get_max_io_workers()),
             cpu_workers_value=str(ConfigHandler.get_max_cpu_workers()),
             no_proxy_value=",".join(ConfigHandler.get_no_proxy_domains()),
+            # F3（检视 06）：过渡期安全告警——仍存在 legacy 明文密钥文件即提示，
+            # 引导用户迁移到 keyring / 环境变量。
+            using_legacy_key=SecurityManager.has_legacy_key_files(),
             is_saving=False,
         )
 

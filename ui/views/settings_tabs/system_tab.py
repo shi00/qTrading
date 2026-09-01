@@ -95,6 +95,43 @@ def _build_log_level_options() -> list[ft.dropdown.Option]:
     ]
 
 
+def _build_legacy_key_warning() -> ft.Control:
+    """构建 legacy 明文密钥文件过渡期安全告警（F3, 检视 06）。
+
+    当仍在使用 .secret.key 家族明文密钥文件时，在核心配置页顶部展示提示，
+    引导用户迁移凭证到 keyring / 环境变量。仅在有 legacy 密钥文件时调用。
+    """
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.SECURITY_ROUNDED, color=AppColors.WARNING),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("sys_legacy_key_warning_title"),
+                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.WARNING,
+                        ),
+                        ft.Text(
+                            I18n.get("sys_legacy_key_warning_desc"),
+                            style=ft.TextThemeStyle.BODY_SMALL,
+                            color=AppColors.INPUT_TEXT,
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        bgcolor=ft.Colors.with_opacity(0.12, AppColors.WARNING),
+        border=ft.border.all(1, ft.Colors.with_opacity(0.4, AppColors.WARNING)),
+        border_radius=8,
+        padding=10,
+    )
+
+
 # ============================================================================
 # SystemTab
 # ============================================================================
@@ -734,49 +771,58 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # TierApiPanel 消费 system_vm (props 推送, 函数调用)
     tier_panel = TierApiPanel(system_vm)
 
+    # F3（检视 06）：过渡期安全告警——仍在使用 legacy 明文密钥文件时，
+    # 在核心配置页顶部插入提示条。
+    core_config_controls: list[ft.Control] = [section_header]
+    if settings_state.using_legacy_key:
+        core_config_controls.extend(
+            [
+                ft.Container(height=10),
+                _build_legacy_key_warning(),
+            ]
+        )
+    core_config_controls.extend(
+        [
+            row_language,
+            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+            row_theme,
+            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+            row_log,
+            ft.Divider(
+                height=20,
+                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
+            ),
+            row_concurrency,
+            ft.Container(height=10),
+            row_thread_pool,
+            ft.Divider(
+                height=20,
+                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
+            ),
+            row_db_pool,
+            ft.Divider(
+                height=20,
+                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
+            ),
+            tier_panel,
+            ft.Divider(
+                height=20,
+                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
+            ),
+            row_proxy,
+            ft.Divider(
+                height=20,
+                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
+            ),
+            row_diagnostics,
+        ]
+    )
+
     return ft.Container(
         content=ft.ListView(
             controls=[
                 DashboardCard(
-                    content=ft.Column(
-                        [
-                            section_header,
-                            ft.Container(height=10),
-                            row_language,
-                            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                            row_theme,
-                            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                            row_log,
-                            ft.Divider(
-                                height=20,
-                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-                            ),
-                            row_concurrency,
-                            ft.Container(height=10),
-                            row_thread_pool,
-                            ft.Divider(
-                                height=20,
-                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-                            ),
-                            row_db_pool,
-                            ft.Divider(
-                                height=20,
-                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-                            ),
-                            tier_panel,
-                            ft.Divider(
-                                height=20,
-                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-                            ),
-                            row_proxy,
-                            ft.Divider(
-                                height=20,
-                                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-                            ),
-                            row_diagnostics,
-                        ],
-                        spacing=10,
-                    ),
+                    content=ft.Column(core_config_controls, spacing=10),
                 ),
             ],
             padding=ft.Padding.only(bottom=50),
