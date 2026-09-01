@@ -949,3 +949,63 @@ class TestFormatterPathSanitization:
         assert "Traceback" in out
         assert os.path.abspath(__file__) not in out, f"测试文件路径泄漏进 traceback: {out}"
         assert "<PATH>" in out
+
+
+class TestBareTokenFallback:
+    """review05-E8: 兜底裸 token 检测（无 key= / URL / JSON 前缀时的最后防线）。
+
+    匹配长度 32-64 的连续字母数字串，采用部分遮蔽（保留首尾各 4 位）
+    降低误报率；register_secret 精确匹配优先，此规则只兜底未注册的裸 token。
+    """
+
+    def test_bare_token_masked_partially(self):
+        """32-64 位连续字母数字裸串应部分遮蔽，保留首尾各 4 位"""
+        token = "AbC3def8Gh0jKlMn2pQr5sTuVwXyZ9012345"
+        assert 32 <= len(token) <= 64
+        result = DataSanitizer.sanitize_error(f"tushare {token} 校验失败")
+        assert token not in result
+        assert f"{token[:4]}***{token[-4:]}" in result
+
+    def test_short_alnum_not_matched(self):
+        """长度 < 32 的字母数字串不应被兜底规则命中（避免误报）"""
+        short = "A1b2C3d4E5f6G7h8"  # 16 位
+        result = DataSanitizer.sanitize_error(f"标识符 {short} 正常")
+        assert short in result
+        assert "***" not in result
+
+    def test_boundary_31_not_matched(self):
+        """恰为 31 位的字母数字串不应被命中"""
+        token = "A" * 31
+        result = DataSanitizer.sanitize_error(f"ref {token} ok")
+        assert token in result
+
+    def test_boundary_32_matched(self):
+        """恰为 32 位的字母数字串应被命中并部分遮蔽"""
+        token = "A" * 32
+        result = DataSanitizer.sanitize_error(f"ref {token} ok")
+        assert token not in result
+        assert f"{token[:4]}***{token[-4:]}" in result
+
+    def test_identifier_with_underscore_not_matched(self):
+        """含下划线的标识符因下划线为分隔边界，不应被整体命中"""
+        ident = "some_very_long_identifier_1234567890_abcdefghijklmno"
+        # 去掉下划线后最长的连续 alnum 段 < 32
+        result = DataSanitizer.sanitize_error(f"ident {ident}")
+        assert ident in result
+
+    def test_masked_in_traceback(self):
+        """traceback 中的裸 token 也应被遮蔽（与主流程一致）"""
+        token = "5tGh9jKlMn2pQr5sTuVwXyZ9012345678AbCdEf"  # 40 位
+        assert 32 <= len(token) <= 64
+        try:
+            raise RuntimeError(f"auth fail: {token}")
+        except RuntimeError as e:
+            result = DataSanitizer.sanitize_error(e, show_traceback=True)
+            assert token not in result
+            assert f"{token[:4]}***{token[-4:]}" in result
+
+    def test_pii_number_not_masked(self):
+        """PII 数字串（身份证/手机号）不应因兜底规则二次损坏"""
+        text = "身份证 11010119900101123X 与 13812345678 均受 PII 规则保护"
+        result = DataSanitizer.sanitize_error(ValueError(text))
+        assert "11010119900101123X" not in result

@@ -139,6 +139,12 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
+    # review05-E8: 兜底裸 token 检测（无 key= / URL / JSON 前缀时的最后防线）。
+    # 匹配长度 32-64 的连续字母数字串。采用部分遮蔽（保留首尾各 4 位）以降低
+    # 误报率（可能命中 hash、UUID、长标识符等正常值）。register_secret 精确匹配
+    # 优先，此规则只兜底未注册的裸 token。
+    _PATTERN_BARE_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9]{32,64}(?![A-Za-z0-9_])")
+
     # Space-separated key-value with known secret prefixes (sk-, pk-, key-, eyJ for JWT)
     _PATTERN_SPACE_KEY_VALUE = re.compile(
         r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token|credentials|credential|private_key|passphrase)\s+(sk-|pk-|key-|eyJ)[^\s,;\"']+",
@@ -173,6 +179,14 @@ class DataSanitizer:
         text = DataSanitizer._PATTERN_ID_CARD.sub("***", text)
         text = DataSanitizer._PATTERN_EMAIL.sub("***", text)
         return text
+
+    @staticmethod
+    def _mask_bare_token(match: re.Match[str]) -> str:
+        """裸 token 部分遮蔽回调：保留首尾各 4 位（review05-E8）。"""
+        token = match.group(0)
+        if len(token) <= 8:
+            return "***"
+        return f"{token[:4]}***{token[-4:]}"
 
     @staticmethod
     def sanitize_paths(text: str) -> str:
@@ -234,6 +248,9 @@ class DataSanitizer:
         # PII 检测: 手机号/身份证/邮箱
         msg = DataSanitizer._sanitize_pii_text(msg)
 
+        # 兜底裸 token 检测（review05-E8，最后防线，部分遮蔽降低误报）
+        msg = DataSanitizer._PATTERN_BARE_TOKEN.sub(DataSanitizer._mask_bare_token, msg)
+
         # 如果需要堆栈,也要脱敏
         if show_traceback and isinstance(exception, BaseException):
             import traceback
@@ -261,6 +278,8 @@ class DataSanitizer:
                         line = line.replace(secret, "***")
                 # PII 检测
                 line = DataSanitizer._sanitize_pii_text(line)
+                # 兜底裸 token（review05-E8，与主流程一致）
+                line = DataSanitizer._PATTERN_BARE_TOKEN.sub(DataSanitizer._mask_bare_token, line)
                 tb_clean.append(line)
             return "\n".join(tb_clean)
 
