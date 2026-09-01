@@ -315,6 +315,39 @@ async def test_diagnostics_export_health_check_exception(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_export_metrics(tmp_path):
+    """review05-E19: export 应把进程内 MetricsRegistry 快照序列化到诊断包的 metrics 字段。"""
+    from utils.metrics import metrics_registry
+
+    metrics_registry.reset()
+    metrics_registry.record("op_success", 12.5)
+    metrics_registry.record("op_error", 30.7, error_code="timeout")
+    metrics_registry.record("op_error", 8.2, error_code="network")
+    try:
+        _make_log_files(tmp_path)
+        with _patch_diagnostics_env(tmp_path):
+            zip_path = await SystemDiagnosticsCollector.export()
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    summary = json.loads(zf.read("diagnostics_summary.json").decode("utf-8"))
+                metrics = summary["metrics"]
+                assert metrics["op_success"]["count"] == 1
+                assert metrics["op_success"]["error_count"] == 0
+                assert metrics["op_success"]["error_codes"] == {}
+                assert metrics["op_success"]["avg_ms"] == pytest.approx(12.5)
+                assert metrics["op_error"]["count"] == 2
+                assert metrics["op_error"]["error_count"] == 2
+                assert metrics["op_error"]["error_codes"] == {"timeout": 1, "network": 1}
+                assert metrics["op_error"]["max_ms"] == 30.7
+                assert metrics["op_error"]["avg_ms"] == pytest.approx(19.45)
+            finally:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+    finally:
+        metrics_registry.reset()
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_export_json_serial_numpy_ndarray(tmp_path):
     """覆盖 diagnostics.py:143-144, 146-147：health_info 含 numpy 多维数组时，
     obj.item() 抛 ValueError（非 0 维数组），回退到 obj.tolist() 序列化为嵌套 list。

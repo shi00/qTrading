@@ -164,6 +164,11 @@ def log_async_operation(
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
                 elapsed_str = f"{elapsed_ms:.1f}ms" if elapsed_ms < 1000 else f"{elapsed_ms / 1000:.2f}s"
 
+                # 记录成功到进程内运行时指标（review05-E19）
+                from utils.metrics import metrics_registry
+
+                metrics_registry.record(op_name, elapsed_ms)
+
                 # 构建结果日志
                 result_info = ""
                 if log_result and result is not None:
@@ -194,6 +199,12 @@ def log_async_operation(
             except Exception as e:
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
                 elapsed_str = f"{elapsed_ms:.1f}ms" if elapsed_ms < 1000 else f"{elapsed_ms / 1000:.2f}s"
+
+                # 记录失败到进程内运行时指标（review05-E19）
+                from utils.error_classifier import classify_error
+                from utils.metrics import metrics_registry
+
+                metrics_registry.record(op_name, elapsed_ms, classify_error(e).get("code", "unknown"))
 
                 if log_exceptions:
                     # 脱敏异常信息
@@ -275,6 +286,10 @@ def track_performance(
                     result = await func(*args, **kwargs)
                 except Exception as e:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    from utils.error_classifier import classify_error
+                    from utils.metrics import metrics_registry
+
+                    metrics_registry.record(op_name, elapsed_ms, classify_error(e).get("code", "unknown"))
                     from utils.error_classifier import classify_severity
                     from utils.sanitizers import DataSanitizer
 
@@ -314,6 +329,10 @@ def track_performance(
                 elapsed = time.perf_counter() - start_time
                 elapsed_ms = elapsed * 1000
 
+                from utils.metrics import metrics_registry
+
+                metrics_registry.record(op_name, elapsed_ms)
+
                 if elapsed_ms > threshold_ms:
                     target_logger.log(
                         level,
@@ -335,6 +354,10 @@ def track_performance(
                 result = func(*args, **kwargs)
             except Exception as e:
                 elapsed_ms = (time.perf_counter() - start_time) * 1000
+                from utils.error_classifier import classify_error
+                from utils.metrics import metrics_registry
+
+                metrics_registry.record(op_name, elapsed_ms, classify_error(e).get("code", "unknown"))
                 from utils.error_classifier import classify_severity
                 from utils.sanitizers import DataSanitizer
 

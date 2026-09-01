@@ -464,10 +464,13 @@ def log_classified(
             exc_info=True,
         )
     """
+    from utils.metrics import metrics_registry
     from utils.sanitizers import DataSanitizer
 
     error_info = classify_error(exc, context=context)
     severity = classify_severity(exc, context=context)
+    # 记录错误码到进程内运行时指标（review05-E19）
+    metrics_registry.record_error(type(exc).__name__, error_info["code"])
     if severity == "system":
         _log = logger.critical
     elif severity == "recoverable":
