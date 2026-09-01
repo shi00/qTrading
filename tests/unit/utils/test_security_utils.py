@@ -462,6 +462,73 @@ class TestHasLegacyEncryptedData:
         assert result is False
 
 
+class TestHasLegacyKeyFiles:
+    """F3（检视 06）：legacy 明文密钥文件检测"""
+
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_true_when_key_file_exists(self, mock_exists):
+        mock_exists.side_effect = lambda p: p == SecurityManager.KEY_FILE
+        assert SecurityManager.has_legacy_key_files() is True
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_true_when_backup_exists(self, mock_exists):
+        mock_exists.side_effect = lambda p: p == SecurityManager.KEY_FILE_BAK
+        assert SecurityManager.has_legacy_key_files() is True
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_false_when_no_key_files(self, mock_exists):
+        mock_exists.return_value = False
+        assert SecurityManager.has_legacy_key_files() is False
+
+    @patch("utils.security_utils.os.path.exists")
+    def test_false_when_only_legacy_marker(self, mock_exists):
+        from utils.security_utils import _LEGACY_MARKER
+
+        mock_exists.side_effect = lambda p: p == _LEGACY_MARKER
+        assert SecurityManager.has_legacy_key_files() is False
+
+
+class TestPurgeLegacyKeyFiles:
+    """F3（检视 06）：legacy 明文密钥文件删除"""
+
+    def setup_method(self):
+        SecurityManager._key = None
+
+    def test_purge_removes_key_and_backup(self, tmp_path):
+        key = tmp_path / ".secret.key"
+        bak = tmp_path / ".secret.key.bak"
+        key.write_bytes(b"k" * 32)
+        bak.write_bytes(b"k" * 32)
+        with (
+            patch.object(SecurityManager, "KEY_FILE", str(key)),
+            patch.object(SecurityManager, "KEY_FILE_BAK", str(bak)),
+            patch("utils.security_utils.os.remove"),
+        ):
+            removed = SecurityManager.purge_legacy_key_files()
+            assert removed is True
+            assert SecurityManager._key is None
+
+    @patch("utils.security_utils.os.path.exists", return_value=False)
+    def test_purge_no_files_returns_false(self, mock_exists):
+        removed = SecurityManager.purge_legacy_key_files()
+        assert removed is False
+        assert SecurityManager._key is None
+
+    @patch("utils.security_utils.os.path.exists", return_value=True)
+    def test_purge_removal_error_logs_no_raise(self, mock_exists):
+        with (
+            patch("utils.security_utils.os.remove", side_effect=OSError("permission denied")),
+            patch("utils.security_utils.logger") as mock_logger,
+        ):
+            removed = SecurityManager.purge_legacy_key_files()
+            assert removed is False
+            assert SecurityManager._key is None
+            assert mock_logger.error.call_count >= 1
+
+
 # ============================================================================
 # 以下为 Task 5.2 补充测试：覆盖 security_utils.py 剩余路径，目标覆盖率 ≥80%
 # ============================================================================

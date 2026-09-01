@@ -239,6 +239,22 @@ class TestModulePureFunctions:
         keys = {o.key for o in options}
         assert keys == {"DEBUG", "INFO", "WARNING", "ERROR"}
 
+    def test_build_legacy_key_warning_returns_container(self, mock_i18n_state) -> None:
+        """_build_legacy_key_warning 返回含标题/描述的安全告警容器（F3, 检视 06）。"""
+        from core.i18n import DEFAULT_LOCALE, I18n
+
+        I18n._locale = DEFAULT_LOCALE
+        from ui.views.settings_tabs.system_tab import _build_legacy_key_warning
+
+        control = _build_legacy_key_warning()
+        assert isinstance(control, ft.Container)
+
+        row = control.content
+        assert isinstance(row, ft.Row)
+        # 图标 + 标题/描述文本列；标题/描述取自 i18n（默认 locale 返回 key 本身，不影响结构）
+        texts = [t.value for t in _walk_all_controls(row) if isinstance(t, ft.Text) and t.value]
+        assert texts, "告警容器应在图标旁渲染标题/描述文本（F3, 检视 06）"
+
 
 # ============================================================================
 # 运行时测试基础设施: FakeSystemViewModel + system_tab_env fixture
@@ -1617,3 +1633,46 @@ class TestOnSubmitEnter:
         handler, args, _ = _await_run_task_handler(env["page"])
         assert handler.__name__ == "_do_save_no_proxy"
         assert len(args) == 1  # no_proxy_value
+
+
+@pytest.fixture
+def legacy_key_present(monkeypatch) -> bool:
+    """SystemSettingsViewModel 构造前将 has_legacy_key_files 置为 True（驱动告警条渲染）。"""
+    monkeypatch.setattr(
+        "ui.viewmodels.system_settings_view_model.SecurityManager.has_legacy_key_files",
+        lambda: True,
+    )
+    return True
+
+
+@pytest.fixture
+def legacy_key_absent(monkeypatch) -> bool:
+    """构造前强制 has_legacy_key_files 为 False（告警条不渲染）。"""
+    monkeypatch.setattr(
+        "ui.viewmodels.system_settings_view_model.SecurityManager.has_legacy_key_files",
+        lambda: False,
+    )
+    return False
+
+
+class TestLegacyKeyWarningBanner:
+    """F3（检视 06）：SystemTab 在 using_legacy_key 时渲染 legacy 密钥告警条。
+
+    using_legacy_key 由 SystemSettingsViewModel 构造时调用
+    SecurityManager.has_legacy_key_files() 决定。legacy_key_present/absent 两个
+    fixture 在挂载（SystemSettingsViewModel 构造）前 patch 该函数，驱动告警条渲染/隐藏分支。
+    """
+
+    def test_banner_rendered_when_legacy_key_present(self, legacy_key_present, system_tab_env) -> None:
+        """has_legacy_key_files=True → 渲染 legacy 密钥告警标题文本。"""
+        env = system_tab_env
+        rendered = _walk_all_controls(env["result"])
+        texts = [t.value for t in rendered if isinstance(t, ft.Text) and t.value]
+        assert any("sys_legacy_key_warning_title" in str(d) for d in texts)
+
+    def test_no_banner_when_no_legacy_key(self, legacy_key_absent, system_tab_env) -> None:
+        """has_legacy_key_files=False → 不渲染 legacy 密钥告警标题文本。"""
+        env = system_tab_env
+        rendered = _walk_all_controls(env["result"])
+        texts = [t.value for t in rendered if isinstance(t, ft.Text) and t.value]
+        assert not any("sys_legacy_key_warning_title" in str(d) for d in texts)

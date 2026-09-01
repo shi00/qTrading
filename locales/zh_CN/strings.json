@@ -895,6 +895,8 @@
     "settings_diagnostics_exporting": "正在导出诊断包...",
     "settings_diagnostics_success": "诊断包已成功导出至: {path}",
     "settings_diagnostics_failed": "导出诊断包失败",
+    "sys_legacy_key_warning_title": "检测到旧版明文密钥文件",
+    "sys_legacy_key_warning_desc": "凭证密钥以明文文件（.secret.key）存储，安全性较低。建议通过环境变量或系统密钥环（keyring）重新保存凭证，由应用自动完成迁移并清理该文件。",
     "sys_core_config": "核心配置",
     "sys_log_label": "控制系统日志详细程度",
     "sys_sync_heavy": "重型同步并发数",

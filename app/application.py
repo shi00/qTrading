@@ -59,9 +59,11 @@ from ui.startup_views import StartupView, _StartupBridge
 from ui.theme import apply_page_theme
 from utils.app_env import is_e2e_mode
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import log_classified
 from utils.exception_hooks import install_asyncio_handler_for_loop
 from utils.log_decorators import UILogger
 from utils.proxy_manager import ProxyManager
+from utils.config.secrets import purge_legacy_key_if_safe as _purge_legacy_key_if_safe
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +227,14 @@ async def _run_session(
     llm_api_key = ConfigHandler.get_llm_config().get("api_key")
     onboarding_complete = ConfigHandler.is_onboarding_complete()
     logger.info("[Main] After ConfigHandler calls")
+
+    # F3（检视 06）：配置加载完毕后，若已无任何仍需 legacy 明文密钥解密的字段
+    # （凭证已迁移到 keyring / 环境变量），安全删除 .secret.key 家族文件。
+    # 判定失败（仍引用加密字段）则保留文件，避免既有加密值不可解密（数据丢失）。
+    try:
+        _purge_legacy_key_if_safe()
+    except Exception as e:
+        log_classified(logger, e, "general", "[Main] Legacy key file cleanup skipped (%s): %s", exc_info=True)
 
     masked_token = mask_sensitive(token)
     masked_llm_key = mask_sensitive(llm_api_key)

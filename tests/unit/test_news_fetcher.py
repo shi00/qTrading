@@ -1787,8 +1787,10 @@ class TestLogWithSeverity:
         """日志消息必须包含 [code=...] 标记。"""
         with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
             _log_with_severity(Exception("connection refused"), "prefix %s", "arg")
-        msg = caplog.records[0].getMessage()
-        assert "[code=" in msg
+        # classify_error 可能先记录 classify 内部 debug，需按 [code=] 过滤出真正日志。
+        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
+        assert code_records
+        msg = code_records[0].getMessage()
         assert "prefix arg" in msg
         # general context: "connection" in error_str → code="network"
         assert "network" in msg

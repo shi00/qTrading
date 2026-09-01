@@ -337,3 +337,22 @@ async def test_run_controller_start_exception_propagates(monkeypatch):
     page = _DummyPage()
     with pytest.raises(RuntimeError, match="start failed"):
         await app_main.run(page)
+
+
+@pytest.mark.asyncio
+async def test_run_f3_cleanup_failure_is_caught_and_logged(monkeypatch):
+    """F3（检视 06）：legacy 密钥清理异常被捕获并记录，不阻断启动流程。
+
+    run() 中 _purge_legacy_key_if_safe() 失败（如权限/IO 异常）时，仅捕获并记
+    log_classified，异常不得向上传播中断启动。
+    """
+    _prepare_run_mocks(monkeypatch)
+
+    def _boom():
+        raise PermissionError("cannot remove legacy key file")
+
+    monkeypatch.setattr(app_main, "_purge_legacy_key_if_safe", _boom)
+
+    page = _DummyPage()
+    await app_main.run(page)  # 不抛异常：F3 清理失败可安全降级
+    assert page.show_toast  # type: ignore[attr-defined]  # [reason: run() 动态挂载]

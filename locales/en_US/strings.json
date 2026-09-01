@@ -1008,6 +1008,8 @@
     "settings_diagnostics_exporting": "Exporting diagnostics...",
     "settings_diagnostics_success": "Diagnostics package exported to: {path}",
     "settings_diagnostics_failed": "Export failed",
+    "sys_legacy_key_warning_title": "Legacy plaintext key file detected",
+    "sys_legacy_key_warning_desc": "Credentials are encrypted with a plaintext key file (.secret.key), which is less secure. Re-save credentials via environment variables or the system keyring; the app will migrate and clean up this file automatically.",
     "sys_core_config": "Core Config",
     "sys_log_label": "System Log Level",
     "sys_concurrency": "Sync Concurrency",
