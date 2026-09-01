@@ -523,3 +523,21 @@ class TestSetValueClamp:
         vm = _make_vm(mock_config_handler)
         vm.set_concurrency_value("")
         assert vm.state.concurrency_value == ""
+
+
+class TestUsingLegacyKey:
+    """F3（检视 06）：using_legacy_key state 由 SecurityManager 检测结果驱动。"""
+
+    @patch("ui.viewmodels.system_settings_view_model.SecurityManager.has_legacy_key_files", return_value=True)
+    def test_true_when_legacy_key_files_exist(self, mock_has, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.state.using_legacy_key is True
+
+    @patch("ui.viewmodels.system_settings_view_model.SecurityManager.has_legacy_key_files", return_value=False)
+    def test_false_when_no_legacy_key_files(self, mock_has, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.state.using_legacy_key is False
+
+    def test_default_state_field_exists(self, mock_config_handler):
+        """state 默认含 using_legacy_key 字段（False 兜底）。"""
+        assert SystemSettingsState().using_legacy_key is False

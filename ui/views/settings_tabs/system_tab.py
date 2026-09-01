@@ -126,7 +126,7 @@ def _build_legacy_key_warning() -> ft.Control:
             spacing=8,
         ),
         bgcolor=ft.Colors.with_opacity(0.12, AppColors.WARNING),
-        border=ft.border.all(1, ft.Colors.with_opacity(0.4, AppColors.WARNING)),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.4, AppColors.WARNING)),
         border_radius=8,
         padding=10,
     )
