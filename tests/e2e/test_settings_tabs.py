@@ -213,7 +213,9 @@ async def test_tushare_token_validate_and_save(e2e_page):
 
     # Token 已由 env var TS_TOKEN=e2e-dummy-token 预填, 直接点击验证
     # verify_token 调外部 Tushare API 失败, 面板级 status 显示翻译错误文本
-    await e2e_page.click_button(verify_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
+    # PR669: verify_button 已 anchor 化, 改用 AnchorPage INTERACTIVE 路径点击,
+    # 规避 CanvasKit 下 click_button fallback 点击偶发不触发 Flutter 回调的坑.
+    await sp.click_tushare_verify(timeout_ms=TIMEOUTS.INTERACTION)
 
     # verify_token 失败路径: classify_error(context="token") → wizard_err_token_*
     # get_error_message 返回翻译文本, VM 用 _raw_message 包装, View 渲染翻译文本.
