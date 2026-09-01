@@ -231,12 +231,43 @@ class SettingsPage:
         await self.ap.select_option(EIDS.SETTINGS.LOG_LEVEL_DROPDOWN, option_text, timeout_ms=timeout_ms)
 
     async def click_tushare_verify(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击 Tushare 面板"验证 Token"按钮（通过 anchor）。
+        """点击 Tushare 面板"验证 Token"按钮，带"确认触发"重试兜底。
 
-        CanvasKit 下 click_button 的 fallback 定位偶发不触发 Flutter 回调，
-        改用 AnchorPage INTERACTIVE 路径的 bbox 中心鼠标点击（PR669 E2E 修复）。
+        CanvasKit 下 click_button fallback 定位偶发不触发 Flutter 回调 → 改用
+        AnchorPage INTERACTIVE 路径的 bbox 中心鼠标点击（PR669 E2E 修复）。
+
+        PR681: 单次 AnchorPage click 在 CI 慢速 headless CanvasKit 下仍偶发被吞
+        （verify_token 未启动 → 无错误文本 → 60s 断言失败）。对齐 ``ScreenerPage.run``
+        的 retry_until_triggered 抗吞模式。
+
+        confirm 信号: ``is_verifying=True`` 时再点击同步渲染 warning 文本
+        ("tushare_verifying_in_progress"，无外部 IO)，或任一验证结果错误文本出现。
+        两者均无需等待外部 Tushare IO 完成即可确认点击已真正触发 verify_token。
+        （disabled 态在 CanvasKit 语义 DOM 无 aria-disabled/aria-hidden 可检测，
+        反幻觉实证已排除，故不以 disabled 作 confirm 信号。）
         """
-        await self.ap.click(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
+        verifying_text = I18n.get("tushare_verifying_in_progress")
+        # 与 test_tushare_token_validate_and_save 的 possible_errors 同源
+        error_keys = (
+            "wizard_err_token_invalid",
+            "wizard_err_token_network",
+            "wizard_err_token_timeout",
+            "wizard_err_token_server",
+            "wizard_err_token_unknown",
+        )
+
+        async def _interact() -> None:
+            await self.ap.click(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
+
+        async def _confirm() -> bool:
+            if await self.page.has_text(verifying_text):
+                return True
+            for k in error_keys:
+                if await self.page.has_text(I18n.get(k)):
+                    return True
+            return False
+
+        await retry_until_triggered(_interact, _confirm)
 
 
 class DataPage:
