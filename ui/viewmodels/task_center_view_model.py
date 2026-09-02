@@ -15,7 +15,7 @@
 import datetime
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from core.i18n import Message
 from services.task_manager import AppTask, TaskManager, TaskStatus
@@ -119,15 +119,15 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
         running = sum(1 for r in rows if r.status == TaskStatus.RUNNING)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         current_page = max(1, min(self._state.current_page, total_pages))
-        self._state = replace(
-            self._state,
+        # 经 _set_state 原子绑定（写 state + 捕获快照 + 分配序号），避免跨线程
+        # 直写 + _notify() 的「高序号携带旧快照」窗口（CON-03 R2 P1）
+        self._set_state(
             tasks=rows,
             total_count=total,
             running_count=running,
             total_pages=total_pages,
             current_page=current_page,
         )
-        self._notify()
 
     # --- Pagination commands ---
 
