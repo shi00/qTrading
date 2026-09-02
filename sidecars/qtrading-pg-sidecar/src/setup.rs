@@ -309,7 +309,11 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
 }
 
 /// 显式 initdb（§7.4）：--data-checksums + scram-sha-256 + UTF8。失败映射 exit 11。
-pub async fn run_initdb(layout: &Layout, username: &str) -> Result<(), u8> {
+///
+/// F5（检视 06）：persistent `password` 文件在 Windows 上以 DPAPI 加密（`PGPW2:` 前缀），
+/// 不可直接作为 initdb `--pwfile`。此处把明文密码写入同目录的临时 pwfile 供 initdb 使用，
+/// initdb 结束后删除（Unix 上临时 pwfile 同样强制 0600）。
+pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Result<(), u8> {
     // 失败注入钩子（与 preflight FORCE_FS_KIND 同款语义；默认不激活）。
     // 集成测试通过 env var 触发 initdb failure 路径，避免实际破坏 PostgreSQL binaries（§17.6 #1）。
     if std::env::var("QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL").is_ok() {
@@ -317,8 +321,27 @@ pub async fn run_initdb(layout: &Layout, username: &str) -> Result<(), u8> {
         return Err(exit_codes::INITDB_FAILED);
     }
 
+    // 临时明文 pwfile：与 password 文件同目录，initdb 后删除，避免明文残留。
+    let pwfile = layout.password_file.with_extension("pwinitdb");
+    if let Some(parent) = pwfile.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    {
+        let mut f = std::fs::File::create(&pwfile).map_err(|e| {
+            eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
+            exit_codes::INITDB_FAILED
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        use std::io::Write;
+        let _ = f.write_all(password.as_bytes());
+    }
+
     let data = layout.data_dir.to_string_lossy().into_owned();
-    let pwfile = layout.password_file.to_string_lossy().into_owned();
+    let pwfile_str = pwfile.to_string_lossy().into_owned();
     let out = pgbin::run_tool(
         &pgbin::tool_path(&layout.install_dir, "initdb"),
         &[
@@ -328,7 +351,7 @@ pub async fn run_initdb(layout: &Layout, username: &str) -> Result<(), u8> {
             username,
             "--auth=scram-sha-256",
             "--auth-local=scram-sha-256",
-            &format!("--pwfile={pwfile}"),
+            &format!("--pwfile={pwfile_str}"),
             "--encoding=UTF8",
             "--data-checksums",
             "--no-instructions",
@@ -338,9 +361,11 @@ pub async fn run_initdb(layout: &Layout, username: &str) -> Result<(), u8> {
     )
     .await
     .map_err(|e| {
+        let _ = std::fs::remove_file(&pwfile);
         eprintln!("[sidecar] initdb exec failed: {e}");
         exit_codes::INITDB_FAILED
     })?;
+    let _ = std::fs::remove_file(&pwfile);
     if !out.success() {
         eprintln!(
             "[sidecar] initdb failed (code {:?}): {}",

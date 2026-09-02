@@ -154,7 +154,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     // 6. Fresh → initdb（exit 11）；安全基线幂等写入（Fresh/Existing 均执行，§13.7.33 漂移自修复）
     if dir_state == DataDirState::Fresh {
         tracing::info!("initdb --data-checksums initializing cluster");
-        setup::run_initdb(&layout, &args.username).await?;
+        setup::run_initdb(&layout, &args.username, &password).await?;
     }
     if let Err(e) = setup::write_security_baseline(&layout.data_dir, &args.listen) {
         eprintln!("[sidecar] 安全基线写入失败: {e}");
