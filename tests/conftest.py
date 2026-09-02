@@ -261,8 +261,8 @@ def _reset_loop_local_fallback() -> Iterator[None]:
     function scope (asyncio_default_test_loop_scope=function) 下 _stores 通过
     WeakKeyDictionary 自动隔离——前一个测试的事件循环关闭后自动 GC，不跨测试残留。
     但 _fallback_store 是普通 dict，在同步上下文中调用 get_loop_local(strict=False)
-    时写入的对象不会自动清理，会通过迁移机制（get_loop_local 第 52-53 行）残留到
-    后续测试的事件循环。本 fixture 清理 _fallback_store 以防止此残留。
+    时写入的对象不会自动清理，会残留到后续测试。本 fixture 清理 _fallback_store
+    以防止此残留（CON-02 已删除 fallback 迁移机制，fallback 与 loop store 隔离）。
     """
     from utils.loop_local import _fallback_store
 
