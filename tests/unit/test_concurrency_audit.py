@@ -5,6 +5,7 @@
 
 import asyncio
 import contextlib
+import threading
 import time
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -418,26 +419,128 @@ class TestScreenerViewModelFlushBehavior:
         assert len(vm._ai_buffer) >= 1
 
 
-class TestLoopLocalFallbackMigration:
-    """P0-4: Verify loop_local fallback-to-loop migration behavioral contract.
+class TestLoopLocalFallbackIsolation:
+    """P0-4/CON-02+CON-11: Verify fallback isolation from loop-local store.
 
-    Behavior under test:
-    - When strict=False, an instance created in fallback is migrated to
-      loop-local store when a loop becomes available, preserving identity.
-    - When strict=True, calling without a loop raises RuntimeError.
+    Behavior under test (修复后契约):
+    - fallback 实例不再迁移进 loop store（CON-02 场景 B）：sync 上下文创建的
+      fallback 实例与 loop 内创建的实例必须不同（删除迁移，禁止 R11 跨循环复用）。
+    - fallback 中创建的 asyncio.Lock 不被任何 loop 共享（R11 守护）。
+    - 循环内 del_loop_local 不误清其他上下文 fallback 实例（CON-11，R7 测试隔离）。
+    - 并发首访同 key 只产生单一 store（CON-02 场景 A，仅回归守卫）。
+    - strict=True 在无 loop 上下文抛 RuntimeError。
     """
 
-    @pytest.mark.asyncio
-    async def test_fallback_instance_migrated_to_loop(self):
+    def test_fallback_instance_not_migrated_to_loop(self):
+        """CON-02: fallback 实例不再迁移进 loop store。
+
+        sync 上下文创建 fallback 实例 → asyncio.run 内再次获取同 key：
+        修复后 loop store 独立 factory() 一次，返回不同实例、不含 fallback 已写入数据。
+        旧实现迁移 fallback 实例进 loop store（`is` 成立 → 失败）。
+        """
         from utils.loop_local import get_loop_local, clear_all_loop_locals
 
         clear_all_loop_locals()
         try:
-            obj_fallback = get_loop_local("test_migration", list, strict=False)
+            obj_fallback = get_loop_local("test_no_migration", list, strict=False)
             obj_fallback.append(1)
-            obj_loop = get_loop_local("test_migration", list, strict=False)
-            assert obj_loop is obj_fallback
-            assert obj_loop == [1]
+
+            async def _probe():
+                return get_loop_local("test_no_migration", list, strict=False)
+
+            obj_loop = asyncio.run(_probe())
+            assert obj_loop is not obj_fallback
+            assert obj_loop == []
+        finally:
+            clear_all_loop_locals()
+
+    def test_fallback_lock_not_shared_across_loops(self):
+        """R11 守护: fallback 中创建的 asyncio.Lock 不得被迁移共享给某个 loop。
+
+        sync 建 asyncio.Lock fallback → 两个独立 asyncio.run loop 各取同 key：
+        三者互不相同。旧实现首个 loop 迁移共享同一实例 → `is not` 断言失败。
+        """
+        from utils.loop_local import get_loop_local, clear_all_loop_locals
+
+        clear_all_loop_locals()
+        try:
+            fallback_lock = get_loop_local("test_lock_shared", asyncio.Lock, strict=False)
+
+            async def _probe():
+                return get_loop_local("test_lock_shared", asyncio.Lock, strict=False)
+
+            loop1_lock = asyncio.run(_probe())
+            loop2_lock = asyncio.run(_probe())
+
+            assert loop1_lock is not fallback_lock
+            assert loop2_lock is not fallback_lock
+            assert loop1_lock is not loop2_lock
+        finally:
+            clear_all_loop_locals()
+
+    def test_concurrent_get_loop_local_single_store(self):
+        """CON-02 回归守卫: 并发首访同 key 不产生孤儿 store。
+
+        两线程内各 asyncio.run（运行中的独立 loop）并发首访同 key：
+        断言两线程实际使用的 store 是同一对象（孤儿 store 会产生不同 store，
+        本测试通过 is 比较检测）。竞态窗口依赖 GIL 调度，非确定性红，
+        故仅作回归守卫（TDD 红期依赖确定性的迁移/清 fallback 测试）。
+        """
+        from utils.loop_local import get_loop_local, clear_all_loop_locals, _stores
+
+        clear_all_loop_locals()
+        barrier = threading.Barrier(2)
+        results: list = []
+        errors: list = []
+
+        def worker() -> None:
+            try:
+                barrier.wait(timeout=5)
+
+                async def _probe():
+                    value = get_loop_local("test_concurrent_key", list, strict=True)
+                    return _stores["test_concurrent_key"], value
+
+                results.append(asyncio.run(_probe()))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == [], f"并发线程异常: {errors}"
+        assert len(results) == 2
+        # 两个线程实际使用的 store 必须是同一对象（孤儿 store 会破坏此断言）
+        assert results[0][0] is results[1][0], "并发首访同一 key 应共享同一 store"
+
+    def test_del_loop_local_in_loop_keeps_fallback(self):
+        """CON-11: 循环内 del_loop_local 不误清其他上下文 fallback 实例。
+
+        sync 建 fallback → asyncio.run 内 del_loop_local → fallback 仍存。
+        旧实现无条件 pop fallback → 断言失败。
+        """
+        from utils.loop_local import (
+            get_loop_local,
+            del_loop_local,
+            clear_all_loop_locals,
+            _fallback_store,
+        )
+
+        clear_all_loop_locals()
+        try:
+            get_loop_local("test_del_in_loop_key", list, strict=False)
+            assert "test_del_in_loop_key" in _fallback_store
+
+            async def _probe():
+                del_loop_local("test_del_in_loop_key")
+
+            asyncio.run(_probe())
+            assert "test_del_in_loop_key" in _fallback_store, (
+                "循环内 del_loop_local 不应清除 fallback 实例（R7 测试隔离语义）"
+            )
         finally:
             clear_all_loop_locals()
 
