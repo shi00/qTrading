@@ -1676,3 +1676,46 @@ class TestLegacyKeyWarningBanner:
         rendered = _walk_all_controls(env["result"])
         texts = [t.value for t in rendered if isinstance(t, ft.Text) and t.value]
         assert not any("sys_legacy_key_warning_title" in str(d) for d in texts)
+
+
+@pytest.fixture
+def keyring_available(monkeypatch) -> bool:
+    """构造前强制 is_keyring_available 为 True（keyring 告警条不渲染）。"""
+    monkeypatch.setattr(
+        "ui.viewmodels.system_settings_view_model.is_keyring_available",
+        lambda: True,
+    )
+    return True
+
+
+@pytest.fixture
+def keyring_unavailable(monkeypatch) -> bool:
+    """构造前强制 is_keyring_available 为 False（驱动 keyring 告警条渲染）。"""
+    monkeypatch.setattr(
+        "ui.viewmodels.system_settings_view_model.is_keyring_available",
+        lambda: False,
+    )
+    return False
+
+
+class TestKeyringUnavailableWarningBanner:
+    """F4（检视 06）：SystemTab 在 keyring 可用性为 False 时渲染告警条。
+
+    keyring_available 由 SystemSettingsViewModel 构造时调用
+    is_keyring_available() 决定。keyring_available/unavailable 两个 fixture
+    在挂载前 patch 该函数，驱动告警条渲染/隐藏分支。
+    """
+
+    def test_banner_rendered_when_keyring_unavailable(self, keyring_unavailable, system_tab_env) -> None:
+        """is_keyring_available=False → 渲染 keyring 不可用告警标题文本。"""
+        env = system_tab_env
+        rendered = _walk_all_controls(env["result"])
+        texts = [t.value for t in rendered if isinstance(t, ft.Text) and t.value]
+        assert any("sys_keyring_unavailable_title" in str(d) for d in texts)
+
+    def test_no_banner_when_keyring_available(self, keyring_available, system_tab_env) -> None:
+        """is_keyring_available=True → 不渲染 keyring 不可用告警标题文本。"""
+        env = system_tab_env
+        rendered = _walk_all_controls(env["result"])
+        texts = [t.value for t in rendered if isinstance(t, ft.Text) and t.value]
+        assert not any("sys_keyring_unavailable_title" in str(d) for d in texts)

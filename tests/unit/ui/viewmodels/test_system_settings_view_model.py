@@ -78,6 +78,15 @@ def _make_vm(mock_config_handler) -> SystemSettingsViewModel:
     return SystemSettingsViewModel()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_keyring_probe():
+    """F4（检视 06）：VM 构造默认将 keyring 可用性预检 patch 为可用，避免单测
+    触发真实 OS keyring 探测（不可控外部依赖）。TestKeyringAvailable 用内层
+    patch 覆盖该默认值。"""
+    with patch("ui.viewmodels.system_settings_view_model.is_keyring_available", return_value=True):
+        yield
+
+
 # --- State immutability ---
 
 
@@ -541,3 +550,21 @@ class TestUsingLegacyKey:
     def test_default_state_field_exists(self, mock_config_handler):
         """state 默认含 using_legacy_key 字段（False 兜底）。"""
         assert SystemSettingsState().using_legacy_key is False
+
+
+class TestKeyringAvailable:
+    """F4（检视 06）：keyring_available state 由 is_keyring_available() 探测结果驱动。"""
+
+    def test_true_when_keyring_available(self, mock_config_handler):
+        with patch("ui.viewmodels.system_settings_view_model.is_keyring_available", return_value=True):
+            vm = _make_vm(mock_config_handler)
+        assert vm.state.keyring_available is True
+
+    def test_false_when_keyring_unavailable(self, mock_config_handler):
+        with patch("ui.viewmodels.system_settings_view_model.is_keyring_available", return_value=False):
+            vm = _make_vm(mock_config_handler)
+        assert vm.state.keyring_available is False
+
+    def test_default_state_field_exists(self):
+        """state 默认含 keyring_available 字段（True 兜底）。"""
+        assert SystemSettingsState().keyring_available is True

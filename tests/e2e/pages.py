@@ -273,7 +273,9 @@ class SettingsPage:
                 for k in error_keys:
                     if await self.page.has_text(I18n.get(k)):
                         return True
-                await self.page.wait_for_timeout(100)
+                # self.page 是 FletPage（非 Playwright Page），wait_for_timeout 需
+                # 走底层 Playwright page（.page），否则 AttributeError（PR684 CI 实证）。
+                await self.page.page.wait_for_timeout(100)
             return False
 
         await retry_until_triggered(_interact, _confirm)

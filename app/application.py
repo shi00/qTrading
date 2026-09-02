@@ -58,12 +58,15 @@ from ui.i18n import I18n
 from ui.startup_views import StartupView, _StartupBridge
 from ui.theme import apply_page_theme
 from utils.app_env import is_e2e_mode
+from utils.config.secrets import (
+    is_keyring_available as _is_keyring_available,
+    purge_legacy_key_if_safe as _purge_legacy_key_if_safe,
+)
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.exception_hooks import install_asyncio_handler_for_loop
 from utils.log_decorators import UILogger
 from utils.proxy_manager import ProxyManager
-from utils.config.secrets import purge_legacy_key_if_safe as _purge_legacy_key_if_safe
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +238,19 @@ async def _run_session(
         _purge_legacy_key_if_safe()
     except Exception as e:
         log_classified(logger, e, "general", "[Main] Legacy key file cleanup skipped (%s): %s", exc_info=True)
+
+    # F4（检视 06）：启动期预检 keyring 可用性。不可用时凭证会自动降级到
+    # AES 加密配置文件（较低安全级别），需显式告知用户，并推荐改用环境变量。
+    # 只读探测一次，结果缓存，后续 SystemTab 直接读取缓存以渲染安全告警条。
+    try:
+        if not _is_keyring_available():
+            logger.error(
+                "[Main] System keyring unavailable: credentials will fall back to AES-encrypted "
+                "config (lower security). Recommend setting TS_TOKEN / DB_PASSWORD / AI_API_KEY "
+                "environment variables instead."
+            )
+    except Exception as e:
+        log_classified(logger, e, "general", "[Main] Keyring availability precheck failed (%s): %s", exc_info=True)
 
     masked_token = mask_sensitive(token)
     masked_llm_key = mask_sensitive(llm_api_key)
