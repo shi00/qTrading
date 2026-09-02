@@ -171,6 +171,12 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 
 工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。
 
+#### 9.8 密码文件与备份的安全要求
+
+- **Windows**：`<app data>/postgres/16/runtime/password` 以 DPAPI 加密存储（文件内容为 `PGPW2:<hex blob>`），仅当前 Windows 用户可解密；复制到其他机器/账号后无法解密，应用将视为启动失败。
+- **Unix**：`runtime/password` 使用 `0600` 权限（`password_file_perms_ok`）保护明文。
+- **目录说明**：应用运行时数据目录 `<app data>/postgres/16/`（含 `runtime/`）与离线备份 `backups/` 目录不应放入云同步目录（OneDrive / iCloud / 网盘等）。Windows 上 DPAPI 密钥绑定本机+当前用户，云同步可能触发不一致副本、或让密钥在本机外的副本无法解密；备份文件本身未加密（见安全检视 F19），请勿将备份置于不受控的共享位置。
+
 ### 10. 运行 embedded 模式真实 sidecar 测试
 
 > 适用场景：验证内置 PostgreSQL（子进程启动）真实场景的端到端覆盖，包含真实 Rust sidecar binary + 真实 PostgreSQL 16。

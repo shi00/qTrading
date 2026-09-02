@@ -45,6 +45,60 @@ class EmbeddedPostgresStartError(RuntimeError):
 
 _READY_SCHEMA = "qtrading.embedded_postgres.run.ready.v1"
 
+# F5（检视 06）：Windows 内侧车以 DPAPI 加密 password 文件。该 ASCII 前缀标记加密格式。
+# 无前缀的文件按明文读（Unix，或 Windows 升级前的旧文件）。
+_EMBEDDED_PW_DPAPI_PREFIX = "PGPW2:"
+
+
+def _unprotect_win32_blob(blob: bytes) -> bytes:  # pragma: no cover -- win-only
+    """F5（检视 06）：Windows DPAPI 解密（CryptUnprotectData，绑定当前用户+机器）。
+
+    ``ctypes.windll`` 仅 Windows 可用，Linux CI 无法执行真实体，故整函数经
+    ``# pragma: no cover`` 排除；对应分支由测试 mock 该函数覆盖。
+    与 sidecar（Rust, CryptProtectData + CRYPTPROTECT_UI_FORBIDDEN, 无 entropy）互通。
+    输出 blob 由系统 LocalAlloc 分配，须经 kernel32.LocalFree 释放。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    in_blob = DATA_BLOB()
+    in_blob.cbData = wintypes.DWORD(len(blob))
+    in_blob.pbData = ctypes.cast(ctypes.create_string_buffer(blob), ctypes.POINTER(ctypes.c_char))
+    out_blob = DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    ok = crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob))
+    if not ok:
+        raise OSError(ctypes.get_last_error() or "CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+
+
+def _read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> str:
+    """F5（检视 06）：读取内置 PG 密码文件。
+
+    - ``PGPW2:`` 前缀：Windows DPAPI 加密，hex(blob) → 解密；
+    - 无前缀：明文（Unix，或 Windows 升级前的旧格式）。
+    """
+    raw = password_file.read_text(encoding="utf-8").strip()
+    if not raw.startswith(_EMBEDDED_PW_DPAPI_PREFIX):
+        return raw
+    if not sys.platform.startswith("win"):
+        raise EmbeddedPostgresStartError("DPAPI-encrypted embedded PG password file on non-Windows platform")
+    try:
+        blob = bytes.fromhex(raw[len(_EMBEDDED_PW_DPAPI_PREFIX) :])
+        return _unprotect_win32_blob(blob).decode("utf-8").strip()
+    except (ValueError, UnicodeDecodeError) as exc:
+        svc_logger.error("embedded PG password DPAPI payload invalid: %s", DataSanitizer.sanitize_error(exc))
+        raise EmbeddedPostgresStartError(f"embedded PG password DPAPI payload invalid: {exc}") from exc
+    except OSError as exc:
+        svc_logger.error("embedded PG password DPAPI decrypt failed: %s", DataSanitizer.sanitize_error(exc))
+        raise EmbeddedPostgresStartError(f"embedded PG password DPAPI decrypt failed: {exc}") from exc
+
 
 def _setup_service_logger(log_dir: Path) -> logging.Logger:
     """为 EmbeddedPostgresService 配置独立 FileHandler，写入 embedded-pg-service.log。
@@ -328,7 +382,8 @@ class EmbeddedPostgresService:
         data_dir_str = str(ready.get("data_dir", str(self._data_dir)))
 
         try:
-            password = password_file.read_text(encoding="utf-8").strip()
+            # F5（检视 06）：Windows 下自动解密 DPAPI 加密的 password 文件；否则明文
+            password = _read_embedded_password(password_file, self._svc_logger)
         except FileNotFoundError as exc:
             self._svc_logger.error("password_file not found: %s", password_file)
             self._cleanup_failed_start()

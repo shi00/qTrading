@@ -746,7 +746,7 @@ async fn restore_into(
         eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", restore_dir.display());
         exit_codes::DUMP_RESTORE_FAILED
     })?;
-    setup::run_initdb(&restore_layout, DEFAULT_USERNAME).await?;
+    setup::run_initdb(&restore_layout, DEFAULT_USERNAME, password).await?;
     if let Err(e) = setup::write_security_baseline(restore_dir, LISTEN_LOCAL) {
         eprintln!("[sidecar] 安全基线写入失败: {e}");
         return Err(exit_codes::DUMP_RESTORE_FAILED);
@@ -1763,7 +1763,7 @@ mod tests {
 
         setup::ensure_binaries(&layout, &|_| {}).await.unwrap();
         password::write_password_file(&layout.password_file, &password).unwrap();
-        setup::run_initdb(&layout, DEFAULT_USERNAME).await.unwrap();
+        setup::run_initdb(&layout, DEFAULT_USERNAME, &password).await.unwrap();
         setup::write_security_baseline(&data_dir, LISTEN_LOCAL).unwrap();
 
         (layout, password, dir)
@@ -1884,8 +1884,9 @@ mod tests {
         let _guard = PG_TEST_MUTEX.lock().unwrap();
         let (layout, password, dir) = setup_pg_layout("resetpw-ok").await;
 
-        // 读取旧密码
-        let old_pwd = std::fs::read_to_string(&layout.password_file).unwrap();
+        // 读取旧密码（F5：Windows 加密文件经 read_password_file 解密为明文）
+        let old_pwd = password::read_password_file(&layout.password_file)
+            .expect("old password should be readable");
 
         // 启动并停止 PG（确保 PGDATA 可用，lock 可获取）
         let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
@@ -1905,8 +1906,9 @@ mod tests {
             result.err()
         );
 
-        // 验证密码已变更
-        let new_pwd = std::fs::read_to_string(&layout.password_file).unwrap();
+        // 验证密码已变更（F5：经 read_password_file 解密，取明文比较）
+        let new_pwd = password::read_password_file(&layout.password_file)
+            .expect("new password should be readable");
         assert_ne!(new_pwd, old_pwd, "password should be rotated");
         assert!(!new_pwd.is_empty(), "new password should not be empty");
 
