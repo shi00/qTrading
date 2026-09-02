@@ -6,6 +6,7 @@
 import multiprocessing
 import queue
 import time
+from pathlib import Path
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -15,6 +16,7 @@ from services.local_model_manager import (
     _HAS_LLAMA_CPP,
     _SENTINEL,
     _persistent_worker,
+    _validate_model_file,
 )
 
 pytestmark = pytest.mark.unit
@@ -76,6 +78,71 @@ class TestLocalModelManagerUnloadModel:
         assert mgr._model_sha256 == ""
         assert mgr._model_stat == (0, 0)
         assert mgr._last_config == {}
+
+
+class TestValidateModelFile:
+    """review 06 F14: _validate_model_file 轻量校验（resolve/存在性/GGUF magic header）。"""
+
+    def _write(self, path, payload: bytes) -> str:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return str(path)
+
+    def test_valid_gguf(self, tmp_path):
+        p = tmp_path / "model.gguf"
+        assert _validate_model_file(self._write(p, b"GGUF" + b"rest-of-file")) is True
+
+    def test_magic_based_not_suffix(self, tmp_path):
+        # 非 .gguf 后缀但魔数为 GGUF 的真模型应通过（llama.cpp 以魔数识别格式）
+        p = tmp_path / "model.bin"
+        assert _validate_model_file(self._write(p, b"GGUF" + b"metadata")) is True
+
+    def test_normalizes_path_with_dotdot(self, tmp_path):
+        # resolve() 将嵌套 ".." 规范化后仍应通过真实文件校验
+        p = tmp_path / "model.gguf"
+        self._write(p, b"GGUF\nmetadata")
+        nested = tmp_path / "sub" / ".." / "model.gguf"
+        assert _validate_model_file(str(nested)) is True
+
+    def test_nonexistent_file(self, tmp_path):
+        assert _validate_model_file(str(tmp_path / "missing.gguf")) is False
+
+    def test_directory(self, tmp_path):
+        d = tmp_path / "model.gguf"
+        d.mkdir(parents=True, exist_ok=True)
+        assert _validate_model_file(str(d)) is False
+
+    def test_uppercase_suffix_accepted(self, tmp_path):
+        p = tmp_path / "MODEL.GGUF"
+        assert _validate_model_file(self._write(p, b"GGUF")) is True
+
+    def test_bad_magic_header(self, tmp_path):
+        p = tmp_path / "model.gguf"
+        assert _validate_model_file(self._write(p, b"FAKE" + b"payload")) is False
+
+    def test_empty_file(self, tmp_path):
+        p = tmp_path / "model.gguf"
+        path = self._write(p, b"")
+        assert _validate_model_file(path) is False
+
+    def test_invalid_path_string(self):
+        # 不可解析路径（含 NUL）应被拒绝而非抛异常
+        assert _validate_model_file("bad\x00path") is False
+
+    def test_resolve_error_returns_false(self, tmp_path):
+        # resolve() 抛出 OSError 时按校验失败处理
+        with patch("pathlib.Path.resolve", side_effect=OSError("resolve failed")):
+            assert _validate_model_file(str(tmp_path / "m.gguf")) is False
+
+    def test_read_error_returns_false(self, tmp_path):
+        # 文件可 stat 但读取失败（IO 错误）时按校验失败处理
+        p = tmp_path / "m.gguf"
+        p.write_bytes(b"GGUF")
+        with (
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(Path, "open", side_effect=OSError("read failed")),
+        ):
+            assert _validate_model_file(str(p)) is False
 
 
 class TestLocalModelManagerLoadModel:
@@ -393,6 +460,7 @@ class TestPersistentWorkerModelReuse:
             }
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=0, st_size=0)),
             ):
@@ -490,6 +558,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -511,6 +580,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -527,6 +597,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -547,6 +618,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -565,6 +637,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -592,6 +665,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 mgr = LocalModelManager()
                 with (
                     patch("os.path.exists", return_value=True),
+                    patch("services.local_model_manager._validate_model_file", return_value=True),
                     # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                     patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                     patch.object(LocalModelManager, "_get_load_lock"),
@@ -796,6 +870,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -816,6 +891,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -839,6 +915,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -872,6 +949,7 @@ class TestLocalModelManagerLoadModelClearsCancel:
 
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -1057,6 +1135,7 @@ class TestLoadModelClearsCancelEvent:
 
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -1393,6 +1472,7 @@ class TestLoadModelOSError:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 patch("os.stat", side_effect=OSError("permission denied")),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -1898,6 +1978,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -1925,6 +2006,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -1950,6 +2032,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -1996,6 +2079,7 @@ class TestLocalModelVerificationMode:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -2039,6 +2123,7 @@ class TestLocalModelVerificationMode:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
@@ -2130,6 +2215,7 @@ class TestLocalModelVerificationMode:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
                 # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
