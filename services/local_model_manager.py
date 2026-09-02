@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any
 
 from utils.config_handler import ConfigHandler
@@ -30,6 +31,37 @@ class LocalInferenceTimeoutError(RuntimeError):
 
 _SENTINEL = "__SHUTDOWN__"
 _VERIFICATION_TIMEOUT_SECONDS = 300
+
+
+def _validate_model_file(model_path: str) -> bool:
+    """轻量校验本地 GGUF 模型文件（review 06 F14）。
+
+    核对三项：路径规范化、存在性、GGUF magic header（前 4 字节为 ``GGUF``）。
+
+    以魔数而非 ``.gguf`` 后缀为准：当前后端 llama.cpp（llama_cpp.Llama）唯一支持的
+    格式就是 GGUF（GGML 已废弃、safetensors 需先转换），故魔数校验既能拒绝"伪装成
+    模型的其他文件"，又不会误伤"文件名非 .gguf 但内容为真 GGUF"的模型。
+    仅做防御性轻量校验，不做目录白名单（用户将模型放何处是他的自由）。
+
+    Args:
+        model_path: 用户在 UI 中选择的模型文件路径。
+
+    Returns:
+        文件通过校验返回 True，否则 False。
+    """
+    try:
+        path = Path(model_path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as f:
+            if f.read(4) != b"GGUF":
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverable by unit tests
@@ -507,8 +539,8 @@ class LocalModelManager:
             logger.error("Cannot load model: llama-cpp-python is not installed.")
             return False
 
-        if not os.path.exists(model_path):
-            logger.error("Model file not found: %s", model_path)
+        if not _validate_model_file(model_path):
+            logger.error("Invalid GGUF model file (missing, wrong type, or bad magic header): %s", model_path)
             return False
 
         if is_verification:
