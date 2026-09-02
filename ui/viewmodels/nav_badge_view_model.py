@@ -21,7 +21,7 @@
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -77,5 +77,6 @@ class NavBadgeViewModel(ObservableViewModelMixin[NavBadgeState]):
         """从 task list 计算 running_count, 仅在变化时更新 state + 通知。"""
         running_count = sum(1 for t in tasks if t.status == TaskStatus.RUNNING)
         if running_count != self._state.running_count:
-            self._state = replace(self._state, running_count=running_count)
-            self._notify()
+            # 经 _set_state 原子绑定（写 state + 捕获快照 + 分配序号），避免跨线程
+            # 直写 + _notify() 的「高序号携带旧快照」窗口（CON-03 R2 P1）
+            self._set_state(running_count=running_count)

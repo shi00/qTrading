@@ -88,13 +88,14 @@ class _CustomSubscribeVM(ObservableViewModelMixin[_DummyState]):
 
             captured = asyncio.get_running_loop()
             self._main_loop = captured
-            # 首次 loop 捕获后 flush pending（与 Mixin.subscribe 一致）
+            # 首次 loop 捕获后 flush pending（与 Mixin.subscribe 一致）；
+            # 缓冲项为 (subs, state, seq) 3 元组（CON-03），seq 用于过期快照丢弃
             if self._pending_notifications:
                 with self._subscribers_lock:
                     pending = self._pending_notifications
                     self._pending_notifications = collections.deque(maxlen=64)
-                for s, st in pending:
-                    self._do_notify(list(s), st)
+                for s, st, _seq in pending:
+                    self._notifier._do_notify(list(s), st)
         except RuntimeError:
             pass
 
@@ -382,6 +383,29 @@ class TestCustomSubscribe:
         vm = _CustomSubscribeVM()
         unsub = vm.subscribe(lambda s: None)
         assert callable(unsub)
+
+    @pytest.mark.asyncio
+    async def test_custom_subscribe_flushes_pending_3tuple(self):
+        """CON-03 回归守卫: _CustomSubscribeVM.subscribe flush 应按 (subs,state,seq) 3 元组解包。
+
+        旧代码按 2 元组 `(s, st)` 解包缓冲项 → 触发 pending flush 时 ValueError → 红。
+        需在 async 上下文运行，否则 subscribe 无法捕获 running loop 触发 flush。
+        """
+        import asyncio
+
+        vm = _CustomSubscribeVM()
+        snapshots: list[_DummyState] = []
+        # 无 loop / owner_tid 场景下缓冲一条通知（缓冲项为 3 元组）
+        with vm._subscribers_lock:
+            vm._notifier._subscribers.append(lambda s: snapshots.append(s))
+        vm._set_state(name="buffered")
+        assert len(vm._notifier._pending_notifications) == 1
+
+        # 订阅（运行中 loop）→ flush 不应因元组解包崩溃
+        vm.subscribe(lambda s: snapshots.append(s))
+        await asyncio.sleep(0.05)
+        assert snapshots, "pending 缓冲应在 subscribe 时被 flush"
+        assert snapshots[-1].name == "buffered"
 
 
 # ============================================================
@@ -737,6 +761,267 @@ class TestCrossThreadNotification:
         assert vm.state.count == N - 1
         # 实际通知次数 < N（节流）；但测试不假设具体次数（调度器行为）
         unsub()
+
+
+# ============================================================
+# Test: 跨线程通知顺序（CON-03）
+# ============================================================
+
+
+class TestObservableNotificationOrder:
+    """CON-03: 跨线程通知单调序号——过期快照被丢弃, 最终送达恒等于 state。
+
+    修复前：`_dispatch_notification_impl` 的 `_pending_notify_handle`「读—取消—写」
+    无锁保护，晚 dispatch 的旧快照可 cancel 新快照的 handle 并送达过期值。
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_snapshot_discarded(self):
+        """CON-03 核心: 新快照先排队、旧快照后到 → 订阅者最终收到新快照。
+
+        旧代码: 第二次 dispatch 读到 old_handle=handle(新) → cancel 之 → 只送达旧快照 → 红。
+        """
+        import asyncio
+        import threading
+
+        vm = _DefaultVM()
+        snapshots: list[_DummyState] = []
+        unsub = vm.subscribe(lambda s: snapshots.append(s))
+        assert vm._main_loop is not None
+        loop = vm._main_loop
+        tid = vm._owner_tid
+
+        v1 = _DummyState(name="stale", count=1)
+        v2 = _DummyState(name="fresh", count=2)
+        subs = list(vm._subscribers)
+
+        # 模拟「新快照先排队（seq=2）、旧快照后到（seq=1）」
+        fired = threading.Event()
+
+        def worker() -> None:
+            try:
+                vm._dispatch_notification_impl(subs, v2, loop, tid, seq=2)
+                vm._dispatch_notification_impl(subs, v1, loop, tid, seq=1)
+            finally:
+                fired.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        assert fired.wait(timeout=2.0), "worker 未在 2s 内完成"
+        t.join(timeout=1.0)
+
+        await asyncio.sleep(0.1)
+        assert snapshots, "订阅者应至少收到一次通知"
+        assert snapshots[-1] is v2, f"最终应收到新快照 v2, 实际 {snapshots[-1]!r}"
+        unsub()
+
+    @pytest.mark.asyncio
+    async def test_fast_path_advances_delivered_seq(self):
+        """CON-03 R1 P1-2: 同线程 fast-path 送达新快照后, 跨线程旧快照回调被丢弃。
+
+        旧代码: fast-path 不推进 `_delivered_seq` → 跨线程 seq=1 回调仍送达 v1 → 红。
+        """
+        import asyncio
+        import threading
+
+        vm = _DefaultVM()
+        snapshots: list[_DummyState] = []
+        unsub = vm.subscribe(lambda s: snapshots.append(s))
+        assert vm._main_loop is not None
+        loop = vm._main_loop
+        tid = vm._owner_tid
+        subs = list(vm._subscribers)
+
+        v1 = _DummyState(name="stale", count=1)
+        v2 = _DummyState(name="fresh", count=2)
+
+        # 主线程（同线程）fast-path：seq=2 同步送达 v2 并推进 delivered_seq
+        vm._dispatch_notification_impl(subs, v2, loop, tid, seq=2)
+        assert snapshots[-1] is v2
+
+        # 工作线程排队 seq=1（旧快照）→ 应被 fire 守卫丢弃
+        fired = threading.Event()
+
+        def worker() -> None:
+            try:
+                vm._dispatch_notification_impl(subs, v1, loop, tid, seq=1)
+            finally:
+                fired.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        assert fired.wait(timeout=2.0), "worker 未在 2s 内完成"
+        t.join(timeout=1.0)
+
+        await asyncio.sleep(0.1)
+        assert snapshots[-1] is v2, f"跨线程旧回调应被丢弃, 实际 {snapshots[-1]!r}"
+        unsub()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_set_state_delivered_matches_state(self):
+        """CON-03 R1 P1-1 回归守卫: 双线程并发 _set_state 后, 最终送达快照与 vm.state 恒等。
+
+        依赖 GIL：仅用于守卫「原子绑定」不变量不被回归破坏；不依赖精确的线程交错时序。
+        """
+        import asyncio
+        import threading
+
+        vm = _DefaultVM()
+        snapshots: list[_DummyState] = []
+        unsub = vm.subscribe(lambda s: snapshots.append(s))
+        assert vm._main_loop is not None
+
+        N = 200
+        barrier = threading.Barrier(2)
+        fired = threading.Event()
+
+        def worker(idx: int) -> None:
+            try:
+                barrier.wait(timeout=2.0)
+                for i in range(N):
+                    vm._set_state(name=f"w{idx}_i{i}", count=i)
+            finally:
+                fired.set()
+
+        ts = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=5.0)
+        assert not any(t.is_alive() for t in ts)
+
+        await asyncio.sleep(0.1)
+        assert snapshots, "应有通知送达"
+        # 原子绑定后：最高序号的送达快照即最后一次写入的 state 实例（last-write-wins）
+        assert snapshots[-1] is vm.state
+        unsub()
+
+    def test_pending_buffer_overflow_metrics(self, caplog):
+        """CON-03 R1 P1-4: pending buffer 溢出应记录 error 日志 + metrics 指标。"""
+        import collections
+
+        from utils.metrics import metrics_registry
+
+        vm = _DefaultVM()
+        metrics_registry.reset()
+        # _buffer_notification 属于 ViewModelNotifier，经 vm._notifier 调用；
+        # 注入小容量 deque 以触发溢出分支
+        vm._notifier._pending_notifications = collections.deque(maxlen=3)
+        with caplog.at_level("ERROR", logger="ui.viewmodels.observable_mixin"):
+            for _ in range(4):
+                vm._notifier._buffer_notification([lambda s: None], _DummyState())
+        assert any("buffer overflow" in r.getMessage() for r in caplog.records)
+        snap = metrics_registry.snapshot()
+        op = snap.get("viewmodel_notify")
+        assert op is not None, "metrics 应记录 viewmodel_notify 操作"
+        assert op.error_codes.get("pending_buffer_overflow", 0) >= 1
+        metrics_registry.reset()
+
+    def test_mixin_impl_passes_seq(self):
+        """CON-03 R1 P1-3: mixin 代理 `_dispatch_notification_impl` 应透传 seq 到 notifier。"""
+        import threading
+        from unittest.mock import MagicMock
+
+        vm = _DefaultVM()
+        vm.subscribe(lambda s: None)
+        seen: list[int | None] = []
+        original = vm._notifier._dispatch_notification_impl
+
+        def spy(subs_snap, state_snap, loop, owner_tid, seq=None):
+            seen.append(seq)
+            return original(subs_snap, state_snap, loop, owner_tid, seq)
+
+        vm._notifier._dispatch_notification_impl = spy  # type: ignore[method-assign] # noqa: PGH003
+        fake_loop = MagicMock()
+        fake_loop.is_running.return_value = True
+        fake_loop.call_soon_threadsafe.return_value = MagicMock()
+
+        vm._dispatch_notification_impl(
+            subs_snap=list(vm._subscribers),
+            state_snap=vm._state,
+            loop=fake_loop,
+            owner_tid=threading.get_ident() + 1,  # 不同 tid → cross_thread
+            seq=9,
+        )
+        assert seen[-1] == 9, f"mixin 应透传 seq=9, 实际 {seen[-1]!r}"
+
+    @pytest.mark.asyncio
+    async def test_buffered_flush_does_not_override_newer(self):
+        """CON-03 P1-1: buffer flush 透传原始 seq——过期缓冲快照不得以更高序号压制新通知。
+
+        旧代码: flush 以 seq=None 重新分配更高序号 → 陈旧 S1 以 seq=N+1 送达并压制
+        已排队的新 S2(seq=N) → 最终 delivered=S1, state=S2 → 红。
+        """
+        import asyncio
+        import threading
+
+        vm = _DefaultVM()
+        # 模拟 pre-subscribe 状态：无 loop、无 owner_tid
+        vm._notifier._main_loop = None
+        vm._notifier._owner_tid = -1
+        snapshots: list[_DummyState] = []
+        vm._notifier._subscribers.append(lambda s: snapshots.append(s))
+
+        # Worker A：无 loop → 缓冲 S1（内部分配 seq=1 并存档）
+        vm._set_state(name="S1", count=1)
+        assert len(vm._notifier._pending_notifications) == 1
+        assert vm._notifier._notify_seq == 1
+
+        # 主线程捕获 loop + owner_tid（模拟 subscribe）
+        loop = asyncio.get_running_loop()
+        vm._notifier._main_loop = loop
+        vm._notifier._owner_tid = threading.get_ident()
+
+        # Worker B：loop 已捕获 → _set_state(S2) 跨线程排队（内部分配 seq=2）
+        fired = threading.Event()
+
+        def worker() -> None:
+            try:
+                vm._set_state(name="S2", count=2)
+            finally:
+                fired.set()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        assert fired.wait(timeout=2.0), "worker 未在 2s 内完成"
+        t.join(timeout=1.0)
+        assert vm._notifier._last_queued_seq == 2
+
+        # flush buffer（模拟 subscribe 首次捕获 loop 后 flush pending）：
+        # 新代码透传原始 seq=1；旧代码重分配 seq=3 会压制 seq=2 的 S2 → 红
+        with vm._notifier._subscribers_lock:
+            pending = vm._notifier._pending_notifications
+            vm._notifier._pending_notifications = collections.deque(maxlen=64)
+        for subs, st, seq in pending:
+            vm._notifier._dispatch_notification_impl(subs, st, loop, threading.get_ident(), seq)
+
+        await asyncio.sleep(0.1)
+        assert snapshots, "应有通知送达"
+        # 最终送达恒等于最新 state（S2）；旧代码最终 delivered=S1 → 红
+        assert snapshots[-1].name == "S2", f"最终应送达 S2, 实际 {snapshots[-1]!r}"
+        vm._notifier._subscribers.clear()
+
+    @pytest.mark.asyncio
+    async def test_fast_path_discards_stale(self):
+        """CON-03 P3-1: fast-path 应丢弃过期序号快照（与 fire_and_wrap 守卫对称）。
+
+        旧代码: fast-path 仅推进不丢弃 → 订阅者收到 ['fresh','stale'] → 红。
+        需在 async 上下文运行，否则 subscribe 无法捕获运行中的 loop（_main_loop 为 None）。
+        """
+        vm = _DefaultVM()
+        snapshots: list[_DummyState] = []
+        vm.subscribe(lambda s: snapshots.append(s))
+        assert vm._main_loop is not None
+        loop = vm._main_loop
+        tid = vm._owner_tid
+        subs = list(vm._subscribers)
+
+        v2 = _DummyState(name="fresh", count=2)
+        v1 = _DummyState(name="stale", count=1)
+        vm._dispatch_notification_impl(subs, v2, loop, tid, seq=2)
+        vm._dispatch_notification_impl(subs, v1, loop, tid, seq=1)  # fast-path 过期 → 丢弃
+        assert snapshots == [v2], f"fast-path 应丢弃过期快照, 实际 {snapshots!r}"
+        vm._notifier._subscribers.clear()
 
 
 # ============================================================

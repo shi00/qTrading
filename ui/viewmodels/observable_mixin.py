@@ -28,10 +28,11 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
+from utils.metrics import metrics_registry
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,11 @@ class ViewModelNotifier[T]:
         self._disposed = False
         self._pending_notify_handle: object | None = None
         self._pending_notifications: deque = deque(maxlen=_MAX_PENDING)
+        # CON-03: 单调序号（_notify_seq 分配全序 / _delivered_seq 已送达上界 /
+        # _last_queued_seq 已排队上界），用于跨线程过期快照丢弃。
+        self._notify_seq = 0
+        self._delivered_seq = 0
+        self._last_queued_seq = 0
 
     # ------------------------------------------------------------------
     # 外部 API
@@ -96,8 +102,12 @@ class ViewModelNotifier[T]:
                     self._pending_notifications = deque(maxlen=_MAX_PENDING)
 
         if pending_to_flush is not None and captured_first_time:
-            for subs_snap, state_snap in pending_to_flush:
-                self._dispatch_notification(subs_snap, state_snap)
+            flush_loop = self._main_loop
+            flush_tid = self._owner_tid
+            if flush_loop is not None:
+                # flush 透传缓冲项原始 seq（CON-03 P1-1），避免重分配更高序号压制新通知
+                for subs_snap, state_snap, seq in pending_to_flush:
+                    self._dispatch_notification_impl(subs_snap, state_snap, flush_loop, flush_tid, seq)
 
         def _unsubscribe() -> None:
             with self._subscribers_lock:
@@ -106,8 +116,34 @@ class ViewModelNotifier[T]:
 
         return _unsubscribe
 
-    def notify(self, state: T) -> None:
-        """state 变化后通知所有订阅者（骨架，不可绕过）。"""
+    def set_state_and_notify(self, changes: Mapping[str, Any]) -> None:
+        """原子：写 state + 捕获快照 + 分配序号（同一临界区，CON-03 R1 P1-1）。
+
+        供 ``ObservableViewModelMixin._set_state`` 委托，保证「序号反映写入完成时刻」——
+        任何时序下送达快照恒等于最后一次写入的 state（``delivered == state`` 不变量）。
+        """
+        owner = cast(Any, self._owner)
+        with self._shutdown_lock:
+            if self._disposed:
+                return
+            with self._subscribers_lock:
+                owner._state = replace(owner._state, **changes)
+                self._notify_seq += 1
+                my_seq = self._notify_seq
+                subs_snapshot: list[Callable[[T], None]] = list(self._subscribers)
+                state_snapshot = owner._state
+                loop_captured = self._main_loop
+                owner_tid_captured = self._owner_tid
+        self._finish_notify(subs_snapshot, state_snapshot, loop_captured, owner_tid_captured, my_seq)
+
+    def notify(self) -> None:
+        """state 变化后通知所有订阅者（直接 _notify 路径；锁内读 state + 分配序号原子绑定）。
+
+        锁内读取 ``owner._state`` 作为快照，消除「调用方锁外读 state 与锁内分配序号」
+        之间并发写者插入的窗口——送达快照恒等于序号对应的 state（CON-03 P2-1）。
+        跨线程直写路径应使用 ``set_state_and_notify``（CON-03 R2 P1）。
+        """
+        owner = cast(Any, self._owner)
         if self._disposed:
             return
 
@@ -115,22 +151,35 @@ class ViewModelNotifier[T]:
             if self._disposed:
                 return
             with self._subscribers_lock:
+                self._notify_seq += 1
+                my_seq = self._notify_seq
                 subs_snapshot: list[Callable[[T], None]] = list(self._subscribers)
-            state_snapshot: T = state
+                state_snapshot = cast(T, owner._state)
             loop_captured = self._main_loop
             owner_tid_captured = self._owner_tid
 
+        self._finish_notify(subs_snapshot, state_snapshot, loop_captured, owner_tid_captured, my_seq)
+
+    def _finish_notify(
+        self,
+        subs_snapshot: list[Callable[[T], None]],
+        state_snapshot: T,
+        loop_captured: asyncio.AbstractEventLoop | None,
+        owner_tid_captured: int,
+        my_seq: int,
+    ) -> None:
+        """通知分发公共出口：无订阅早返 / 无 loop 走 buffer 或同步 / 有 loop 走统一调度。"""
         if not subs_snapshot:
             return
 
         if loop_captured is None:
             if owner_tid_captured in (None, -1):
-                self._buffer_notification(subs_snapshot, state_snapshot)
+                self._buffer_notification(subs_snapshot, state_snapshot, my_seq)
             else:
                 self._do_notify(subs_snapshot, state_snapshot)
             return
 
-        self._dispatch_notification_impl(subs_snapshot, state_snapshot, loop_captured, owner_tid_captured)
+        self._dispatch_notification_impl(subs_snapshot, state_snapshot, loop_captured, owner_tid_captured, my_seq)
 
     def dispose(self) -> None:
         """清理资源（三步原子关闭协议）。
@@ -183,8 +232,9 @@ class ViewModelNotifier[T]:
                         with self._subscribers_lock:
                             pending = self._pending_notifications
                             self._pending_notifications = deque(maxlen=_MAX_PENDING)
-                        for s, st in pending:
-                            self._dispatch_notification_impl(s, st, loop, self._owner_tid)
+                        # flush 透传缓冲项原始 seq（CON-03 P1-1）
+                        for s, st, seq in pending:
+                            self._dispatch_notification_impl(s, st, loop, self._owner_tid, seq)
         return loop
 
     @property
@@ -252,15 +302,31 @@ class ViewModelNotifier[T]:
     # 内部实现（非扩展点）
     # ------------------------------------------------------------------
 
-    def _buffer_notification(self, subs_snap: list[Callable[[T], None]], state_snap: T) -> None:
-        dq = self._pending_notifications
-        if len(dq) == _MAX_PENDING - 1:
-            logger.warning(
-                "[ViewModelNotifier] pending notifications near cap %d; oldest will be dropped",
-                _MAX_PENDING,
-            )
+    def _buffer_notification(
+        self,
+        subs_snap: list[Callable[[T], None]],
+        state_snap: T,
+        seq: int | None = None,
+    ) -> None:
+        """缓冲无 loop 场景的通知；存原始 seq 供 flush 透传（CON-03 P1-1）。
+
+        ``seq`` 未传时锁内分配（``_dispatch_notification`` 扩展点路径）。溢出判定与
+        append 同临界区，避免并发 flush 换 deque 时检查/写入分离的 TOCTOU（P3-2）。
+        """
         with self._subscribers_lock:
-            dq.append((subs_snap, state_snap))
+            if seq is None:
+                self._notify_seq += 1
+                seq = self._notify_seq
+            dq = self._pending_notifications
+            # CON-03 R1 P1-4: 用 deque 自身 maxlen 判定溢出（append 将丢弃最旧时），
+            # 与测试注入 maxlen 的判定一致；升级为 error + metrics 便于运维可见。
+            if dq.maxlen is not None and len(dq) >= dq.maxlen:
+                logger.error(
+                    "[ViewModelNotifier] pending notification buffer overflow (maxlen=%d); oldest dropped",
+                    dq.maxlen,
+                )
+                metrics_registry.record_error("viewmodel_notify", "pending_buffer_overflow")
+            dq.append((subs_snap, state_snap, seq))
 
     def _dispatch_notification_impl(
         self,
@@ -268,11 +334,27 @@ class ViewModelNotifier[T]:
         state_snap: T,
         loop: asyncio.AbstractEventLoop,
         owner_tid: int,
+        seq: int | None = None,
     ) -> None:
-        """统一跨线程调度：同线程 fast-path / 跨线程 call_soon_threadsafe + 合并节流。"""
+        """统一跨线程调度：同线程 fast-path / 跨线程 call_soon_threadsafe + 合并节流 + 过期丢弃。
+
+        ``seq`` 为单调序号（由 ``set_state_and_notify`` / ``notify`` 分配；未传时内部分配）：
+        - 跨线程排队前：``_last_queued_seq >= seq`` → 已有更新通知排队，本过期快照直接丢弃；
+        - 回调执行前：``my_seq < _delivered_seq`` → cancel 未生效的过期回调自我丢弃；
+        - 同线程 fast-path：``seq <= _delivered_seq`` → 丢弃过期快照（与 fire_and_wrap 对称，
+          CON-03 P3-1）；否则推进 ``_delivered_seq`` 并送达，使后续过期跨线程回调被丢弃（P1-2）。
+        """
+        if seq is None:  # 非 notify 路径（pending flush / 外部直调）内部分配
+            with self._subscribers_lock:
+                self._notify_seq += 1
+                seq = self._notify_seq
+
         cross_thread = owner_tid != -1 and threading.get_ident() != owner_tid and loop.is_running()
 
         if not cross_thread:
+            if seq <= self._delivered_seq:
+                return  # 过期快照（防御性守卫，正常单写者时序下不可达）
+            self._delivered_seq = seq
             self._do_notify(subs_snap, state_snap)
             return
 
@@ -280,31 +362,31 @@ class ViewModelNotifier[T]:
             subs_closure: list[Callable[[T], None]] = subs_snap,
             state_closure: T = state_snap,
             loop_closure: asyncio.AbstractEventLoop = loop,
+            my_seq: int = seq,
         ) -> None:
             if self._disposed:
                 return
-            cur_handle = self._pending_notify_handle
-            if cur_handle is handle_ref_holder.get("handle"):
-                self._pending_notify_handle = None
+            if my_seq < self._delivered_seq:
+                return  # cancel 未生效的过期回调，丢弃
+            self._delivered_seq = my_seq
             self._do_notify(subs_closure, state_closure)
 
-        handle_ref_holder: dict[str, Any] = {"handle": None}
+        with self._subscribers_lock:
+            if self._last_queued_seq >= seq:
+                return  # 已有更新的通知排队，本通知为过期快照，丢弃
+            old_handle = self._pending_notify_handle
+            try:
+                handle = loop.call_soon_threadsafe(fire_and_wrap)
+            except RuntimeError:
+                return
+            self._pending_notify_handle = handle
+            self._last_queued_seq = seq
 
-        old_handle = self._pending_notify_handle
         if old_handle is not None and hasattr(old_handle, "cancel") and not isinstance(old_handle, bool):
             try:
                 cast(Any, old_handle).cancel()
             except Exception:
                 logger.debug("[ViewModelNotifier] throttle cancel old handle failed", exc_info=True)
-
-        try:
-            handle = loop.call_soon_threadsafe(fire_and_wrap)
-        except RuntimeError:
-            self._pending_notify_handle = None
-            return
-
-        handle_ref_holder["handle"] = handle
-        self._pending_notify_handle = handle
 
 
 class ObservableViewModelMixin[T]:
@@ -442,7 +524,7 @@ class ObservableViewModelMixin[T]:
     def _notify(self) -> None:
         if not hasattr(self, "_notifier"):
             self._init_mixin_fields()
-        self._notifier.notify(self._state)
+        self._notifier.notify()
 
     def dispose(self) -> None:
         if not hasattr(self, "_notifier"):
@@ -460,11 +542,12 @@ class ObservableViewModelMixin[T]:
         state_snap: T,
         loop: asyncio.AbstractEventLoop,
         owner_tid: int,
+        seq: int | None = None,
     ) -> None:
         """统一跨线程调度实现（代理 notifier；测试/VM 可直接调用）。"""
         if not hasattr(self, "_notifier"):
             self._init_mixin_fields()
-        self._notifier._dispatch_notification_impl(subs_snap, state_snap, loop, owner_tid)
+        self._notifier._dispatch_notification_impl(subs_snap, state_snap, loop, owner_tid, seq)
 
     # ==================================================================
     # 内部实现（非扩展点，子类不 override；兼容宿主 _disposed 读取）
@@ -474,10 +557,11 @@ class ObservableViewModelMixin[T]:
         """Update state fields (dataclasses.replace) and notify subscribers.
 
         统一 disposed guard；子类覆盖时应先调用 super()._set_state。
+        委托 ``set_state_and_notify`` 实现「写 state + 捕获快照 + 分配序号」原子绑定
+        （CON-03 R1 P1-1），避免直写 + ``_notify()`` 的跨线程过期快照窗口。
         """
         if not hasattr(self, "_notifier"):
             self._init_mixin_fields()
         if self._notifier.disposed:
             return
-        self._state = replace(cast(Any, self._state), **changes)
-        self._notify()
+        self._notifier.set_state_and_notify(changes)
