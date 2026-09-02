@@ -312,6 +312,29 @@ class TestSaveDbPasswordEncryptFallback:
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
             assert result is False
 
+    def test_fallback_logs_error_not_warning(self):
+        """F4（检视 06）：keyring 降级到加密配置属于安全级别降级，须记 error 而非 warning。"""
+        with (
+            patch.object(
+                cfg_mod.keyring,
+                "set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
+            patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
+            patch.object(
+                cfg_mod.SecurityManager,
+                "encrypt_data",
+                return_value="ENCRYPTED",
+            ),
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
+            patch.object(cfg_mod.logger, "error") as mock_error,
+            patch.object(cfg_mod.logger, "warning") as mock_warning,
+        ):
+            result = cfg_mod.ConfigHandler.save_db_password("my_password")
+            assert result is True
+            assert any("Falling back to SecurityManager" in str(c[0][0]) for c in mock_error.call_args_list)
+            assert not any("Falling back to SecurityManager" in str(c[0][0]) for c in mock_warning.call_args_list)
+
 
 class TestSaveTokenEncryptFallback:
     """ConfigHandler.save_token 加密 fallback 路径"""
@@ -2922,3 +2945,62 @@ class TestPurgeLegacyKeyIfSafe:
             result = purge_legacy_key_if_safe()
             assert result is True
             cfg_mod.SecurityManager.purge_legacy_key_files.assert_called_once_with()
+
+
+class TestSecretsKeyringAvailability:
+    """F4（检视 06）：is_keyring_available 只读预检 + 结果缓存。
+
+    只读探测（get_password）不写 OS keyring：后端可用但无该项时返回 None（不抛
+    异常）→ 判为可用；后端不可用（无 D-Bus/未登录/权限拒绝）时抛异常 → 判为
+    不可用。结果缓存于模块级，_reset_keyring_available_cache 供测试重置。
+    """
+
+    def setup_method(self):
+        # setup 阶段重置：清理同 worker 中其他用例（application/system_tab）对
+        # secrets 模块级缓存的真实探测污染，保证每个用例从干净状态开始。
+        from utils.config import secrets as secrets_mod
+
+        secrets_mod._reset_keyring_available_cache()
+
+    def teardown_method(self):
+        from utils.config import secrets as secrets_mod
+
+        secrets_mod._reset_keyring_available_cache()
+
+    def test_returns_true_when_get_password_succeeds(self):
+        """get_password 正常返回（后端可用）→ True。"""
+        from utils.config import secrets as secrets_mod
+
+        with patch.object(cfg_mod.keyring, "get_password", return_value=None):
+            assert secrets_mod.is_keyring_available() is True
+
+    def test_returns_false_when_get_password_raises(self):
+        """get_password 抛异常（后端不可用）→ False。"""
+        from utils.config import secrets as secrets_mod
+
+        with patch.object(cfg_mod.keyring, "get_password", side_effect=RuntimeError("no dbus")):
+            assert secrets_mod.is_keyring_available() is False
+
+    def test_result_is_cached(self):
+        """结果缓存：首次探测后不再重复调用 get_password。"""
+        from utils.config import secrets as secrets_mod
+
+        with patch.object(
+            cfg_mod.keyring,
+            "get_password",
+            side_effect=[None, RuntimeError("should not be called")],
+        ):
+            assert secrets_mod.is_keyring_available() is True
+            # 缓存命中：第二次调用不再触发 new get_password
+            assert secrets_mod.is_keyring_available() is True
+
+    def test_reset_cache_reenables_probe(self):
+        """重置缓存后重新探测，反映后端最新可用性。"""
+        from utils.config import secrets as secrets_mod
+
+        with patch.object(cfg_mod.keyring, "get_password", side_effect=RuntimeError("unavailable")):
+            assert secrets_mod.is_keyring_available() is False
+        # 后端恢复后（模拟），reset 缓存 + get_password 成功 → True
+        secrets_mod._reset_keyring_available_cache()
+        with patch.object(cfg_mod.keyring, "get_password", return_value=None):
+            assert secrets_mod.is_keyring_available() is True

@@ -132,6 +132,44 @@ def _build_legacy_key_warning() -> ft.Control:
     )
 
 
+def _build_keyring_unavailable_warning() -> ft.Control:
+    """构建 keyring 后端不可用安全告警（F4, 检视 06）。
+
+    当系统 keyring 不可用时，凭证会静默降级写入 AES 加密配置文件（较低安全
+    级别）。此提示条告知用户该降级已发生，并推荐改用环境变量保存凭证。
+    仅当 keyring 不可用时调用。
+    """
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=AppColors.WARNING),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("sys_keyring_unavailable_title"),
+                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.WARNING,
+                        ),
+                        ft.Text(
+                            I18n.get("sys_keyring_unavailable_desc"),
+                            style=ft.TextThemeStyle.BODY_SMALL,
+                            color=AppColors.INPUT_TEXT,
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        bgcolor=ft.Colors.with_opacity(0.12, AppColors.WARNING),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.4, AppColors.WARNING)),
+        border_radius=8,
+        padding=10,
+    )
+
+
 # ============================================================================
 # SystemTab
 # ============================================================================
@@ -779,6 +817,15 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             [
                 ft.Container(height=10),
                 _build_legacy_key_warning(),
+            ]
+        )
+    # F4（检视 06）：keyring 后端不可用告警——凭证将降级到 AES 加密配置
+    # （较低安全级别），提示改为环境变量方式保存凭证。
+    if not settings_state.keyring_available:
+        core_config_controls.extend(
+            [
+                ft.Container(height=10),
+                _build_keyring_unavailable_warning(),
             ]
         )
     core_config_controls.extend(

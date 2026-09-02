@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.config.secrets import is_keyring_available
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.security_utils import SecurityManager
@@ -82,6 +83,9 @@ class SystemSettingsState:
     # F3（检视 06）：仍在使用 legacy 明文密钥文件（.secret.key 家族）时为 True，
     # View 据此在设置页显示安全告警（过渡期提示，引导迁移到 keyring / 环境变量）。
     using_legacy_key: bool = False
+    # F4（检视 06）：系统 keyring 后端不可用时为 False，View 据此在设置页顶部显示
+    # 安全告警，提示凭证将降级到 AES 加密配置（较低安全级别），推荐改用环境变量。
+    keyring_available: bool = True
 
 
 class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
@@ -123,6 +127,9 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             # F3（检视 06）：过渡期安全告警——仍存在 legacy 明文密钥文件即提示，
             # 引导用户迁移到 keyring / 环境变量。
             using_legacy_key=SecurityManager.has_legacy_key_files(),
+            # F4（检视 06）：keyring 可用性（启动期已预检并缓存），不可用即提示
+            # 凭证将降级存储，推荐改用环境变量。
+            keyring_available=is_keyring_available(),
             is_saving=False,
         )
 

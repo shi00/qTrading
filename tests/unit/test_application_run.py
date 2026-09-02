@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -355,4 +355,39 @@ async def test_run_f3_cleanup_failure_is_caught_and_logged(monkeypatch):
 
     page = _DummyPage()
     await app_main.run(page)  # 不抛异常：F3 清理失败可安全降级
+    assert page.show_toast  # type: ignore[attr-defined]  # [reason: run() 动态挂载]
+
+
+@pytest.mark.asyncio
+async def test_run_f4_keyring_unavailable_logs_error(monkeypatch):
+    """F4（检视 06）：启动期预检发现 keyring 不可用时记录 error 日志。
+
+    is_keyring_available() 返回 False → 依据检视结论（安全降级需用户知情）以
+    error 级别记录，提示凭证将降级存储并推荐使用环境变量；且不阻断启动。
+    """
+    _prepare_run_mocks(monkeypatch)
+    monkeypatch.setattr(app_main, "_is_keyring_available", lambda: False)
+
+    page = _DummyPage()
+    with patch.object(app_main.logger, "error") as mock_error:
+        await app_main.run(page)
+    assert any("System keyring unavailable" in str(c[0][0]) for c in mock_error.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_run_f4_keyring_precheck_exception_is_caught(monkeypatch):
+    """F4（检视 06）：启动期 keyring 预检自身异常被捕获降级，不阻断启动。
+
+    预检的 try/except 防御边界：即使 is_keyring_available() 抛异常，也只记
+    log_classified 而不中断启动流程（keyring 探测失败不影响应用可用性）。
+    """
+    _prepare_run_mocks(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("keyring probe exploded")
+
+    monkeypatch.setattr(app_main, "_is_keyring_available", _boom)
+
+    page = _DummyPage()
+    await app_main.run(page)  # 不抛异常：预检失败可安全降级
     assert page.show_toast  # type: ignore[attr-defined]  # [reason: run() 动态挂载]
