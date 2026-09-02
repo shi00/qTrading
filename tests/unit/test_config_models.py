@@ -190,6 +190,11 @@ class TestGetDefaultConfig:
         for key in expected_keys:
             assert key in result, f"Missing key: {key}"
 
+    def test_ai_prompt_dump_enabled_default_disabled(self):
+        """F6: ai_prompt_dump_enabled 应默认关闭（安全项，防 prompt 默认落盘泄露）。"""
+        result = get_default_config()
+        assert result["ai_prompt_dump_enabled"] is False
+
     def test_nested_sync_integrity(self):
         result = get_default_config()
         assert isinstance(result["sync_integrity"], dict)
