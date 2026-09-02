@@ -32,15 +32,22 @@ class LocalInferenceTimeoutError(RuntimeError):
 _SENTINEL = "__SHUTDOWN__"
 _VERIFICATION_TIMEOUT_SECONDS = 300
 
+# 受支持的本地模型文件魔数白名单（小端 32 位整数视角即 0x46554747）。
+# 当前唯一后端 llama.cpp（llama_cpp.Llama）仅支持 GGUF；若未来引入支持
+# 其他格式（ONNX/safetensors 等）的后端，在此登记其魔数并配套新增后端加载
+# 分支即可，本校验逻辑无需改动。
+_MODEL_FILE_MAGICS: tuple[bytes, ...] = (b"GGUF",)
+
 
 def _validate_model_file(model_path: str) -> bool:
-    """轻量校验本地 GGUF 模型文件（review 06 F14）。
+    """轻量校验本地模型文件（review 06 F14）。
 
-    核对三项：路径规范化、存在性、GGUF magic header（前 4 字节为 ``GGUF``）。
+    核对三项：路径规范化、存在性、受支持格式 magic header（前 4 字节须命中
+    ``_MODEL_FILE_MAGICS``）。
 
-    以魔数而非 ``.gguf`` 后缀为准：当前后端 llama.cpp（llama_cpp.Llama）唯一支持的
-    格式就是 GGUF（GGML 已废弃、safetensors 需先转换），故魔数校验既能拒绝"伪装成
-    模型的其他文件"，又不会误伤"文件名非 .gguf 但内容为真 GGUF"的模型。
+    以魔数而非 ``.gguf`` 后缀为准：当前后端 llama.cpp 唯一支持的格式就是
+    GGUF，故魔数校验既能拒绝"伪装成模型的其他文件"，又不会误伤"文件名非
+    .gguf 但内容为真 GGUF"的模型。
     仅做防御性轻量校验，不做目录白名单（用户将模型放何处是他的自由）。
 
     Args:
@@ -57,7 +64,7 @@ def _validate_model_file(model_path: str) -> bool:
         return False
     try:
         with path.open("rb") as f:
-            if f.read(4) != b"GGUF":
+            if f.read(4) not in _MODEL_FILE_MAGICS:
                 return False
     except OSError:
         return False
