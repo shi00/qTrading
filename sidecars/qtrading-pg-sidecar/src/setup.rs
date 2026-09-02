@@ -327,11 +327,10 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
         let _ = std::fs::create_dir_all(parent);
     }
     {
-        let mut f = std::fs::File::create(&pwfile)
-            .map_err(|e| {
-                eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
-                exit_codes::INITDB_FAILED
-            })?;
+        let mut f = std::fs::File::create(&pwfile).map_err(|e| {
+            eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
+            exit_codes::INITDB_FAILED
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -131,7 +131,7 @@ mod dpapi {
 
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
     pub fn protect(data: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -157,7 +157,8 @@ mod dpapi {
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let out = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }.to_vec();
+        let out = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }
+            .to_vec();
         unsafe { LocalFree(out_blob.pbData as _) };
         Ok(out)
     }
@@ -185,7 +186,8 @@ mod dpapi {
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let out = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }.to_vec();
+        let out = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }
+            .to_vec();
         unsafe { LocalFree(out_blob.pbData as _) };
         Ok(out)
     }
@@ -281,7 +283,10 @@ mod tests {
         let path = dir.join("password");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "PlainPwd-1_2.3~").unwrap();
-        assert_eq!(read_password_file(&path).as_deref(), Some("PlainPwd-1_2.3~"));
+        assert_eq!(
+            read_password_file(&path).as_deref(),
+            Some("PlainPwd-1_2.3~")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1763,7 +1763,9 @@ mod tests {
 
         setup::ensure_binaries(&layout, &|_| {}).await.unwrap();
         password::write_password_file(&layout.password_file, &password).unwrap();
-        setup::run_initdb(&layout, DEFAULT_USERNAME, &password).await.unwrap();
+        setup::run_initdb(&layout, DEFAULT_USERNAME, &password)
+            .await
+            .unwrap();
         setup::write_security_baseline(&data_dir, LISTEN_LOCAL).unwrap();
 
         (layout, password, dir)
