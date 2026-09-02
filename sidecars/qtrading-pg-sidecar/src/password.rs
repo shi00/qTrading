@@ -20,6 +20,8 @@ pub fn generate_password() -> String {
 }
 
 /// F5（检视 06）：hex 编码小写（DPAPI blob 文本化，避免引入额外 cargo 依赖）。
+/// 仅在 Windows DPAPI 加密路径（`encode_password_file`）使用，须与之一致地按平台限定。
+#[cfg(windows)]
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -31,7 +33,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
@@ -264,9 +266,12 @@ mod tests {
 
     #[test]
     fn hex_roundtrips() {
-        let data = b"\x00\x01\xfe\xffhello\x80";
-        assert_eq!(hex_decode(&hex_encode(data)).unwrap(), data);
-        assert_eq!(hex_encode(b""), "");
+        #[cfg(windows)]
+        {
+            let data = b"\x00\x01\xfe\xffhello\x80";
+            assert_eq!(hex_decode(&hex_encode(data)).unwrap(), data);
+            assert_eq!(hex_encode(b""), "");
+        }
         assert_eq!(hex_decode("").unwrap(), Vec::<u8>::new());
     }
 
