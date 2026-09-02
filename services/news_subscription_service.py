@@ -86,35 +86,40 @@ class NewsSubscriptionService:
                 task.cancel()
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化（CacheManager/
+        # AIService 被重复构造）。初始化整体移入锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
+        with self._lock:
+            if self._initialized:
+                return
+            self.cache = CacheManager()
+            self.ai_client = AIService()
+            self._running = False
+            self._last_news_time = None
+            self._last_news_content = None
 
-        self.cache = CacheManager()
-        self.ai_client = AIService()
-        self._running = False
-        self._last_news_time = None
-        self._last_news_content = None
+            # Async Queue
+            self.processing_queue = None
 
-        # Async Queue
-        self.processing_queue = None
+            # Strong references to prevent GC from killing background tasks
+            self._background_tasks = set()
 
-        # Strong references to prevent GC from killing background tasks
-        self._background_tasks = set()
+            # Observer Pattern: List of callbacks
+            # Format: set of callables
+            self._listeners = set()
+            self._alert_listeners = set()  # Special listeners for popups (controlled by config)
+            self._listener_errors: dict = {}  # M9-001: 显式初始化，消除延迟创建异味
 
-        # Observer Pattern: List of callbacks
-        # Format: set of callables
-        self._listeners = set()
-        self._alert_listeners = set()  # Special listeners for popups (controlled by config)
-        self._listener_errors: dict = {}  # M9-001: 显式初始化，消除延迟创建异味
+            self._current_fetch_task = None
+            self._processing_task = None
 
-        self._current_fetch_task = None
-        self._processing_task = None
+            # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
+            self._seen_hashes: OrderedDict[str, None] = OrderedDict()
+            self._MAX_SEEN = 200
 
-        # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
-        self._seen_hashes: OrderedDict[str, None] = OrderedDict()
-        self._MAX_SEEN = 200
-
-        self._initialized = True
+            self._initialized = True
 
     def add_listener(self, callback: typing.Callable | None, is_alert: typing.Any = False):
         """

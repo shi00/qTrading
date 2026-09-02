@@ -102,29 +102,34 @@ class SchedulerService:
             cls._safe_shutdown_scheduler(inst.scheduler, context="atexit")
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化。初始化整体移入
+        # 锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
-
-        # Initialize AsyncIOScheduler with explicit timezone
-        # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
-        # 'misfire_grace_time': 60 allows jobs to run up to 60s late during heavy load
-        # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
-        self.scheduler = AsyncIOScheduler(
-            job_defaults={
-                "max_instances": 1,
-                "misfire_grace_time": 60,
-            },
-            timezone="Asia/Shanghai",
-        )
-        self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
-        self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
-        self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
-        self._db_state_loaded = False
-        # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
-        # SchedulerService 仅调度注册的 callable，不感知具体业务类。
-        self._registered_jobs: dict[str, Callable[[object], Awaitable[object]]] = {}
-        self._initialized = True
-        logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
+        with self._lock:
+            if self._initialized:
+                return
+            # Initialize AsyncIOScheduler with explicit timezone
+            # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
+            # 'misfire_grace_time': 60 allows jobs to run up to 60s late during heavy load
+            # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
+            self.scheduler = AsyncIOScheduler(
+                job_defaults={
+                    "max_instances": 1,
+                    "misfire_grace_time": 60,
+                },
+                timezone="Asia/Shanghai",
+            )
+            self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
+            self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
+            self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
+            self._db_state_loaded = False
+            # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
+            # SchedulerService 仅调度注册的 callable，不感知具体业务类。
+            self._registered_jobs: dict[str, Callable[[object], Awaitable[object]]] = {}
+            self._initialized = True
+            logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
 
     def register_job(self, job_name: str, job_fn: Callable[[object], Awaitable[object]]) -> None:
         """注册定时业务 job（review01-A2-1 依赖注入）。

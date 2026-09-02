@@ -63,15 +63,20 @@ class ThreadPoolManager:
             _manager = None
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化（前一个线程池泄漏）。
+        # 初始化整体移入锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
+        with self._lock:
+            if self._initialized:
+                return
+            self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
+            self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
+            self._shutdown_event = threading.Event()
 
-        self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
-        self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
-        self._shutdown_event = threading.Event()
-
-        self._init_pools()
-        self._initialized = True
+            self._init_pools()
+            self._initialized = True
 
     @classmethod
     def _atexit_cleanup(cls):

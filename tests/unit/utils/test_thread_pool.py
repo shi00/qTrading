@@ -1,4 +1,6 @@
 import inspect
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -115,6 +117,69 @@ class TestThreadPoolManagerSingleton:
         ThreadPoolManager._reset_singleton()
         mgr2 = ThreadPoolManager()
         assert mgr1 is not mgr2
+
+
+class TestThreadPoolManagerConcurrentInit:
+    """CON-01: 并发首次访问时 _init_pools 只执行一次（double-checked locking）。
+
+    旧模式"锁在 __new__、初始化在 __init__ 锁外"存在竞态：两线程同时首次访问时，
+    后到线程在首个线程完成初始化前也看到 _initialized=False，重复创建线程池（前一个泄漏）。
+    本测试用事件闩锁强制两线程交错进入初始化段，断言 _init_pools 恰好执行一次。
+    """
+
+    def test_concurrent_init_inits_pools_once(self):
+        ThreadPoolManager._reset_singleton()
+
+        start = threading.Barrier(3)  # 2 workers + main，保证两线程同时开始构造
+        entered = threading.Event()  # 首个线程已进入初始化段
+        release = threading.Event()  # 主线程放行首个线程
+        gate_lock = threading.Lock()
+        init_count = {"n": 0}
+
+        real_io = ThreadPoolExecutor(max_workers=2)
+        real_cpu = ThreadPoolExecutor(max_workers=2)
+
+        def slow_init(self):
+            with gate_lock:
+                init_count["n"] += 1
+                if init_count["n"] == 1:
+                    entered.set()
+                    release.wait()  # 首个线程在此停车，确保第二个线程也进入 __init__
+            self._io_pool = real_io
+            self._cpu_pool = real_cpu
+
+        instances = []
+        errors = []
+
+        def worker():
+            try:
+                start.wait()
+                instances.append(ThreadPoolManager())
+            except Exception as e:  # pragma: no cover - 仅测试防御
+                errors.append(e)
+
+        with patch.object(ThreadPoolManager, "_init_pools", slow_init):
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            start.wait()
+            entered.wait()
+            # 在首个线程完成初始化（_initialized=True）前，给第二个线程足够的调度窗口
+            # 到达 _initialized 检查：DCL 下第二线程被锁阻塞（无副作用），旧模式下则进入
+            # 初始化段使计数=2 → 断言失败，从而把回归捕获从概率性（~76%）提升到近乎确定。
+            time.sleep(0.1)
+            release.set()
+            t1.join()
+            t2.join()
+
+        assert not errors, errors
+        assert instances[0] is instances[1]
+        assert init_count["n"] == 1, "并发首次访问时 _init_pools 应只执行一次"
+
+        ThreadPoolManager._reset_singleton()
+        real_io.shutdown(wait=False, cancel_futures=True)
+        real_cpu.shutdown(wait=False, cancel_futures=True)
 
 
 class TestThreadPoolManagerSubmit:

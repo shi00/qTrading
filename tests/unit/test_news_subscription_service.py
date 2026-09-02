@@ -57,6 +57,70 @@ class TestSingletonLifecycle:
             s2 = NewsSubscriptionService()
             assert s1 is s2
 
+    def test_concurrent_init_runs_once(self):
+        """CON-01: 并发首次访问时 __init__ 只执行一次初始化（double-checked locking）。
+
+        旧模式"锁在 __new__、初始化在 __init__ 锁外"存在竞态：两线程同时首次访问时，
+        后到线程在首个线程完成初始化前也看到 _initialized=False，导致 CacheManager/
+        AIService 被重复构造。本测试用事件闩锁强制两线程交错进入初始化段，
+        断言依赖构造恰好各一次。
+        """
+        import threading
+        import time
+
+        NewsSubscriptionService._reset_singleton()
+
+        start = threading.Barrier(3)  # 2 workers + main，保证两线程同时开始构造
+        entered = threading.Event()  # 首个线程已进入 CacheManager 构造
+        release = threading.Event()  # 主线程放行首个线程
+        gate_lock = threading.Lock()
+        cm_count = {"n": 0}
+
+        real_cm = MagicMock()
+        real_ai = MagicMock()
+
+        def slow_cm():
+            with gate_lock:
+                cm_count["n"] += 1
+                if cm_count["n"] == 1:
+                    entered.set()
+                    release.wait()  # 首个线程在此停车，确保第二个线程也进入 __init__
+            return real_cm
+
+        instances = []
+        errors = []
+
+        def worker():
+            try:
+                start.wait()
+                instances.append(NewsSubscriptionService())
+            except Exception as e:  # pragma: no cover - 仅测试防御
+                errors.append(e)
+
+        with (
+            patch("services.news_subscription_service.CacheManager", side_effect=slow_cm),
+            patch("services.news_subscription_service.AIService", return_value=real_ai),
+        ):
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            start.wait()
+            entered.wait()
+            # 在首个线程完成初始化（_initialized=True）前，给第二个线程足够的调度窗口
+            # 到达 _initialized 检查：DCL 下第二线程被锁阻塞（无副作用），旧模式下则进入
+            # 初始化段使计数=2 → 断言失败，从而把回归捕获从概率性（~76%）提升到近乎确定。
+            time.sleep(0.1)
+            release.set()
+            t1.join()
+            t2.join()
+
+        assert not errors, errors
+        assert instances[0] is instances[1]
+        assert cm_count["n"] == 1, "并发首次访问时 CacheManager 应只构造一次"
+
+        NewsSubscriptionService._reset_singleton()
+
     def test_reset_singleton_clears_state(self):
         with (
             patch("services.news_subscription_service.CacheManager"),
