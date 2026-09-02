@@ -266,7 +266,10 @@ class SettingsPage:
             # CanvasKit 下该文本经 Flet 重渲染需数帧；单次 has_text 会把渲染延迟误判为
             # "未触发"而重复点击。此处轮询 2s：命中即确认点击已触发，不重复点击。
             # 同时检测验证结果错误文本（网络失败路径，覆盖 verify_token 已快速失败场景）。
-            deadline = time.monotonic() + 2.0
+            # 轮询窗口按 E2E_TIMEOUT_MULTIPLIER 缩放（对齐 ScreenerPage.run 的
+            # expect_hidden 内部 _tm 缩放；此前裸 2.0s 在 CI 慢速 VM 下窗口过短导致
+            # 全部 3 次 confirm 超时 → retry_until_triggered 误报未触发）。
+            deadline = time.monotonic() + (2.0 * self.page._timeout_multiplier)  # noqa: SLF001  # 与 conftest slow marker 一致的 multiplier 访问
             while time.monotonic() < deadline:
                 if await self.page.has_text(verifying_text):
                     return True
