@@ -88,7 +88,7 @@ def _read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> 
     if not raw.startswith(_EMBEDDED_PW_DPAPI_PREFIX):
         return raw
     if not sys.platform.startswith("win"):
-        raise EmbeddedPostgresStartError("DPAPI-encrypted embedded PG password file on non-Windows platform")
+        raise EmbeddedPostgresStartError("DPAPI-encrypted embedded PG password file on a non-Windows platform")
     try:
         blob = bytes.fromhex(raw[len(_EMBEDDED_PW_DPAPI_PREFIX) :])
         return _unprotect_win32_blob(blob).decode("utf-8").strip()
