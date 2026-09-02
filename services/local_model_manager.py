@@ -272,23 +272,29 @@ class LocalModelManager:
         return cls._instance
 
     def __init__(self, *, clock=None):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化。初始化整体移入
+        # 锁内并二次检查，保证恰好执行一次。RLock 允许 get_instance 持锁后重入 __init__。
         if self._initialized:
             return
-        self._model_path: str = ""
-        self._model_sha256: str = ""
-        self._model_stat: tuple = (0, 0)
-        self._last_config: dict = {}
-        self._is_loading: bool = False
-        self._cancel_event: threading.Event = threading.Event()
-        self._worker_proc: multiprocessing.Process | None = None
-        self._request_queue: multiprocessing.Queue | None = None
-        self._result_queue: multiprocessing.Queue | None = None
-        self._worker_ready: bool = False
-        self._worker_lock: threading.Lock = threading.Lock()
-        self._verification_mode: bool = False
-        self._verification_start_time: float = 0.0
-        self._clock = clock or time.monotonic
-        self._initialized = True
+        with self._lock:
+            if self._initialized:
+                return
+            self._model_path: str = ""
+            self._model_sha256: str = ""
+            self._model_stat: tuple = (0, 0)
+            self._last_config: dict = {}
+            self._is_loading: bool = False
+            self._cancel_event: threading.Event = threading.Event()
+            self._worker_proc: multiprocessing.Process | None = None
+            self._request_queue: multiprocessing.Queue | None = None
+            self._result_queue: multiprocessing.Queue | None = None
+            self._worker_ready: bool = False
+            self._worker_lock: threading.Lock = threading.Lock()
+            self._verification_mode: bool = False
+            self._verification_start_time: float = 0.0
+            self._clock = clock or time.monotonic
+            self._initialized = True
 
     def _shutdown_worker(self, *, force: bool = False):
         """Shut down the persistent worker subprocess (thread-safe).

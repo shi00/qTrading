@@ -114,27 +114,33 @@ class StrategyManager:
         pass
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化（策略实例被重复构造）。
+        # 初始化整体移入锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
+        with self._lock:
+            if self._initialized:
+                return
 
-        _import_all_strategies()
-        self.strategies = {}
-        registry = get_strategy_registry()
-        for k, cls in registry.items():
-            instance = cls()
-            instance.key = k
-            self.strategies[k] = instance
+            _import_all_strategies()
+            self.strategies = {}
+            registry = get_strategy_registry()
+            for k, cls in registry.items():
+                instance = cls()
+                instance.key = k
+                self.strategies[k] = instance
 
-        logger.info(
-            "[StrategyManager] Loaded %d strategies: %s",
-            len(self.strategies),
-            list(self.strategies.keys()),
-        )
-        self._validate_i18n()
+            logger.info(
+                "[StrategyManager] Loaded %d strategies: %s",
+                len(self.strategies),
+                list(self.strategies.keys()),
+            )
+            self._validate_i18n()
 
-        self._dependency_cache: dict[str, dict] | None = None
+            self._dependency_cache: dict[str, dict] | None = None
 
-        self._initialized = True
+            self._initialized = True
 
     def _validate_i18n(self):
         """Startup validation — warn if any strategy is missing i18n keys."""

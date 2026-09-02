@@ -143,21 +143,26 @@ class AIService:
         del_loop_local("ai_news_semaphore")
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化。初始化整体移入
+        # 锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
+        with self._lock:
+            if self._initialized:
+                return
+            self._is_cloud_configured = False
+            self._litellm_config = {}
+            self._local_model_loaded = False
+            self._supports_reasoning = False
+            self._failover_credentials: dict[str, dict] = {}
 
-        self._is_cloud_configured = False
-        self._litellm_config = {}
-        self._local_model_loaded = False
-        self._supports_reasoning = False
-        self._failover_credentials: dict[str, dict] = {}
+            self._configure_litellm()
+            self._setup_client()
+            self._cleanup_prompt_dumps()
+            self._ensure_subservices()
 
-        self._configure_litellm()
-        self._setup_client()
-        self._cleanup_prompt_dumps()
-        self._ensure_subservices()
-
-        self._initialized = True
+            self._initialized = True
 
     def _ensure_subservices(self) -> None:
         """确保子模块实例存在（兼容 AIService.__new__ 构造的测试替身）。"""

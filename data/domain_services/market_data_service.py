@@ -91,18 +91,23 @@ class MarketDataService:
                 t.cancel()
 
     def __init__(self):
+        # CON-01: double-checked locking。__new__ 持锁创建实例，但 __init__ 在锁外执行会
+        # 导致并发首次访问时两线程都见 _initialized=False 而重复初始化。初始化整体移入
+        # 锁内并二次检查，保证恰好执行一次。
         if self._initialized:
             return
-
-        self.api = TushareClient()
-        self.cache = CacheManager()
-        self.trade_calendar = TradeCalendarService(self.cache, self.api)
-        self._running = False
-        self._task = None
-        self._cached_data = None
-        self._listeners = set()
-        self._background_tasks = set()
-        self._initialized = True
+        with self._lock:
+            if self._initialized:
+                return
+            self.api = TushareClient()
+            self.cache = CacheManager()
+            self.trade_calendar = TradeCalendarService(self.cache, self.api)
+            self._running = False
+            self._task = None
+            self._cached_data = None
+            self._listeners = set()
+            self._background_tasks = set()
+            self._initialized = True
 
     def add_listener(self, callback: typing.Callable | None):
         """Add a listener for market data updates"""
