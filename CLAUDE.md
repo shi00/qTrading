@@ -280,3 +280,4 @@ app → 编排所有层，仅被 main.py 调用
 | AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
+| AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |

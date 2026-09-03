@@ -62,6 +62,7 @@ KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
 REDLINES_YAML_PATH = ROOT / "docs" / "governance" / "redlines.yml"
 EXCEPTIONS_YAML_PATH = ROOT / "docs" / "governance" / "exceptions.yml"
 CANONICAL_TOPICS_YAML_PATH = ROOT / "docs" / "governance" / "canonical-topics.yml"
+AGENTS_PATH = ROOT / "AGENTS.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 
@@ -1294,6 +1295,56 @@ def check_canonical_topics_consistency() -> list[str]:
     return errors
 
 
+def _render_agents_invariant_lines() -> list[str]:
+    """从 redlines.yml 渲染 AGENTS.md 最小安全集生成区块内容（不含包裹标记）。
+
+    取 `rule_type: INVARIANT` 的红线（按 yml 顺序）+ 追加 R18（WORKFLOW，影响工作区整洁）。
+    """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 避免未安装时影响其他检查
+
+    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    redlines = data["redlines"]
+    lines: list[str] = []
+    for entry in redlines:
+        rule_type = entry.get("rule_type")
+        if rule_type != "INVARIANT":
+            continue
+        lines.append(f"- {entry['id']}：{entry['title']}")
+    # R18 为 WORKFLOW 但影响工作区整洁，显式追加为区块末项
+    for entry in redlines:
+        if entry.get("id") == "R18":
+            lines.append(f"- R18：{entry['title']}")
+            break
+    return lines
+
+
+def check_agents_md_sync() -> list[str]:
+    """校验 AGENTS.md 生成区块与 redlines.yml 一致性（DOC-08/DOC-13）。
+
+    AGENTS.md 的 `<!-- generated:redlines-invariant -->` 与 `<!-- /generated -->` 之间内容
+    必须等于由 redlines.yml 渲染的结果（见 _render_agents_invariant_lines），从机制上消除多源漂移。
+    """
+    errors: list[str] = []
+    if not AGENTS_PATH.exists():
+        return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
+    content = AGENTS_PATH.read_text(encoding="utf-8")
+    start_tag = "<!-- generated:redlines-invariant -->"
+    end_tag = "<!-- /generated -->"
+    start = content.find(start_tag)
+    end = content.find(end_tag)
+    if start == -1 or end == -1 or end <= start:
+        return [f"AGENTS.md 缺少生成区块标记（{start_tag} / {end_tag}）"]
+
+    block = content[start + len(start_tag) : end].strip().splitlines()
+    expected = _render_agents_invariant_lines()
+    if block != expected:
+        errors.append(
+            "AGENTS.md 生成区块与 redlines.yml 不一致（INVARIANT 红线 + R18）。"
+            "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。"
+        )
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -1313,6 +1364,8 @@ def main() -> int:
     all_errors.extend(check_canonical_topics_consistency())
     # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
     all_errors.extend(check_flet_hub_completeness())
+    # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
+    all_errors.extend(check_agents_md_sync())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -1324,7 +1377,7 @@ def main() -> int:
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性）"
+        "Flet 入口完整性 / AGENTS.md 生成区块一致性）"
     )
     return 0
 

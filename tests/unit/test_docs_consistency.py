@@ -2699,3 +2699,68 @@ class TestCanonicalTopicsYamlConsistency:
                 f"CLAUDE.md §1.8 引用的路径 '{path}' 未在 canonical-topics.yml 中注册，"
                 f"可能存在单边漂移（新增 §1.8 行时未同步 canonical-topics.yml）"
             )
+
+
+class TestAgentsMdSync:
+    """AGENTS.md 最小安全集生成区块与 redlines.yml 一致性契约测试 (DOC-08 / DOC-13, 见 ADR-0006)."""
+
+    def test_agents_md_exists_and_has_generated_block(self):
+        """AGENTS.md 存在且含生成区块包裹标记."""
+        from check_docs_consistency import AGENTS_PATH
+
+        assert AGENTS_PATH.exists(), "AGENTS.md should exist"
+        content = AGENTS_PATH.read_text(encoding="utf-8")
+        assert "<!-- generated:redlines-invariant -->" in content, "缺少生成区块起始标记"
+        assert "<!-- /generated -->" in content, "缺少生成区块结束标记"
+
+    def test_render_invariant_lines_expected_ids(self):
+        """渲染结果应为 INVARIANT(R2/R3/R4/R5/R7/R9/R10) + R18, 共 8 行."""
+        from check_docs_consistency import _render_agents_invariant_lines
+
+        lines = _render_agents_invariant_lines()
+        ids = [line.removeprefix("- R").split("：")[0] for line in lines]
+        assert ids == ["2", "3", "4", "5", "7", "9", "10", "18"], f"红线集合漂移, got: {ids}"
+
+    def test_check_agents_md_sync_passes(self):
+        """真实 AGENTS.md 生成区块应与 redlines.yml 渲染一致 (无错误)."""
+        from check_docs_consistency import check_agents_md_sync
+
+        assert check_agents_md_sync() == []
+
+    def test_detects_block_drift(self, tmp_path, monkeypatch):
+        """篡改 AGENTS.md 生成区块 → check_agents_md_sync() 报错."""
+        from check_docs_consistency import (
+            AGENTS_PATH,
+            check_agents_md_sync,
+            _render_agents_invariant_lines,
+        )
+
+        content = AGENTS_PATH.read_text(encoding="utf-8")
+        start_tag = "<!-- generated:redlines-invariant -->"
+        end_tag = "<!-- /generated -->"
+        start = content.find(start_tag)
+        end = content.find(end_tag)
+        expected = _render_agents_invariant_lines()
+        tampered = "\n".join([expected[0]] + ["- R99：臆造红线"] + expected[1:])
+        new_content = content[: start + len(start_tag)] + "\n" + tampered + "\n" + content[end:]
+        tmp_agents = tmp_path / "AGENTS.md"
+        tmp_agents.write_text(new_content, encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", tmp_agents)
+
+        errors = check_agents_md_sync()
+        assert len(errors) > 0, "应检出生成区块漂移, got no errors"
+        assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
+
+    def test_detects_missing_markers(self, tmp_path, monkeypatch):
+        """缺少标记块 → check_agents_md_sync() 报错并提示标记缺失."""
+        from check_docs_consistency import check_agents_md_sync
+
+        tmp_agents = tmp_path / "AGENTS.md"
+        tmp_agents.write_text("# no markers here", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", tmp_agents)
+
+        errors = check_agents_md_sync()
+        assert len(errors) > 0, "应检出缺少标记, got no errors"
+        assert any("缺少生成区块标记" in e for e in errors), f"错误信息应提示标记缺失, got: {errors}"
