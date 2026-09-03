@@ -36,7 +36,7 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
 
 
 # P1-01: 例外统一由 docs/governance/exceptions.yml 注册表管理，此处仅读取，不再各自维护。
-# 例外原因与审批记录见 exceptions.yml EX-0001。
+# 例外原因与审批记录见 exceptions.yml（当前为空，无例外）。
 def _load_known_exceptions() -> set[str]:
     """从例外注册表加载架构边界例外路径 (rule_id=R1 的 paths)。
 
