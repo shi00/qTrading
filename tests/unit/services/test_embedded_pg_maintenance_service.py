@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -488,7 +488,10 @@ class TestEmbeddedPgMaintenanceServiceArgv:
 
 
 class TestRunSidecarTimeout:
-    """review03-C19: subprocess.TimeoutExpired 必须包装为 EmbeddedPgMaintenanceError（可操作提示）。"""
+    """review03-C19: subprocess.TimeoutExpired 必须包装为 EmbeddedPgMaintenanceError（可操作提示）。
+
+    CON-04 起改用 Popen（非 run）：超时路径须 kill 子进程并回收输出，避免泄漏。
+    """
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_timeout_wrapped_as_business_error(self, maintenance_service) -> None:
@@ -496,18 +499,53 @@ class TestRunSidecarTimeout:
 
         from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
 
+        proc_mock = MagicMock()
+        # 第一次 communicate 抛 TimeoutExpired，第二次（kill 后回收输出）返回空
+        proc_mock.communicate = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="sidecar", timeout=3600), ("", "")]
+        )
+        proc_mock.kill = MagicMock()
+
         with (
             patch(
                 "services.embedded_pg_maintenance_service.ThreadPoolManager",
                 return_value=_DirectTP(),
             ),
             patch(
-                "services.embedded_pg_maintenance_service.subprocess.run",
-                side_effect=subprocess.TimeoutExpired(cmd="sidecar", timeout=3600),
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
             ),
         ):
             with pytest.raises(EmbeddedPgMaintenanceError, match="超时"):
                 await maintenance_service._run_sidecar(["sidecar", "doctor"])
+
+        proc_mock.kill.assert_called_once_with()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_timeout_kill_oserror_still_raises_business_error(self, maintenance_service) -> None:
+        """对抗性检视：进程在超时与 kill 竞态窗口自然退出时，kill 抛 OSError 不得掩盖业务异常。"""
+        import subprocess
+
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        proc_mock = MagicMock()
+        proc_mock.communicate = MagicMock(side_effect=[subprocess.TimeoutExpired(cmd="sidecar", timeout=3600)])
+        proc_mock.kill = MagicMock(side_effect=OSError("no such process"))
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="超时"):
+                await maintenance_service._run_sidecar(["sidecar", "doctor"])
+
+        proc_mock.kill.assert_called_once_with()
 
 
 # =============================================================================
@@ -567,3 +605,211 @@ class TestEmbeddedPgMaintenanceSanitization:
 
         # 反向断言：原始路径字符串不出现在异常消息中
         assert sensitive_path not in str(exc_info.value)
+
+
+# =============================================================================
+# TestRequestCancel: CON-04 停机终止在途 dump（3 个）
+# =============================================================================
+class TestRequestCancel:
+    """CON-04: request_cancel 终止在途可取消命令（仅 dump 注册），无活动命令返回 False。"""
+
+    def test_request_cancel_no_active_proc_returns_false(self, maintenance_service) -> None:
+        """无活动命令（_active_proc 为 None）时返回 False，不抛异常。"""
+        assert maintenance_service.request_cancel() is False
+
+    def test_request_cancel_terminates_active_proc(self, maintenance_service) -> None:
+        """有活动命令时 terminate 并返回 True。"""
+        proc_mock = MagicMock()
+        maintenance_service._active_proc = proc_mock
+        assert maintenance_service.request_cancel() is True
+        proc_mock.terminate.assert_called_once_with()
+
+    def test_request_cancel_oserror_treated_as_terminated(self, maintenance_service) -> None:
+        """terminate 抛 OSError（进程已在竞态窗口自然退出）视为已终止，仍返回 True。"""
+        proc_mock = MagicMock()
+        proc_mock.terminate.side_effect = OSError("no such process")
+        maintenance_service._active_proc = proc_mock
+        assert maintenance_service.request_cancel() is True
+        proc_mock.terminate.assert_called_once_with()
+
+
+# =============================================================================
+# TestRunSidecarCancelAllowed: CON-04 句柄注册/清理 + 并发 guard（3 个）
+# =============================================================================
+class TestRunSidecarCancelAllowed:
+    """CON-04: cancel_allowed=True 时注册/清理 _active_proc，并发 dump 被拒且不误清句柄。"""
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_cancel_allowed_registers_and_clears_active_proc(self, maintenance_service) -> None:
+        """dump 在途时 _active_proc 已注册（可被 request_cancel 终止），完成后清空。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.stdout = "dump ok"
+        proc_mock.stderr = ""
+        captured: dict[str, object] = {}
+
+        def _communicate(timeout=None):
+            captured["active_during_run"] = maintenance_service._active_proc
+            return ("dump ok", "")
+
+        proc_mock.communicate = MagicMock(side_effect=_communicate)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            exit_code, stdout, stderr = await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        assert (exit_code, stdout, stderr) == (0, "dump ok", "")
+        assert captured["active_during_run"] is proc_mock
+        assert maintenance_service._active_proc is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_concurrent_dump_guard_rejects_and_preserves_active_proc(self, maintenance_service) -> None:
+        """已有 dump 在途时，第二次 dump 被拒（kill 新进程）且不误清在途句柄。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        first_proc = MagicMock()  # 已在途 dump 句柄
+        second_proc = MagicMock()
+        maintenance_service._active_proc = first_proc
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=second_proc,
+            ),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
+                await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        second_proc.kill.assert_called_once_with()
+        second_proc.communicate.assert_called_once_with()  # 被拒进程被回收，避免僵尸/管道泄漏
+        # 回归：guard 拒绝路径的 finally 不得误清在途 dump 句柄
+        assert maintenance_service._active_proc is first_proc
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_concurrent_dump_guard_kill_oserror_still_raises(self, maintenance_service) -> None:
+        """对抗性检视：被拒进程恰在竞态窗口自然退出时 kill 抛 OSError，仍抛并发拒绝业务异常。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        first_proc = MagicMock()  # 已在途 dump 句柄
+        second_proc = MagicMock()
+        second_proc.kill = MagicMock(side_effect=OSError("no such process"))
+        maintenance_service._active_proc = first_proc
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=second_proc,
+            ),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
+                await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        second_proc.kill.assert_called_once_with()
+        assert maintenance_service._active_proc is first_proc
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_cancel_allowed_false_not_registered(self, maintenance_service) -> None:
+        """cancel_allowed=False（doctor/restore/shell）不注册 _active_proc，停机不可中断。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.stdout = ""
+        proc_mock.stderr = ""
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            await maintenance_service._run_sidecar(["sidecar", "doctor"], cancel_allowed=False)
+
+        assert maintenance_service._active_proc is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_timeout_with_cancel_allowed_clears_active_proc(self, maintenance_service) -> None:
+        """cancel_allowed=True 超时路径（kill 后回收输出）也应清空 _active_proc（finally 兜底）。"""
+        import subprocess
+
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        proc_mock = MagicMock()
+        proc_mock.communicate = MagicMock(
+            side_effect=[subprocess.TimeoutExpired(cmd="sidecar", timeout=3600), ("", "")]
+        )
+        proc_mock.kill = MagicMock()
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="超时"):
+                await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        proc_mock.kill.assert_called_once_with()
+        # 注册路径的 finally 在超时异常后仍清空句柄（吸收对抗性检视 P2-4 测试缺口）
+        assert maintenance_service._active_proc is None
+
+
+# =============================================================================
+# TestCommandCancelWiring: CON-04 各命令 cancel_allowed 接线（2 个）
+# =============================================================================
+class TestCommandCancelWiring:
+    """CON-04: 各命令的 cancel_allowed 接线——dump 可取消，restore 拒绝取消。"""
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_passes_cancel_allowed_true(self, maintenance_service, tmp_path: Path) -> None:
+        """dump 调用 _run_sidecar 时传 cancel_allowed=True（备份可安全中断）。"""
+        calls: list[bool] = []
+
+        async def fake_run(argv, *, cancel_allowed=False):
+            calls.append(cancel_allowed)
+            return 0, "dump ok", ""
+
+        with patch.object(maintenance_service, "_run_sidecar", new=fake_run):
+            await maintenance_service.dump(tmp_path / "backup.dump")
+
+        assert calls == [True]
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_restore_passes_cancel_allowed_false(self, maintenance_service, tmp_path: Path) -> None:
+        """restore 调用 _run_sidecar 时传 cancel_allowed=False（数据一致性优先，拒绝取消）。"""
+        calls: list[bool] = []
+
+        async def fake_run(argv, *, cancel_allowed=False):
+            calls.append(cancel_allowed)
+            return 0, "", ""
+
+        input_path = tmp_path / "backup.dump"
+        input_path.write_bytes(b"fake")
+
+        with patch.object(maintenance_service, "_run_sidecar", new=fake_run):
+            await maintenance_service.restore(input_path)
+
+        assert calls == [False]

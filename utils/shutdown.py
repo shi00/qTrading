@@ -458,6 +458,17 @@ class ShutdownCoordinator:
     def _step6_shutdown_thread_pools_sync(self):
         from utils.thread_pool import ThreadPoolManager
 
+        # CON-04: 停机前先终止在途可取消 sidecar 命令（如用户备份中关闭应用），
+        # 避免 subprocess 被进程退出强杀残留 .partial；restore 类不可取消命令不受影响。
+        # 注：shutdown(wait=False) 不等待在途任务——运行中 subprocess 由本处提前 terminate
+        # 让其自然结束，配合看门狗兜底；不引入 wait=True（会阻塞停机至多 3600s）。
+        from services.embedded_pg_maintenance_service import (  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
+            EmbeddedPgMaintenanceService,
+        )
+
+        if EmbeddedPgMaintenanceService._instance is not None:
+            EmbeddedPgMaintenanceService._instance.request_cancel()
+
         if ThreadPoolManager._instance is not None:
             ThreadPoolManager._instance.shutdown(wait=False)
             logger.info("[Shutdown]   - Thread pools shut down.")
