@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from data.mixins.health_mixin import HealthCheckMixin, _compute_tier
+from data.persistence.write_quality import WriteQuality
 from data.constants import (
     SYNC_RESULT_EMPTY,
     TIER_QUOTE_FRESHNESS_DAYS,
@@ -1716,3 +1717,57 @@ class TestRunQualityScanDeepBranches:
             result = await proc.run_quality_scan(sample_size=5)
             assert "score" in result
             assert "fin_recency_ok" in result
+
+
+class TestCheckDataHealthCoerceGate:
+    """DAT-03: 关键表最近一次写入 coerce 率超阈值 → check_data_health 视为质量降级。"""
+
+    # 全部关键表（TABLE_DEFINITIONS.quality_config.critical=True）
+    _CRIT = ("daily_quotes", "financial_reports", "daily_indicators", "moneyflow_daily")
+
+    def _fresh_proc(self):
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        full_tables = {t: {"ratio": 0.9} for t in self._CRIT}
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={"tables": full_tables, "global_trade_days": 500}
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_coerce_degrade_marks_red_and_tier0(self):
+        proc = self._fresh_proc()
+        try:
+            # 仅对 daily_quotes 注入高 coerce 率（0.5 > 阈值 0.001），其余关键表健康
+            WriteQuality().record_write("daily_quotes", rows=100, coerced_rows=50)
+            with patch("data.mixins.health_mixin.get_now") as mock_now:
+                mock_now.return_value = datetime.datetime(2024, 6, 14)
+                result = await proc.check_data_health()
+            assert result["status"] == "red"
+            assert proc._quality_tier == 0
+        finally:
+            WriteQuality._reset_singleton()
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_coerce_keeps_green(self):
+        proc = self._fresh_proc()
+        try:
+            # coerce 率 1/10000 = 1e-4，低于阈值，不应触发降级
+            WriteQuality().record_write("daily_quotes", rows=10000, coerced_rows=1)
+            with patch("data.mixins.health_mixin.get_now") as mock_now:
+                mock_now.return_value = datetime.datetime(2024, 6, 14)
+                result = await proc.check_data_health()
+            assert result["status"] != "red"
+            assert proc._quality_tier != 0
+        finally:
+            WriteQuality._reset_singleton()

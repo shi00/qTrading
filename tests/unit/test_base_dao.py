@@ -20,6 +20,7 @@ from data.persistence.daos.base_dao import (
     EngineDisposedError,
     DatabaseQueryError,
 )
+from data.persistence.write_quality import WriteQuality
 
 pytestmark = pytest.mark.unit
 
@@ -307,7 +308,7 @@ class TestNullProtectedDefaultsFalse:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_a": "val"}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_a": "val"}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -349,7 +350,7 @@ class TestNullProtectedDefaultsFalse:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_b": "val"}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_b": "val"}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -428,7 +429,7 @@ class TestMissingColsExcludedFromUpdate:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "col_a": "val"}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_a": "val"}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1236,7 +1237,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1261,7 +1262,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
@@ -1292,7 +1293,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1, "b": None}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1, "b": None}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1331,7 +1332,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1370,7 +1371,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1410,7 +1411,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1446,7 +1447,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1475,7 +1476,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1505,7 +1506,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1533,7 +1534,7 @@ class TestBaseDaoSaveUpsertExtended:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -1554,7 +1555,7 @@ class TestBaseDaoSaveUpsertExtended:
         n_rows = 1200
 
         def mock_prepare_records(task_type, fn, df_slice):
-            return [{"a": i} for i in range(len(df_slice))]
+            return ([{"a": i} for i in range(len(df_slice))], {})
 
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
@@ -1589,7 +1590,7 @@ class TestBaseDaoSaveUpsertExtended:
         n_rows = 700
 
         def mock_prepare_records(task_type, fn, df_slice):
-            return [{"a": i} for i in range(len(df_slice))]
+            return ([{"a": i} for i in range(len(df_slice))], {})
 
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
@@ -2698,7 +2699,7 @@ class TestSaveUpsertLongTx:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": i, "name": "x"} for i in range(1001)])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": i, "name": "x"} for i in range(1001)], {}))
             mock_stmt = MagicMock()
             mock_stmt.excluded = MagicMock()
             mock_pg.return_value = mock_stmt
@@ -2746,7 +2747,7 @@ class TestSaveUpsertLongTx:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"id": 1, "name": "x"}, {"id": 2, "name": "y"}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "name": "x"}, {"id": 2, "name": "y"}], {}))
             mock_stmt = MagicMock()
             mock_stmt.excluded = MagicMock()
             mock_pg.return_value = mock_stmt
@@ -3233,7 +3234,7 @@ class TestLogAsyncOperationCoverage:
             mock_meta.tables = {"test_table": mock_table}
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=[{"a": 1}])
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"a": 1}], {}))
             mock_stmt = MagicMock()
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
@@ -3246,3 +3247,150 @@ class TestLogAsyncOperationCoverage:
                 f"Expected @log_async_operation SLOW warning with '>5000ms', "
                 f"got records: {[r.message for r in caplog.records]}"
             )
+
+
+class TestSaveUpsertCoerceGate:
+    """DAT-03: _save_upsert 将日期列 coerce 样本登记到 WriteQuality，供健康门控降级。"""
+
+    @pytest.mark.asyncio
+    async def test_coerce_stats_recorded_and_logged(self, caplog):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_col_date = MagicMock()
+        mock_col_date.name = "trade_date"
+        mock_col_date.info = {}
+        mock_col_date.type = Date()
+        mock_table.columns = [mock_col_id, mock_col_date]
+        mock_table.c = {"id": mock_col_id, "trade_date": mock_col_date}
+
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            # 模拟 _prepare_records：2 行记录中 1 行日期字段 coerce 置 NULL
+            mock_tpm_instance.run_async = AsyncMock(
+                return_value=(
+                    [{"id": 1, "trade_date": "2024-01-01"}],
+                    {"trade_date": {"count": 1, "samples": ["2024-01-"]}},
+                )
+            )
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            with caplog.at_level(logging.ERROR, logger="data.persistence.daos.base_dao"):
+                await dao._save_upsert(
+                    pd.DataFrame({"id": [1], "trade_date": ["2024-01-01"]}),
+                    "test_table",
+                    ["id", "trade_date"],
+                    ["id"],
+                    conn=mock_conn,
+                )
+
+        # 1) 脏日期不再静默：触发 error 告警
+        assert any("日期字段无法解析已置 NULL" in r.message for r in caplog.records)
+        # 2) 表级 coerce 率已登记（rows=1, coerced=1 → ratio=1.0），驱动健康门控降级
+        ratio = WriteQuality().get_coerce_ratio("test_table")
+        assert ratio == pytest.approx(1.0)
+        assert WriteQuality().is_degraded("test_table") is True
+
+    @pytest.mark.asyncio
+    async def test_clean_coerce_not_degraded(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_table.columns = [mock_col_id]
+        mock_table.c = {"id": mock_col_id}
+
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            # 无 coerce：coerce_stats 为空
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1]}),
+                "test_table",
+                ["id"],
+                ["id"],
+                conn=mock_conn,
+            )
+
+        assert WriteQuality().get_coerce_ratio("test_table") == pytest.approx(0.0)
+        assert WriteQuality().is_degraded("test_table") is False
+
+    @pytest.mark.asyncio
+    async def test_dirty_date_coerce_real_prepare(self, caplog):
+        """DAT-03/04: 真实执行 _prepare_records，非法日期被 coerce 置 NULL 并登记告警。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_col_date = MagicMock()
+        mock_col_date.name = "dt"
+        mock_col_date.info = {}
+        mock_col_date.type = Date()
+        mock_table.columns = [mock_col_id, mock_col_date]
+        mock_table.c = {"id": mock_col_id, "dt": mock_col_date}
+
+        captured = None
+
+        async def capture_execute(stmt, chunk):
+            nonlocal captured
+            captured = chunk
+
+        mock_conn.execute = capture_execute
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+
+            df = pd.DataFrame({"id": [1, 2], "dt": ["2024-01-01", "not-a-date"]})
+            with caplog.at_level(logging.ERROR, logger="data.persistence.daos.base_dao"):
+                await dao._save_upsert(df, "test_table", ["id", "dt"], ["id"], conn=mock_conn)
+
+        # 脏日期被 coerce 置 NULL（非静默）
+        assert captured is not None
+        assert captured[1]["dt"] is None
+        assert captured[0]["dt"] == datetime.date(2024, 1, 1)
+        assert any("日期字段无法解析已置 NULL" in r.message for r in caplog.records)
+        assert WriteQuality().is_degraded("test_table") is True
