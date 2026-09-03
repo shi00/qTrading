@@ -887,6 +887,142 @@ class TestScreenerDao:
         assert "or_yoy" in result
         assert result["or_yoy"] == 0.0
 
+    async def test_get_screening_data_pit_includes_recently_delisted(
+        self, screener_dao, clean_db, test_engine: AsyncEngine
+    ):
+        """DAT-01: 单日选股 PIT 存活判定 — 已退市但 delist_date 晚于 as_of 的股票在 as_of 时可见。
+
+        修复前 WHERE b.list_status='L' 硬编码会整行滤掉 list_status='D' 的股票，
+        即使其退市日晚于回测日（生存者偏差）；PIT 守卫因此成为死代码。
+        """
+        async with test_engine.begin() as conn:
+            # 2020-01-01 上市、2023-06-30 退市的股票
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('600000.SH', '600000', '退市股', '银行', 'D', '2020-01-01', '2023-06-30')"
+                )
+            )
+            # 对照组：始终在市股票，保证退市日后查询结果非空，断言"排除退市股"而非"整日无数据"
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('000002.SZ', '000002', '在市股', '房地产', 'L', '2020-01-01', NULL)"
+                )
+            )
+            # require_close=True 需要查询日当天的 close 数据
+            # （600000.SH 仅退市前一日；000002.SZ 两日都在市）
+            for d, code in (
+                (date(2023, 1, 5), "600000.SH"),
+                (date(2023, 1, 5), "000002.SZ"),
+                (date(2024, 1, 5), "000002.SZ"),
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                        "VALUES (:code, :d, 12.0, 1.0, 500000, 5000000)"
+                    ),
+                    {"code": code, "d": d},
+                )
+
+        # 退市日前（2023-01-05 < delist_date=2023-06-30）→ PIT 存活，应包含
+        result_before = await screener_dao.get_screening_data(trade_date="20230105")
+        assert not result_before.empty
+        assert "600000.SH" in set(result_before["ts_code"].tolist())
+
+        # 退市日后（2024-01-05 > delist_date=2023-06-30）→ PIT 已退市，应排除（对照组在市股仍包含）
+        result_after = await screener_dao.get_screening_data(trade_date="20240105")
+        assert not result_after.empty
+        assert "600000.SH" not in set(result_after["ts_code"].tolist())
+        assert "000002.SZ" in set(result_after["ts_code"].tolist())
+
+    async def test_get_screening_data_range_pit(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """DAT-01: 区间选股 PIT 存活判定 — 区间内退市前日期包含、退市后日期不包含。"""
+        async with test_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('600000.SH', '600000', '退市股', '银行', 'D', '2020-01-01', '2023-06-30')"
+                )
+            )
+            # 对照组：始终在市股票，保证退市后交易日查询结果非空
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('000002.SZ', '000002', '在市股', '房地产', 'L', '2020-01-01', NULL)"
+                )
+            )
+            # 区间查询依赖 trade_cal 的 is_open=1 交易日（setup_stock_data 未插 trade_cal，须补插）
+            for d in (date(2023, 1, 5), date(2024, 1, 5)):
+                await conn.execute(
+                    text("INSERT INTO trade_cal (cal_date, exchange, is_open) VALUES (:d, 'SSE', 1)"),
+                    {"d": d},
+                )
+            # require_close=True 需要查询日当天的 close 数据
+            # （600000.SH 仅退市前一日；000002.SZ 两日都在市）
+            for d, code in (
+                (date(2023, 1, 5), "600000.SH"),
+                (date(2023, 1, 5), "000002.SZ"),
+                (date(2024, 1, 5), "000002.SZ"),
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                        "VALUES (:code, :d, 12.0, 1.0, 500000, 5000000)"
+                    ),
+                    {"code": code, "d": d},
+                )
+
+        # 区间覆盖退市前（2023-01-05）与退市后（2024-01-05）
+        result = await screener_dao.get_screening_data_range("20230101", "20240131")
+        assert not result.empty
+        # 退市前交易日 → PIT 存活，包含该股票
+        rows_before = result[result["trade_date"] == date(2023, 1, 5)]
+        assert not rows_before.empty
+        assert "600000.SH" in set(rows_before["ts_code"].tolist())
+        # 退市后交易日 → PIT 已退市，不包含该股票（对照组在市股仍包含）
+        rows_after = result[result["trade_date"] == date(2024, 1, 5)]
+        assert not rows_after.empty
+        assert "600000.SH" not in set(rows_after["ts_code"].tolist())
+        assert "000002.SZ" in set(rows_after["ts_code"].tolist())
+
+    async def test_get_screening_data_no_param_excludes_delisted(
+        self, screener_dao, clean_db, test_engine: AsyncEngine
+    ):
+        """DAT-01: 实盘无参路径 — 最近交易日 as_of 不包含已退市股票。
+
+        get_screening_data() 无参时 as_of = MAX(daily_quotes.trade_date)（最近交易日）。
+        退市股 delist_date < as_of → PIT 排除；对照组在市股仍包含。
+        """
+        async with test_engine.begin() as conn:
+            # 2020-01-01 上市、2023-06-30 退市的股票
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('600000.SH', '600000', '退市股', '银行', 'D', '2020-01-01', '2023-06-30')"
+                )
+            )
+            # 对照组：始终在市股票，保证最近交易日查询结果非空
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date, delist_date) "
+                    "VALUES ('000002.SZ', '000002', '在市股', '房地产', 'L', '2020-01-01', NULL)"
+                )
+            )
+            # 最近交易日 2024-01-05（晚于退市日）：仅在市股有行情
+            await conn.execute(
+                text(
+                    "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                    "VALUES ('000002.SZ', :d, 12.0, 1.0, 500000, 5000000)"
+                ),
+                {"d": date(2024, 1, 5)},
+            )
+
+        result = await screener_dao.get_screening_data()
+        assert not result.empty
+        assert "600000.SH" not in set(result["ts_code"].tolist())
+        assert "000002.SZ" in set(result["ts_code"].tolist())
+
 
 @pytest.mark.asyncio
 class TestHolderDao:

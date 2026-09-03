@@ -26,6 +26,7 @@ from data.persistence.models import (
 from data.sync.base import safe_error
 
 from .base_dao import BaseDao, EngineDisposedError
+from .stock_dao import stock_alive_condition
 
 logger = logging.getLogger(__name__)
 
@@ -233,8 +234,8 @@ class QuoteDao(BaseDao):
         同时验证该日期是否为交易日。
 
         Note:
-            退市逻辑必须与 get_bulk_expected_stock_counts 保持同步。
-            WHERE 条件语义：
+            存活判定经 stock_alive_condition() 唯一正本渲染（DAT-01），
+            禁止内联复制 WHERE 条件。语义：
             - list_status='L' 且 delist_date 为空或大于当前日期 → 存活
             - list_status='D' 且 delist_date 非空且大于当前日期 → 存活（退市后仍有数据）
 
@@ -245,6 +246,8 @@ class QuoteDao(BaseDao):
             该日理论上应该有行情数据的股票数量
         """
         try:
+            # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染，
+            # 与 screener_dao 模板替换模式一致（review03-C7：避免 f-string 拼 SQL）。
             df = await self._read_db(
                 """
                 WITH trade_day_check AS (
@@ -258,16 +261,15 @@ class QuoteDao(BaseDao):
                     SELECT COUNT(*) as cnt
                     FROM stock_basic
                     WHERE list_date <= $1
-                      AND (
-                        (list_status = 'L' AND (delist_date IS NULL OR delist_date > $1))
-                        OR
-                        (list_status = 'D' AND delist_date IS NOT NULL AND delist_date > $1)
-                      )
+                      AND __STOCK_ALIVE_CONDITION__
                 )
                 SELECT
                     COALESCE((SELECT is_trade_day FROM trade_day_check), 0) as is_trade_day,
                     (SELECT cnt FROM stock_counts) as cnt
-                """,
+                """.replace(
+                    "__STOCK_ALIVE_CONDITION__",
+                    stock_alive_condition(alias="", as_of="$1"),
+                ),
                 (trade_date,),
             )
 
@@ -786,8 +788,8 @@ class QuoteDao(BaseDao):
         使用 delist_date 精确排除历史退市股票。
 
         Note:
-            退市逻辑必须与 get_expected_stock_count 保持同步。
-            WHERE 条件语义：
+            存活判定经 stock_alive_condition() 唯一正本渲染（DAT-01），
+            禁止内联复制 WHERE 条件。语义：
             - list_status='L' 且 delist_date 为空或大于当前日期 → 存活
             - list_status='D' 且 delist_date 非空且大于当前日期 → 存活（退市后仍有数据）
 
@@ -799,6 +801,8 @@ class QuoteDao(BaseDao):
             dict[日期, 理论存活股票数]
         """
         try:
+            # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染，
+            # 与 screener_dao 模板替换模式一致（review03-C7：避免 f-string 拼 SQL）。
             df = await self._read_db(
                 """
                 WITH trading_days AS (
@@ -815,17 +819,17 @@ class QuoteDao(BaseDao):
                     FROM stock_basic
                     WHERE list_date IS NOT NULL
                       AND list_date <= $2
-                      AND (
-                          (list_status = 'L' AND COALESCE(delist_date, '2099-12-31'::date) > $1)
-                          OR (list_status = 'D' AND delist_date IS NOT NULL AND delist_date > $1)
-                      )
+                      AND __STOCK_ALIVE_CONDITION__
                 )
                 SELECT t.trade_date, COUNT(a.start_date) as expected_count
                 FROM trading_days t
                 LEFT JOIN alive_ranges a ON a.start_date <= t.trade_date AND a.end_date > t.trade_date
                 GROUP BY t.trade_date
                 ORDER BY t.trade_date
-                """,
+                """.replace(
+                    "__STOCK_ALIVE_CONDITION__",
+                    stock_alive_condition(alias="", as_of="$1"),
+                ),
                 (start_date, end_date),
             )
 
@@ -1021,6 +1025,9 @@ class QuoteDao(BaseDao):
         For historical dates where daily_indicators data is unavailable,
         indicator fields are excluded from the result to avoid conflating
         "not yet synced" with "field missing".
+
+        Note: 本查询统计「当前在市股票」的字段覆盖率（list_status='L'），
+        非 PIT 存活判定（见 stock_alive_condition），禁止用历史日期作时点选股池。
         """
         field_sql = """
             SELECT

@@ -328,7 +328,8 @@ class BacktestDataProvider:
 
         使用 ScreenerDao.get_screening_data() 标准 SQL，确保：
         1. 包含 turnover_rate, pe_ttm, pb, total_mv 等完整字段
-        2. 过滤已退市股票 (list_status='L')
+        2. 按 as_of 时点 PIT 存活判定过滤（stock_alive_condition：退市日晚于 as_of 的股票
+           在 as_of 时可见，避免生存者偏差；DAT-01）
         3. 过滤当时未上市股票 (list_date <= trade_date)
         4. 包含 is_tradable 字段（来自 suspend_d 表）
         5. 财报数据满足 ann_date <= trade_date 约束

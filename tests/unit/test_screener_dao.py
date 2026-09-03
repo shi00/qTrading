@@ -4,12 +4,15 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import re
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
 
 from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.quote_dao import QuoteDao
+from data.persistence.daos.stock_dao import stock_alive_condition
 from data.constants import REVIEW_STATUS_COMPLETED
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -376,13 +379,15 @@ class TestScreenerDaoBuildScreeningSql:
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql(require_close=True)
         assert "q.close IS NOT NULL" in sql
-        assert "b.list_status = 'L'" in sql
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql
 
     def test_build_sql_without_close_requirement(self):
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql(require_close=False)
         assert "q.close IS NOT NULL" not in sql
-        assert "b.list_status = 'L'" in sql
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql
 
     def test_build_sql_contains_all_joins(self):
         dao = ScreenerDao(MagicMock())
@@ -411,7 +416,8 @@ class TestScreenerDaoBuildScreeningSql:
         assert "__CLOSE_COND__" not in sql_true
         assert "__CLOSE_COND__" not in sql_false
         assert "WHERE q.close IS NOT NULL" in sql_true
-        assert "WHERE b.list_status = 'L'" in sql_false
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql_false
 
 
 class TestScreenerDaoSwIndustryJoin:
@@ -642,14 +648,16 @@ class TestScreenerDaoBuildScreeningSqlRange:
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql_range(require_close=True)
         assert "q.close IS NOT NULL" in sql
-        assert "b.list_status = 'L'" in sql
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql
         assert "trade_cal" in sql
 
     def test_build_sql_without_close_requirement(self):
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql_range(require_close=False)
         assert "q.close IS NOT NULL" not in sql
-        assert "b.list_status = 'L'" in sql
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql
 
     def test_build_sql_contains_lateral_join(self):
         dao = ScreenerDao(MagicMock())
@@ -670,7 +678,84 @@ class TestScreenerDaoBuildScreeningSqlRange:
         assert "__CLOSE_COND__" not in sql_true
         assert "__CLOSE_COND__" not in sql_false
         assert "WHERE q.close IS NOT NULL" in sql_true
-        assert "WHERE b.list_status = 'L'" in sql_false
+        # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
+        assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql_false
+
+
+class TestScreenerDaoPitCondition:
+    """DAT-01: 选股主路径 PIT 存活判定（生存者偏差修复）。"""
+
+    @staticmethod
+    def _normalize(sql: str) -> str:
+        return "".join(sql.split())
+
+    @staticmethod
+    def _extract_pit_fragment(sql: str) -> str:
+        """提取 SQL 中的 PIT 存活条件片段（((...)) 括号对），供全等断言。"""
+        m = re.search(r"\(\(.*?list_status = 'D'.*?\)\)", sql, re.S)
+        assert m is not None, f"SQL 中未找到 PIT 存活条件片段:\n{sql}"
+        return m.group(0)
+
+    def test_screening_sql_includes_pit_condition(self):
+        """两模板渲染后必须包含 list_status='D' 分支（退市后仍有数据）与 delist_date 比较。"""
+        dao = ScreenerDao(MagicMock())
+        sql_single = dao._build_screening_sql(require_close=True)
+        sql_range = dao._build_screening_sql_range(require_close=True)
+        assert "list_status = 'D'" in sql_single
+        assert "delist_date > $5" in sql_single
+        assert "list_status = 'D'" in sql_range
+        assert "delist_date > cal.cal_date" in sql_range
+
+    def test_build_sql_no_stock_alive_placeholder_residue(self):
+        """DAT-01: __STOCK_ALIVE_CONDITION__ 占位符必须被完全替换，无残留。"""
+        dao = ScreenerDao(MagicMock())
+        sqls = (
+            dao._build_screening_sql(require_close=True),
+            dao._build_screening_sql(require_close=False),
+            dao._build_screening_sql_range(require_close=True),
+            dao._build_screening_sql_range(require_close=False),
+        )
+        for sql in sqls:
+            assert "__STOCK_ALIVE_CONDITION__" not in sql
+            assert "__CLOSE_COND__" not in sql
+
+    @pytest.mark.asyncio
+    async def test_all_stock_pool_sqls_reference_shared_condition(self):
+        """DAT-01 (M2): 四个股票池 SQL 的 PIT 片段必须与 stock_alive_condition() 唯一正本全等。
+
+        逐态断言（alias/as_of 两态 × 单日/区间），规范化空白后全等，防止任何调用方
+        内联复制或改写条件（含 quote_dao 原"保持同步"docstring 约定已被证伪的情况）。
+        """
+        screener = ScreenerDao(MagicMock())
+        quote = QuoteDao(MagicMock())
+
+        # screener 单日模板 → alias="b.", as_of="$5"
+        single = screener._build_screening_sql(require_close=False)
+        assert self._normalize(self._extract_pit_fragment(single)) == self._normalize(
+            stock_alive_condition(alias="b.", as_of="$5")
+        )
+
+        # screener 区间模板 → alias="b.", as_of="cal.cal_date"
+        rng = screener._build_screening_sql_range(require_close=False)
+        assert self._normalize(self._extract_pit_fragment(rng)) == self._normalize(
+            stock_alive_condition(alias="b.", as_of="cal.cal_date")
+        )
+
+        # quote 单日 → alias="", as_of="$1"
+        quote._read_db = AsyncMock(return_value=pd.DataFrame({"is_trade_day": [1], "cnt": [10]}))
+        await quote.get_expected_stock_count("20240101")
+        q_single_sql = quote._read_db.call_args[0][0]
+        assert self._normalize(self._extract_pit_fragment(q_single_sql)) == self._normalize(
+            stock_alive_condition(alias="", as_of="$1")
+        )
+
+        # quote 区间 → alias="", as_of="$1"
+        quote._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240102"], "expected_count": [1]}))
+        await quote.get_bulk_expected_stock_counts("20240101", "20240105")
+        q_rng_sql = quote._read_db.call_args[0][0]
+        assert self._normalize(self._extract_pit_fragment(q_rng_sql)) == self._normalize(
+            stock_alive_condition(alias="", as_of="$1")
+        )
 
 
 class TestScreenerDaoGetScreeningDataRange:

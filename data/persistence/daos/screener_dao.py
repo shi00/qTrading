@@ -13,15 +13,17 @@ from data.sync.base import safe_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 from .base_dao import BaseDao, EngineDisposedError
+from .stock_dao import stock_alive_condition
 
 logger = logging.getLogger(__name__)
 
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
 
-# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__ 为唯一可变点，
-# 由 _build_screening_sql/_build_screening_sql_range 按 require_close 布尔
-# 替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
+# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__ 与 __STOCK_ALIVE_CONDITION__
+# 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range 按 require_close
+# 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
+# __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
@@ -77,9 +79,8 @@ _SCREENING_SQL_TEMPLATE = """
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
-               WHERE __CLOSE_COND__b.list_status = 'L'
-                 AND b.list_date <= $4
-                 AND (b.delist_date IS NULL OR b.delist_date > $5)
+               WHERE __CLOSE_COND__b.list_date <= $4
+                 AND __STOCK_ALIVE_CONDITION__
               """
 
 
@@ -137,9 +138,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
-               WHERE __CLOSE_COND__b.list_status = 'L'
-                 AND b.list_date <= cal.cal_date
-                 AND (b.delist_date IS NULL OR b.delist_date > cal.cal_date)
+               WHERE __CLOSE_COND__b.list_date <= cal.cal_date
+                 AND __STOCK_ALIVE_CONDITION__
               """
 
 
@@ -266,8 +266,10 @@ class ScreenerDao(BaseDao):
         # review03-C7: SQL 模板为模块级静态常量，__CLOSE_COND__ 仅由 require_close
         # 布尔决定两种受控片段（空串 / "q.close IS NOT NULL...\nAND "），无用户输入，
         # 避免 f-string 拼 SQL 模式（列名亦来自 ORM 元数据，非拼接点）。
+        # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染。
         close_clause = "q.close IS NOT NULL\n                 AND " if require_close else ""
-        return _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
+        sql = _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
+        return sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
 
     async def get_screening_data(self, trade_date: str | None = None):
         if not trade_date:
@@ -290,8 +292,13 @@ class ScreenerDao(BaseDao):
     def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
         # review03-C7: 同 _build_screening_sql，__CLOSE_COND__ 仅由 require_close
         # 布尔决定两种受控片段，避免 f-string 拼 SQL 模式。
+        # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染。
         close_clause = "q.close IS NOT NULL AND " if require_close else ""
-        return _SCREENING_SQL_RANGE_TEMPLATE.replace("__CLOSE_COND__", close_clause)
+        sql = _SCREENING_SQL_RANGE_TEMPLATE.replace("__CLOSE_COND__", close_clause)
+        return sql.replace(
+            "__STOCK_ALIVE_CONDITION__",
+            stock_alive_condition(alias="b.", as_of="cal.cal_date"),
+        )
 
     async def get_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=True)

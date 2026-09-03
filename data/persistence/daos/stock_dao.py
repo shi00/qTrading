@@ -23,6 +23,31 @@ from .base_dao import BaseDao, EngineDisposedError
 logger = logging.getLogger(__name__)
 
 
+def stock_alive_condition(alias: str = "", as_of: str = "$1") -> str:
+    """stock_basic 存活判定 SQL 片段（DAT-01 唯一正本，PIT 语义）。
+
+    四处调用方（screener_dao 单日/区间模板、quote_dao 单日/区间查询）必须引用本函数，
+    禁止在各自 SQL 中复制条件（quote_dao 原 docstring 的同步约定已被证伪）。
+
+    语义：
+    - list_status='L' 且 delist_date 为空或晚于 as_of → 存活
+    - list_status='D' 且 delist_date 非空且晚于 as_of → 存活（退市后仍有数据）
+    - 其余（含 'D' 且 delist_date IS NULL 的异常数据）→ 排除
+    - 边界：delist_date == as_of 当日不可见（delist_date > as_of 严格大于，
+      与 quote_dao 原正本一致；delist_date 数据口径待核验，若为"最后交易日"语义
+      存在单日 off-by-one，见 DAT-01 后续任务登记）
+
+    Args:
+        alias: 表别名（screener 传 "b."，quote 传 ""）——必须为代码受控常量，
+               禁止传入任何用户输入（R4 纵深防御）。
+        as_of: 时点参数占位符（"$1" / "$5" / "cal.cal_date"）——同上，受控常量。
+    """
+    return (
+        f"(({alias}list_status = 'L' AND ({alias}delist_date IS NULL OR {alias}delist_date > {as_of}))"
+        f" OR ({alias}list_status = 'D' AND {alias}delist_date IS NOT NULL AND {alias}delist_date > {as_of}))"
+    )
+
+
 class StockDao(BaseDao):
     AI_CONCEPT_PREFIX = "AI_LLM_"
     EM_CONCEPT_PREFIX = "EM_"
