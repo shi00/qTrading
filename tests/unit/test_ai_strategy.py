@@ -215,6 +215,40 @@ class TestAISelectionStrategyFilter:
         result = await s.filter(context)
         assert result.empty
 
+    @pytest.mark.asyncio
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_filter_does_not_drop_delisted_but_alive_stock(self, mock_ch, mock_ai_cls):
+        """DAT-01 (M1): 存活过滤由 DAO PIT 条件承担，策略层不再按当前 list_status 过滤。
+
+        screening_data 中 list_status='D' 但 delist_date 晚于 as_of 的股票（PIT 存活）
+        不得被 filter 丢弃，否则回测引入生存者偏差。
+        """
+        mock_ch.get_ai_max_candidates.return_value = 10
+        mock_ch.get_strategy_min_turnover.return_value = 1.0
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.is_cloud_available.return_value = False
+        mock_ai_cls.return_value = mock_ai_instance
+        s = AISelectionStrategy()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600000.SH"],
+                "name": ["在市", "已退市但PIT存活"],
+                "pe_ttm": [15.0, 20.0],
+                "turnover_rate": [5.0, 6.0],
+                "list_status": ["L", "D"],
+                "pct_chg": [2.0, 3.0],
+            }
+        )
+        context = {
+            "screening_data": df,
+            "fundamental_screening_data": df,
+            "data_processor": _make_dp(),
+        }
+        result = await s.filter(context)
+        assert len(result) == 2, "已退市但 PIT 存活的股票不应被策略层按当前 list_status 丢弃"
+        assert {"000001.SZ", "600000.SH"} == set(result["ts_code"])
+
 
 class TestAISelectionStrategyGetAiContext:
     @patch("strategies.ai_strategy.ConfigHandler")

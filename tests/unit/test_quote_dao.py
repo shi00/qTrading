@@ -701,7 +701,9 @@ class TestQuoteDaoGetBulkExpectedStockCounts:
         await dao.get_bulk_expected_stock_counts("20240101", "20240601")
         sql = dao._read_db.call_args[0][0]
         assert "list_date <= $2" in sql
-        assert "COALESCE(delist_date, '2099-12-31'::date) > $1" in sql
+        # DAT-01: 存活判定经 stock_alive_condition() 唯一正本渲染，区间 join 结构保留
+        assert "COALESCE(delist_date, '2099-12-31'::date) AS end_date" in sql
+        assert "delist_date > $1" in sql
 
 
 class TestQuoteDaoGetSyncQualityScore:

@@ -54,10 +54,13 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         # --- Step 1: Pre-Filter (The Sieve) ---
-        # Rule: Listed, Profitable (PE>0), Active (Turnover > min)
+        # Rule: Profitable (PE>0), Active (Turnover > min)
+        # DAT-01: 存活（Listed）过滤由 DAO 的 PIT 条件承担（as_of 时点判定），
+        # 此处不再按当前 list_status 过滤，否则回测场景会把「已退市但 as_of 时仍存活」
+        # 的股票二次滤除，重新引入生存者偏差。
         min_turnover = ConfigHandler.get_strategy_min_turnover()
 
-        mask = (df["pe_ttm"] > 0) & (df["turnover_rate"] > min_turnover) & (df["list_status"] == "L")
+        mask = (df["pe_ttm"] > 0) & (df["turnover_rate"] > min_turnover)
         candidates = df[mask].copy()
 
         # Sort by turnover_rate desc (Most active), cap at limit
