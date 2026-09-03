@@ -4,11 +4,11 @@
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
-> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-08-13（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
+> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-03（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 > **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
 > - owner: 架构维护者
-> - ruleset_version: 1.1.0（与 CLAUDE.md 同步，规则集版本变更时递增）
-> - last_reviewed: 2026-08-13
+> - ruleset_version: 1.3.0（与 CLAUDE.md 同步，规则集版本变更时递增）
+> - last_reviewed: 2026-09-03
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
 > - supersedes: 无
@@ -149,7 +149,8 @@ cd qTrading
 
 # 创建虚拟环境
 uv venv
-.venv\Scripts\activate  # Windows
+# 激活虚拟环境（Windows / Linux、macOS 激活命令不同，按你的平台执行）
+.venv\Scripts\activate   # Windows (PowerShell / cmd)
 # 或 source .venv/bin/activate  # Linux/macOS
 
 # 在项目 venv 内安装依赖（不要使用 --system，否则会装到系统 Python 与 venv 意图冲突）
@@ -177,7 +178,7 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 > - **本地集成测试库**：`test_astock`（由测试配置自动加载与清空，详见 [测试规范](#测试规范)）
 
 ```bash
-# 创建数据库
+# 创建数据库（POSIX 客户端命令；Windows 用户若未安装 PostgreSQL 客户端，可从 pgAdmin 图形界面创建，库名同为 astock_screener）
 createdb astock_screener
 
 # 运行迁移
@@ -644,10 +645,16 @@ except Exception as e:
 ### docs/governance/ — 治理类机器可读文件
 
 - [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R18 编号/标题/说明/enforcement/human_review_required）
+- [exceptions.yml](./docs/governance/exceptions.yml) — 架构边界例外注册表（rule_id 维度，协议级例外的唯一登记入口）
+- [canonical-topics.yml](./docs/governance/canonical-topics.yml) — 主题→canonical 正本映射（决策树机器可读镜像）
+
+### docs/task-plans/ — 任务计划
+
+- [ux-12-backtest-chart-context-plan.md](./docs/task-plans/ux-12-backtest-chart-context-plan.md) — 回测图表上下文计划（示例：任务计划按需归档与此）
 
 ### docs/reviews/ — AI 代码检视指南
 
-- [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（约 148 行，51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
+- [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
 - [review-profiles/](./docs/reviews/review-profiles/) — 9 个专项 Profile（Web/API、前端/移动、消息/管道、数据库/迁移、CLI/IaC、库/SDK、第三方/RPA、AI/ML/LLM、项目 Profile）
 - [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 10 个通用质量维度详细要点
 - [scenario-completeness.md](./docs/reviews/scenario-completeness.md) — 场景完整性与遗漏方法

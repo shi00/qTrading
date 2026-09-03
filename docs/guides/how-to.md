@@ -104,7 +104,7 @@
 3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
-6. 在 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) 的单例列表中补充新单例名称。
+6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本，勿改 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)，§4.3 仅含登记指引）。
 7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。
 
 ### 9. 内置 PostgreSQL 离线维护

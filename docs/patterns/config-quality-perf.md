@@ -25,3 +25,5 @@
 - **取舍**: 同一函数只挂一个性能装饰器，优先选 `@log_async_operation` (功能更完整)。
 
 **标准性能红线 (`PerfThreshold`)**: 具体数值见 `utils/log_decorators.py`，涵盖内存计算/DB单查询/外部网络/DB批量IO/AI推理/全局初始化六类场景。
+
+> **操作指引**：修改配置项或调整性能相关阈值，入口见 [CLAUDE.md §1.8 决策树](../../CLAUDE.md#18-任务类型--必读文件-决策树)（「修改配置项 / 性能优化 / 阈值调整」均路由到本节）；完整新增策略/DAO 的落地流程见 [docs/guides/how-to.md](../guides/how-to.md)。

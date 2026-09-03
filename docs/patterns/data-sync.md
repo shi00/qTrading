@@ -60,3 +60,5 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - **不实现自动重连**：自动重连会引入重连风暴风险，且会掩盖真实故障（PG 崩溃是异常事件，应让用户看到明确错误并触发诊断流程）。
 - **失败表现**：断连期间 DAO 操作抛 `EngineDisposedError`（R5）或连接池超时异常，经 `classify_error` 分类后按严重度记录；不应静默吞没。
 - **UI 提示映射**：连接失败/`EngineDisposedError` 应映射为可操作用户提示（如"数据库连接已断开，点击重新连接"），而非通用错误——该映射属错误反馈路径（报告 05 范围）。
+
+> **操作指引**：新增/修改数据同步源的完整步骤见 [docs/guides/how-to.md](../guides/how-to.md)「5. 新增一个外部数据源」与「5.1 Tushare 集成工作流（简述）」；新增同步表前须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`，并遵循本节 CLAUDE.md §3.1 R2（取消传播）与 §3.2（质量门控）约束。

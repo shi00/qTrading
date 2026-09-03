@@ -10,7 +10,8 @@
 - [flet/](./flet/README.md) — Flet UI/UX 设计、声明式 API、无障碍、项目差异、MCP 核验、升级与 CanvasKit E2E 避坑入口
 - [debt/](./debt/) — 已知架构技术债（含 Tushare 相关条目：P3-Tushare-Token-Invalid-Race / P3-Tushare-Client-Lazy-Markers）
 - [adr/](./adr/) — 架构决策记录（ADR）
-- [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml）
+- [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml / exceptions.yml / canonical-topics.yml）
+- [task-plans/](./task-plans/) — 任务计划（按需归档，示例见 ux-12-backtest-chart-context-plan.md）
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
 
