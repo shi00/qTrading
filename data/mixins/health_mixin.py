@@ -43,6 +43,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# DAT-02: adj_factor 缺失率告警阈值（QualityScan 采样中缺失率超过该比例则告警）
+_ADJ_FACTOR_NULL_RATIO_WARN = 0.1
+
 
 def _compute_tier(
     lag_days: int,
@@ -754,6 +757,20 @@ class HealthCheckMixin:
                         ["close", "vol"],
                     )
                     scan_results["nulls"].append(null_res.get("close", 0.0))
+
+                    # Check adj_factor monotonicity + null ratio (DAT-02)
+                    adj_health = DataQualityService.check_adj_factor_monotonic(df_daily)
+                    if adj_health["violations"]:
+                        logger.warning(
+                            "[DataProcessor] QualityScan | ⚠️ adj_factor 非单调: %s",
+                            adj_health["violations"],
+                        )
+                    if adj_health["null_ratio"] > _ADJ_FACTOR_NULL_RATIO_WARN:
+                        logger.warning(
+                            "[DataProcessor] QualityScan | ⚠️ adj_factor 缺失率 %.0f%%: %s",
+                            adj_health["null_ratio"] * 100,
+                            ts_code,
+                        )
 
             # 4. Aggregate Quote Metrics
             avg_continuity = (

@@ -969,6 +969,7 @@ class TushareClient:
 
         # 2. Fetch Adj Factor
         # Tushare adj_factor API has same signature logic
+        _adj_ctx = ts_code or trade_date or "batch"
         try:
             df_adj = await self._handle_api_call(
                 self.pro.adj_factor,
@@ -978,11 +979,26 @@ class TushareClient:
                 trade_date=trade_date,
             )
 
-            if df_adj is not None and not df_adj.empty:
+            if df_adj is None or df_adj.empty:
+                # 数据为空：不 merge，保留 NULL，避免把"数据不完整"编码为因子=1
+                logger.warning(
+                    "[API] adj_factor data missing/incomplete (empty), adj_factor left NULL for %s", _adj_ctx
+                )
+            elif "trade_date" not in df_adj.columns or "ts_code" not in df_adj.columns:
+                logger.warning(
+                    "[API] adj_factor data missing/incomplete (missing trade_date/ts_code columns), "
+                    "adj_factor left NULL for %s",
+                    _adj_ctx,
+                )
+            else:
                 # Merge logic
                 # Tushare returns trade_date, ts_code, adj_factor
-                # Ensure keys specifically
-                if "trade_date" in df_adj.columns and "ts_code" in df_adj.columns:
+                if "adj_factor" not in df_adj.columns:
+                    logger.warning(
+                        "[API] adj_factor data missing/incomplete (no adj_factor column), adj_factor left NULL for %s",
+                        _adj_ctx,
+                    )
+                else:
                     df_daily = pd.merge(
                         df_daily,
                         df_adj[["ts_code", "trade_date", "adj_factor"]],
@@ -990,13 +1006,15 @@ class TushareClient:
                         how="left",
                     )
         except Exception as e:
-            logger.warning("[API] Failed to fetch adj_factor: %s, using default 1.0", DataSanitizer.sanitize_error(e))
+            logger.warning("[API] Failed to fetch adj_factor: %s", DataSanitizer.sanitize_error(e))
 
-        # Fill NaN adj_factor with 1.0
-        if "adj_factor" in df_daily.columns:
-            df_daily["adj_factor"] = df_daily["adj_factor"].fillna(1.0)
+        # 保留 NULL：确保 adj_factor 列始终存在（值可为 NULL），不兜底 1.0
+        if "adj_factor" not in df_daily.columns:
+            df_daily["adj_factor"] = pd.Series(pd.NA, index=df_daily.index)
         else:
-            df_daily["adj_factor"] = 1.0
+            n_nan = int(df_daily["adj_factor"].isna().sum())
+            if n_nan > 0:
+                logger.warning("[API] %d rows have no adj_factor match, left NULL for %s", n_nan, _adj_ctx)
 
         return df_daily
 

@@ -114,6 +114,48 @@ class TestPriceAdjustment:
         # Stock2: 基准为最新一日 adj_factor=1.0, Day2 adj_factor=1.0 → qfq_close = 22.2
         assert stock2["qfq_close"].to_list()[1] == pytest.approx(22.2, rel=0.01)
 
+    def test_apply_qfq_middle_null_no_jump(self) -> None:
+        """中间日 adj_factor 缺失（NULL）应 ffill 延续，不产生幻影跳变（DAT-02）。
+
+        对照：中间日被污染为 1.0（历史静默降级产物）会产生幻影跳变，
+        证明单调性检查（DataQualityService.check_adj_factor_monotonic）的必要性；
+        消费侧保持 ffill/bfill 延续语义，不做变更。
+        """
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        def build(adj_factor: list[float | None]) -> pl.DataFrame:
+            return pl.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                    "open": [10.0, 10.5, 11.0],
+                    "high": [10.5, 11.0, 11.5],
+                    "low": [9.5, 10.0, 10.5],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": adj_factor,
+                }
+            )
+
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        baseline = engine._apply_qfq(build([1.5, 1.5, 2.0]))["qfq_close"].to_list()
+        middle_null = engine._apply_qfq(build([1.5, None, 2.0]))["qfq_close"].to_list()
+        polluted = engine._apply_qfq(build([1.5, 1.0, 2.0]))["qfq_close"].to_list()
+
+        # NULL 经 ffill/bfill 延续 → 与无缺失基线完全一致，无额外跳变
+        assert middle_null == pytest.approx(baseline)
+
+        # 中间日 qfq_close 相对前一日变化 < 20%（无幻影跳变）
+        assert (middle_null[1] / middle_null[0] - 1) < 0.2
+
+        # 中间日污染为 1.0 → 该日 qfq_close 显著低于基线（幻影跳变），
+        # 证明单调性不变量检查确有必要
+        assert polluted[1] < baseline[1] * 0.8
+
 
 class TestExRightDate:
     """除权日复权价格计算专项测试"""
