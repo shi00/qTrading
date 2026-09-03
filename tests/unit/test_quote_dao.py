@@ -639,6 +639,29 @@ class TestQuoteDaoGetFieldCompleteness:
         result = await dao.get_field_completeness("20240615")
         assert result == {}
 
+    @pytest.mark.asyncio
+    async def test_sql_includes_ann_date_not_null(self):
+        """DAT-06: 字段完整度财务子查询必须显式 ann_date IS NOT NULL，防回退。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "total": [100],
+                    "indicators_available": [80],
+                    "roe_count": [70],
+                    "or_yoy_count": [60],
+                    "netprofit_yoy_count": [50],
+                    "dv_ttm_count": [40],
+                    "pe_ttm_count": [80],
+                    "pb_count": [80],
+                    "debt_to_assets_count": [60],
+                }
+            )
+        )
+        await dao.get_field_completeness("20240615")
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
 
 class TestQuoteDaoSaveIndexDailybasic:
     @pytest.mark.asyncio

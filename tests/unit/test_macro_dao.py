@@ -171,6 +171,8 @@ class TestMacroDaoGetMacroEconomyLatest:
         stmt = dao._read_db_select.call_args[0][0]
         sql_str = str(stmt)
         assert "publish_date <=" in sql_str
+        # DAT-06: publish_date 与 ann_date 同构的可空 PIT 键，必须显式 IS NOT NULL
+        assert "publish_date IS NOT NULL" in sql_str
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
@@ -181,6 +183,8 @@ class TestMacroDaoGetMacroEconomyLatest:
         stmt = dao._read_db_select.call_args[0][0]
         sql_str = str(stmt)
         assert "publish_date <=" not in sql_str
+        # DAT-06: 非 as-of 分支同样必须显式 IS NOT NULL，消除两分支口径差
+        assert "publish_date IS NOT NULL" in sql_str
 
 
 class TestMacroDaoGetShiborLatestWithAsOfDate:

@@ -7,11 +7,14 @@
 - L2: 批量预取避免 N+1 查询
 """
 
+import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
+import pytest_asyncio
+from sqlalchemy import text
 
 from data.persistence.daos.financial_dao import FinancialDao
 
@@ -243,3 +246,70 @@ class TestCashflowField:
 
             assert "n_cashflow_act" in df.columns
             assert df["n_cashflow_act"].iloc[0] == 100000000
+
+
+@pytest_asyncio.fixture
+async def setup_ann_date_null_rows(function_engine):
+    """DAT-06: 插入 999999.SZ 的 ann_date 有效/NULL 两行，teardown 定向清理（与 MVD 无冲突）。
+
+    自包含 fixture：不依赖 setup_stock_data 字面数据；999999.SZ 与 MVD ts_code 无冲突。
+    """
+    async with function_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
+                "VALUES ('999999.SZ', '2024-06-30', '2024-07-01', 10.0)"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
+                "VALUES ('999999.SZ', '2024-12-31', NULL, 20.0)"
+            )
+        )
+    yield
+    async with function_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM financial_reports WHERE ts_code = '999999.SZ'"))
+
+
+class TestDat06AnnDateNull:
+    """DAT-06: ann_date IS NULL 行在 PIT/非 PIT 双分支的口径一致性（回测/实盘不分叉）。"""
+
+    @pytest.fixture
+    def financial_dao(self, function_engine):
+        return FinancialDao(function_engine)
+
+    @pytest.mark.asyncio
+    async def test_financial_history_pit_ann_date_null_consistency(self, financial_dao, setup_ann_date_null_rows):
+        """T1: as-of 与非 as-of 两分支的 end_date 集合一致，且均仅含有效行 {2024-06-30}。
+
+        修复前非 as-of 分支会返回 NULL ann_date 行（2024-12-31）→ 集合为 {06-30, 12-31} → 断言失败。
+        """
+        asof = await financial_dao.get_financial_reports_history("999999.SZ", as_of_date=datetime.date(2024, 12, 31))
+        latest = await financial_dao.get_financial_reports_history("999999.SZ", as_of_date=None)
+        assert set(asof["end_date"]) == {datetime.date(2024, 6, 30)}
+        assert set(latest["end_date"]) == {datetime.date(2024, 6, 30)}
+
+    @pytest.mark.asyncio
+    async def test_financial_history_batch_pit_ann_date_null_consistency(self, financial_dao, setup_ann_date_null_rows):
+        """T2: batch 版本同样保证双分支一致，仅返回有效行。"""
+        asof = await financial_dao.get_financial_reports_history_batch(
+            ["999999.SZ"], as_of_date=datetime.date(2024, 12, 31)
+        )
+        latest = await financial_dao.get_financial_reports_history_batch(["999999.SZ"], as_of_date=None)
+        assert set(asof["end_date"]) == {datetime.date(2024, 6, 30)}
+        assert set(latest["end_date"]) == {datetime.date(2024, 6, 30)}
+
+    @pytest.mark.asyncio
+    async def test_has_ann_date_nulls_true_with_null_row(self, financial_dao, setup_ann_date_null_rows):
+        """T3: 存在 NULL ann_date 行时 has_ann_date_nulls() 返回 True（非零即告警）。"""
+        assert await financial_dao.has_ann_date_nulls() is True
+
+    @pytest.mark.asyncio
+    async def test_has_ann_date_nulls_false_on_clean_mvd(self, financial_dao):
+        """T3b: 干净 MVD（所有 ann_date 非空）下返回 False。
+
+        依赖隐式约定：MVD 造数（mvd_data.py MVD_FINANCIAL_REPORTS）不得含 ann_date NULL 行，
+        否则本测试会假失败——新增 NULL 行造数时需同步更新本断言。
+        """
+        assert await financial_dao.has_ann_date_nulls() is False

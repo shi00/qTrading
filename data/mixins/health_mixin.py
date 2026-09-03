@@ -7,6 +7,7 @@ Expected host class attributes: cache, trade_calendar, is_cancelled(), clear_can
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import time
@@ -30,6 +31,7 @@ from data.constants import (
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.write_quality import WriteQuality
 from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
@@ -511,6 +513,25 @@ class HealthCheckMixin:
                     I18n.get("health_breadth_warning").format(
                         count=len(missing_breadth),
                     ),
+                )
+
+            # DAT-06: financial_reports 存在 ann_date IS NULL 的行 → 回测/实盘口径分叉。
+            # 仅告警 + reasons 可见（健康面板），不硬降级 tier/status（review「非零即告警」）。
+            try:
+                if await self.cache.financial_dao.has_ann_date_nulls():
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ financial_reports 存在 ann_date 为 NULL 的行（DAT-06），"
+                        "回测/实盘口径将分叉",
+                    )
+                    reasons.append("financial_reports has rows with NULL ann_date")
+            except asyncio.CancelledError:
+                raise
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.debug(
+                    "[DataProcessor] Health | ann_date NULL check skipped: %s",
+                    DataSanitizer.sanitize_error(e),
                 )
 
             # Log Metrics

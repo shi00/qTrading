@@ -110,7 +110,7 @@ class HolderDao(BaseDao):
                     SELECT ts_code, end_date, ann_date, holder_name, hold_amount,
                            hold_ratio, hold_float_ratio, hold_change, holder_type
                     FROM top10_holders
-                    WHERE ts_code = $1 AND ann_date <= $2
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
                     ORDER BY end_date DESC, hold_ratio DESC
                     LIMIT 20
                     """,
@@ -122,7 +122,7 @@ class HolderDao(BaseDao):
                     SELECT ts_code, end_date, ann_date, holder_name, hold_amount,
                            hold_ratio, hold_float_ratio, hold_change, holder_type
                     FROM top10_holders
-                    WHERE ts_code = $1
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL
                     ORDER BY end_date DESC, hold_ratio DESC
                     LIMIT 20
                     """,
@@ -147,7 +147,7 @@ class HolderDao(BaseDao):
                     SELECT ts_code, end_date, ann_date, holder_num,
                            holder_num_change, holder_num_ratio
                     FROM stk_holdernumber
-                    WHERE ts_code = $1 AND ann_date <= $2
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
                     ORDER BY end_date DESC
                     LIMIT 5
                     """,
@@ -159,7 +159,7 @@ class HolderDao(BaseDao):
                     SELECT ts_code, end_date, ann_date, holder_num,
                            holder_num_change, holder_num_ratio
                     FROM stk_holdernumber
-                    WHERE ts_code = $1
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL
                     ORDER BY end_date DESC
                     LIMIT 5
                     """,
@@ -190,6 +190,7 @@ class HolderDao(BaseDao):
                             ts_code, end_date, ann_date, holder_name, hold_ratio
                         FROM top10_holders
                         WHERE ts_code IN ({placeholders})
+                          AND ann_date IS NOT NULL
                           AND ann_date <= ${ann_date_param}
                         ORDER BY ts_code, end_date DESC, hold_ratio DESC
                     """
@@ -201,6 +202,7 @@ class HolderDao(BaseDao):
                     ts_code, end_date, ann_date, holder_name, hold_ratio
                 FROM top10_holders
                 WHERE ts_code IN ({placeholders})
+                  AND ann_date IS NOT NULL
                 ORDER BY ts_code, end_date DESC, hold_ratio DESC
                 """,
                 None,
@@ -224,7 +226,8 @@ class HolderDao(BaseDao):
                             SELECT *,
                                 ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                             FROM stk_holdernumber
-                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
+                            WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
+                              AND ann_date <= ${ann_date_param}
                         ) sub
                         WHERE rn <= 5
                         ORDER BY ts_code, end_date DESC
@@ -239,7 +242,7 @@ class HolderDao(BaseDao):
                     SELECT *,
                         ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                     FROM stk_holdernumber
-                    WHERE ts_code IN ({placeholders})
+                    WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
                 ) sub
                 WHERE rn <= 5
                 ORDER BY ts_code, end_date DESC
