@@ -20,6 +20,12 @@ from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
+# DAT-05: Tushare pledge_stat API 不返回 ann_date（MD-001），PIT 过滤只能退回 end_date。
+# 质押统计实际披露晚于报告期结束数周，直接 `end_date <= as_of` 会形成约 3~4 周未来函数
+# （回测提前读到未公告数据，系统性高估风控能力）。采用保守滞后：报告期结束 + 45 天视为
+# 可见（参考 data/sync/macro.py _compute_publish_date 的估算模式）。
+_PLEDGE_PIT_LAG_DAYS = 45
+
 
 class FinancialDao(BaseDao):
     async def save_financial_reports(self, df: pd.DataFrame, conn=None):
@@ -333,7 +339,7 @@ class FinancialDao(BaseDao):
                             ts_code, end_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${start_idx + chunk_len}
+                          AND end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
                         """
                     ),

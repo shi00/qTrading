@@ -11,6 +11,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
+from data.persistence.daos.financial_dao import _PLEDGE_PIT_LAG_DAYS
 
 pytestmark = pytest.mark.unit
 
@@ -87,7 +88,7 @@ class TestGetPledgeDetailBatch:
 
     @pytest.mark.asyncio
     async def test_get_pledge_detail_batch_with_as_of_date_passes_param(self):
-        """as_of_date 非空时使用带 end_date <= $N 过滤的 SQL 模板。"""
+        """as_of_date 非空时使用带 PIT 滞后过滤（end_date + INTERVAL lag days <= $N）的 SQL 模板。"""
         dao = _make_dao()
         expected = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240630"]})
         dao.chunked_in_query = AsyncMock(return_value=expected)
@@ -96,10 +97,16 @@ class TestGetPledgeDetailBatch:
 
         pd.testing.assert_frame_equal(result, expected)
         dao.chunked_in_query.assert_awaited_once()
-        call_kwargs = dao.chunked_in_query.call_args.kwargs
+        call_args = dao.chunked_in_query.call_args
+        call_kwargs = call_args.kwargs
         # params_fn 应返回 [as_of_date]
         params_fn = call_kwargs["params_fn"]
         assert params_fn(["000001.SZ"]) == ["20240630"]
+        # DAT-05: SQL 模板应包含保守滞后谓词，避免 end_date 直接做 PIT 的未来函数
+        # chunked_in_query(_read_db, sql_template, ts_codes, ...)，args[1] 即 as_of 分支的模板函数
+        sql_template = call_args.args[1]
+        sql = sql_template("$1,$2", 2, 0)
+        assert f"end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <=" in sql
 
     @pytest.mark.asyncio
     async def test_get_pledge_detail_batch_without_as_of_date_uses_simple_template(self):

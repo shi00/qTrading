@@ -9,7 +9,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.financial_dao import FinancialDao
+from data.persistence.daos.financial_dao import FinancialDao, _PLEDGE_PIT_LAG_DAYS
 
 pytestmark = pytest.mark.unit
 
@@ -587,7 +587,7 @@ class TestGetPledgeStatBatch:
         result = await dao.get_pledge_stat_batch(["000001.SZ"], as_of_date="20240701")
         assert not result.empty
         sql = dao._read_db.call_args[0][0]
-        assert "end_date <=" in sql
+        assert f"end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <=" in sql
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):
