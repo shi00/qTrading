@@ -419,6 +419,32 @@ class TestShutdownCoordinatorCleanupSteps:
             await coord._step6_shutdown_thread_pools()
 
     @pytest.mark.asyncio
+    async def test_step6_shutdown_calls_request_cancel_when_service_present(self):
+        """CON-04: 停机前应终止在途可取消 sidecar 命令（用户备份中关闭应用）。"""
+        coord = ShutdownCoordinator()
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("services.embedded_pg_maintenance_service.EmbeddedPgMaintenanceService") as mock_epg,
+        ):
+            mock_tpm._instance = MagicMock()
+            mock_instance = MagicMock()
+            mock_epg._instance = mock_instance
+            await coord._step6_shutdown_thread_pools()
+            mock_instance.request_cancel.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_step6_shutdown_skips_request_cancel_when_service_absent(self):
+        """CON-04: 维护服务未初始化时 Step 6 跳过 request_cancel，不抛异常。"""
+        coord = ShutdownCoordinator()
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("services.embedded_pg_maintenance_service.EmbeddedPgMaintenanceService") as mock_epg,
+        ):
+            mock_tpm._instance = MagicMock()
+            mock_epg._instance = None
+            await coord._step6_shutdown_thread_pools()
+
+    @pytest.mark.asyncio
     async def test_step7_close_database_managers_calls_close_all(self):
         """Step 7 应调用 DataExplorerQueryClient.close_all() 关闭所有同步引擎。"""
         coord = ShutdownCoordinator()

@@ -3,7 +3,7 @@
 职责：
 - 调用 sidecar CLI 的 doctor/dump/restore/maintenance-shell 子命令
 - 解析 JSON 输出，校验 schema 版本（R-A3: ``qtrading.embedded_postgres.doctor.v1``）
-- 通过 ThreadPoolManager 提交同步 subprocess.run 避免阻塞事件循环（R16）
+- 通过 ThreadPoolManager 提交同步 subprocess（R16: 不阻塞事件循环）；dump 类命令暴露句柄可取消（CON-04）
 - 错误分类映射（exit code → 错误类型 + 日志级别 + 用户提示）
 
 设计要点：
@@ -132,6 +132,9 @@ class EmbeddedPgMaintenanceService:
         with self._lock:
             if self._initialized:
                 return
+            # CON-04: 在途可取消命令句柄（仅 dump 类注册）。__init__ 内初始化，保证
+            # "开过备份面板但未执行备份就关机"时 request_cancel() 可安全读取。
+            self._active_proc: subprocess.Popen | None = None
             self._initialized = True
 
     @classmethod
@@ -180,7 +183,8 @@ class EmbeddedPgMaintenanceService:
             asyncio.CancelledError: R2 透传
         """
         argv = await asyncio.to_thread(self._build_dump_argv, output_path)
-        exit_code, stdout, stderr = await self._run_sidecar(argv)
+        # CON-04: dump 是可安全中断的备份类命令，注册句柄供 request_cancel() 停机终止
+        exit_code, stdout, stderr = await self._run_sidecar(argv, cancel_allowed=True)
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "dump")
         path = Path(output_path)
@@ -300,31 +304,92 @@ class EmbeddedPgMaintenanceService:
 
     # ---- subprocess 调用 ----
 
-    async def _run_sidecar(self, argv: list[str]) -> tuple[int, str, str]:
+    async def _run_sidecar(self, argv: list[str], *, cancel_allowed: bool = False) -> tuple[int, str, str]:
         """调用 sidecar CLI，返回 ``(exit_code, stdout, stderr)``。
 
-        通过 ThreadPoolManager 提交同步 subprocess.run（R16: 不阻塞事件循环）。
-        timeout=3600s 匹配 sidecar dump/restore 大库耗时。
+        通过 ThreadPoolManager 提交同步 subprocess（R16: 不阻塞事件循环）。
+        - 用 Popen 而非 run：暴露进程句柄供 ``request_cancel()`` 终止在途 dump（CON-04）。
+          注：terminate 为硬杀（sidecar 未装信号处理器，Windows 即 TerminateProcess），且仅
+          终止 sidecar 包装进程——在线路径下孤儿 pg_dump 可能继续写 .partial，直到其自然
+          结束 / Step 8 停止 PG / 进程退出回收；dump 中断残留 .partial 由 sidecar doctor
+          dump_partials 检测（不自动清理，见技术债 P3-CON04）。
+        - TimeoutExpired 时 kill 子进程（subprocess.run 超时不杀进程会泄漏）。
+        - ``cancel_allowed=True`` 仅 dump 类可安全中断操作（restore 拒绝取消，数据一致性优先）。
         """
 
         def _run() -> tuple[int, str, str]:
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            registered = False
+            if cancel_allowed:
+                with self._lock:
+                    if self._active_proc is not None:  # 并发 dump guard（UI is_backing_up 异步传播可能被双击击穿）
+                        # 拒绝并发 dump：终止并回收刚启动的进程，避免僵尸/管道泄漏。
+                        # kill/communicate 合并容错：进程恰在竞态窗口自然退出时 kill 抛
+                        # ProcessLookupError(OSError)，忽略清理异常、保留并发拒绝业务异常。
+                        try:
+                            proc.kill()
+                            proc.communicate()
+                        except OSError:
+                            pass  # 进程已被回收
+                        raise EmbeddedPgMaintenanceError("已有备份任务在进行中，请先完成后再试")
+                    self._active_proc = proc
+                    registered = True
             try:
-                proc = subprocess.run(argv, capture_output=True, text=True, timeout=3600)
-                return proc.returncode, proc.stdout, proc.stderr
-            except subprocess.TimeoutExpired as exc:
-                # review03-C19: 超时经业务异常包装，用户看到可操作提示而非原始 subprocess 异常
-                severity = classify_severity(exc, "general")
-                logger.log(
-                    logging.WARNING if severity == "recoverable" else logging.ERROR,
-                    "[embedded_pg_maintenance] sidecar command timed out (severity=%s): %s",
-                    severity,
-                    DataSanitizer.sanitize_error(str(argv[:2])),
-                )
-                raise EmbeddedPgMaintenanceError(
-                    f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
-                ) from exc
+                try:
+                    stdout, stderr = proc.communicate(timeout=3600)
+                    return proc.returncode, stdout, stderr
+                except subprocess.TimeoutExpired as exc:
+                    # review03-C19: 超时经业务异常包装；同时 kill 子进程回收输出，避免泄漏。
+                    # kill/communicate 合并容错：进程在超时与 kill 竞态窗口自然退出时，
+                    # kill 抛 ProcessLookupError(OSError)，忽略清理异常、保留超时业务异常。
+                    try:
+                        proc.kill()
+                        proc.communicate()
+                    except OSError:
+                        pass  # 进程已被回收，忽略输出回收异常
+                    severity = classify_severity(exc, "general")
+                    logger.log(
+                        logging.WARNING if severity == "recoverable" else logging.ERROR,
+                        "[embedded_pg_maintenance] sidecar command timed out (severity=%s): %s",
+                        severity,
+                        DataSanitizer.sanitize_error(str(argv[:2])),
+                    )
+                    raise EmbeddedPgMaintenanceError(
+                        f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
+                    ) from exc
+            finally:
+                if registered:
+                    with self._lock:
+                        self._active_proc = None
 
         return await ThreadPoolManager().run_async(TaskType.IO, _run)
+
+    def request_cancel(self) -> bool:
+        """请求终止在途的可取消 sidecar 命令（当前仅 dump）。返回是否已发起终止。
+
+        同步、非阻塞方法（非协程，禁止 await；terminate 为瞬时 syscall，可在事件循环线程调用）。
+        无活动命令或 restore/doctor/shell 命令返回 False。
+        注：terminate 仅终止 sidecar 包装进程——在线路径下孤儿 pg_dump 可能继续写 .partial，
+        由进程退出 / Step 8 停止 PG / OS 进程树清理兜底（见技术债 P3-CON04）。
+        terminate 在锁内调用（与非阻塞 syscall 串行化，消除 stale-PID 竞态窗口）；
+        OSError 表示进程已在竞态窗口自然退出，视为已终止。
+        """
+        with self._lock:
+            proc = self._active_proc
+            if proc is None:
+                return False
+            try:
+                proc.terminate()
+            except OSError:
+                # 进程已自然退出，视为已终止；日志在锁外打印（避免锁内 IO）
+                already_exited = True
+            else:
+                already_exited = False
+        if already_exited:
+            logger.info("[embedded_pg_maintenance] request_cancel: active sidecar command already exited")
+        else:
+            logger.info("[embedded_pg_maintenance] request_cancel: terminating active sidecar command")
+        return True
 
     # ---- 错误分类 ----
 

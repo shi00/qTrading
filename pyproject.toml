@@ -251,6 +251,7 @@ ignore_imports = [
     "utils.shutdown -> data.domain_services.market_data_service",
     "utils.shutdown -> data.persistence.data_explorer_query_client",
     "utils.shutdown -> data.persistence.embedded_postgres.service",
+    "utils.shutdown -> services.embedded_pg_maintenance_service",
     "utils.shutdown -> services.local_model_manager",
     "utils.shutdown -> services.news_subscription_service",
     "utils.shutdown -> services.task_manager",
