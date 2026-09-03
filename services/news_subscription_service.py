@@ -393,7 +393,9 @@ class NewsSubscriptionService:
                     self.processing_queue.task_done()  # type: ignore[union-attr]
                     continue
 
-                content_hash = item.get("content_hash", hashlib.md5(content.encode()).hexdigest()[:12])
+                content_hash = item.get(
+                    "content_hash", hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
+                )  # 内容去重，非安全用途
                 with correlation_scope(f"news-{content_hash}"):
                     tags = await self._generate_tags(content)
                     item["tags"] = tags
