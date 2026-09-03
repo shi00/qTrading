@@ -11,6 +11,7 @@ import pandas as pd
 from data.persistence.models import PledgeDetail, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
+from .financial_dao import _PLEDGE_PIT_LAG_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,9 @@ class PledgeDetailDao(BaseDao):
 
         Args:
             ts_codes: 股票代码列表
-            as_of_date: 截止日期（YYYYMMDD 或 date），仅返回 end_date <= as_of_date 的记录；
-                None 时不过滤日期。
+            as_of_date: 截止日期（YYYYMMDD 或 date），仅返回 end_date + 滞后窗口 <= as_of_date
+                的记录；None 时不过滤日期。质押明细无 ann_date（DAT-05），采用保守滞后
+                （_PLEDGE_PIT_LAG_DAYS）避免未来函数。
 
         Returns:
             DataFrame，每个 ts_code 取最近一条 end_date 记录。
@@ -54,7 +56,7 @@ class PledgeDetailDao(BaseDao):
                             total_pledge_amount, pledge_ratio
                         FROM pledge_detail
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${start_idx + chunk_len}
+                          AND end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
                         """
                     ),
