@@ -97,6 +97,25 @@ class TestFinancialSyncRun:
         assert isinstance(result, SyncResult)
 
     @pytest.mark.asyncio
+    async def test_full_sync_includes_delisted_stocks(self):
+        """DAT-04: 财务同步股票池覆盖退市股票（list_status='D'），消除基本面生存者偏差。"""
+        ctx = make_ctx()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "list_status": ["L", "D"],  # 000002.SZ 已退市
+                }
+            )
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+        income_calls = [call.kwargs.get("ts_code") for call in ctx.api.get_income.await_args_list]
+        assert "000001.SZ" in income_calls
+        assert "000002.SZ" in income_calls
+
+    @pytest.mark.asyncio
     async def test_incremental_sync_reports_progress_done(self):
         """D7: 增量 sync 的 progress_sync_done 上报 Message({'day': ...}) 而非已翻译字符串。"""
         ctx = make_ctx()
