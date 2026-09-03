@@ -9,6 +9,7 @@ import ast
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
+    _check_R4_text_fstring_in_tree,
     _check_R_no_bare_ft_colors_in_tree,
     _check_R_no_bare_font_size_in_tree,
     _decorator_names,
@@ -43,6 +45,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R4,
     check_R4_in_tests,
     check_R4_literal_assignments,
+    check_R4_text_fstring_sql,
     check_R_no_bare_ft_colors_in_ui,
     check_R_no_bare_font_size_in_ui,
     main,
@@ -218,6 +221,75 @@ class TestR4FstringFunction:
         code = 'sql = "SELECT * FROM t"\n'
         warnings = self._warn(code)
         assert warnings == []
+
+
+class TestR4TextFstringFunction:
+    """R4 补充检测（DAT-08）：``text(f"...")`` / ``sa.text(f"...")`` 形态，ERROR 语义。
+
+    覆盖场景：
+    - text(f"...") / sa.text(f"...") 应被检测
+    - 行尾 ``# noqa: R4`` 豁免（对齐 _check_R4_literal_assignments_in_tree 惯例）
+    - ft.Text(f"...") 等大写控件名、其它对象方法 text(f"...") 不误报
+    - 普通字符串（非 f-string）与变量参数不检测
+    """
+
+    def _check(self, code: str, *, add_noqa: bool = False) -> list[str]:
+        tree = ast.parse(code)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "fake_module.py"
+            content = code + ("  # noqa: R4\n" if add_noqa else "")
+            p.write_text(content, encoding="utf-8")
+            return _check_R4_text_fstring_in_tree(tree, p)
+
+    def test_text_fstring_detected(self):
+        """text(f"...") 拼 SQL 应被检测为 ERROR。"""
+        code = "from sqlalchemy import text\nconn.execute(text(f\"SET LOCAL timeout = '{t}'\"))"
+        errors = self._check(code)
+        assert len(errors) == 1
+        assert "R4 f-string 拼接 SQL" in errors[0]
+
+    def test_sa_text_fstring_detected(self):
+        """sa.text(f"...") 形态应被检测为 ERROR。"""
+        code = 'conn.execute(sa.text(f"SELECT {cols} FROM t"))'
+        errors = self._check(code)
+        assert len(errors) == 1
+        assert "R4 f-string 拼接 SQL" in errors[0]
+
+    def test_sqlalchemy_text_fstring_detected(self):
+        """sqlalchemy.text(f"...") 形态应被检测为 ERROR。"""
+        code = 'conn.execute(sqlalchemy.text(f"SELECT * FROM {tbl}"))'
+        errors = self._check(code)
+        assert len(errors) == 1
+
+    def test_noqa_exempted(self):
+        """行尾 # noqa: R4 应豁免 text(f"...")。"""
+        code = "conn.execute(text(f\"SET LOCAL timeout = '{t}'\"))"
+        errors = self._check(code, add_noqa=True)
+        assert errors == []
+
+    def test_ft_text_not_flagged(self):
+        """ft.Text(f"...") 大写控件名不应误报。"""
+        code = 'ft.Text(f"row {i} loaded")'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_object_method_text_not_flagged(self):
+        """其它对象的方法 text(f"...") 不应误报（非 SQLAlchemy text）。"""
+        code = 'obj.text(f"anything {x}")'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_plain_string_not_flagged(self):
+        """text("...") 普通字符串（非 f-string）不应检测。"""
+        code = 'conn.execute(text("SELECT 1"))'
+        errors = self._check(code)
+        assert errors == []
+
+    def test_variable_arg_not_flagged(self):
+        """text(var) 变量参数（非 f-string）不应检测。"""
+        code = "conn.execute(text(sql_query))"
+        errors = self._check(code)
+        assert errors == []
 
 
 # ============================================================================
@@ -807,6 +879,11 @@ class TestRedlineIntegrationOnCurrentCodebase:
         """R4 补充（review07-G18）：当前生产代码无'SQL 开头 + %s'的未豁免字面量。"""
         errors = check_R4_literal_assignments()
         assert errors == [], "R4 literal assignment violations found:\n  " + "\n  ".join(errors)
+
+    def test_check_R4_text_fstring_passes(self):
+        """R4 补充（DAT-08）：当前生产代码无 text(f"...") f-string 拼 SQL。"""
+        errors = check_R4_text_fstring_sql()
+        assert errors == [], "R4 text(f) violations found:\n  " + "\n  ".join(errors)
 
     def test_check_R12_passes(self):
         """R12：当前代码库 models.py 的 __tablename__ 与 TABLE_DEFINITIONS 一致。"""

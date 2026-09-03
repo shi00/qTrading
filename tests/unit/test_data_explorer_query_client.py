@@ -478,10 +478,11 @@ class TestExecuteSql:
         assert result["success"] is True
         sql_texts = [str(s) for s in executed]
         assert any("SET TRANSACTION READ ONLY" in t for t in sql_texts)
-        assert any("SET LOCAL statement_timeout" in t for t in sql_texts)
-        # 用户查询在 SET LOCAL 之后执行（语序校验）
+        # DAT-08: SET 不支持参数绑定，改用 set_config(..., true) 等价 SET LOCAL（仅当前事务生效）
+        assert any("set_config('statement_timeout', :v, true)" in t for t in sql_texts)
+        # 用户查询在 set_config 之后执行（语序校验）
         assert sql_texts.index([t for t in sql_texts if "SELECT * FROM stock_basic" in t][0]) > sql_texts.index(
-            [t for t in sql_texts if "SET LOCAL statement_timeout" in t][0]
+            [t for t in sql_texts if "set_config('statement_timeout', :v, true)" in t][0]
         )
 
     def test_select_truncated(self):

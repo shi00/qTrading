@@ -3,7 +3,8 @@
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
 - R4  SQL 注入：扫描 data/services/strategies/app 与 tests/ 目录下 asyncpg 原生查询中的 %s 占位符
   （必须用 $1, $2, ...）；补充检测"SQL 开头字面量 + %s"（绕过 1，ERROR + # noqa: R4）与 f-string
-  SQL 模板（绕过 2，WARNING）
+  SQL 模板（绕过 2，WARNING）；DAT-08 起新增 `text(f"...")`/`sa.text(f"...")` 形态（ERROR + # noqa: R4，
+  参数化替代：`sa.text("... :v ...")` + dict 绑定）
 - R12 数据表未注册：对比 models.py 的 __tablename__ 与 data_dictionary.py 的 TABLE_DEFINITIONS
 - R13 DAO 未注册：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
@@ -271,6 +272,68 @@ def check_R4_fstring_sql() -> None:
         print("[WARN] R4 f-string SQL 模板（合法用法可忽略，拼接外部输入须参数化）：", file=sys.stderr)
         for w in warnings:
             print(f"  - {w}", file=sys.stderr)
+
+
+# DAT-08: text(f"...") / sa.text(f"...") 形态检测（ERROR）
+_TEXT_FSTRING_FUNC_MODULES = frozenset({"sa", "sqlalchemy"})
+
+
+def _is_text_call(node: ast.Call) -> bool:
+    """判断 Call 是否为 text(...) / sa.text(...) / sqlalchemy.text(...)。
+
+    仅匹配小写 text（SQLAlchemy），排除 ft.Text 等大写控件名与其它对象方法
+    （obj.text(f"...") 不匹配，避免未来合法方法调用被 ERROR 误伤）。
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "text"
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "text"
+        and isinstance(func.value, ast.Name)
+        and func.value.id in _TEXT_FSTRING_FUNC_MODULES
+    )
+
+
+def _check_R4_text_fstring_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数（DAT-08）：检测 ``text(f"...")`` / ``sa.text(f"...")`` 形态（f-string 拼 SQL，禁止）。
+
+    ERROR 语义：参数化替代为 ``sa.text("... :v ...")`` + dict 绑定。行尾 ``# noqa: R4`` 豁免
+    （对齐 ``_check_R4_literal_assignments_in_tree`` 惯例）。仅扫描 Call 首参为 JoinedStr（f-string）。
+    """
+    errors: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        # 契约测试用临时文件构造 AST（不在 ROOT 下），fallback 到绝对路径显示
+        rel = source_path
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_text_call(node):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.JoinedStr):
+            continue
+        if _line_has_noqa_marker(source_path, node.lineno, _R4_NOQA_MARKER):
+            continue
+        errors.append(
+            f"{rel}:{node.lineno}: R4 f-string 拼接 SQL — text(f...) 禁止，必须参数化 "
+            f'(sa.text("... :v ...") + dict 绑定)，否则未来值可配置时将成注入点'
+        )
+    return errors
+
+
+def check_R4_text_fstring_sql() -> list[str]:
+    """R4 补充（DAT-08）：``text(f"...")`` 形态检测，ERROR 阻断（改造后产品代码应为 0）。"""
+    errors: list[str] = []
+    for dir_name in ("data", "services", "strategies", "app", "core", "utils", "ui"):
+        target_dir = ROOT / dir_name
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            errors.extend(_check_R4_text_fstring_in_tree(tree, p))
+    return errors
 
 
 # tests/ 目录扫描时跳过缓存与构建产物，但保留 tests 自身（复用 _SKIP_DIRS，移除 "tests" 以允许扫描）
@@ -1198,6 +1261,7 @@ def main() -> int:
         ("R4 SQL 注入", check_R4()),
         ("R4 潜在 SQL 字面量", check_R4_literal_assignments()),
         ("R4 SQL 注入 (tests)", check_R4_in_tests()),
+        ("R4 text(f) f-string SQL (DAT-08)", check_R4_text_fstring_sql()),
         ("R12 数据表未注册", check_R12()),
         ("R13 DAO 未注册", check_R13()),
         ("R14 策略未注册", check_R14()),
@@ -1221,7 +1285,7 @@ def main() -> int:
         return 1
 
     print(
-        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist）"
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08）"
     )
     return 0
 
