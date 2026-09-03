@@ -366,7 +366,8 @@ class DataExplorerQueryClient:
                 with conn.begin():
                     conn.execute(sa.text("SET TRANSACTION READ ONLY"))
                     # C6: SET LOCAL 在事务内生效，超时后语句被服务端取消（resource 滥用防线）
-                    conn.execute(sa.text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
+                    # DAT-08: SET 不支持参数绑定，改用 set_config(..., true) 等价 SET LOCAL（仅当前事务生效；依赖下方显式事务块）
+                    conn.execute(sa.text("SELECT set_config('statement_timeout', :v, true)"), {"v": _STATEMENT_TIMEOUT})
                     result = conn.execute(sa.text(sql_query))
 
                     # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
