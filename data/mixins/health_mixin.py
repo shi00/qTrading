@@ -30,6 +30,7 @@ from data.constants import (
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
+from data.persistence.write_quality import WriteQuality
 from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -440,6 +441,17 @@ class HealthCheckMixin:
                 name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
             ]
             missing_critical = [t for t in critical_tables if tables.get(t, {}).get("ratio", 0) < 0.1]
+
+            # DAT-03: 关键表最近一次写入发生脏日期 coerce 超阈值 → 该表数据疑为错/缺，
+            # 也视为质量降级（进 missing_critical 驱动 red status 与 tier=CRITICAL）。
+            write_quality = WriteQuality()
+            for t in critical_tables:
+                if t not in missing_critical and write_quality.is_degraded(t):
+                    missing_critical.append(t)
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ 关键表 %s 最近一次写入日期字段 coerce 率超阈值，视为质量降级。",
+                        t,
+                    )
 
             # Count all missing stock tables (exclude sparse tables — low coverage is expected)
             all_missing = [

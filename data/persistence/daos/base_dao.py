@@ -9,9 +9,12 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 import sqlalchemy as sa
+from sqlalchemy import Date, DateTime
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from data.persistence import engine_provider
+from data.persistence.models import Base
+from data.persistence.write_quality import WriteQuality
 from utils.error_classifier import classify_error, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
@@ -635,10 +638,6 @@ class BaseDao:
 
         self._check_engine(context="upsert")
 
-        import asyncio
-
-        from data.persistence.models import Base
-
         await self._wait_maintenance_guard(context="upsert")
 
         table = Base.metadata.tables.get(table_name)
@@ -673,20 +672,27 @@ class BaseDao:
 
         df_slice = df[columns]
 
-        from sqlalchemy import Date, DateTime
-
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
         # Extracting out the CPU intensive conversion to allow async offloading
-        def _prepare_records(df_slice: typing.Any):
+        def _prepare_records(df_slice: typing.Any) -> tuple[list[dict], dict[str, dict]]:
             df_clean = df_slice.copy()
 
+            # DAT-03: 统计日期列 coerce（无法解析被置 NULL）的告警样本，而非静默丢弃
+            coerce_stats: dict[str, dict] = {}
+
             for col in df_clean.columns:
-                if col in target_date_cols:
-                    df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce").dt.date
-                elif col in target_datetime_cols:
-                    df_clean[col] = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
+                if col in target_date_cols or col in target_datetime_cols:
+                    converted = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
+                    bad_mask = converted.isna() & df_clean[col].notna()
+                    coerced = int(bad_mask.sum())
+                    if coerced > 0:
+                        coerce_stats[col] = {
+                            "count": coerced,
+                            "samples": df_clean.loc[bad_mask, col].head(3).tolist(),
+                        }
+                    df_clean[col] = converted.dt.date if col in target_date_cols else converted
 
             for col in df_clean.columns:
                 col_dtype = df_clean[col].dtype
@@ -702,17 +708,30 @@ class BaseDao:
                         .map(lambda v: v.replace(tzinfo=None) if v is not None else None)
                     )
 
-            df_clean = df_clean.where(df_clean.notna(), None)
+            # DAT-04: 向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
+            # astype(object) 后再按 notna mask 填 None：None 在 object 列可稳定保存，
+            # 不会被 str/float dtype 自动转回 NaN（`df_clean.where(notna, None)` 单独用会失败）。
+            mask = df_clean.notna()
+            df_clean = df_clean.astype(object).where(mask, None)
 
             records = df_clean.to_dict(orient="records")
 
-            for record in records:
-                for k, v in record.items():
-                    if pd.api.types.is_scalar(v) and pd.isna(v):
-                        record[k] = None
-            return records
+            return records, coerce_stats
 
-        records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
+        records, coerce_stats = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
+
+        total_coerced = sum(s["count"] for s in coerce_stats.values())
+        if total_coerced > 0:
+            logger.error(
+                "[%s] Insert '%s': %d 行日期字段无法解析已置 NULL（%s）。"
+                "上游日期格式异常，需恢复为 ISO 格式，避免静默错数据。",
+                self.__class__.__name__,
+                table_name,
+                total_coerced,
+                coerce_stats,
+            )
+        # DAT-03: 登记表级日期 coerce 率，供数据质量门控判定该表是否降级
+        WriteQuality().record_write(table_name, rows=len(df), coerced_rows=total_coerced)
 
         # DAT-01: 线程池 await 是另一处状态可变边界，执行 SQL 前必须复查引擎。
         self._check_engine(context="upsert:post-prepare")
