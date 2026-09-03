@@ -1048,7 +1048,7 @@ class QuoteDao(BaseDao):
                 FROM stock_basic b
                 LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $1
                 LEFT JOIN (SELECT ts_code, roe, or_yoy, netprofit_yoy, debt_to_assets,
-                                  ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY ann_date DESC, end_date DESC) AS rn
+                                  ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC, ann_date DESC) AS rn  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                            FROM financial_reports WHERE ann_date <= $2) f
                           ON b.ts_code = f.ts_code AND f.rn = 1
                 WHERE b.list_status = 'L'

@@ -608,6 +608,31 @@ class TestQuoteDaoGetFieldCompleteness:
         assert isinstance(result, dict)
 
     @pytest.mark.asyncio
+    async def test_sql_orders_financial_by_end_date(self):
+        """DAT-03: get_field_completeness 财务子查询必须按 end_date DESC 取最新报告期，禁止回退。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        mock_read = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "total": [2],
+                    "indicators_available": [0],
+                    "roe_count": [2],
+                    "or_yoy_count": [1],
+                    "netprofit_yoy_count": [1],
+                    "dv_ttm_count": [0],
+                    "pe_ttm_count": [0],
+                    "pb_count": [0],
+                    "debt_to_assets_count": [1],
+                }
+            )
+        )
+        dao._read_db = mock_read
+        await dao.get_field_completeness("20241120")
+        sql = mock_read.call_args[0][0]
+        assert "ORDER BY end_date DESC, ann_date DESC" in sql
+        assert "ORDER BY ann_date DESC, end_date DESC" not in sql
+
+    @pytest.mark.asyncio
     async def test_error(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db = AsyncMock(side_effect=Exception("DB Error"))
