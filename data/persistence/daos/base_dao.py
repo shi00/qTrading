@@ -60,12 +60,27 @@ class BaseDao:
             )
         # review03-C11 Step2: disposed 状态查询从 CacheManager._instance 迁移到
         # engine_provider（解除 data/persistence → data/cache 反向运行时查询）。
-        # 按引擎身份判定：仅受管引擎受全局 disposed 影响，独立注入引擎不受影响。
+        # DAT-02: is_disposed 基于"已释放引擎集合"判定——释放过即不可用，
+        # 独立注入引擎（测试引擎）未被标记释放则不受影响。
         if engine_provider.is_disposed(self.engine):
             suffix = f", {context} rejected." if context else "."
             raise EngineDisposedError(
                 f"[{self.__class__.__name__}] Engine disposed{suffix} Call CacheManager.init_db() to reinitialize."
             )
+
+    async def _wait_maintenance_guard(self, context: str = "dao") -> None:
+        """等待维护事件后重新检查引擎（DAT-01：消除 R5 守卫 TOCTOU）。
+
+        ``await self._get_maintenance_event().wait()`` 之后引擎状态可能已变——
+        维护/停机/模式切换期间 CacheManager 可能 dispose 引擎、重建引擎或清空
+        DAO 引用。因此"检查到使用之间"若有 await，则必须在 await 之后再查一次
+        ``_check_engine``，避免携带过期守卫结论在已释放引擎上执行操作。
+
+        所有 DAO 执行出口（write/read/upsert/guarded_begin）统一经此方法等待
+        + 复查，保证新增/复用路径自动获得守卫。
+        """
+        await self._get_maintenance_event().wait()
+        self._check_engine(context=f"{context}:post-maintenance")
 
     @asynccontextmanager
     async def _guarded_begin(self, conn: typing.Any = None):
@@ -75,7 +90,7 @@ class BaseDao:
         Otherwise, it starts an engine.begin() transaction.
         """
         self._check_engine()
-        await self._get_maintenance_event().wait()
+        await self._wait_maintenance_guard(context="begin")
 
         if conn is not None:
             yield conn
@@ -489,7 +504,7 @@ class BaseDao:
                 else tuple(self._convert_param_for_asyncpg(p) for p in params)
             )
 
-        await self._get_maintenance_event().wait()
+        await self._wait_maintenance_guard(context="write")
 
         # Check if engine is disposed/closed
         try:
@@ -624,7 +639,7 @@ class BaseDao:
 
         from data.persistence.models import Base
 
-        await self._get_maintenance_event().wait()
+        await self._wait_maintenance_guard(context="upsert")
 
         table = Base.metadata.tables.get(table_name)
         if table is None:
@@ -698,6 +713,9 @@ class BaseDao:
             return records
 
         records = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
+
+        # DAT-01: 线程池 await 是另一处状态可变边界，执行 SQL 前必须复查引擎。
+        self._check_engine(context="upsert:post-prepare")
 
         stmt = pg_insert(table)
         update_cols = [c for c in columns if c not in pk_columns and c != "created_at" and c not in missing_cols]
@@ -893,7 +911,7 @@ class BaseDao:
         if params:
             params = tuple(self._convert_param_for_asyncpg(p) for p in params)
 
-        await self._get_maintenance_event().wait()
+        await self._wait_maintenance_guard(context="read")
 
         start_time = time.perf_counter()
         try:
@@ -990,7 +1008,7 @@ class BaseDao:
         """
         self._check_engine(context="read")
 
-        await self._get_maintenance_event().wait()
+        await self._wait_maintenance_guard(context="read")
 
         start_time = time.perf_counter()
         df: pd.DataFrame = pd.DataFrame()
