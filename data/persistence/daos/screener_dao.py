@@ -391,7 +391,9 @@ class ScreenerDao(BaseDao):
             )
         )
 
-        await self._get_maintenance_event().wait()
+        # DAT-01: 与 base_dao 一致，维护事件放行后复查引擎，防范 conn 路径 TOCTOU
+        # （conn 由裸 engine.begin() 提供，无 _guarded_begin 守卫，须在此复查）
+        await self._wait_maintenance_guard(context="update_prediction_result")
         if conn is not None:
             await conn.execute(stmt)
         else:

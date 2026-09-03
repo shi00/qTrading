@@ -581,6 +581,54 @@ class TestBaseDaoWriteDbExtended:
                 await dao._write_db("INSERT INTO t VALUES ($1)")
 
     @pytest.mark.asyncio
+    async def test_save_upsert_rechecks_engine_after_maintenance_wait(self):
+        """DAT-01: 维护事件放行后若引擎已释放，_save_upsert 必须抛 EngineDisposedError。
+
+        构造时序：入口检查通过 → 阻塞于维护事件 → 期间 mark_disposed(True) →
+        放行事件 → 复查守卫必须抛出 EngineDisposedError，而非在已释放引擎上执行写入。
+        """
+        from data.persistence import engine_provider
+
+        engine_provider.reset_engine_provider()
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        engine_provider.set_engine(mock_engine)
+
+        evt = asyncio.Event()
+        evt.clear()
+        with patch.object(BaseDao, "_get_maintenance_event", return_value=evt):
+            df = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "symbol": ["000001"],
+                    "name": ["PingAn"],
+                    "area": ["Shenzhen"],
+                    "industry": ["Bank"],
+                    "market": ["Main"],
+                    "list_date": ["19910403"],
+                }
+            )
+            task = asyncio.create_task(
+                dao._save_upsert(
+                    df,
+                    "stock_basic",
+                    ["ts_code", "symbol", "name", "area", "industry", "market", "list_date"],
+                    ["ts_code"],
+                )
+            )
+            # 让任务停留在 maintenance event 等待处（await wait）
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            engine_provider.mark_disposed(True)
+            evt.set()
+
+        with pytest.raises(EngineDisposedError, match="post-maintenance"):
+            await task
+
+        mock_engine.begin.assert_not_called()
+        engine_provider.reset_engine_provider()
+
+    @pytest.mark.asyncio
     async def test_write_sync_engine_none(self):
         mock_engine = _setup_mock_engine_begin(AsyncMock())
         mock_engine.sync_engine = None

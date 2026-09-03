@@ -105,3 +105,19 @@ class TestEngineProviderEngineScopedIsDisposed:
         _reset_provider()
         engine_provider.mark_disposed(True)
         assert engine_provider.is_disposed() is True
+
+    def test_disposed_engine_stays_disposed_after_engine_replacement(self):
+        """DAT-02: 引擎被替换后，已释放的旧引擎仍应被 is_disposed 识别。
+
+        旧实现 `engine is _engine` 在 mark_disposed(False) + set_engine(新引擎) 后，
+        对旧引擎返回 False → 放行在已释放引擎上的操作（R5 失效）。改为已释放集合
+        判定后，旧引擎应永久为 disposed，新引擎可用。
+        """
+        _reset_provider()
+        engine_a, engine_b = object(), object()
+        engine_provider.set_engine(engine_a)
+        engine_provider.mark_disposed(True)  # engine_a 释放
+        engine_provider.set_engine(engine_b)  # 替换为新引擎
+        engine_provider.mark_disposed(False)  # 新引擎就绪
+        assert engine_provider.is_disposed(engine_a) is True
+        assert engine_provider.is_disposed(engine_b) is False

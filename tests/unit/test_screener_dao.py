@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
@@ -549,6 +551,47 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
             mock_update.return_value.where.return_value.values.return_value = MagicMock()
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
         mock_conn.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_prediction_result_conn_path_rechecks_engine_after_wait(self):
+        """DAT-01: conn 路径维护事件放行后若引擎已释放，须抛 EngineDisposedError 而非执行 conn。
+
+        覆盖 update_prediction_result 的 conn 直执行分支：入口 _check_engine 通过 →
+        阻塞于维护事件 → 期间 mark_disposed(True) → 放行后 _wait_maintenance_guard
+        复查必须抛出 EngineDisposedError，且不得调用 conn.execute。
+        """
+        from data.persistence import engine_provider
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        engine_provider.reset_engine_provider()
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        engine_provider.set_engine(mock_engine)
+
+        evt = asyncio.Event()
+        evt.clear()
+        dao._get_maintenance_event = MagicMock(return_value=evt)
+
+        mock_conn = AsyncMock()
+        with (
+            patch(
+                "data.persistence.daos.screener_dao.Base.metadata.tables",
+                new=MagicMock(get=MagicMock(return_value=MagicMock())),
+            ),
+            patch("data.persistence.daos.screener_dao.sa.update") as mock_update,
+        ):
+            mock_update.return_value.where.return_value.values.return_value = MagicMock()
+            task = asyncio.create_task(dao.update_prediction_result(record_id=1, pct=5.0, label="WIN", conn=mock_conn))
+            # 让任务停留在维护事件等待处
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            engine_provider.mark_disposed(True)
+            evt.set()
+
+        with pytest.raises(EngineDisposedError, match="post-maintenance"):
+            await task
+        mock_conn.execute.assert_not_called()
+        engine_provider.reset_engine_provider()
 
 
 class TestScreenerDaoSaveScreeningResultsTuple:
