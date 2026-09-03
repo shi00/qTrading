@@ -467,6 +467,35 @@ class TestScreenerDaoSwIndustryJoin:
         assert fallback_pattern in sql_single, "单日 SQL 缺少 COALESCE 回退"
         assert fallback_pattern in sql_range, "区间 SQL 缺少 COALESCE 回退"
 
+    @staticmethod
+    def _extract_sw_industry_lateral(sql: str) -> str:
+        """提取 sw_industry_member 的 LATERAL 子查询片段（含 LIMIT 1）。
+
+        以 LEFT JOIN LATERAL (SELECT sw_l2_name FROM sw_industry_member 起头、
+        ") m ON TRUE" 收尾，因此只捕获行业子查询，不会误捕财务子查询。
+        """
+        m = re.search(
+            r"LEFT JOIN LATERAL \(\s*SELECT sw_l2_name\s*FROM sw_industry_member.*?LIMIT 1\s*\) m ON TRUE",
+            sql,
+            re.S,
+        )
+        assert m is not None, f"SQL 中未找到 sw_industry_member LATERAL 子查询:\n{sql}"
+        return m.group(0)
+
+    def test_industry_lateral_deterministic_order(self):
+        """DAT-08①: 行业 LATERAL 子查询 LIMIT 1 前必须有 ORDER BY index_code。
+
+        sw_industry_member 主键为 (ts_code, index_code)，同 ts_code 可有多行；
+        无 ORDER BY 的 LIMIT 1 返回行随执行计划（VACUUM/ANALYZE/并行度）漂移，
+        导致同一股票行业归属在两次运行间变化。单日/区间两模板都必须满足。
+        """
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            lateral = self._extract_sw_industry_lateral(sql)
+            assert "ORDER BY index_code" in lateral, f"行业 LATERAL 缺少 ORDER BY:\n{lateral}"
+            assert "LIMIT 1" in lateral
+            assert lateral.index("ORDER BY index_code") < lateral.index("LIMIT 1")
+
 
 class TestScreenerDaoGetLatestClosedTradeDate:
     @pytest.mark.asyncio
