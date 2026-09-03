@@ -230,8 +230,11 @@ class FinancialSyncStrategy(ISyncStrategy):
             result_accumulator.status = "failed"
             return
 
-        df_active = df_basic[df_basic["list_status"] == "L"]
-        all_stocks = set(df_active["ts_code"].tolist())
+        # DAT-04: 财务同步股票池覆盖「曾经在市」股票（list_status IN ('L','D')），
+        # 消除基本面生存者偏差。stock_basic 已由 data_processor.sync_stock_basic
+        # 通过 get_stock_basic_all() 同步 L/D 双状态，此处直接按状态过滤。
+        df_pool = df_basic[df_basic["list_status"].isin(["L", "D"])]
+        all_stocks = set(df_pool["ts_code"].tolist())
         total_stocks = len(all_stocks)
 
         # 2. Concurrency Control
