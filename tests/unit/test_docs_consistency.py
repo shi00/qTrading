@@ -2764,3 +2764,267 @@ class TestAgentsMdSync:
         errors = check_agents_md_sync()
         assert len(errors) > 0, "应检出缺少标记, got no errors"
         assert any("缺少生成区块标记" in e for e in errors), f"错误信息应提示标记缺失, got: {errors}"
+
+
+class TestRulesetMetadataConsistency:
+    """规则集元数据一致性（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version / last_reviewed 同步."""
+
+    def test_metadata_pass_on_current_repo(self):
+        """真实 CLAUDE.md / CONTRIBUTING.md 应满足元数据同步（无错误）."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        assert check_ruleset_metadata_consistency() == []
+
+    def test_detects_ruleset_version_drift(self, tmp_path, monkeypatch):
+        """ruleset_version 不一致 → 报错（fail closed）."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        contributing.write_text("> - ruleset_version: 1.2.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("ruleset_version 漂移" in e for e in errors), f"应检出 ruleset_version 漂移, got: {errors}"
+
+    def test_detects_contributing_last_reviewed_earlier(self, tmp_path, monkeypatch):
+        """CONTRIBUTING 的 last_reviewed 早于 CLAUDE → 报错."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        contributing.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-08-01\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("last_reviewed" in e and "早于" in e for e in errors), f"应检出 last_reviewed 倒挂, got: {errors}"
+
+    def test_detects_missing_metadata(self, tmp_path, monkeypatch):
+        """任一份文件缺元数据字段 → 报错."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        claude.write_text("# no ruleset metadata\n", encoding="utf-8")
+        contributing.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("CLAUDE.md 缺少 ruleset_version" in e for e in errors), f"应检出缺字段, got: {errors}"
+
+
+class TestDecisionTreeMapping:
+    """决策树与其机器可读镜像双向一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml."""
+
+    def test_mapping_pass_on_current_repo(self):
+        """真实 §1.8 决策树与 canonical-topics.yml 应双向一致（无错误）."""
+        from check_docs_consistency import check_decision_tree_mapping
+
+        assert check_decision_tree_mapping() == []
+
+    def test_detects_claude_target_not_registered(self, tmp_path, monkeypatch):
+        """§1.8 引用的路径未在 yml 登记 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| X | [foo](./docs/patterns/foo.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump({"topics": [{"id": "bar", "title": "Bar", "canonical": "docs/patterns/bar.md"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/patterns/foo.md" in e and "未在 canonical-topics.yml" in e for e in errors), (
+            f"应检出 §1.8 目标未登记, got: {errors}"
+        )
+
+    def test_detects_yml_canonical_missing_in_claude(self, tmp_path, monkeypatch):
+        """yml 登记的 canonical 未在 §1.8 出现 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| X | [foo](./docs/patterns/foo.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        # yml 追加一个宪法未出现的 canonical，制造反向漂移
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "foo", "title": "Foo", "canonical": "docs/patterns/foo.md"},
+                        {"id": "orphan", "title": "Orphan", "canonical": "CONTRIBUTING.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("CONTRIBUTING.md" in e and "未在 CLAUDE.md" in e for e in errors), f"应检出反向漂移, got: {errors}"
+
+
+class TestCanonicalRouting:
+    """canonical 入口承担条件路由责任（DOC-05）：声明 workflow 的入口必须含指向 workflow 的链接."""
+
+    def test_routing_pass_on_current_repo(self):
+        """真实 canonical-topics.yml 中声明 workflow 的主题均应路由到 workflow（无错误）."""
+        from check_docs_consistency import check_canonical_routing
+
+        assert check_canonical_routing() == []
+
+    def test_detects_missing_workflow_link(self, tmp_path, monkeypatch):
+        """canonical 文档未含指向 workflow 的链接 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_routing
+
+        # canonical 指向仓库真实文件（CONTRIBUTING.md），workflow 用制造的文件名确保缺失
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {
+                            "id": "dao",
+                            "title": "DAO",
+                            "canonical": "CONTRIBUTING.md",
+                            "workflow": "docs/fabricated-routing-guide.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_routing()
+        assert any("未路由到" in e and "fabricated-routing-guide.md" in e for e in errors), (
+            f"应检出 canonical 未路由到 workflow, got: {errors}"
+        )
+
+
+class TestDocsIndexCompleteness:
+    """文档索引全覆盖（DOC-07 / DOC-11）：docs/**/*.md 均被 CONTRIBUTING 或 docs/README 引用."""
+
+    def test_index_pass_on_current_repo(self):
+        """真实 docs/ 目录应全被两级索引覆盖（无错误）."""
+        from check_docs_consistency import check_docs_index_completeness
+
+        assert check_docs_index_completeness() == []
+
+    def test_detects_uncovered_file(self, tmp_path, monkeypatch):
+        """docs/ 下存在未被任何索引源引用的 .md → 报错."""
+        from check_docs_consistency import check_docs_index_completeness
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "README.md").write_text("# Index\n", encoding="utf-8")
+        (docs_dir / "a.md").write_text("# A\n", encoding="utf-8")
+        (docs_dir / "b.md").write_text("# B\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# Contrib\n[a](./docs/a.md)\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_docs_index_completeness()
+        assert any("b.md" in e and "未被 CONTRIBUTING.md" in e for e in errors), f"应检出未覆盖 b.md, got: {errors}"
+
+    def test_directory_link_covers_subfiles(self, tmp_path, monkeypatch):
+        """目录级引用应覆盖其下全部文件（含子目录）."""
+        from check_docs_consistency import check_docs_index_completeness
+
+        docs_dir = tmp_path / "docs"
+        sub = docs_dir / "sub"
+        sub.mkdir(parents=True)
+        (docs_dir / "README.md").write_text("# Index\n[sub](./sub/)\n", encoding="utf-8")
+        (sub / "x.md").write_text("# X\n", encoding="utf-8")
+        (sub / "nested").mkdir()
+        (sub / "nested" / "y.md").write_text("# Y\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# Contrib\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        assert check_docs_index_completeness() == [], "目录级引用应覆盖其下全部文件"
+
+
+class TestGovernanceIdReferences:
+    """治理 id 引用一致性（DOC-09）：EX-\\d{4} 双向——引用须已登记，登记须被消费."""
+
+    def test_id_refs_pass_on_current_repo(self):
+        """真实 exceptions.yml（空）与消费文档间应无悬空/孤儿引用（无错误）."""
+        from check_docs_consistency import check_governance_id_references
+
+        assert check_governance_id_references() == []
+
+    def test_detects_dangling_reference(self, tmp_path, monkeypatch):
+        """消费文档引用未登记的 EX-\\d{4} → 报错."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs" / "governance"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "exceptions.yml").write_text("exceptions: []\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("引用已删除的例外 EX-0001\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX reference\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", tmp_path / "docs" / "README.md")
+
+        errors = check_governance_id_references()
+        assert any("EX-0001" in e and "未在 exceptions.yml" in e for e in errors), f"应检出悬空引用, got: {errors}"
+
+    def test_detects_orphan_registration(self, tmp_path, monkeypatch):
+        """exceptions.yml 登记但从未被消费文档引用 → 报错."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs" / "governance"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "exceptions.yml").write_text(
+            "exceptions:\n  - id: EX-0001\n    rule_id: R1\n    reason: x\n"
+            "    owner: n\n    approved_by: n\n    removal_trigger: x\n    verification: x\n"
+            "    paths:\n      - CONTRIBUTING.md\n",
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX reference\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX reference\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", tmp_path / "docs" / "README.md")
+
+        errors = check_governance_id_references()
+        assert any("EX-0001" in e and "从未被任何消费文档引用" in e for e in errors), f"应检出孤儿登记, got: {errors}"

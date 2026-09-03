@@ -20,6 +20,16 @@
    id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
 11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
+12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
+   last_reviewed 为合法日期且前者不早于后者。
+13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树「必读入口」与 canonical-topics.yml
+   canonical 镜像双向一致（同一主题必须指向同一正本）。
+14. canonical 路由一致性检查（DOC-05）：声明 workflow 的 canonical 入口必须含指向该 workflow 的链接，
+   令入口承担条件路由责任。
+15. 文档索引全覆盖检查（DOC-07/DOC-11）：docs/**/*.md 每个文件均被 CONTRIBUTING.md 或
+   docs/README.md 引用（目录级引用视为覆盖其下全部文件）。
+16. 治理 id 引用一致性检查（DOC-09）：EX-\\d{4} 双向校验——消费文档引用的例外必须已登记，
+   已登记例外必须被消费文档引用。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -70,6 +80,9 @@ PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 CI_WORKFLOW_DIR = ROOT / ".github" / "workflows"
 CHECK_REDLINES_SCRIPT_PATH = ROOT / "scripts" / "check_redlines.py"
 GITLEAKS_CONFIG_PATH = ROOT / ".gitleaks.toml"
+
+# docs/ 顶层目录与导航入口（check_docs_index_completeness 的索引源之一）
+DOCS_README_PATH = ROOT / "docs" / "README.md"
 
 # docs/flet/ 目录与导航入口
 FLET_DOCS_DIR = ROOT / "docs" / "flet"
@@ -1345,6 +1358,319 @@ def check_agents_md_sync() -> list[str]:
     return errors
 
 
+# --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
+# 元数据格式（P2-07 统一格式）：
+#   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
+_RULESET_VERSION_PATTERN = re.compile(r"ruleset_version[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)")
+_LAST_REVIEWED_PATTERN = re.compile(r"last_reviewed[：:]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")
+
+
+def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
+    """从 markdown 元数据块提取 (ruleset_version, last_reviewed)，缺失返回 None。"""
+    m = _RULESET_VERSION_PATTERN.search(content)
+    d = _LAST_REVIEWED_PATTERN.search(content)
+    return (m.group(1) if m else None, d.group(1) if d else None)
+
+
+def check_ruleset_metadata_consistency() -> list[str]:
+    """检查项 12：CLAUDE.md 与 CONTRIBUTING.md 规则集元数据一致性（DOC-01）。
+
+    已由 _check_version_consistency（产品版本对应 pyproject.toml）覆盖「对应版本」，
+    本检查补齐 `ruleset_version` 与 `last_reviewed` 两个字段——它们**从未被任何检查读取**
+    （DOC-01 门禁空白的主因），修复后禁止再漂移。
+
+    断言：
+    1. 两份文件均有 ruleset_version，且值相等。
+    2. 两份文件均有 last_reviewed，且值为合法日期。
+    3. CONTRIBUTING.md 的 last_reviewed 不早于 CLAUDE.md（人类贡献流程更新自由度不低于宪法）。
+    """
+    from datetime import date
+
+    errors: list[str] = []
+    claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
+    contributing_ver, contributing_reviewed = _extract_metadata_versions(CONTRIBUTING_PATH.read_text(encoding="utf-8"))
+
+    if claude_ver is None:
+        errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
+    if contributing_ver is None:
+        errors.append("CONTRIBUTING.md 缺少 ruleset_version 元数据字段")
+    if claude_ver is not None and contributing_ver is not None and claude_ver != contributing_ver:
+        errors.append(
+            f"ruleset_version 漂移: CLAUDE.md={claude_ver} != CONTRIBUTING.md={contributing_ver} "
+            "(两文件须同步，规则集版本规则变更时递增)"
+        )
+
+    if claude_reviewed is None:
+        errors.append("CLAUDE.md 缺少 last_reviewed 元数据字段")
+    if contributing_reviewed is None:
+        errors.append("CONTRIBUTING.md 缺少 last_reviewed 元数据字段")
+
+    if claude_reviewed is not None and contributing_reviewed is not None:
+        try:
+            claude_date = date.fromisoformat(claude_reviewed)
+            contributing_date = date.fromisoformat(contributing_reviewed)
+        except ValueError:
+            errors.append("CLAUDE.md/CONTRIBUTING.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
+        else:
+            if contributing_date < claude_date:
+                errors.append(
+                    f"CONTRIBUTING.md last_reviewed({contributing_reviewed}) 早于 "
+                    f"CLAUDE.md last_reviewed({claude_reviewed})"
+                )
+    return errors
+
+
+# --- DOC-04: 决策树与其机器可读镜像的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
+# CLAUDE.md §1.8「必读入口」列既可能以 markdown 链接 `[text](./docs/x.md)` 出现，
+# 也可能以裸路径文本出现（如 `docs/guides/how-to.md「7. 新增回测配置」`、`CONTRIBUTING.md「...」`）。
+# canonical-topics.yml 的 canonical 值统一为仓库相对路径（如 `docs/patterns/mvvm.md` / `CONTRIBUTING.md`）。
+_CANONICAL_TOPICS_REQUIRED = frozenset({"id", "title", "canonical"})
+
+
+def _load_canonical_topics() -> list[dict] | None:
+    """加载 canonical-topics.yml 的 topics 列表；无法解析或结构非法时返回 None。"""
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
+        return None
+    return [t for t in data["topics"] if isinstance(t, dict)]
+
+
+def _extract_decision_tree_targets(claude_content: str) -> set[str]:
+    """从 CLAUDE.md §1.8 决策树表格「必读入口」列提取目标路径集合（去 ./ 前缀、去重）。
+
+    表格行格式：`| 任务类型 | 必读入口 |`。仅处理以 `|` 开头、含第二列的表格行，
+    从第二列提取所有形如 `docs/x/y.md` 或 `CONTRIBUTING.md` 的路径 token。
+    归一化：剥离前导 `./`，保留仓库相对路径。
+    """
+    targets: set[str] = set()
+    in_decision_table = False
+    for line in claude_content.splitlines():
+        stripped = line.strip()
+        if not in_decision_table:
+            if stripped.startswith("|") and "必读入口" in line:
+                in_decision_table = True
+            else:
+                continue
+        if not stripped.startswith("|"):
+            break  # 决策树表格结束（其后的引用块说明行不含 `|` 前缀）
+        cols = stripped.split("|")
+        if len(cols) < 2:
+            continue
+        entry_col = cols[2] if len(cols) >= 3 else cols[1]
+        for token in re.findall(r"(?:\./)?(?:docs/[\w.\-/]+\.md|CONTRIBUTING\.md)", entry_col):
+            targets.add(token.removeprefix("./"))
+    return targets
+
+
+def check_decision_tree_mapping() -> list[str]:
+    """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 镜像双向一致（DOC-04）。
+
+    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」，二者对同一主题必须指向
+    同一正本。双向断言（允许一对多：宪法合并行 ↔ yml 拆分主题，只要 canonical 值相同）：
+    1. 宪法 §1.8 表格「必读入口」列出现的每个目标路径，必须能在 yml canonical 中找到。
+    2. yml 每个 canonical 值，必须能在宪法 §1.8 表格「必读入口」列中找到。
+    """
+    errors: list[str] = []
+    claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
+    claude_targets = _extract_decision_tree_targets(claude_content)
+
+    topics = _load_canonical_topics()
+    if topics is None:
+        errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过决策树映射校验")
+        return errors
+
+    yml_canonicals: set[str] = set()
+    missing_fields = []
+    for idx, topic in enumerate(topics, 1):
+        missing = _CANONICAL_TOPICS_REQUIRED - topic.keys()
+        if missing:
+            missing_fields.append(f"topics[{idx}] 缺字段 {sorted(missing)}")
+        canonical = topic.get("canonical")
+        if isinstance(canonical, str):
+            yml_canonicals.add(canonical.removeprefix("./"))
+    errors.extend(missing_fields)
+
+    # 方向 1: 宪法入口都应在 yml 中登记（不含 canonical-topics.yml 自身引用）
+    for target in sorted(claude_targets):
+        if target == "docs/governance/canonical-topics.yml":
+            continue
+        if target not in yml_canonicals:
+            errors.append(f"决策树映射: CLAUDE.md §1.8 引用目标 '{target}' 未在 canonical-topics.yml 中登记")
+
+    # 方向 2: yml 每个 canonical 都应在宪法 §1.8 中出现
+    for canonical in sorted(yml_canonicals):
+        if canonical not in claude_targets:
+            errors.append(
+                f"决策树映射: canonical-topics.yml 的 canonical '{canonical}' 未在 CLAUDE.md §1.8 决策树中出现"
+            )
+    return errors
+
+
+def check_canonical_routing() -> list[str]:
+    """检查项 14：canonical 入口承担条件路由责任（DOC-05）。
+
+    canonical-topics.yml 的字段说明声明「入口文档负责条件路由」。本检查将对「带略显深度的
+    工作流入口」主题（yml 中声明了 `workflow` 字段）做可执行断言：其 canonical 文档中必须
+    存在指向该 workflow 文档的链接（允许条件路由定位到操作步骤）。
+
+    说明：backtest / embedded-pg 两主题的 canonical 直接就是 how-to.md 本身，无需 workflow
+    字段，故不在校验范围（它们天然承担操作步骤承载）。
+    """
+    errors: list[str] = []
+    topics = _load_canonical_topics()
+    if topics is None:
+        errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过 canonical 路由校验")
+        return errors
+
+    for idx, topic in enumerate(topics, 1):
+        workflow = topic.get("workflow")
+        canonical = topic.get("canonical")
+        # 仅校验显式声明 workflow 的主题（strategy / dao / ui-view 等）
+        if not isinstance(workflow, str) or not isinstance(canonical, str):
+            continue
+        canonical_path = ROOT / canonical.removeprefix("./")
+        if not canonical_path.exists():
+            errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
+            continue
+        workflow_basename = Path(workflow).name
+        if not workflow_basename:
+            continue
+        doc_content = canonical_path.read_text(encoding="utf-8")
+        # 断言 canonical 文档含指向 workflow 文档（basename 形式 markdown 链接/引用）的路由
+        if workflow_basename not in doc_content:
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) canonical '{canonical}' 未路由到 "
+                f"workflow '{workflow}'（应含指向 {workflow_basename} 的链接）"
+            )
+    return errors
+
+
+# --- DOC-07/DOC-11: 文档索引全覆盖（CONTRIBUTING.md 或 docs/README.md 目录级引用覆盖 docs/**/*.md）---
+# 职责单一：断言 `docs/**/*.md` 中每个文件都能被索引源引用，目录级引用视为覆盖其下全部文件。
+# 固定双索引源（CONTRIBUTING_PATH / DOCS_README_PATH），不依赖手动维护的清单。
+# docs 根目录由 DOCS_README_PATH 推导，便于单测 monkeypatch 注入临时树。
+
+
+def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
+    """判断 doc 是否被任一索引源的链接（文件级或目录级）覆盖。"""
+    docs_root = DOCS_README_PATH.parent
+    for src in index_sources:
+        content = src.read_text(encoding="utf-8")
+        for m in _MD_LINK_PATTERN.finditer(content):
+            url = m.group(2).strip()
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            target = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+            if not target:
+                continue
+            resolved = (src.parent / target).resolve()
+            try:
+                resolved.relative_to(docs_root)
+            except ValueError:
+                continue  # 目标在 docs/ 外，不构成覆盖
+            if resolved.is_dir():
+                # 目录级引用覆盖其下全部文件（含嵌套子目录）
+                if doc.is_relative_to(resolved):
+                    return True
+            else:
+                if resolved == doc:
+                    return True
+    return False
+
+
+def check_docs_index_completeness() -> list[str]:
+    """检查项 15：文档索引全覆盖（DOC-07 / DOC-11）。
+
+    断言 `docs/**/*.md` 中每个文件（排除 docs/README.md 自身）都能在
+    `CONTRIBUTING.md`「文档索引」或 `docs/README.md`「目录结构」中被引用，
+    目录级引用（指向目录的链接）视为覆盖其下全部文件。
+
+    这是 check_flet_hub_completeness() 向全 docs 目录的推广，同时闭合
+    DOC-07（reviews 检视报告不可发现）与 DOC-11（索引自称全覆盖实缺目录）。
+    """
+    errors: list[str] = []
+    if not DOCS_README_PATH.exists():
+        return [f"docs 索引入口不存在: {DOCS_README_PATH}"]
+
+    docs_root = DOCS_README_PATH.parent
+    index_sources = [CONTRIBUTING_PATH, DOCS_README_PATH]
+    for doc in sorted(docs_root.rglob("*.md")):
+        if doc == DOCS_README_PATH:
+            continue
+        if _docs_doc_covered(doc, index_sources):
+            continue
+        errors.append(
+            f"文档索引全覆盖: {doc.relative_to(docs_root).as_posix()} "
+            "未被 CONTRIBUTING.md 或 docs/README.md 引用（目录级引用视为覆盖其下文件）"
+        )
+    return errors
+
+
+# --- DOC-09: 治理 id 引用一致性（EX-\d{4} 双向：注册表 ↔ 消费文档）---
+# 宪法曾引用未登记的 EX-0001（复现 GOV-01，DOC-09）。本检查把「引用必须落在注册表、
+# 登记必须被消费」沉淀为机制：任一方向漂移即报错，防止悬空/孤儿例外长期存活。
+# 消费语料 = CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（exceptions.yml 自身是注册表非消费者）。
+_EX_ID_PATTERN = re.compile(r"\bEX-\d{4}\b")
+
+
+def _load_exception_ids() -> list[str] | None:
+    """加载 exceptions.yml 已登记例外 id 列表；无法解析或结构非法返回 None。"""
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
+        return None
+    return [e["id"] for e in data["exceptions"] if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def _scan_exception_refs() -> set[str]:
+    """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身）。"""
+    refs: set[str] = set()
+    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH, *(DOCS_README_PATH.parent.rglob("*.md"))]
+    for path in consumers:
+        if path == EXCEPTIONS_YAML_PATH:
+            continue
+        refs.update(_EX_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
+    return refs
+
+
+def check_governance_id_references() -> list[str]:
+    """检查项 16：治理 id 引用一致性（DOC-09，`EX-\\d{4}` 双向）。
+
+    1. 方向 1（悬空）：消费文档引用的每个 EX-\\d{4} 必须已在 exceptions.yml 登记。
+       宪法中的 EX 引用若指向未登记例外，会导致 AI 认为存在一条已批准例外——**直接误导**。
+    2. 方向 2（孤儿）：exceptions.yml 登记的唯一 id（EX-\\d{4}）必须被至少一个消费文档引用。
+       登记但从不被引用说明例外已过期，应按 append-only + 移除规则清理。
+
+    仅校验 EX-\\d{4}（架构边界例外，rule_id=R1，见 exceptions.yml 字段说明）。
+    """
+    errors: list[str] = []
+    loaded = _load_exception_ids()
+    if loaded is None:
+        errors.append("exceptions.yml 无法解析或无 exceptions 列表，跳过治理 id 引用校验")
+        return errors
+    registered = set(loaded)
+
+    refs = _scan_exception_refs()
+
+    # 方向 1: 悬空引用（被引用但未登记）
+    for ref in sorted(refs - registered):
+        errors.append(f"治理 id 引用: {ref} 被消费文档引用，但未在 exceptions.yml 登记")
+    # 方向 2: 孤儿登记（已登记但从未被消费文档引用）
+    for ex_id in sorted(registered - refs):
+        errors.append(f"治理 id 引用: {ex_id} 已在 exceptions.yml 登记，但从未被任何消费文档引用")
+
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -1367,6 +1693,14 @@ def main() -> int:
     # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
     all_errors.extend(check_agents_md_sync())
 
+    # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
+    # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
+    all_errors.extend(check_ruleset_metadata_consistency())
+    all_errors.extend(check_decision_tree_mapping())
+    all_errors.extend(check_canonical_routing())
+    all_errors.extend(check_docs_index_completeness())
+    all_errors.extend(check_governance_id_references())
+
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
         for err in all_errors:
@@ -1377,7 +1711,8 @@ def main() -> int:
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS.md 生成区块一致性）"
+        "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
+        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 治理 id 引用一致性）"
     )
     return 0
 
