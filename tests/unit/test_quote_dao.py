@@ -1324,3 +1324,63 @@ class TestQuoteDaoEngineDisposedErrorPropagation:
         dao._read_db_select = AsyncMock(side_effect=DatabaseQueryError("db error"))
         result = await dao.check_data_exists("20240615", tables=["daily_quotes"], raise_on_error=False)
         assert result is False
+
+
+class TestQuoteDaoCrossValidation:
+    """DAT-12: 跨表/跨字段一致性校验 DAO 方法（生产健康检查，外键替代）。"""
+
+    def _make_dao(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [0]}))
+        return dao
+
+    @pytest.mark.asyncio
+    async def test_count_orphan_ts_codes_with_violations(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [3]}))
+        assert await dao.count_orphan_ts_codes() == 3
+        # 参数化绑定（R4）：查询含 $1 窗口占位符，窗口值经 params 传递而非拼接
+        sql = dao._read_db.call_args.args[0]
+        assert "$1" in sql
+        assert len(dao._read_db.call_args.args[1]) == 1
+
+    @pytest.mark.asyncio
+    async def test_count_orphan_ts_codes_empty(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": []}))
+        assert await dao.count_orphan_ts_codes() == 0
+
+    @pytest.mark.asyncio
+    async def test_count_orphan_ts_codes_none(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.count_orphan_ts_codes() == 0
+
+    @pytest.mark.asyncio
+    async def test_count_price_range_violations(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [5]}))
+        assert await dao.count_price_range_violations() == 5
+
+    @pytest.mark.asyncio
+    async def test_count_moneyflow_net_mismatch(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [7]}))
+        assert await dao.count_moneyflow_net_mismatch() == 7
+        # 容差作为 $2 参数绑定（R4），非拼接进 SQL
+        args = dao._read_db.call_args.args
+        assert len(args[1]) == 2
+
+    @pytest.mark.asyncio
+    async def test_count_adj_factor_monotonic_violations(self):
+        dao = self._make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [2]}))
+        assert await dao.count_adj_factor_monotonic_violations() == 2
+
+    @pytest.mark.asyncio
+    async def test_get_index_daily_coverage_summary(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        df = pd.DataFrame({"ts_code": ["000001.SH"], "row_count": [100], "latest_trade_date": ["20240614"]})
+        dao._read_db = AsyncMock(return_value=df)
+        result = await dao.get_index_daily_coverage_summary()
+        assert "ts_code" in result.columns and "latest_trade_date" in result.columns

@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import datetime
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -460,3 +462,51 @@ class TestSearchStocks:
         # 关键词去除首尾空白后进入参数化查询
         assert "%平安%" in compiled
         assert "%  平安  %" not in compiled
+
+
+class TestStockBasicHealthSummary:
+    """DAT-13: stock_basic 健康摘要 DAO 方法（active 数 / 新鲜度 / ts_code 格式）。"""
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = _make_dao()
+        df = pd.DataFrame(
+            {
+                "active_count": [5200],
+                "latest_updated_at": [datetime.datetime(2024, 6, 10, 9, 30)],
+                "invalid_ts_code_count": [0],
+            }
+        )
+        dao._read_db = AsyncMock(return_value=df)
+        result = await dao.get_stock_basic_health_summary()
+        assert result.iloc[0]["active_count"] == 5200
+        assert result.iloc[0]["invalid_ts_code_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_stock_basic_health_summary() is None
+
+
+class TestGetLatestOpenCalDate:
+    """DAT-13: trade_cal 最新 is_open=1 日期 DAO 方法。"""
+
+    @pytest.mark.asyncio
+    async def test_with_date(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"latest_cal": [datetime.date(2024, 7, 20)]}))
+        result = await dao.get_latest_open_cal_date()
+        assert result == datetime.date(2024, 7, 20)
+
+    @pytest.mark.asyncio
+    async def test_none(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"latest_cal": [None]}))
+        assert await dao.get_latest_open_cal_date() is None
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_latest_open_cal_date() is None

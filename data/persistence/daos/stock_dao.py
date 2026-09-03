@@ -73,6 +73,38 @@ class StockDao(BaseDao):
             return df["cnt"].iloc[0] or 0
         return 0
 
+    async def get_stock_basic_health_summary(self) -> pd.DataFrame:
+        """DAT-13: stock_basic 健康摘要——单行 DataFrame。
+
+        Columns:
+            active_count: list_status='L' 的股票数（期望约 5000~5600）
+            latest_updated_at: 最新更新时刻（新鲜度）
+            invalid_ts_code_count: 不符合 ``^\\d{6}\\.(SZ|SH|BJ)$`` 的 ts_code 数
+        """
+        return await self._read_db(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE list_status = 'L') AS active_count,
+                MAX(updated_at) AS latest_updated_at,
+                COUNT(*) FILTER (
+                    WHERE ts_code !~ '^[0-9]{6}\\.(SZ|SH|BJ)$'
+                ) AS invalid_ts_code_count
+            FROM stock_basic
+            """,
+        )
+
+    async def get_latest_open_cal_date(self) -> typing.Any:
+        """DAT-13: trade_cal 中最新 is_open=1 的日期（未来覆盖基线）。
+
+        返回 datetime.date；无任何 open 日记录时返回 None。
+        """
+        df = await self._read_db(
+            "SELECT MAX(cal_date) AS latest_cal FROM trade_cal WHERE is_open = 1",
+        )
+        if df is None or df.empty or df["latest_cal"].iloc[0] is None:
+            return None
+        return df["latest_cal"].iloc[0]
+
     async def search_stocks(self, keyword: str, limit: int = 10) -> pd.DataFrame:
         """按代码/名称/拼音符号模糊搜索上市股票（stock_basic，list_status='L'）.
 
