@@ -21,6 +21,7 @@ _RECENT_DATE_STR = _RECENT_DATE.strftime("%Y%m%d")
 _RECENT_DATE_MINUS_2_STR = _RECENT_DATE_MINUS_2.strftime("%Y%m%d")
 _RECENT_DATE_MINUS_90_STR = _RECENT_DATE_MINUS_90.strftime("%Y%m%d")
 
+from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
@@ -101,6 +102,58 @@ async def setup_stock_data(test_engine: AsyncEngine):
                 "VALUES ('000001.SZ', :end_date, :ann_date, 12.0, 30.0, 80.0)"
             ),
             {"end_date": _RECENT_DATE_MINUS_90, "ann_date": _RECENT_DATE_MINUS_2},
+        )
+
+
+@pytest_asyncio.fixture
+async def financial_dao(test_engine: AsyncEngine):
+    return FinancialDao(test_engine)
+
+
+@pytest_asyncio.fixture
+async def setup_supplementary_announcement(test_engine: AsyncEngine):
+    """DAT-03: 补充公告场景造数（专用自包含 fixture，不依赖 setup_stock_data）。
+
+    场景：Q3（end_date=2024-09-30）2024-10-28 首次公告；Q1（end_date=2024-03-31）
+    2024-11-15 补充更正（ann_date 更新为更晚）。as_of=2024-11-20 时正确口径
+    （end_date DESC）应选中 Q3，旧口径（ann_date DESC 优先）会选中 Q1。
+
+    约束：本 fixture 内所有 financial_reports.end_date 必须 ≤ 2024-09-30，
+    否则「最新=Q3」的断言会因新增更晚报告期而失效。
+    """
+    async with test_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date) "
+                "VALUES ('000001.SZ', '000001', '平安银行', '银行', 'L', '2020-01-01')"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                "VALUES ('000001.SZ', :d, 10.0, 2.0, 1000000, 10000000)"
+            ),
+            {"d": date(2024, 11, 20)},
+        )
+        await conn.execute(
+            text("INSERT INTO trade_cal (cal_date, exchange, is_open) VALUES (:d, 'SSE', 1)"),
+            {"d": date(2024, 11, 20)},
+        )
+        # Q3：2024-10-28 首次公告
+        await conn.execute(
+            text(
+                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe, or_yoy, netprofit_yoy) "
+                "VALUES ('000001.SZ', :end_date, :ann_date, 12.0, 20.0, 15.0)"
+            ),
+            {"end_date": date(2024, 9, 30), "ann_date": date(2024, 10, 28)},
+        )
+        # Q1 更正：2024-11-15 补充公告（ann_date 更新为更晚）
+        await conn.execute(
+            text(
+                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe, or_yoy, netprofit_yoy) "
+                "VALUES ('000001.SZ', :end_date, :ann_date, 5.0, -3.0, -5.0)"
+            ),
+            {"end_date": date(2024, 3, 31), "ann_date": date(2024, 11, 15)},
         )
 
 
@@ -1548,3 +1601,83 @@ class TestScreenerDaoDynamicCols:
         result2 = dao.SH_BASE_COLS
 
         assert result1 is result2
+
+
+@pytest.mark.asyncio
+class TestSupplementaryAnnouncementOrdering:
+    """DAT-03: 补充公告场景下，选股主路径与 AI 财务上下文必须取同一报告期（end_date 最新）。
+
+    旧口径（ORDER BY ann_date DESC 优先）在补充公告（ann_date 更新为更晚）场景会
+    选中更早报告期；本组测试在修复前必失败，用于捕获回归。
+    """
+
+    async def test_screening_and_financial_history_agree(
+        self, screener_dao, financial_dao, clean_db, setup_supplementary_announcement
+    ):
+        """单日选股主路径与 AI 财务上下文返回同一报告期（Q3，end_date 最新）。"""
+        # as_of=2024-11-20：Q1 更正（ann_date=11-15）比 Q3 首次公告（ann_date=10-28）更晚，
+        # 旧口径会选中 Q1（roe=5.0）；正确口径（end_date DESC）选中 Q3（roe=12.0）。
+        result = await screener_dao.get_screening_data("20241120")
+        assert not result.empty
+        assert float(result["roe"].iloc[0]) == 12.0
+
+        batch = await financial_dao.get_financial_reports_history_batch(["000001.SZ"], as_of_date=date(2024, 11, 20))
+        assert not batch.empty
+        first = batch.iloc[0]
+        assert first["end_date"] == date(2024, 9, 30)
+        assert float(first["roe"]) == 12.0
+
+    async def test_screening_range_supplementary_announcement(
+        self, screener_dao, clean_db, setup_supplementary_announcement
+    ):
+        """区间选股模板同样按 end_date 口径取最新报告期（Q3）。"""
+        result = await screener_dao.get_screening_data_range("20241101", "20241130")
+        assert not result.empty
+        row = result[result["trade_date"] == date(2024, 11, 20)]
+        assert not row.empty
+        assert float(row["roe"].iloc[0]) == 12.0
+
+    async def test_get_field_completeness_supplementary_announcement(
+        self, quote_dao, clean_db, test_engine: AsyncEngine
+    ):
+        """get_field_completeness 必须按 end_date 口径取最新报告期。
+
+        A 股：Q3 roe 非空 + Q1 更正 roe=NULL（ann_date 更晚）；B 股：仅 Q1 roe=3.0。
+        正确口径（end_date DESC）→ A 股计入 Q3 的 roe，roe 覆盖率 2/2=1.0；
+        旧口径（ann_date DESC 优先）→ A 股选 Q1 更正行（roe=NULL），roe 覆盖率 1/2=0.5。
+        """
+        async with test_engine.begin() as conn:
+            for code in ("000001.SZ", "000002.SZ"):
+                await conn.execute(
+                    text(
+                        "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date) "
+                        "VALUES (:code, :symbol, :name, '银行', 'L', '2020-01-01')"
+                    ),
+                    {"code": code, "symbol": code[:6], "name": code[:6]},
+                )
+            # A 股：Q3 roe 非空（首次公告）
+            await conn.execute(
+                text(
+                    "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
+                    "VALUES ('000001.SZ', :e, :a, 12.0)"
+                ),
+                {"e": date(2024, 9, 30), "a": date(2024, 10, 28)},
+            )
+            # A 股：Q1 更正 roe=NULL（补充公告，ann_date 更晚）
+            await conn.execute(
+                text(
+                    "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
+                    "VALUES ('000001.SZ', :e, :a, NULL)"
+                ),
+                {"e": date(2024, 3, 31), "a": date(2024, 11, 15)},
+            )
+            # B 股：仅 Q1 roe 非空
+            await conn.execute(
+                text(
+                    "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) VALUES ('000002.SZ', :e, :a, 3.0)"
+                ),
+                {"e": date(2024, 3, 31), "a": date(2024, 11, 15)},
+            )
+
+        result = await quote_dao.get_field_completeness(trade_date=date(2024, 11, 20))
+        assert result["roe"] == 1.0

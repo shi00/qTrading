@@ -65,7 +65,7 @@ _SCREENING_SQL_TEMPLATE = """
                                                 netprofit_yoy,
                                                 ROW_NUMBER() OVER (
                                                     PARTITION BY ts_code
-                                                    ORDER BY ann_date DESC, end_date DESC
+                                                    ORDER BY end_date DESC, ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                                                 ) AS rn
                                          FROM financial_reports
                                          WHERE ann_date <= $3) f_inner
@@ -127,7 +127,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             FROM financial_reports f_inner
                             WHERE f_inner.ts_code = b.ts_code
                               AND f_inner.ann_date <= cal.cal_date
-                            ORDER BY f_inner.ann_date DESC, f_inner.end_date DESC
+                            ORDER BY f_inner.end_date DESC, f_inner.ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                             LIMIT 1
                         ) f ON TRUE
                         LEFT JOIN LATERAL (

@@ -408,6 +408,15 @@ class TestScreenerDaoBuildScreeningSql:
         assert "ROW_NUMBER() OVER" in sql
         assert "PARTITION BY ts_code" in sql
 
+    def test_build_sql_financial_ordering_by_end_date(self):
+        """DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC，禁止回退到 ann_date DESC 优先。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "ORDER BY end_date DESC, ann_date DESC" in sql
+        assert "ORDER BY ann_date DESC, end_date DESC" not in sql
+        sql_range = dao._build_screening_sql_range()
+        assert "ORDER BY f_inner.end_date DESC, f_inner.ann_date DESC" in sql_range
+
     def test_build_sql_template_placeholder_replaced(self):
         """review03-C7: __CLOSE_COND__ 模板占位符必须被 require_close 完全替换，无残留。"""
         dao = ScreenerDao(MagicMock())
