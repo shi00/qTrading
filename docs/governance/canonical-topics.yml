@@ -101,3 +101,7 @@ topics:
     title: 架构设计 / 公共契约 / 跨层范式
     canonical: docs/adr/0001-record-architecture-decisions.md
     note: 存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR (P2-17)
+
+  - id: governance-docs
+    title: 修改治理文档 / 规则
+    canonical: docs/adr/0002-document-layering.md

@@ -35,6 +35,9 @@ AStockScreener 项目文档在 Phase 2 渐进式披露拆分前存在以下漂�
 - docs/ 各子目录按类别归类，跨目录交叉引用用相对路径 + 锚点。
 - man/ 不再承载 Flet 内容（改为 stub），其他 man/ 专题保留。
 - 文档权威按主题确定正本，而非按目录层级全局覆盖（P1-05 修订，见 CLAUDE.md §1「文档权威性（按主题正本）」）；冲突时先按主题确定正本，再以正本裁决。
+- 新增/修改任何 `docs/` 文档，必须同步登记到 `docs/README.md` 索引。
+- 检视报告统一落 `docs/reviews/<date>-<scope>/` 目录或 `docs/reviews/<date>-<scope>.md` 文件。
+- 修改宪法（CLAUDE.md §3）红线表，必须同步更新 `docs/governance/redlines.yml` 机器可读镜像（由 `check_redlines_yaml_consistency` 门禁守护）。
 
 ## Consequences
 
