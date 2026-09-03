@@ -799,9 +799,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     trade_date,
                     missing_cols,
                 )
-            if "adj_factor" not in df_quotes.columns:
+            adj_col = df_quotes.get("adj_factor")
+            if adj_col is None or adj_col.isna().all():
                 logger.warning(
-                    "[HistoricalSync] DaySync | ⚠️ adj_factor column missing in quotes for %s. "
+                    "[HistoricalSync] DaySync | ⚠️ adj_factor column missing or all-NULL in quotes for %s. "
                     "This may affect price adjustment calculations.",
                     trade_date,
                 )

@@ -195,6 +195,103 @@ class TestDataQualityServiceCheckCrossValidation:
         assert any("Data quality check warning" in r.getMessage() for r in caplog.records)
 
 
+class TestDataQualityServiceCheckAdjFactorMonotonic:
+    def test_empty_df(self):
+        result = DataQualityService.check_adj_factor_monotonic(pd.DataFrame())
+        assert result == {"violations": [], "checked_stocks": 0, "null_ratio": 0.0}
+
+    def test_missing_column(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result == {"violations": [], "checked_stocks": 0, "null_ratio": 0.0}
+
+    def test_monotonic_increasing_passes(self):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240612", "20240613", "20240614"],
+                "adj_factor": [1.0, 1.5, 2.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == []
+        assert result["checked_stocks"] == 1
+        assert result["null_ratio"] == 0.0
+
+    def test_monotonic_with_equal_values_passes(self):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240612", "20240613", "20240614"],
+                "adj_factor": [1.0, 1.0, 2.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == []
+
+    def test_decrease_flags_violation(self):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240612", "20240613", "20240614"],
+                "adj_factor": [2.0, 1.5, 2.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == ["000001.SZ"]
+
+    def test_null_skipped_from_monotonic_but_counted(self):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240612", "20240613", "20240614"],
+                "adj_factor": [1.0, None, 2.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        # NULL 跳过单调判断（非污染），但缺失率被统计
+        assert result["violations"] == []
+        assert result["null_ratio"] == pytest.approx(1 / 3)
+
+    def test_multi_stock_only_violating_flagged(self):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3 + ["000002.SZ"] * 3,
+                "trade_date": ["20240612", "20240613", "20240614"] * 2,
+                "adj_factor": [1.0, 1.5, 2.0, 2.0, 1.0, 2.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == ["000002.SZ"]
+        assert result["checked_stocks"] == 2
+
+    def test_descending_input_not_false_positive(self):
+        """health_mixin 采样传入降序 df（sort_values ascending=False），
+        正常升序单调序列不得被误判为违规（DAT-02 检视修复）。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240614", "20240613", "20240612"],
+                "adj_factor": [2.0, 1.5, 1.0],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == []
+        assert result["checked_stocks"] == 1
+
+    def test_descending_input_violation_still_detected(self):
+        """降序输入 + 真实非单调（升序中下降）仍应告警。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240614", "20240613", "20240612"],
+                "adj_factor": [1.0, 2.0, 1.5],
+            }
+        )
+        result = DataQualityService.check_adj_factor_monotonic(df)
+        assert result["violations"] == ["000001.SZ"]
+
+
 class TestDataQualityServiceCheckContinuityExtended:
     def test_all_nan_dates(self):
         df = pd.DataFrame({"date": [None, None]})

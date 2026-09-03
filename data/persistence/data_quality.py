@@ -183,3 +183,31 @@ class DataQualityService:
                 logger.warning("Data quality check warning: %s", e, exc_info=True)
 
         return issues
+
+    @staticmethod
+    def check_adj_factor_monotonic(df: pd.DataFrame) -> dict[str, Any]:
+        """adj_factor 累计因子单调不减不变量检查 + 缺失率（DAT-02）。
+
+        - 按 ts_code 分组，检查每只股票 adj_factor 序列是否单调不减。
+        - NULL 视为"缺失"跳过单调判断（缺失由 null_protected 保护，非污染），
+          但统计缺失率返回。
+        - 返回 {"violations": [ts_code, ...], "checked_stocks": n, "null_ratio": float}。
+        """
+        result: dict[str, Any] = {"violations": [], "checked_stocks": 0, "null_ratio": 0.0}
+        if df is None or df.empty or "adj_factor" not in df.columns:
+            return result
+
+        result["null_ratio"] = float(df["adj_factor"].isna().mean())
+        # 单调性判定统一按 trade_date 升序进行，消除调用方顺序依赖：
+        # health_mixin 采样传入降序 df，若直接对降序序列判 diff<0 会把
+        # 正常（升序单调不减）股票误判为违规（DAT-02 检视修复）。
+        work = df.dropna(subset=["adj_factor"])
+        if "trade_date" in work.columns:
+            work = work.sort_values("trade_date", ascending=True)
+
+        for ts_code, group in work.groupby("ts_code"):
+            result["checked_stocks"] += 1
+            if group["adj_factor"].diff().dropna().lt(0).any():
+                result["violations"].append(ts_code)
+
+        return result

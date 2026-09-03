@@ -825,6 +825,30 @@ class TestHistoricalSyncDailySnapshotExtended:
         sr = SyncResult()
         result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
         assert result is True
+        # 列缺失 → 仍应记录 adj_factor missing 告警（DAT-02 保持缺失可见）
+        assert any("adj_factor missing" in w for w in sr.warnings)
+
+    @pytest.mark.asyncio
+    async def test_adj_factor_all_null_warning(self):
+        """adj_factor 列存在但全 NULL 同样应告警（DAT-02 写侧恒返回该列，防告警失效）。"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                    "vol": [1000],
+                    "adj_factor": [None],
+                }
+            )
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert any("adj_factor missing" in w for w in sr.warnings)
 
     @pytest.mark.asyncio
     async def test_missing_basic_columns(self):

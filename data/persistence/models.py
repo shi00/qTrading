@@ -77,7 +77,7 @@ class DailyQuotes(Base):
     pct_chg = Column(Numeric(8, 4))
     vol = Column(BigInteger)
     amount = Column(Numeric(20, 4))
-    adj_factor = Column(Numeric(20, 12))
+    adj_factor = Column(Numeric(20, 12), info={"null_protected": True})
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

@@ -1699,7 +1699,7 @@ class TestTushareClientSimpleApiMethods:
 
     @pytest.mark.asyncio
     async def test_get_daily_quotes_no_adj_columns(self, tushare_client_mocks):
-        """When adj_factor df lacks adj_factor column, default 1.0 should be applied."""
+        """When adj_factor df lacks adj_factor column, adj_factor should be left NULL (not 1.0)."""
         client, _, _ = tushare_client_mocks
         daily_df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0]})
         adj_df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "value": [1.0]})
@@ -1714,11 +1714,11 @@ class TestTushareClientSimpleApiMethods:
         client._handle_api_call = mock_handle
         result = await client.get_daily_quotes(trade_date="20240614")
         assert "adj_factor" in result.columns
-        assert result["adj_factor"].iloc[0] == 1.0
+        assert result["adj_factor"].isna().all()
 
     @pytest.mark.asyncio
     async def test_get_daily_quotes_adj_exception_default(self, tushare_client_mocks):
-        """When adj_factor API raises, default 1.0 should be applied."""
+        """When adj_factor API raises, adj_factor should be left NULL (not 1.0)."""
         client, _, _ = tushare_client_mocks
         daily_df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0]})
         call_count = [0]
@@ -1732,11 +1732,11 @@ class TestTushareClientSimpleApiMethods:
         client._handle_api_call = mock_handle
         result = await client.get_daily_quotes(trade_date="20240614")
         assert "adj_factor" in result.columns
-        assert result["adj_factor"].iloc[0] == 1.0
+        assert result["adj_factor"].isna().all()
 
     @pytest.mark.asyncio
     async def test_get_daily_quotes_nan_adj_filled(self, tushare_client_mocks):
-        """NaN adj_factor values should be filled with 1.0."""
+        """Rows without an adj_factor match should be left NULL (not filled with 1.0)."""
         client, _, _ = tushare_client_mocks
         daily_df = pd.DataFrame(
             {
@@ -1756,7 +1756,65 @@ class TestTushareClientSimpleApiMethods:
 
         client._handle_api_call = mock_handle
         result = await client.get_daily_quotes(trade_date="20240614")
-        assert result["adj_factor"].isna().sum() == 0
+        # 000001.SZ 有因子，000002.SZ 无匹配 → 保留 NULL
+        assert result["adj_factor"].isna().sum() == 1
+        assert result.loc[result["ts_code"] == "000002.SZ", "adj_factor"].isna().all()
+
+    @pytest.mark.asyncio
+    async def test_get_daily_quotes_nan_adj_logs_warning(self, tushare_client_mocks, caplog):
+        """Unmatched adj_factor rows left NULL and a warning is logged (DAT-02)."""
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        daily_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": ["20240614", "20240614"],
+                "close": [10.0, 20.0],
+            }
+        )
+        adj_df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "adj_factor": [1.5]})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return daily_df
+            return adj_df
+
+        client._handle_api_call = mock_handle
+        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
+            result = await client.get_daily_quotes(trade_date="20240614")
+        assert result["adj_factor"].isna().sum() == 1
+        assert any("no adj_factor match" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_get_daily_quotes_empty_adj_leaves_null(self, tushare_client_mocks, caplog):
+        """Empty adj_factor API result leaves adj_factor NULL (not 1.0) and logs (DAT-02)."""
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        daily_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "close": [10.0],
+            }
+        )
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return daily_df
+            return pd.DataFrame()
+
+        client._handle_api_call = mock_handle
+        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
+            result = await client.get_daily_quotes(trade_date="20240614")
+        assert "adj_factor" in result.columns
+        assert result["adj_factor"].isna().all()
+        assert any("missing/incomplete" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_get_moneyflow_hsgt_attaches_units(self, tushare_client_mocks):

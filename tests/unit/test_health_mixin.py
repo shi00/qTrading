@@ -402,6 +402,44 @@ class TestRunQualityScan:
         assert result["score"] == 0
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_scan_adj_factor_violation_warns(self, caplog):
+        """adj_factor 非单调 + 高缺失率应在 QualityScan 采样中告警（DAT-02）。"""
+        proc = FakeProcessor()
+        basics = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "list_status": ["L"],
+            }
+        )
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(return_value=basics)
+        proc.cache.check_comprehensive_health = AsyncMock(return_value={"tables": {}})
+        # 升序 [1.0, None, 2.0, 1.0]：降序切片后 dropna 为 [1.0, 2.0, 1.0] → 非单调；
+        # 缺失率 1/4 = 25% > 10% → 两条告警同时触发
+        proc.cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 4,
+                    "trade_date": ["20240611", "20240612", "20240613", "20240614"],
+                    "close": [10.0, 10.5, 11.0, 11.5],
+                    "vol": [1000, 1000, 1000, 1000],
+                    "adj_factor": [1.0, None, 2.0, 1.0],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={})
+        proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        proc.trade_calendar.get_trade_cal_df = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        )
+
+        with caplog.at_level("WARNING", logger="data.mixins.health_mixin"):
+            result = await proc.run_quality_scan(sample_size=5)
+        assert "score" in result
+        assert any("adj_factor 非单调" in r.getMessage() for r in caplog.records)
+        assert any("adj_factor 缺失率" in r.getMessage() for r in caplog.records)
+
 
 class TestAssignBasicTierExtended:
     @pytest.mark.asyncio
