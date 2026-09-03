@@ -11,6 +11,7 @@ import asyncio
 import datetime
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -20,6 +21,7 @@ from data.constants import (
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
+    MAJOR_INDICES,
     SYNC_RESULT_EMPTY,
     TIER_FINANCIAL_FRESHNESS_DAYS,
     TIER_FIN_FRESH_RATIO_GOLD,
@@ -47,6 +49,16 @@ logger = logging.getLogger(__name__)
 
 # DAT-02: adj_factor 缺失率告警阈值（QualityScan 采样中缺失率超过该比例则告警）
 _ADJ_FACTOR_NULL_RATIO_WARN = 0.1
+
+# DAT-13: stock_basic active 数合理区间（A 股上市公司约 5000~5600）
+_STOCK_BASIC_ACTIVE_MIN = 5000
+_STOCK_BASIC_ACTIVE_MAX = 5600
+# DAT-13: stock_basic updated_at 超过该天数视为陈旧
+_STOCK_BASIC_STALE_DAYS = 30
+# DAT-13: trade_cal 未来至少覆盖该天数（自然日），否则回测/调度日期轴提前截断
+_TRADE_CAL_FUTURE_DAYS = 30
+# DAT-13: index_daily 最新交易日滞后该天数视为陈旧
+_INDEX_STALE_DAYS = 7
 
 
 def _compute_tier(
@@ -534,6 +546,12 @@ class HealthCheckMixin:
                     DataSanitizer.sanitize_error(e),
                 )
 
+            # DAT-12: 跨表/跨字段一致性校验（外键替代，review03 建议的 SQL 检查）。
+            # 仅告警 + reasons 可见，不硬降级 tier/status。
+            await self._run_cross_validation_checks(reasons)
+            # DAT-13: 维度表质量监控（stock_basic / trade_cal / index_daily）。
+            await self._run_dimension_checks(reasons)
+
             # Log Metrics
             logger.debug(
                 "[DataProcessor] Health | Metrics snapshot: Lag=%sd, FinCoverage=%.1f%%, Missing=%s, "
@@ -642,6 +660,145 @@ class HealthCheckMixin:
                 exc_info=True,
             )
             return {"status": "red", "msg": f"Check failed: {safe}"}
+
+    async def _run_cross_validation_checks(self, reasons: list[str]) -> None:
+        """DAT-12: 跨表/跨字段一致性检查（生产原无任何跨表防线，外键替代）。
+
+        review03 DAT-12 建议的 5 条规则中，financial_reports.ann_date IS NULL 已由
+        DAT-06 单独实现；其余 4 条（孤儿 ts_code / 价格范围 / moneyflow 净流入 /
+        adj_factor 单调）在此实现。全部只告警 + reasons 可见（健康面板），不硬降级
+        tier/status（「非零即告警」口径）。每条检查独立容错，单表异常不影响其余检查。
+        """
+        q = self.cache.quote_dao
+        checks: list[tuple[str, Callable[[], Awaitable[int]]]] = [
+            ("orphan ts_codes in daily_quotes not in stock_basic", q.count_orphan_ts_codes),
+            ("price range violations (high<low or close outside)", q.count_price_range_violations),
+            ("moneyflow net_mf_amount != sum(buy) - sum(sell)", q.count_moneyflow_net_mismatch),
+            ("adj_factor decreased vs previous trade day", q.count_adj_factor_monotonic_violations),
+        ]
+        for label, check in checks:
+            try:
+                cnt = await check()
+                if cnt:
+                    logger.warning("[DataProcessor] Health | ⚠️ DAT-12 %s: %d 行", label, cnt)
+                    reasons.append(f"{label}: {cnt} rows")
+            except asyncio.CancelledError:
+                raise
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.debug(
+                    "[DataProcessor] Health | DAT-12 check '%s' skipped: %s",
+                    label,
+                    DataSanitizer.sanitize_error(e),
+                )
+
+    async def _run_dimension_checks(self, reasons: list[str]) -> None:
+        """DAT-13: 维度表质量监控——stock_basic / trade_cal / index_daily。
+
+        与日线表不同，维度表的检查是「覆盖度」而非「连续性」：
+        - stock_basic: active 数合理区间 + ts_code 格式合法 + updated_at 新鲜度
+        - trade_cal: 未来至少覆盖 _TRADE_CAL_FUTURE_DAYS 天（否则回测/调度日期轴提前截断）
+        - index_daily: 每只 MAJOR_INDICES 都有近期数据（screening_history 的
+          index_pct / alpha 计算基准）。同样只告警，不硬降级。
+        """
+        # --- stock_basic ---
+        try:
+            sb = await self.cache.stock_dao.get_stock_basic_health_summary()
+            if sb is not None and not sb.empty:
+                row = sb.iloc[0]
+                active = row.get("active_count")
+                if active is not None and not (_STOCK_BASIC_ACTIVE_MIN <= active <= _STOCK_BASIC_ACTIVE_MAX):
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ DAT-13 stock_basic active=%s 超出合理区间 [%d, %d]",
+                        active,
+                        _STOCK_BASIC_ACTIVE_MIN,
+                        _STOCK_BASIC_ACTIVE_MAX,
+                    )
+                    reasons.append(f"stock_basic active count {active} outside expected range")
+                invalid = row.get("invalid_ts_code_count")
+                if invalid:
+                    reasons.append(f"stock_basic has {invalid} invalid ts_code rows")
+                latest_upd = row.get("latest_updated_at")
+                if latest_upd is not None:
+                    age_days = (get_now() - parse_date(latest_upd)).days
+                    if age_days > _STOCK_BASIC_STALE_DAYS:
+                        logger.warning(
+                            "[DataProcessor] Health | ⚠️ DAT-13 stock_basic updated_at 陈旧 (%dd)",
+                            age_days,
+                        )
+                        reasons.append(f"stock_basic updated_at stale ({age_days}d)")
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(
+                "[DataProcessor] Health | DAT-13 stock_basic check skipped: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+
+        # --- trade_cal ---
+        try:
+            latest_cal = await self.cache.stock_dao.get_latest_open_cal_date()
+            if latest_cal is None:
+                reasons.append("trade_cal has no open-day records")
+            else:
+                cal_d = latest_cal.date() if isinstance(latest_cal, datetime.datetime) else latest_cal
+                if cal_d < get_now().date() + datetime.timedelta(days=_TRADE_CAL_FUTURE_DAYS):
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ DAT-13 trade_cal 最新 open 日=%s 未来覆盖不足",
+                        cal_d,
+                    )
+                    reasons.append(f"trade_cal future coverage insufficient (latest open day {cal_d})")
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(
+                "[DataProcessor] Health | DAT-13 trade_cal check skipped: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+
+        # --- index_daily ---
+        try:
+            idx = await self.cache.quote_dao.get_index_daily_coverage_summary()
+            covered = set(idx["ts_code"].tolist()) if idx is not None and not idx.empty else set()
+            missing = [c for c in MAJOR_INDICES if c not in covered]
+            if missing:
+                logger.warning(
+                    "[DataProcessor] Health | ⚠️ DAT-13 index_daily 缺失 %d 只 MAJOR_INDICES: %s",
+                    len(missing),
+                    missing,
+                )
+                reasons.append(f"index_daily missing data for {len(missing)} MAJOR_INDICES")
+            if idx is not None and not idx.empty:
+                cutoff = get_now().date() - datetime.timedelta(days=_INDEX_STALE_DAYS)
+                stale = []
+                for _, r in idx.iterrows():
+                    latest = r.get("latest_trade_date")
+                    if latest is None:
+                        continue
+                    d = latest.date() if isinstance(latest, datetime.datetime) else latest
+                    if d < cutoff:
+                        stale.append(str(r.get("ts_code")))
+                if stale:
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ DAT-13 index_daily 陈旧 %d 只: %s",
+                        len(stale),
+                        stale,
+                    )
+                    reasons.append(f"index_daily stale for {len(stale)} MAJOR_INDICES")
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(
+                "[DataProcessor] Health | DAT-13 index_daily check skipped: %s",
+                DataSanitizer.sanitize_error(e),
+            )
 
     @log_async_operation(
         operation_name="run_quality_scan",

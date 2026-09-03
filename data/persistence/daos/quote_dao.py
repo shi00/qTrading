@@ -1107,3 +1107,106 @@ class QuoteDao(BaseDao):
             normalized,
             {"score": 0, "expected_base": 0, "tables": {}, "issues": ["查询失败"]},
         )
+
+    # --- DAT-12: 跨表/跨字段一致性校验（生产健康检查，外键替代） ---
+    # 近期窗口限制扫描范围，避免对全表（千万级）做代价过高的聚合。
+    _CROSS_VALIDATION_WINDOW_DAYS = 120
+    # moneyflow_daily net_mf_amount 与「Σ买入 − Σ卖出」的容差（万元），容忍分项舍入差异。
+    _MONEYFLOW_NET_TOLERANCE = 1.0
+
+    async def _count_in_window(self, sql: str, params: list) -> int:
+        """DAT-12: 执行带 $N 占位符的 COUNT 查询，返回首个 cnt 值（查询失败/空结果返回 0）。"""
+        df = await self._read_db(sql, params)
+        if df is None or df.empty:
+            return 0
+        return int(df["cnt"].iloc[0])
+
+    async def count_orphan_ts_codes(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
+        """DAT-12: daily_quotes 中 stock_basic 不存在的 ts_code 数（外键替代，捕获脏股票代码）。
+
+        NOT EXISTS 等价集合差；stock_basic.ts_code 为主键非 NULL，无 NULL 语义陷阱。
+        """
+        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        return await self._count_in_window(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM (
+                SELECT DISTINCT q.ts_code
+                FROM daily_quotes q
+                WHERE q.trade_date >= $1
+                  AND NOT EXISTS (SELECT 1 FROM stock_basic b WHERE b.ts_code = q.ts_code)
+            ) orphan_codes
+            """,
+            [cutoff],
+        )
+
+    async def count_price_range_violations(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
+        """DAT-12: 行情脏数据——high < low 或 close 越界 [low, high] 的行数（近期窗口）。"""
+        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        return await self._count_in_window(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM daily_quotes
+            WHERE trade_date >= $1
+              AND (high < low OR close > high OR close < low)
+            """,
+            [cutoff],
+        )
+
+    async def count_moneyflow_net_mismatch(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
+        """DAT-12: moneyflow_daily 净流入额与「Σ买入 − Σ卖出」不符的行数（近期窗口）。
+
+        net_mf_amount = Σbuy − Σsell；容差 _MONEYFLOW_NET_TOLERANCE（万元）容忍分项舍入。
+        """
+        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        return await self._count_in_window(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM moneyflow_daily
+            WHERE trade_date >= $1
+              AND ABS(net_mf_amount - (
+                  (buy_sm_amount + buy_md_amount + buy_lg_amount + buy_elg_amount)
+                  - (sell_sm_amount + sell_md_amount + sell_lg_amount + sell_elg_amount)
+              )) > $2
+            """,
+            [cutoff, self._MONEYFLOW_NET_TOLERANCE],
+        )
+
+    async def count_adj_factor_monotonic_violations(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
+        """DAT-12: adj_factor 相对前一交易日下降的行数（捕获 DAT-02 的 adj_factor 静默降级 1.0）。
+
+        窗口函数 LAG 按 (ts_code, trade_date) 排序取前值；仅统计近期窗口以控制成本。
+        """
+        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        return await self._count_in_window(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM (
+                SELECT q.ts_code,
+                       q.trade_date,
+                       q.adj_factor,
+                       LAG(q.adj_factor) OVER (
+                           PARTITION BY q.ts_code ORDER BY q.trade_date
+                       ) AS prev_adj_factor
+                FROM daily_quotes q
+                WHERE q.trade_date >= $1
+                  AND q.adj_factor IS NOT NULL
+            ) t
+            WHERE t.prev_adj_factor IS NOT NULL
+              AND t.adj_factor < t.prev_adj_factor
+            """,
+            [cutoff],
+        )
+
+    async def get_index_daily_coverage_summary(self) -> pd.DataFrame:
+        """DAT-13: 各指数的日线覆盖摘要——行数 + 最新交易日。
+
+        供 dimension 检查验证每只 MAJOR_INDICES 均有近期数据（缺失的指数不会出现在结果中）。
+        """
+        return await self._read_db(
+            """
+            SELECT i.ts_code, COUNT(*) AS row_count, MAX(i.trade_date) AS latest_trade_date
+            FROM index_daily i
+            GROUP BY i.ts_code
+            """,
+        )

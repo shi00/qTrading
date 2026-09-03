@@ -10,8 +10,10 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from data.mixins.health_mixin import HealthCheckMixin, _compute_tier
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.write_quality import WriteQuality
 from data.constants import (
+    MAJOR_INDICES,
     SYNC_RESULT_EMPTY,
     TIER_QUOTE_FRESHNESS_DAYS,
     TIER_FINANCIAL_FRESHNESS_DAYS,
@@ -435,6 +437,305 @@ class TestCheckDataHealth:
         proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(side_effect=Exception("DB error"))
         result = await proc.check_data_health()
         assert result["status"] == "red"
+
+
+class TestCrossValidationChecks:
+    """DAT-12: 跨表/跨字段一致性校验（_run_cross_validation_checks，仅告警不降级）。"""
+
+    @pytest.mark.asyncio
+    async def test_no_violations_no_reason(self):
+        proc = FakeProcessor()
+        for name in (
+            "count_orphan_ts_codes",
+            "count_price_range_violations",
+            "count_moneyflow_net_mismatch",
+            "count_adj_factor_monotonic_violations",
+        ):
+            setattr(proc.cache.quote_dao, name, AsyncMock(return_value=0))
+        reasons: list[str] = []
+        await proc._run_cross_validation_checks(reasons)
+        assert reasons == []
+
+    @pytest.mark.asyncio
+    async def test_violations_append_reason(self):
+        proc = FakeProcessor()
+        proc.cache.quote_dao.count_orphan_ts_codes = AsyncMock(return_value=3)
+        proc.cache.quote_dao.count_price_range_violations = AsyncMock(return_value=0)
+        proc.cache.quote_dao.count_moneyflow_net_mismatch = AsyncMock(return_value=0)
+        proc.cache.quote_dao.count_adj_factor_monotonic_violations = AsyncMock(return_value=0)
+        reasons: list[str] = []
+        await proc._run_cross_validation_checks(reasons)
+        assert any("orphan ts_codes" in r and "3 rows" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_exception_skipped_other_checks_continue(self):
+        """单条检查抛异常不中断其余检查（吞异常仅 debug），其余违规仍追加 reason。"""
+        proc = FakeProcessor()
+        proc.cache.quote_dao.count_orphan_ts_codes = AsyncMock(side_effect=RuntimeError("boom"))
+        proc.cache.quote_dao.count_price_range_violations = AsyncMock(return_value=2)
+        proc.cache.quote_dao.count_moneyflow_net_mismatch = AsyncMock(return_value=0)
+        proc.cache.quote_dao.count_adj_factor_monotonic_violations = AsyncMock(return_value=0)
+        reasons: list[str] = []
+        await proc._run_cross_validation_checks(reasons)
+        assert any("price range" in r and "2 rows" in r for r in reasons)
+        assert not any("orphan" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """EngineDisposedError 必须向上传播（R5），不得吞没。"""
+        proc = FakeProcessor()
+        proc.cache.quote_dao.count_orphan_ts_codes = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError, match="disposed"):
+            await proc._run_cross_validation_checks([])
+
+
+class TestDimensionChecks:
+    """DAT-13: 维度表质量监控（_run_dimension_checks，仅告警不降级）。
+
+    get_now 固定为 2024-06-14 (UTC+8)：stock_basic 新鲜度 / trade_cal 未来覆盖 /
+    index_daily 陈旧判断均基于该基准日。
+    """
+
+    _NOW = datetime.datetime(2024, 6, 14, tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+
+    def _stock_basic_df(self, active=5200, invalid=0, updated=datetime.datetime(2024, 6, 10, 9, 0)):
+        return pd.DataFrame(
+            {"active_count": [active], "latest_updated_at": [updated], "invalid_ts_code_count": [invalid]}
+        )
+
+    @pytest.mark.asyncio
+    async def test_stock_basic_healthy_no_reason(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert not any("stock_basic" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_stock_basic_active_out_of_range(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df(active=100))
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("stock_basic active count 100 outside expected range" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_stock_basic_invalid_ts_code(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df(invalid=2))
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("invalid ts_code" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_stock_basic_stale(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(
+            return_value=self._stock_basic_df(updated=datetime.datetime(2024, 5, 1, 9, 0))
+        )
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("stock_basic updated_at stale" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_trade_cal_no_open_days(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=None)
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("no open-day records" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_trade_cal_future_insufficient(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 6, 20))
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("future coverage insufficient" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_trade_cal_future_ok(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 7, 20))
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert not any("trade_cal" in r for r in reasons)
+
+    def _index_df(self, latest_dates=None):
+        """默认覆盖全部 MAJOR_INDICES；latest_dates 可覆盖部分指数为陈旧/缺失。"""
+        latest_dates = latest_dates or {c: datetime.date(2024, 6, 13) for c in MAJOR_INDICES}
+        return pd.DataFrame(
+            {
+                "ts_code": list(latest_dates.keys()),
+                "row_count": [100] * len(latest_dates),
+                "latest_trade_date": list(latest_dates.values()),
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_index_daily_healthy_no_reason(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 7, 20))
+        proc.cache.quote_dao.get_index_daily_coverage_summary = AsyncMock(return_value=self._index_df())
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert not any("index_daily" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_index_daily_missing_indices(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 7, 20))
+        proc.cache.quote_dao.get_index_daily_coverage_summary = AsyncMock(
+            return_value=self._index_df({"000001.SH": datetime.date(2024, 6, 13)})
+        )
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("missing data for 6 MAJOR_INDICES" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_index_daily_stale(self):
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(return_value=self._stock_basic_df())
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 7, 20))
+        proc.cache.quote_dao.get_index_daily_coverage_summary = AsyncMock(
+            return_value=self._index_df(
+                {
+                    c: (datetime.date(2024, 6, 5) if c == "000001.SH" else datetime.date(2024, 6, 13))
+                    for c in MAJOR_INDICES
+                }
+            )
+        )
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("index_daily stale for 1 MAJOR_INDICES" in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_exception_skipped(self):
+        """stock_basic 检查抛异常不中断 trade_cal/index_daily 检查，也不追加 reason。"""
+        proc = FakeProcessor()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(side_effect=RuntimeError("boom"))
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=None)
+        reasons: list[str] = []
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            await proc._run_dimension_checks(reasons)
+        assert any("no open-day records" in r for r in reasons)
+        assert not any("stock_basic" in r for r in reasons)
+
+
+class TestDat12Dat13WiredThroughCheckDataHealth:
+    """DAT-12/13 经 check_data_health 全链路接入（镜像 DAT-06 的 wiring 测试）。"""
+
+    def _base_proc(self):
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.financial_dao.has_ann_date_nulls = AsyncMock(return_value=False)
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_dat12_violations_appear_in_reasons(self):
+        proc = self._base_proc()
+        for name in (
+            "count_orphan_ts_codes",
+            "count_price_range_violations",
+            "count_moneyflow_net_mismatch",
+            "count_adj_factor_monotonic_violations",
+        ):
+            setattr(proc.cache.quote_dao, name, AsyncMock(return_value=1))
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "active_count": [5200],
+                    "latest_updated_at": [datetime.datetime(2024, 6, 10, 9, 0)],
+                    "invalid_ts_code_count": [0],
+                }
+            )
+        )
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=datetime.date(2024, 7, 20))
+        proc.cache.quote_dao.get_index_daily_coverage_summary = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": MAJOR_INDICES,
+                    "row_count": [100] * len(MAJOR_INDICES),
+                    "latest_trade_date": [datetime.date(2024, 6, 13)] * len(MAJOR_INDICES),
+                }
+            )
+        )
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(
+                2024, 6, 14, tzinfo=datetime.timezone(datetime.timedelta(hours=8))
+            )
+            result = await proc.check_data_health()
+        assert any("orphan ts_codes" in r for r in result["reasons"])
+        assert any("price range" in r for r in result["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_dat13_dimension_violations_appear_in_reasons(self):
+        proc = self._base_proc()
+        proc.cache.stock_dao.get_stock_basic_health_summary = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "active_count": [100],
+                    "latest_updated_at": [datetime.datetime(2024, 5, 1, 9, 0)],
+                    "invalid_ts_code_count": [2],
+                }
+            )
+        )
+        proc.cache.stock_dao.get_latest_open_cal_date = AsyncMock(return_value=None)
+        proc.cache.quote_dao.get_index_daily_coverage_summary = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SH"],
+                    "row_count": [100],
+                    "latest_trade_date": [datetime.date(2024, 6, 5)],
+                }
+            )
+        )
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(
+                2024, 6, 14, tzinfo=datetime.timezone(datetime.timedelta(hours=8))
+            )
+            result = await proc.check_data_health()
+        assert any("outside expected range" in r for r in result["reasons"])
+        assert any("no open-day records" in r for r in result["reasons"])
+        assert any("missing data for 6 MAJOR_INDICES" in r for r in result["reasons"])
 
 
 class TestRunQualityScan:

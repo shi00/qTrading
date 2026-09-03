@@ -143,7 +143,11 @@ COMMON_COLUMNS = {
 
 # Table Definitions with Table-Specific Column Overrides
 TABLE_DEFINITIONS = {
-    "stock_basic": {"alias": "tab_stock_basic"},
+    "stock_basic": {
+        "alias": "tab_stock_basic",
+        "desc": "股票基础信息（定义股票池 universe，DAT-13 纳入质量监控）",
+        "quality_config": {"tier": 3, "monitor": True},
+    },
     "stock_concepts": {
         "alias": "tab_stock_concepts",
         "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_LLM_<sha256> 前缀概念)",
@@ -370,7 +374,11 @@ TABLE_DEFINITIONS = {
             "frequency": "daily",
         },
     },
-    "index_daily": {"alias": "tab_index_daily"},
+    "index_daily": {
+        "alias": "tab_index_daily",
+        "desc": "指数日线（仅 MAJOR_INDICES，DAT-13 纳入质量监控）",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
+    },
     "index_dailybasic": {"alias": "tab_index_dailybasic"},
     "northbound_holding": {
         "alias": "tab_northbound_holding",
@@ -588,7 +596,12 @@ TABLE_DEFINITIONS = {
             "content_hash": "col_content_hash",
         },
     },
-    "trade_cal": {"alias": "tab_trade_cal"},
+    "trade_cal": {
+        "alias": "tab_trade_cal",
+        "desc": "交易日历（定义交易日基准，DAT-13 纳入质量监控）",
+        "quality_config": {"tier": 3, "monitor": True},
+        "type": "global",
+    },
     "screening_history": {
         "alias": "tab_screening_history",
     },
