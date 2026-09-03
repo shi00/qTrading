@@ -1112,6 +1112,7 @@ _R16_SINGLETON_CLASSES = frozenset(
         "EmbeddedPostgresService",
         "EmbeddedPgMaintenanceService",
         "AppColors",
+        "WriteQuality",
     }
 )
 
