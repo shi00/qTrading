@@ -585,6 +585,39 @@ class TestProcessingLoop:
         with pytest.raises(asyncio.CancelledError):
             await task
 
+    @pytest.mark.asyncio
+    async def test_content_hash_md5_marks_usedforsecurity_false(self, svc):
+        """DAT-07: item 无 content_hash 时，md5 摘要必须带 usedforsecurity=False（防回退，消除弱哈希告警噪声）。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait({"content": "test news"})
+
+        processed = asyncio.Event()
+        md5_mock = MagicMock()
+        md5_mock.hexdigest.return_value = "a" * 12
+
+        async def fake_generate_tags(content):
+            processed.set()
+            return "tag"
+
+        with (
+            patch("services.news_subscription_service.hashlib.md5", return_value=md5_mock) as md5_spy,
+            patch.object(svc, "_generate_tags", fake_generate_tags),
+            patch("services.news_subscription_service.CacheManager.normalize_news_item", return_value={}),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.wait_for(processed.wait(), timeout=2)
+            svc._running = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        md5_spy.assert_any_call(b"test news", usedforsecurity=False)
+
 
 # ---------------------------------------------------------------------------
 # _notify_listeners
