@@ -1717,6 +1717,29 @@ class TestTushareClientSimpleApiMethods:
         assert result["adj_factor"].isna().all()
 
     @pytest.mark.asyncio
+    async def test_get_daily_quotes_adj_missing_key_columns(self, tushare_client_mocks, caplog):
+        """df_adj 缺 trade_date/ts_code 键列应告警并保留 NULL（DAT-02 覆盖 L988 分支）。"""
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        daily_df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0]})
+        adj_df = pd.DataFrame({"value": [1.0]})
+        call_count = [0]
+
+        async def mock_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return daily_df
+            return adj_df
+
+        client._handle_api_call = mock_handle
+        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
+            result = await client.get_daily_quotes(trade_date="20240614")
+        assert "adj_factor" in result.columns
+        assert result["adj_factor"].isna().all()
+        assert any("missing/incomplete" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_get_daily_quotes_adj_exception_default(self, tushare_client_mocks):
         """When adj_factor API raises, adj_factor should be left NULL (not 1.0)."""
         client, _, _ = tushare_client_mocks
