@@ -68,7 +68,7 @@ _SCREENING_SQL_TEMPLATE = """
                                                     ORDER BY end_date DESC, ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                                                 ) AS rn
                                          FROM financial_reports
-                                         WHERE ann_date <= $3) f_inner
+                                         WHERE ann_date IS NOT NULL AND ann_date <= $3) f_inner
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
                         LEFT JOIN LATERAL (
@@ -126,6 +126,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                                    f_inner.netprofit_yoy
                             FROM financial_reports f_inner
                             WHERE f_inner.ts_code = b.ts_code
+                              AND f_inner.ann_date IS NOT NULL
                               AND f_inner.ann_date <= cal.cal_date
                             ORDER BY f_inner.end_date DESC, f_inner.ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                             LIMIT 1

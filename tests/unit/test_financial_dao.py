@@ -923,3 +923,129 @@ class TestEngineDisposedErrorPropagation:
         dao._read_db = AsyncMock(side_effect=DatabaseQueryError("db error"))
         result = await dao.get_financial_reports_history("000001.SZ")
         assert result.empty
+
+
+class TestHasAnnDateNulls:
+    """DAT-06: has_ann_date_nulls() EXISTS 语义检查（非零即告警）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_nulls_exist(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"has_nulls": [True]}))
+        assert await dao.has_ann_date_nulls() is True
+        sql = dao._read_db.call_args[0][0]
+        assert "EXISTS" in sql
+        assert "ann_date IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_nulls(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"has_nulls": [False]}))
+        assert await dao.has_ann_date_nulls() is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_none_result(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.has_ann_date_nulls() is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_empty(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.has_ann_date_nulls() is False
+
+
+class TestDat06AnnDateNotNullPredicates:
+    """DAT-06: financial 相关查询双分支（as-of/非 as-of）必须显式 ann_date IS NOT NULL。
+
+    防回退：若谓词被移除，下列断言将失败，确保「NULL 剔除成为明写规则」不被静默回退。
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_financial_reports_history("000001.SZ", as_of_date="20240701")
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_non_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_financial_reports_history("000001.SZ", as_of_date=None)
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" not in sql
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_batch_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "rn": [1]}))
+        await dao.get_financial_reports_history_batch(["000001.SZ"], as_of_date="20240701")
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_batch_non_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "rn": [1]}))
+        await dao.get_financial_reports_history_batch(["000001.SZ"], as_of_date=None)
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" not in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_audit_batch_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_fina_audit_batch(["000001.SZ"], as_of_date="20240701")
+        sql = dao._read_db.call_args[0][0]
+        assert "audit_result IS NOT NULL" in sql
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_audit_batch_non_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_fina_audit_batch(["000001.SZ"], as_of_date=None)
+        sql = dao._read_db.call_args[0][0]
+        assert "audit_result IS NOT NULL" in sql
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" not in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_fina_mainbz("000001.SZ", as_of_date="20240701")
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_non_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_fina_mainbz("000001.SZ", as_of_date=None)
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" not in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_batch_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "dr": [1]}))
+        await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date="20240701")
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_batch_non_as_of(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "dr": [1]}))
+        await dao.get_fina_mainbz_batch(["000001.SZ"], as_of_date=None)
+        sql = dao._read_db.call_args[0][0]
+        assert "ann_date IS NOT NULL" in sql
+        assert "ann_date <=" not in sql

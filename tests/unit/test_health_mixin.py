@@ -322,6 +322,113 @@ class TestCheckDataHealth:
             assert "status" in result
 
     @pytest.mark.asyncio
+    async def test_ann_date_nulls_appends_reason(self):
+        """DAT-06: financial_reports 存在 ann_date IS NULL 行 → reasons 追加告警（非零即告警）。"""
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.financial_dao.has_ann_date_nulls = AsyncMock(return_value=True)
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            result = await proc.check_data_health()
+            assert "reasons" in result
+            assert any("ann_date" in r for r in result["reasons"])
+        proc.cache.financial_dao.has_ann_date_nulls.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ann_date_nulls_false_no_reason(self):
+        """DAT-06: 无 NULL 行时不追加告警 reason。"""
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.financial_dao.has_ann_date_nulls = AsyncMock(return_value=False)
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            result = await proc.check_data_health()
+            assert "reasons" in result
+            assert not any("ann_date" in r for r in result["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_ann_date_nulls_exception_skipped(self):
+        """DAT-06: has_ann_date_nulls 抛异常时不中断健康检查、不追加 reason（吞异常仅 debug）。"""
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        proc.cache.check_comprehensive_health = AsyncMock(
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
+        )
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["financial_reports"],
+                    "last_data_date": ["20240610"],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.financial_dao.has_ann_date_nulls = AsyncMock(side_effect=RuntimeError("boom"))
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            result = await proc.check_data_health()
+            assert "reasons" in result
+            assert not any("ann_date" in r for r in result["reasons"])
+        proc.cache.financial_dao.has_ann_date_nulls.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_exception_returns_red(self):
         proc = FakeProcessor()
         proc._health_cache = {"time": 0, "data": None}

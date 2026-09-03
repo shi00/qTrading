@@ -154,7 +154,7 @@ class FinancialDao(BaseDao):
                         debt_to_assets, or_yoy, netprofit_yoy, goodwill,
                         audit_result, n_cashflow_act, money_cap, accounts_receiv
                     FROM financial_reports
-                    WHERE ts_code = $1 AND ann_date <= $2
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
                     ORDER BY end_date DESC
                     LIMIT $3
                     """,
@@ -171,7 +171,7 @@ class FinancialDao(BaseDao):
                         debt_to_assets, or_yoy, netprofit_yoy, goodwill,
                         audit_result, n_cashflow_act, money_cap, accounts_receiv
                     FROM financial_reports
-                    WHERE ts_code = $1
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL
                     ORDER BY end_date DESC
                     LIMIT $2
                     """,
@@ -212,7 +212,7 @@ class FinancialDao(BaseDao):
                                 audit_result, n_cashflow_act, money_cap, accounts_receiv,
                                 ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
                             FROM financial_reports
-                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${ann_date_param}
+                            WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL AND ann_date <= ${ann_date_param}
                         ) sub
                         WHERE rn <= ${limit_param}
                         ORDER BY ts_code, end_date DESC
@@ -232,9 +232,9 @@ class FinancialDao(BaseDao):
                             debt_to_assets, or_yoy, netprofit_yoy, goodwill,
                             audit_result, n_cashflow_act, money_cap, accounts_receiv,
                             ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                        FROM financial_reports
-                        WHERE ts_code IN ({placeholders})
-                    ) sub
+                            FROM financial_reports
+                            WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
+                        ) sub
                     WHERE rn <= ${limit_param}
                     ORDER BY ts_code, end_date DESC
                 """
@@ -268,6 +268,7 @@ class FinancialDao(BaseDao):
                         FROM fina_audit
                         WHERE ts_code IN ({placeholders})
                           AND audit_result IS NOT NULL
+                          AND ann_date IS NOT NULL
                           AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC, ann_date DESC
                         """
@@ -281,6 +282,7 @@ class FinancialDao(BaseDao):
                 FROM fina_audit
                 WHERE ts_code IN ({placeholders})
                   AND audit_result IS NOT NULL
+                  AND ann_date IS NOT NULL
                 ORDER BY ts_code, end_date DESC, ann_date DESC
                 """,
                 None,
@@ -393,7 +395,7 @@ class FinancialDao(BaseDao):
                     """
                     SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                     FROM fina_mainbz
-                    WHERE ts_code = $1 AND ann_date <= $2
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
                     ORDER BY end_date DESC, bz_sales DESC
                     LIMIT 10
                     """,
@@ -404,7 +406,7 @@ class FinancialDao(BaseDao):
                     """
                     SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                     FROM fina_mainbz
-                    WHERE ts_code = $1
+                    WHERE ts_code = $1 AND ann_date IS NOT NULL
                     ORDER BY end_date DESC, bz_sales DESC
                     LIMIT 10
                     """,
@@ -434,7 +436,7 @@ class FinancialDao(BaseDao):
                         FROM (
                             SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                             FROM fina_mainbz
-                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${start_idx + chunk_len}
+                            WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL AND ann_date <= ${start_idx + chunk_len}
                         ) sub
                         WHERE sub.dr = 1
                         ORDER BY ts_code, bz_sales DESC
@@ -448,7 +450,7 @@ class FinancialDao(BaseDao):
                 FROM (
                     SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                     FROM fina_mainbz
-                    WHERE ts_code IN ({placeholders})
+                    WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
                 ) sub
                 WHERE sub.dr = 1
                 ORDER BY ts_code, bz_sales DESC
@@ -468,6 +470,17 @@ class FinancialDao(BaseDao):
             "Failed to get fina_mainbz batch",
             post_process=post_process,
         )
+
+    async def has_ann_date_nulls(self) -> bool:
+        """DAT-06: financial_reports 是否存在 ann_date IS NULL 的行（非零即告警，EXISTS 语义）。
+
+        EXISTS 短路为 O(首个 NULL) 定位，避免对全表 COUNT 扫描；
+        语义与 review「非零即告警」完全匹配。
+        """
+        df = await self._read_db(
+            "SELECT EXISTS (SELECT 1 FROM financial_reports WHERE ann_date IS NULL) AS has_nulls",
+        )
+        return bool(df["has_nulls"].iloc[0]) if df is not None and not df.empty else False
 
     async def verify_stock_financial_integrity(
         self,

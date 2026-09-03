@@ -176,6 +176,9 @@ class MacroDao(BaseDao):
                 t.c.ti_yoy,
             ]
             stmt = sa.select(*cols)
+            # DAT-06: publish_date 与 ann_date 同构的可空 PIT 键，两分支显式排除 NULL，
+            # 使「NULL 被剔除」成为明写规则，消除 as-of/非 as-of 口径差。
+            stmt = stmt.where(t.c.publish_date.is_not(None))
             if as_of_date is not None:
                 stmt = stmt.where(t.c.publish_date <= as_of_date)
             # 返回最多 2 行：月度行（m2/cpi/ppi）与 GDP 行（gdp_yoy/pi_yoy 等）

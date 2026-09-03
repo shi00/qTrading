@@ -428,6 +428,12 @@ class TestScreenerDaoBuildScreeningSql:
         # DAT-01: PIT 存活判定（含 list_status='D' 但 delist_date 晚于 as_of 的分支）
         assert "list_status = 'D' AND b.delist_date IS NOT NULL" in sql_false
 
+    def test_build_sql_includes_ann_date_not_null(self):
+        """DAT-06: 财务子查询必须显式 ann_date IS NOT NULL，防回退。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "ann_date IS NOT NULL AND ann_date <=" in sql
+
 
 class TestScreenerDaoSwIndustryJoin:
     """Phase 3F-2 轨道 B：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member + COALESCE。
@@ -678,6 +684,12 @@ class TestScreenerDaoBuildScreeningSqlRange:
         sql = dao._build_screening_sql_range()
         assert "cal_date >= $1" in sql
         assert "cal_date <= $2" in sql
+
+    def test_build_sql_range_includes_ann_date_not_null(self):
+        """DAT-06: 区间模板财务子查询必须显式 ann_date IS NOT NULL，防回退。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "f_inner.ann_date IS NOT NULL" in sql
 
     def test_build_sql_range_template_placeholder_replaced(self):
         """review03-C7: __CLOSE_COND__ 模板占位符必须被 require_close 完全替换，无残留。"""
