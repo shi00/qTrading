@@ -2887,6 +2887,111 @@ class TestDecisionTreeMapping:
         errors = check_decision_tree_mapping()
         assert any("CONTRIBUTING.md" in e and "未在 CLAUDE.md" in e for e in errors), f"应检出反向漂移, got: {errors}"
 
+    def test_detects_shared_canonical_topic_misassigned(self, tmp_path, monkeypatch):
+        """共享 canonical 的 yml 主题归属与白名单不一致（主题正本被指到别的主体）→ 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) |\n"
+            "| 主题 A | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        # a/b 分别指向不同正本，集合级断言会因两者都存在于两侧而通过，但归属已错配
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "a", "title": "A", "canonical": "docs/patterns/mvvm.md"},
+                        {"id": "b", "title": "B", "canonical": "docs/patterns/mvvm.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
+            {"docs/patterns/mvvm.md": {"a", "c"}},
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/patterns/mvvm.md" in e and "归属 ['a', 'b']" in e for e in errors), (
+            f"应检出共享 canonical 归属错配, got: {errors}"
+        )
+
+    def test_detects_merged_topic_removed(self, tmp_path, monkeypatch):
+        """共享 canonical 的期望主题被删除（合并行承载主题数丢）→ 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump({"topics": [{"id": "a", "title": "A", "canonical": "docs/flet/README.md"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
+            {"docs/flet/README.md": {"a", "b"}},
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/flet/README.md" in e and "归属" in e for e in errors), (
+            f"应检出共享 canonical 主题删除, got: {errors}"
+        )
+
+    def test_detects_unregistered_shared_canonical(self, tmp_path, monkeypatch):
+        """单主题 canonical 被多个 yml 主题共享但未登记白名单 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| 策略 | [docs/patterns/strategy.md](./docs/patterns/strategy.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "p1", "title": "P1", "canonical": "docs/patterns/strategy.md"},
+                        {"id": "p2", "title": "P2", "canonical": "docs/patterns/strategy.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/patterns/strategy.md" in e and "未登记" in e for e in errors), (
+            f"应检出未登记共享 canonical, got: {errors}"
+        )
+
 
 class TestCanonicalRouting:
     """canonical 入口承担条件路由责任（DOC-05）：声明 workflow 的入口必须含指向 workflow 的链接."""

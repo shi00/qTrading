@@ -1433,6 +1433,17 @@ def check_ruleset_metadata_consistency() -> list[str]:
 # canonical-topics.yml 的 canonical 值统一为仓库相对路径（如 `docs/patterns/mvvm.md` / `CONTRIBUTING.md`）。
 _CANONICAL_TOPICS_REQUIRED = frozenset({"id", "title", "canonical"})
 
+# 宪法 §1.8 采用「合并行」：一行任务类型承载 yml 拆分的多个主题（共享同一 canonical）。
+# 集合级双向断言会压平该分布，使「主题归属被指到别的主体」或「合并行承载主题被删」静默漏报。
+# 本白名单按 yml 稳定 id 声明每个共享 canonical 的期望主题归属，逐主题绑定仅升级方向 2。
+# 新增共享 canonical（同一路径被多个 topic 引用）时须在此登记，否则方向 2 视为单主题 canonical。
+_DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
+    "docs/flet/README.md": {"ui-view", "ui-layout", "i18n"},
+    "docs/patterns/config-quality-perf.md": {"performance", "config"},
+    "docs/guides/testing.md": {"testing", "e2e-testing"},
+    "docs/guides/how-to.md": {"backtest", "embedded-pg"},
+}
+
 
 def _load_canonical_topics() -> list[dict] | None:
     """加载 canonical-topics.yml 的 topics 列表；无法解析或结构非法时返回 None。"""
@@ -1480,7 +1491,8 @@ def check_decision_tree_mapping() -> list[str]:
     宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」，二者对同一主题必须指向
     同一正本。双向断言（允许一对多：宪法合并行 ↔ yml 拆分主题，只要 canonical 值相同）：
     1. 宪法 §1.8 表格「必读入口」列出现的每个目标路径，必须能在 yml canonical 中找到。
-    2. yml 每个 canonical 值，必须能在宪法 §1.8 表格「必读入口」列中找到。
+    2. yml 每个 canonical 值，必须能在宪法 §1.8 表格「必读入口」列中找到；共享 canonical
+       额外按 _DECISION_TREE_MERGED_IDS 白名单逐主题绑定，防止主题归属被指到别的主体。
     """
     errors: list[str] = []
     claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
@@ -1491,7 +1503,7 @@ def check_decision_tree_mapping() -> list[str]:
         errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过决策树映射校验")
         return errors
 
-    yml_canonicals: set[str] = set()
+    yml_canonical_map: dict[str, set[str]] = {}
     missing_fields = []
     for idx, topic in enumerate(topics, 1):
         missing = _CANONICAL_TOPICS_REQUIRED - topic.keys()
@@ -1499,21 +1511,38 @@ def check_decision_tree_mapping() -> list[str]:
             missing_fields.append(f"topics[{idx}] 缺字段 {sorted(missing)}")
         canonical = topic.get("canonical")
         if isinstance(canonical, str):
-            yml_canonicals.add(canonical.removeprefix("./"))
+            yml_canonical_map.setdefault(canonical.removeprefix("./"), set()).add(topic["id"])
     errors.extend(missing_fields)
 
     # 方向 1: 宪法入口都应在 yml 中登记（不含 canonical-topics.yml 自身引用）
     for target in sorted(claude_targets):
         if target == "docs/governance/canonical-topics.yml":
             continue
-        if target not in yml_canonicals:
+        if target not in yml_canonical_map:
             errors.append(f"决策树映射: CLAUDE.md §1.8 引用目标 '{target}' 未在 canonical-topics.yml 中登记")
 
-    # 方向 2: yml 每个 canonical 都应在宪法 §1.8 中出现
-    for canonical in sorted(yml_canonicals):
+    # 方向 2: 逐主题绑定 canonical 归属（补齐集合级丢失「分布/归属」的交叉错配与归属丢失）
+    for canonical, topic_ids in sorted(yml_canonical_map.items()):
+        if canonical in _DECISION_TREE_MERGED_IDS:
+            # 共享 canonical：须在宪法出现，且 yml 归属与白名单（宪法合并行承载主题集）一致
+            if canonical not in claude_targets:
+                errors.append(f"决策树映射: canonical '{canonical}' 已登记合并但未在 CLAUDE.md §1.8 决策树中出现")
+            expected = _DECISION_TREE_MERGED_IDS[canonical]
+            if topic_ids != expected:
+                errors.append(
+                    f"决策树映射: canonical '{canonical}' 归属 {sorted(topic_ids)} 与宪法 §1.8 "
+                    f"合并行承载 {sorted(expected)} 不一致（同步 yml 归属或登记合并白名单）"
+                )
+            continue
+        # 单主题 canonical：须在宪法出现，且不得被多主题共享（如确需合并须登记白名单）
         if canonical not in claude_targets:
             errors.append(
                 f"决策树映射: canonical-topics.yml 的 canonical '{canonical}' 未在 CLAUDE.md §1.8 决策树中出现"
+            )
+        if len(topic_ids) != 1:
+            errors.append(
+                f"决策树映射: canonical '{canonical}' 被多个主题 {sorted(topic_ids)} 共享但未登记 "
+                f"_DECISION_TREE_MERGED_IDS，如属宪法 §1.8 合并行请登记白名单"
             )
     return errors
 
