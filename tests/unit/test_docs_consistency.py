@@ -2817,6 +2817,40 @@ class TestRulesetMetadataConsistency:
         errors = check_ruleset_metadata_consistency()
         assert any("CLAUDE.md 缺少 ruleset_version" in e for e in errors), f"应检出缺字段, got: {errors}"
 
+    def test_detects_agents_ruleset_version_drift(self, tmp_path, monkeypatch):
+        """AGENTS.md 的 ruleset_version 与 CLAUDE 不一致 → 报错（DOC-13 纳入跨工具入口）."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        agents = tmp_path / "AGENTS.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        contributing.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        agents.write_text("> - ruleset_version: 1.2.0\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("AGENTS.md" in e and "!=" in e for e in errors), f"应检出 AGENTS 漂移, got: {errors}"
+
+    def test_agents_missing_ruleset_version(self, tmp_path, monkeypatch):
+        """AGENTS.md 存在但缺 ruleset_version → 报错."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        agents = tmp_path / "AGENTS.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        contributing.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        agents.write_text("# AGENTS.md\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("AGENTS.md 缺少 ruleset_version" in e for e in errors), f"应检出 AGENTS 缺字段, got: {errors}"
+
 
 class TestDecisionTreeMapping:
     """决策树与其机器可读镜像双向一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml."""

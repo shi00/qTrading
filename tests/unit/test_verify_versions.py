@@ -77,6 +77,13 @@ def setup_test_files(
     claude = tmp_path / "CLAUDE.md"
     claude.write_text("# CLAUDE.md\n", encoding="utf-8")
 
+    # AGENTS.md：对应版本与 pyproject_v 绑定，保证 check_agents_version (Check 10) 一致
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(
+        f"> **对应版本**：{pyproject_v}（产品版本，与 pyproject.toml 一致）\n",
+        encoding="utf-8",
+    )
+
     requirements_dev = tmp_path / "requirements-dev.txt"
     requirements_dev.write_text(f"pyright=={pkg_pyright}\n", encoding="utf-8")
 
@@ -119,10 +126,39 @@ def _patch_all_paths(
         patch("verify_versions.CONTRIBUTING_PATH", contributing),
         patch("verify_versions.SECURITY_PATH", security),
         patch("verify_versions.CLAUDE_PATH", claude),
+        # AGENTS_PATH 由 pyproject.parent 推导，与 setup_test_files 创建的 AGENTS.md 一致
+        patch("verify_versions.AGENTS_PATH", pyproject.parent / "AGENTS.md"),
         patch("verify_versions.REQUIREMENTS_DEV_PATH", requirements_dev),
         patch("verify_versions.SIDECAR_CARGO_PATH", sidecar_dir / "Cargo.toml"),
         patch("verify_versions.SIDECAR_PROTOCOL_PATH", sidecar_dir / "src" / "protocol.rs"),
     ]
+
+
+def test_agents_version_matches(tmp_path):
+    """AGENTS.md 对应版本与 pyproject 一致 → 无错误."""
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("> **对应版本**：0.6.9（产品版本，与 pyproject.toml 一致）\n", encoding="utf-8")
+    with patch("verify_versions.AGENTS_PATH", agents):
+        errors = verify_versions.check_agents_version("0.6.9")
+    assert errors == []
+
+
+def test_agents_version_mismatch(tmp_path):
+    """AGENTS.md 对应版本与 pyproject 不一致 → 报错."""
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("> **对应版本**：0.6.8（产品版本，与 pyproject.toml 一致）\n", encoding="utf-8")
+    with patch("verify_versions.AGENTS_PATH", agents):
+        errors = verify_versions.check_agents_version("0.6.9")
+    assert any("0.6.8" in e and "0.6.9" in e for e in errors), f"应检出版本失配, got: {errors}"
+
+
+def test_agents_version_missing_header(tmp_path):
+    """AGENTS.md 缺「对应版本」字段 → 报错."""
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# AGENTS.md\n", encoding="utf-8")
+    with patch("verify_versions.AGENTS_PATH", agents):
+        errors = verify_versions.check_agents_version("0.6.9")
+    assert any("missing '**对应版本**'" in e for e in errors), f"应检出缺字段, got: {errors}"
 
 
 def test_verify_versions_fix(tmp_path):
