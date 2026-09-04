@@ -12,8 +12,6 @@ MVD 数据特征（用于断言设计）：
 - shibor_daily: 利率递增（on=1.85 → y1=2.50）
 """
 
-from decimal import Decimal
-
 import pytest
 
 from data.cache.cache_manager import CacheManager
@@ -42,8 +40,8 @@ class TestFinancialTrendLogic:
         roe_values = df_sorted["roe"].tolist()
         # MVD 设计为递增：12.5 → 13.0 → 13.5 → 14.0 → 14.5 → 15.0 → 15.5 → 16.0
         assert roe_values == sorted(roe_values), f"ROE 应递增，实际: {roe_values}"
-        assert roe_values[0] == Decimal("12.5")
-        assert roe_values[-1] == Decimal("16.0")
+        assert roe_values[0] == 12.5  # DAT-10/11 归一化后为 float64
+        assert roe_values[-1] == 16.0
 
     @pytest.mark.asyncio
     async def test_prompt_validator_detects_roe_trend(self):
@@ -78,7 +76,7 @@ class TestHolderDataLogic:
         assert len(df) == 3
 
         total_ratio = df["hold_ratio"].sum()
-        assert total_ratio == Decimal("5.5")
+        assert total_ratio == 5.5
 
     @pytest.mark.asyncio
     async def test_holder_number_decreasing_trend(self):

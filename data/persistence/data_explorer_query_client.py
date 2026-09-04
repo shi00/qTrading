@@ -10,6 +10,7 @@ import sqlparse
 from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
+from utils.df_normalize import normalize_decimal_columns
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +287,8 @@ class DataExplorerQueryClient:
                 if not rows:
                     return pd.DataFrame()
                 cols = list(result.keys())
-                return pd.DataFrame(rows, columns=cols)
+                # DAT-10/11: Numeric 列 Decimal → float64 归一化（量小，同步执行）
+                return normalize_decimal_columns(pd.DataFrame(rows, columns=cols))
 
         except Exception as e:
             logger.error("Error querying table %s: %s", table_name, safe_error(e))
@@ -376,7 +378,8 @@ class DataExplorerQueryClient:
                     cols = list(result.keys())
                     rows = result.fetchmany(MAX_FETCH)
 
-                    df = pd.DataFrame(rows, columns=cols)
+                    # DAT-10/11: Numeric 列 Decimal → float64 归一化（量 ≤ 2000，同步执行）
+                    df = normalize_decimal_columns(pd.DataFrame(rows, columns=cols))
 
                     return {
                         "success": True,

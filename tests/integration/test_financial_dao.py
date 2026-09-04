@@ -8,7 +8,6 @@
 """
 
 import datetime
-from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -43,8 +42,8 @@ class TestFinancialDaoIntegrity:
         # Level 2: 验证第一期与最新期 ROE 值
         # 注意：DAO 使用 ORDER BY end_date DESC，显式按 end_date ASC 排序后再断言（见约束 3）
         df_sorted = df.sort_values("end_date", ascending=True).reset_index(drop=True)
-        assert df_sorted["roe"].iloc[0] == Decimal("12.5")  # 第一期（2024Q1）
-        assert df_sorted["roe"].iloc[-1] == Decimal("16.0")  # 最新期（2025Q4）
+        assert df_sorted["roe"].iloc[0] == 12.5  # 第一期（2024Q1），DAT-10/11 归一化后为 float64
+        assert df_sorted["roe"].iloc[-1] == 16.0  # 最新期（2025Q4）
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history_empty(self, financial_dao):
@@ -107,7 +106,7 @@ class TestFinancialDaoIntegrity:
         # Level 2: 验证 000001.SZ 的质押比例（DISTINCT ON (ts_code) 仅返回 1 条）
         row = df[df["ts_code"] == "000001.SZ"]
         assert len(row) == 1
-        assert row["pledge_ratio"].iloc[0] == Decimal("10.5")
+        assert row["pledge_ratio"].iloc[0] == 10.5
 
     @pytest.mark.asyncio
     async def test_get_fina_mainbz(self, financial_dao):

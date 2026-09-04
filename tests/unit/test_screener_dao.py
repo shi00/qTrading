@@ -145,6 +145,22 @@ class TestScreenerDaoGetScreeningData:
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
 
+    @pytest.mark.asyncio
+    async def test_range_query_passes_max_rows_guardrail(self):
+        """DAT-10: 两个区间预载查询都必须携带 max_rows 护栏，防止 OOM。"""
+        import data.persistence.daos.screener_dao as screener_mod
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.5]}))
+        result = await dao.get_screening_data_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert dao._read_db.call_args.kwargs.get("max_rows") == screener_mod._MAX_SCREENING_RANGE_ROWS
+
+        result_f = await dao.get_fundamental_screening_data_range("20240601", "20240615")
+        assert isinstance(result_f, pd.DataFrame)
+        assert dao._read_db.call_args.kwargs.get("max_rows") == screener_mod._MAX_SCREENING_RANGE_ROWS
+        assert screener_mod._MAX_SCREENING_RANGE_ROWS == 1_500_000
+
 
 class TestScreenerDaoGetPendingPredictions:
     @pytest.mark.asyncio

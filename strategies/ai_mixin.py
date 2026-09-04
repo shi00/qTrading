@@ -20,7 +20,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 
 import httpx
 from cachetools import TTLCache
@@ -839,9 +838,7 @@ class AIStrategyMixin:
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
-        row_dict["confidence"] = (
-            min(100, max(1, int(confidence))) if isinstance(confidence, (int, float, Decimal)) else 50
-        )
+        row_dict["confidence"] = min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else 50
         return row_dict
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)

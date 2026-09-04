@@ -18,7 +18,6 @@ import logging
 import math
 import typing
 from collections.abc import Callable
-from decimal import Decimal
 
 import flet as ft
 import flet_charts as fch
@@ -42,7 +41,7 @@ def is_valid_number(val) -> bool:
     """Check if val is a valid (non-NaN) number."""
     if val is None:
         return False
-    if isinstance(val, (float, Decimal)):
+    if isinstance(val, float):
         return not math.isnan(val)
     if isinstance(val, int):
         return True

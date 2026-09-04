@@ -269,8 +269,7 @@ class TestEmbeddedPgDaoReadWrite:
         assert read_df is not None
         assert len(read_df) == 3, f"期望读回 3 条，实际 {len(read_df)}"
         # 按交易日排序验证趋势
-        # NOTE: asyncpg 从 PG NUMERIC 列读回 Decimal，与 float 比较时 10.8 因二进制不精确而
-        # 不相等（Decimal('10.8000') == 10.8 → False），需 float() 转换后比较
+        # DAT-10/11: 读取边界已归一化 NUMERIC → float64，float() 仅作显式类型声明
         read_df = read_df.sort_values("trade_date", ascending=True).reset_index(drop=True)
         assert float(read_df["close"].iloc[0]) == 10.8
         assert float(read_df["close"].iloc[-1]) == 11.3

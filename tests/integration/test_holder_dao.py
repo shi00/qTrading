@@ -6,7 +6,6 @@
 - L2: 批量预取避免 N+1 查询
 """
 
-from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -41,8 +40,8 @@ class TestHolderDaoIntegrity:
         # MVD 中 000001.SZ 的 3 条记录 end_date 均为 2025-12-31，仅返回 1 条（见约束 4）
         rows = df[df["ts_code"] == "000001.SZ"]
         assert len(rows) == 1
-        # 返回的是 hold_ratio 最大的那条
-        assert rows["hold_ratio"].iloc[0] == Decimal("2.5")
+        # 返回的是 hold_ratio 最大的那条（DAT-10/11 归一化后为 float64）
+        assert rows["hold_ratio"].iloc[0] == 2.5
 
     @pytest.mark.asyncio
     async def test_get_top10_holders_batch_empty(self, holder_dao):
@@ -79,7 +78,7 @@ class TestHolderDaoIntegrity:
         # 注意：get_top10_holders（非 batch）无 DISTINCT ON，返回全部 3 条记录
         assert len(df) == 3
         total_ratio = df["hold_ratio"].sum()
-        assert total_ratio == Decimal("5.5")
+        assert total_ratio == 5.5
 
 
 class TestHolderDaoBatchPerformance:
