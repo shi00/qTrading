@@ -1510,8 +1510,9 @@ def check_decision_tree_mapping() -> list[str]:
         if missing:
             missing_fields.append(f"topics[{idx}] 缺字段 {sorted(missing)}")
         canonical = topic.get("canonical")
-        if isinstance(canonical, str):
-            yml_canonical_map.setdefault(canonical.removeprefix("./"), set()).add(topic["id"])
+        topic_id = topic.get("id")
+        if isinstance(canonical, str) and isinstance(topic_id, str):
+            yml_canonical_map.setdefault(canonical.removeprefix("./"), set()).add(topic_id)
     errors.extend(missing_fields)
 
     # 方向 1: 宪法入口都应在 yml 中登记（不含 canonical-topics.yml 自身引用）

@@ -2992,6 +2992,70 @@ class TestDecisionTreeMapping:
             f"应检出未登记共享 canonical, got: {errors}"
         )
 
+    def test_detects_merged_canonical_missing_in_claude(self, tmp_path, monkeypatch):
+        """共享 canonical 已登记白名单但未在宪法 §1.8 出现 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "a", "title": "A", "canonical": "docs/patterns/a.md"},
+                        {"id": "x", "title": "X", "canonical": "docs/patterns/merged.md"},
+                        {"id": "y", "title": "Y", "canonical": "docs/patterns/merged.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
+            {"docs/patterns/merged.md": {"x", "y"}},
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/patterns/merged.md" in e and "已登记合并但未在" in e for e in errors), (
+            f"应检出合并 canonical 缺于宪法, got: {errors}"
+        )
+
+    def test_missing_id_field_does_not_crash(self, tmp_path, monkeypatch):
+        """topic 缺 id 字段不应 KeyError 崩溃，而应优雅报缺字段（回归 guard）."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump({"topics": [{"title": "A", "canonical": "docs/patterns/a.md"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("缺字段" in e and "id" in e for e in errors), f"应优雅报缺 id 字段, got: {errors}"
+
 
 class TestCanonicalRouting:
     """canonical 入口承担条件路由责任（DOC-05）：声明 workflow 的入口必须含指向 workflow 的链接."""
