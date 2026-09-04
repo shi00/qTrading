@@ -3221,6 +3221,32 @@ class TestDocsIndexCompleteness:
 
         assert check_docs_index_completeness() == [], "目录级引用应覆盖其下全部文件"
 
+    def test_local_artifact_dirs_exempt_from_index_scan(self, tmp_path, monkeypatch):
+        """本地产物/归档目录内的 .md 不参与索引覆盖校验（DOC-11 产物豁免，修复误报）.
+
+        Path.rglob 不识别 .gitignore，此前会把未跟踪本地产物纳入「索引全覆盖」扫描并误报
+        「未进索引」。本测试断言产物目录（如 docs/audit/）内未引用文档不再报错。
+        """
+        from check_docs_consistency import check_docs_index_completeness
+
+        docs_dir = tmp_path / "docs"
+        artifact = docs_dir / "audit"
+        artifact.mkdir(parents=True)
+        (docs_dir / "README.md").write_text("# Index\n", encoding="utf-8")
+        # 产物目录内文档未被任何索引源引用
+        (artifact / "remote-unwanted-content-audit.md").write_text("# Audit\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# Contrib\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr(
+            "check_docs_consistency._LOCAL_ARTIFACT_DIRS",
+            (artifact,),
+        )
+
+        assert check_docs_index_completeness() == [], "本地产物目录内文档应豁免索引覆盖校验"
+
 
 class TestReviewsIndexCompleteness:
     """检视方法论文档登记（DOC-07）：docs/reviews/README.md 以文件级链接登记顶层方法论."""
