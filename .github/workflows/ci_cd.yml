@@ -114,6 +114,11 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # diff-coverage 需真实 merge-base：默认 fetch-depth=1 浅克隆使三点 diff 退化两点，
+          # 误把 main 侧并发改动计入本分支变更行，导致 diff-coverage 误报（review 流水线问题）。
+          # 完整历史（fetch-depth: 0）保证 `git merge-base origin/main HEAD` 可算。
+          fetch-depth: 0
 
       - name: Verify CI_PG_PASSWORD secret
         env:
