@@ -76,6 +76,7 @@ _SCREENING_SQL_TEMPLATE = """
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
                               AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            ORDER BY index_code  -- DAT-08: 确定性排序，主键 (ts_code, index_code) 取最小 index_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
@@ -136,6 +137,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
                               AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            ORDER BY index_code  -- DAT-08: 确定性排序，主键 (ts_code, index_code) 取最小 index_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
