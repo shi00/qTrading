@@ -1790,6 +1790,7 @@
     "backtest_chart_summary_total_return": "总收益：{value}",
     "backtest_chart_summary_max_dd": "最大回撤：{value}",
     "backtest_chart_summary_data_note": "注：基本面数据为最新修订版，历史重述可能导致回测结果随时间漂移",
+    "backtest_chart_summary_industry_note": "注：行业分类为当前快照，跨分类调整期的回测可能存在前视",
     "backtest_no_trades": "暂无交易记录",
     "backtest_no_ic_data": "暂无IC数据",
     "backtest_no_monthly_data": "暂无月度统计",
