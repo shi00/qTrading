@@ -3130,6 +3130,50 @@ class TestCanonicalRouting:
             f"应检出 canonical 未路由到 workflow, got: {errors}"
         )
 
+    def test_detects_text_mention_without_markdown_link(self, tmp_path, monkeypatch):
+        """canonical 仅纯文本提及 workflow 文件名（非 markdown 链接）→ 报错."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_routing
+
+        # 构造 tmp 目录树：canonical 与 workflow 文档均在 tmp 下
+        root = tmp_path
+        (root / "docs" / "patterns").mkdir(parents=True)
+        (root / "docs" / "guides").mkdir(parents=True)
+
+        # workflow 目标文档存在
+        workflow_path = root / "docs" / "guides" / "how-to.md"
+        workflow_path.write_text("# 工作流文档\n", encoding="utf-8")
+
+        # canonical 文档仅纯文本提及 how-to.md（无 markdown 链接）
+        canonical_path = root / "docs" / "patterns" / "dao-pattern.md"
+        canonical_path.write_text("## DAO 模式\n\n操作步骤见 how-to.md 第 1 节\n", encoding="utf-8")
+
+        # mock canonical-topics.yml，声明 dao → workflow: how-to.md
+        yml = root / "docs" / "governance" / "canonical-topics.yml"
+        yml.parent.mkdir(parents=True)
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {
+                            "id": "dao",
+                            "title": "DAO",
+                            "canonical": "docs/patterns/dao-pattern.md",
+                            "workflow": "docs/guides/how-to.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.ROOT", root)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_routing()
+        assert any("未路由到" in e and "how-to.md" in e for e in errors), f"应检出纯文本提及未路由, got: {errors}"
+
 
 class TestDocsIndexCompleteness:
     """文档索引全覆盖（DOC-07 / DOC-11）：docs/**/*.md 均被 CONTRIBUTING 或 docs/README 引用."""
