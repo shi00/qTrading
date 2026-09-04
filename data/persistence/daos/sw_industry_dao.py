@@ -2,7 +2,8 @@
 
 Phase 3F-1 §4.3.2：申万行业分类建表，对应 Tushare index_classify /
 index_member_all 接口。全局快照，月度更新，供 AI 行业景气度分析与
-stock_basic.industry 字段切换（Phase 3F-2 轨道 A/B）。
+screener 查询时计算 industry_sw_l2（DAT-08③，与 stock_basic.industry
+Tushare 原始值拆列输出，不再混列覆写）。
 """
 
 import asyncio
@@ -90,14 +91,14 @@ class SwIndustryMemberDao(BaseDao):
             return pd.DataFrame()
 
     async def get_sw_l2_mapping(self, ts_codes: list[str] | None = None) -> dict[str, str]:
-        """批量查询 ts_code → 申万二级行业名（sw_l2_name）映射（Phase 3F-2 轨道 A 写时覆写）。
+        """批量查询 ts_code → 申万二级行业名（sw_l2_name）映射。
 
-        用于 ``sync_stock_basic`` 写入前覆写 ``industry`` 列、``prefetch_auxiliary_data``
-        批量预取双保险。同一 ts_code 在 sw_industry_member 中可能对应多个 index_code，
-        但 sw_l2_name 一致，故按 ts_code 去重取任一非空值即可。
+        用于 ``prefetch_auxiliary_data`` 批量预取 AI 行业上下文。同一 ts_code 在
+        sw_industry_member 中可能对应多个 index_code，但 sw_l2_name 一致，故按
+        ts_code 去重取任一非空值即可。
 
         Args:
-            ts_codes: 股票代码列表，None 表示查询全表（用于 sync_stock_basic 全量覆写）。
+            ts_codes: 股票代码列表，None 表示查询全表。
 
         Returns:
             {ts_code: sw_l2_name} 字典。无映射或不在此列表的 ts_code 不包含在结果中。

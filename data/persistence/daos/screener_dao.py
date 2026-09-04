@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
-                     COALESCE(m.sw_l2_name, b.industry) AS industry,
+                     m.sw_l2_name AS industry_sw_l2,
+                     b.industry AS industry_tushare,
                      b.list_date,
                      b.list_status,
                      q.trade_date,
@@ -88,7 +89,8 @@ _SCREENING_SQL_TEMPLATE = """
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
-                     COALESCE(m.sw_l2_name, b.industry) AS industry,
+                     m.sw_l2_name AS industry_sw_l2,
+                     b.industry AS industry_tushare,
                      b.list_date,
                      b.list_status,
                      cal.cal_date AS trade_date,

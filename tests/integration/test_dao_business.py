@@ -814,10 +814,11 @@ class TestScreenerDao:
     async def test_get_screening_data_sw_industry_override(
         self, screener_dao, clean_db, setup_stock_data, test_engine: AsyncEngine
     ):
-        """Phase 3F-2 轨道 B：验证 COALESCE(m.sw_l2_name, b.industry) 覆写路径。
+        """DAT-08③：验证单日选股 SQL 将申万二级行业拆分为独立列。
 
         setup_stock_data 已注入 stock_basic.industry='银行'，此处追加
-        sw_industry_member.sw_l2_name='银行II'，验证 COALESCE 返回 '银行II' 而非 '银行'。
+        sw_industry_member.sw_l2_name='银行II'，验证 industry_sw_l2='银行II'
+        且 industry_tushare 保留 Tushare 原始值 '银行'，不再 COALESCE 混列。
         单元测试 test_screener_dao.py 仅做 SQL 字符串断言，本测试验证实际查询语义。
         """
         async with test_engine.begin() as conn:
@@ -832,8 +833,9 @@ class TestScreenerDao:
         result = await screener_dao.get_screening_data(trade_date=_RECENT_DATE)
         assert not result.empty
         assert result["ts_code"].iloc[0] == "000001.SZ"
-        # COALESCE 覆写：返回 sw_l2_name='银行II' 而非 stock_basic.industry='银行'
-        assert result["industry"].iloc[0] == "银行II"
+        # 拆列语义：industry_sw_l2 取申万二级，industry_tushare 保留 Tushare 原始值
+        assert result["industry_sw_l2"].iloc[0] == "银行II"
+        assert result["industry_tushare"].iloc[0] == "银行"
 
     async def test_save_screening_results_column_order(self, screener_dao, clean_db):
         """验证动态列推导与 tuple 顺序一致，防止列错位"""

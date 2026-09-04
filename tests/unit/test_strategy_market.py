@@ -223,21 +223,21 @@ class TestNorthboundHoldingStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "平安银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 6.5,
                     "total_mv": 1000000,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "万科A",
-                    "industry": "房地产",
+                    "industry_sw_l2": "房地产",
                     "pe_ttm": 8.0,
                     "total_mv": 800000,
                 },
                 {
                     "ts_code": "600000.SH",
                     "name": "浦发银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 5.0,
                     "total_mv": 1200000,
                 },
@@ -337,14 +337,14 @@ class TestInstitutionalStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "机构买入股",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 6.5,
                     "total_mv": 1000000,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "普通股",
-                    "industry": "房地产",
+                    "industry_sw_l2": "房地产",
                     "pe_ttm": 8.0,
                     "total_mv": 800000,
                 },
@@ -427,14 +427,14 @@ class TestBlockTradeStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "大宗交易股",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 6.5,
                     "total_mv": 1000000,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "普通股",
-                    "industry": "房地产",
+                    "industry_sw_l2": "房地产",
                     "pe_ttm": 8.0,
                     "total_mv": 800000,
                 },
@@ -525,21 +525,21 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "平安银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 5.5,
                     "total_mv": 4000.0,
                 },
                 {
                     "ts_code": "600000.SH",
                     "name": "浦发银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 4.5,
                     "total_mv": 3000.0,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "小盘股",
-                    "industry": "科技",
+                    "industry_sw_l2": "科技",
                     "pe_ttm": 20.0,
                     "total_mv": 50.0,
                 },
@@ -569,7 +569,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "平安银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 5.5,
                     "total_mv": 4000.0,
                 },
@@ -596,7 +596,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "平安银行",
-                    "industry": "银行",
+                    "industry_sw_l2": "银行",
                     "pe_ttm": 5.5,
                     "total_mv": 4000.0,
                 },
@@ -618,7 +618,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "p",
-                    "industry": "x",
+                    "industry_sw_l2": "x",
                     "pe_ttm": 1.0,
                     "total_mv": 1.0,
                 }
@@ -641,7 +641,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "p",
-                    "industry": "x",
+                    "industry_sw_l2": "x",
                     "pe_ttm": 5.0,
                     "total_mv": 500.0,
                 }
@@ -662,14 +662,14 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "亏损股",
-                    "industry": "科技",
+                    "industry_sw_l2": "科技",
                     "pe_ttm": -5.0,
                     "total_mv": 4000.0,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "盈利股",
-                    "industry": "科技",
+                    "industry_sw_l2": "科技",
                     "pe_ttm": 10.0,
                     "total_mv": 3000.0,
                 },
@@ -692,7 +692,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                 {
                     "ts_code": "000001.SZ",
                     "name": "p",
-                    "industry": "x",
+                    "industry_sw_l2": "x",
                     "pe_ttm": 5.0,
                     "total_mv": 500.0,
                 }

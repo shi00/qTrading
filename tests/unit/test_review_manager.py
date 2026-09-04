@@ -42,23 +42,21 @@ class TestReviewManagerInit:
 
 
 class TestReviewManagerSwIndustryPassThrough:
-    """Phase 3F-2 轨道 B：验证 save_results 能正确传递申万行业字段。
+    """DAT-08③：验证 save_results 能正确传递申万二级行业字段。
 
-    screener_dao 的 SQL 已改为 COALESCE(m.sw_l2_name, b.industry) AS industry，
-    review_manager.save_results 通过 _s(row, "industry") 读取后写入 screening_history，
-    无需修改代码即可传递申万行业（自动获益）。
+    screener_dao 的 SQL 已拆为 industry_sw_l2 / industry_tushare 两列，
+    review_manager.save_results 通过 _s(row, "industry_sw_l2") 读取后写入
+    screening_history.industry（单列，存策略选用分类：申万二级）。
     """
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_review_manager_uses_sw_industry(self, mock_cm, mock_tc):
-        """Phase 3F-2：含申万二级行业名的 df 经 save_results 后，industry 字段应原样写入 record。
+        """DAT-08③：含申万二级行业名的 df 经 save_results 后，industry 字段应原样写入 record。
 
-        review_manager L521 路径切换验证：上游 screener_dao SQL 已改为
-        COALESCE(m.sw_l2_name, b.industry) AS industry，review_manager 通过 _s(row, "industry")
-        透传 df.industry 字段（v1.9.0 M-4 修订后实施），无需修改 review_manager 代码即可
-        自动获益于申万行业覆写。
+        review_manager 通过 _s(row, "industry_sw_l2") 透传 df.industry_sw_l2 字段，
+        screening_history.industry 保存申万二级行业名。
         """
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
@@ -73,7 +71,7 @@ class TestReviewManagerSwIndustryPassThrough:
             {
                 "ts_code": ["000001.SZ"],
                 "name": ["平安银行"],
-                "industry": ["银行Ⅱ"],
+                "industry_sw_l2": ["银行Ⅱ"],
                 "trade_date": ["20240615"],
                 "close": [10.0],
                 "pct_chg": [1.0],

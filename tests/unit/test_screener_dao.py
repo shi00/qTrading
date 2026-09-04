@@ -436,36 +436,46 @@ class TestScreenerDaoBuildScreeningSql:
 
 
 class TestScreenerDaoSwIndustryJoin:
-    """Phase 3F-2 轨道 B：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member + COALESCE。
+    """DAT-08③：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member 拆分为两列。
 
-    M-4 约束：无申万映射时 COALESCE 回退到 b.industry，保留 API 原始值。
+    拆列语义：申万二级行业经 LATERAL join 计算为 industry_sw_l2（无映射为 NULL）；
+    stock_basic.industry 保留 Tushare 原始值输出为 industry_tushare；不再 COALESCE 混列。
     """
 
     def test_screener_sql_uses_sw_industry(self):
-        """_build_screening_sql 必须包含 sw_industry_member JOIN 与 COALESCE 行业覆写。"""
+        """_build_screening_sql 必须包含 sw_industry_member JOIN 与双列拆分。"""
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql()
         assert "sw_industry_member" in sql
-        assert "COALESCE(m.sw_l2_name, b.industry)" in sql
+        assert "AS industry_sw_l2" in sql
+        assert "AS industry_tushare" in sql
+        assert "COALESCE(m.sw_l2_name, b.industry)" not in sql
         assert "LEFT JOIN LATERAL" in sql
 
     def test_screener_sql_range_uses_sw_industry(self):
-        """_build_screening_sql_range 必须包含 sw_industry_member JOIN 与 COALESCE 行业覆写。"""
+        """_build_screening_sql_range 必须包含 sw_industry_member JOIN 与双列拆分。"""
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql_range()
         assert "sw_industry_member" in sql
-        assert "COALESCE(m.sw_l2_name, b.industry)" in sql
+        assert "AS industry_sw_l2" in sql
+        assert "AS industry_tushare" in sql
+        assert "COALESCE(m.sw_l2_name, b.industry)" not in sql
         assert "LEFT JOIN LATERAL" in sql
 
-    def test_industry_fallback_when_sw_missing(self):
-        """COALESCE 语义验证：SQL 文本必须包含 COALESCE(m.sw_l2_name, b.industry)，
-        确保无申万映射时回退到 stock_basic.industry（M-4 无映射保留原始值）。"""
+    def test_industry_split_no_coalesce(self):
+        """双列拆分契约：单日/区间模板均输出 industry_sw_l2 与 industry_tushare 两列，
+        且不再存在 COALESCE(m.sw_l2_name, b.industry) 单列混合（评审 m1：含
+        fundamental 模板，经 require_close 参数复用的同一静态模板）。"""
         dao = ScreenerDao(MagicMock())
-        sql_single = dao._build_screening_sql()
-        sql_range = dao._build_screening_sql_range()
-        fallback_pattern = "COALESCE(m.sw_l2_name, b.industry) AS industry"
-        assert fallback_pattern in sql_single, "单日 SQL 缺少 COALESCE 回退"
-        assert fallback_pattern in sql_range, "区间 SQL 缺少 COALESCE 回退"
+        for sql in (
+            dao._build_screening_sql(),
+            dao._build_screening_sql_range(),
+            dao._build_screening_sql(require_close=False),
+            dao._build_screening_sql_range(require_close=False),
+        ):
+            assert "m.sw_l2_name AS industry_sw_l2" in sql, f"缺少 industry_sw_l2:\n{sql}"
+            assert "b.industry AS industry_tushare" in sql, f"缺少 industry_tushare:\n{sql}"
+            assert "COALESCE(m.sw_l2_name, b.industry) AS industry" not in sql, f"残留 COALESCE 混列:\n{sql}"
 
     @staticmethod
     def _extract_sw_industry_lateral(sql: str) -> str:

@@ -504,11 +504,11 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         """
         计算各行业的涨跌统计。
         """
-        if "industry" not in screening_data.columns or "pct_chg" not in screening_data.columns:
+        if "industry_sw_l2" not in screening_data.columns or "pct_chg" not in screening_data.columns:
             return {}
 
         stats = {}
-        for industry, group in screening_data.groupby("industry"):
+        for industry, group in screening_data.groupby("industry_sw_l2"):
             stats[industry] = {
                 "count": len(group),
                 "up_count": (group["pct_chg"] > 0).sum(),
@@ -582,7 +582,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             (text, is_valid)：始终返回 is_valid=True，因为即使无数据也展示行业信息。
         """
         sector_stats = prefetched.sector_stats
-        industry = row.get("industry", "")
+        industry = row.get("industry_sw_l2", "")
 
         if not sector_stats or industry not in sector_stats:
             return (f"行业统计: {industry or '未知'} (暂无数据)", True)

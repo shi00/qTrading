@@ -125,7 +125,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
         try:
             nb_lf = pl.from_pandas(nb_df).lazy()
             # Select limited columns from base to avoid collisions or generic naming
-            base_lf = lf.select(["ts_code", "name", "industry", "pe_ttm", "total_mv"])
+            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
 
             return (
                 nb_lf.drop_nulls(subset=["ratio"])
@@ -274,7 +274,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 
         try:
             top_lf = pl.from_pandas(lhb).lazy()
-            base_lf = lf.select(["ts_code", "name", "industry", "pe_ttm", "total_mv"])
+            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
 
             return (
                 top_lf.filter(pl.col("net_amount").is_not_null())
@@ -335,7 +335,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
 
         try:
             block_lf = pl.from_pandas(block).lazy()
-            base_lf = lf.select(["ts_code", "name", "industry", "pe_ttm", "total_mv"])
+            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
 
             return (
                 block_lf.filter(pl.col("amount") > target_amount)
