@@ -1720,6 +1720,18 @@ def check_reviews_index_completeness() -> list[str]:
 # 消费语料 = CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（exceptions.yml 自身是注册表非消费者）。
 _EX_ID_PATTERN = re.compile(r"\bEX-\d{4}\b")
 
+# 消费语料豁免的归档/记录/评测目录：历史批次计划、审计报告、任务工作记录、第三方评测样本。
+# 属「非当前治理活文档」：归档引用的已删 EX 属历史记录，不参与悬空判断；残留的现存 EX 引用
+# 也不得充当活引用掩盖方向 2 的孤儿判定。新增此类目录时须在此登记（denylist 安全默认：新活文档
+# 自动仍在扫描范围，活文档悬空引用绝不漏报）。
+_EX_REF_EXCLUDED_DIRS: tuple[Path, ...] = (
+    ROOT / "docs" / "plans" / "archive",
+    ROOT / "docs" / "audit",
+    ROOT / "docs" / "task-plans",
+    ROOT / "docs" / "superpowers" / "plans",
+    ROOT / "docs" / "reviews" / "evals",
+)
+
 
 def _load_exception_ids() -> list[str] | None:
     """加载 exceptions.yml 已登记例外 id 列表；无法解析或结构非法返回 None。"""
@@ -1735,12 +1747,20 @@ def _load_exception_ids() -> list[str] | None:
 
 
 def _scan_exception_refs() -> set[str]:
-    """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身）。"""
+    """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身与归档/记录/评测豁免目录）。
+
+    consumer 为 CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（活文档）；归档/记录/评测目录
+    由 _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
+    """
     refs: set[str] = set()
-    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH, *(DOCS_README_PATH.parent.rglob("*.md"))]
-    for path in consumers:
+    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH]
+    for path in DOCS_README_PATH.parent.rglob("*.md"):
         if path == EXCEPTIONS_YAML_PATH:
             continue
+        if any(path.is_relative_to(excluded) for excluded in _EX_REF_EXCLUDED_DIRS):
+            continue
+        consumers.append(path)
+    for path in consumers:
         refs.update(_EX_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
     return refs
 
