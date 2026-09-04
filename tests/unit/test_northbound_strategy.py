@@ -49,9 +49,9 @@ def _make_screening_df() -> pd.DataFrame:
     """构造多只股票的 screening_data, 用于过滤+排序测试."""
     return pd.DataFrame(
         [
-            {"ts_code": "000001.SZ", "name": "stock_a", "industry": "Bank", "pe_ttm": 5.5, "total_mv": 4000.0},
-            {"ts_code": "600000.SH", "name": "stock_b", "industry": "Bank", "pe_ttm": 4.5, "total_mv": 3000.0},
-            {"ts_code": "000002.SZ", "name": "small_cap", "industry": "Tech", "pe_ttm": 20.0, "total_mv": 50.0},
+            {"ts_code": "000001.SZ", "name": "stock_a", "industry_sw_l2": "Bank", "pe_ttm": 5.5, "total_mv": 4000.0},
+            {"ts_code": "600000.SH", "name": "stock_b", "industry_sw_l2": "Bank", "pe_ttm": 4.5, "total_mv": 3000.0},
+            {"ts_code": "000002.SZ", "name": "small_cap", "industry_sw_l2": "Tech", "pe_ttm": 20.0, "total_mv": 50.0},
         ]
     )
 
@@ -255,8 +255,20 @@ class TestNorthboundFlowStrategy:
         strat = NorthboundFlowStrategy()
         df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "profitable", "industry": "Tech", "pe_ttm": 10.0, "total_mv": 1000.0},
-                {"ts_code": "000002.SZ", "name": "loss_making", "industry": "Tech", "pe_ttm": -5.0, "total_mv": 1000.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "profitable",
+                    "industry_sw_l2": "Tech",
+                    "pe_ttm": 10.0,
+                    "total_mv": 1000.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "loss_making",
+                    "industry_sw_l2": "Tech",
+                    "pe_ttm": -5.0,
+                    "total_mv": 1000.0,
+                },
             ]
         )
         lf = pl.from_pandas(df).lazy()

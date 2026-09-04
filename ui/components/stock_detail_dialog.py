@@ -138,6 +138,33 @@ def _info_chip(label, value, color=None) -> ft.Container:
     )
 
 
+def _industry_text(stock_data: dict, key: str) -> str:
+    """取行业文本，None/NaN/空串统一显示 '-'（纯函数）。"""
+    v = stock_data.get(key)
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "-"
+    s = str(v)
+    return s if s else "-"
+
+
+def _build_industry_chips(stock_data: dict) -> ft.Control:
+    """DAT-08③：按数据源列集展示行业分类。
+
+    live 模式（screening 结果含 industry_sw_l2 / industry_tushare 两列）分别展示
+    申万二级与 Tushare 行业芯片；历史模式（screening_history 仅单列 industry，
+    已存策略选用分类）fallback 展示单芯片。
+    """
+    if "industry_sw_l2" in stock_data:
+        return ft.Row(
+            [
+                _info_chip(I18n.get("detail_industry_sw_l2"), _industry_text(stock_data, "industry_sw_l2")),
+                _info_chip(I18n.get("detail_industry_tushare"), _industry_text(stock_data, "industry_tushare")),
+            ],
+            spacing=8,
+        )
+    return _info_chip(I18n.get("detail_industry"), _industry_text(stock_data, "industry"))
+
+
 def _build_prediction_badge(value) -> ft.Container:
     """Task 4.3 (FR-UX-005): 构建 WIN/LOSS 徽章 (模块级纯函数, 可独立单测)."""
     val_str = str(value).upper() if value is not None else ""
@@ -490,10 +517,7 @@ def _build_content(
             ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row(
                 [
-                    _info_chip(
-                        I18n.get("detail_industry"),
-                        str(stock_data.get("industry", "-")),
-                    ),
+                    _build_industry_chips(stock_data),
                     _info_chip(
                         I18n.get("detail_list_date"),
                         str(stock_data.get("list_date", "-")),

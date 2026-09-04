@@ -93,14 +93,14 @@ class TestVolumeBreakoutStrategy:
             {
                 "ts_code": ["000001.SZ", "000002.SZ", "600001.SH"],
                 "name": ["A银行", "B科技", "C钢铁"],
-                "industry": ["银行", "科技", "钢铁"],
+                "industry_sw_l2": ["银行", "科技", "钢铁"],
                 "pct_chg": [3.0, 4.0, 5.0],
                 "turnover_rate": [5.0, 5.0, 5.0],
             }
         )
         lf = pl.from_pandas(df).lazy()
         result = strategy._filter_logic(lf, {"params": {}}).collect()
-        industries = set(result["industry"].to_list())
+        industries = set(result["industry_sw_l2"].to_list())
         assert industries == {"银行", "科技", "钢铁"}
 
     def test_volume_anomaly_high_turnover_passes(self) -> None:
@@ -287,7 +287,7 @@ class TestNorthboundHoldingStrategy:
         """空 northbound_data 返回空 LazyFrame (lf.head(0))。"""
         strategy = NorthboundHoldingStrategy()
         base_df = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["A"], "industry": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
+            {"ts_code": ["000001.SZ"], "name": ["A"], "industry_sw_l2": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
         )
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"northbound_data": pd.DataFrame(), "params": {}}).collect()
@@ -300,7 +300,7 @@ class TestNorthboundHoldingStrategy:
             {
                 "ts_code": ["000001.SZ", "600001.SH"],
                 "name": ["A", "B"],
-                "industry": ["银行", "钢铁"],
+                "industry_sw_l2": ["银行", "钢铁"],
                 "pe_ttm": [10.0, 20.0],
                 "total_mv": [100.0, 200.0],
             }
@@ -358,7 +358,7 @@ class TestInstitutionalStrategy:
     def test_empty_top_list_returns_empty(self) -> None:
         strategy = InstitutionalStrategy()
         base_df = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["A"], "industry": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
+            {"ts_code": ["000001.SZ"], "name": ["A"], "industry_sw_l2": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
         )
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"top_list": pd.DataFrame(), "params": {}}).collect()
@@ -371,7 +371,7 @@ class TestInstitutionalStrategy:
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
                 "name": ["A", "B"],
-                "industry": ["x", "y"],
+                "industry_sw_l2": ["x", "y"],
                 "pe_ttm": [10.0, 20.0],
                 "total_mv": [100.0, 200.0],
             }
@@ -397,7 +397,7 @@ class TestInstitutionalStrategy:
         """边界: top_list 缺 net_amount 列时返回空 (early return lf.head(0))。"""
         strategy = InstitutionalStrategy()
         base_df = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["A"], "industry": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
+            {"ts_code": ["000001.SZ"], "name": ["A"], "industry_sw_l2": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
         )
         lhb_df = pd.DataFrame({"ts_code": ["000001.SZ"]})  # 缺 net_amount 列
         lf = pl.from_pandas(base_df).lazy()
@@ -438,7 +438,7 @@ class TestBlockTradeStrategy:
     def test_empty_block_trade_returns_empty(self) -> None:
         strategy = BlockTradeStrategy()
         base_df = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["A"], "industry": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
+            {"ts_code": ["000001.SZ"], "name": ["A"], "industry_sw_l2": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
         )
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"block_trade": pd.DataFrame(), "params": {}}).collect()
@@ -451,7 +451,7 @@ class TestBlockTradeStrategy:
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
                 "name": ["A", "B"],
-                "industry": ["x", "y"],
+                "industry_sw_l2": ["x", "y"],
                 "pe_ttm": [10.0, 20.0],
                 "total_mv": [100.0, 200.0],
             }
@@ -475,7 +475,7 @@ class TestBlockTradeStrategy:
         """边界: block_trade 缺少 amount 列时返回空 (early return lf.head(0))。"""
         strategy = BlockTradeStrategy()
         base_df = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["A"], "industry": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
+            {"ts_code": ["000001.SZ"], "name": ["A"], "industry_sw_l2": ["x"], "pe_ttm": [10.0], "total_mv": [100.0]}
         )
         block_df = pd.DataFrame({"ts_code": ["000001.SZ"], "vol": [100.0]})  # 缺 amount 列
         lf = pl.from_pandas(base_df).lazy()

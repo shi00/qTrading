@@ -346,7 +346,7 @@ async def test_prefetch_indicators_exception():
 async def test_prefetch_sector_stats():
     s = OversoldStrategy()
     dp = _make_dp_for_prefetch()
-    screening_data = pd.DataFrame({"ts_code": ["000001.SZ"], "industry": ["电子"], "pct_chg": [-2.0]})
+    screening_data = pd.DataFrame({"ts_code": ["000001.SZ"], "industry_sw_l2": ["电子"], "pct_chg": [-2.0]})
     candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
     prefetched = PreFetchedContext()
     prefetched.trade_date = datetime.date(2024, 6, 14)
@@ -476,7 +476,7 @@ class TestOversoldComputeSectorStats(unittest.TestCase):
         data = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
-                "industry": ["电子", "电子", "银行"],
+                "industry_sw_l2": ["电子", "电子", "银行"],
                 "pct_chg": [1.0, -2.0, 0.5],
             }
         )
@@ -493,13 +493,13 @@ class TestOversoldComputeSectorStats(unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_sector_stats_with_sw_industry(self):
-        """Phase 3F-2：screening_data 的 industry 列来自 screener_dao COALESCE 后的申万行业，
-        _compute_sector_stats 应按申万二级行业名分组统计（无需修改代码，自动获益）。"""
+        """DAT-08③：screening_data 的 industry_sw_l2 列来自 screener_dao LATERAL join 的
+        申万二级行业，_compute_sector_stats 应按申万二级行业名分组统计。"""
         s = OversoldStrategy()
         data = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ", "600519.SH"],
-                "industry": ["银行Ⅱ", "银行Ⅱ", "白酒Ⅱ"],
+                "industry_sw_l2": ["银行Ⅱ", "银行Ⅱ", "白酒Ⅱ"],
                 "pct_chg": [1.0, -0.5, 2.0],
             }
         )

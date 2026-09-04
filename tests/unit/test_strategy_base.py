@@ -41,7 +41,7 @@ def strategies_ctx():
         {
             "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
             "name": ["Stock A", "Stock B", "Stock C"],
-            "industry": ["Bank", "Real Estate", "Tech"],
+            "industry_sw_l2": ["Bank", "Real Estate", "Tech"],
             "pe_ttm": [10.0, 50.0, 5.0],
             "pb": [1.0, 5.0, 0.8],
             "dv_ttm": [3.0, 0.5, 4.5],

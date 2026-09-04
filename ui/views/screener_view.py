@@ -113,6 +113,8 @@ _COLUMN_WIDTHS = {
     "ai_reason": 250,
     "confidence": 70,
     "industry": 120,
+    "industry_sw_l2": 140,
+    "industry_tushare": 110,
     "strategy_name": 120,
     "prediction_result": 80,
     "t1_pct": 80,

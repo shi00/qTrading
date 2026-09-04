@@ -569,7 +569,7 @@ class SwIndustryClassify(Base):
 class SwIndustryMember(Base):
     """申万行业成分股映射（Phase 3F-1，全局快照，对应 Tushare index_member_all 接口）。
 
-    供 AI 行业景气度分析与 stock_basic.industry 字段切换（Phase 3F-2 轨道 A/B）。
+    供 AI 行业景气度分析与 screener 查询时计算 industry_sw_l2（DAT-08③）。
     """
 
     __tablename__ = "sw_industry_member"

@@ -814,11 +814,10 @@ class CacheManager:
         return await self.sw_industry_member_dao.get_sw_industry_by_ts_code(ts_code)
 
     async def get_sw_l2_mapping(self, ts_codes: list[str] | None = None) -> dict[str, str]:
-        """Phase 3F-2 轨道 A：批量查询 ts_code → 申万二级行业名映射。
+        """批量查询 ts_code → 申万二级行业名映射。
 
-        用于 ``sync_stock_basic`` 写时覆写 ``stock_basic.industry`` 列、
-        ``prefetch_auxiliary_data`` 批量预取双保险。无映射的 ts_code 不在结果中，
-        调用方应据此"有则覆写、无则保留 API 原始值"（v1.9.0 M-4）。
+        用于 ``prefetch_auxiliary_data`` 批量预取 AI 行业上下文（DAT-08③ 后不再
+        覆写 ``stock_basic.industry``，两套行业分类由 screener 查询时拆列输出）。
         """
         return await self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes)
 

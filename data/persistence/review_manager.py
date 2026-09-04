@@ -575,7 +575,7 @@ class ReviewManager:
                     "name": _s(row, "name"),
                     "close": _f(row, "close"),
                     "pct_chg": _f(row, "pct_chg"),
-                    "industry": _s(row, "industry"),
+                    "industry": _s(row, "industry_sw_l2"),
                     "vol": _f(row, "vol"),
                     "amount": _f(row, "amount"),
                     "turnover_rate": _f(row, "turnover_rate"),

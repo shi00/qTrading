@@ -109,7 +109,7 @@ class TestBuildSectorContext(unittest.TestCase):
         prefetched = PreFetchedContext()
         prefetched.sector_stats = sector_stats
 
-        row = {"ts_code": "000001.SZ", "industry": "电子", "close": 10.0}
+        row = {"ts_code": "000001.SZ", "industry_sw_l2": "电子", "close": 10.0}
         result_text, result_valid = self.strategy._build_sector_context(row, prefetched)
 
         self.assertTrue(result_valid)
@@ -124,7 +124,7 @@ class TestBuildSectorContext(unittest.TestCase):
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {}
 
-        row = {"ts_code": "000001.SZ", "industry": "未知行业", "close": 10.0}
+        row = {"ts_code": "000001.SZ", "industry_sw_l2": "未知行业", "close": 10.0}
         result_text, result_valid = self.strategy._build_sector_context(row, prefetched)
 
         # 即使无数据，sector context 仍返回 is_valid=True（显示行业信息）
@@ -918,7 +918,7 @@ class TestSectorEdgeCases(unittest.TestCase):
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {"电子": {"count": 10}}
 
-        row = {"ts_code": "000001.SZ", "industry": "", "close": 10.0}
+        row = {"ts_code": "000001.SZ", "industry_sw_l2": "", "close": 10.0}
         result_text, _ = self.strategy._build_sector_context(row, prefetched)
 
         self.assertIn("暂无数据", result_text)
@@ -929,7 +929,7 @@ class TestSectorEdgeCases(unittest.TestCase):
         prefetched = PreFetchedContext()
         prefetched.sector_stats = {"电子": {"count": 10}}
 
-        row = {"ts_code": "000001.SZ", "industry": "电子", "close": 10.0}
+        row = {"ts_code": "000001.SZ", "industry_sw_l2": "电子", "close": 10.0}
         result_text, _ = self.strategy._build_sector_context(row, prefetched)
 
         self.assertIn("电子", result_text)
@@ -979,9 +979,9 @@ class TestComputeSectorStats(unittest.TestCase):
         """正常计算行业统计"""
         screening_data = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "industry": "电子", "pct_chg": 1.5},
-                {"ts_code": "000002.SZ", "industry": "电子", "pct_chg": -0.5},
-                {"ts_code": "000003.SZ", "industry": "医药", "pct_chg": 2.0},
+                {"ts_code": "000001.SZ", "industry_sw_l2": "电子", "pct_chg": 1.5},
+                {"ts_code": "000002.SZ", "industry_sw_l2": "电子", "pct_chg": -0.5},
+                {"ts_code": "000003.SZ", "industry_sw_l2": "医药", "pct_chg": 2.0},
             ]
         )
 
@@ -1004,6 +1004,33 @@ class TestComputeSectorStats(unittest.TestCase):
         result = self.strategy._compute_sector_stats(screening_data)
 
         self.assertEqual(result, {})
+
+    def test_compute_sector_stats_nan_industry(self):
+        """申万行业缺失（NaN）时该行被 groupby 丢弃，不产生 NaN 分组（DAT-08③）。"""
+        screening_data = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "industry_sw_l2": "电子", "pct_chg": 1.5},
+                {"ts_code": "000002.SZ", "industry_sw_l2": None, "pct_chg": -0.5},
+                {"ts_code": "000003.SZ", "industry_sw_l2": float("nan"), "pct_chg": 2.0},
+            ]
+        )
+
+        result = self.strategy._compute_sector_stats(screening_data)
+
+        self.assertIn("电子", result)
+        self.assertEqual(result["电子"]["count"], 1)
+        self.assertNotIn(float("nan"), result)
+
+    def test_build_sector_context_nan_industry(self):
+        """row 的 industry_sw_l2 为 NaN（申万映射缺失）时落入"暂无数据"分支（DAT-08③）。"""
+        prefetched = PreFetchedContext()
+        prefetched.sector_stats = {"电子": {"count": 10}}
+
+        row = {"ts_code": "000001.SZ", "industry_sw_l2": float("nan"), "close": 10.0}
+        result_text, result_valid = self.strategy._build_sector_context(row, prefetched)
+
+        self.assertTrue(result_valid)
+        self.assertIn("暂无数据", result_text)
 
     def test_compute_sector_stats_empty_df(self):
         """空 DataFrame 返回空字典"""

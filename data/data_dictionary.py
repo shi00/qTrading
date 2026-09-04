@@ -101,6 +101,8 @@ COMMON_COLUMNS = {
     # Others
     "area": "col_area",
     "industry": "col_industry",
+    "industry_sw_l2": "col_industry_sw_l2",
+    "industry_tushare": "col_industry_tushare",
     "market": "col_market",
     "list_status": "col_list_status",
     "audit_result": "col_audit_result",
