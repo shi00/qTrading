@@ -1380,15 +1380,16 @@ def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
 
 
 def check_ruleset_metadata_consistency() -> list[str]:
-    """检查项 12：CLAUDE.md 与 CONTRIBUTING.md 规则集元数据一致性（DOC-01）。
+    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13）。
 
     已由 _check_version_consistency（产品版本对应 pyproject.toml）覆盖「对应版本」，
     本检查补齐 `ruleset_version` 与 `last_reviewed` 两个字段——它们**从未被任何检查读取**
-    （DOC-01 门禁空白的主因），修复后禁止再漂移。
+    （DOC-01 门禁空白的主因），修复后禁止再漂移。随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
+    ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
 
     断言：
-    1. 两份文件均有 ruleset_version，且值相等。
-    2. 两份文件均有 last_reviewed，且值为合法日期。
+    1. 三份文件均有 ruleset_version，且值相等（AGENTS 无 last_reviewed 字段，不校验该维度）。
+    2. CLAUDE.md 与 CONTRIBUTING.md 均有 last_reviewed，且值为合法日期。
     3. CONTRIBUTING.md 的 last_reviewed 不早于 CLAUDE.md（人类贡献流程更新自由度不低于宪法）。
     """
     from datetime import date
@@ -1396,15 +1397,27 @@ def check_ruleset_metadata_consistency() -> list[str]:
     errors: list[str] = []
     claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
     contributing_ver, contributing_reviewed = _extract_metadata_versions(CONTRIBUTING_PATH.read_text(encoding="utf-8"))
+    # AGENTS.md 为跨工具入口：仅纳入 ruleset_version 同步（无 last_reviewed）。存在性由
+    # check_agents_md_sync fail-closed 守护，故此处不存在时跳过 ruleset 校验。
+    agents_ver: str | None = None
+    if AGENTS_PATH.exists():
+        agents_ver, _ = _extract_metadata_versions(AGENTS_PATH.read_text(encoding="utf-8"))
 
     if claude_ver is None:
         errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
     if contributing_ver is None:
         errors.append("CONTRIBUTING.md 缺少 ruleset_version 元数据字段")
+    if agents_ver is None:
+        errors.append("AGENTS.md 缺少 ruleset_version 元数据字段")
     if claude_ver is not None and contributing_ver is not None and claude_ver != contributing_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != CONTRIBUTING.md={contributing_ver} "
             "(两文件须同步，规则集版本规则变更时递增)"
+        )
+    if claude_ver is not None and agents_ver is not None and claude_ver != agents_ver:
+        errors.append(
+            f"ruleset_version 漂移: CLAUDE.md={claude_ver} != AGENTS.md={agents_ver} "
+            "(AGENTS 为跨工具入口，规则集版本须与宪法同步)"
         )
 
     if claude_reviewed is None:

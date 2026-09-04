@@ -12,6 +12,8 @@ Checks:
 9. Sidecar 版本一致性：Cargo.toml [package].version / pyproject.toml [tool.qtrading.sidecar] /
    src/protocol.rs PROTOCOL_VERSION 三方对齐（pg_plan §15.5 AI-12）；
    可选 ``--check-sidecar-binary`` 启用四方校验（调用 sidecar version --json）。
+10. AGENTS.md 对应版本（产品版本）匹配 pyproject.toml version（DOC-13，AGENTS 纳入
+    verify-versions 白名单后补实际校验，避免 hook 空转）。
 
 Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
 """
@@ -35,6 +37,7 @@ README_PATH = ROOT / "README.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 SECURITY_PATH = ROOT / "SECURITY.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
+AGENTS_PATH = ROOT / "AGENTS.md"
 SIDECAR_CARGO_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "Cargo.toml"
 SIDECAR_PROTOCOL_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "src" / "protocol.rs"
 
@@ -142,6 +145,29 @@ def check_security_supported_version(pyproject_ver: str) -> list[str]:
         errors.append(
             f"SECURITY.md supported version table missing '{major_minor}.x' (pyproject version: {pyproject_ver})"
         )
+    return errors
+
+
+def check_agents_version(pyproject_ver: str) -> list[str]:
+    """Check 10: AGENTS.md 对应版本（产品版本）匹配 pyproject.toml version（DOC-13）。
+
+    pre-commit verify-versions hook 的 files 白名单已含 AGENTS.md，此校验填补此前
+    hook 触发即空转的缺口。存在性由 check_docs_consistency 的 check_agents_md_sync 守护，
+    缺失时此处 fail-open；AGENTS 的 ruleset_version 同步由
+    check_ruleset_metadata_consistency 守护。
+    """
+    errors = []
+    if not AGENTS_PATH.exists():
+        return errors
+    content = AGENTS_PATH.read_text(encoding="utf-8")
+    # 复用 check_docs_consistency 已验证形态：`**对应版本**：0.9.0（...）`（全角/半角冒号兼容）
+    m = re.search(r"\*\*对应版本\*\*[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)", content)
+    if not m:
+        errors.append(f"AGENTS.md missing '**对应版本**' field matching pyproject version '{pyproject_ver}'")
+        return errors
+    ver = m.group(1)
+    if ver != pyproject_ver:
+        errors.append(f"AGENTS.md 对应版本 '{ver}' != pyproject.toml version '{pyproject_ver}'")
     return errors
 
 
@@ -474,6 +500,9 @@ def main() -> None:
 
     # Check 9: Sidecar 版本一致性（pg_plan §15.5 AI-12）
     errors.extend(check_sidecar_version_consistency(sidecar_binary))
+
+    # Check 10: AGENTS.md 产品版本一致性（DOC-13）
+    errors.extend(check_agents_version(pyproject_ver))
 
     if fixed_any:
         print("Auto-fixed version mismatches. Please stage the changes and try committing again.")
