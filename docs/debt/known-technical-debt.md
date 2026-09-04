@@ -55,6 +55,14 @@
 | **P3-UX06-Startup-SLA-E2E-Gap** | **冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位）** | UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import ~5.4s（本机 dev 基准，pandas 主导）+ 单例 ~0.46s + 7 View 渲染 ~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited_tabs 懒构造推广判定为收益/风险比不成立（可省 ~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（_build_pages_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（worktree 内）。 | 在 GUI/浏览器环境下执行真实启动测量：启动应用 → `time NavigationRail 可交互`（Flet 首帧 patch 下发时间戳）。验收标准：① 真实冷启动 ≤ 8s（或按实测更新 SLA 阈值）；② 低性能机器同样测量并记录。upgrade 触发条件：① 真实端到端测量 > 8s（SLA 超阈）时触发 visited_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时。 |
 | **P3-B12-Screener-Formatting-Logic-in-VM** | **#B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM）** | review02 B12 已实现第 1 步（data_version memo 缓存，消除无谓重算，解决 90%）；第 2 步需将 `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM，state 携带渲染就绪数据。跨 VM 边界且与 report04 D9（AI 流式更新重建机制重构）"避免 data_version 未变时全量重建"目标耦合，故本批次只实现第 1 步，第 2 步登记为依赖 D9 的后续任务（修复方案 §B12 第 2 步）。相关文件：`ui/views/screener_view.py`。 | 将格式化逻辑迁移至 VM 层，View 仅做数据到控件的映射。验收标准：① `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 迁至 VM，state 携带渲染就绪数据；② 现有 `test_screener_view_runtime.py` / `test_screener_view_model.py` 全过；③ screener_view 渲染路径无重复格式化。upgrade 触发条件：report04 D9（AI 流式更新重建机制重构）合并时 / screener_view 重构时。 |
 
+## 已接受的权衡（Accepted Tradeoffs）
+
+> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「不做但要写清楚」路径。
+
+| 级别 | 问题描述 | 决策与缓解 | 升级触发条件 |
+|------|---------|-----------|-------------|
+| **P3-DAT07-Restatement** | **回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①）** | `financial_reports` 主键 `(ts_code, end_date)` 无修订历史，财报被重述时新数值直接覆盖旧值，库里只保留"今天所知的版本"。**决策**：不修（YAGNI——A 股重述实际发生率未量化，影子表方案显著增加存储与复杂度，review03「可复现回测」方案按需再评估）。**缓解**：回测报告 UI 摘要显式标注"基本面数据为最新修订版，历史重述可能导致回测结果随时间漂移"（`backtest_result_panel.py::_build_chart_summary` + i18n `backtest_chart_summary_data_note`）。**关联验证**：Tushare `income` 接口 `report_type` 默认="1"（合并报表），同步仅请求单一 report_type，`(ts_code, end_date)` 上不发生多类型碰撞（DAT-07② 结案为"结构上允许碰撞"）。相关文件：`data/sync/financial.py`（`_dedup_financial_df`）、`ui/components/backtest/backtest_result_panel.py`。 | ① 用户报告跨重述期回测结果漂移影响实盘决策；② 或量化重述发生率后决定上影子表（`financial_reports_history`）时；③ 或回测报告引入 as-of 语义时。 |
+
 ## 引用关系
 
 - [CLAUDE.md §3.3](../../CLAUDE.md#33--已知技术债与架构限制-known-limitations): 已知技术债与架构限制索引（CLAUDE.md 仅保留摘要 + 指向本文的链接）
