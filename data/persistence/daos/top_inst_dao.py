@@ -39,7 +39,8 @@ class TopInstDao(BaseDao):
                 None 时不过滤日期。
 
         Returns:
-            DataFrame，每个 ts_code 取最近一条 trade_date 记录。
+            DataFrame，每个 ts_code 取最近一条 trade_date 的净买入最大席位（DAT-09：
+            DISTINCT ON 语义稳定化，避免同日多席位行取任意行）。
         """
 
         def sql_fn(as_of):
@@ -48,13 +49,12 @@ class TopInstDao(BaseDao):
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
-                            ts_code, trade_date, name, close, pct_change,
-                            amount, net_amount, buy_amount, buy_value,
-                            sell_amount, sell_value
+                            ts_code, trade_date, exalter, side, buy, buy_rate,
+                            sell, sell_rate, net_buy, reason
                         FROM top_inst
                         WHERE ts_code IN ({placeholders})
                           AND trade_date <= ${start_idx + chunk_len}
-                        ORDER BY ts_code, trade_date DESC
+                        ORDER BY ts_code, trade_date DESC, net_buy DESC
                         """
                     ),
                     lambda chunk: [as_of],
@@ -62,12 +62,11 @@ class TopInstDao(BaseDao):
             return (
                 """
                 SELECT DISTINCT ON (ts_code)
-                    ts_code, trade_date, name, close, pct_change,
-                    amount, net_amount, buy_amount, buy_value,
-                    sell_amount, sell_value
+                    ts_code, trade_date, exalter, side, buy, buy_rate,
+                    sell, sell_rate, net_buy, reason
                 FROM top_inst
                 WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, trade_date DESC
+                ORDER BY ts_code, trade_date DESC, net_buy DESC
                 """,
                 None,
             )

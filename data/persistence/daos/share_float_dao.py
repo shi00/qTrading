@@ -24,12 +24,11 @@ class ShareFloatDao(BaseDao):
     async def save_share_float(self, df: pd.DataFrame):
         """UPSERT share_float rows. R8: 使用 _save_upsert 而非 _write_db(is_many=True)。
 
-        holder_name 当前 Tushare API 不返回，排除以避免 _save_upsert 触发
-        "Missing columns" 警告；若 API 后续支持该字段，移除 exclude 即可。
+        DAT-09：API fields 已补 holder_name（官方契约 doc_id=160），不再排除该列。
         """
         if df is None or df.empty:
             return 0
-        cols = get_model_columns(ShareFloat, exclude={"holder_name"})
+        cols = get_model_columns(ShareFloat)
         pk_columns = get_model_pk_columns(ShareFloat)
         return await self._save_upsert(
             df,

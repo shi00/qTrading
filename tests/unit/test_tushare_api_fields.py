@@ -11,7 +11,10 @@ from data.external.tushare_client import TushareClient
 from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 from data.persistence.daos.quote_dao import QuoteDao
+from data.persistence.daos.share_float_dao import ShareFloatDao
+from data.persistence.daos.top_inst_dao import TopInstDao
 
 from tests._helpers import extract_cols_from_method, extract_fields_from_api_method
 import pytest
@@ -55,6 +58,9 @@ class TestApiFieldsExplicit:
         "get_top10_holders",
         "get_stk_holdernumber",
         "get_fina_mainbz",
+        "get_share_float",
+        "get_top_inst",
+        "get_pledge_detail",
     ]
 
     def test_api_methods_should_specify_fields(self):
@@ -105,6 +111,9 @@ class TestApiFieldsMatchDaoCols:
         ("get_fina_mainbz", "save_fina_mainbz"),
         ("get_index_daily", "save_index_daily"),
         ("get_index_weight", "save_index_weights"),
+        ("get_top_inst", "save_top_inst"),
+        ("get_share_float", "save_share_float"),
+        ("get_pledge_detail", "save_pledge_detail"),
     ]
 
     def test_api_fields_cover_dao_cols(self):
@@ -113,6 +122,9 @@ class TestApiFieldsMatchDaoCols:
             "MarketDao": MarketDao,
             "HolderDao": HolderDao,
             "FinancialDao": FinancialDao,
+            "TopInstDao": TopInstDao,
+            "ShareFloatDao": ShareFloatDao,
+            "PledgeDetailDao": PledgeDetailDao,
         }
 
         issues = []

@@ -188,42 +188,51 @@ def _format_forecast_section(df: pd.DataFrame) -> str:
 
 
 def _format_pledge_detail_section(df: pd.DataFrame) -> str:
-    """格式化股权质押明细段落（Phase 3B）。
+    """格式化股权质押明细段落（Phase 3B，DAT-09 重写为官方字段）。
 
     入参 df 由 ``get_pledge_detail_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
-    仅返回每只股票最新一期明细，故直接取 ``iloc[0]``。
+    仅返回每只股票最新公告日记录，故直接取 ``iloc[0]``。
 
-    格式示例：``- 质押明细: 质押股数 1000.00 万股（无限售 800.00，有限售 200.00），占总股本 35.2%``
+    格式示例：``- 质押明细: 公告 2018-01-06，股东 中科汇通(深圳)股权投资基金有限公司
+    （质押股数: 500.00 万股，持股总数: 2321.99 万股，质押总数: 2321.99 万股），质押比例 5.2%``
     """
     if df is None or df.empty:
         return ""
     row = df.iloc[0]
+    ann_date = row.get("ann_date")
+    holder_name = row.get("holder_name")
     pledge_amount = row.get("pledge_amount")
-    unlimited = row.get("unlimited_pledge_amount")
-    limited = row.get("limited_pledge_amount")
-    total_pledge = row.get("total_pledge_amount")
-    pledge_ratio = row.get("pledge_ratio")
+    holding_amount = row.get("holding_amount")
+    pledged_amount = row.get("pledged_amount")
+    p_total_ratio = row.get("p_total_ratio")
+
+    def _fmt_date(v):
+        if isinstance(v, (date, datetime)):
+            return v.strftime("%Y-%m-%d")
+        return str(v) if v is not None and not pd.isna(v) else "N/A"
 
     parts: list[str] = []
     if pledge_amount is not None and not pd.isna(pledge_amount):
-        parts.append(f"{I18n.get('ai_pledge_amount')}: {float(pledge_amount):.2f}")
-    if total_pledge is not None and not pd.isna(total_pledge):
-        parts.append(f"{I18n.get('ai_pledge_total')}: {float(total_pledge):.2f}")
-    if unlimited is not None and not pd.isna(unlimited):
-        parts.append(f"{I18n.get('ai_pledge_unlimited')}: {float(unlimited):.2f}")
-    if limited is not None and not pd.isna(limited):
-        parts.append(f"{I18n.get('ai_pledge_limited')}: {float(limited):.2f}")
+        parts.append(f"{I18n.get('ai_pledge_amount')}: {float(pledge_amount):.2f} 万股")
+    if holding_amount is not None and not pd.isna(holding_amount):
+        parts.append(f"{I18n.get('ai_pledge_holding')}: {float(holding_amount):.2f} 万股")
+    if pledged_amount is not None and not pd.isna(pledged_amount):
+        parts.append(f"{I18n.get('ai_pledge_pledged')}: {float(pledged_amount):.2f} 万股")
 
     if not parts:
         return ""
 
     detail_str = "（" + "，".join(parts) + "）"
+    holder_str = str(holder_name) if holder_name is not None and not pd.isna(holder_name) else "N/A"
     ratio_str = (
-        f"，{I18n.get('ai_pledge_ratio')} {float(pledge_ratio):.1f}%"
-        if pledge_ratio is not None and not pd.isna(pledge_ratio)
+        f"，{I18n.get('ai_pledge_ratio')} {float(p_total_ratio):.1f}%"
+        if p_total_ratio is not None and not pd.isna(p_total_ratio)
         else ""
     )
-    return f"- {I18n.get('ai_pledge_detail')}: {detail_str}{ratio_str}"
+    return (
+        f"- {I18n.get('ai_pledge_detail')}: {I18n.get('ai_pledge_announce')} {_fmt_date(ann_date)}，"
+        f"{I18n.get('ai_pledge_holder')} {holder_str}{detail_str}{ratio_str}"
+    )
 
 
 def _format_share_float_section(df: pd.DataFrame) -> str:

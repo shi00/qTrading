@@ -683,6 +683,24 @@ class BaseDao:
 
         df_slice = df[columns]
 
+        # DAT-09: 通用防线——UPSERT 静默合并重复主键会导致丢行（明细表曾因此丢数据）。
+        # 在此告警，仅提示不阻断：重复主键可能是 API 自身重复返回，也可能仍需扩大主键维度。
+        duplicate_mask = df_slice.duplicated(subset=pk_columns, keep=False)
+        dup_rows = int(duplicate_mask.sum())
+        if dup_rows > 0:
+            dup_lost = int(len(df_slice) - df_slice.drop_duplicates(subset=pk_columns).shape[0])
+            dup_samples = df_slice.loc[duplicate_mask, pk_columns].drop_duplicates().head(3).to_dict(orient="records")
+            logger.warning(
+                "[%s] Insert '%s': %d/%d 行主键重复（UPSERT 将静默合并，预计丢 %d 行）。"
+                "样本主键：%s。若 API 按主键返回本就唯一，需扩大主键维度。",
+                self.__class__.__name__,
+                table_name,
+                dup_rows,
+                len(df_slice),
+                dup_lost,
+                dup_samples,
+            )
+
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 

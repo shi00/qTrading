@@ -1744,12 +1744,19 @@ class TestBuildAuxiliaryDataText:
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
-                    "end_date": [datetime.date(2024, 6, 30)],
+                    "ann_date": [datetime.date(2024, 6, 28)],
+                    "holder_name": ["张三"],
                     "pledge_amount": [1000000.0],
-                    "unlimited_pledge_amount": [800000.0],
-                    "limited_pledge_amount": [200000.0],
-                    "total_pledge_amount": [1000000.0],
-                    "pledge_ratio": [35.2],
+                    "start_date": [datetime.date(2024, 5, 1)],
+                    "end_date": [datetime.date(2024, 6, 30)],
+                    "is_release": [None],
+                    "release_date": [None],
+                    "pledgor": [None],
+                    "holding_amount": [5000000.0],
+                    "pledged_amount": [1000000.0],
+                    "p_total_ratio": [35.2],
+                    "h_total_ratio": [20.0],
+                    "is_buyback": [None],
                 }
             )
         )
@@ -1764,12 +1771,13 @@ class TestBuildAuxiliaryDataText:
             result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
         assert "质押明细" in result_text
+        assert "公告 2024-06-28" in result_text
+        assert "股东 张三" in result_text
         assert "质押股数" in result_text
         assert "1000000.00" in result_text
-        assert "无限售质押" in result_text
-        assert "800000.00" in result_text
-        assert "有限售质押" in result_text
-        assert "200000.00" in result_text
+        assert "持股总数" in result_text
+        assert "5000000.00" in result_text
+        assert "质押总数" in result_text
         assert "35.2%" in result_text
         assert "ai_label_pledge_detail" in labels_out
 
@@ -1793,12 +1801,19 @@ class TestBuildAuxiliaryDataText:
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
-                    "end_date": [datetime.date(2024, 6, 30)],
+                    "ann_date": [datetime.date(2024, 6, 28)],
+                    "holder_name": ["张三"],
                     "pledge_amount": [1000000.0],
-                    "unlimited_pledge_amount": [800000.0],
-                    "limited_pledge_amount": [200000.0],
-                    "total_pledge_amount": [1000000.0],
-                    "pledge_ratio": [35.2],
+                    "start_date": [datetime.date(2024, 5, 1)],
+                    "end_date": [datetime.date(2024, 6, 30)],
+                    "is_release": [None],
+                    "release_date": [None],
+                    "pledgor": [None],
+                    "holding_amount": [5000000.0],
+                    "pledged_amount": [1000000.0],
+                    "p_total_ratio": [35.2],
+                    "h_total_ratio": [20.0],
+                    "is_buyback": [None],
                 }
             )
         )
@@ -1812,7 +1827,7 @@ class TestBuildAuxiliaryDataText:
             client.is_api_covered_by_tier.return_value = False
             result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
-        # stale 标注前缀
+        # stale 标注前缀（date_column=end_date）
         assert "【数据停止更新，最后更新：2024-06-30】" in result_text
         # 仍注入历史数据
         assert "质押明细" in result_text

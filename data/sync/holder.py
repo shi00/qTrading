@@ -165,6 +165,18 @@ class HolderSyncStrategy(ISyncStrategy):
                     )
 
             if errors < _MAX_ERRORS and not self._cancelled:
+                count, actual_date = await self._sync_pledge_detail()
+                if count < 0:
+                    errors += 1
+                elif count > 0:
+                    result.added += count
+                    await self.context.cache.sync_dao.update_sync_status(
+                        "pledge_detail",
+                        actual_date or await self._get_effective_trade_date(),
+                        count,
+                    )
+
+            if errors < _MAX_ERRORS and not self._cancelled:
                 count, actual_date = await self._sync_stk_holdertrade()
                 if count < 0:
                     errors += 1
@@ -778,6 +790,89 @@ class HolderSyncStrategy(ISyncStrategy):
                 e,
                 "general",
                 "[HolderSync] Table | Error syncing share_float (%s): %s",
+                exc_info=True,
+            )
+            if severity == "system":
+                raise
+            return -1, None
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def _sync_pledge_detail(self):
+        """
+        Fetch recent pledge_detail (股权质押明细) by ann_date range.
+
+        pledge_detail is event-driven. Sync a window of
+        [today - 90 days, today] to capture recent pledge announcements.
+
+        DAT-09：pledge_detail 此前无任何同步入口（SYNCED_TABLES 与历史同步均未覆盖），
+        重建表后若不同步则为空表；本方法复刻 _sync_share_float/_sync_stk_holdertrade 模式
+        接入调用链。
+
+        Returns (row_count, actual_date) on success, (-1, None) on error.
+        """
+        try:
+            today = await self._get_effective_trade_date()
+            start_date = (today - datetime.timedelta(days=90)).strftime("%Y%m%d")
+            end_date = today.strftime("%Y%m%d")
+
+            if self._cancelled:
+                logger.debug("[HolderSync] pledge_detail | Cancelled before API call.")
+                return -1, None
+
+            df = await self.context.api.get_pledge_detail(start_date=start_date, end_date=end_date)
+
+            if df is not None and not df.empty:
+                await self.context.cache.save_pledge_detail(df)
+                logger.debug(
+                    "[HolderSync] Table | pledge_detail ann_date %s~%s: %s records",
+                    start_date,
+                    end_date,
+                    len(df),
+                )
+                return len(df), today
+
+            logger.debug(
+                "[HolderSync] Table | pledge_detail ann_date %s~%s: no data",
+                start_date,
+                end_date,
+            )
+            return 0, today
+        except EngineDisposedError:
+            raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for pledge_detail",
+            )
+            try:
+                today = await self._get_effective_trade_date()
+                await self.context.cache.sync_dao.update_sync_status(
+                    "pledge_detail",
+                    today,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                severity = classify_severity(e, context="general")
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[HolderSync] pledge_detail | Failed to record skipped_permission status (%s): %s",
+                    exc_info=True,
+                )
+                if severity == "system":
+                    raise
+            return -1, None
+        except Exception as e:
+            severity = classify_severity(e, context="general")
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[HolderSync] Table | Error syncing pledge_detail (%s): %s",
                 exc_info=True,
             )
             if severity == "system":

@@ -810,15 +810,14 @@ class TestTushareClientApiMethods:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": ["20240614"],
-                "name": ["平安银行"],
-                "close": [10.0],
-                "pct_change": [1.0],
-                "amount": [1000000.0],
-                "net_amount": [500000.0],
-                "buy_amount": [800000.0],
-                "buy_value": [8000000.0],
-                "sell_amount": [300000.0],
-                "sell_value": [3000000.0],
+                "exalter": ["机构专用"],
+                "side": ["B"],
+                "buy": [800000.0],
+                "buy_rate": [12.5],
+                "sell": [300000.0],
+                "sell_rate": [5.0],
+                "net_buy": [500000.0],
+                "reason": ["日涨幅偏离值达7%"],
             }
         )
         client._handle_api_call = AsyncMock(return_value=expected_df)
@@ -830,9 +829,9 @@ class TestTushareClientApiMethods:
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.top_inst callable
         assert callable(call_args.args[0])
-        # kwargs 含 trade_date 和 fields
+        # kwargs 含 trade_date 和 fields（DAT-09：官方契约字段，容纳逐席位明细）
         assert call_args.kwargs["trade_date"] == "20240614"
-        assert "ts_code,trade_date,name,close,pct_change,amount" in call_args.kwargs["fields"]
+        assert "exalter,side,buy,buy_rate,sell,sell_rate,net_buy,reason" in call_args.kwargs["fields"]
 
     @pytest.mark.asyncio
     async def test_get_stk_limit_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):

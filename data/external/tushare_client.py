@@ -158,7 +158,8 @@ class TushareClient:
         "cn_m": {"month": "period"},
         # Phase 2D §3.2.6：cn_gdp API 返回 quarter 列，重命名为 period 统一处理
         "cn_gdp": {"quarter": "period"},
-        # Phase 3D：share_float API 返回 float_type，重命名为 share_type（与 ORM 列名对齐）
+        # DAT-09：share_float fields 已切官方 share_type；条目保留为兼容（未实测前
+        # 若 API 实际返回 float_type，rename 幂等兜底，不会报错）
         "share_float": {"float_type": "share_type"},
         # R17（迁移 0015）：shibor API 返回 date/on/1w-1y（SQL 保留字/数字开头），
         # 重命名为 record_date/on_rate/week_1-week_2/month_1-month_3-month_6-month_9/year_1
@@ -1097,7 +1098,7 @@ class TushareClient:
         return await self._handle_api_call(
             self.pro.top_inst,
             trade_date=trade_date,
-            fields="ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,buy_value,sell_amount,sell_value",
+            fields="trade_date,ts_code,exalter,side,buy,buy_rate,sell,sell_rate,net_buy,reason",
         )
 
     async def get_stk_limit(self, trade_date: str | None):
@@ -1351,17 +1352,28 @@ class TushareClient:
             fields="ts_code,end_date,pledge_count,unrest_pledge,rest_pledge,total_share,pledge_ratio",
         )
 
-    async def get_pledge_detail(self, ts_code: str | None = None, end_date: str | None = None):
+    async def get_pledge_detail(
+        self,
+        ts_code: str | None = None,
+        ann_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
         """Get share pledge detail.
 
         Phase 3B §3.2：股权质押明细，挂 @log_async_operation（由 _handle_api_call 提供）
         + 显式 fields。与 pledge_stat（统计）互补，提供更细粒度的质押信息供 AI 分析。
+
+        DAT-09：fields 改为官方契约 14 字段（doc_id=111）。
+        输入参数 ts_code / ann_date / start_date / end_date（公告日期范围）。
         """
         return await self._handle_api_call(
             self.pro.pledge_detail,
             ts_code=ts_code,
+            ann_date=ann_date,
+            start_date=start_date,
             end_date=end_date,
-            fields="ts_code,end_date,pledge_amount,unlimited_pledge_amount,limited_pledge_amount,total_pledge_amount,pledge_ratio",
+            fields="ts_code,ann_date,holder_name,pledge_amount,start_date,end_date,is_release,release_date,pledgor,holding_amount,pledged_amount,p_total_ratio,h_total_ratio,is_buyback",
         )
 
     async def get_share_float(
@@ -1373,14 +1385,14 @@ class TushareClient:
         """Get share float (unlock) data.
 
         Phase 3D §3.2：限售解禁，挂 @log_async_operation（由 _handle_api_call 提供）
-        + 显式 fields。float_type 经 _COLUMN_RENAMES 重命名为 share_type。
+        + 显式 fields。DAT-09：fields 改为官方契约（doc_id=160，含 holder_name/share_type）。
         """
         return await self._handle_api_call(
             self.pro.share_float,
             ts_code=ts_code,
             start_date=start_date,
             end_date=end_date,
-            fields="ts_code,ann_date,float_date,float_share,float_ratio,float_type",
+            fields="ts_code,ann_date,float_date,float_share,float_ratio,holder_name,share_type",
         )
 
     async def get_stk_holdertrade(
