@@ -52,6 +52,105 @@ class TestThreadPoolManagerReloadConfig:
         assert isinstance(tpm._io_pool, ThreadPoolExecutor)
         assert isinstance(tpm._cpu_pool, ThreadPoolExecutor)
 
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_after_shutdown_noop(self, mock_ch):
+        """CON-05: 停机后 reload_config 幂等，不重建线程池（防泄漏）。
+
+        旧代码无 _shutdown_event 检查：shutdown() 后 reload_config() 会重建两个
+        ThreadPoolExecutor，但 io_pool/cpu_pool property 因 _shutdown_event.is_set()
+        抛 RuntimeError → 新池永远拿不到、永远不被 shutdown() → 纯泄漏。
+        """
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown(wait=False)
+        tpm.reload_config()
+        assert tpm._shutdown_event.is_set()
+        assert tpm._io_pool is None
+        assert tpm._cpu_pool is None
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_pools_accessible(self, mock_ch):
+        """CON-05: 热重载后 io_pool/cpu_pool property 可访问，且反映新配置。"""
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        mock_ch.get_max_io_workers.return_value = 8
+        mock_ch.get_max_cpu_workers.return_value = 4
+        tpm.reload_config()
+        assert isinstance(tpm.io_pool, ThreadPoolExecutor)
+        assert isinstance(tpm.cpu_pool, ThreadPoolExecutor)
+        assert tpm.io_pool_max_workers == 8
+        assert tpm.cpu_pool_max_workers == 4
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_inflight_task_completes(self, mock_ch):
+        """CON-05 行为守护：reload_config 不中断/孤立运行中任务。
+
+        旧代码（wait=False）下运行中任务同样自然完成——本测试守护的是
+        「reload 不孤立在途任务」不变量，防止未来把 cancel_futures 语义扩展到
+        运行中任务、或把旧池 shutdown 内联同步执行（join 自身 worker 死锁）。
+
+        确定性同步：任务体内先 started.set() 再 release.wait()，主线程
+        started.wait() 后才 reload，保证任务已进入运行态而非仍在排队
+        （排队任务会被 cancel_futures=True 取消，会误触发本测试）。
+        """
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_task():
+            started.set()
+            release.wait(timeout=10)
+            return "inflight-done"
+
+        future = tpm.submit(TaskType.IO, blocking_task)
+        assert started.wait(timeout=10), "任务未在旧池启动"
+        try:
+            mock_ch.get_max_io_workers.return_value = 8
+            mock_ch.get_max_cpu_workers.return_value = 4
+            tpm.reload_config()  # 热重载不应中断在途任务
+            release.set()
+            assert future.result(timeout=10) == "inflight-done"
+        finally:
+            release.set()  # 防异常路径任务挂起
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_shutdown_during_creation_noop(self, mock_ch):
+        """CON-05: 创建新池过程中并发停机（TOCTOU 防御分支）——释放新池并早退。
+
+        编排：仅对 reload 创建的新池生效——第二次构造（CPU 池）完成后置位
+        _shutdown_event，命中 reload_config 内「swap 前二次检查」分支，
+        断言新建 io/cpu 池被释放（_shutdown=True）、旧池未被 swap。
+        """
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+
+        original_init = ThreadPoolExecutor.__init__
+        created_pools: list[ThreadPoolExecutor] = []
+        counter = {"n": 0}
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            created_pools.append(self)
+            counter["n"] += 1
+            if counter["n"] == 2:
+                tpm._shutdown_event.set()
+
+        with patch.object(ThreadPoolExecutor, "__init__", patched_init):
+            tpm.reload_config()
+
+        assert tpm._shutdown_event.is_set()
+        assert len(created_pools) == 2
+        assert all(pool._shutdown for pool in created_pools), "新建池应被释放，避免泄漏"
+        # 未执行 swap：旧池保留原引用
+        assert tpm._io_pool is not None
+        assert tpm._cpu_pool is not None
+
 
 class TestThreadPoolManagerShutdown:
     @patch("utils.thread_pool.ConfigHandler")

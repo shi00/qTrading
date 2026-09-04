@@ -106,7 +106,16 @@ class ThreadPoolManager:
         )
 
     def reload_config(self):
-        """Reload pools with new configuration. Swaps pools first to minimize downtime."""
+        """Reload pools with new configuration. Swaps pools first to minimize downtime.
+
+        CON-05: 停机后调用本方法必须幂等早退——否则会重建两个 ThreadPoolExecutor，
+        但 io_pool/cpu_pool property 因 _shutdown_event.is_set() 抛 RuntimeError，
+        新池永远拿不到、永远不被 shutdown()（纯泄漏）。
+        """
+        if self._shutdown_event.is_set():
+            logger.debug("Ignoring reload_config after shutdown (idempotent)")
+            return
+
         logger.info("Reloading Thread Pool Configuration...")
 
         # Reset IO workers cap warning so it can fire again after a user-initiated config change.
@@ -125,7 +134,16 @@ class ThreadPoolManager:
             thread_name_prefix="CPU_Worker",
         )
 
-        # 2. Swap references (Atomic in Python GIL)
+        # 2. Re-check shutdown before swapping (CON-05): 收窄「检查通过后、并发停机
+        #    置位 _shutdown_event」的 TOCTOU 窗口，命中则释放刚建的新池并早退，
+        #    避免新池泄漏。
+        if self._shutdown_event.is_set():
+            new_io_pool.shutdown(wait=False, cancel_futures=True)
+            new_cpu_pool.shutdown(wait=False, cancel_futures=True)
+            logger.debug("Ignoring reload_config: shutdown started during pool creation (idempotent)")
+            return
+
+        # 3. Swap references (Atomic in Python GIL)
         old_io_pool = self._io_pool
         old_cpu_pool = self._cpu_pool
 
@@ -138,17 +156,24 @@ class ThreadPoolManager:
             cpu_workers,
         )
 
-        # 3. Graceful shutdown of old pools in background thread to avoid blocking reload
+        # 4. Graceful shutdown of old pools in background thread to avoid blocking reload
         def shutdown_old_pools():
-            # 务实方案（B5）：wait=False + cancel_futures=True，立即取消旧池排队任务，
-            # 运行中任务继续执行直到自然结束；进程退出时 daemon 线程被强杀亦无等待代价。
-            # 低频热重载路径不为 drain 引入持续任务计数器（宪法 §1.3）。
+            # CON-05: shutdown 的 wait 参数只决定调用方是否阻塞等待，不终止运行中任务——
+            # wait=False 与 wait=True 下在途任务都自然完成（cancel_futures=True 仅取消排队
+            # 未启动任务），因此保持 wait=False 不改变「reload 不孤立在途任务」的语义。
+            # 必须经后台线程执行（承重约束）：reload_config 经 run_async 在旧 IO 池 worker
+            # 内被调用（system_settings_view_model.save_thread_pool），同步 shutdown(wait=True)
+            # 会 join 自身 worker 死锁，故此处不可内联。
+            # 进程退出时在途 dump/restore 被强杀的风险由 CON-04 的 request_cancel 停机集成
+            # 覆盖（dump 类可取消；restore 类按 CON-04 设计拒绝取消、强杀为已接受权衡）。
             if old_io_pool:
                 old_io_pool.shutdown(wait=False, cancel_futures=True)
             if old_cpu_pool:
                 old_cpu_pool.shutdown(wait=False, cancel_futures=True)
             logger.warning(
-                "Old Thread Pools shut down (wait=False); in-flight tasks may be interrupted on process exit."
+                "Old Thread Pools shut down (wait=False, cancel_futures=True); "
+                "running tasks continue to completion, queued tasks are cancelled; "
+                "in-flight task kill-on-process-exit is covered by CON-04 request_cancel."
             )
 
         threading.Thread(target=shutdown_old_pools, daemon=True).start()
