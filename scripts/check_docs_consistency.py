@@ -30,6 +30,9 @@
    docs/README.md 引用（目录级引用视为覆盖其下全部文件）。
 16. 治理 id 引用一致性检查（DOC-09）：EX-\\d{4} 双向校验——消费文档引用的例外必须已登记，
    已登记例外必须被消费文档引用。
+17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
+   方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使既有
+   检视结论/方法论对新会话一跳可达。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -87,6 +90,10 @@ DOCS_README_PATH = ROOT / "docs" / "README.md"
 # docs/flet/ 目录与导航入口
 FLET_DOCS_DIR = ROOT / "docs" / "flet"
 FLET_HUB_PATH = FLET_DOCS_DIR / "README.md"
+
+# docs/reviews/ 目录与索引入口（DOC-07 检视方法论文档登记）
+REVIEWS_DOCS_DIR = ROOT / "docs" / "reviews"
+REVIEWS_README_PATH = REVIEWS_DOCS_DIR / "README.md"
 
 # 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
 # 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
@@ -1611,6 +1618,72 @@ def check_docs_index_completeness() -> list[str]:
     return errors
 
 
+# --- DOC-07: 检视方法论文档登记（docs/reviews/README.md 文件级登记顶层方法论）---
+# check_docs_index_completeness 的目录级引用（`[reviews/](./reviews/)`）只保证「顶层目录可达」，
+# 无法要求「新增方法论文档必须被登记」。本检查仿 check_flet_hub_completeness，把 docs/reviews/
+# 顶层方法论文档的登记从「目录级覆盖」收紧到「README 文件级链接」，使新增方法论对新会话可达。
+# 仅枚举 docs/reviews/*.md 顶层文件（排除 README 自身与子目录）；子目录（review-profiles/、
+# evals/）由各自子 README 与 check_docs_index_completeness 兜底。轮次报告落根 reviews/
+# （gitignored 本地产物）不在仓库扫描范围。
+
+
+def check_reviews_index_completeness() -> list[str]:
+    """检查项 17：检视方法论文档登记完整性（DOC-07）。
+
+    确保 docs/reviews/README.md 以文件级链接登记全部顶层方法论文档
+    （ai-review / appendix / quality-dimensions / scenario-completeness 等），
+    使「既有检视结论 / 方法论」对新会话一跳可达。
+    """
+    errors: list[str] = []
+    if not REVIEWS_README_PATH.exists():
+        return [f"reviews 索引入口不存在: {REVIEWS_README_PATH}"]
+
+    readme_content = REVIEWS_README_PATH.read_text(encoding="utf-8")
+
+    # 枚举 docs/reviews/ 顶层 .md（排除 README 自身）
+    actual_files: set[str] = set()
+    for path in REVIEWS_README_PATH.parent.glob("*.md"):
+        if path.name == "README.md":
+            continue
+        actual_files.add(path.name)
+
+    # 提取 README 中指向 docs/reviews/ 目录内 .md 文件的链接的文件名集合
+    referenced_files: set[str] = set()
+    in_code_block = False
+    for line in readme_content.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        for m in _MD_LINK_PATTERN.finditer(line):
+            url = m.group(2).strip()
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            url_path = url.split("#", 1)[0].split("?", 1)[0]
+            if not url_path:
+                continue
+            target_path = (REVIEWS_README_PATH.parent / url_path).resolve()
+            try:
+                rel = target_path.relative_to(REVIEWS_DOCS_DIR)
+            except ValueError:
+                continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
+            if len(rel.parts) != 1:
+                # 仅统计顶层（`./xxx.md` 形式）引用；轮次表根 reviews/ 路径/子目录引用不纳入登记集
+                continue
+            url_basename = rel.name
+            if url_basename.endswith(".md") and url_basename != "README.md":
+                referenced_files.add(url_basename)
+
+    # 未登记的顶层方法论文档
+    for fname in sorted(actual_files - referenced_files):
+        errors.append(f"检视方法论文档登记: docs/reviews/README.md 未登记顶层方法论文档 '{fname}'")
+    # 幽灵链接（README 引用不存在的 docs/reviews/ 内文档）
+    for fname in sorted(referenced_files - actual_files):
+        errors.append(f"检视方法论文档登记: docs/reviews/README.md 引用了不存在的文档 '{fname}'")
+    return errors
+
+
 # --- DOC-09: 治理 id 引用一致性（EX-\d{4} 双向：注册表 ↔ 消费文档）---
 # 宪法曾引用未登记的 EX-0001（复现 GOV-01，DOC-09）。本检查把「引用必须落在注册表、
 # 登记必须被消费」沉淀为机制：任一方向漂移即报错，防止悬空/孤儿例外长期存活。
@@ -1699,6 +1772,7 @@ def main() -> int:
     all_errors.extend(check_decision_tree_mapping())
     all_errors.extend(check_canonical_routing())
     all_errors.extend(check_docs_index_completeness())
+    all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_governance_id_references())
 
     if all_errors:
@@ -1712,7 +1786,7 @@ def main() -> int:
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 治理 id 引用一致性）"
+        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / 治理 id 引用一致性）"
     )
     return 0
 

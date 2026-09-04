@@ -6,6 +6,15 @@
 >
 > **路径说明**：报告正文落 `reviews/` 根的为**本地检视工作产物，已被 `.gitignore` 排除、不入 git**（见 [.gitignore](../../.gitignore) `/reviews/`），仅在新会话本地工作区可读；已丢失报告的轮次仅保留 ID 供追溯，不复原正文。
 
+## 方法论文档
+
+检视方法论资产登记于此（新增顶层方法论文档须同时在本文件登记，见 `check_reviews_index_completeness` 门禁）：
+
+- [ai-review.md](./ai-review.md) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
+- [appendix.md](./appendix.md) — 检视附录（模板 / 术语 / 深度阅读）
+- [quality-dimensions.md](./quality-dimensions.md) — 检视质量维度定义
+- [scenario-completeness.md](./scenario-completeness.md) — Evals 场景完整性方法论
+
 ## 轮次清单
 
 | 轮次 | 日期 | 范围 / 对象 | 报告路径 | 状态 |
