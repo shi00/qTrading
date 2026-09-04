@@ -1561,12 +1561,41 @@ def check_decision_tree_mapping() -> list[str]:
     return errors
 
 
+def _canonical_routes_to_workflow(doc_content: str, doc_dir: Path, workflow_target: Path) -> bool:
+    """canonical 文档中是否存在一条真实 markdown 链接，经相对解析后指向 workflow 目标文档。
+
+    纯文本/反引号提及、代码块内示例链接不算真路由：DOC-05 要求 canonical 入口文档完整承担
+    条件路由责任，必须以可点击的相对路径链接指向 workflow 文档。
+    """
+    in_code_block = False
+    for line in doc_content.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        for m in _MD_LINK_PATTERN.finditer(line):
+            url = m.group(2).strip()
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            path_part = url.split("#", 1)[0].split("?", 1)[0]
+            if not path_part:
+                continue
+            try:
+                target = (doc_dir / path_part).resolve()
+            except Exception:
+                continue
+            if target == workflow_target:
+                return True
+    return False
+
+
 def check_canonical_routing() -> list[str]:
     """检查项 14：canonical 入口承担条件路由责任（DOC-05）。
 
-    canonical-topics.yml 的字段说明声明「入口文档负责条件路由」。本检查将对「带略显深度的
-    工作流入口」主题（yml 中声明了 `workflow` 字段）做可执行断言：其 canonical 文档中必须
-    存在指向该 workflow 文档的链接（允许条件路由定位到操作步骤）。
+    canonical-topics.yml 的字段说明声明「入口文档负责条件路由」。本检查将对「带工作流入口」
+    主题（yml 中声明了 `workflow` 字段）做可执行断言：其 canonical 文档中必须存在指向该
+    workflow 文档的真实 markdown 链接（纯文本/反引号提及不算真路由）。
 
     说明：backtest / embedded-pg 两主题的 canonical 直接就是 how-to.md 本身，无需 workflow
     字段，故不在校验范围（它们天然承担操作步骤承载）。
@@ -1587,15 +1616,13 @@ def check_canonical_routing() -> list[str]:
         if not canonical_path.exists():
             errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
             continue
-        workflow_basename = Path(workflow).name
-        if not workflow_basename:
-            continue
+        workflow_target = (ROOT / workflow.removeprefix("./")).resolve()
         doc_content = canonical_path.read_text(encoding="utf-8")
-        # 断言 canonical 文档含指向 workflow 文档（basename 形式 markdown 链接/引用）的路由
-        if workflow_basename not in doc_content:
+        # 真链接断言：必须存在指向 workflow 文档的 markdown 链接（纯文本/反引号提及不算真路由）
+        if not _canonical_routes_to_workflow(doc_content, canonical_path.parent, workflow_target):
             errors.append(
                 f"topics[{idx}] (id={topic.get('id')}) canonical '{canonical}' 未路由到 "
-                f"workflow '{workflow}'（应含指向 {workflow_basename} 的链接）"
+                f"workflow '{workflow}'（真链接断言：应含指向 {Path(workflow).name} 的 markdown 链接）"
             )
     return errors
 
