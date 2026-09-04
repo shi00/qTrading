@@ -273,7 +273,15 @@ async def setup_ann_date_null_rows(function_engine):
 
 
 class TestDat06AnnDateNull:
-    """DAT-06: ann_date IS NULL 行在 PIT/非 PIT 双分支的口径一致性（回测/实盘不分叉）。"""
+    """DAT-06: ann_date IS NULL 行在 PIT/非 PIT 双分支的口径一致性（回测/实盘不分叉）。
+
+    xdist_group("serial")：本类测试通过全表 has_ann_date_nulls() 断言"无 NULL 行"（T3b），
+    而 T1/T2/T3 的 setup_ann_date_null_rows fixture 会向同一张表插入 NULL 行（teardown 才清理）。
+    并行（-n auto --dist=loadgroup）下 T3b 会读到其他 worker 尚未清理的 NULL 行导致 flaky，
+    故将本类锁定到同一 worker 串行执行（仓库既有模式，见 test_config_panels.py migration 组）。
+    """
+
+    pytestmark = pytest.mark.xdist_group("serial")
 
     @pytest.fixture
     def financial_dao(self, function_engine):
