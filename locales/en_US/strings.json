@@ -1789,6 +1789,8 @@
     "backtest_chart_summary_end_nav": "Ending NAV: {nav}",
     "backtest_chart_summary_total_return": "Total Return: {value}",
     "backtest_chart_summary_max_dd": "Max Drawdown: {value}",
+    "backtest_chart_summary_data_note": "Note: Fundamental data is the latest revised version; restatements may cause backtest results to drift over time",
+    "backtest_chart_summary_industry_note": "Note: Industry classification is the current snapshot; backtests across classification-adjustment periods may have lookahead",
     "backtest_no_trades": "No trade records",
     "backtest_no_ic_data": "No IC data",
     "backtest_no_monthly_data": "No monthly statistics",

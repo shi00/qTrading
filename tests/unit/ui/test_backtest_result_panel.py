@@ -426,6 +426,10 @@ class TestBacktestChartContext:
         assert I18n.get("backtest_chart_summary_source", strategy="test_strategy", benchmark="000300.SH") in text.value
         assert I18n.get("backtest_chart_summary_total_return", value="10.00%") in text.value
         assert I18n.get("backtest_chart_summary_max_dd", value="5.00%") in text.value
+        # DAT-07①: 摘要末尾显式标注基本面数据为最新修订版（重述偏差 tradeoff）
+        assert I18n.get("backtest_chart_summary_data_note") in text.value
+        # DAT-08②: 摘要末尾显式标注行业分类为当前快照（快照前视 tradeoff）
+        assert I18n.get("backtest_chart_summary_industry_note") in text.value
 
 
 class TestBuildMonthlyTable:

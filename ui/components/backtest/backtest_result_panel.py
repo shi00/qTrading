@@ -503,6 +503,11 @@ def _build_chart_summary(
     if "max_drawdown" in metrics:
         lines.append(I18n.get("backtest_chart_summary_max_dd", value=f"{metrics['max_drawdown'] * 100:.2f}%"))
 
+    # DAT-07①: 回测报告显式标注"基本面数据为最新修订版，存在重述偏差"（accepted tradeoff，见 docs/debt/known-technical-debt.md）
+    lines.append(I18n.get("backtest_chart_summary_data_note"))
+    # DAT-08②: 回测报告显式标注"行业分类为当前快照，跨分类调整期回测存在前视"（accepted tradeoff，见 docs/debt/known-technical-debt.md）
+    lines.append(I18n.get("backtest_chart_summary_industry_note"))
+
     return ft.Text(
         value="\n".join(lines),
         selectable=True,
