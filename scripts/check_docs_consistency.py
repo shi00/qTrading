@@ -31,8 +31,8 @@
 16. 治理 id 引用一致性检查（DOC-09）：EX-\\d{4} 双向校验——消费文档引用的例外必须已登记，
    已登记例外必须被消费文档引用。
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
-   方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使既有
-   检视结论/方法论对新会话一跳可达。
+   方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
+   方法论与轮次清单一跳可达（结论正文落根 reviews/ 为本地 gitignored 产物，不入仓库）。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -1632,7 +1632,7 @@ def check_reviews_index_completeness() -> list[str]:
 
     确保 docs/reviews/README.md 以文件级链接登记全部顶层方法论文档
     （ai-review / appendix / quality-dimensions / scenario-completeness 等），
-    使「既有检视结论 / 方法论」对新会话一跳可达。
+    使「检视方法论 / 轮次清单」对新会话一跳可达（结论正文为本地 gitignored 产物，不入仓库）。
     """
     errors: list[str] = []
     if not REVIEWS_README_PATH.exists():
