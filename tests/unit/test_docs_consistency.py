@@ -3238,3 +3238,52 @@ class TestGovernanceIdReferences:
 
         errors = check_governance_id_references()
         assert any("EX-0001" in e and "从未被任何消费文档引用" in e for e in errors), f"应检出孤儿登记, got: {errors}"
+
+    def test_excluded_dir_refs_do_not_trigger_dangling(self, tmp_path, monkeypatch):
+        """归档/豁免目录中的 EX 引用不参与悬空校验（不构成治理消费）."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs"
+        (docs_dir / "governance").mkdir(parents=True)
+        (docs_dir / "governance" / "exceptions.yml").write_text("exceptions: []\n", encoding="utf-8")
+        archive_dir = docs_dir / "plans" / "archive"
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "old-plan.md").write_text("历史计划引用 EX-0001\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX reference\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX reference\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "governance" / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        # 仅豁免 plans/archive，归档中的 EX 引用不再是治理消费
+        monkeypatch.setattr("check_docs_consistency._EX_REF_EXCLUDED_DIRS", (archive_dir,))
+
+        assert check_governance_id_references() == []
+
+    def test_active_dir_refs_still_trigger_dangling(self, tmp_path, monkeypatch):
+        """非豁免活文档目录中的 EX 悬空引用仍被检出（豁免不发生扩散）."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs"
+        (docs_dir / "governance").mkdir(parents=True)
+        (docs_dir / "governance" / "exceptions.yml").write_text("exceptions: []\n", encoding="utf-8")
+        (docs_dir / "active.md").write_text("活文档引用 EX-0001\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX reference\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX reference\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "governance" / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        # 豁免目录设为不存在的归档目录，active.md 仍在扫描范围
+        monkeypatch.setattr("check_docs_consistency._EX_REF_EXCLUDED_DIRS", (docs_dir / "plans" / "archive",))
+
+        errors = check_governance_id_references()
+        assert any("EX-0001" in e and "未在 exceptions.yml" in e for e in errors), (
+            f"活文档悬空引用应仍被检出, got: {errors}"
+        )
