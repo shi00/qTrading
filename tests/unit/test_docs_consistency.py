@@ -3391,3 +3391,67 @@ class TestGovernanceIdReferences:
         assert any("EX-0001" in e and "未在 exceptions.yml" in e for e in errors), (
             f"活文档悬空引用应仍被检出, got: {errors}"
         )
+
+
+class TestAgentsDeclaration:
+    """_check_agents_declaration 声明句披露组成规则契约测试（DOC-08）。
+
+    生成区块内容由 check_agents_md_sync 守护；本类专测区块前声明句是否披露
+    「INVARIANT 全量 + R18（WORKFLOW）」这一组成规则，覆盖全部 return 分支。
+    """
+
+    START_TAG = "<!-- generated:redlines-invariant -->"
+    END_TAG = "<!-- /generated -->"
+
+    def _agents_content(self, declaration: str) -> str:
+        """合成最小 AGENTS.md：头部声明（普通段落，与真实文件一致）+ 生成区块。"""
+        return (
+            "# AGENTS.md — 跨工具规则入口\n"
+            "> 元数据块\n"
+            "\n"
+            f"{declaration}\n"
+            "\n"
+            f"{self.START_TAG}\n"
+            "- R2：异常吞没\n"
+            "- R18：未隔离开发\n"
+            f"{self.END_TAG}\n"
+        )
+
+    def test_positive_declaration_discloses_composition(self):
+        from check_docs_consistency import _check_agents_declaration
+
+        content = self._agents_content("下方为跨工具红线最小安全集：INVARIANT 全量 + R18（WORKFLOW，守护工作区整洁）。")
+        assert _check_agents_declaration(content) == []
+
+    def test_negative_declaration_missing_r18(self):
+        from check_docs_consistency import _check_agents_declaration
+
+        content = self._agents_content("下方为跨工具红线最小安全集：INVARIANT 全量。")
+        errors = _check_agents_declaration(content)
+        assert len(errors) == 1, f"应仅报 R18 缺失, got: {errors}"
+        assert "R18" in errors[0]
+
+    def test_negative_declaration_missing_invariant(self):
+        from check_docs_consistency import _check_agents_declaration
+
+        content = self._agents_content("下方为跨工具红线最小安全集：R18（WORKFLOW，守护工作区整洁）。")
+        errors = _check_agents_declaration(content)
+        assert len(errors) == 1, f"应仅报 INVARIANT 缺失, got: {errors}"
+        assert "INVARIANT" in errors[0]
+
+    def test_fail_closed_no_paragraph_before_start_tag(self):
+        from check_docs_consistency import _check_agents_declaration
+
+        # start_tag 前只有空行、无正文段落 → 无法核实声明句（fail-closed）
+        content = f"\n{self.START_TAG}\n- R18：未隔离开发\n{self.END_TAG}\n"
+        errors = _check_agents_declaration(content)
+        assert len(errors) == 1, f"应报缺少声明句, got: {errors}"
+        assert "缺少声明句" in errors[0]
+
+    def test_fail_closed_missing_start_tag(self):
+        from check_docs_consistency import _check_agents_declaration
+
+        content = "# AGENTS.md\n\n下方为跨工具红线最小安全集：INVARIANT 全量 + R18（WORKFLOW）。\n"
+        errors = _check_agents_declaration(content)
+        assert len(errors) == 1, f"应报 start_tag 缺失, got: {errors}"
+        assert "start_tag 缺失" in errors[0]

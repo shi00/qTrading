@@ -1338,11 +1338,47 @@ def _render_agents_invariant_lines() -> list[str]:
     return lines
 
 
+def _check_agents_declaration(content: str) -> list[str]:
+    """校验 AGENTS.md 最小安全集区块前的声明句是否披露组成规则（含 R18）。
+
+    生成区块内容本身由 _render_agents_invariant_lines + check_agents_md_sync 守护，
+    但区块外的声明句（自然语言，AGENTS.md 中为普通段落，非引用块）可能与之脱节。
+    本函数取 start_tag 之前**最后一段连续正文**（跨空行分隔，兼容普通段落与 `>` 引用块），
+    断言其同时含 `INVARIANT` 与 `R18` 两个关键词（fail-closed：start_tag 前无正文段
+    或 start_tag 缺失时显式报错，不静默跳过）。
+    """
+    start_tag = "<!-- generated:redlines-invariant -->"
+    start = content.find(start_tag)
+    if start == -1:
+        return ["AGENTS.md 缺少生成区块标记（start_tag 缺失），无法核实区块前声明句是否披露组成规则"]
+    lines = content[:start].splitlines()
+    # 跳过尾随空行，定位最后一段正文的首行边界
+    i = len(lines) - 1
+    while i >= 0 and not lines[i].strip():
+        i -= 1
+    if i < 0:
+        return ["AGENTS.md 最小安全集区块前缺少声明句（无正文段落），无法核实其披露组成规则"]
+    paragraph: list[str] = []
+    while i >= 0 and lines[i].strip():
+        paragraph.append(lines[i])
+        i -= 1
+    merged = " ".join(reversed(paragraph))
+    errors: list[str] = []
+    for keyword in ("INVARIANT", "R18"):
+        if keyword not in merged:
+            errors.append(
+                f"AGENTS.md 声明句未披露区块包含 {keyword}（区块组成 = INVARIANT 全量 + R18），"
+                "请与 check_agents_md_sync 组成规则保持同步，勿使声明句与生成区块脱节"
+            )
+    return errors
+
+
 def check_agents_md_sync() -> list[str]:
     """校验 AGENTS.md 生成区块与 redlines.yml 一致性（DOC-08/DOC-13）。
 
     AGENTS.md 的 `<!-- generated:redlines-invariant -->` 与 `<!-- /generated -->` 之间内容
-    必须等于由 redlines.yml 渲染的结果（见 _render_agents_invariant_lines），从机制上消除多源漂移。
+    必须等于由 redlines.yml 渲染的结果（见 _render_agents_invariant_lines），从机制上消除多源漂移；
+    同时校验区块前声明句披露组成规则（见 _check_agents_declaration）。
     """
     errors: list[str] = []
     if not AGENTS_PATH.exists():
@@ -1362,6 +1398,7 @@ def check_agents_md_sync() -> list[str]:
             "AGENTS.md 生成区块与 redlines.yml 不一致（INVARIANT 红线 + R18）。"
             "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。"
         )
+    errors.extend(_check_agents_declaration(content))
     return errors
 
 

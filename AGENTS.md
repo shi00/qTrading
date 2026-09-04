@@ -12,7 +12,7 @@
 - **语言约定**：始终使用简体中文回复。
 - **只读默认**：回答/诊断默认只读，文件或外部状态修改须用户明确授权（对应 CLAUDE.md §1.0 / §1.1）。
 
-下方为不可豁免红线（`rule_type: INVARIANT`）的最小安全集，由 [redlines.yml](./docs/governance/redlines.yml) 生成的导出镜像（由 `check_agents_md_sync` 门禁守护，见 CONTRIBUTING.md「文档一致性校验」）。正本以 CLAUDE.md §3.1 / redlines.yml 为准，本区块 **SHALL NOT 手工修改**，如需变更请改正本后同步：
+下方为跨工具红线最小安全集，由 [redlines.yml](./docs/governance/redlines.yml) 生成的导出镜像（由 `check_agents_md_sync` 门禁守护，见 CONTRIBUTING.md「文档一致性校验」）。组成规则：redlines.yml 中全部 `rule_type: INVARIANT` 红线，另加 R18（`rule_type: WORKFLOW`，守护工作区整洁）。正本以 CLAUDE.md §3.1 / redlines.yml 为准，本区块 **SHALL NOT 手工修改**，如需变更请改正本后同步：
 
 <!-- generated:redlines-invariant -->
 - R2：异常吞没
