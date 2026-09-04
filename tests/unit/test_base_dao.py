@@ -19,6 +19,7 @@ from data.persistence.daos.base_dao import (
     BaseDao,
     EngineDisposedError,
     DatabaseQueryError,
+    _build_df_normalized,
 )
 from data.persistence.write_quality import WriteQuality
 
@@ -243,6 +244,47 @@ class TestBaseDaoReadDb:
             mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame([(1, "test")], columns=["id", "name"]))
             result = await dao._read_db("SELECT * FROM t")
             assert isinstance(result, pd.DataFrame)
+
+    @pytest.mark.asyncio
+    async def test_read_db_uses_build_df_normalized(self):
+        """DAT-10/11: _read_db 经 _build_df_normalized 构造 DataFrame（Decimal 归一化）。"""
+        from decimal import Decimal
+
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(Decimal("1.5"), "000001")]
+        mock_result.keys.return_value = ["price", "code"]
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            normalized = _build_df_normalized([(Decimal("1.5"), "000001")], ["price", "code"])
+            mock_tpm_instance.run_async = AsyncMock(return_value=normalized)
+            result = await dao._read_db("SELECT * FROM t")
+            # ThreadPoolManager.run_async 的第二参是 _build_df_normalized（首参为 TaskType.CPU）
+            args, _kwargs = mock_tpm_instance.run_async.call_args
+            assert args[1] is _build_df_normalized
+            # 返回值已归一化：Decimal → float64
+            assert result["price"].dtype == "float64"
+            assert result["code"].dtype != "float64"
+
+    def test_build_df_normalized_converts_decimal(self):
+        """_build_df_normalized 将 Decimal 列归一化为 float64，字符串列不动。"""
+        from decimal import Decimal
+
+        df = _build_df_normalized(
+            [(Decimal("10.5"), "000001"), (Decimal("20.25"), "000002")],
+            ["price", "code"],
+        )
+        assert df["price"].dtype == "float64"
+        assert df["price"].iloc[0] == 10.5
+        assert pd.api.types.is_string_dtype(df["code"])
 
 
 class TestSlowQueryThresholdConstants:

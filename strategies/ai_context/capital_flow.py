@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
 
 import pandas as pd
 
@@ -66,7 +65,7 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
             if not stock_tl.empty:
                 row = stock_tl.iloc[0]
                 reason = row.get("reason")
-                reason = reason if reason and not (isinstance(reason, (float, Decimal)) and reason != reason) else "N/A"
+                reason = reason if reason else "N/A"
                 net_amt = sf(row.get("net_amount"))
                 net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
                 parts.append(

@@ -2,7 +2,6 @@ import datetime
 import functools
 import logging
 import typing
-from decimal import Decimal
 
 import pandas as pd
 import sqlalchemy as sa
@@ -16,6 +15,10 @@ from .base_dao import BaseDao, EngineDisposedError
 from .stock_dao import stock_alive_condition
 
 logger = logging.getLogger(__name__)
+
+# DAT-10: 区间预载日线选股查询的行数护栏，防止大区间一次性拉取致 OOM。
+# 超出后由 _read_db 抛 ValueError，BacktestDataProvider.preload_range 捕获并降级逐日查询。
+_MAX_SCREENING_RANGE_ROWS = 1_500_000
 
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
@@ -262,7 +265,7 @@ class ScreenerDao(BaseDao):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
             val = df["max_td"].iloc[0]
-            if val is not None and not (isinstance(val, (float, Decimal)) and val != val):
+            if val is not None and not (isinstance(val, float) and val != val):
                 return str(val)
         return None  # type: ignore[untyped]
 
@@ -307,11 +310,13 @@ class ScreenerDao(BaseDao):
 
     async def get_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=True)
-        return await self._read_db(sql, (start_date, end_date))
+        # DAT-10: 区间预载携带行数护栏，超限抛 ValueError 由上游降级逐日查询
+        return await self._read_db(sql, (start_date, end_date), max_rows=_MAX_SCREENING_RANGE_ROWS)
 
     async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=False)
-        return await self._read_db(sql, (start_date, end_date))
+        # DAT-10: 区间预载携带行数护栏（与日线区间一致）
+        return await self._read_db(sql, (start_date, end_date), max_rows=_MAX_SCREENING_RANGE_ROWS)
 
     # --- Review Manager Methods ---
 

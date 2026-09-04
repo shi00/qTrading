@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from data.persistence import engine_provider
 from data.persistence.models import Base
 from data.persistence.write_quality import WriteQuality
+from utils.df_normalize import normalize_decimal_columns
 from utils.error_classifier import classify_error, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
@@ -41,6 +42,16 @@ _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 # review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
 _LONG_TX_ROW_THRESHOLD = 20_000
+
+
+def _build_df_normalized(rows, cols):
+    """构造 DataFrame 并归一化 Decimal 列（DAT-10/11）。
+
+    读取路径统一入口：``pd.DataFrame`` 构造 + ``normalize_decimal_columns``
+    一次完成，供 CPU 线程池整体提交，避免两次往返。
+    """
+    df = pd.DataFrame(rows, columns=cols)
+    return normalize_decimal_columns(df)
 
 
 class BaseDao:
@@ -977,12 +988,12 @@ class BaseDao:
                 "Add WHERE filters or increase max_rows."
             )
 
-        # Offload DF creation
+        # Offload DF creation + Decimal 归一化（DAT-10/11）
         df = await ThreadPoolManager().run_async(
             TaskType.CPU,
-            pd.DataFrame,
+            _build_df_normalized,
             rows,
-            columns=cols,
+            cols,
         )
 
         elapsed = (time.perf_counter() - start_time) * 1000
@@ -1037,11 +1048,12 @@ class BaseDao:
                 rows = result.fetchall()
                 cols = list(result.keys())
 
+                # Offload DF creation + Decimal 归一化（DAT-10/11）
                 df = await ThreadPoolManager().run_async(
                     TaskType.CPU,
-                    pd.DataFrame,
+                    _build_df_normalized,
                     rows,
-                    columns=cols,
+                    cols,
                 )
 
                 elapsed = (time.perf_counter() - start_time) * 1000

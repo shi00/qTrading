@@ -20,7 +20,6 @@ import datetime
 import logging
 import os
 import typing
-from decimal import Decimal
 
 import flet as ft
 import pandas as pd
@@ -177,7 +176,7 @@ def _format_cell_value(col: str, val) -> str:
             val_f = float(val)
             sign = "+" if val_f > 0 else ""
             return f"{sign}{val_f:.2f}"
-        if isinstance(val, (float, Decimal)):
+        if isinstance(val, float):
             return f"{val:.2f}"
     return str(val)
 

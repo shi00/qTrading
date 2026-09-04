@@ -345,6 +345,27 @@ class TestQueryTable:
             result = dm.query_table("stock_basic")
             assert result.empty
 
+    def test_decimal_normalized(self):
+        """DAT-10/11: query_table 对 Numeric 列 Decimal → float64 归一化。"""
+        from decimal import Decimal
+
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(Decimal("10.5"), "000001.SZ")]
+        mock_result.keys.return_value = ["price", "ts_code"]
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with (
+            patch.object(dm, "_validate_table_name"),
+            patch.object(dm, "get_table_schema", return_value=[{"name": "ts_code"}]),
+        ):
+            result = dm.query_table("stock_basic")
+            assert result["price"].dtype == "float64"
+            assert result["price"].iloc[0] == 10.5
+            assert pd.api.types.is_string_dtype(result["ts_code"])
+
     def test_with_sort(self):
         dm = _make_dm()
         mock_conn = MagicMock()
@@ -455,6 +476,24 @@ class TestExecuteSql:
         result = dm.execute_sql("SELECT * FROM stock_basic")
         assert result["success"] is True
         assert isinstance(result["data"], pd.DataFrame)
+
+    def test_select_decimal_normalized(self):
+        """DAT-10/11: execute_sql 对 Numeric 列 Decimal → float64 归一化。"""
+        from decimal import Decimal
+
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["price"]
+        mock_result.fetchmany.return_value = [(Decimal("10.5"),), (Decimal("20.25"),)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        result = dm.execute_sql("SELECT * FROM stock_basic")
+        assert result["success"] is True
+        assert result["data"]["price"].dtype == "float64"
+        assert result["data"]["price"].iloc[0] == 10.5
 
     def test_statement_timeout_set(self):
         """C6: execute_sql 必须设置会话级 statement_timeout，防止重查询挂住连接。"""
