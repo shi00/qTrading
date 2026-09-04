@@ -172,16 +172,21 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ## 数据库设置
 
 > [!NOTE]
-> 项目的数据库命名约定如下：
+> 项目默认启用内置嵌入式 PostgreSQL（`embedded_pg_enabled` 默认 `True`），应用首次启动自动初始化数据目录并创建业务库 `qtrading`，**默认模式无需手动创建数据库、无需安装客户端**（嵌入式由 sidecar 自动建库）。本节的 `createdb` 命令仅适用于「显式使用外部 PostgreSQL」的自定义场景。数据库命名约定：
 > - **项目名**：`AStockScreener`
-> - **本地生产/开发库**：`astock_screener`（使用 `createdb astock_screener` 创建，由 Alembic 迁移驱动）
+> - **嵌入式 PG 业务库（默认）**：`qtrading`（sidecar 自动创建）
+> - **外部 PostgreSQL 开发库（可选）**：`astock_screener`（须手动创建，由 Alembic 迁移驱动）
 > - **本地集成测试库**：`test_astock`（由测试配置自动加载与清空，详见 [测试规范](#测试规范)）
 
 ```bash
-# 创建数据库（POSIX 客户端命令；Windows 用户若未安装 PostgreSQL 客户端，可从 pgAdmin 图形界面创建，库名同为 astock_screener）
+# 仅外部 PostgreSQL 场景——创建开发库（库名同为 astock_screener，小写+下划线、非 SQL 保留字，无需引号）
+# 跨平台说明：createdb 为 POSIX 客户端命令；Windows/macOS 若未安装 PostgreSQL 客户端，
+# 可用 psql 等价（默认连接 localhost:5432，需具备相应凭据）：
+#   psql -U <admin> -c "CREATE DATABASE astock_screener"
+# 或经 pgAdmin 图形界面创建。
 createdb astock_screener
 
-# 运行迁移
+# 运行迁移（嵌入式 / 外部场景通用）
 python -m alembic upgrade head
 ```
 
