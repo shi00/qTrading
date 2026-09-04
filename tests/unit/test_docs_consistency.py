@@ -2975,6 +2975,47 @@ class TestDocsIndexCompleteness:
         assert check_docs_index_completeness() == [], "目录级引用应覆盖其下全部文件"
 
 
+class TestReviewsIndexCompleteness:
+    """检视方法论文档登记（DOC-07）：docs/reviews/README.md 以文件级链接登记顶层方法论."""
+
+    def test_reviews_index_pass_on_current_repo(self):
+        """真实 docs/reviews/README.md 应登记全部顶层方法论文档（无错误）."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        assert check_reviews_index_completeness() == []
+
+    def test_detects_unregistered_top_level_doc(self, tmp_path, monkeypatch):
+        """新增顶层方法论文档未在 README 登记 → 报错."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        reviews_dir.mkdir(parents=True)
+        (reviews_dir / "README.md").write_text("# Index\n[ai-review.md](./ai-review.md)\n", encoding="utf-8")
+        (reviews_dir / "ai-review.md").write_text("# A\n", encoding="utf-8")
+        (reviews_dir / "new-methodology.md").write_text("# N\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_index_completeness()
+        assert any("new-methodology.md" in e and "未登记" in e for e in errors), f"应检出未登记, got: {errors}"
+
+    def test_detects_phantom_link(self, tmp_path, monkeypatch):
+        """README 引用不存在的 docs/reviews/ 内文档 → 报错（幽灵链接）."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        reviews_dir.mkdir(parents=True)
+        (reviews_dir / "README.md").write_text("# Index\n[ghost.md](./ghost.md)\n", encoding="utf-8")
+        # 无 ghost.md 实体文件
+
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_index_completeness()
+        assert any("ghost.md" in e and "引用了不存在的文档" in e for e in errors), f"应检出幽灵链接, got: {errors}"
+
+
 class TestGovernanceIdReferences:
     """治理 id 引用一致性（DOC-09）：EX-\\d{4} 双向——引用须已登记，登记须被消费."""
 

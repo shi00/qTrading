@@ -1,10 +1,19 @@
 # 检视轮次索引 (Review Index)
 
-> **目的**：让既有检视结论对新会话一跳可达，避免重复检视、重复给出已存在的结论（沿 [CLAUDE.md](../../CLAUDE.md) §1.8「AI 代码检视 / PR review」→ [ai-review.md](./ai-review.md) → 本文件）。
+> **目的**：让既有检视方法论与轮次清单对新会话一跳可达（结论正文为本地 gitignored 产物，不入仓库，见「路径说明」），避免重复检视、重复给出已存在的结论（沿 [CLAUDE.md](../../CLAUDE.md) §1.8「AI 代码检视 / PR review」→ [ai-review.md](./ai-review.md) → 本文件）。
 >
 > **状态取值**：`进行中` / `已归档` / `已消化`（已消化 = 该轮发现已全部落入修复队列并关闭）。
 >
 > **路径说明**：报告正文落 `reviews/` 根的为**本地检视工作产物，已被 `.gitignore` 排除、不入 git**（见 [.gitignore](../../.gitignore) `/reviews/`），仅在新会话本地工作区可读；已丢失报告的轮次仅保留 ID 供追溯，不复原正文。
+
+## 方法论文档
+
+检视方法论资产登记于此（新增顶层方法论文档须同时在本文件登记，见 `check_reviews_index_completeness` 门禁）：
+
+- [ai-review.md](./ai-review.md) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
+- [appendix.md](./appendix.md) — 检视附录（模板 / 术语 / 深度阅读）
+- [quality-dimensions.md](./quality-dimensions.md) — 检视质量维度定义
+- [scenario-completeness.md](./scenario-completeness.md) — Evals 场景完整性方法论
 
 ## 轮次清单
 
