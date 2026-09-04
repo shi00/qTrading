@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from check_diff_coverage import (  # noqa: E402 - sys.path 注入后导入
     _is_source_file,
     compute_diff_coverage,
+    get_diff_added_lines,
     load_coverage,
     parse_diff,
 )
@@ -395,3 +396,94 @@ class TestDiffCoverageIntegration:
         assert covered == 5
         assert total == 5
         assert uncovered == {}
+
+
+# ============================================================================
+# _resolve_merge_base / get_diff_added_lines: 浅克隆三点退化防御 (review 流水线问题)
+# ============================================================================
+
+
+class _FakeResult:
+    """模拟 subprocess.CompletedProcess，仅含测试所需字段。"""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class TestResolveMergeBase:
+    """_resolve_merge_base: 三点 diff 需真实 merge-base，浅克隆下不可用时不得退化两点。"""
+
+    def test_merge_base_resolved(self, monkeypatch):
+        """merge-base 成功解析 → 返回该提交，据此做三点 diff。"""
+        import check_diff_coverage as m
+        from check_diff_coverage import _resolve_merge_base
+
+        monkeypatch.setattr(
+            m.subprocess,
+            "run",
+            lambda *a, **k: _FakeResult(0, "ae721f1d4210266bff3921f11dc0a0de82ded23f\n"),
+        )
+        assert _resolve_merge_base("origin/main") == "ae721f1d4210266bff3921f11dc0a0de82ded23f"
+
+    def test_merge_base_unavailable_returns_empty(self, monkeypatch):
+        """merge-base 计算失败（浅克隆/无共同祖先）→ 返回空串，不静默退化两点。"""
+        from check_diff_coverage import _resolve_merge_base
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(
+            m.subprocess,
+            "run",
+            lambda *a, **k: _FakeResult(128, "", "fatal: no merge base"),
+        )
+        assert _resolve_merge_base("origin/main") == ""
+
+
+class TestGetDiffAddedLinesNoDegradation:
+    """get_diff_added_lines: 以真实 merge-base 计算三点差异，不退化两点。"""
+
+    def test_uses_merge_base_not_two_point(self, monkeypatch):
+        """merge-base 可用 → 用 merge-base 与 HEAD 做 diff（而非 base...HEAD 三点退化两点）。
+
+        关键断言：git diff 命令基于 merge_base ↔ HEAD，排除 base 侧（main）并发改动。
+        """
+        import check_diff_coverage as m
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            # diff 命令：返回一个不含 data_processor 的源码新增行
+            diff = """diff --git a/data/foo.py b/data/foo.py
+--- a/data/foo.py
++++ b/data/foo.py
+@@ -1,0 +2,1 @@
++new
+"""
+            return _FakeResult(0, diff)
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+
+        result = get_diff_added_lines("origin/main")
+        # diff 参数应为 [merge_base, "HEAD"]，即命令 ["git","diff",...,"mb1111","HEAD"]
+        assert "mb1111" in calls[-1]
+        assert calls[-1][-1] == "HEAD"
+        assert result == {"data/foo.py": [2]}
+
+    def test_merge_base_unavailable_non_degraded(self, monkeypatch):
+        """merge-base 不可用 → 返回空 dict（非两点退化），由 main() 按 advisory 处理。
+
+        这是响应浅克隆缺陷的核心：绝不把 base 侧并发改动计入本分支变更行。
+        """
+        import check_diff_coverage as m
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "merge-base":
+                return _FakeResult(128, "", "fatal: no merge base")
+            raise AssertionError(f"merge-base 失败后不应再执行 diff 命令: {cmd}")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        assert get_diff_added_lines("origin/main") == {}

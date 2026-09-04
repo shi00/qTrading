@@ -73,19 +73,40 @@ def parse_diff(diff_text: str) -> dict[str, list[int]]:
     return {f: lines for f, lines in added_lines.items() if lines}
 
 
+def _resolve_merge_base(base: str) -> str:
+    """解析 base 与 HEAD 的真实 merge-base 提交。
+
+    CI 在浅克隆下 `git fetch --depth=1 origin main` 会更新 origin/main 为浅提交，
+    `git diff base...HEAD` 的三点语法此时无法从无祖先的浅历史计算 merge-base，
+    实际退化为两点 diff，把 main 侧并发改动一并计入本分支变更行（误报 diff-coverage）。
+    故显式用 `git merge-base` 计算真实基点：成功返回该提交，失败（无共同祖先）返回空串。
+    """
+    result = subprocess.run(["git", "merge-base", base, "HEAD"], capture_output=True, text=True, cwd=ROOT)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
 def get_diff_added_lines(base: str) -> dict[str, list[int]]:
-    """获取 git diff 中新增的行号，返回 {filepath: [line_no, ...]}。"""
-    cmd_variants = [
-        ["git", "diff", "--unified=0", "--no-color", f"{base}...HEAD"],
-        ["git", "diff", "--unified=0", "--no-color", base],
-    ]
-    last_error = ""
-    for cmd in cmd_variants:
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
-        if result.returncode == 0:
-            return parse_diff(result.stdout)
-        last_error = result.stderr.strip()
-    raise RuntimeError(f"git diff 失败（base={base}）: {last_error}")
+    """获取 git diff 中新增的行号，返回 {filepath: [line_no, ...]}。
+
+    以真实 merge-base 计算三点差异（仅本分支相对基点的改动），而非依赖 `...`,
+    避免浅克隆下三点退化两点、误把 base 侧并发改动计入。
+    """
+    merge_base = _resolve_merge_base(base)
+    if not merge_base:
+        # 无法找到共同祖先（浅克隆/无 merge-base）：三点语义不可用。
+        # 不静默退化为两点（会把 base 侧改动误算进来），直接视为无量纲失败由 main() 以 advisory 处理。
+        return {}
+    result = subprocess.run(
+        ["git", "diff", "--unified=0", "--no-color", merge_base, "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff 失败（base={base}）: {result.stderr.strip()}")
+    return parse_diff(result.stdout)
 
 
 def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
