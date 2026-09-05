@@ -270,7 +270,7 @@ class QuoteDao(BaseDao):
                     "__STOCK_ALIVE_CONDITION__",
                     stock_alive_condition(alias="", as_of="$1"),
                 ),
-                (trade_date,),
+                (self._to_db_date(trade_date),),
             )
 
             if df is not None and not df.empty:
@@ -304,12 +304,12 @@ class QuoteDao(BaseDao):
             sql += f" AND ts_code = ${idx}"
             params.append(ts_code)
             idx += 1
-        sd = self._to_date_str(start_date) if start_date else None
+        sd = self._to_db_date(start_date) if start_date else None
         if sd:
             sql += f" AND trade_date >= ${idx}"
             params.append(sd)
             idx += 1
-        ed = self._to_date_str(end_date) if end_date else None
+        ed = self._to_db_date(end_date) if end_date else None
         if ed:
             sql += f" AND trade_date <= ${idx}"
             params.append(ed)
@@ -442,7 +442,7 @@ class QuoteDao(BaseDao):
             sql += f" AND ts_code=${idx}"
             p.append(ts_code)
             idx += 1
-        td = self._to_date_str(trade_date) if trade_date else None
+        td = self._to_db_date(trade_date) if trade_date else None
         if td:
             sql += f" AND trade_date=${idx}"
             p.append(td)
@@ -473,12 +473,12 @@ class QuoteDao(BaseDao):
         params = []
         idx = 1
 
-        sd = self._to_date_str(start_date) if start_date else None
+        sd = self._to_db_date(start_date) if start_date else None
         if sd:
             sql += f" AND trade_date >= ${idx}"
             params.append(sd)
             idx += 1
-        ed = self._to_date_str(end_date) if end_date else None
+        ed = self._to_db_date(end_date) if end_date else None
         if ed:
             sql += f" AND trade_date <= ${idx}"
             params.append(ed)
@@ -517,12 +517,12 @@ class QuoteDao(BaseDao):
         p = []
         if trade_date:
             sql += " AND trade_date=$1"
-            p.append(trade_date)
+            p.append(self._to_db_date(trade_date))
         return await self._read_db(sql, p)
 
     async def get_block_trade_range(self, start_date: str, end_date: str):
         sql = "SELECT * FROM block_trade WHERE trade_date >= $1 AND trade_date <= $2"
-        return await self._read_db(sql, [start_date, end_date])
+        return await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
 
     # --- Limit List ---
     async def save_limit_list(self, df: pd.DataFrame):
@@ -559,18 +559,18 @@ class QuoteDao(BaseDao):
         """
         if trade_date:
             sql = "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE trade_date=$1"
-            return await self._read_db(sql, [trade_date])
+            return await self._read_db(sql, [self._to_db_date(trade_date)])
 
         sql = "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE 1=1"
         p = []
         idx = 1
         if start_date:
             sql += f" AND trade_date>=${idx}"
-            p.append(start_date)
+            p.append(self._to_db_date(start_date))
             idx += 1
         if end_date:
             sql += f" AND trade_date<=${idx}"
-            p.append(end_date)
+            p.append(self._to_db_date(end_date))
             idx += 1
         sql += " ORDER BY trade_date, ts_code"
         return await self._read_db(sql, p)
@@ -591,13 +591,13 @@ class QuoteDao(BaseDao):
         p = []
         if trade_date:
             sql += " AND trade_date=$1"
-            p.append(trade_date)
+            p.append(self._to_db_date(trade_date))
         df = await self._read_db(sql, p)
         return attach_top_list_column_units(df)
 
     async def get_top_list_range(self, start_date: str, end_date: str):
         sql = "SELECT * FROM top_list WHERE trade_date >= $1 AND trade_date <= $2"
-        df = await self._read_db(sql, [start_date, end_date])
+        df = await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
         return attach_top_list_column_units(df)
 
     # --- Margin ---
@@ -641,18 +641,18 @@ class QuoteDao(BaseDao):
         """
         if trade_date:
             sql = "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE trade_date=$1"
-            return await self._read_db(sql, [trade_date])
+            return await self._read_db(sql, [self._to_db_date(trade_date)])
 
         sql = "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE 1=1"
         p = []
         idx = 1
         if start_date:
             sql += f" AND trade_date>=${idx}"
-            p.append(start_date)
+            p.append(self._to_db_date(start_date))
             idx += 1
         if end_date:
             sql += f" AND trade_date<=${idx}"
-            p.append(end_date)
+            p.append(self._to_db_date(end_date))
             idx += 1
         sql += " ORDER BY trade_date, ts_code"
         return await self._read_db(sql, p)
@@ -674,7 +674,7 @@ class QuoteDao(BaseDao):
         idx = 1
         if trade_date:
             sql += f" AND trade_date=${idx}"
-            p.append(trade_date)
+            p.append(self._to_db_date(trade_date))
             idx += 1
         if ts_code:
             sql += f" AND ts_code=${idx}"
@@ -684,7 +684,7 @@ class QuoteDao(BaseDao):
 
     async def get_moneyflow_range(self, start_date: str, end_date: str):
         sql = "SELECT * FROM moneyflow_daily WHERE trade_date >= $1 AND trade_date <= $2"
-        return await self._read_db(sql, [start_date, end_date])
+        return await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
 
     # --- Northbound ---
     async def save_northbound(self, df: pd.DataFrame):
@@ -703,7 +703,7 @@ class QuoteDao(BaseDao):
         idx = 1
         if trade_date:
             sql += f" AND trade_date=${idx}"
-            p.append(trade_date)
+            p.append(self._to_db_date(trade_date))
             idx += 1
         if ts_code:
             sql += f" AND ts_code=${idx}"
@@ -713,7 +713,7 @@ class QuoteDao(BaseDao):
 
     async def get_northbound_range(self, start_date: str, end_date: str):
         sql = "SELECT * FROM northbound_holding WHERE trade_date >= $1 AND trade_date <= $2"
-        return await self._read_db(sql, [start_date, end_date])
+        return await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
 
     async def get_latest_northbound(self):
         df = await self._read_db(
@@ -830,7 +830,7 @@ class QuoteDao(BaseDao):
                     "__STOCK_ALIVE_CONDITION__",
                     stock_alive_condition(alias="", as_of="$1"),
                 ),
-                (start_date, end_date),
+                (self._to_db_date(start_date), self._to_db_date(end_date)),
             )
 
             if df is None or df.empty:
@@ -1055,7 +1055,7 @@ class QuoteDao(BaseDao):
             ) sub
         """
         try:
-            df_fields = await self._read_db(field_sql, (trade_date, trade_date))
+            df_fields = await self._read_db(field_sql, (self._to_db_date(trade_date), self._to_db_date(trade_date)))
             if df_fields is not None and not df_fields.empty:
                 row_f = df_fields.iloc[0]
                 total = int(row_f["total"]) if row_f["total"] else 0
@@ -1126,7 +1126,7 @@ class QuoteDao(BaseDao):
 
         NOT EXISTS 等价集合差；stock_basic.ts_code 为主键非 NULL，无 NULL 语义陷阱。
         """
-        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1142,7 +1142,7 @@ class QuoteDao(BaseDao):
 
     async def count_price_range_violations(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
         """DAT-12: 行情脏数据——high < low 或 close 越界 [low, high] 的行数（近期窗口）。"""
-        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1158,7 +1158,7 @@ class QuoteDao(BaseDao):
 
         net_mf_amount = Σbuy − Σsell；容差 _MONEYFLOW_NET_TOLERANCE（万元）容忍分项舍入。
         """
-        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1177,7 +1177,7 @@ class QuoteDao(BaseDao):
 
         窗口函数 LAG 按 (ts_code, trade_date) 排序取前值；仅统计近期窗口以控制成本。
         """
-        cutoff = self._to_date_str(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt

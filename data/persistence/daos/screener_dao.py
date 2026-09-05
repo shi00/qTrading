@@ -260,14 +260,19 @@ class ScreenerDao(BaseDao):
         )
         return wins, losses
 
+    # --- Data fetch for logic: 日期形参在 DAO 边界显式转为 date（DAT-26） ---
+    # 调用方（data_processor/data_provider）以 8 位 YYYYMMDD 字符串作为 context key，
+    # 不能改其格式；只在 DAO 边界经 BaseDao._to_db_date 显式转成 date 对象供 _read_db 绑定。
+
     # --- Internal: Resolve latest trade date from DB (Defense in Depth) ---
-    async def _get_latest_closed_trade_date(self) -> str:
+    async def _get_latest_closed_trade_date(self) -> datetime.date | None:
+        """返回最近已收盘交易日（date 对象）。DAT-26: 直接返回 date，不再 str()。"""
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
             val = df["max_td"].iloc[0]
             if val is not None and not (isinstance(val, float) and val != val):
-                return str(val)
-        return None  # type: ignore[untyped]
+                return typing.cast(datetime.date, val)
+        return None
 
     # --- Screening Data Fetch for Logic ---
     def _build_screening_sql(self, *, require_close: bool = True) -> str:
@@ -279,23 +284,27 @@ class ScreenerDao(BaseDao):
         sql = _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
         return sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
 
-    async def get_screening_data(self, trade_date: str | None = None):
+    async def get_screening_data(self, trade_date: str | datetime.date | None = None):
         if not trade_date:
             trade_date = await self._get_latest_closed_trade_date()
         if not trade_date:
             logger.warning("[ScreenerDao] No trade_date available for screening data query")
             return pd.DataFrame()
         sql = self._build_screening_sql(require_close=True)
-        return await self._read_db(sql, (trade_date,) * 6)
+        # DAT-26: 边界显式转 date；suppress_errors=False 使查询失败显式传播，
+        # 与"无数据返回空表"可区分（上游 data_provider 有 try/except 承接）。
+        td = self._to_db_date(trade_date)
+        return await self._read_db(sql, (td,) * 6, suppress_errors=False)
 
-    async def get_fundamental_screening_data(self, trade_date: str | None = None):
+    async def get_fundamental_screening_data(self, trade_date: str | datetime.date | None = None):
         if not trade_date:
             trade_date = await self._get_latest_closed_trade_date()
         if not trade_date:
             logger.warning("[ScreenerDao] No trade_date available for fundamental screening data query")
             return pd.DataFrame()
         sql = self._build_screening_sql(require_close=False)
-        return await self._read_db(sql, (trade_date,) * 6)
+        td = self._to_db_date(trade_date)
+        return await self._read_db(sql, (td,) * 6, suppress_errors=False)
 
     def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
         # review03-C7: 同 _build_screening_sql，__CLOSE_COND__ 仅由 require_close
@@ -311,12 +320,20 @@ class ScreenerDao(BaseDao):
     async def get_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=True)
         # DAT-10: 区间预载携带行数护栏，超限抛 ValueError 由上游降级逐日查询
-        return await self._read_db(sql, (start_date, end_date), max_rows=_MAX_SCREENING_RANGE_ROWS)
+        # DAT-26: 边界显式转 date
+        return await self._read_db(
+            sql,
+            (self._to_db_date(start_date), self._to_db_date(end_date)),
+            max_rows=_MAX_SCREENING_RANGE_ROWS,
+        )
 
     async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
         sql = self._build_screening_sql_range(require_close=False)
-        # DAT-10: 区间预载携带行数护栏（与日线区间一致）
-        return await self._read_db(sql, (start_date, end_date), max_rows=_MAX_SCREENING_RANGE_ROWS)
+        return await self._read_db(
+            sql,
+            (self._to_db_date(start_date), self._to_db_date(end_date)),
+            max_rows=_MAX_SCREENING_RANGE_ROWS,
+        )
 
     # --- Review Manager Methods ---
 
