@@ -549,3 +549,65 @@ class TestThreadPoolManagerContextVarsPropagation:
         with pytest.raises(ValueError) as excinfo:
             await mgr.run_async(TaskType.IO, functools.partial(AsyncMock()))
         assert "Cannot run coroutine function" in str(excinfo.value)
+
+
+class TestThreadPoolManagerMaxWorkersSnapshot:
+    """CON-10: max_workers property 返回决策值快照，不读取 CPython 私有属性 _max_workers。"""
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_cpu_zero_configured_returns_zero(self, mock_ch):
+        """CPU 配置 0（未显式配置）时 property 返回 0，池仍可正常创建。"""
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 0
+        tpm = ThreadPoolManager()
+        assert isinstance(tpm.cpu_pool, ThreadPoolExecutor)
+        assert tpm.cpu_pool_max_workers == 0
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_io_zero_configured_returns_zero(self, mock_ch):
+        """IO 配置 0（配置损坏防御）时 property 返回 0，池仍可正常创建。"""
+        mock_ch.get_max_io_workers.return_value = 0
+        mock_ch.get_max_cpu_workers.return_value = 4
+        tpm = ThreadPoolManager()
+        assert isinstance(tpm.io_pool, ThreadPoolExecutor)
+        assert tpm.io_pool_max_workers == 0
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_zero_workers_no_value_error(self, mock_ch):
+        """reload_config 遇 CPU/IO 配置 0 不再抛 ValueError（max_workers=0 非法）。
+
+        修复前 reload_config 直接传 max_workers=0 抛 ValueError；
+        修复后与 _init_pools 一致走 `> 0 else None`，property 返回 0。
+        """
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        mock_ch.get_max_io_workers.return_value = 0
+        mock_ch.get_max_cpu_workers.return_value = 0
+        tpm.reload_config()
+        assert tpm.io_pool_max_workers == 0
+        assert tpm.cpu_pool_max_workers == 0
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_recovery_syncs_max_workers(self, mock_ch):
+        """io_pool property 的 recovery 分支重建池后，max_workers 快照同步更新。"""
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm._io_pool = None
+        assert isinstance(tpm.io_pool, ThreadPoolExecutor)
+        assert tpm.io_pool_max_workers == 4
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_max_workers_zero_after_shutdown(self, mock_ch):
+        """CON-10: 停机后 max_workers property 返回 0（报告要求保持的语义）。
+
+        TaskManager/diagnostics 依赖 0 语义走兜底，不能因改为快照字段后
+        在停机场景抛异常或返回旧值。
+        """
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        tpm.shutdown(wait=False)
+        assert tpm.io_pool_max_workers == 0
+        assert tpm.cpu_pool_max_workers == 0
