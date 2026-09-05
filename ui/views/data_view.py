@@ -10,7 +10,8 @@
   (D13: 消除同一 VM 三重订阅导致的三子树重复渲染), 不再 ``use_viewmodel(vm=)``
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``, cleanup 时移除
-- PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+- CacheCleared 信号经 ``ft.use_state(get_cache_cleared_state)`` 订阅 Observable 自动重渲染
+  (UIX-01: 替代原 pubsub 订阅, 消除同 topic 退订误伤)
 - page 访问用 ``ft.context.page`` (try/except 守卫 RuntimeError)
 - 异步任务用 ``page.run_task``, R2 CancelledError 必须 raise
 - 消费声明式 PaginatedTable (函数调用, props 推送)
@@ -38,10 +39,10 @@ from ui.components.flet_type_helpers import (
 )
 from ui.components.state_views import EmptyState, ErrorState
 from ui.components.toast_manager import open_export_folder
+from ui.cache_cleared_state import get_cache_cleared_state
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
@@ -1256,7 +1257,8 @@ def DataExplorerView(active: bool = True) -> ft.Container:
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
     - DataExplorerViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-    - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+    - CacheCleared 信号经 ``ft.use_state(get_cache_cleared_state)`` 订阅 Observable 自动重渲染
+      (UIX-01: 替代原 pubsub 订阅)
     - page 访问用 ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 子 Tab 为纯 props 组件 (state 由本组件唯一订阅后传入, D13 消除三重订阅)
 
@@ -1274,31 +1276,19 @@ def DataExplorerView(active: bool = True) -> ft.Container:
     # --- Tab 选中状态 ---
     selected_index, set_selected_index = ft.use_state(0)
 
-    # --- PubSub 订阅/退订 (topic 精准退订, 避免误伤其他视图订阅) ---
-    def _on_broadcast_message(topic: str, message: str) -> None:
-        if topic == CACHE_CLEARED_TOPIC and message == "cache_cleared":
+    # --- CacheCleared 订阅 (UIX-01: pubsub → Observable 转发, 保留 active 门控) ---
+    cache_state, _ = ft.use_state(get_cache_cleared_state)
+    last_seq = ft.use_ref(cache_state.seq)
+
+    def _on_cache_seq_change() -> None:
+        if cache_state.seq == last_seq.current:
+            return
+        last_seq.current = cache_state.seq
+        if active:
             vm.mark_tables_stale()
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
 
-    async def _setup_pubsub() -> None:
-        if not active:
-            return
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.pubsub.subscribe_topic(CACHE_CLEARED_TOPIC, _on_broadcast_message)
-        except RuntimeError:
-            pass
-
-    async def _cleanup_pubsub() -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC)
-        except RuntimeError:
-            pass
-
-    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
+    ft.use_effect(_on_cache_seq_change, dependencies=[cache_state.seq, active])
 
     # --- 事件 handler ---
     def _on_tab_changed(e: ft.ControlEvent) -> None:

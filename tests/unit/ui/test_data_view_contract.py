@@ -1117,14 +1117,14 @@ class TestDataExplorerViewComponentBody:
 
         assert fake_vm.dispose_called is True, "内部 VM 模式卸载应 dispose"
 
-    def test_mount_triggers_pubsub_subscribe(
+    def test_mount_uses_observable_not_pubsub_subscribe(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
         monkeypatch,
     ):
-        """挂载后 pubsub.subscribe_topic 被调用。"""
+        """UIX-01: 挂载后不再调用 pubsub.subscribe_topic (CACHE_CLEARED 脱离 pubsub)."""
         from ui.views.data_view import DataExplorerView
 
         fake_vm = _FakeDataExplorerViewModel()
@@ -1134,16 +1134,16 @@ class TestDataExplorerViewComponentBody:
         page = _make_fake_page()
         _mount(component, page=page)
 
-        page.pubsub.subscribe_topic.assert_called_once()
+        page.pubsub.subscribe_topic.assert_not_called()
 
-    def test_unmount_triggers_pubsub_unsubscribe(
+    def test_unmount_no_pubsub_unsubscribe(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
         monkeypatch,
     ):
-        """卸载后 pubsub.unsubscribe_topic 被调用。"""
+        """UIX-01: 卸载后不再调用 pubsub.unsubscribe_topic (无 pubsub 中介)."""
         from ui.views.data_view import DataExplorerView
 
         fake_vm = _FakeDataExplorerViewModel()
@@ -1155,7 +1155,7 @@ class TestDataExplorerViewComponentBody:
 
         run_unmount_effects(component)
 
-        page.pubsub.unsubscribe_topic.assert_called_once()
+        page.pubsub.unsubscribe_topic.assert_not_called()
 
     def test_tab_change_updates_selected_index(
         self,
@@ -1915,17 +1915,18 @@ class TestSQLConsoleTabEventHandlers:
 # ============================================================================
 
 
-class TestDataExplorerViewPubSubCallback:
-    """DataExplorerView PubSub callback 测试: _on_broadcast_message 路径。"""
+class TestDataExplorerViewCacheClearedObserver:
+    """DataExplorerView CacheCleared Observable 订阅 测试 (UIX-01: pubsub → Observable 转发)."""
 
-    def test_pubsub_callback_triggers_mark_tables_stale(
+    def test_cache_cleared_notify_triggers_mark_tables_stale(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
         monkeypatch,
     ):
-        """_on_broadcast_message: cache_cleared 消息 → vm.mark_tables_stale。"""
+        """notify_cache_cleared() 递增 seq → active 视图执行 vm.mark_tables_stale。"""
+        from ui.cache_cleared_state import notify_cache_cleared
         from ui.views.data_view import DataExplorerView
 
         fake_vm = _FakeDataExplorerViewModel()
@@ -1935,24 +1936,20 @@ class TestDataExplorerViewPubSubCallback:
         page = _make_fake_page()
         _mount(component, page=page)
 
-        # Extract the callback passed to subscribe_topic
-        subscribe_call = page.pubsub.subscribe_topic.call_args
-        callback = subscribe_call[0][1]
-
-        # Trigger cache_cleared message
-        callback("cache_cleared", "cache_cleared")
+        notify_cache_cleared()
+        run_render_effects(component)
 
         calls = [c[0] for c in fake_vm.method_calls]
         assert "mark_tables_stale" in calls
 
-    def test_pubsub_callback_ignores_other_messages(
+    def test_cache_cleared_seq_unchanged_does_not_mark_stale(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
         monkeypatch,
     ):
-        """_on_broadcast_message: 非 cache_cleared 消息 → 不触发 mark_tables_stale。"""
+        """seq 未变化 (re-render) → 不触发 mark_tables_stale。"""
         from ui.views.data_view import DataExplorerView
 
         fake_vm = _FakeDataExplorerViewModel()
@@ -1962,23 +1959,79 @@ class TestDataExplorerViewPubSubCallback:
         page = _make_fake_page()
         _mount(component, page=page)
 
-        subscribe_call = page.pubsub.subscribe_topic.call_args
-        callback = subscribe_call[0][1]
-
-        # Trigger non-cache_cleared message
-        callback("cache_cleared", "other_message")
+        run_render_effects(component)
 
         calls = [c[0] for c in fake_vm.method_calls]
         assert "mark_tables_stale" not in calls
 
-    def test_pubsub_callback_ignores_other_topics(
+    def test_cache_cleared_inactive_does_not_mark_stale(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
         monkeypatch,
     ):
-        """_on_broadcast_message: 非 CACHE_CLEARED_TOPIC → 不触发。"""
+        """active=False 时 notify_cache_cleared 不触发 mark_tables_stale (active 门控)."""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        notify_cache_cleared()
+        run_render_effects(component)
+
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "mark_tables_stale" not in calls
+
+    def test_cache_cleared_inactive_consumed_seq_no_retroactive_trigger(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """失活期间消费 seq 后激活不补触发历史信号 (seq==last_seq 早返).
+
+        UIX-01 语义: 失活视图仍常驻挂载 (app_layout ft.Stack + visible 切换),
+        通知时 last_seq 推进但 active 门控不执行动作; 激活时 active 变化触发
+        effect 重跑, 但 seq==last_seq 直接早返, 与原 pubsub「失活期间事件丢失、
+        激活不补发」语义逐点一致.
+        """
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        # 失活期间通知: seq 推进且被 last_seq 消费, active 门控不执行动作
+        notify_cache_cleared()
+        run_render_effects(component)
+        assert "mark_tables_stale" not in [c[0] for c in fake_vm.method_calls]
+
+        # 激活: active 变化触发 effect 重跑, 但 seq==last_seq 早返, 不补触发
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "mark_tables_stale" not in calls
+
+    def test_cache_cleared_uses_observable_not_pubsub(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """UIX-01: DataExplorerView 不再使用 CACHE_CLEARED_TOPIC pubsub 订阅。"""
         from ui.views.data_view import DataExplorerView
 
         fake_vm = _FakeDataExplorerViewModel()
@@ -1988,13 +2041,11 @@ class TestDataExplorerViewPubSubCallback:
         page = _make_fake_page()
         _mount(component, page=page)
 
-        subscribe_call = page.pubsub.subscribe_topic.call_args
-        callback = subscribe_call[0][1]
-
-        callback("other_topic", "cache_cleared")
-
-        calls = [c[0] for c in fake_vm.method_calls]
-        assert "mark_tables_stale" not in calls
+        page.pubsub.subscribe_topic.assert_not_called()
+        page.pubsub.unsubscribe_topic.assert_not_called()
+        source = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "data_view.py"
+        content = source.read_text(encoding="utf-8")
+        assert "CACHE_CLEARED_TOPIC" not in content
 
 
 # ============================================================================

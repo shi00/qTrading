@@ -67,6 +67,23 @@ def _reset_pending_prefill() -> Iterator[None]:
     _pending_prefill.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_cache_cleared_state() -> Iterator[None]:
+    """每测前后恢复 CacheClearedState 模块级单例, 防止跨测试 seq 累积污染 (R7 测试隔离).
+
+    UIX-01 新增的 ui.cache_cleared_state._cache_cleared_state 是模块级惰性单例
+    (非 @register_singleton), 不被 tests/conftest.py 的 _reset_all_singletons autouse
+    覆盖; home_view/data_view/data_source_tab 等消费方测试依赖 last_seq 相对语义,
+    绝对 seq 累积会使"seq 未变不重复执行"断言在跨测试场景误判.
+    """
+    import ui.cache_cleared_state as m
+
+    saved = m._cache_cleared_state
+    m._cache_cleared_state = None
+    yield
+    m._cache_cleared_state = saved
+
+
 # 注：_reset_context_page fixture 已提升到 tests/conftest.py 项目根，覆盖所有目录
 # （含 tests/unit/test_main_prepare_db_retry.py 等非 ui/ 目录调用 attach_fake_page 的场景）。
 
