@@ -7,8 +7,9 @@ Create Date: 2026-09-04 00:00:00.000000
 DAT-09：四张明细表原主键维度不足，UPSERT 时静默丢行：
 - top_list: PK (trade_date, ts_code) → (trade_date, ts_code, reason)，
   容纳同一股票同日多条上榜原因。
-- top_inst: 列重写为官方契约（doc_id=107），PK (ts_code, trade_date, exalter, side)，
-  容纳逐席位（exalter × side）明细。
+- top_inst: 列重写为官方契约（doc_id=107），PK (ts_code, trade_date, exalter, side,
+  reason)，容纳逐席位（exalter × side）明细；reason 参与主键以容纳同日多上榜理由
+  （review 730-C1）。
 - pledge_detail: 列重写为官方契约（doc_id=111），PK (ts_code, ann_date, holder_name,
   start_date, pledge_amount) 容纳同日多笔质押（含金额维度）。
 - share_float: PK (ts_code, float_date) → (ts_code, float_date, holder_name)，
@@ -78,15 +79,15 @@ def upgrade() -> None:
         sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("exalter", sa.String(), nullable=False),
         sa.Column("side", sa.String(2), nullable=False),
+        sa.Column("reason", sa.String(), nullable=False),
         sa.Column("buy", sa.Numeric(20, 4)),
         sa.Column("buy_rate", sa.Numeric(12, 4)),
         sa.Column("sell", sa.Numeric(20, 4)),
         sa.Column("sell_rate", sa.Numeric(12, 4)),
         sa.Column("net_buy", sa.Numeric(20, 4)),
-        sa.Column("reason", sa.String()),
         sa.Column("updated_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
-        sa.PrimaryKeyConstraint("ts_code", "trade_date", "exalter", "side", name=op.f("pk_top_inst")),
+        sa.PrimaryKeyConstraint("ts_code", "trade_date", "exalter", "side", "reason", name=op.f("pk_top_inst")),
     )
     op.create_index("ix_top_inst_trade_date", "top_inst", ["trade_date"])
 

@@ -73,9 +73,10 @@ class TestSaveTopInst:
         call_args = dao._save_upsert.call_args
         # 第一个位置参数是 df；第二个是表名
         assert call_args.args[1] == "top_inst"
-        # DAT-09：pk_columns 必须包含逐席位主键 ts_code/trade_date/exalter/side
+        # DAT-09：pk_columns 必须包含逐席位主键 ts_code/trade_date/exalter/side，
+        # 且含 reason 维度（同日多上榜理由，review 730-C1）。
         pk_columns = call_args.kwargs["pk_columns"]
-        for col in ("ts_code", "trade_date", "exalter", "side"):
+        for col in ("ts_code", "trade_date", "exalter", "side", "reason"):
             assert col in pk_columns
 
 

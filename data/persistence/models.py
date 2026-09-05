@@ -180,6 +180,9 @@ class TopInst(Base):
     """龙虎榜机构席位交易明细（Phase 2E top_inst 已封装 API 激活）。
 
     DAT-09：重写为官方契约字段（doc_id=107），主键容纳逐席位明细。
+    同一股票同一交易日可能因多个上榜理由（reason）分别上榜，同一营业部
+    （exalter）会在各 reason 分组下重复出现且 side 相同，故 reason 必须
+    参与主键，否则 UPSERT 静默合并丢行（review 730-C1）。
     """
 
     __tablename__ = "top_inst"
@@ -187,12 +190,12 @@ class TopInst(Base):
     trade_date = Column(Date, primary_key=True, index=True)
     exalter = Column(String, primary_key=True)
     side = Column(String(2), primary_key=True)
+    reason = Column(String, primary_key=True)
     buy = Column(Numeric(20, 4))
     buy_rate = Column(Numeric(12, 4))
     sell = Column(Numeric(20, 4))
     sell_rate = Column(Numeric(12, 4))
     net_buy = Column(Numeric(20, 4))
-    reason = Column(String)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

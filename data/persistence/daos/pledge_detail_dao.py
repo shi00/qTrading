@@ -57,7 +57,7 @@ class PledgeDetailDao(BaseDao):
                         FROM pledge_detail
                         WHERE ts_code IN ({placeholders})
                           AND ann_date <= ${start_idx + chunk_len}
-                        ORDER BY ts_code, ann_date DESC
+                        ORDER BY ts_code, ann_date DESC, holder_name
                         """
                     ),
                     lambda chunk: [as_of],
@@ -71,7 +71,7 @@ class PledgeDetailDao(BaseDao):
                     h_total_ratio, is_buyback
                 FROM pledge_detail
                 WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, ann_date DESC
+                ORDER BY ts_code, ann_date DESC, holder_name
                 """,
                 None,
             )

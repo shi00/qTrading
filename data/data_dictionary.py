@@ -329,7 +329,7 @@ TABLE_DEFINITIONS = {
             "strategy": "batch",
             "api": "get_top_inst",
             "date_col": "trade_date",
-            "keys": ["ts_code", "trade_date", "exalter", "side"],
+            "keys": ["ts_code", "trade_date", "exalter", "side", "reason"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "columns": {

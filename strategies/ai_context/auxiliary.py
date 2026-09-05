@@ -127,7 +127,9 @@ async def _build_auxiliary_data_text(
                 "pledge_detail",
                 pledge_detail_df,
                 _format_pledge_detail_section,
-                date_column="end_date",
+                # M2(review 730)：主时间维度为公告日 ann_date（同步/查询均按 ann_date），
+                # end_date 为质押结束日（多为未来），作 stale 基准会显示错误日期。
+                date_column="ann_date",
             )
             if pledge_detail_line:
                 lines.append(pledge_detail_line)

@@ -808,33 +808,58 @@ class HolderSyncStrategy(ISyncStrategy):
         重建表后若不同步则为空表；本方法复刻 _sync_share_float/_sync_stk_holdertrade 模式
         接入调用链。
 
+        M1(review 730)：pledge_detail 单次最大 1000 行（官方限量 doc_id=111），
+        90 天全市场单次调用会被截断且首日缺口永久缺失；改为按交易日逐日拉取
+        （单日全市场质押公告远小于 1000 行）。交易日历不可用时回退自然日
+        （周末/节假日 API 返回空，不报错）。
+
         Returns (row_count, actual_date) on success, (-1, None) on error.
         """
         try:
             today = await self._get_effective_trade_date()
-            start_date = (today - datetime.timedelta(days=90)).strftime("%Y%m%d")
-            end_date = today.strftime("%Y%m%d")
+            start_date = today - datetime.timedelta(days=90)
 
             if self._cancelled:
                 logger.debug("[HolderSync] pledge_detail | Cancelled before API call.")
                 return -1, None
 
-            df = await self.context.api.get_pledge_detail(start_date=start_date, end_date=end_date)
+            trade_calendar = getattr(getattr(self.context, "processor", None), "trade_calendar", None)
+            if trade_calendar is not None:
+                trade_dates = await trade_calendar.get_trade_dates(start_date, today)
+            else:
+                day_count = (today - start_date).days + 1
+                trade_dates = [start_date + datetime.timedelta(days=n) for n in range(day_count)]
 
-            if df is not None and not df.empty:
-                await self.context.cache.save_pledge_detail(df)
+            frames: list[pd.DataFrame] = []
+            for day in trade_dates:
+                if self._cancelled:
+                    break
+                df = await self.context.api.get_pledge_detail(ann_date=day.strftime("%Y%m%d"))
+                if df is not None and not df.empty:
+                    if len(df) >= 1000:
+                        logger.warning(
+                            "[HolderSync] pledge_detail | %s 返回 %d 行，达到单次限量（1000），"
+                            "该日质押公告可能被截断。",
+                            day,
+                            len(df),
+                        )
+                    frames.append(df)
+
+            if frames:
+                combined = pd.concat(frames, ignore_index=True)
+                await self.context.cache.save_pledge_detail(combined)
                 logger.debug(
                     "[HolderSync] Table | pledge_detail ann_date %s~%s: %s records",
-                    start_date,
-                    end_date,
-                    len(df),
+                    start_date.strftime("%Y%m%d"),
+                    today.strftime("%Y%m%d"),
+                    len(combined),
                 )
-                return len(df), today
+                return len(combined), today
 
             logger.debug(
                 "[HolderSync] Table | pledge_detail ann_date %s~%s: no data",
-                start_date,
-                end_date,
+                start_date.strftime("%Y%m%d"),
+                today.strftime("%Y%m%d"),
             )
             return 0, today
         except EngineDisposedError:

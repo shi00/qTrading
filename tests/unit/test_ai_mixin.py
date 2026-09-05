@@ -1211,7 +1211,7 @@ class TestBuildCapitalFlowText:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": [pd.Timestamp("2024-01-18")],
-                "net_amount": [120000000.0],  # 1.2 亿元
+                "net_buy": [120000000.0],  # 1.2 亿元（DAT-09 契约字段）
             }
         )
         labels: list[str] = []
@@ -1244,7 +1244,7 @@ class TestBuildCapitalFlowText:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": [pd.Timestamp("2024-01-18")],
-                "net_amount": [120000000.0],
+                "net_buy": [120000000.0],
             }
         )
         labels: list[str] = []
@@ -1827,8 +1827,8 @@ class TestBuildAuxiliaryDataText:
             client.is_api_covered_by_tier.return_value = False
             result_text, result_valid = await _build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
         assert result_valid is True
-        # stale 标注前缀（date_column=end_date）
-        assert "【数据停止更新，最后更新：2024-06-30】" in result_text
+        # stale 标注前缀（date_column=ann_date，review 730-M2：主时间维度为公告日）
+        assert "【数据停止更新，最后更新：2024-06-28】" in result_text
         # 仍注入历史数据
         assert "质押明细" in result_text
         assert "1000000.00" in result_text

@@ -640,6 +640,18 @@ class TestBaseDaoSaveUpsertDuplicatePk:
         assert "test_table" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_duplicate_pk_with_null_logs_not_null_hint(self, caplog):
+        """NULL 主键不会静默合并（NOT NULL 约束报错），告警文案应区分（review 730）。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, None, None], "col_a": ["x", "y", "z"]})
+        with caplog.at_level(logging.WARNING):
+            await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert "主键重复" in caplog.text
+        assert "NOT NULL" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_unique_pk_no_warning(self, caplog):
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
