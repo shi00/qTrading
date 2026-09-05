@@ -159,6 +159,7 @@ class TopList(Base):
     __tablename__ = "top_list"
     trade_date = Column(Date, primary_key=True)
     ts_code = Column(String, primary_key=True, index=True)
+    reason = Column(String, primary_key=True)
     name = Column(String)
     close = Column(Numeric(12, 4))
     pct_change = Column(Numeric(8, 4))
@@ -171,26 +172,30 @@ class TopList(Base):
     net_rate = Column(Numeric(12, 4))
     amount_rate = Column(Numeric(12, 4))
     float_values = Column(Numeric(20, 4))
-    reason = Column(String)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
 class TopInst(Base):
-    """龙虎榜机构席位交易明细（Phase 2E top_inst 已封装 API 激活）。"""
+    """龙虎榜机构席位交易明细（Phase 2E top_inst 已封装 API 激活）。
+
+    DAT-09：重写为官方契约字段（doc_id=107），主键容纳逐席位明细。
+    同一股票同一交易日可能因多个上榜理由（reason）分别上榜，同一营业部
+    （exalter）会在各 reason 分组下重复出现且 side 相同，故 reason 必须
+    参与主键，否则 UPSERT 静默合并丢行（review 730-C1）。
+    """
 
     __tablename__ = "top_inst"
     ts_code = Column(String, primary_key=True)
     trade_date = Column(Date, primary_key=True, index=True)
-    name = Column(String)
-    close = Column(Numeric(12, 4))
-    pct_change = Column(Numeric(8, 4))
-    amount = Column(Numeric(20, 4))
-    net_amount = Column(Numeric(20, 4))
-    buy_amount = Column(Numeric(20, 4))
-    buy_value = Column(Numeric(20, 4))
-    sell_amount = Column(Numeric(20, 4))
-    sell_value = Column(Numeric(20, 4))
+    exalter = Column(String, primary_key=True)
+    side = Column(String(2), primary_key=True)
+    reason = Column(String, primary_key=True)
+    buy = Column(Numeric(20, 4))
+    buy_rate = Column(Numeric(12, 4))
+    sell = Column(Numeric(20, 4))
+    sell_rate = Column(Numeric(12, 4))
+    net_buy = Column(Numeric(20, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -504,22 +509,36 @@ class PledgeStat(Base):
 
 
 class PledgeDetail(Base):
-    """股权质押明细（Phase 3B，与 pledge_stat 互补，提供更细粒度的质押信息供 AI 分析）。"""
+    """股权质押明细（Phase 3B，与 pledge_stat 互补，提供更细粒度的质押信息供 AI 分析）。
+
+    DAT-09：重写为官方契约字段（doc_id=111），主键 (ts_code, ann_date, holder_name,
+    start_date, pledge_amount) 容纳同日多笔质押（含金额维度，同键完全重复仅去重不丢数据）。
+    """
 
     __tablename__ = "pledge_detail"
     ts_code = Column(String, primary_key=True)
-    end_date = Column(Date, primary_key=True, index=True)
-    pledge_amount = Column(Numeric(20, 4))
-    unlimited_pledge_amount = Column(Numeric(20, 4))
-    limited_pledge_amount = Column(Numeric(20, 4))
-    total_pledge_amount = Column(Numeric(20, 4))
-    pledge_ratio = Column(Numeric(12, 4))
+    ann_date = Column(Date, primary_key=True, index=True)
+    holder_name = Column(String(100), primary_key=True)
+    start_date = Column(Date, primary_key=True, index=True)
+    pledge_amount = Column(Numeric(20, 4), primary_key=True)
+    end_date = Column(Date)
+    is_release = Column(String(2))
+    release_date = Column(Date)
+    pledgor = Column(String(100))
+    holding_amount = Column(Numeric(20, 4))
+    pledged_amount = Column(Numeric(20, 4))
+    p_total_ratio = Column(Numeric(12, 4))
+    h_total_ratio = Column(Numeric(12, 4))
+    is_buyback = Column(String(2))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
 class ShareFloat(Base):
-    """限售解禁（Phase 3D，限售股解禁数据，供 AI 分析解禁压力与减持风险）。"""
+    """限售解禁（Phase 3D，限售股解禁数据，供 AI 分析解禁压力与减持风险）。
+
+    DAT-09：主键加 holder_name 维度，容纳同日多股东解禁（doc_id=160）。
+    """
 
     __tablename__ = "share_float"
     ts_code = Column(String, primary_key=True)
@@ -527,7 +546,7 @@ class ShareFloat(Base):
     float_date = Column(Date, primary_key=True, index=True)
     float_share = Column(Numeric(20, 4))
     float_ratio = Column(Numeric(8, 4))
-    holder_name = Column(String(100))
+    holder_name = Column(String(100), primary_key=True)
     share_type = Column(String(50))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))

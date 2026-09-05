@@ -105,10 +105,10 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
 
                 def _format_top_inst(df: pd.DataFrame) -> str:
                     row = df.iloc[0]
-                    net_amt = sf(row.get("net_amount"))
+                    net_buy = sf(row.get("net_buy"))
                     return (
                         f"{I18n.get('ai_top_inst_yes')} ({I18n.get('ai_net_buy')}: "
-                        f"{format_amount(net_amt, TOP_LIST_NET_AMOUNT_UNIT)})"
+                        f"{format_amount(net_buy, TOP_LIST_NET_AMOUNT_UNIT)})"
                     )
 
                 section = _build_stale_section("top_inst", stock_ti, _format_top_inst, date_column="trade_date")

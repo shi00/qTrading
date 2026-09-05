@@ -57,15 +57,14 @@ class TestSaveTopInst:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": ["20240614"],
-                "name": ["平安银行"],
-                "close": [10.0],
-                "pct_change": [1.0],
-                "amount": [1000000.0],
-                "net_amount": [500000.0],
-                "buy_amount": [800000.0],
-                "buy_value": [8000000.0],
-                "sell_amount": [300000.0],
-                "sell_value": [3000000.0],
+                "exalter": ["机构专用"],
+                "side": ["B"],
+                "buy": [800000.0],
+                "buy_rate": [12.5],
+                "sell": [300000.0],
+                "sell_rate": [5.0],
+                "net_buy": [500000.0],
+                "reason": ["日涨幅偏离值达7%"],
             }
         )
         result = await dao.save_top_inst(df)
@@ -74,10 +73,11 @@ class TestSaveTopInst:
         call_args = dao._save_upsert.call_args
         # 第一个位置参数是 df；第二个是表名
         assert call_args.args[1] == "top_inst"
-        # pk_columns 必须包含 ts_code 和 trade_date
+        # DAT-09：pk_columns 必须包含逐席位主键 ts_code/trade_date/exalter/side，
+        # 且含 reason 维度（同日多上榜理由，review 730-C1）。
         pk_columns = call_args.kwargs["pk_columns"]
-        assert "ts_code" in pk_columns
-        assert "trade_date" in pk_columns
+        for col in ("ts_code", "trade_date", "exalter", "side", "reason"):
+            assert col in pk_columns
 
 
 class TestGetTopInstBatch:

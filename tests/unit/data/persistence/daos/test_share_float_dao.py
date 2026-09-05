@@ -61,6 +61,7 @@ class TestSaveShareFloat:
                 "float_date": [datetime.date(2024, 8, 15)],
                 "float_share": [1000.0],
                 "float_ratio": [5.2],
+                "holder_name": ["张三"],
                 "share_type": ["定向增发"],
             }
         )
@@ -70,10 +71,10 @@ class TestSaveShareFloat:
         call_args = dao._save_upsert.call_args
         # 第一个位置参数是 df；第二个是表名
         assert call_args.args[1] == "share_float"
-        # pk_columns 必须包含 ts_code 和 float_date
+        # DAT-09：pk_columns 必须包含 ts_code/float_date/holder_name 三维主键
         pk_columns = call_args.kwargs["pk_columns"]
-        assert "ts_code" in pk_columns
-        assert "float_date" in pk_columns
+        for col in ("ts_code", "float_date", "holder_name"):
+            assert col in pk_columns
 
 
 class TestGetShareFloatUpcomingBatch:

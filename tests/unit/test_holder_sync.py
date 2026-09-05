@@ -8,7 +8,7 @@ from itertools import count
 
 import pytest
 import datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, call
 import pandas as pd
 
 from data.external.tushare_client import TushareAPIPermissionError
@@ -629,6 +629,130 @@ class TestHolderSyncShareFloat:
         strategy._cancelled = True
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         count, date = await strategy._sync_share_float()
+        assert count == -1
+        assert date is None
+
+
+class TestHolderSyncPledgeDetail:
+    """DAT-09：_sync_pledge_detail 单元测试。
+
+    pledge_detail 是事件驱动数据（按公告日期），sync 窗口 [today-90, today]。
+    M1(review 730)：单次 API 限量 1000 行，按交易日逐日拉取规避截断。
+    """
+
+    def _make_ctx_with_trade_dates(self, trade_dates):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar = MagicMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=trade_dates)
+        ctx.cache = MagicMock()
+        ctx.cache.save_pledge_detail = AsyncMock()
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 28)],
+                    "holder_name": ["张三"],
+                    "pledge_amount": [1000000.0],
+                    "start_date": [datetime.date(2024, 5, 1)],
+                    "end_date": [datetime.date(2024, 6, 30)],
+                }
+            )
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
+        assert count == 1
+        assert date == datetime.date(2024, 6, 30)
+        # 按日拉取：ann_date 参数传入单个交易日
+        ctx.api.get_pledge_detail.assert_awaited_once_with(ann_date="20240628")
+        ctx.cache.save_pledge_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_merges_multiple_trade_dates(self):
+        """多交易日数据合并为单次 save，避免逐日批量写入。"""
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 27), datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 28)],
+                    "holder_name": ["张三"],
+                    "pledge_amount": [1000000.0],
+                    "start_date": [datetime.date(2024, 5, 1)],
+                    "end_date": [datetime.date(2024, 6, 30)],
+                }
+            )
+        )
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
+        assert count == 2  # 两个交易日各 1 行合并
+        assert date == datetime.date(2024, 6, 30)
+        ctx.api.get_pledge_detail.assert_has_awaits([call(ann_date="20240627"), call(ann_date="20240628")])
+        ctx.cache.save_pledge_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_natural_days_without_calendar(self):
+        """交易日历不可用时回退自然日循环（processor 为 None）。"""
+        ctx = MagicMock()
+        ctx.processor = None  # weakref 失效场景：无交易日历 → 走自然日回退
+        ctx.api = MagicMock()
+        ctx.api.get_pledge_detail = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 28)],
+                    "holder_name": ["张三"],
+                    "pledge_amount": [1000000.0],
+                    "start_date": [datetime.date(2024, 5, 1)],
+                    "end_date": [datetime.date(2024, 6, 30)],
+                }
+            )
+        )
+        ctx.cache = MagicMock()
+        ctx.cache.save_pledge_detail = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
+        assert count > 0
+        assert date == datetime.date(2024, 6, 30)
+        ctx.cache.save_pledge_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_data(self):
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(return_value=pd.DataFrame())
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
+        assert count == 0
+        assert date == datetime.date(2024, 6, 30)
+        ctx.cache.save_pledge_detail.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_api_error(self):
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(side_effect=Exception("API Error"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
+        assert count == -1
+        assert date is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled(self):
+        ctx = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._cancelled = True
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+        count, date = await strategy._sync_pledge_detail()
         assert count == -1
         assert date is None
 

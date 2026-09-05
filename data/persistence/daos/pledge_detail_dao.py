@@ -11,7 +11,6 @@ import pandas as pd
 from data.persistence.models import PledgeDetail, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
-from .financial_dao import _PLEDGE_PIT_LAG_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +36,12 @@ class PledgeDetailDao(BaseDao):
 
         Args:
             ts_codes: 股票代码列表
-            as_of_date: 截止日期（YYYYMMDD 或 date），仅返回 end_date + 滞后窗口 <= as_of_date
-                的记录；None 时不过滤日期。质押明细无 ann_date（DAT-05），采用保守滞后
-                （_PLEDGE_PIT_LAG_DAYS）避免未来函数。
+            as_of_date: 截止日期（YYYYMMDD 或 date），仅返回 ann_date <= as_of_date 的
+                记录（DAT-09：官方契约含 ann_date，DAT-05 的保守滞后不再需要）；
+                None 时不过滤日期。
 
         Returns:
-            DataFrame，每个 ts_code 取最近一条 end_date 记录。
+            DataFrame，每个 ts_code 取最近一条 ann_date 记录。
         """
 
         def sql_fn(as_of):
@@ -51,13 +50,14 @@ class PledgeDetailDao(BaseDao):
                     lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
-                            ts_code, end_date, pledge_amount,
-                            unlimited_pledge_amount, limited_pledge_amount,
-                            total_pledge_amount, pledge_ratio
+                            ts_code, ann_date, holder_name, pledge_amount,
+                            start_date, end_date, is_release, release_date, pledgor,
+                            holding_amount, pledged_amount, p_total_ratio,
+                            h_total_ratio, is_buyback
                         FROM pledge_detail
                         WHERE ts_code IN ({placeholders})
-                          AND end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <= ${start_idx + chunk_len}
-                        ORDER BY ts_code, end_date DESC
+                          AND ann_date <= ${start_idx + chunk_len}
+                        ORDER BY ts_code, ann_date DESC, holder_name
                         """
                     ),
                     lambda chunk: [as_of],
@@ -65,12 +65,13 @@ class PledgeDetailDao(BaseDao):
             return (
                 """
                 SELECT DISTINCT ON (ts_code)
-                    ts_code, end_date, pledge_amount,
-                    unlimited_pledge_amount, limited_pledge_amount,
-                    total_pledge_amount, pledge_ratio
+                    ts_code, ann_date, holder_name, pledge_amount,
+                    start_date, end_date, is_release, release_date, pledgor,
+                    holding_amount, pledged_amount, p_total_ratio,
+                    h_total_ratio, is_buyback
                 FROM pledge_detail
                 WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, end_date DESC
+                ORDER BY ts_code, ann_date DESC, holder_name
                 """,
                 None,
             )

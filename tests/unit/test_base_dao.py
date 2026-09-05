@@ -592,6 +592,76 @@ class TestBaseDaoSaveUpsert:
             assert result == 0
 
 
+class TestBaseDaoSaveUpsertDuplicatePk:
+    """DAT-09: _save_upsert 通用防线——API 返回重复主键时告警，防止静默丢行被忽视。"""
+
+    async def _run_save_upsert(self, dao, df, columns, pk_columns, mock_conn):
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = pk_columns[0]
+        mock_col_pk.info = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "col_a"
+        mock_col_a.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_a]
+        mock_table.c = {"id": mock_col_pk, "col_a": mock_col_a}
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_a": "val"}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            return await dao._save_upsert(
+                df,
+                "test_table",
+                columns,
+                pk_columns,
+                conn=mock_conn,
+            )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_pk_logs_warning(self, caplog):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, 1, 2], "col_a": ["x", "y", "z"]})
+        with caplog.at_level(logging.WARNING):
+            await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert "主键重复" in caplog.text
+        assert "test_table" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_duplicate_pk_with_null_logs_not_null_hint(self, caplog):
+        """NULL 主键不会静默合并（NOT NULL 约束报错），告警文案应区分（review 730）。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, None, None], "col_a": ["x", "y", "z"]})
+        with caplog.at_level(logging.WARNING):
+            await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert "主键重复" in caplog.text
+        assert "NOT NULL" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_unique_pk_no_warning(self, caplog):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, 2, 3], "col_a": ["x", "y", "z"]})
+        with caplog.at_level(logging.WARNING):
+            await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert "主键重复" not in caplog.text
+
+
 class TestBaseDaoWriteDbExtended:
     @pytest.mark.asyncio
     async def test_write_success_with_conn(self):

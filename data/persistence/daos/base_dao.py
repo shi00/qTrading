@@ -683,6 +683,41 @@ class BaseDao:
 
         df_slice = df[columns]
 
+        # DAT-09: 通用防线——UPSERT 静默合并重复主键会导致丢行（明细表曾因此丢数据）。
+        # 在此告警，仅提示不阻断：重复主键可能是 API 自身重复返回，也可能仍需扩大主键维度。
+        duplicate_mask = df_slice.duplicated(subset=pk_columns, keep=False)
+        dup_rows = int(duplicate_mask.sum())
+        if dup_rows > 0:
+            dup_lost = int(len(df_slice) - df_slice.drop_duplicates(subset=pk_columns).shape[0])
+            dup_samples = df_slice.loc[duplicate_mask, pk_columns].drop_duplicates().head(3).to_dict(orient="records")
+            # NULL 主键不会静默合并：Postgres 主键 NOT NULL，将抛约束异常（显式失败），
+            # 与"静默丢行"排障方向不同，需在文案中区分（review 730）。
+            null_pk_rows = int(df_slice.loc[duplicate_mask, pk_columns].isna().any(axis=1).sum())
+            if null_pk_rows:
+                logger.warning(
+                    "[%s] Insert '%s': %d/%d 行主键重复（其中 %d 行主键含 NULL，"
+                    "将触发 NOT NULL 约束报错而非静默合并；其余将静默合并，预计丢 %d 行）。"
+                    "样本主键：%s。若 API 按主键返回本就唯一，需扩大主键维度。",
+                    self.__class__.__name__,
+                    table_name,
+                    dup_rows,
+                    len(df_slice),
+                    null_pk_rows,
+                    dup_lost,
+                    dup_samples,
+                )
+            else:
+                logger.warning(
+                    "[%s] Insert '%s': %d/%d 行主键重复（UPSERT 将静默合并，预计丢 %d 行）。"
+                    "样本主键：%s。若 API 按主键返回本就唯一，需扩大主键维度。",
+                    self.__class__.__name__,
+                    table_name,
+                    dup_rows,
+                    len(df_slice),
+                    dup_lost,
+                    dup_samples,
+                )
+
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 

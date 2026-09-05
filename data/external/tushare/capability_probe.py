@@ -352,7 +352,7 @@ class CapabilityProbeService:
                 # P1 推荐接入（4 个）
                 ("stk_limit", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
                 ("express", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-                ("pledge_detail", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("pledge_detail", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
                 ("shibor_lpr", {"date": recent_date}),
                 # P1 待实测（3 个）
                 ("stock_company", {"ts_code": PROBE_STOCK_CODE}),

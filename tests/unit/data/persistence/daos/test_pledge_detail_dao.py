@@ -11,7 +11,6 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
-from data.persistence.daos.financial_dao import _PLEDGE_PIT_LAG_DAYS
 
 pytestmark = pytest.mark.unit
 
@@ -57,12 +56,19 @@ class TestSavePledgeDetail:
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "end_date": ["20240630"],
+                "ann_date": ["20240630"],
+                "holder_name": ["张三"],
+                "start_date": ["20240501"],
                 "pledge_amount": [1000000.0],
-                "unlimited_pledge_amount": [800000.0],
-                "limited_pledge_amount": [200000.0],
-                "total_pledge_amount": [1000000.0],
-                "pledge_ratio": [35.2],
+                "end_date": ["20250501"],
+                "is_release": ["N"],
+                "release_date": [None],
+                "pledgor": ["某银行"],
+                "holding_amount": [5000000.0],
+                "pledged_amount": [1000000.0],
+                "p_total_ratio": [20.0],
+                "h_total_ratio": [5.0],
+                "is_buyback": ["N"],
             }
         )
         result = await dao.save_pledge_detail(df)
@@ -71,10 +77,10 @@ class TestSavePledgeDetail:
         call_args = dao._save_upsert.call_args
         # 第一个位置参数是 df；第二个是表名
         assert call_args.args[1] == "pledge_detail"
-        # pk_columns 必须包含 ts_code 和 end_date
+        # DAT-09：pk_columns 必须包含新五维主键
         pk_columns = call_args.kwargs["pk_columns"]
-        assert "ts_code" in pk_columns
-        assert "end_date" in pk_columns
+        for col in ("ts_code", "ann_date", "holder_name", "start_date", "pledge_amount"):
+            assert col in pk_columns
 
 
 class TestGetPledgeDetailBatch:
@@ -88,9 +94,9 @@ class TestGetPledgeDetailBatch:
 
     @pytest.mark.asyncio
     async def test_get_pledge_detail_batch_with_as_of_date_passes_param(self):
-        """as_of_date 非空时使用带 PIT 滞后过滤（end_date + INTERVAL lag days <= $N）的 SQL 模板。"""
+        """as_of_date 非空时使用带 ann_date <= $N PIT 过滤的 SQL 模板（DAT-09 改用官方 ann_date）。"""
         dao = _make_dao()
-        expected = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240630"]})
+        expected = pd.DataFrame({"ts_code": ["000001.SZ"], "ann_date": ["20240630"]})
         dao.chunked_in_query = AsyncMock(return_value=expected)
 
         result = await dao.get_pledge_detail_batch(["000001.SZ", "000002.SZ"], as_of_date="20240630")
@@ -102,11 +108,12 @@ class TestGetPledgeDetailBatch:
         # params_fn 应返回 [as_of_date]
         params_fn = call_kwargs["params_fn"]
         assert params_fn(["000001.SZ"]) == ["20240630"]
-        # DAT-05: SQL 模板应包含保守滞后谓词，避免 end_date 直接做 PIT 的未来函数
+        # DAT-09: PIT 过滤基于官方 ann_date，替代旧的 end_date + INTERVAL 保守滞后
         # chunked_in_query(_read_db, sql_template, ts_codes, ...)，args[1] 即 as_of 分支的模板函数
         sql_template = call_args.args[1]
         sql = sql_template("$1,$2", 2, 0)
-        assert f"end_date + INTERVAL '{_PLEDGE_PIT_LAG_DAYS} days' <=" in sql
+        assert "ann_date <=" in sql
+        assert "INTERVAL" not in sql
 
     @pytest.mark.asyncio
     async def test_get_pledge_detail_batch_without_as_of_date_uses_simple_template(self):
