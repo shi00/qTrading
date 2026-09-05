@@ -6,6 +6,7 @@ These models represent the database schema previously defined in schema.sql.
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -44,13 +45,10 @@ class StockBasic(Base):
     area = Column(String)
     industry = Column(String)
     market = Column(String)
-    list_date = Column(Date, index=True)
+    list_date = Column(Date)
     list_status = Column(String)
-    delist_date = Column(Date, nullable=True, index=True)  # 退市日期
-    __table_args__ = (
-        Index("idx_stock_basic_dates", "list_date", "delist_date"),
-        Index("idx_stock_basic_status", "list_status", "list_date"),
-    )
+    delist_date = Column(Date, nullable=True)  # 退市日期
+    __table_args__ = (CheckConstraint("ts_code ~ '^[0-9]{6}\\.[A-Z]{2}$'", name="valid_ts_code_format"),)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -59,7 +57,7 @@ class StockConcepts(Base):
     __tablename__ = "stock_concepts"
     ts_code = Column(String, primary_key=True)
     concept_name = Column(String)
-    concept_id = Column(String, primary_key=True)
+    concept_id = Column(String, primary_key=True, index=True)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -279,7 +277,6 @@ class ScreeningHistory(Base):
         ),
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
         Index("idx_sh_date_code", "trade_date", "ts_code"),
-        Index("idx_sh_run_id", "run_id"),
         Index("idx_sh_prediction_result", "prediction_result", postgresql_where=text("prediction_result IS NOT NULL")),
         Index(
             "idx_sh_pending",
@@ -299,7 +296,7 @@ class ScreeningThinking(Base):
     __tablename__ = "screening_thinking"
     id = Column(Integer, primary_key=True, autoincrement=True)
     history_id = Column(
-        Integer,
+        BigInteger,
         ForeignKey("screening_history.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
@@ -333,7 +330,6 @@ class MarketNews(Base):
 
     __table_args__ = (
         UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
-        Index("ix_market_news_source", "source"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
     )
 
@@ -592,7 +588,7 @@ class SwIndustryMember(Base):
     """
 
     __tablename__ = "sw_industry_member"
-    ts_code = Column(String, primary_key=True, index=True)
+    ts_code = Column(String, primary_key=True)
     index_code = Column(String, primary_key=True)
     index_name = Column(String)
     sw_l1_code = Column(String)
@@ -886,7 +882,7 @@ class Watchlist(Base):
 
     __tablename__ = "watchlist"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    ts_code = Column(String, nullable=False, unique=True, index=True)
+    ts_code = Column(String, nullable=False, unique=True)
     stock_name = Column(String)
     added_at = Column(DateTime(timezone=False), server_default=text("now()"))
     note = Column(String)
