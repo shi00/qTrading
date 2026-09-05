@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from utils.thread_pool import ThreadPoolManager, TaskType, get_thread_pool_manager
 
@@ -496,6 +496,59 @@ class TestThreadPoolManagerContextVarsPropagation:
             await mgr.run_async(TaskType.IO, partial_coro)
         assert "Cannot run coroutine function" in str(excinfo.value)
         assert "dummy_coro" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_run_async_plain_magicmock_executes(self):
+        """CON-06：无 spec 的 MagicMock 经 iscoroutinefunction 判定为非协程，正常执行不抛。"""
+        mgr = ThreadPoolManager()
+        fn = MagicMock()
+        result = await mgr.run_async(TaskType.IO, fn)
+        assert result is not None
+        fn.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_run_async_magicmock_spec_sync_func_raises(self):
+        """CON-06：移除 mock 检测后的行为变更——MagicMock(spec=同步函数) 现被判为协程并拒绝。
+
+        旧行为：NonCallableMock 短路返回 False，spec'd mock 静默进入 executor 执行；
+        新行为：fail-fast 抛 ValueError（对 AsyncMock 属改进；对 spec'd 同步 mock 属已知语义误报的取舍）。"""
+        mgr = ThreadPoolManager()
+
+        def sync_func():
+            pass
+
+        with pytest.raises(ValueError) as excinfo:
+            await mgr.run_async(TaskType.IO, MagicMock(spec=sync_func))
+        assert "Cannot run coroutine function" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_run_async_asyncmock_raises(self):
+        """CON-06：AsyncMock 判为协程，抛 ValueError。"""
+        mgr = ThreadPoolManager()
+        with pytest.raises(ValueError) as excinfo:
+            await mgr.run_async(TaskType.IO, AsyncMock())
+        assert "Cannot run coroutine function" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_run_async_partial_magicmock_executes(self):
+        """CON-06：partial 包无 spec MagicMock——inspect 解包 partial 后仍判为非协程，正常执行。"""
+        import functools
+
+        mgr = ThreadPoolManager()
+        fn = MagicMock()
+        result = await mgr.run_async(TaskType.IO, functools.partial(fn))
+        assert result is not None
+        fn.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_run_async_partial_asyncmock_raises(self):
+        """CON-06：partial 包 AsyncMock——inspect 解包 partial 后判为协程，抛 ValueError。"""
+        import functools
+
+        mgr = ThreadPoolManager()
+        with pytest.raises(ValueError) as excinfo:
+            await mgr.run_async(TaskType.IO, functools.partial(AsyncMock()))
+        assert "Cannot run coroutine function" in str(excinfo.value)
 
 
 class TestThreadPoolManagerMaxWorkersSnapshot:
