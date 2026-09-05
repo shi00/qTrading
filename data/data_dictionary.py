@@ -767,7 +767,7 @@ TABLE_DEFINITIONS = {
     "moneyflow_hsgt": {
         "alias": "tab_moneyflow_hsgt",
         "desc": "北向资金流",
-        "sync_config": {"strategy": "market", "api": "moneyflow_hsgt"},
+        "sync_config": {"strategy": "historical", "api": "moneyflow_hsgt"},
         "quality_config": {"tier": 2, "monitor": True},
         "type": "global",
         "columns": {
