@@ -110,6 +110,11 @@ def use_viewmodel[T: _ViewModelProtocol](
 
     def setup() -> None:
         unsub_ref.current = resolved_vm.subscribe(lambda new_state: set_state(new_state))
+        # UIX-03 补偿: 订阅在 mount effect 阶段才建立, 而 VM 在渲染期构造。若 VM 构造即
+        # 启动加载并在订阅前完成(本地缓存命中最易触发), 该变更对 _notify(此时 _subscribers
+        # 为空)静默丢弃且不进 pending 缓冲。此处订阅后立即补一次同步, 取最新已提交快照,
+        # 消除"首帧通知丢失"导致的骨架屏永久停留。set_state 幂等(同值 Flet 不重渲染)。
+        set_state(resolved_vm.state)
 
     def cleanup() -> None:
         if unsub_ref.current is not None:
