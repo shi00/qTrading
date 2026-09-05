@@ -178,9 +178,10 @@ class TestBaseDaoConvertParamForAsyncpg:
         assert BaseDao._convert_param_for_asyncpg(None) is None
 
     def test_yyyymmdd_string(self):
+        # DAT-26: 8 位纯数字串不再被 _convert_param_for_asyncpg 猜测为日期，
+        # 原样透传（调用方须在 DAO 边界用 _to_db_date 显式转换）。
         result = BaseDao._convert_param_for_asyncpg("20240615")
-        assert isinstance(result, datetime.date)
-        assert result == datetime.date(2024, 6, 15)
+        assert result == "20240615"
 
     def test_yyyy_mm_dd_string(self):
         result = BaseDao._convert_param_for_asyncpg("2024-06-15")
@@ -216,6 +217,34 @@ class TestBaseDaoConvertParamForAsyncpg:
     def test_short_digit_string(self):
         result = BaseDao._convert_param_for_asyncpg("1234567")
         assert result == "1234567"
+
+
+class TestBaseDaoToDbDate:
+    """DAT-26: _to_db_date 在 DAO 边界显式规范化日期形参。"""
+
+    def test_none(self):
+        assert BaseDao._to_db_date(None) is None
+
+    def test_date_object_unchanged(self):
+        d = datetime.date(2024, 6, 15)
+        assert BaseDao._to_db_date(d) is d
+
+    def test_datetime_to_date(self):
+        dt = datetime.datetime(2024, 6, 15, 10, 30, 0)
+        assert BaseDao._to_db_date(dt) == datetime.date(2024, 6, 15)
+
+    def test_yyyymmdd_string(self):
+        assert BaseDao._to_db_date("20240615") == datetime.date(2024, 6, 15)
+
+    def test_iso_string(self):
+        assert BaseDao._to_db_date("2024-06-15") == datetime.date(2024, 6, 15)
+
+    def test_non_date_string_passthrough(self):
+        assert BaseDao._to_db_date("hello") == "hello"
+
+    def test_invalid_digits_passthrough(self):
+        # 无法解析为合法日期时原样透传，交由 DB 报错，不静默猜测
+        assert BaseDao._to_db_date("99999999") == "99999999"
 
 
 class TestBaseDaoReadDb:

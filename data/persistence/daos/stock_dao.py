@@ -150,8 +150,8 @@ class StockDao(BaseDao):
         sql = "SELECT * FROM trade_cal WHERE 1=1"
         p = []
         idx = 1
-        sd = self._to_date_str(start_date)
-        ed = self._to_date_str(end_date)
+        sd = self._to_db_date(start_date)
+        ed = self._to_db_date(end_date)
         if sd:
             sql += f" AND cal_date>=${idx}"
             p.append(sd)
@@ -186,8 +186,8 @@ class StockDao(BaseDao):
         Returns:
             int: Number of trading days
         """
-        sd = self._to_date_str(start_date)
-        ed = self._to_date_str(end_date)
+        sd = self._to_db_date(start_date)
+        ed = self._to_db_date(end_date)
         sql = "SELECT COUNT(*) as cnt FROM trade_cal WHERE is_open=1 AND cal_date >= $1 AND cal_date <= $2"
         df = await self._read_db(sql, (sd, ed))
         if df is None or df.empty:
@@ -205,7 +205,7 @@ class StockDao(BaseDao):
         Returns:
             date: The start date (N trading days before end_date)
         """
-        ed = self._to_date_str(end_date)
+        ed = self._to_db_date(end_date)
         sql = """
             SELECT cal_date FROM trade_cal
             WHERE is_open = 1 AND cal_date <= $1
@@ -238,7 +238,10 @@ class StockDao(BaseDao):
             ) as expected FROM stock_basic s
             WHERE s.list_status = 'L'
         """
-        df = await self._read_db(sql, (start_date, end_date))
+        df = await self._read_db(
+            sql,
+            (self._to_db_date(start_date), self._to_db_date(end_date)),
+        )
         if df is None or df.empty:
             return 1
         return df["expected"].iloc[0] or 1

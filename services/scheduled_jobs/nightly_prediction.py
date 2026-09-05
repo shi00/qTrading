@@ -19,6 +19,7 @@ import pandas as pd
 
 from core.i18n import I18n, Message
 from data.data_processor import DataProcessor
+from data.persistence.daos.base_dao import DatabaseQueryError
 from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from utils.config_handler import ConfigHandler
@@ -65,7 +66,12 @@ async def _prediction_logic(
     await processor.prepare_market_data()
 
     tm.update_progress(task_id, 0.3, Message("sched_pred_context"))
-    context = await processor.get_strategy_data()
+    try:
+        context = await processor.get_strategy_data()
+    except DatabaseQueryError:
+        # DAT-26: get_screening_data 改 suppress_errors=False 后，真实 DB 故障抛
+        # DatabaseQueryError 而非静默空表。夜间任务按既有"无上下文即失败"语义收敛为 i18n 消息。
+        raise RuntimeError(I18n.get("sched_pred_no_context")) from None
     if not context:
         raise RuntimeError(I18n.get("sched_pred_no_context"))
     context["data_processor"] = processor

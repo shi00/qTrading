@@ -46,7 +46,7 @@ class FinancialDao(BaseDao):
         if period:
             df = await self._read_db(
                 "SELECT ts_code, end_date FROM financial_reports WHERE end_date = $1",
-                (period,),
+                (self._to_db_date(period),),
             )
         else:
             df = await self._read_db("SELECT ts_code, end_date FROM financial_reports")
@@ -75,7 +75,7 @@ class FinancialDao(BaseDao):
             return pd.DataFrame()
         return await self._read_db(
             "SELECT * FROM daily_indicators WHERE trade_date = $1",
-            (with_date,),
+            (self._to_db_date(with_date),),
         )
 
     async def get_cached_indicator_dates(self):
@@ -164,7 +164,7 @@ class FinancialDao(BaseDao):
                     ORDER BY end_date DESC
                     LIMIT $3
                     """,
-                    (ts_code, as_of_date, periods),
+                    (ts_code, self._to_db_date(as_of_date), periods),
                 )
             else:
                 df = await self._read_db(
@@ -405,7 +405,7 @@ class FinancialDao(BaseDao):
                     ORDER BY end_date DESC, bz_sales DESC
                     LIMIT 10
                     """,
-                    (ts_code, as_of_date),
+                    (ts_code, self._to_db_date(as_of_date)),
                 )
             else:
                 df = await self._read_db(
