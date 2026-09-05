@@ -42,9 +42,9 @@ from ui.components.settings_widgets import (
     SectionHeader,
     SettingRow,
 )
+from ui.cache_cleared_state import notify_cache_cleared
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceState, DataSourceViewModel, HealthResultRow, TaskStatus
@@ -994,11 +994,9 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(_on_snack_change, dependencies=[state.snack.seq if state.snack else 0])
 
-    # --- cache_cleared effect: state.cache_cleared_version → broadcast PubSub (瞬态信号, 非 dual-track) ---
+    # --- cache_cleared effect: state.cache_cleared_version → notify Observable (瞬时信号, 非 dual-track) ---
     def _on_cache_cleared_version_change() -> None:
-        page = _get_page()
-        if page is not None:
-            page.pubsub.send_all_on_topic(CACHE_CLEARED_TOPIC, "cache_cleared")
+        notify_cache_cleared()
 
     ft.use_effect(_on_cache_cleared_version_change, dependencies=[state.cache_cleared_version])
 
