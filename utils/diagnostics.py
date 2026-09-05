@@ -14,6 +14,8 @@ import sys
 import zipfile
 import tempfile
 import shutil
+from collections.abc import Callable
+from typing import Any
 
 import config
 from utils.config_handler import ConfigHandler
@@ -57,11 +59,23 @@ class SystemDiagnosticsCollector:
             from utils.thread_pool import ThreadPoolManager
 
             tp_manager = ThreadPoolManager()
+
+            def _safe_pool(getter: Callable[[], Any]) -> Any | None:
+                """停机后 io_pool/cpu_pool property 抛 RuntimeError，转为 None 兜底。"""
+                try:
+                    return getter()
+                except RuntimeError:
+                    return None
+
+            io_pool = _safe_pool(lambda: tp_manager.io_pool)
+            cpu_pool = _safe_pool(lambda: tp_manager.cpu_pool)
             thread_pool_info = {
-                "io_max_workers": tp_manager.io_pool._max_workers if tp_manager.io_pool else None,
-                "io_current_threads": len(tp_manager.io_pool._threads) if tp_manager.io_pool else 0,
-                "cpu_max_workers": tp_manager.cpu_pool._max_workers if tp_manager.cpu_pool else None,
-                "cpu_current_threads": len(tp_manager.cpu_pool._threads) if tp_manager.cpu_pool else 0,
+                # CON-10: max_workers 走 public property（不读 CPython 私有属性 _max_workers）；
+                # _threads 无公开替代，保留仅用于诊断采集（非热路径）。
+                "io_max_workers": tp_manager.io_pool_max_workers or None,
+                "io_current_threads": len(io_pool._threads) if io_pool else 0,
+                "cpu_max_workers": tp_manager.cpu_pool_max_workers or None,
+                "cpu_current_threads": len(cpu_pool._threads) if cpu_pool else 0,
             }
 
             # 任务管理器指标
