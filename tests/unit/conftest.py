@@ -48,6 +48,23 @@ def _reset_all_singletons():
 
 
 @pytest.fixture(autouse=True)
+def _reset_toast_manager_state():
+    """重置 ToastManager 模块级可变状态（R7 测试状态污染）。
+
+    ToastManager 已按 review05-E15 去单例化：状态（_state/_next_id/_is_stopping/
+    _active_tasks）全部上提为模块级，实例为无状态薄壳，不被 @register_singleton
+    管理（M12-030 评估结论：非事实单例，不再注册实例单例）。因此模块级可变状态
+    需在此 autouse fixture 中手动重置，与 _reset_all_singletons 等互补，避免跨
+    测试残留（并发 toast / 关闭状态泄漏到后续测试）。
+    """
+    from ui.components.toast_manager import _reset_state_for_test
+
+    _reset_state_for_test()
+    yield
+    _reset_state_for_test()
+
+
+@pytest.fixture(autouse=True)
 def _reset_data_explorer_shared_engine():
     """Reset DataExplorerQueryClient._shared_engine before and after each unit test.
 
