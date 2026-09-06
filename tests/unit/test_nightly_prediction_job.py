@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from core.i18n import Message
+from core.i18n import I18n, Message
+from data.persistence.daos.base_dao import DatabaseQueryError
 from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
 
 pytestmark = pytest.mark.unit
@@ -236,6 +237,45 @@ class TestNightlyPredictionLogicClosure:
         # as exc_info + 后续断言：异常已抛出（i18n 消息不硬编码）+ 未标记完成
         assert exc_info.value is not None
         assert svc.marked_dates == []
+
+    @pytest.mark.asyncio
+    async def test_prediction_logic_db_query_error_raises(self):
+        """DAT-26: get_strategy_data 抛 DatabaseQueryError（suppress_errors=False 后
+        DB 故障显式传播）→ 收敛为 sched_pred_no_context，未标记完成。"""
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        runner = AsyncMock(return_value=pd.DataFrame())
+
+        async def _fail_get_strategy_data() -> None:
+            raise DatabaseQueryError("query failed")
+
+        job = build_nightly_prediction_job(runner)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager", return_value=mock_tm),
+            patch("services.scheduled_jobs.nightly_prediction.ReviewManager") as mock_rm,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp_instance.init_data = AsyncMock()
+            mock_dp_instance.prepare_market_data = AsyncMock()
+            mock_dp_instance.get_strategy_data = _fail_get_strategy_data
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value = datetime(2024, 6, 14, 20, 30)
+            await job(svc)
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+
+            with pytest.raises(RuntimeError) as exc_info:
+                await factory("test_task")
+
+        # DatabaseQueryError 被转译为通用 no-context 消息，未标记完成、未落库
+        assert exc_info.value.args == (I18n.get("sched_pred_no_context"),)
+        assert svc.marked_dates == []
+        mock_rm.return_value.save_results.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_prediction_logic_no_trade_date_raises(self):

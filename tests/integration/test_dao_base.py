@@ -31,9 +31,9 @@ class TestBaseDaoConvertParam:
         assert result is None
 
     def test_convert_date_string_yyyymmdd(self):
-        """YYYYMMDD 格式字符串转换为 date"""
+        # DAT-26: 8 位纯数字串不再被猜为日期，原样透传（边界由 _to_db_date 显式转换）
         result = BaseDao._convert_param_for_asyncpg("20240321")
-        assert result == datetime.date(2024, 3, 21)
+        assert result == "20240321"
 
     def test_convert_date_string_yyyy_mm_dd(self):
         """YYYY-MM-DD 格式字符串转换为 date"""
@@ -65,32 +65,6 @@ class TestBaseDaoConvertParam:
         """浮点数保持不变"""
         result = BaseDao._convert_param_for_asyncpg(123.45)
         assert result == 123.45
-
-
-class TestBaseDaoToDateStr:
-    """测试 BaseDao._to_date_str 方法"""
-
-    def test_none(self):
-        result = BaseDao._to_date_str(None)
-        assert result is None
-
-    def test_string_passthrough(self):
-        result = BaseDao._to_date_str("20240321")
-        assert result == "20240321"
-
-    def test_empty_string(self):
-        result = BaseDao._to_date_str("")
-        assert result == ""
-
-    def test_date_object(self):
-        d = datetime.date(2024, 3, 21)
-        result = BaseDao._to_date_str(d)
-        assert result == "20240321"
-
-    def test_date_object_padding(self):
-        d = datetime.date(2024, 1, 5)
-        result = BaseDao._to_date_str(d)
-        assert result == "20240105"
 
 
 class TestBaseDaoQuoteColumns:

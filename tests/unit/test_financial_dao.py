@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import datetime
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
@@ -233,7 +235,7 @@ class TestGetFinancialReportsHistory:
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "ann_date <=" in sql
-        assert call_args[0][1] == ("000001.SZ", "20240701", 8)
+        assert call_args[0][1] == ("000001.SZ", datetime.date(2024, 7, 1), 8)
 
     @pytest.mark.asyncio
     async def test_without_as_of_date(self):

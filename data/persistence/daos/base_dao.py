@@ -381,6 +381,10 @@ class BaseDao:
         if not ts_codes:
             return pd.DataFrame()
 
+        # DAT-26: as_of_date（调用方以 8 位 YYYYMMDD 串传入）在 DAO 边界显式归一化为
+        # date 对象，避免 _convert_param_for_asyncpg 对所有 8 位纯数字串做隐式日期猜测。
+        as_of_date = self._to_db_date(as_of_date)
+
         try:
             sql_template, params_fn = sql_fn(as_of_date)
             kwargs: dict[str, typing.Any] = {}
@@ -417,14 +421,6 @@ class BaseDao:
                 DataSanitizer.sanitize_error(e),
             )
             return pd.DataFrame()
-
-    @staticmethod
-    def _to_date_str(val: datetime.date | str | None) -> str | None:
-        if val is None:
-            return None
-        if isinstance(val, str):
-            return val
-        return val.strftime("%Y%m%d")
 
     @classmethod
     def _get_maintenance_event(cls):
@@ -915,17 +911,53 @@ class BaseDao:
             return -1
 
     @staticmethod
+    def _to_db_date(val) -> typing.Any:
+        """DAT-26: 将日期形参显式规范化为 datetime.date，供 _read_db 绑定。
+
+        调用方（实盘 data_processor、回测 data_provider、sync 流程等）以 8 位
+        YYYYMMDD / 10 位 ISO 字符串或 date/datetime 对象传递日期参数。策略方在值
+        同时被当作字符串 key（context、groupby 键）时无法全局改格式，只能在 DAO
+        边界显式转成 date 对象，避免 _convert_param_for_asyncpg 对所有 8 位纯数字
+        串做隐式日期猜测（DAT-26）。解析失败或非日期输入原样透传，交由 DB 报错。
+
+        date/datetime 对象与 ISO 字符串由 _convert_param_for_asyncpg 透传/识别。
+        """
+        if val is None:
+            return None
+        if isinstance(val, datetime.datetime):
+            return val.date()
+        if isinstance(val, datetime.date):
+            return val
+        if isinstance(val, str):
+            try:
+                clean_val = val.strip()
+                if len(clean_val) == 8 and clean_val.isdigit():
+                    return datetime.date(int(clean_val[:4]), int(clean_val[4:6]), int(clean_val[6:8]))
+                if (len(clean_val) == 10 and clean_val[4] in "-/" and clean_val[7] in "-/") or "T" in clean_val:
+                    import pandas as pd
+
+                    return pd.to_datetime(clean_val).date()
+            except (ValueError, TypeError):
+                logger.debug("[BaseDao] _to_db_date skipped for '%s'", val)
+                return val
+        return val
+
+    @staticmethod
     def _convert_param_for_asyncpg(val: typing.Any):
         """
         Convert Python values to types compatible with asyncpg.
 
         asyncpg requires strict type matching for DATE columns:
         - Expects datetime.date objects (with .toordinal() method)
-        - String dates like '20260320' will cause DataError
+        - String dates like '20260320' will cause DataError (unless already
+          normalized to a date object by the caller via _to_db_date)
 
+        DAT-26: 不含 8 位纯数字串→date 的隐式猜测。8 位 YYYYMMDD 这类不明确的
+        字符串不会在本方法被猜为日期，调用方须在 DAO 边界用 _to_db_date 显式转换。
 
         This method converts:
-        - str dates in various formats -> datetime.date
+        - 10 位 ISO / 斜杠日期串 -> datetime.date（形态明确，不歧义）
+        - T 分隔的 datetime 字符串 -> datetime.date
         - Other types passed through unchanged
         """
         if val is None:
@@ -934,16 +966,12 @@ class BaseDao:
         if isinstance(val, str):
             try:
                 clean_val = val.strip()
-                if len(clean_val) == 8 and clean_val.isdigit():
-                    return datetime.date(int(clean_val[:4]), int(clean_val[4:6]), int(clean_val[6:8]))
-                elif (len(clean_val) == 10 and clean_val[4] == "-" and clean_val[7] == "-") or (
+                if (len(clean_val) == 10 and clean_val[4] == "-" and clean_val[7] == "-") or (
                     len(clean_val) == 10 and clean_val[4] == "/" and clean_val[7] == "/"
                 ):
                     return datetime.date(int(clean_val[:4]), int(clean_val[5:7]), int(clean_val[8:10]))
                 elif "T" in clean_val:
                     try:
-                        import pandas as pd
-
                         return pd.to_datetime(clean_val).date()
                     except (ValueError, TypeError) as e:
                         logger.debug("[BaseDao] Pandas date parse skipped for '%s': %s", clean_val, e)

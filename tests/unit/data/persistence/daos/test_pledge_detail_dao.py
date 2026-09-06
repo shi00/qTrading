@@ -2,6 +2,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
 import asyncio
+import datetime
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -105,9 +106,9 @@ class TestGetPledgeDetailBatch:
         dao.chunked_in_query.assert_awaited_once()
         call_args = dao.chunked_in_query.call_args
         call_kwargs = call_args.kwargs
-        # params_fn 应返回 [as_of_date]
+        # params_fn 应返回 [as_of_date]（DAT-26: DAO 边界统一 date 对象）
         params_fn = call_kwargs["params_fn"]
-        assert params_fn(["000001.SZ"]) == ["20240630"]
+        assert params_fn(["000001.SZ"]) == [datetime.date(2024, 6, 30)]
         # DAT-09: PIT 过滤基于官方 ann_date，替代旧的 end_date + INTERVAL 保守滞后
         # chunked_in_query(_read_db, sql_template, ts_codes, ...)，args[1] 即 as_of 分支的模板函数
         sql_template = call_args.args[1]

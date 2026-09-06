@@ -114,7 +114,7 @@ class HolderDao(BaseDao):
                     ORDER BY end_date DESC, hold_ratio DESC
                     LIMIT 20
                     """,
-                    (ts_code, as_of_date),
+                    (ts_code, self._to_db_date(as_of_date)),
                 )
             else:
                 df = await self._read_db(
@@ -151,7 +151,7 @@ class HolderDao(BaseDao):
                     ORDER BY end_date DESC
                     LIMIT 5
                     """,
-                    (ts_code, as_of_date),
+                    (ts_code, self._to_db_date(as_of_date)),
                 )
             else:
                 df = await self._read_db(
@@ -282,7 +282,7 @@ class HolderDao(BaseDao):
         try:
             df = await self._read_db(
                 "SELECT DISTINCT ts_code FROM top10_holders WHERE end_date = $1",
-                (period,),
+                (self._to_db_date(period),),
             )
             if df is not None and not df.empty:
                 return set(df["ts_code"].tolist())

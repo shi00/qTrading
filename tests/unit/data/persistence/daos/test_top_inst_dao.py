@@ -2,6 +2,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
 import asyncio
+import datetime
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -101,9 +102,9 @@ class TestGetTopInstBatch:
         pd.testing.assert_frame_equal(result, expected)
         dao.chunked_in_query.assert_awaited_once()
         call_kwargs = dao.chunked_in_query.call_args.kwargs
-        # params_fn 应返回 [as_of_date]
+        # params_fn 应返回 [as_of_date]（DAT-26: DAO 边界统一 date 对象）
         params_fn = call_kwargs["params_fn"]
-        assert params_fn(["000001.SZ"]) == ["20240614"]
+        assert params_fn(["000001.SZ"]) == [datetime.date(2024, 6, 14)]
 
     @pytest.mark.asyncio
     async def test_get_top_inst_batch_without_as_of_date_uses_simple_template(self):

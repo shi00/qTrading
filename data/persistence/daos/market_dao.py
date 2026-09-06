@@ -102,12 +102,12 @@ class MarketDao(BaseDao):
             sql += f" AND ts_code = ${idx}"
             params.append(ts_code)
             idx += 1
-        sd = self._to_date_str(start_date) if start_date else None
+        sd = self._to_db_date(start_date) if start_date else None
         if sd:
             sql += f" AND trade_date >= ${idx}"
             params.append(sd)
             idx += 1
-        ed = self._to_date_str(end_date) if end_date else None
+        ed = self._to_db_date(end_date) if end_date else None
         if ed:
             sql += f" AND trade_date <= ${idx}"
             params.append(ed)
@@ -145,12 +145,12 @@ class MarketDao(BaseDao):
         params = []
         idx = 1
 
-        sd = self._to_date_str(start_date) if start_date else None
+        sd = self._to_db_date(start_date) if start_date else None
         if sd:
             sql += f" AND trade_date >= ${idx}"
             params.append(sd)
             idx += 1
-        ed = self._to_date_str(end_date) if end_date else None
+        ed = self._to_db_date(end_date) if end_date else None
         if ed:
             sql += f" AND trade_date <= ${idx}"
             params.append(ed)
@@ -189,7 +189,7 @@ class MarketDao(BaseDao):
 
     async def get_index_weights(self, index_code: str | None, trade_date: str | None):
         sql = "SELECT * FROM index_weight WHERE index_code = $1 AND trade_date = $2"
-        return await self._read_db(sql, (index_code, trade_date))
+        return await self._read_db(sql, (index_code, self._to_db_date(trade_date)))
 
     async def get_latest_index_weight_date(self):
         """Get latest trade_date in index_weight."""
@@ -227,7 +227,7 @@ class MarketDao(BaseDao):
         sql = "SELECT * FROM moneyflow_hsgt WHERE 1=1"
         params = []
         idx = 1
-        td = self._to_date_str(trade_date) if trade_date else None
+        td = self._to_db_date(trade_date) if trade_date else None
         if td:
             sql += f" AND trade_date = ${idx}"
             params.append(td)
@@ -245,7 +245,7 @@ class MarketDao(BaseDao):
 
     async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str):
         sql = "SELECT * FROM moneyflow_hsgt WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date DESC"
-        df = await self._read_db(sql, [start_date, end_date])
+        df = await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
         if df is not None and not df.empty:
             df = attach_hsgt_column_units(df)
         return df
