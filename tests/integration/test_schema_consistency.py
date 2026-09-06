@@ -216,7 +216,9 @@ class TestMetadataVsAlembicConsistency:
         alembic_indexes = _get_index_names(alembic_engine, "screening_history")
 
         # Check key indexes exist
-        key_indexes = {"idx_sh_date_strategy", "idx_sh_date_code", "idx_sh_run_id"}
+        # DAT-15: idx_sh_run_id 已被删除（冗余，前导列 run_id 由唯一约束
+        # uq_screening_history_run_code(run_id, ts_code) 覆盖），此处以唯一约束断言 run_id 访问路径。
+        key_indexes = {"idx_sh_date_strategy", "idx_sh_date_code", "uq_screening_history_run_code"}
         for idx in key_indexes:
             assert idx in meta_indexes, f"Metadata missing index: {idx}"
             assert idx in alembic_indexes, f"Alembic missing index: {idx}"
