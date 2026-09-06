@@ -31,6 +31,11 @@ def vm():
     return model
 
 
+def _row_vals(rows, col: str) -> list:
+    """提取 current_page_rows 中每个 ScreenerRow 的指定列值 (改写 get_current_page_data)."""
+    return [r.values[col] for r in rows]
+
+
 class TestScreenerViewModelConstants:
     def test_task_name_prefix(self):
         assert TASK_NAME_PREFIX == "strategy_screening"
@@ -75,7 +80,7 @@ class TestScreenerViewModelInit:
         assert vm.state.status_color == ""
         assert vm.state.logs == ()
         assert vm.state.task_unlocked is False
-        assert vm.state.data_version == 0
+        assert vm.state.current_page_rows == ()
 
 
 class TestScreenerViewModelSortState:
@@ -299,15 +304,15 @@ class TestScreenerViewModelPagination:
         assert vm.state.total_pages == 2
 
         assert vm.state.page_no == 1
-        page_data = vm.get_current_page_data()
-        assert len(page_data) == 50
-        assert page_data.iloc[0]["A"] == 0
+        rows = vm.state.current_page_rows
+        assert len(rows) == 50
+        assert rows[0].values["A"] == 0
 
         vm.change_page(1)
         assert vm.state.page_no == 2
-        page_data = vm.get_current_page_data()
-        assert len(page_data) == 50
-        assert page_data.iloc[0]["A"] == 50
+        rows = vm.state.current_page_rows
+        assert len(rows) == 50
+        assert rows[0].values["A"] == 50
 
         vm.change_page(1)
         assert vm.state.page_no == 2  # already at last page
@@ -316,7 +321,7 @@ class TestScreenerViewModelPagination:
 class TestScreenerViewModelStockFilter:
     """UX-04 (P2-01): 股票代码过滤 — VM 层 ts_code 子串匹配 + 分页联动.
 
-    覆盖: set_stock_filter 状态更新/幂等/分页重算、get_current_page_data
+    覆盖: set_stock_filter 状态更新/幂等/分页重算、current_page_rows
     过滤切片、子串/大小写/字面量(regex=False)匹配语义、列缺失/空串跳过、
     尾随空格原值存储+匹配 strip、clear_filters 重置、has_export_data 解耦。
     """
@@ -332,7 +337,7 @@ class TestScreenerViewModelStockFilter:
         vm._full_results = self._DF.copy()
         vm._update_pagination()
         assert vm.state.total_items == 3
-        assert vm.state.data_version == 0
+        assert vm.state.current_page_rows != ()
 
         vm.set_stock_filter("000001")
 
@@ -340,58 +345,51 @@ class TestScreenerViewModelStockFilter:
         assert vm.state.page_no == 1
         assert vm.state.total_items == 1
         assert vm.state.total_pages == 1
-        assert vm.state.data_version == 1
+        assert _row_vals(vm.state.current_page_rows, "ts_code") == ["000001.SZ"]
 
     def test_set_stock_filter_idempotent(self, vm):
         vm._full_results = self._DF.copy()
         notified = []
         vm.subscribe(lambda s: notified.append(s))
         vm.set_stock_filter("000001")
-        assert len(notified) == 1
+        # C2b H1: filter 状态写入 + _update_pagination 切片更新 → 2 次 notify
+        assert len(notified) == 2
 
-        vm.set_stock_filter("000001")  # 相同值: 幂等短路, 不触发重渲染
+        vm.set_stock_filter("000001")  # 相同值: 幂等短路, 不触发额外 notify
 
-        assert len(notified) == 1
+        assert len(notified) == 2
 
-    def test_get_current_page_data_filtered(self, vm):
+    def test_get_current_page_rows_filtered(self, vm):
         vm._full_results = self._DF.copy()
         vm.set_stock_filter("000001")
 
-        page = vm.get_current_page_data()
-
-        assert list(page["ts_code"]) == ["000001.SZ"]
+        assert _row_vals(vm.state.current_page_rows, "ts_code") == ["000001.SZ"]
 
     def test_filter_partial_code_substring(self, vm):
         vm._full_results = self._DF.copy()
         vm.set_stock_filter("0002")  # 尾部子串 (非前缀): 000002.SZ 索引 2-5 命中
 
-        page = vm.get_current_page_data()
-
-        assert list(page["ts_code"]) == ["000002.SZ"]
+        assert _row_vals(vm.state.current_page_rows, "ts_code") == ["000002.SZ"]
 
     def test_filter_case_insensitive(self, vm):
         vm._full_results = self._DF.copy()
         vm.set_stock_filter("sz")
 
-        page = vm.get_current_page_data()
-
-        assert set(page["ts_code"]) == {"000001.SZ", "000002.SZ"}
+        assert set(_row_vals(vm.state.current_page_rows, "ts_code")) == {"000001.SZ", "000002.SZ"}
 
     def test_filter_regex_literal(self, vm):
         # 字面量匹配: "." 不作正则通配, "000001XSZ" 不应命中 "000001.SZ"
         vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ", "000001XSZ"]})
         vm.set_stock_filter("000001.SZ")
 
-        page = vm.get_current_page_data()
-
-        assert list(page["ts_code"]) == ["000001.SZ"]
+        assert _row_vals(vm.state.current_page_rows, "ts_code") == ["000001.SZ"]
 
     def test_filter_missing_ts_code_column_noop(self, vm):
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
         vm.set_stock_filter("000001")
 
         assert vm.state.total_items == 3
-        assert len(vm.get_current_page_data()) == 3
+        assert len(vm.state.current_page_rows) == 3
 
     def test_filter_empty_string_noop(self, vm):
         vm._full_results = self._DF.copy()
@@ -399,7 +397,7 @@ class TestScreenerViewModelStockFilter:
         vm.set_stock_filter("")  # 清空过滤: 恢复全量
 
         assert vm.state.total_items == 3
-        assert len(vm.get_current_page_data()) == 3
+        assert len(vm.state.current_page_rows) == 3
 
     def test_filter_no_match_empty_page(self, vm):
         vm._full_results = self._DF.copy()
@@ -407,7 +405,7 @@ class TestScreenerViewModelStockFilter:
 
         assert vm.state.total_items == 0
         assert vm.state.total_pages == 0
-        assert vm.get_current_page_data().empty
+        assert vm.state.current_page_rows == ()
 
     def test_filter_with_trailing_space_still_matches(self, vm):
         vm._full_results = self._DF.copy()
@@ -415,9 +413,7 @@ class TestScreenerViewModelStockFilter:
 
         assert vm.state.stock_filter == "000001 "  # 存储不 strip
 
-        page = vm.get_current_page_data()
-
-        assert list(page["ts_code"]) == ["000001.SZ"]  # 匹配时 strip
+        assert _row_vals(vm.state.current_page_rows, "ts_code") == ["000001.SZ"]  # 匹配时 strip
 
     def test_update_pagination_respects_filter(self, vm):
         vm._full_results = self._DF.copy()
@@ -1034,32 +1030,62 @@ class TestUpdatePagination:
         assert vm.state.total_pages == 0
 
 
-class TestGetCurrentPageData:
-    def test_returns_sliced_dataframe(self, vm):
+class TestCurrentPageRows:
+    """current_page_rows 切片契约 (C2b 消除双轨制)."""
+
+    def test_returns_first_page_rows(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._set_state(page_no=1, page_size=50)
         vm._update_pagination()
-        page = vm.get_current_page_data()
-        assert len(page) == 50
-        assert page.iloc[0]["A"] == 0
+        rows = vm.state.current_page_rows
+        assert len(rows) == 50
+        assert rows[0].values["A"] == 0
 
     def test_second_page(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._set_state(page_no=2, page_size=50)
         vm._update_pagination()
-        page = vm.get_current_page_data()
-        assert len(page) == 50
-        assert page.iloc[0]["A"] == 50
+        rows = vm.state.current_page_rows
+        assert len(rows) == 50
+        assert rows[0].values["A"] == 50
 
     def test_none_returns_empty(self, vm):
         vm._full_results = None
-        result = vm.get_current_page_data()
-        assert result.empty
+        vm._update_pagination()
+        assert vm.state.current_page_rows == ()
 
     def test_empty_df_returns_empty(self, vm):
         vm._full_results = pd.DataFrame()
-        result = vm.get_current_page_data()
-        assert result.empty
+        vm._update_pagination()
+        assert vm.state.current_page_rows == ()
+
+    def test_rows_are_frozen_and_read_only(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        vm._update_pagination()
+        rows = vm.state.current_page_rows
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            rows[0].values["A"] = 999  # MappingProxyType 只读
+        # 赋值被拒绝后原值不变 (强断言: 非仅"抛异常", 还验证不可变语义)
+        assert rows[0].values["A"] == 1
+
+    def test_unchanged_slice_reuses_reference(self, vm):
+        """C2b: 内容未变 (如流式页满后仅 total_* 增长) 复用引用, 供 View 格式化 memo 命中."""
+        vm._full_results = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
+        vm._update_pagination()
+        ref1 = vm.state.current_page_rows
+        # 相同切片再次 _update_pagination → 引用应复用 (内容未变)
+        vm._update_pagination()
+        assert vm.state.current_page_rows is ref1
+
+    def test_content_change_new_reference(self, vm):
+        """C2b: 切片内容变化 → 新引用 (View 须重格式化)."""
+        vm._full_results = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
+        vm._update_pagination()
+        ref1 = vm.state.current_page_rows
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3, 4, 5], "B": [3, 4, 5, 6, 7]})
+        vm._update_pagination()
+        assert vm.state.current_page_rows is not ref1
+        assert len(vm.state.current_page_rows) == 5
 
 
 class TestChangePage:

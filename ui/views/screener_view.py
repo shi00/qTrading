@@ -50,6 +50,7 @@ from ui.viewmodels.screener_view_model import (
     _MAX_LOG_CARDS,
     HistoryTreeRow,
     ScreenerState,
+    ScreenerRow,
     ScreenerViewModel,
     StrategyDepRow,
     StreamCard,
@@ -181,10 +182,12 @@ def _format_cell_value(col: str, val) -> str:
     return str(val)
 
 
-def _build_table_data(df: pd.DataFrame, vm: ScreenerViewModel) -> tuple[list, list]:
+def _build_table_data(current_page_rows: tuple[ScreenerRow, ...], vm: ScreenerViewModel) -> tuple[list, list]:
     vt_columns = []
     visible_cols = []
-    for col in df.columns:
+    # C2b: 列序来自首行 values 的 key (df column 顺序), 空态无行则无列 (EmptyState 兜底)
+    columns = tuple(current_page_rows[0].values.keys()) if current_page_rows else ()
+    for col in columns:
         if col in _HIDDEN_COLS:
             continue
         visible_cols.append(col)
@@ -192,9 +195,9 @@ def _build_table_data(df: pd.DataFrame, vm: ScreenerViewModel) -> tuple[list, li
         label = vm.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
-    raw_records = df.to_dict("records")  # type: ignore[call-overload]
     formatted_rows: list[dict[str, typing.Any]] = []
-    for raw in raw_records:
+    for row in current_page_rows:
+        raw = row.values
         fmt: dict[str, typing.Any] = {col: _format_cell_value(col, raw[col]) for col in visible_cols}
         fmt["_raw"] = raw  # #423: 携带原始行引用, 供 _on_row_click 反查 (替代 ts_code 字典反查, 避免同名多行覆盖)
         formatted_rows.append(fmt)
@@ -1294,24 +1297,21 @@ def ScreenerView(
     status_text_value = _render_status_message(state.status_message)
     status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
 
-    # 表格数据: 从 VM 读取当前页 (B12 memo: data_version + page_no + page_size + locale
-    # 均未变时复用已格式化结果, 避免 AI 流式更新高频 re-render 时重复执行 to_dict/全列格式化。
-    # 分页维度必须入 key: get_current_page_data() 按 (page_no-1)*page_size 切片,
-    # 翻页/改页大小后 data_version 不变, 纯 data_version key 会返回旧分页数据。
-    # locale 必须入 key: _format_cell_value 输出 unit_yi/unit_wan 等 locale 相关字符串,
-    # 切换语言后纯数据 key 会返回旧 locale 单位。
-    # df 空态前置判定 + memo=None 失效: 新 run 重置/无结果路径不改 data_version, 防止
-    # 陈旧命中 (memo key 需依赖 VM 侧 data_version 与内容变更原子递增, 见 screener_view_model
-    # _flush_ai_buffer / switch_to_realtime / load_history_data 的顺序修正))
-    df = vm.get_current_page_data()
-    memo_key = (state.data_version, state.page_no, state.page_size, get_observable_state().locale)
+    # 表格数据: 从 VM 读当前页 locale-neutral 原始行 (C2b 消除双轨制)。
+    # memo 以 current_page_rows 引用同一性 + locale 为 key: 内容帧变化 → VM 生成新切片引用
+    # → 重格式化; 仅 total_*/状态变化而当前页内容未变 → 引用复用 (VM _update_pagination 去重)
+    # → 命中 memo 不重复格式化。locale 必须入 key: _format_cell_value 输出 unit_yi/unit_wan 等
+    # locale 相关字符串, 切换语言后需按新 locale 重格式化。
+    # 空态前置判定: 无行 (current_page_rows=()) 时直接置 memo=None, 防空态→恢复数据即新引用
+    # 触发重算 (防陈旧命中, 等价原 data_version 的 run 重置/无结果窗口)。
+    current_page_rows = state.current_page_rows
     memo = table_memo_ref.current
-    if df is not None and not df.empty:
-        if memo is not None and memo[0] == memo_key:
-            vt_columns, formatted_rows = memo[1], memo[2]
+    if current_page_rows:
+        if memo is not None and memo[0] is current_page_rows and memo[1] == get_observable_state().locale:
+            vt_columns, formatted_rows = memo[2], memo[3]
         else:
-            vt_columns, formatted_rows = _build_table_data(df, vm)
-            table_memo_ref.current = (memo_key, vt_columns, formatted_rows)
+            vt_columns, formatted_rows = _build_table_data(current_page_rows, vm)
+            table_memo_ref.current = (current_page_rows, get_observable_state().locale, vt_columns, formatted_rows)
     else:
         vt_columns = []
         formatted_rows = []

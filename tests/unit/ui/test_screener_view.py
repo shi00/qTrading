@@ -12,12 +12,13 @@
 """
 
 import datetime
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-from ui.viewmodels.screener_view_model import ScreenerViewModel, StrategyDepRow
+from ui.viewmodels.screener_view_model import ScreenerRow, ScreenerViewModel, StrategyDepRow
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
     _HIDDEN_COLS,
@@ -31,6 +32,11 @@ from ui.views.screener_view import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def _df_rows(df: pd.DataFrame) -> tuple[ScreenerRow, ...]:
+    """C2b: 把 DataFrame 转为 locale-neutral current_page_rows (模拟 VM 切片产出)."""
+    return tuple(ScreenerRow(values=MappingProxyType(dict(record))) for record in df.to_dict("records"))
 
 
 class TestFormatCellValue:
@@ -164,7 +170,7 @@ class TestBuildTableData:
 
     def test_hides_hidden_columns(self):
         df = pd.DataFrame({"symbol": ["s1"], "ts_code": ["000001.SZ"], "name": ["test"]})
-        cols, rows = _build_table_data(df, self._make_vm())
+        cols, rows = _build_table_data(_df_rows(df), self._make_vm())
         col_ids = [c["id"] for c in cols]
         assert "symbol" not in col_ids
         assert "ts_code" in col_ids
@@ -172,17 +178,17 @@ class TestBuildTableData:
 
     def test_uses_custom_width(self):
         df = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        cols, _ = _build_table_data(df, self._make_vm())
+        cols, _ = _build_table_data(_df_rows(df), self._make_vm())
         assert cols[0]["width"] == _COLUMN_WIDTHS["ts_code"]
 
     def test_default_width_for_unknown_col(self):
         df = pd.DataFrame({"unknown_col": ["val"]})
-        cols, _ = _build_table_data(df, self._make_vm())
+        cols, _ = _build_table_data(_df_rows(df), self._make_vm())
         assert cols[0]["width"] == 80
 
     def test_formats_rows(self):
         df = pd.DataFrame({"name": ["test"], "close": [12.34]})
-        _, rows = _build_table_data(df, self._make_vm())
+        _, rows = _build_table_data(_df_rows(df), self._make_vm())
         assert len(rows) == 1
         assert rows[0]["name"] == "test"
         assert rows[0]["close"] == "12.34"
@@ -197,7 +203,7 @@ class TestBuildTableData:
                 "close": [10.5, 11.0],
             }
         )
-        _, rows = _build_table_data(df, self._make_vm())
+        _, rows = _build_table_data(_df_rows(df), self._make_vm())
         assert len(rows) == 2
         # trade_date 在 _HIDDEN_COLS 中: formatted_row 顶层不含 (仅 _raw 携带原始值)
         assert "trade_date" not in rows[0]  # 顶层无 trade_date (验证隐藏)
