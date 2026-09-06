@@ -50,14 +50,6 @@ from ui.theme import AppColors
 pytestmark = pytest.mark.unit
 
 
-@pytest.fixture(autouse=True)
-def _reset_toast_state():
-    """每条测试前重置全局 state 和任务集合，避免跨测试泄漏。"""
-    tm_module._reset_state_for_test()
-    yield
-    tm_module._reset_state_for_test()
-
-
 # ============================================================================
 # 1. @ft.component 装饰契约
 # ============================================================================
@@ -1268,9 +1260,20 @@ class TestR7ResetStateForTest:
         assert len(tm_module._active_tasks) == 0
 
     def test_autouse_fixture_calls_reset_state_for_test(self):
-        """R7: autouse fixture _reset_toast_state 必须调用 _reset_state_for_test (源码守护)。"""
-        fixture = globals().get("_reset_toast_state")
-        assert fixture is not None, "_reset_toast_state autouse fixture 必须存在"
+        """R7: conftest autouse fixture 必须调用 _reset_state_for_test (源码守护, C1 迁移)。
+
+        reset 已从本模块 fixture（_reset_toast_state）上移到 tests/unit/conftest.py 的
+        _reset_toast_manager_state，供全量单元测试共享（详见 C1 fix/b3-01-state-ownership）。
+        """
+        import importlib.util
+        from pathlib import Path
+
+        conftest_path = Path(__file__).resolve().parents[1] / "conftest.py"
+        spec = importlib.util.spec_from_file_location("unit_conftest", conftest_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fixture = getattr(mod, "_reset_toast_manager_state", None)
+        assert callable(fixture), "_reset_toast_manager_state conftest autouse fixture 必须存在 (C1)"
         source = inspect.getsource(fixture)
         assert "_reset_state_for_test" in source, "fixture 必须调用 _reset_state_for_test (R7 测试隔离)"
 

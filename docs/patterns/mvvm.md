@@ -116,6 +116,21 @@ def ScreenerView():
 - 卸载时：`use_effect` 的显式 `cleanup=` 参数调 `unsub()` 退订；内部模式且 `dispose_on_unmount=True` 时额外调 `vm.dispose()`
 - `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: ScreenerViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) DI 原则）
 
+### 状态归属决策表
+
+UI 层实际并存四种状态机制，本表是"什么状态放哪里"的正本约定（UIX-05），防止每个作者自行判断导致的归属分歧：
+
+| 状态类型 | 机制 | 载体 | 生命周期 | 清理责任 | 示例 |
+| --- | --- | --- | --- | --- | --- |
+| **业务状态 / 跨组件共享数据** | VM 不可变快照 | `ObservableViewModelMixin` + `use_viewmodel`（内部模式组件 / 外部模式消费方） | 与 VM 同寿 | hook cleanup（退订 + dispose） | 分页/排序/筛选、AI 流式卡片、总条数 |
+| **进程级单值（locale / theme 等）** | 全局 `ft.Observable` 状态源 | `I18nState` / `AppColorsState` 等模块级或类级状态体 | 进程 | 仅测试 `_reset_*` / 版本化状态源 | locale、主题色 |
+| **纯本地 UI 态（展开/折叠/焦点/编辑中间态）** | 组件局部 `use_state` | 组件内 `use_state(value)` | 组件挂载期 | 框架 | 面板展开、输入焦点 |
+| **跨视图一次性信号** | `page.pubsub` | Flet session pubsub topic | Flet session | 组件 effect cleanup，**须说明多订阅者语义** | `TOPIC_NAVIGATE` |
+
+**判定顺序**：先问是否业务状态（进快照）→ 是否进程级单值（global Observable）→ 是否纯本地 UI 态（use_state）→ 仅当"跨视图、一次性、需广播给多个订阅者"才用 pubsub。**禁止把业务状态塞进 `use_state` 或 global Observable**（会绕过 VM 不可变快照契约，复制出双轨制）。
+
+**pubsub 使用红线**：订阅 `page.pubsub` 前必须确认该 topic 的**多订阅者语义**（同一 topic 上 `unsubscribe_topic(topic)` 会移除整个 session 在该 topic 的全部 handler，任一方退订会误伤其他订阅者——见 UIX-01）。能改全局 Observable 信号源转发的场景优先用 Observable，pubsub 只保留给唯一订阅者的一次性导航类信号。
+
 ### 存量技术债
 
 [ui/viewmodels/](../../ui/viewmodels/) 下所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）+ state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。已知例外清单见 `ui/viewmodels/` 审查记录。
