@@ -20,6 +20,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_change, safe_on_click
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -129,7 +130,7 @@ def _build_links_row(provider: str) -> ft.Row:
             )
         )
 
-    return ft.Row(controls=links, spacing=10, wrap=True)
+    return SafeWrapRow(controls=links, spacing=10)
 
 
 # --- Event handler factories (submit VM commands via page.run_task) ---

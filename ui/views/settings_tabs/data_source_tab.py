@@ -35,6 +35,7 @@ from ui.components.flet_type_helpers import (
     safe_on_select,
 )
 from ui.components.health_report_dialog import HealthReportDialog, HealthScanDialog
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.components.settings_widgets import (
     ActionChip,
     DashboardCard,
@@ -169,7 +170,7 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
                 spacing=5,
                 alignment=ft.MainAxisAlignment.START,
             ),
-            ft.Row(integrity_items, spacing=5, alignment=ft.MainAxisAlignment.START, wrap=True),
+            SafeWrapRow(integrity_items, spacing=5, alignment=ft.MainAxisAlignment.START),
             ft.Row(
                 [
                     ft.Icon(ft.Icons.VERIFIED, size=AppStyles.FONT_SIZE_LG, color=AppColors.PRIMARY),
@@ -527,11 +528,10 @@ def _build_historical_card(
         subtitle=I18n.get("settings_hint_first_run"),
         control=ft.Column(
             [
-                ft.Row(
+                SafeWrapRow(
                     [history_years_dropdown, sync_button],
                     alignment=ft.MainAxisAlignment.END,
                     spacing=10,
-                    wrap=True,
                 ),
                 ft.Row(
                     [
