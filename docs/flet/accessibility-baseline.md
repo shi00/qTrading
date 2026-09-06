@@ -49,7 +49,8 @@
 
 - **响应式布局**：窄布局下不得通过 `visible=False` 隐藏操作入口（如「运行」「保存」按钮）。
 - **替代方案**：若空间不足，操作入口可折叠到菜单（`ft.PopupMenuItem`）或图标按钮（带 `tooltip`），但不得完全隐藏。
-- **响应式栅格**：视图栅格统一使用 [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置（`COL_FULL`/`COL_HALF`/`COL_THIRD`/`COL_QUARTER`/`COL_TWO_THIRDS`），其断点键沿用 Flet `ResponsiveRow` 默认档位（xs/sm/md/lg）；桌面端窗口最小宽度 1280（`app/window_lifecycle.py`），布局设计以该宽度为下限。
+- **响应式栅格**：视图栅格**推荐使用** [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置（`COL_FULL`/`COL_HALF`/`COL_THIRD`/`COL_QUARTER`/`COL_TWO_THIRDS`），**新增布局优先使用 `COL_*`**；其断点键沿用 Flet `ResponsiveRow` 默认档位（xs/sm/md/lg）；桌面端窗口最小宽度 1280（`app/window_lifecycle.py`），布局设计以该宽度为下限。
+  - **现状**：`AppStyles.COL_*` 字面引用仅 3 处/2 文件（其中 `backtest_result_panel.py` 经 `_COL_QUARTER` 别名间接使用 8 处），`ResponsiveRow` 提及 19 次（实测构造 14 处/10 文件），16/19 未使用规定栅格配置（报告口径）；存量迁移跟踪见 UIX-13 结构性批次（响应式断点模型）。
 
 ## 3. 审查清单（PR 评审用）
 
