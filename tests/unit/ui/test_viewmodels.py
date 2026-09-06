@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from ui.viewmodels.home_view_model import HomeViewModel
-from ui.viewmodels.screener_view_model import ScreenerViewModel
+from ui.viewmodels.screener_view_model import RealtimeSnapshot, ScreenerViewModel
 
 pytestmark = pytest.mark.unit
 
@@ -466,7 +466,15 @@ class TestScreenerViewModelDispose:
         screener_vm._main_loop = MagicMock()
         screener_vm._full_results = pd.DataFrame({"a": [1]})
         screener_vm._ai_buffer = [{"x": 1}]
-        screener_vm._realtime_snapshot = {"full_results": pd.DataFrame()}
+        screener_vm._realtime_snapshot = RealtimeSnapshot(
+            full_results=pd.DataFrame(),
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            ai_buffer=[],
+            stream_cards=(),
+            stream_buffers={},
+        )
         screener_vm.dispose()
         assert screener_vm._main_loop is None
         assert screener_vm._full_results is None
@@ -573,8 +581,8 @@ class TestScreenerViewModelSwitchToHistory:
         screener_vm.switch_to_history()
         assert screener_vm.state.mode == "HISTORY"
         assert screener_vm._realtime_snapshot is not None
-        assert screener_vm._realtime_snapshot["full_results"] is df
-        assert screener_vm._realtime_snapshot["page_no"] == 3
+        assert screener_vm._realtime_snapshot.full_results is df
+        assert screener_vm._realtime_snapshot.page_no == 3
         assert screener_vm._full_results is None
         assert screener_vm.state.page_no == 1
 
@@ -591,13 +599,15 @@ class TestScreenerViewModelSwitchToRealtime:
         # 与 tests/unit/test_screener_view_model.py 同构 (页码 clamp 后不允许越界)
         df = pd.DataFrame({"a": range(150)})
         screener_vm._set_state(mode="HISTORY")
-        screener_vm._realtime_snapshot = {
-            "full_results": df,
-            "page_no": 3,
-            "sort_column": "a",
-            "sort_ascending": False,
-            "ai_buffer": [{"x": 1}],
-        }
+        screener_vm._realtime_snapshot = RealtimeSnapshot(
+            full_results=df,
+            page_no=3,
+            sort_column="a",
+            sort_ascending=False,
+            ai_buffer=[{"x": 1}],
+            stream_cards=(),
+            stream_buffers={},
+        )
         screener_vm.switch_to_realtime()
         assert screener_vm.state.mode == "REALTIME"
         assert screener_vm._full_results is df
@@ -606,13 +616,15 @@ class TestScreenerViewModelSwitchToRealtime:
 
     def test_merges_discarded_buffer(self, screener_vm):
         screener_vm._set_state(mode="HISTORY")
-        screener_vm._realtime_snapshot = {
-            "full_results": None,
-            "page_no": 1,
-            "sort_column": None,
-            "sort_ascending": True,
-            "ai_buffer": [],
-        }
+        screener_vm._realtime_snapshot = RealtimeSnapshot(
+            full_results=None,
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            ai_buffer=[],
+            stream_cards=(),
+            stream_buffers={},
+        )
         screener_vm._discarded_buffer = [{"y": 2}, {"y": 3}]
         screener_vm.switch_to_realtime()
         assert screener_vm._ai_buffer == [{"y": 2}, {"y": 3}]

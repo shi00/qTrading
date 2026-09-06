@@ -5,8 +5,9 @@ import io
 import logging
 import time
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -102,6 +103,23 @@ class HistoryTreeState:
 
 
 @dataclass(frozen=True)
+class RealtimeSnapshot:
+    """HISTORY 切换前的实时态快照 (M12-017 不可变加固: dict → frozen dataclass).
+
+    frozen 契约使字段缺失在构造期即报错 (不再靠 switch_to_realtime 里 dict .get 静默缺省);
+    ai_buffer/stream_buffers 为 VM 内部可变缓冲, 仅随快照整体保存/恢复引用, 不改写其内容.
+    """
+
+    full_results: pd.DataFrame | None
+    page_no: int
+    sort_column: str | None
+    sort_ascending: bool
+    ai_buffer: list[dict]
+    stream_cards: tuple[StreamCard, ...]
+    stream_buffers: dict[str, dict]
+
+
+@dataclass(frozen=True)
 class StrategyDepRow:
     """单个策略的依赖信息行 (D10: 替换 ``{"name": str, "missing_apis": list}`` 裸 dict).
 
@@ -164,7 +182,9 @@ class ScreenerState:
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
     # D3: 策略参数 (View 编辑中间态下沉 VM — 消除 View params_ref 双轨).
     # 每次 set_strategy_param 生成新 dict (不可变快照), 切换策略时 init 重置.
-    strategy_params: dict[str, Any] = field(default_factory=dict)
+    # M12-017: dict → Mapping; set/init/reset 均经 MappingProxyType 只读包装,
+    # External 无法就地写. (空默认仍为只读空 dict, 无熵)
+    strategy_params: Mapping[str, Any] = field(default_factory=dict)
     # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
@@ -204,8 +224,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._last_ai_update = 0.0
         self._flush_pending = False
 
-        # History mode snapshot (internal)
-        self._realtime_snapshot: dict | None = None
+        # History mode snapshot (internal, frozen dataclass — M12-017)
+        self._realtime_snapshot: RealtimeSnapshot | None = None
 
         # Stream card buffers (VM owns card lifecycle, §3.2 MVVM state-driven)
         self._stream_buffers: dict[str, dict] = {}
@@ -254,6 +274,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # disposed guard 保留（与 Mixin 的 disposed guard 冗余但不报错，保留作为短路优化）
         if self._disposed:
             return
+        if "strategy_params" in changes:
+            # M12-017 根因护栏：state 边界统一强制只读，防内部/测试绕开命名
+            # setter 以可变 dict 注入，破坏不可变快照契约。dict(mapping) 拷贝后只读包装。
+            changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None) -> None:
@@ -431,15 +455,15 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 defaults[p["name"]] = self.get_base_prompt(strategy_key) or p.get("default", "")
             else:
                 defaults[p["name"]] = p.get("default")
-        self._set_state(strategy_params=defaults)
+        self._set_state(strategy_params=MappingProxyType(defaults))
 
     def set_strategy_param(self, name: str, value: Any) -> None:
         """更新单个策略参数 (生成新 dict 保持不可变快照)."""
-        self._set_state(strategy_params={**self._state.strategy_params, name: value})
+        self._set_state(strategy_params=MappingProxyType({**self._state.strategy_params, name: value}))
 
     def reset_strategy_params(self) -> None:
         """清空策略参数草稿 (策略取消选中时调用)."""
-        self._set_state(strategy_params={})
+        self._set_state(strategy_params=MappingProxyType({}))
 
     async def reset_strategy_prompt(self, strategy_key: str) -> str:
         """重置策略 prompt 为默认值 (Phase 3.3: 从 View 迁入, 内聚到 VM).
@@ -1453,15 +1477,15 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if self._state.mode == "HISTORY":
             return
         # Snapshot realtime state
-        self._realtime_snapshot = {
-            "full_results": self._full_results,
-            "page_no": self._state.page_no,
-            "sort_column": self._state.sort_column,
-            "sort_ascending": self._state.sort_ascending,
-            "ai_buffer": self._ai_buffer[:],
-            "stream_cards": self._state.stream_cards,
-            "stream_buffers": dict(self._stream_buffers),
-        }
+        self._realtime_snapshot = RealtimeSnapshot(
+            full_results=self._full_results,
+            page_no=self._state.page_no,
+            sort_column=self._state.sort_column,
+            sort_ascending=self._state.sort_ascending,
+            ai_buffer=self._ai_buffer[:],
+            stream_cards=self._state.stream_cards,
+            stream_buffers=dict(self._stream_buffers),
+        )
         # Clear for history data
         self._full_results = None
         self._ai_buffer = []
@@ -1485,14 +1509,15 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if self._state.mode == "REALTIME":
             return
         # Restore snapshot
-        if self._realtime_snapshot:
-            self._full_results = self._realtime_snapshot["full_results"]
-            pn = self._realtime_snapshot["page_no"]
-            sc = self._realtime_snapshot["sort_column"]
-            sa = self._realtime_snapshot["sort_ascending"]
-            self._ai_buffer = self._realtime_snapshot["ai_buffer"]
-            stream_cards = self._realtime_snapshot.get("stream_cards", ())
-            self._stream_buffers = self._realtime_snapshot.get("stream_buffers", {})
+        snap = self._realtime_snapshot
+        if snap is not None:
+            self._full_results = snap.full_results
+            pn = snap.page_no
+            sc = snap.sort_column
+            sa = snap.sort_ascending
+            self._ai_buffer = snap.ai_buffer
+            stream_cards = snap.stream_cards
+            self._stream_buffers = snap.stream_buffers
             self._realtime_snapshot = None
             # U-3 fix: Merge discarded_buffer back to ai_buffer
             if self._discarded_buffer:
