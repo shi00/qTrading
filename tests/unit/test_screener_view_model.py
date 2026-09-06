@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import tempfile
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -1672,6 +1673,8 @@ class TestScreenerViewModelStrategyParams:
         vm = ScreenerViewModel()
         vm._set_state(strategy_params={"top_n": 50, "pe": 10})
         original = vm.state.strategy_params
+        # M12-017 根因护栏: _set_state 直接注入可变 dict 时, 必须经 MappingProxyType 冻结
+        assert type(vm.state.strategy_params) is MappingProxyType
 
         vm.set_strategy_param("top_n", 100)
 

@@ -274,6 +274,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # disposed guard 保留（与 Mixin 的 disposed guard 冗余但不报错，保留作为短路优化）
         if self._disposed:
             return
+        if "strategy_params" in changes:
+            # M12-017 根因护栏：state 边界统一强制只读，防内部/测试绕开命名
+            # setter 以可变 dict 注入，破坏不可变快照契约。dict(mapping) 拷贝后只读包装。
+            changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None) -> None:
