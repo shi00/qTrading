@@ -20,6 +20,7 @@ import asyncio
 import datetime
 import inspect
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -39,6 +40,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
+    ScreenerRow,
     ScreenerState,
     StrategyDepRow,
     StrategyRunRow,
@@ -406,10 +408,21 @@ class _FakeScreenerViewModel:
         """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
         return f"列别名[{col}]"
 
-    def get_current_page_data(self) -> Any:
-        if self._current_page_data is not None:
-            return self._current_page_data
-        return pd.DataFrame()
+    def _set_current_page_rows(self, df: pd.DataFrame | None, page_no: int = 1, page_size: int = 50) -> None:
+        """C2b: 注入 state.current_page_rows (locale-neutral 原始行), 替代旧 _current_page_data."""
+        if df is not None and not df.empty:
+            rows = tuple(ScreenerRow(values=MappingProxyType(dict(record))) for record in df.to_dict("records"))
+            total_items = len(df)
+            total_pages = (total_items + page_size - 1) // page_size
+            self._set_state(
+                current_page_rows=rows,
+                total_items=total_items,
+                total_pages=total_pages,
+                page_no=page_no,
+                page_size=page_size,
+            )
+        else:
+            self._set_state(current_page_rows=(), total_items=0, total_pages=0)
 
     def get_export_data(self) -> Any:
         return self._export_data
@@ -631,6 +644,16 @@ def screener_view_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     from ui.views import screener_view as mod
 
     fake_vm = _FakeScreenerViewModel()
+    fake_vm._set_current_page_rows(
+        pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.5, 9.8],
+            }
+        )
+    )
+    # UX-04: has_export_data 基于全量结果近似 (导出判据与表格切片解耦). fixture 默认非空全量.
     fake_vm._current_page_data = pd.DataFrame(
         {
             "ts_code": ["000001.SZ", "000002.SZ"],
@@ -638,7 +661,7 @@ def screener_view_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
             "close": [10.5, 9.8],
         }
     )
-    fake_vm._set_state(total_items=2, total_pages=1, strategies_loaded=True)
+    fake_vm._set_state(strategies_loaded=True)
     mocks = _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
 
     component = make_component(mod.ScreenerView)
@@ -2762,7 +2785,7 @@ class TestTableDataRendering:
     """表格数据渲染: 有数据/无数据."""
 
     def test_no_data_renders_empty_state(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回空 DataFrame → EmptyState 渲染 (P1-3 批次 2 #70).
+        """state.current_page_rows 为空元组 → EmptyState 渲染 (P1-3 批次 2 #70, C2b 改写).
 
         EmptyState 分支替代 PaginatedTable: 无 on_sort/on_row_click 回调捕获。
         清空 captured_callbacks 后 _rerender, 验证无新增回调 (PaginatedTable mock 未被调用)。
@@ -2771,8 +2794,8 @@ class TestTableDataRendering:
         fake_vm = env["fake_vm"]
 
         # 清空数据触发 EmptyState 分支
-        fake_vm._current_page_data = pd.DataFrame()
-        fake_vm._set_state(total_items=0, total_pages=0, strategies_loaded=True)
+        fake_vm._set_current_page_rows(pd.DataFrame())
+        fake_vm._set_state(strategies_loaded=True)
         # 清空 captured_callbacks (初始渲染时已捕获回调), 验证 _rerender 不再新增
         env["captured_callbacks"].clear()
         _rerender(env)
@@ -2797,18 +2820,20 @@ class TestTableDataRendering:
         assert "cta_text" not in empty_state_block, "EmptyState should not have cta_text parameter (Task 3.5)"
 
     def test_with_data_renders_table(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""
+        """state.current_page_rows 非空 (locale-neutral 原始行) → 表格渲染数据 (C2b 改写)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._current_page_data = pd.DataFrame(
-            {
-                "ts_code": ["000001.SZ", "000002.SZ"],
-                "name": ["平安银行", "万科A"],
-                "close": [10.5, 9.8],
-            }
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "name": ["平安银行", "万科A"],
+                    "close": [10.5, 9.8],
+                }
+            )
         )
-        fake_vm._set_state(total_items=2, total_pages=1, strategies_loaded=True)
+        fake_vm._set_state(strategies_loaded=True)
         _rerender(env)
 
         # PaginatedTable mock 被调用 (rows 参数含数据)
@@ -2817,7 +2842,7 @@ class TestTableDataRendering:
 
 
 class TestTableDataMemo:
-    """B12: 表格渲染 memo — data_version/page_no/page_size 未变时复用, 分页/空态失效."""
+    """B12: 表格渲染 memo — 以 current_page_rows 引用同一性 + locale 为 key; 内容帧/空态失效."""
 
     @pytest.fixture
     def counting_build(self, screener_view_env, monkeypatch):
@@ -2826,74 +2851,81 @@ class TestTableDataMemo:
         real_build = mod._build_table_data
         calls = {"n": 0}
 
-        def _counting(df, vm):
+        def _counting(current_page_rows, vm):
             calls["n"] += 1
-            return real_build(df, vm)
+            return real_build(current_page_rows, vm)
 
         monkeypatch.setattr(mod, "_build_table_data", _counting)
         return calls
 
     def test_same_key_reuses_memo(self, screener_view_env, counting_build) -> None:
-        """data_version/page_no/page_size 均未变 → 复用 memo, 不再调用 _build_table_data."""
+        """current_page_rows 引用 + locale 均未变 → 复用 memo, 不再调用 _build_table_data."""
         env = screener_view_env
-        # 初始 render 已构建 memo (data_version=0, page_no=1, page_size=50)
+        # 初始 render 已构建 memo
         _rerender(env)
         assert counting_build["n"] == 0, "同 key 重渲染应命中 memo"
 
         _rerender(env)
         assert counting_build["n"] == 0, "再次同 key 重渲染仍应命中 memo"
 
-    def test_data_version_change_invalidates(self, screener_view_env, counting_build) -> None:
-        """data_version 递增 → 重算 (新 run 结果 / 实时流 flush / 排序)."""
+    def test_content_frame_change_invalidates(self, screener_view_env, counting_build) -> None:
+        """内容帧变化 (VM 生成新切片引用, 如新 run 结果/实时流 flush/排序) → 重算."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         _rerender(env)
         assert counting_build["n"] == 0
 
-        fake_vm._set_state(data_version=1)
+        # 同值不同引用 → 必须重算 (C2b: 内容变化由新切片引用表征)
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "name": ["平安银行", "万科A"],
+                    "close": [10.6, 9.8],
+                }
+            )
+        )
         _rerender(env)
-        assert counting_build["n"] == 1, "data_version 变化应重算"
+        assert counting_build["n"] == 1, "新切片引用 (内容帧变化) 应重算"
 
         # 再次同 key 重渲染命中新 memo
         _rerender(env)
         assert counting_build["n"] == 1
 
     def test_pagination_change_invalidates(self, screener_view_env, counting_build) -> None:
-        """page_no / page_size 变化 → 重算 (防止旧分页数据)."""
+        """分页变化 → VM 生成新切片引用 → 重算 (防止旧分页数据)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         _rerender(env)
         assert counting_build["n"] == 0
 
-        fake_vm._set_state(page_no=2, total_items=100, total_pages=2)
+        # 重建 100 行 → 切第 2 页 (page_no=2) 生成新切片引用
+        fake_vm._set_current_page_rows(
+            pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(100)], "close": [float(i) for i in range(100)]}),
+            page_no=2,
+        )
         _rerender(env)
-        assert counting_build["n"] == 1, "page_no 变化应重算"
-
-        fake_vm._set_state(page_size=100, total_pages=1)
-        _rerender(env)
-        assert counting_build["n"] == 2, "page_size 变化应重算"
+        assert counting_build["n"] == 1, "page_no 变化 (新切片) 应重算"
 
     def test_empty_data_invalidates_memo(self, screener_view_env, counting_build) -> None:
-        """空数据 → EmptyState + memo 失效; 恢复数据 (data_version 不变) → 重算非陈旧命中.
+        """空数据 → EmptyState + memo 失效; 恢复数据 → 重算非陈旧命中.
 
-        对应 run 重置/无结果路径不改 data_version 的防陈旧场景 (B12 对抗性检视补充).
+        对应 run 重置/无结果路径不改引用时的防陈旧场景 (B12 对抗性检视补充).
         """
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         # 清空数据 → EmptyState (memo 失效)
-        fake_vm._current_page_data = pd.DataFrame()
-        fake_vm._set_state(total_items=0, total_pages=0)
+        fake_vm._set_current_page_rows(pd.DataFrame())
         env["captured_callbacks"].clear()
         _rerender(env)
         assert counting_build["n"] == 0
         assert "on_sort" not in env["captured_callbacks"], "空态应渲染 EmptyState 而非表格"
 
-        # 恢复数据且 data_version 不变 (模拟 run 结果先于版本递增的窗口) → 必须重算, 不得命中空态前旧 memo
-        fake_vm._current_page_data = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]})
-        fake_vm._set_state(total_items=1, total_pages=1)
+        # 恢复数据 → 必须重算, 不得命中空态前旧 memo
+        fake_vm._set_current_page_rows(pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]}))
         _rerender(env)
         assert counting_build["n"] == 1, "空态失效后恢复数据应重算 (防陈旧命中)"
 
@@ -3246,8 +3278,8 @@ class TestStockFilterUX04:
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._current_page_data = pd.DataFrame()
-        fake_vm._set_state(stock_filter="NOMATCH", total_items=0, total_pages=0, strategies_loaded=True)
+        fake_vm._set_current_page_rows(pd.DataFrame())
+        fake_vm._set_state(stock_filter="NOMATCH", strategies_loaded=True)
         env["captured_callbacks"].clear()
         _rerender(env)
 
