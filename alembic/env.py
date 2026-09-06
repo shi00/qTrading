@@ -14,6 +14,9 @@ except AttributeError:
     pass  # Windows doesn't have tzset
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# DAT-19: alembic/ 目录不在 prepend_sys_path（`=`）内，注册到 sys.path，
+# 使迁移可经顶层 `from _shared_helpers import column_exists` 复用幂等 helper。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 
