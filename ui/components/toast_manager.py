@@ -212,7 +212,7 @@ def show(
         page: 目标页面（调用方显式传入，不在实例/闭包中持有）
         message: 显示文本
         toast_type: 'info' / 'success' / 'error' / 'warning'
-        duration: 自动消失秒数
+        duration: 自动消失秒数, 普通 toast 下限 10s (低于 10 会被 clamp 到 10, 见 §2.3)
         action_text: 操作按钮文本 (P2-10); None 时不显示按钮
         on_action: 操作按钮回调 (P2-10); action_text 非空时必填
     """
@@ -233,6 +233,10 @@ def show(
     # P2-10: action toast 用更长 duration (30s), 给用户足够时间点击操作
     if action_text is not None:
         duration = 30
+    else:
+        # 无障碍最低标准 (docs/flet/accessibility-baseline.md §2.3): 普通 toast
+        # duration 不得低于 10s (对齐本函数默认值), 防止瞬态通知对读屏用户不可达
+        duration = max(10, duration)
 
     # _mutation_lock 保护 id 自增 + 队列读改写原子性（get_global_state 用 _state_lock，异锁嵌套安全）
     with _mutation_lock:

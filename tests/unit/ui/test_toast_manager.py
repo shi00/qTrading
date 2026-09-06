@@ -1316,14 +1316,22 @@ class TestToastAction:
         assert toast.action_text == "打开文件夹"
         assert toast.on_action is cb
 
-    def test_show_without_action_keeps_duration(self):
-        """无 action_text 时 duration 不被覆盖。"""
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [(0, 10), (-5, 10), (7, 10), (10, 10), (30, 30)],
+    )
+    def test_show_without_action_clamps_duration_to_minimum(self, given, expected):
+        """无 action_text 时 duration 不得低于 10s 无障碍下限 (accessibility-baseline §2.3)。
+
+        低于 10s 的 duration 会被 clamp 到 10s，防止瞬态通知对读屏用户不可达；
+        不低于 10s 的 duration 不被误伤。
+        """
         page = self._make_page()
         manager = ToastManager(page)
-        manager.show("plain", duration=7)
+        manager.show("plain", duration=given)
 
         state = get_global_state()
-        assert state.toasts[0].duration == 7
+        assert state.toasts[0].duration == expected
         assert state.toasts[0].action_text is None
         assert state.toasts[0].on_action is None
 
