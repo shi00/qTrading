@@ -1784,20 +1784,25 @@ class TestDataSourceTabStateEffects:
         texts = _find_by_type(result, ft.Text)
         assert any(t.value == "common_check_fail" for t in texts)
 
-    def test_cache_cleared_version_change_triggers_pubsub(
+    def test_cache_cleared_version_change_triggers_notify(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """cache_cleared_version 变化 → page.pubsub.send_all_on_topic 调用。"""
+        """cache_cleared_version 变化 → notify_cache_cleared() 递增 Observable seq (UIX-01).
+
+        发送方直连 Observable: 版本变化触发 effect 调 notify_cache_cleared(), 断言全局
+        CacheClearedState.seq 单调递增, 以行为副作用代替无参 mock 弱断言。
+        """
+        from ui.cache_cleared_state import get_cache_cleared_state
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         page = _make_fake_page()
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component, page=page)
+        before = get_cache_cleared_state().seq
         fake_vm._set_state(cache_cleared_version=1)
         run_render_effects(component)
-        # mount effect + render effect 都可能触发, 用 assert_called 容忍多次
-        page.pubsub.send_all_on_topic.assert_called()
+        assert get_cache_cleared_state().seq > before
 
 
 # ============================================================================

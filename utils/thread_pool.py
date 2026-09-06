@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import functools
+import inspect
 import logging
 import threading
 from collections.abc import Callable
@@ -284,25 +285,12 @@ class ThreadPoolManager:
         固有语义——线程无法被外部中断）。需要真正可中断的长任务，必须自行接受
         ``threading.Event`` 并在函数体内周期性检查。
         """
-        import inspect
 
         def is_coro(f):
-            import sys
-
-            if "unittest.mock" in sys.modules:
-                try:
-                    from unittest.mock import NonCallableMock
-
-                    if isinstance(f, NonCallableMock):
-                        return False
-                except ImportError:
-                    pass
-
-            if inspect.iscoroutinefunction(f):
-                return True
-            if hasattr(f, "func"):
-                return is_coro(f.func)
-            return False
+            # 3.13+ inspect.iscoroutinefunction 内部经 functools._unwrap_partial 循环解包
+            # functools.partial（含多层嵌套），无需手动递归 hasattr(f, "func") 分支；
+            # 且该递归对 MagicMock 会因动态属性产生无限递归（CON-06）。
+            return inspect.iscoroutinefunction(f)
 
         if is_coro(func):
             func_name = getattr(func, "__name__", None) or getattr(getattr(func, "func", None), "__name__", "unknown")

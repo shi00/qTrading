@@ -27,9 +27,10 @@ from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.components.state_views import ErrorState
+from ui.cache_cleared_state import get_cache_cleared_state
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.pubsub_topics import CACHE_CLEARED_TOPIC, TOPIC_NAVIGATE
+from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel
@@ -73,11 +74,6 @@ def HomeView(
     ft.use_state(AppColors.get_observable_state)
 
     # --- Handlers ---
-
-    def _on_broadcast_message(topic: str, message: str) -> None:
-        """PubSub topic 事件处理 (cache_cleared → 清空状态)."""
-        if topic == CACHE_CLEARED_TOPIC and message == "cache_cleared":
-            vm.clear_state()
 
     def _refresh_clicked(e: ft.ControlEvent) -> None:
         ensure_correlation_id()
@@ -181,27 +177,21 @@ def HomeView(
                 exc_info=True,
             )
 
-    # --- PubSub 订阅/退订 (Phase 3.0.3 模式) ---
+    # --- CacheCleared 订阅 (UIX-01: pubsub → Observable 转发, 保留 active 门控) ---
 
-    async def _setup_pubsub() -> None:
-        if not active:
+    # 信号当前快照 (经 use_state(get_cache_cleared_state) 订阅 Observable 自动重渲染)
+    cache_state, _ = ft.use_state(get_cache_cleared_state)
+    # 已消费的序号上界 (仅对 seq 变化生效; mount/active 翻转 seq 未变则早返)
+    last_seq = ft.use_ref(cache_state.seq)
+
+    def _on_cache_seq_change() -> None:
+        if cache_state.seq == last_seq.current:
             return
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.pubsub.subscribe_topic(CACHE_CLEARED_TOPIC, _on_broadcast_message)
-        except RuntimeError:
-            pass
+        last_seq.current = cache_state.seq
+        if active:
+            vm.clear_state()
 
-    async def _cleanup_pubsub() -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC)
-        except RuntimeError:
-            pass
-
-    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
+    ft.use_effect(_on_cache_seq_change, dependencies=[cache_state.seq, active])
 
     # --- 初始加载 (mount 时执行一次; active 失活经 cleanup 调 vm.stop() 退订) ---
 

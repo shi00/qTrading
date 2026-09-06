@@ -113,7 +113,8 @@ def use_viewmodel[T: _ViewModelProtocol](
         # UIX-03 补偿: 订阅在 mount effect 阶段才建立, 而 VM 在渲染期构造。若 VM 构造即
         # 启动加载并在订阅前完成(本地缓存命中最易触发), 该变更对 _notify(此时 _subscribers
         # 为空)静默丢弃且不进 pending 缓冲。此处订阅后立即补一次同步, 取最新已提交快照,
-        # 消除"首帧通知丢失"导致的骨架屏永久停留。set_state 幂等(同值 Flet 不重渲染)。
+        # 消除"首帧通知丢失"导致的骨架屏永久停留。UIX-04 换实例场景同理需要该补偿:
+        # 新实例已提交的快照不会重放, 靠订阅后立即同步收敛到新实例最新状态。set_state 幂等。
         set_state(resolved_vm.state)
 
     def cleanup() -> None:
@@ -123,6 +124,10 @@ def use_viewmodel[T: _ViewModelProtocol](
         if should_dispose:
             resolved_vm.dispose()
 
-    ft.use_effect(setup, dependencies=[], cleanup=cleanup)
+    # UIX-04: dependencies 用 resolved_vm 对象身份, 替代恒为 [] 的 deps。
+    # - 内部模式: resolved_vm = vm_ref.current 恒为同一实例 → deps 恒定, effect 不重跑(等价原 [])。
+    # - 外部模式: 同实例也不重跑; 若消费方切换 vm 实例, 自动 cleanup 旧订阅 + 重订阅 + 补偿,
+    #   把"外部实例可变"从约定升级为结构约束(否则 deps=[] 会让子组件永久停留在旧实例快照)。
+    ft.use_effect(setup, dependencies=[resolved_vm], cleanup=cleanup)
 
     return state, resolved_vm
