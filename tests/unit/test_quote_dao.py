@@ -725,8 +725,8 @@ class TestQuoteDaoGetBulkExpectedStockCounts:
         await dao.get_bulk_expected_stock_counts("20240101", "20240601")
         call_args = dao._read_db.call_args
         params = call_args[0][1]
-        assert params[0] == "20240101"
-        assert params[1] == "20240601"
+        assert params[0] == datetime.date(2024, 1, 1)
+        assert params[1] == datetime.date(2024, 6, 1)
 
     @pytest.mark.asyncio
     async def test_date_normalization(self):
@@ -918,7 +918,7 @@ class TestQuoteDaoCoverageGaps:
         assert result is not None
         dao._read_db.assert_called_once_with(
             "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE 1=1 AND trade_date>=$1 AND trade_date<=$2 ORDER BY trade_date, ts_code",
-            ["20240101", "20240630"],
+            [datetime.date(2024, 1, 1), datetime.date(2024, 6, 30)],
         )
 
     @pytest.mark.asyncio
@@ -929,7 +929,7 @@ class TestQuoteDaoCoverageGaps:
         assert result is not None
         dao._read_db.assert_called_once_with(
             "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE 1=1 AND trade_date>=$1 AND trade_date<=$2 ORDER BY trade_date, ts_code",
-            ["20240101", "20240630"],
+            [datetime.date(2024, 1, 1), datetime.date(2024, 6, 30)],
         )
 
     @pytest.mark.asyncio
@@ -940,7 +940,7 @@ class TestQuoteDaoCoverageGaps:
         assert result is not None
         dao._read_db.assert_called_once_with(
             "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE trade_date=$1",
-            ["20240615"],
+            [datetime.date(2024, 6, 15)],
         )
 
     @pytest.mark.asyncio
@@ -1082,7 +1082,7 @@ class TestQuoteDaoGetTopListRange:
         assert "ts_code" in result.columns
         dao._read_db.assert_called_once_with(
             "SELECT * FROM top_list WHERE trade_date >= $1 AND trade_date <= $2",
-            ["20240601", "20240615"],
+            [datetime.date(2024, 6, 1), datetime.date(2024, 6, 15)],
         )
 
     @pytest.mark.asyncio

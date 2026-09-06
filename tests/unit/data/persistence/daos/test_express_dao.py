@@ -111,7 +111,7 @@ class TestGetExpressBatch:
         dao.chunked_in_query.assert_awaited_once()
         call_kwargs = dao.chunked_in_query.call_args.kwargs
         params_fn = call_kwargs["params_fn"]
-        assert params_fn(["000001.SZ"]) == ["20241015"]
+        assert params_fn(["000001.SZ"]) == [datetime.date(2024, 10, 15)]
 
     @pytest.mark.asyncio
     async def test_without_as_of_date_invokes_chunked_in_query(self):
