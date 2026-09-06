@@ -937,7 +937,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
                     if save_failed_reason is not None:
                         self._set_state(
-                            page_no=1,
                             loading=False,
                             status_message=Message(
                                 "screener_done_unsaved",
@@ -951,7 +950,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                         )
                     else:
                         self._set_state(
-                            page_no=1,
                             loading=False,
                             status_message=Message(
                                 "screener_done_saved",
@@ -965,7 +963,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 self._full_results = pd.DataFrame()
                 self._update_pagination(page_no=1)
                 self._set_state(
-                    page_no=1,
                     loading=False,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
@@ -1015,8 +1012,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # Reset Local UI State
         self._full_results = None
         self._ai_buffer = []
+        # C2b H1: 清空结果后经唯一 owner 重算分页与当前页切片 (空表 + loading 转圈, 不残留旧帧)
+        self._update_pagination(page_no=1)
         self._set_state(
-            page_no=1,
             loading=True,
             # §3.2: VM 只产出 i18n key (name_key), View 渲染时翻译为当前 locale 策略名.
             # 避免 VM 持有翻译字符串导致 locale 切换后 state 残留旧 locale 翻译.
