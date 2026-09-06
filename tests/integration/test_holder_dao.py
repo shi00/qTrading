@@ -6,6 +6,7 @@
 - L2: 批量预取避免 N+1 查询
 """
 
+import datetime
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -303,7 +304,7 @@ class TestHolderDaoIncremental:
 
     @pytest.mark.asyncio
     async def test_get_existing_top10_ts_codes_correct_sql(self, holder_dao):
-        """验证 SQL 查询使用了正确的 period 参数"""
+        """验证 SQL 查询使用正确的 period 参数（DAT-26：DAO 边界经 _to_db_date 归一化为 datetime.date 对象）"""
         with patch.object(
             holder_dao,
             "_read_db",
@@ -316,4 +317,4 @@ class TestHolderDaoIncremental:
             call_args = mock_read.call_args
             assert "top10_holders" in call_args[0][0]
             assert "end_date" in call_args[0][0]
-            assert call_args[0][1] == ("20230930",)
+            assert call_args[0][1] == (datetime.date(2023, 9, 30),)
