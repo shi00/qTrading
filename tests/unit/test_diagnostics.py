@@ -54,11 +54,11 @@ def _patch_diagnostics_env(
     mock_tm.get_all_tasks.return_value = []
 
     mock_tp = MagicMock()
+    mock_tp.io_pool_max_workers = 10
+    mock_tp.cpu_pool_max_workers = 4
     mock_io_pool = MagicMock()
-    mock_io_pool._max_workers = 10
     mock_io_pool._threads = []
     mock_cpu_pool = MagicMock()
-    mock_cpu_pool._max_workers = 4
     mock_cpu_pool._threads = []
     mock_tp.io_pool = mock_io_pool
     mock_tp.cpu_pool = mock_cpu_pool
@@ -126,11 +126,11 @@ async def test_diagnostics_export(tmp_path):
 
         # Mock ThreadPoolManager
         mock_tp = MagicMock()
+        mock_tp.io_pool_max_workers = 10
+        mock_tp.cpu_pool_max_workers = 4
         mock_io_pool = MagicMock()
-        mock_io_pool._max_workers = 10
         mock_io_pool._threads = []
         mock_cpu_pool = MagicMock()
-        mock_cpu_pool._max_workers = 4
         mock_cpu_pool._threads = []
         mock_tp.io_pool = mock_io_pool
         mock_tp.cpu_pool = mock_cpu_pool
@@ -243,11 +243,11 @@ async def test_diagnostics_export_with_numpy_types(tmp_path):
         mock_tm.get_all_tasks.return_value = []
 
         mock_tp = MagicMock()
+        mock_tp.io_pool_max_workers = 10
+        mock_tp.cpu_pool_max_workers = 4
         mock_io_pool = MagicMock()
-        mock_io_pool._max_workers = 10
         mock_io_pool._threads = []
         mock_cpu_pool = MagicMock()
-        mock_cpu_pool._max_workers = 4
         mock_cpu_pool._threads = []
         mock_tp.io_pool = mock_io_pool
         mock_tp.cpu_pool = mock_cpu_pool

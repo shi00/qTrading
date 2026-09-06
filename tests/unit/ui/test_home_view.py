@@ -110,9 +110,15 @@ class TestHomeViewDeclarativeContract:
         assert "_page_ref" not in content
 
     def test_no_use_ref_cache_imperative(self) -> None:
-        """验证无 use_ref 缓存命令式控件实例 (声明式红线 4)."""
+        """验证无 use_ref 缓存命令式控件实例 (声明式红线 4).
+
+        UIX-01: home_view 引入 ``ft.use_ref(cache_state.seq)`` 缓存 CacheCleared
+        信号序号 (非控件实例, 用于 seq 去重); 该用法允许. 移除该固定模式后仍不得
+        出现任何其余 use_ref (守护不缓存命令式控件).
+        """
         content = _read_source()
-        assert "use_ref" not in content
+        stripped = content.replace("ft.use_ref(cache_state.seq)", "")
+        assert "use_ref" not in stripped
 
     def test_uses_use_viewmodel(self) -> None:
         """验证通过 use_viewmodel(HomeViewModel) 消费 VM (内部 VM 模式)."""
@@ -134,19 +140,19 @@ class TestHomeViewDeclarativeContract:
         content = _read_source()
         assert "ft.context.page" in content
 
-    def test_uses_pubsub_use_effect(self) -> None:
-        """验证 PubSub 用 use_effect(setup, [], cleanup=cleanup) topic 模式."""
+    def test_uses_cache_cleared_observable_effect(self) -> None:
+        """UIX-01: cache_cleared 用 use_state(get_cache_cleared_state) Observable 订阅模式."""
         content = _read_source()
-        assert "page.pubsub.subscribe_topic" in content
-        assert "page.pubsub.unsubscribe_topic" in content
-        assert "ft.use_effect(" in content
-        assert "cleanup=" in content
+        assert "get_cache_cleared_state" in content
+        assert "use_effect(_on_cache_seq_change" in content
+        assert "CACHE_CLEARED_TOPIC" not in content
 
-    def test_pubsub_uses_topic_unsubscribe(self) -> None:
-        """验证 PubSub 用 unsubscribe_topic 精准退订 (避免误伤其他视图订阅)."""
+    def test_no_pubsub_cache_cleared_subscription(self) -> None:
+        """UIX-01: 不再用 subscribe_topic 订阅 cache_cleared (pubsub 中介已移除)."""
         content = _read_source()
-        assert "page.pubsub.unsubscribe_topic(" in content
-        assert "page.pubsub.unsubscribe()" not in content
+        # TOPIC_NAVIGATE 的 pubsub 发送保留 (app_layout 唯一订阅者), subscribe_topic 已全部移除
+        assert "subscribe_topic" not in content
+        assert "CACHE_CLEARED_TOPIC" not in content
 
     def test_consumes_declarative_market_dashboard(self) -> None:
         """验证消费声明式 MarketDashboard(indices=...) props 推送."""
@@ -437,40 +443,50 @@ class TestHomeViewRuntime:
         run_unmount_effects(component)
         assert mock_home_vm.dispose_called is True
 
-    def test_mount_subscribes_pubsub(
+    def test_uses_observable_not_pubsub_for_cache_cleared(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_home_vm,
     ) -> None:
-        """挂载后 pubsub.subscribe_topic(CACHE_CLEARED_TOPIC) 被调用."""
+        """UIX-01: HomeView 经 get_cache_cleared_state Observable 订阅, 不再使用 pubsub 订阅 cache_cleared.
+
+        发送方 直连 Observable (notify_cache_cleared) 后, HomeView 不再
+        subscribe_topic CACHE_CLEARED_TOPIC。此测试断言: 挂载 后不触发 pubsub
+        subscribe_topic (其影响视图退订连带 误伤已被消除)。
+        """
         from ui.views.home_view import HomeView
-        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 
         component = make_component(HomeView)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
 
-        page.pubsub.subscribe_topic.assert_called_once()
-        args = page.pubsub.subscribe_topic.call_args
-        assert args.args[0] == CACHE_CLEARED_TOPIC
+        page.pubsub.subscribe_topic.assert_not_called()
+        # 源码级守护: 不再引用 CACHE_CLEARED_TOPIC / pubsub 订阅 cache_cleared
+        source = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "home_view.py"
+        content = source.read_text(encoding="utf-8")
+        assert "CACHE_CLEARED_TOPIC" not in content
+        assert "subscribe_topic" not in content
 
-    def test_unmount_unsubscribes_pubsub(
+    def test_unmount_does_not_unsubscribe_pubsub(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_home_vm,
     ) -> None:
-        """卸载后 pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC) 被调用."""
+        """UIX-01: 卸载 不再调用 pubsub.unsubscribe_topic (cache_cleared 已脱离 pubsub).
+
+        unsubscribe_topic 移除 (topic, session_id) 整个 handler 集合, 是 UIX-01
+        根因; 移除 pubsub 中介 后 卸载 无此副作用。
+        """
         from ui.views.home_view import HomeView
-        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 
         component = make_component(HomeView)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
         run_unmount_effects(component)
 
-        page.pubsub.unsubscribe_topic.assert_called_once_with(CACHE_CLEARED_TOPIC)
+        page.pubsub.unsubscribe_topic.assert_not_called()
 
     def test_render_header_contains_title_and_refresh_button(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
@@ -562,51 +578,45 @@ class TestHomeViewRuntime:
         # run_task 被调用 (传入 _load_data 协程函数)
         assert page.run_task.called
 
-    def test_on_broadcast_message_clears_state(
+    def test_cache_cleared_notify_clears_state(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_home_vm,
     ) -> None:
-        """CACHE_CLEARED_TOPIC 事件触发 vm.clear_state + set_market_data({})."""
+        """UIX-01: notify_cache_cleared() 递增 seq → active 视图执行 vm.clear_state.
+
+        发送方 直连 Observable 后, HomeView 经 get_cache_cleared_state 订阅,
+        seq 变化触发 use_effect → active 时调用 clear_state。
+        """
+        from ui.cache_cleared_state import notify_cache_cleared
         from ui.views.home_view import HomeView
-        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 
         component = make_component(HomeView)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
 
-        # 找到 _setup_pubsub 注册的 callback
-        subscribe_call = page.pubsub.subscribe_topic.call_args
-        callback = subscribe_call.args[1]
+        # 触发一次缓存清除通知 (seq 递增)
+        notify_cache_cleared()
+        run_render_effects(component)
 
-        # 触发 cache_cleared 事件
-        callback(CACHE_CLEARED_TOPIC, "cache_cleared")
-
-        # vm.clear_state 被调用
         assert "clear_state" in mock_home_vm.method_calls
 
-    def test_on_broadcast_message_ignores_other_messages(
+    def test_cache_cleared_seq_unchanged_does_not_clear(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_home_vm,
     ) -> None:
-        """非 cache_cleared 消息不触发 clear_state."""
+        """seq 未变化 (mount/active 翻转) 不重复执行 clear_state."""
         from ui.views.home_view import HomeView
-        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 
         component = make_component(HomeView)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
 
-        subscribe_call = page.pubsub.subscribe_topic.call_args
-        callback = subscribe_call.args[1]
-
-        # 触发非 cache_cleared 事件
-        callback(CACHE_CLEARED_TOPIC, "other_message")
-        callback("other_topic", "cache_cleared")
-
+        # 仅 re-render (seq 不变) → 不触发 clear_state
+        run_render_effects(component)
         assert "clear_state" not in mock_home_vm.method_calls
 
     def test_on_news_update_tag_update_no_throw(
@@ -727,17 +737,21 @@ class TestHomeViewActiveProp:
         assert "load_market_data" not in mock_home_vm.method_calls
         assert "refresh_news" not in mock_home_vm.method_calls
 
-    def test_inactive_mount_does_not_subscribe_pubsub(
+    def test_inactive_mount_does_not_clear_on_cache_cleared(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:
-        """active=False 时 page.pubsub.subscribe_topic 未被调用."""
+        """UIX-01: active=False 时 notify_cache_cleared 不触发 vm.clear_state (active 门控)."""
+        from ui.cache_cleared_state import notify_cache_cleared
         from ui.views.home_view import HomeView
 
         component = make_component(HomeView, active=False)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
 
-        page.pubsub.subscribe_topic.assert_not_called()
+        notify_cache_cleared()
+        run_render_effects(component)
+
+        assert "clear_state" not in mock_home_vm.method_calls
 
 
 # ============================================================================
@@ -1042,71 +1056,9 @@ class TestHomeViewExceptionPaths:
         # run_task 未被调用 (page 不可用, 早返回)
         assert not page.run_task.called
 
-    def test_setup_pubsub_page_none_no_throw(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
-        """_setup_pubsub 在 page 不可用时进入 except RuntimeError, 不抛异常.
-
-        覆盖 lines 114->exit (page is None branch) + 116-117 (except RuntimeError: pass).
-
-        实现方式: 包装 FakeSession.schedule_effect, 在执行 effect setup 之前设置
-        _context_page = None. 这样 _schedule_effect (访问 context.page 获取 session)
-        仍能成功, 而 _setup_pubsub 内部 ft.context.page 抛 RuntimeError 被 except 捕获.
-        """
-        from flet.controls.context import _context_page
-
-        from ui.views.home_view import HomeView
-
-        component = make_component(HomeView)
-        page = _make_fake_page()
-
-        # 包装 session.schedule_effect: effect 执行期间 _context_page = None
-        original_schedule = page.session.schedule_effect
-
-        def _schedule_with_no_context(hook: Any, is_cleanup: bool) -> None:
-            token = _context_page.set(None)
-            try:
-                original_schedule(hook, is_cleanup)
-            finally:
-                _context_page.reset(token)
-
-        page.session.schedule_effect = _schedule_with_no_context  # type: ignore[method-assign]
-
-        run_mount_effects(component, page=page)
-
-        # 不抛异常即通过; pubsub.subscribe_topic 未被调用 (page 不可用)
-        assert not page.pubsub.subscribe_topic.called
-
-    def test_cleanup_pubsub_page_none_no_throw(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
-        """_cleanup_pubsub 在 page 不可用时进入 except RuntimeError, 不抛异常.
-
-        覆盖 lines 122->exit (page is None branch) + 124-125 (except RuntimeError: pass).
-        """
-        from flet.controls.context import _context_page
-
-        from ui.views.home_view import HomeView
-
-        component = make_component(HomeView)
-        page = _make_fake_page()
-
-        # 包装 session.schedule_effect: effect 执行期间 _context_page = None
-        original_schedule = page.session.schedule_effect
-
-        def _schedule_with_no_context(hook: Any, is_cleanup: bool) -> None:
-            token = _context_page.set(None)
-            try:
-                original_schedule(hook, is_cleanup)
-            finally:
-                _context_page.reset(token)
-
-        page.session.schedule_effect = _schedule_with_no_context  # type: ignore[method-assign]
-
-        run_mount_effects(component, page=page)
-        # reset 以过滤 mount 时的调用
-        page.pubsub.unsubscribe_topic.reset_mock()
-
-        run_unmount_effects(component)
-
-        # 不抛异常即通过; unsubscribe_topic 未被调用 (page 不可用)
-        assert not page.pubsub.unsubscribe_topic.called
+    # --- UIX-01: _setup_pubsub/_cleanup_pubsub 已删除 (CACHE_CLEARED 脱离 pubsub),
+    #     原 test_setup_pubsub_page_none_no_throw / test_cleanup_pubsub_page_none_no_throw
+    #     针对已不存在的逻辑, 随 UIX-01 移除。
 
 
 # ============================================================================

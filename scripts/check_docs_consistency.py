@@ -105,15 +105,18 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
 _DOC_EXCLUDES: dict[Path, str] = {
     # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
+    ROOT / "docs" / "superpowers": "本地 skill 计划目录（.gitignore 排除），非交付物，不参与文档一致性校验",
 }
 CHECKED_DOCS: list[Path] = sorted(
-    {
+    d
+    for d in {
         *ROOT.glob("*.md"),
         *(ROOT / "docs").rglob("*.md"),
         *(ROOT / "man").rglob("*.md"),
         ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
     }
-    - set(_DOC_EXCLUDES)
+    # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
+    if not any(d == e or e in d.parents for e in _DOC_EXCLUDES)
 )
 
 # Flet 版本漂移检查范围（治理文档）

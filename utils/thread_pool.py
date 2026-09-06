@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import functools
+import inspect
 import logging
 import threading
 from collections.abc import Callable
@@ -73,6 +74,10 @@ class ThreadPoolManager:
                 return
             self._io_pool: concurrent.futures.ThreadPoolExecutor | None = None
             self._cpu_pool: concurrent.futures.ThreadPoolExecutor | None = None
+            # CON-10: 决策后的 worker 数快照（0 = 未初始化/未显式配置/已停机），
+            # 避免每次读取 CPython 私有属性 ThreadPoolExecutor._max_workers。
+            self._io_max_workers = 0
+            self._cpu_max_workers = 0
             self._shutdown_event = threading.Event()
 
             self._init_pools()
@@ -104,6 +109,9 @@ class ThreadPoolManager:
             max_workers=cpu_workers if cpu_workers > 0 else None,
             thread_name_prefix="CPU_Worker",
         )
+        # CON-10: 保存决策后 worker 数，property 返回字段而非私有属性 _max_workers
+        self._io_max_workers = io_workers if io_workers > 0 else 0
+        self._cpu_max_workers = cpu_workers if cpu_workers > 0 else 0
 
     def reload_config(self):
         """Reload pools with new configuration. Swaps pools first to minimize downtime.
@@ -126,11 +134,11 @@ class ThreadPoolManager:
         cpu_workers = ConfigHandler.get_max_cpu_workers()
 
         new_io_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=io_workers,
+            max_workers=io_workers if io_workers > 0 else None,
             thread_name_prefix="IO_Worker",
         )
         new_cpu_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=cpu_workers,
+            max_workers=cpu_workers if cpu_workers > 0 else None,
             thread_name_prefix="CPU_Worker",
         )
 
@@ -149,6 +157,9 @@ class ThreadPoolManager:
 
         self._io_pool = new_io_pool
         self._cpu_pool = new_cpu_pool
+        # CON-10: 字段赋值紧跟 swap（早退分支不触碰字段，保持与 pool 一致）
+        self._io_max_workers = io_workers if io_workers > 0 else 0
+        self._cpu_max_workers = cpu_workers if cpu_workers > 0 else 0
 
         logger.info(
             "Thread Pools swapped. New sizes: IO=%s, CPU=%s",
@@ -214,21 +225,24 @@ class ThreadPoolManager:
     def io_pool_max_workers(self) -> int:
         """Max workers of the IO pool (public API, ASYNC-010).
 
-        Returns 0 if the pool is not initialized or has been shut down.
+        CON-10: 返回 _init_pools/reload_config 保存的决策值快照，不再读取
+        CPython 私有属性 ThreadPoolExecutor._max_workers（无稳定性承诺）。
+        返回 0 表示池未初始化、已停机或未显式配置（0 = 未配置/默认）。
         """
         if self._io_pool is None or self._shutdown_event.is_set():
             return 0
-        return self._io_pool._max_workers
+        return self._io_max_workers
 
     @property
     def cpu_pool_max_workers(self) -> int:
         """Max workers of the CPU pool (public API, ASYNC-010).
 
-        Returns 0 if the pool is not initialized or has been shut down.
+        CON-10: 返回决策值快照（见 io_pool_max_workers）。CPU 未显式配置
+        （配置为 0）时返回 0，消费方（如 TaskManager）应按"未配置"走兜底。
         """
         if self._cpu_pool is None or self._shutdown_event.is_set():
             return 0
-        return self._cpu_pool._max_workers
+        return self._cpu_max_workers
 
     def get_executor(
         self,
@@ -271,25 +285,12 @@ class ThreadPoolManager:
         固有语义——线程无法被外部中断）。需要真正可中断的长任务，必须自行接受
         ``threading.Event`` 并在函数体内周期性检查。
         """
-        import inspect
 
         def is_coro(f):
-            import sys
-
-            if "unittest.mock" in sys.modules:
-                try:
-                    from unittest.mock import NonCallableMock
-
-                    if isinstance(f, NonCallableMock):
-                        return False
-                except ImportError:
-                    pass
-
-            if inspect.iscoroutinefunction(f):
-                return True
-            if hasattr(f, "func"):
-                return is_coro(f.func)
-            return False
+            # 3.13+ inspect.iscoroutinefunction 内部经 functools._unwrap_partial 循环解包
+            # functools.partial（含多层嵌套），无需手动递归 hasattr(f, "func") 分支；
+            # 且该递归对 MagicMock 会因动态属性产生无限递归（CON-06）。
+            return inspect.iscoroutinefunction(f)
 
         if is_coro(func):
             func_name = getattr(func, "__name__", None) or getattr(getattr(func, "func", None), "__name__", "unknown")

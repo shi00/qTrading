@@ -15,7 +15,9 @@ import flet as ft
 import pytest
 
 from tests.unit.ui.component_renderer import (
+    attach_fake_page,
     make_component,
+    render_once,
     run_mount_effects,
     run_render_effects,
     run_unmount_effects,
@@ -105,6 +107,13 @@ def ConsumingComponent():
             ft.Text(value=f"label={state.label}"),
         ],
     )
+
+
+@ft.component
+def ConsumingExternalComponent(vm: FakeViewModel):
+    """外部 VM 模式消费 use_viewmodel 的测试组件（vm 由消费方注入）。"""
+    state, _ = use_viewmodel(vm=vm)
+    return ft.Column(controls=[ft.Text(value=f"value={state.value}")])
 
 
 # ============================================================================
@@ -210,3 +219,63 @@ class TestUseViewmodelHook:
         # VM 实例引用稳定（同一对象）
         vm_id_after = id(vm_ref_hook.ref.current)
         assert vm_id_first == vm_id_after
+
+    def test_subscribe_compensates_mount_before_notify_latest_state(self) -> None:
+        """UIX-03: 订阅建立前已发出的 VM 变更在 mount 后经补偿同步被接收。
+
+        复现场景：VM 在渲染期构造、mount effect 订阅建立之前即完成加载并变更 state
+        （本地缓存命中最易触发）。此变更对空订阅者 _notify 静默丢弃（不进 pending 缓冲）。
+        修复要求 setup() 订阅后补一次 `set_state(resolved_vm.state)`，使首帧渲染到最终状态。
+        """
+        component = make_component(ConsumingComponent)
+        attach_fake_page(component)
+        render_once(component)
+
+        # 首次渲染已构造 VM（use_ref factory），但 mount effects 尚未执行 → 尚未 subscribe
+        vm_ref_hook: Any = component._state.hooks[0]
+        vm = vm_ref_hook.ref.current
+        state_hook: Any = component._state.hooks[1]
+        assert state_hook.value.value == 0  # 首帧快照（use_state 初始化器已捕获）
+
+        # 模拟 VM 在订阅建立前完成为加载并变更 state（_notify 时无订阅者，丢弃）
+        vm.set_value(99)
+        assert vm._subscribers == []  # hook 尚未 subscribe
+
+        # 执行 mount effects：setup() 订阅 + 补偿同步
+        component._state.mounted = True
+        component._run_mount_effects()
+
+        # 修复后 state 已同步为最新快照（无修复时停留在首帧 0）
+        assert state_hook.value.value == 99
+        assert state_hook.value.label == "v99"
+
+    def test_external_vm_swaps_instance_resubscribes(self) -> None:
+        """UIX-04: 外部 VM 模式切换实例后自动重订阅并同步新实例快照。
+
+        deps 用 `resolved_vm` 对象身份后, 实例变化会 cleanup 旧订阅 + 重订阅 + 补偿同步,
+        而相同实例下 effect 不重跑(保证现网外部调用点零行为变化)。
+        """
+        vm1 = FakeViewModel()
+        vm1.set_value(1)
+        component = make_component(ConsumingExternalComponent, vm=vm1)
+        run_mount_effects(component)
+
+        # 外部模式: use_state 是 hook0; state 已同步为 vm1 快照, 已订阅 vm1
+        state_hook: Any = component._state.hooks[0]
+        assert state_hook.value.value == 1
+        assert len(vm1._subscribers) == 1
+
+        # 同一实例的 re-render: effect 不重跑(不重复订阅, 与现网一致)
+        run_render_effects(component)
+        assert len(vm1._subscribers) == 1
+
+        # 更换实例: 父组件传入不同 vm
+        vm2 = FakeViewModel()
+        vm2.set_value(2)
+        component.kwargs = {"vm": vm2}
+        run_render_effects(component)
+
+        # vm1 被退订, vm2 被订阅, state 同步为 vm2 快照(原 deps=[] 会停留在 vm1)
+        assert len(vm1._subscribers) == 0
+        assert len(vm2._subscribers) == 1
+        assert state_hook.value.value == 2
