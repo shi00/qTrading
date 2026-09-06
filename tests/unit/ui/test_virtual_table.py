@@ -28,12 +28,14 @@ import flet as ft
 import pytest
 
 from ui.components.virtual_table import (
+    HEADER_HEIGHT,
     MAX_COL_WIDTH,
     MIN_COL_WIDTH,
     MIN_TABLE_WIDTH,
     PaginatedTable,
     ROW_HEIGHT,
     _ColWidthsCache,
+    _assert_table_positive_size,
     _clamp_width,
     _col_width,
     _total_width,
@@ -170,6 +172,27 @@ class TestClampWidth:
     def test_row_height_meets_minimum(self):
         """UX-11 (P2-03): 行高 30→32, 高于 WCAG 2.2 的 24px 最低目标并预留余量 (Plans 验收 ≥32)。"""
         assert ROW_HEIGHT == 32
+
+
+class TestAssertTablePositiveSize:
+    """零尺寸护栏 (UIX-13 C5): PaginatedTable 结构尺寸不变量 (PR373 视口塌陷防护)。"""
+
+    def test_ok_with_normal_layout(self):
+        """正常结构尺寸 (total_w >= MIN_TABLE_WIDTH, 正的表头/行高) 不抛。"""
+        _assert_table_positive_size(MIN_TABLE_WIDTH, HEADER_HEIGHT, ROW_HEIGHT)
+
+    def test_rejects_below_min_width(self):
+        """total_w 低于 MIN_TABLE_WIDTH 抛 ValueError (防常量归零/宽度退化)。"""
+        with pytest.raises(ValueError, match="结构宽度非法"):
+            _assert_table_positive_size(MIN_TABLE_WIDTH - 1, HEADER_HEIGHT, ROW_HEIGHT)
+
+    def test_rejects_zero_header_height(self):
+        with pytest.raises(ValueError, match="结构高度非法"):
+            _assert_table_positive_size(MIN_TABLE_WIDTH, 0, ROW_HEIGHT)
+
+    def test_rejects_zero_row_height(self):
+        with pytest.raises(ValueError, match="结构高度非法"):
+            _assert_table_positive_size(MIN_TABLE_WIDTH, HEADER_HEIGHT, 0)
 
 
 class TestColWidthsCache:

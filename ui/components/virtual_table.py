@@ -95,6 +95,23 @@ def _clamp_width(width: float, min_width: int, max_width: int) -> int:
     return max(min_width, min(max_width, int(width)))
 
 
+def _assert_table_positive_size(total_w: int, header_h: int, row_h: int) -> None:
+    """零尺寸护栏 (UIX-13 C5): 表格结构性尺寸不得为 0 (PR373 视口塌陷防护).
+
+    背景: flet 0.86.5 无控件级布局后尺寸回调 (无 Container.on_resize),
+    渲染后容器实际可用宽/高由父链 expand 分配、组件层不可测, 故本护栏在
+    结构层锁定不变量 — total_w 不得低于 MIN_TABLE_WIDTH, 表头/行高必须为正,
+    防止常量误改 (如 MIN_TABLE_WIDTH 归零) 或宽度计算退化引入视口塌陷。
+
+    :raises ValueError: 任一结构尺寸违反不变量 (显式异常而非 assert,
+        避免 -O 优化跳过护栏).
+    """
+    if total_w < MIN_TABLE_WIDTH:
+        raise ValueError(f"PaginatedTable 结构宽度非法: total_w={total_w} < MIN_TABLE_WIDTH={MIN_TABLE_WIDTH}")
+    if header_h <= 0 or row_h <= 0:
+        raise ValueError(f"PaginatedTable 结构高度非法: header_h={header_h}, row_h={row_h}")
+
+
 class _ColWidthsCache:
     """列宽拖拽状态缓存 (use_ref 承载, 避免 use_state 触发全表 re-render)。
 
@@ -535,6 +552,9 @@ def PaginatedTable(
 
     total_w = _total_width(cols_list, col_widths)
     row_count = len(rows_list)
+
+    # UIX-13 C5: 零尺寸护栏 (结构不变量, 防 PR373 类视口塌陷; 显式异常见函数 docstring)
+    _assert_table_positive_size(total_w, HEADER_HEIGHT, ROW_HEIGHT)
 
     header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor, col_widths, drag_handlers)
 
