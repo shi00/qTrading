@@ -597,11 +597,18 @@ async def _setup_canvaskit_intercept(page) -> None:
     await page.route("**/*", intercept_external)
 
 
-async def _make_page(browser, app: AppServer, request, *, check_db_error: bool = False) -> FletPage:
+async def _make_page(
+    browser,
+    app: AppServer,
+    request,
+    *,
+    check_db_error: bool = False,
+    viewport: tuple[int, int] = (1400, 900),
+) -> FletPage:
     app.assert_alive()
     logger.info("[E2E Page] creating new browser context for %s", request.node.name)
 
-    context = await browser.new_context(viewport={"width": 1400, "height": 900})
+    context = await browser.new_context(viewport={"width": viewport[0], "height": viewport[1]})
     await context.tracing.start(screenshots=True, snapshots=True)
     page = await context.new_page()
 
@@ -1511,23 +1518,15 @@ def _e2e_app_dep(request) -> AppServer:
         return typing.cast(AppServer, request.getfixturevalue("flet_app_ro"))
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
-    """Function 级 Page：依 mutates_config marker 路由到对应 session pool。
+async def _e2e_page_with_viewport(
+    e2e_browser, app: AppServer, request, *, viewport: tuple[int, int]
+) -> typing.AsyncGenerator[FletPage]:
+    """e2e_page 生命周期（指定视口）：_make_page + slow 放大 + canary + teardown。
 
-    - mutates_config 用例 → flet_app_mut（独立 mutating pool，不播种）
-    - 其他用例 → flet_app_ro + seed_e2e_data（read-only pool，播种）
-
-    契约：mutates_config 用例不依赖种子数据（flet_app_mut 不播种）。
-    如需种子数据，移除 mutates_config marker 改用 read-only pool。
-
-    双 pool 隔离消除 read-only 池被 mutating 池连坐污染（方案 §4.3 Level 2）。
-    CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
-
-    loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
-    fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
+    C5-5 (UIX-13): 1280×720 视口用例复用同一生命周期，仅视口不同（对照
+    docs/flet/accessibility-baseline.md §2.5 最小宽度 1280）。
     """
-    fp = await _make_page(e2e_browser, _e2e_app_dep, request, check_db_error=True)
+    fp = await _make_page(e2e_browser, app, request, check_db_error=True, viewport=viewport)
     if request.node.get_closest_marker("slow"):
         fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
 
@@ -1553,6 +1552,37 @@ async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
         for when in ("setup", "call")
     )
     await _teardown_page(fp, request, failed=failed)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
+    """Function 级 Page：依 mutates_config marker 路由到对应 session pool。
+
+    - mutates_config 用例 → flet_app_mut（独立 mutating pool，不播种）
+    - 其他用例 → flet_app_ro + seed_e2e_data（read-only pool，播种）
+
+    契约：mutates_config 用例不依赖种子数据（flet_app_mut 不播种）。
+    如需种子数据，移除 mutates_config marker 改用 read-only pool。
+
+    双 pool 隔离消除 read-only 池被 mutating 池连坐污染（方案 §4.3 Level 2）。
+    CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
+
+    loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
+    fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
+    """
+    async for fp in _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1400, 900)):
+        yield fp
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def e2e_page_1280x720(e2e_browser, _e2e_app_dep: AppServer, request):
+    """C5-5 (UIX-13): 1280×720 视口 Page（对照 accessibility-baseline §2.5 最小宽度 1280）。
+
+    与 e2e_page 共用生命周期（read-only pool + 播种），仅视口不同；用于断言
+    最小宽度下主要视图无塌陷（PR373 视口塌陷回归防护）。
+    """
+    async for fp in _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1280, 720)):
+        yield fp
 
 
 @pytest.fixture(autouse=True)

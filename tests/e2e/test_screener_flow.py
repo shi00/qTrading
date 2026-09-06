@@ -276,3 +276,26 @@ async def test_screener_pct_chg_positive_prefix(e2e_page):
     plus_prefix_loc = e2e_page.page.locator("text=/\\+\\d+\\.\\d+/")
     await plus_prefix_loc.first.wait_for(state="attached", timeout=TIMEOUTS.INTERACTION)
     assert await plus_prefix_loc.count() > 0, "P3-15: 正值 pct_chg 未显示 '+' 前缀 (色盲友好)"
+
+
+async def test_screener_1280x720_viewport_no_collapse(e2e_page_1280x720):
+    """C5-5 (UIX-13): 1280×720 最小视口下选股主流程无塌陷。
+
+    对照 docs/flet/accessibility-baseline.md §2.5 最小宽度 1280（PR373 视口塌陷
+    回归防护）：1280×720 视口下导航 + 选策略 + 执行 + 结果表 + 分页信息均正常
+    渲染可见（ResponsiveRow 断点对齐 flet 0.86.5，xs 档不塌陷）。
+    """
+    screener = ScreenerPage(e2e_page_1280x720)
+    await screener.open()
+
+    # 页面标题 + 策略选择控件在最小视口下可见
+    await screener.expect_text(I18n.get("screener_title"), timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.expect_text(I18n.get("select_strategy"), timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 选策略 → 执行 → 结果表可见（结果行 + 分页信息）
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    page_info = I18n.get("screener_page_info").format(current=1, total=1)
+    await screener.expect_text(page_info, timeout_ms=TIMEOUTS.INTERACTION)

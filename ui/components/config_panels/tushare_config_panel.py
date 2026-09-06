@@ -23,6 +23,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
@@ -294,11 +295,10 @@ def TushareConfigPanel(
         [
             ft.Column(
                 [
-                    ft.Row(
+                    SafeWrapRow(
                         [token_input] + buttons,
                         alignment=ft.MainAxisAlignment.START,
                         spacing=10,
-                        wrap=True,
                     ),
                     storage_hint_text,
                     tier_dropdown,

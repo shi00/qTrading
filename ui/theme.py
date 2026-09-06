@@ -523,6 +523,16 @@ class AppStyles:
     # EMPTY_STATE_PADDING: 空状态/loading 状态全屏居中容器的内边距 (视觉留白, 远大于普通间距)
     EMPTY_STATE_PADDING = 40
 
+    # --- Responsive Breakpoints (UIX-13: 对齐 flet 0.86.5 ResponsiveRow 默认档位, 见
+    # flet/controls/core/responsive_row.py breakpoints 默认值, Bootstrap 对齐) ---
+    # XS=0 / SM=576 / MD=768 / LG=992 / XL=1200 / XXL=1400 (最小宽度 px)
+    BREAKPOINT_XS = 0
+    BREAKPOINT_SM = 576
+    BREAKPOINT_MD = 768
+    BREAKPOINT_LG = 992
+    BREAKPOINT_XL = 1200
+    BREAKPOINT_XXL = 1400
+
     # --- Responsive Column Configs (标准栅格配置，消除各视图重复硬编码 col={...}) ---
     COL_FULL = {"xs": 12}
     COL_HALF = {"xs": 12, "sm": 6}
