@@ -293,12 +293,14 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
 
-    def _update_pagination(self, page_size: int | None = None, page_no: int | None = None) -> None:
+    def _update_pagination(self, page_size: int | None = None, page_no: int | None = None, **changes) -> None:
         """Recompute pagination fields in state, then notify via _set_state.
 
         C2b H1: 唯一切片 owner。所有导致 ``_full_results`` 或过滤/排序/分页变化的数据写点
         必须汇入本方法，禁止在写点直接拼 ``_set_state(page_no/total_*/current_page_rows)``。
-        本方法原子地产出 ``page_no/total_items/total_pages/current_page_rows``:
+        本方法**单帧原子**地产出 ``page_no/total_items/total_pages/current_page_rows``，
+        并可将写点的非分页字段经 ``**changes`` 一并原子落入同一帧（第 2 轮对抗检视 M-1/H-1：
+        消除「新分页元数据 + 旧切片内容」或「mode 已切换 + 旧内容行」的陈旧中间帧）。
         current_page_rows 存 locale-neutral 原始行 (VM 不调 I18n)，View 渲染期按 locale 格式化。
         内容未变时 (如流式页满后仅 total_* 增长) 复用上一帧引用，使 View 侧格式化 memo 命中。
 
@@ -306,7 +308,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         跨线程封送 + subscribers snapshot）。
         """
         ps = page_size if page_size is not None else self._state.page_size
-        filtered = self._get_filtered_results()
+        # 单帧原子: stock_filter 随 changes 在帧末才落入 state, 计算过滤须显式取本次值
+        # (否则读旧 state.stock_filter, 过滤不生效 — M-1 单帧化时序)
+        filtered = self._get_filtered_results(stock_filter=changes.get("stock_filter"))
         if filtered is not None:
             total_items = len(filtered)
             total_pages = (total_items + ps - 1) // ps
@@ -327,6 +331,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             total_items=total_items,
             total_pages=total_pages,
             current_page_rows=rows,
+            **changes,
         )
 
     @staticmethod
@@ -1131,15 +1136,15 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` /
         ``stock_filter`` 字段 (UX-04), 分页按全量重算保持状态自洽。
         """
-        self._set_state(
+        # C2b H1: 清空筛选/排序后经唯一 owner 单帧原子重算分页与当前页切片
+        # (page_no 不得直写 _set_state: 第 2 轮对抗检视 M-1 消除陈旧中间帧)
+        self._update_pagination(
             page_no=1,
             sort_column=None,
             sort_ascending=True,
             tier_hint=None,
             stock_filter="",
         )
-        # C2b H1: 清空筛选/排序后经唯一 owner 重算分页与当前页切片, 保持表格与 total_* 一致
-        self._update_pagination(page_no=1)
 
     # --- Stock code filter (UX-04 P2-01) ---
 
@@ -1169,12 +1174,9 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         """
         if value == self._state.stock_filter:
             return  # 幂等: 相同值不触发重渲染
-        self._set_state(
-            stock_filter=value,
-            page_no=1,
-        )
-        # C2b H1: 过滤值变化后经唯一 owner 重算分页与当前页切片
-        self._update_pagination(page_no=1)
+        # C2b H1: 过滤值变化后经唯一 owner 单帧原子重算分页与当前页切片
+        # (M-1: page_no 不直写 _set_state, 避免「新 page_no + 旧过滤切片」陈旧帧)
+        self._update_pagination(page_no=1, stock_filter=value)
 
     @property
     def has_export_data(self) -> bool:
@@ -1508,12 +1510,11 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         self._full_results = None
         self._ai_buffer = []
         self._stream_buffers.clear()
-        # _update_pagination only updates pagination fields; sort_* are set in _set_state below.
-        self._update_pagination(page_no=1)
-        # Task 3.2: 重置 history_tree state (消除 View 双轨状态, View 不再 set_history_tree_*)
-        self._set_state(
-            mode="HISTORY",
+        # C2b H1: 经唯一 owner 单帧原子产出「HISTORY + 空表 + 分页归零」,
+        # 避免「mode 未切换 + 空表」或「HISTORY + 旧 REALTIME 切片」陈旧中间帧 (M-1/H-1)
+        self._update_pagination(
             page_no=1,
+            mode="HISTORY",
             sort_column=None,
             sort_ascending=True,
             stream_cards=(),
@@ -1541,17 +1542,16 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 self._ai_buffer.extend(self._discarded_buffer)
                 logger.debug("[ScreenerVM] Merged %s discarded items back to ai_buffer", len(self._discarded_buffer))
                 self._discarded_buffer = []
-            # C2b H1: 恢复快照后经唯一 owner 重算分页与当前页切片 (mode/sort 先落 state)
-            self._set_state(
+            # C2b H1: 恢复快照后经唯一 owner 单帧原子产出「REALTIME + 恢复内容 + 合法页码」,
+            # 避免「mode=REALTIME + HISTORY 旧切片」陈旧中间帧 (M-1/H-1);
+            # UX-04: 快照页码越界时 _update_pagination 已钳制到过滤后合法范围
+            self._update_pagination(
+                page_no=pn,
                 mode="REALTIME",
-                # UX-04: 读回 clamp 后合法页码 — HISTORY 中可能已修改 stock_filter/
-                # page_size 使快照 page_no 越界, _update_pagination 已钳制到合法范围
-                page_no=self._state.page_no,
                 sort_column=sc,
                 sort_ascending=sa,
                 stream_cards=stream_cards,
             )
-            self._update_pagination(page_no=pn)
         else:
             self._set_state(mode="REALTIME")
         logger.info("[ScreenerVM] Switched to REALTIME mode")
@@ -1658,14 +1658,14 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                 sort_column = "ai_score"
             else:
                 sort_column = None
-            # C2b H1: 数据内容变更后经唯一 owner 原子产出分页元数据 + 当前页切片
-            self._set_state(
+            # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
+            # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)
+            self._update_pagination(
                 page_no=1,
                 loading=False,
                 sort_column=sort_column,
                 sort_ascending=False,
             )
-            self._update_pagination(page_no=1)
         except asyncio.CancelledError:
             self._set_state(loading=False)
             raise

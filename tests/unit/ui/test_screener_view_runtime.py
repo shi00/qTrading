@@ -424,11 +424,6 @@ class _FakeScreenerViewModel:
         else:
             self._set_state(current_page_rows=(), total_items=0, total_pages=0)
 
-    def get_current_page_data(self) -> Any:
-        if self._current_page_data is not None:
-            return self._current_page_data
-        return pd.DataFrame()
-
     def get_export_data(self) -> Any:
         return self._export_data
 
@@ -2790,7 +2785,7 @@ class TestTableDataRendering:
     """表格数据渲染: 有数据/无数据."""
 
     def test_no_data_renders_empty_state(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回空 DataFrame → EmptyState 渲染 (P1-3 批次 2 #70).
+        """state.current_page_rows 为空元组 → EmptyState 渲染 (P1-3 批次 2 #70, C2b 改写).
 
         EmptyState 分支替代 PaginatedTable: 无 on_sort/on_row_click 回调捕获。
         清空 captured_callbacks 后 _rerender, 验证无新增回调 (PaginatedTable mock 未被调用)。
@@ -2825,7 +2820,7 @@ class TestTableDataRendering:
         assert "cta_text" not in empty_state_block, "EmptyState should not have cta_text parameter (Task 3.5)"
 
     def test_with_data_renders_table(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""
+        """state.current_page_rows 非空 (locale-neutral 原始行) → 表格渲染数据 (C2b 改写)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 

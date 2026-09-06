@@ -119,12 +119,6 @@ class FakeScreenerViewModel:
     def unsubscribe_task_manager(self) -> None:
         self.method_calls.append("unsubscribe_task_manager")
 
-    def get_current_page_data(self) -> Any:
-        """返回空 DataFrame（避免表格渲染失败）。"""
-        import pandas as pd
-
-        return pd.DataFrame()
-
     def get_strategy_params(self, key: str | None) -> list:
         return []
 
