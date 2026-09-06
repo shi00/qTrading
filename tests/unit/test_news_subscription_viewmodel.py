@@ -85,24 +85,26 @@ class TestHistoryModeBuffer:
             patch("ui.viewmodels.screener_view_model.StrategyManager"),
             patch("ui.viewmodels.screener_view_model.DataProcessor"),
         ):
-            from ui.viewmodels.screener_view_model import ScreenerViewModel
+            from ui.viewmodels.screener_view_model import RealtimeSnapshot, ScreenerViewModel
 
             vm = ScreenerViewModel()
-            vm._realtime_snapshot = {
-                "full_results": None,
-                "page_no": 1,
-                "sort_column": None,
-                "sort_ascending": True,
-                "ai_buffer": ["chunk3"],
-            }
-            vm._discarded_buffer = ["chunk1", "chunk2"]
+            vm._realtime_snapshot = RealtimeSnapshot(
+                full_results=None,
+                page_no=1,
+                sort_column=None,
+                sort_ascending=True,
+                ai_buffer=[{"chunk": "chunk3"}],
+                stream_cards=(),
+                stream_buffers={},
+            )
+            vm._discarded_buffer = [{"chunk": "chunk1"}, {"chunk": "chunk2"}]
             vm._set_state(mode="HISTORY")
 
             vm.switch_to_realtime()
 
-            assert "chunk1" in vm._ai_buffer
-            assert "chunk2" in vm._ai_buffer
-            assert "chunk3" in vm._ai_buffer
+            assert {"chunk": "chunk1"} in vm._ai_buffer
+            assert {"chunk": "chunk2"} in vm._ai_buffer
+            assert {"chunk": "chunk3"} in vm._ai_buffer
             assert vm._discarded_buffer == []
 
     def test_discarded_buffer_merge_logic(self):

@@ -10,7 +10,12 @@ import pytest
 
 from core.i18n import Message
 from ui.components.virtual_table import next_sort_state
-from ui.viewmodels.screener_view_model import ScreenerViewModel, StrategyDepRow, TASK_NAME_PREFIX
+from ui.viewmodels.screener_view_model import (
+    RealtimeSnapshot,
+    ScreenerViewModel,
+    StrategyDepRow,
+    TASK_NAME_PREFIX,
+)
 from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
@@ -154,7 +159,15 @@ class TestScreenerViewModelDispose:
     def test_dispose_clears_large_references_and_state(self, vm):
         vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
         vm._ai_buffer = [{"ts_code": "000001.SZ"}]
-        vm._realtime_snapshot = {"ts_code": "000001.SZ"}
+        vm._realtime_snapshot = RealtimeSnapshot(
+            full_results=vm._full_results,
+            page_no=vm.state.page_no,
+            sort_column=None,
+            sort_ascending=True,
+            ai_buffer=[],
+            stream_cards=(),
+            stream_buffers={},
+        )
 
         vm.dispose()
 
@@ -1141,19 +1154,21 @@ class TestSwitchToHistory:
         vm._set_state(page_no=3, sort_column="A", sort_ascending=False)
         vm._ai_buffer = [{"x": 1}]
         vm.switch_to_history()
-        assert vm._realtime_snapshot["page_no"] == 3
-        assert vm._realtime_snapshot["sort_column"] == "A"
-        assert vm._realtime_snapshot["sort_ascending"] is False
-        assert vm._realtime_snapshot["ai_buffer"] == [{"x": 1}]
+        assert vm._realtime_snapshot is not None
+        assert vm._realtime_snapshot.page_no == 3
+        assert vm._realtime_snapshot.sort_column == "A"
+        assert vm._realtime_snapshot.sort_ascending is False
+        assert vm._realtime_snapshot.ai_buffer == [{"x": 1}]
 
     def test_snapshots_stream_cards_and_buffers(self, vm):
         """P1-3: switch_to_history 必须快照 stream_cards 和 stream_buffers。"""
         vm.start_stream_card("stock_1")
         vm.switch_to_history()
-        assert vm._realtime_snapshot["stream_cards"] != ()
-        assert len(vm._realtime_snapshot["stream_cards"]) == 1
-        assert vm._realtime_snapshot["stream_cards"][0].name == "stock_1"
-        assert len(vm._realtime_snapshot["stream_buffers"]) == 1
+        assert vm._realtime_snapshot is not None
+        assert vm._realtime_snapshot.stream_cards != ()
+        assert len(vm._realtime_snapshot.stream_cards) == 1
+        assert vm._realtime_snapshot.stream_cards[0].name == "stock_1"
+        assert len(vm._realtime_snapshot.stream_buffers) == 1
 
     def test_clears_stream_cards_and_buffers_on_switch(self, vm):
         """P1-3: switch_to_history 后 state.stream_cards 和 _stream_buffers 必须清空。"""
