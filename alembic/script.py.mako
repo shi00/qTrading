@@ -24,10 +24,11 @@ def upgrade() -> None:
     """Upgrade schema."""
     # 幂等编写提示（DAT-19）：结构性变更（add/drop column/index/table）默认用内省判断再执行，
     # 确保重复运行不报错；或优先用 op.add_column/create_index 的 if_not_exists / drop_* 的 if_exists。
-    # 内省判断可参考本模板同目录 alembic/_shared_helpers.py 的 column_exists() 模式：
-    #   例：if "col" not in _columns(op.get_bind(), "<table>"): op.add_column(...)
-    #   实际导入路径依运行环境解析（alembic 命名空间包与已装 alembic 包同名，慎用顶层
-    #   "from alembic._shared_helpers import ..."，需按脚本目录相对导入或路径注册）。
+    # 内省判断可复用本模板同目录 alembic/_shared_helpers.py 的 column_exists()：
+    #   from _shared_helpers import column_exists
+    #   if not column_exists(op.get_bind(), "<table>", "col"): op.add_column(...)
+    # 注意：alembic/ 目录由 alembic/env.py 注册到 sys.path，故用顶层导入而非
+    #   "from alembic._shared_helpers import ..."（后者会命中已装的同名 alembic 包）。
     ${upgrades if upgrades else "pass"}
 
 
