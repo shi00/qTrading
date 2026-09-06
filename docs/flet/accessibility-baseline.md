@@ -29,8 +29,12 @@
 
 ### 2.3 错误状态可读性
 
-- **错误消息**：`ft.TextField(error_text=...)` 必须设置非空错误消息，不依赖颜色变化作为唯一错误提示。
-- **SnackBar 反馈**：操作成功/失败必须通过 `ft.use_dialog(ft.SnackBar(...))` 反馈，不依赖控制台日志。
+- **错误消息**：`ft.TextField(error=...)` 必须设置非空错误消息（`error` 接受字符串或 `ft.Text(...)` 插槽——Flet 0.86 的 `TextField` 无 `error_text`；`ft.Dropdown(error_text=...)`），不依赖颜色变化作为唯一错误提示。
+- **Toast 反馈**：操作成功/失败必须通过 `ToastManager.show()`（`ui/components/toast_manager.py`）反馈，不依赖控制台日志。Toast 无障碍要求：
+  - 普通 toast duration 不得低于 10s（`show()` 强制下限，低于 10 自动提升到 10）；操作型 toast（含 action 按钮）自动 30s。
+  - Toast 必须可手动关闭（`ToastCard` 提供关闭按钮），禁止依赖自动消失作为唯一关闭路径。
+  - 依据：10s 低于常见 toast 显示时长参考 20s，但 Toast 支持手动关闭 + hover/展开暂停倒计时（桌面鼠标场景）+ 操作型 30s，整体可辩护。
+  - 存量过渡：`ui/components/_markdown_safe.py`、`ui/components/config_panels/backup_restore_panel.py` 仍走 `page.show_toast(...)`（`app/application.py` 启动时对 `page.show_toast` 动态挂载，路径真实可达），应迁移到 `ToastManager.show()`；迁移跟踪见后续 M12 / UIX-13 批次。
 - **表单校验**：必填字段未填时必须显示明确错误消息，禁止静默忽略提交。
 
 ### 2.4 键盘路径
