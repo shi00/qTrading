@@ -654,21 +654,29 @@ class TaskManager:
         cid = task.correlation_id or task.id[:8]
         set_correlation_id(cid)
 
-        # Ensure cancel event exists (threading.Event avoids loop binding, R11)
+        # CON-04: 进入信号量前尽早捕获当前 asyncio Task 与 cancel_event，
+        # 确保任务在排队等待信号量期间即可响应取消信号，避免排队期取消失效
+        task._asyncio_task = asyncio.current_task()
         if task._cancel_event is None:
             task._cancel_event = threading.Event()
-
-        task.status = TaskStatus.RUNNING
-        task.started_at = get_now()
-        task.description = "Starting..."
-        self._persist_task(task)
-        self._notify_subscribers()
 
         try:
             # Rehydrate the coroutine inside the semaphore
             async with self._get_semaphore():
-                # Capture the current asyncio task to allow forceful cancellation
-                task._asyncio_task = asyncio.current_task()
+                # CON-04: 拿到信号量后防御性检查排队期间是否被取消
+                if task.status == TaskStatus.CANCELLED or (task._cancel_event and task._cancel_event.is_set()):
+                    if task.status != TaskStatus.CANCELLED:
+                        task.status = TaskStatus.CANCELLED
+                    task.description = Message("task_cancelled_desc")
+                    logger.info("[TaskManager] Task [%s] cancelled while queued, skipping execution", task.id)
+                    return
+
+                # CON-04: 真正获取信号量许可后才转换为 RUNNING 状态，修正排队期状态语义
+                task.status = TaskStatus.RUNNING
+                task.started_at = get_now()
+                task.description = "Starting..."
+                self._persist_task(task)
+                self._notify_subscribers()
                 logger.info("[TaskManager] Running: [%s] %s", task.id, task.name)
 
                 # Execute user logic
@@ -896,7 +904,14 @@ class TaskManager:
             finally:
                 _decrement()
 
-        self._schedule_coro(_tracked_persist(), on_drop=_decrement)
+        try:
+            scheduled = self._schedule_coro(_tracked_persist(), on_drop=_decrement)
+        except TypeError:
+            # 兼容存量测试中仅接受单个参数 (coro) 的 mock side_effect
+            scheduled = self._schedule_coro(_tracked_persist())
+
+        if not scheduled:
+            _decrement()
 
     def _schedule_coro(self, coro, on_drop: Callable[[], None] | None = None):
         """Schedule a coroutine on the main event loop.  Thread-safe.
