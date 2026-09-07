@@ -174,6 +174,64 @@ class TestTaskManagerReloadConfig:
                 mgr.reload_config()
                 mock_del.assert_called_once_with("task_manager_semaphore")
 
+    @pytest.mark.asyncio
+    async def test_reload_config_defers_reset_when_task_running(self):
+        """CON-05: 存在 RUNNING 任务时 reload_config 应推迟重置，避免并发突破。"""
+        from services.task_manager import AppTask, TaskStatus
+
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            mgr = TaskManager()
+            sem_old = mgr._get_semaphore()
+
+            # 模拟一个正在运行的任务
+            running_task = AppTask(name="running_test", task_type="test")
+            running_task.status = TaskStatus.RUNNING
+            mgr._tasks[running_task.id] = running_task
+
+            mock_ch.get_max_concurrent_tasks.return_value = 5
+            with patch("services.task_manager.del_loop_local") as mock_del:
+                mgr.reload_config()
+                # 信号量不应立即被删除
+                mock_del.assert_not_called()
+                assert mgr._semaphore_needs_reset is True
+
+            # 此时获取信号量依然为旧信号量
+            sem_current = mgr._get_semaphore()
+            assert sem_current is sem_old
+
+            # 清理运行中任务
+            del mgr._tasks[running_task.id]
+
+    @pytest.mark.asyncio
+    async def test_reload_config_applies_reset_after_running_task_finishes(self):
+        """CON-05: 当最后一个 RUNNING 任务结束退出后，推迟的重置操作生效。"""
+        from services.task_manager import AppTask, TaskStatus
+
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 3
+            mgr = TaskManager()
+            sem_old = mgr._get_semaphore()
+
+            running_task = AppTask(name="running_test", task_type="test")
+            running_task.status = TaskStatus.RUNNING
+            mgr._tasks[running_task.id] = running_task
+
+            mock_ch.get_max_concurrent_tasks.return_value = 8
+            mgr.reload_config()
+            assert mgr._semaphore_needs_reset is True
+
+            # 任务执行结束退出 RUNNING 状态
+            running_task.status = TaskStatus.COMPLETED
+            mgr._check_and_reset_semaphore_if_needed()
+
+            assert mgr._semaphore_needs_reset is False
+            sem_new = mgr._get_semaphore()
+            assert sem_new is not sem_old
+            assert sem_new._value == 8
+
+            del mgr._tasks[running_task.id]
+
 
 class TestTaskManagerSubscribe:
     def test_subscribe(self):
