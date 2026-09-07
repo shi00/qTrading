@@ -18,7 +18,7 @@ T = TypeVar("T")
 
 class TaskType(Enum):
     IO = auto()  # For Network, Database, Disk operations (High concurrency allowed)
-    CPU = auto()  # For Pandas (releasing GIL), specific Math. PURE PYTHON LOOPS SHOULD USE MULTIPROCESSING!
+    CPU = auto()  # For Polars/NumPy (releasing GIL). Pure Python loops should vectorize with Polars!
 
 
 from utils.singleton_registry import register_singleton
@@ -32,8 +32,8 @@ class ThreadPoolManager:
     Architectural Note:
     - IO Pool: High concurrent thread count for blocking I/O.
     - CPU Pool: Low thread count (cpu cores).
-      WARNING: Only effective for CPU tasks that release the GIL (e.g. NumPy, Pandas, C-extensions).
-      Pure Python CPU-bound tasks will suffer from GIL contention and should use ProcessPoolExecutor instead.
+      WARNING: Only effective for CPU tasks that release the GIL (e.g. Polars, NumPy, Pandas, C-extensions).
+      Pure Python CPU-bound tasks suffer from GIL contention; vectorize using Polars instead of multiprocessing.
     """
 
     _instance: "ThreadPoolManager | None" = None

@@ -22,12 +22,12 @@
 | R8 废弃 API | 批量写入未用 `_save_upsert()` |
 | R9 敏感信息泄露 | 日志/异常直接打印明文 Token/API Key/密码 |
 | R10 硬编码密钥 | 代码或测试中硬编码 API Key/DB 密码 |
-| R11 跨循环复用同步原语 | 直接将 `asyncio.Event/Lock` 作为类属性 |
+| R11 跨循环复用同步原语 | 直接将 `asyncio.Event/Lock` 作为类/实例属性（AST 扫描构造点；缓存点与跨循环使用人工评审） |
 | R12 未注册数据表 | 新增表只改 models.py 不更新 data_dictionary.py |
 | R13 未注册 DAO | 新增 DAO 不在 CacheManager.__init__ 实例化 |
 | R14 未注册策略 | 新增策略不使用 `@register_strategy("key")` |
 | R15 未注册单例 | 新增单例不使用 `@register_singleton`、不实现 `_reset_singleton` |
-| R16 UI 阻塞主循环 | Flet 事件处理器中同步执行 IO/CPU 密集任务 |
+| R16 UI 阻塞主循环 | Flet 事件处理器中同步执行 IO/CPU 密集任务（CPU 密集仅限 Polars 等释放 GIL 库调用，纯 Python 计算须向量化） |
 | R17 保留字作字段 | SQL 保留字作表名或列名 |
 | R18 未隔离开发 | 新特性/重构未启用 git worktree 隔离 |
 
