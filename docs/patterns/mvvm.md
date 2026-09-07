@@ -131,6 +131,22 @@ UI 层实际并存四种状态机制，本表是"什么状态放哪里"的正本
 
 **pubsub 使用红线**：订阅 `page.pubsub` 前必须确认该 topic 的**多订阅者语义**（同一 topic 上 `unsubscribe_topic(topic)` 会移除整个 session 在该 topic 的全部 handler，任一方退订会误伤其他订阅者——见 UIX-01）。能改全局 Observable 信号源转发的场景优先用 Observable，pubsub 只保留给唯一订阅者的一次性导航类信号。
 
+### 复杂 ViewModel 拆分：Mixin 组合（C3 / UIX-07）
+
+`ScreenerViewModel`（原 1808 行/66 方法单体，复杂度失控）按**职责**（非行数）拆为组合类 + 5 个职责 mixin + 共享类型模块。拆分后跨职责编排、资源生命周期、异步基建留在组合类；各 mixin 只依赖 `screener_types` 声明的共享状态，通过 MRO 访问 `self._state` / `self._set_state`（经 `ObservableViewModelMixin`）。
+
+| 文件 | 职责 |
+|------|------|
+| `ui/viewmodels/screener_types.py` | 共享 immutable dataclass/常量（`ScreenerRow` / `ScreenerState` / `StreamCard` / `RealtimeSnapshot` 等） |
+| `ui/viewmodels/pagination_sorting_mixin.py` | 分页唯一 owner（`_update_pagination`）+ 排序 + stock 过滤器 |
+| `ui/viewmodels/ai_stream_mixin.py` | `run_strategy` 编排 + 流式卡片 / AI 缓冲 / 单股重试 |
+| `ui/viewmodels/history_mode_mixin.py` | REALTIME/HISTORY 切换 + `_realtime_snapshot` 快照 + 历史树/历史记录加载 |
+| `ui/viewmodels/strategy_meta_mixin.py` | 策略查询 / 参数草稿 / 预设 / 描述 / tier 提示 |
+| `ui/viewmodels/export_mixin.py` | CSV / Excel / bytes 导出 |
+| `ui/viewmodels/screener_view_model.py` | 组合类：跨职责编排、异步基建、splitter 持久化；**再导出** `ScreenerRow`/`ScreenerState` 等，保持既有 `from ...screener_view_model import X` 接口不变 |
+
+**新装约束**：新增 mixin 不得跨 mixin 直接调用对方私有方法；共享状态一律经 `screener_types` 定义；组合类保持为唯一 `use_viewmodel` 消费入口。
+
 ### 存量技术债
 
 [ui/viewmodels/](../../ui/viewmodels/) 下所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）+ state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。已知例外清单见 `ui/viewmodels/` 审查记录。

@@ -119,7 +119,7 @@ class TestSortDirectionConsistency:
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
         vm._set_state(sort_column="A", sort_ascending=True)
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("A", ascending=False)
 
@@ -134,7 +134,7 @@ class TestSortDirectionConsistency:
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
         vm._set_state(sort_column="A", sort_ascending=True)
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("A")
 
@@ -149,7 +149,7 @@ class TestSortDirectionConsistency:
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
         vm._set_state(sort_column="A", sort_ascending=False)
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("B")
 
@@ -175,7 +175,7 @@ class TestSortDirectionConsistency:
         snapshots = []
         vm.subscribe(lambda s: snapshots.append(s))
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("A", ascending=True)
 
@@ -587,7 +587,7 @@ class TestScreenerViewModelExport:
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_export.csv")
-            with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+            with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm:
                 mock_tm.return_value.run_async = AsyncMock(
                     side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
                 )
@@ -607,7 +607,7 @@ class TestScreenerViewModelExport:
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_export.xlsx")
-            with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+            with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm:
                 mock_tm.return_value.run_async = AsyncMock(
                     side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
                 )
@@ -632,9 +632,9 @@ class TestScreenerViewModelExport:
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, "test_export.xlsx")
             with (
-                patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm,
+                patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm,
                 patch(
-                    "ui.viewmodels.screener_view_model.DataSanitizer.sanitize_error",
+                    "ui.viewmodels.export_mixin.DataSanitizer.sanitize_error",
                     return_value="<sanitized>",
                 ) as mock_sanitize,
             ):
@@ -665,7 +665,7 @@ class TestScreenerViewModelExport:
     async def test_export_results_bytes_csv_success(self, vm):
         """DoD: format_='csv' 时通过 ThreadPoolManager offload to_csv, 返回 utf-8-sig bytes."""
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+        with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm:
             mock_tm.return_value.run_async = AsyncMock(
                 side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
             )
@@ -685,7 +685,7 @@ class TestScreenerViewModelExport:
     async def test_export_results_bytes_xlsx_success(self, vm):
         """DoD: format_='xlsx' 时通过 ThreadPoolManager offload to_excel, 返回 xlsx bytes."""
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+        with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm:
             mock_tm.return_value.run_async = AsyncMock(
                 side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
             )
@@ -709,9 +709,9 @@ class TestScreenerViewModelExport:
         """
         vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
         with (
-            patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm,
+            patch("ui.viewmodels.export_mixin.ThreadPoolManager") as mock_tm,
             patch(
-                "ui.viewmodels.screener_view_model.DataSanitizer.sanitize_error",
+                "ui.viewmodels.export_mixin.DataSanitizer.sanitize_error",
                 return_value="<sanitized>",
             ) as mock_sanitize,
         ):
@@ -765,7 +765,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy", save_results=True, params=test_params)
@@ -828,7 +828,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy", save_results=True)
@@ -878,7 +878,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy", save_results=True)
@@ -937,7 +937,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy", save_results=False)
@@ -978,7 +978,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy")
@@ -1020,7 +1020,7 @@ class TestScreenerViewModelRunStrategy:
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = mock_submit_task
             await vm.run_strategy("test_strategy")
@@ -1443,7 +1443,7 @@ class TestLoadHistoryData:
         if side_effect is not None:
             mock_records.side_effect = side_effect
         return patch(
-            "ui.viewmodels.screener_view_model.CacheManager",
+            "ui.viewmodels.history_mode_mixin.CacheManager",
             return_value=MagicMock(screener_dao=MagicMock(get_history_records=mock_records)),
         )
 
@@ -2095,7 +2095,7 @@ class TestScreenerViewModelMessageParamsPurity:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.update_progress = MagicMock()
             mock_tm.return_value.submit_task = MagicMock(return_value="test_task_id")
             await vm.run_strategy("test_strategy", save_results=False)
@@ -2125,7 +2125,7 @@ class TestScreenerViewModelMessageParamsPurity:
         snapshots = []
         vm.subscribe(lambda s: snapshots.append(s))
 
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.submit_task = MagicMock(return_value="test_task_id")
             await vm.run_strategy("test_strat", save_results=False)
 
@@ -2170,7 +2170,7 @@ class TestScreenerViewModelMessageParamsPurity:
             return "test_task_id"
 
         snapshots = []
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
             mock_tm.return_value.submit_task = mock_submit
             mock_tm.return_value.update_progress = MagicMock()
             await vm.run_strategy("test_strat", save_results=False)
