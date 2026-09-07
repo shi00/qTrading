@@ -1,6 +1,7 @@
 import logging
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -1029,10 +1030,14 @@ def test_sanitizers_import_does_not_load_pandas(tmp_path, monkeypatch):
         "assert _is_dataframe('str') is False\n"
         "print('OK: pandas not loaded')\n"
     )
+    # test_sanitizers.py 位于 tests/unit/utils/，上溯 3 级即仓库根，用作子进程 cwd
+    # 以保证子进程从 PR 源根解析 utils.sanitizers，而非继承父进程 cwd。
+    _repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [sys.executable, "-c", subprocess_code],
         capture_output=True,
         text=True,
+        cwd=str(_repo_root),
     )
     assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
     assert "OK: pandas not loaded" in result.stdout
