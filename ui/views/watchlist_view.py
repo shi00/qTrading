@@ -15,7 +15,7 @@ import flet as ft
 
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import safe_on_click
-from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState
+from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState, LoadingState
 from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -261,12 +261,7 @@ def WatchlistView(
     has_complete_failure = state.load_error is not None and not state.watchlist_rows
 
     if state.is_loading:
-        body = ft.Column(
-            [ft.ProgressRing()],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            expand=True,
-        )
+        body = LoadingState()
     elif has_complete_failure:
         body = ErrorState(
             icon=ft.Icons.ERROR_OUTLINE,

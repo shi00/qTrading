@@ -741,9 +741,21 @@ def _collect_all_controls(root: object) -> list:
     跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock I18n/AppColors 下
     content 属性返回新 MagicMock, 无守卫会无限生成子节点致内存暴涨)。
     """
-    if root is None or not isinstance(root, ft.Control):
+    from flet.components.component import Component
+
+    if root is None or not isinstance(root, (ft.Control, Component)):
         return []
     result: list = [root]
+
+    if isinstance(root, Component):
+        try:
+            from tests.unit.ui.component_renderer import render_once
+
+            root._state.mounted = True
+            rendered = render_once(root)
+            result.extend(_collect_all_controls(rendered))
+        except Exception:
+            pass
     for attr in ("controls", "items", "tabs"):
         children = getattr(root, attr, None)
         if isinstance(children, list):

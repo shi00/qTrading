@@ -1,13 +1,13 @@
-"""state_views — 声明式空态/错误态组件 (P1-3 批次 2).
+"""state_views — 声明式三态组件 (空态/错误态/加载态, P1-3 批次 2 / UIX-14).
 
-提供可复用的 EmptyState / ErrorState 声明式组件，供 screener_view / data_view /
-home_view 等消费方在数据为空或加载失败时显示统一占位 UI。
+提供可复用的 EmptyState / ErrorState / LoadingState 声明式组件，供各 View 在数据加载中、
+为空或加载失败时显示统一步调与响应式主题占位 UI。
 
 契约 (CLAUDE.md §3.2 MVVM + §3.3 声明式 UI):
 - ``@ft.component`` 函数组件，无 class 子类
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 颜色全部使用 ``AppColors`` 语义 token (Layer 1 自动切换 + Layer 2 业务色)
-- ``on_cta`` / ``on_retry`` 回调由消费方注入，组件不持有业务状态
+- ``on_cta`` / ``on_retry`` / ``on_cancel`` 回调由消费方注入，组件不持有业务状态
 """
 
 from collections.abc import Callable
@@ -219,4 +219,77 @@ def ErrorState(
     )
 
 
-__all__ = ["EmptyState", "ErrorState", "GITHUB_ISSUES_URL"]
+@ft.component
+def LoadingState(
+    message: str = "",
+    size: float | None = None,
+    color: str | None = None,
+    stroke_width: float = 4.0,
+    on_cancel: Callable[[], None] | None = None,
+    cancel_text: str | None = None,
+    expand: bool = True,
+) -> ft.Container:
+    """加载态占位组件 (三态规范之加载态, UIX-14).
+
+    Args:
+        message: 加载提示文案 (已翻译字符串, 可选; 默认空).
+        size: ProgressRing 尺寸 (可选, 默认 AppStyles.ICON_SIZE_XL).
+        color: ProgressRing 颜色 (可选, 默认 AppColors.PRIMARY).
+        stroke_width: ProgressRing 线宽 (可选, 默认 4.0).
+        on_cancel: 取消操作回调 (可选; None 时不渲染取消按钮).
+        cancel_text: 取消按钮文案 (已翻译字符串; on_cancel 非空时生效).
+        expand: 是否撑满父级容器 (可选, 默认 True; 嵌套在受限 Card/Dialog 时可置为 False).
+    """
+    ft.use_state(get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
+
+    def _on_cancel_click(_e: ft.ControlEvent) -> None:
+        if on_cancel is not None:
+            on_cancel()
+
+    ring_size = size if size is not None else AppStyles.ICON_SIZE_XL
+    ring_color = color if color is not None else AppColors.PRIMARY
+
+    column_controls: list[ft.Control] = [
+        ft.ProgressRing(
+            width=ring_size,
+            height=ring_size,
+            stroke_width=stroke_width,
+            color=ring_color,
+        )
+    ]
+
+    if message:
+        column_controls.append(
+            ft.Text(
+                message,
+                size=AppStyles.FONT_SIZE_BODY,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+        )
+
+    if on_cancel is not None and cancel_text:
+        column_controls.append(
+            ft.TextButton(
+                content=cancel_text,
+                icon=ft.Icons.CLOSE,
+                on_click=safe_on_click(_on_cancel_click),
+                style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+            )
+        )
+
+    return ft.Container(
+        content=ft.Column(
+            column_controls,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=12,
+        ),
+        alignment=ft.Alignment.CENTER,
+        expand=expand,
+        padding=AppStyles.EMPTY_STATE_PADDING,
+    )
+
+
+__all__ = ["EmptyState", "ErrorState", "LoadingState", "GITHUB_ISSUES_URL"]
