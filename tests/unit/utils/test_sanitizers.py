@@ -1,4 +1,6 @@
 import logging
+import subprocess
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -1009,3 +1011,28 @@ class TestBareTokenFallback:
         text = "身份证 11010119900101123X 与 13812345678 均受 PII 规则保护"
         result = DataSanitizer.sanitize_error(ValueError(text))
         assert "11010119900101123X" not in result
+
+
+def test_sanitizers_import_does_not_load_pandas(tmp_path, monkeypatch):
+    """PRF-01: utils.sanitizers 顶层不再因 pandas 而成为重依赖枢纽。
+
+    断言在 pandas 未加载的子进程中 import utils.sanitizers 不会连带加载 pandas，
+    且 `_is_dataframe` 在 pandas 未加载时对非 DataFrame 对象返回 False（语义等价）。
+    通过独立子进程执行，避免当前测试进程已导入 pandas 造成干扰。
+    """
+    subprocess_code = (
+        "import sys\n"
+        "from utils.sanitizers import _is_dataframe\n"
+        "assert 'pandas' not in sys.modules, 'sanitizers import 不应加载 pandas'\n"
+        "assert _is_dataframe({'a': 1}) is False\n"
+        "assert _is_dataframe(None) is False\n"
+        "assert _is_dataframe('str') is False\n"
+        "print('OK: pandas not loaded')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", subprocess_code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    assert "OK: pandas not loaded" in result.stdout
