@@ -210,20 +210,92 @@ def check_eids_refs() -> list[str]:
     return errors
 
 
+def _collect_eids_refs_in_tree(
+    tree: ast.Module,
+    referenced: dict[str, set[str]],
+) -> None:
+    """收集 AST 中所有 EIDS.X.Y 引用的 (ns, attr)。"""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        inner = node.value
+        if not isinstance(inner, ast.Attribute):
+            continue
+        if not isinstance(inner.value, ast.Name) or inner.value.id != "EIDS":
+            continue
+        ns = inner.attr
+        attr = node.attr
+        if ns in referenced:
+            referenced[ns].add(attr)
+
+
+def check_unused_eids(
+    eids_path: Path | None = None,
+    scan_dirs: tuple[str, ...] | None = None,
+    root: Path | None = None,
+) -> list[str]:
+    """UIX-18: 检查 e2e_ids.py 中声明的每个 public 常量/方法是否被引用或标注 # reserved:。
+
+    防止提前声明未使用常量，避免无接线的死锚点膨胀（CLAUDE.md §1.3 YAGNI）。
+    """
+    base_root = root if root is not None else ROOT
+    target_eids = eids_path if eids_path is not None else base_root / "ui" / "testing" / "e2e_ids.py"
+    target_dirs = scan_dirs if scan_dirs is not None else _SCAN_DIRS
+
+    namespaces = _extract_eids_namespaces(target_eids)
+    if not namespaces:
+        return []
+
+    referenced: dict[str, set[str]] = {ns: set() for ns in namespaces}
+
+    for dir_name in target_dirs:
+        target_dir = base_root / dir_name
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            if p == target_eids:
+                continue
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            _collect_eids_refs_in_tree(tree, referenced)
+
+    try:
+        eids_content = target_eids.read_text(encoding="utf-8")
+        eids_lines = eids_content.splitlines()
+    except OSError:
+        return []
+
+    errors: list[str] = []
+    for ns, attrs in namespaces.items():
+        for attr in sorted(attrs):
+            if attr.startswith("_"):
+                continue
+            if attr in referenced[ns]:
+                continue
+            # 检查是否有 # reserved 注释
+            is_reserved = any(attr in line and ("# reserved:" in line or "# reserved" in line) for line in eids_lines)
+            if not is_reserved:
+                errors.append(f"EIDS.{ns}.{attr} 已声明但未在代码中引用，亦未标注 '# reserved:' 说明保留原因 (UIX-18)")
+    return errors
+
+
 # ============================================================================
 # CLI 入口
 # ============================================================================
 
 
 def main() -> int:
-    """运行 EIDS 引用检查，返回退出码。"""
-    errors = check_eids_refs()
-    if errors:
-        print("[FAIL] E2E anchor 引用检查失败：", file=sys.stderr)
-        for err in errors:
+    """运行 EIDS 引用检查与未引用死锚点检查，返回退出码。"""
+    ref_errors = check_eids_refs()
+    unused_errors = check_unused_eids()
+    all_errors = ref_errors + unused_errors
+    if all_errors:
+        print("[FAIL] E2E anchor 检查失败：", file=sys.stderr)
+        for err in all_errors:
             print(f"  - {err}", file=sys.stderr)
         return 1
-    print("[PASS] E2E anchor 引用检查通过")
+    print("[PASS] E2E anchor 检查通过")
     return 0
 
 
