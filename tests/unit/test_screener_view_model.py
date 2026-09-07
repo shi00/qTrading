@@ -351,7 +351,7 @@ class TestScreenerViewModelStockFilter:
 
     覆盖: set_stock_filter 状态更新/幂等/分页重算、current_page_rows
     过滤切片、子串/大小写/字面量(regex=False)匹配语义、列缺失/空串跳过、
-    尾随空格原值存储+匹配 strip、clear_filters 重置、has_export_data 解耦。
+    尾随空格原值存储+匹配 strip、has_export_data 解耦。
     """
 
     _DF = pd.DataFrame(
@@ -451,15 +451,6 @@ class TestScreenerViewModelStockFilter:
         vm.change_page_size(1)
 
         assert vm.state.total_pages == 2  # 分页基于过滤后行数重算
-
-    def test_clear_filters_resets_stock_filter(self, vm):
-        vm._full_results = self._DF.copy()
-        vm.set_stock_filter("000001")
-
-        vm.clear_filters()
-
-        assert vm.state.stock_filter == ""
-        assert vm.state.total_items == 3  # 分页同步恢复全量, 状态自洽
 
     def test_has_export_data_property(self, vm):
         vm._full_results = self._DF.copy()

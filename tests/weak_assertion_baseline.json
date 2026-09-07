@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "total": 774,
+  "total": 773,
   "entries": [
     {
       "file": "integration/test_ai_concept_tagging.py",
@@ -5034,13 +5034,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/ui/viewmodels/test_screener_view_model.py",
-      "line": 254,
-      "type": "weak_is_not_none_ratio",
-      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_clear_filters_does_not_clear_full_results",
-      "source_line": "        assert vm._full_results is not None"
     },
     {
       "file": "unit/ui/viewmodels/test_screener_view_model.py",
