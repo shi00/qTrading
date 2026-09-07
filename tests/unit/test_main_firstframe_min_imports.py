@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,14 @@ pytestmark = pytest.mark.unit
 
 # tests/unit/ 上溯 2 级即仓库根，main.py 位于仓库根
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _subprocess_env() -> dict[str, str]:
+    """构造子进程环境，强制 UTF-8 IO 编码（Windows CI 默认 code page cp1252 无法编码中文）。"""
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
 
 _SUBPROCESS_CODE = (
     "import sys\n"
@@ -40,6 +49,9 @@ def test_import_main_does_not_load_heavy_imports() -> None:
         [sys.executable, "-c", _SUBPROCESS_CODE],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
         cwd=str(_REPO_ROOT),
     )
     assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
