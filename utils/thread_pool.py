@@ -56,7 +56,6 @@ class ThreadPoolManager:
                 except (RuntimeError, ValueError, OSError):
                     pass
             cls._instance = None
-            cls._initialized = False
 
         # Also reset the global _manager accessor
         global _manager
