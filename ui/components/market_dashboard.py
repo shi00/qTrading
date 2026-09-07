@@ -177,7 +177,7 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
         bgcolor=AppColors.SURFACE,
         border_radius=4,
         border=ft.Border.all(1, AppColors.BORDER),
-        col={"xs": 6, "sm": 4, "md": 3, "lg": 2},
+        col=AppStyles.COL_QUARTER,
     )
 
 

@@ -26,6 +26,7 @@ import flet as ft
 import platformdirs
 
 from ui.components.flet_type_helpers import safe_on_click
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -304,10 +305,9 @@ def BackupRestorePanel() -> ft.Container:
             style=AppStyles.secondary_button(),
         )
         restore_section_controls.append(
-            ft.Row(
+            SafeWrapRow(
                 [confirm_restore_button, cancel_restore_button],
                 spacing=10,
-                wrap=True,
             )
         )
 

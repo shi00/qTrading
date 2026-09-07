@@ -95,6 +95,21 @@ def _clamp_width(width: float, min_width: int, max_width: int) -> int:
     return max(min_width, min(max_width, int(width)))
 
 
+def _assert_table_positive_size(total_w: int, header_h: int, row_h: int) -> None:
+    """表格结构尺寸完整性校验 (UIX-13 C5).
+
+    锁定结构层不变量 — total_w 不得低于 MIN_TABLE_WIDTH，表头高与行高必须为正，
+    防止列宽计算退化或参数非法配置导致表格无法正常排版。
+
+    :raises ValueError: 任一结构尺寸违反不变量 (显式抛出异常而非 assert，
+        避免 -O 优化跳过校验).
+    """
+    if total_w < MIN_TABLE_WIDTH:
+        raise ValueError(f"PaginatedTable 结构宽度非法: total_w={total_w} < MIN_TABLE_WIDTH={MIN_TABLE_WIDTH}")
+    if header_h <= 0 or row_h <= 0:
+        raise ValueError(f"PaginatedTable 结构高度非法: header_h={header_h}, row_h={row_h}")
+
+
 class _ColWidthsCache:
     """列宽拖拽状态缓存 (use_ref 承载, 避免 use_state 触发全表 re-render)。
 
@@ -535,6 +550,9 @@ def PaginatedTable(
 
     total_w = _total_width(cols_list, col_widths)
     row_count = len(rows_list)
+
+    # UIX-13 C5: 表格结构尺寸校验 (防列宽计算退化/非法尺寸参数)
+    _assert_table_positive_size(total_w, HEADER_HEIGHT, ROW_HEIGHT)
 
     header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor, col_widths, drag_handlers)
 

@@ -17,6 +17,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -215,10 +216,9 @@ def DatabaseStatusPanel() -> ft.Container:
                 *info_controls,
                 error_text_ctrl,
                 ft.Container(height=12),
-                ft.Row(
+                SafeWrapRow(
                     [refresh_button, open_data_dir_button, open_log_dir_button],
                     spacing=10,
-                    wrap=True,
                 ),
             ],
             spacing=5,

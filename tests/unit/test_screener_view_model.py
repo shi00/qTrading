@@ -1917,6 +1917,21 @@ class TestScreenerViewModelStrategyParams:
 
         assert vm.state.strategy_params == {}
 
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_get_strategy_params_injects_ai_prompt_in_advanced_group(self, mock_dp, mock_sm, mock_rm):
+        """get_strategy_params: 自动注入 ai_system_prompt 且必须归入 advanced 分组 (折叠防视口塌陷)."""
+        mock_sm.return_value.get_strategy_params.return_value = [
+            {"name": "param1", "type": "number", "default": 10},
+        ]
+        vm = ScreenerViewModel()
+        params = vm.get_strategy_params("dummy_strategy")
+        ai_params = [p for p in params if p.get("name") == "ai_system_prompt"]
+        assert len(ai_params) == 1
+        assert ai_params[0]["group"] == "advanced"
+        assert ai_params[0]["type"] == "textarea"
+
 
 class TestScreenerViewModelSetHistoryViewingStatus:
     """R.2.6.3: set_history_viewing_status command — 历史查看状态迁入 VM state.

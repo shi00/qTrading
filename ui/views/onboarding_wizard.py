@@ -44,6 +44,7 @@ from ui.components.flet_type_helpers import (
     safe_on_hover,
     safe_on_select,
 )
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
@@ -582,7 +583,7 @@ def _build_data_sync_step(
                     bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
                 ),
                 ft.Container(height=20),
-                ft.Row(
+                SafeWrapRow(
                     safe_controls(
                         [
                             ft.Button(
@@ -615,7 +616,6 @@ def _build_data_sync_step(
                         ]
                     ),
                     alignment=ft.MainAxisAlignment.CENTER,
-                    wrap=True,
                 ),
                 ft.Container(height=20),
                 ft.ProgressBar(

@@ -28,6 +28,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -767,10 +768,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon_color=AppColors.WARNING,
         title=I18n.get("settings_db_pool"),
         subtitle=I18n.get("settings_pool_desc"),
-        control=ft.Row(
+        control=SafeWrapRow(
             [pool_size_input, db_overflow_input, db_timeout_input, save_db_pool_btn],
             spacing=5,
-            wrap=True,
         ),
         title_key="settings_db_pool",
         subtitle_key="settings_pool_desc",

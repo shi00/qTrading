@@ -22,6 +22,7 @@ from datetime import datetime
 import flet as ft
 
 from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
+from ui.components.safe_wrap_row import SafeWrapRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -426,17 +427,15 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         [
             panel_title,
             ft.Container(height=4),
-            ft.Row(
+            SafeWrapRow(
                 [tier_dropdown, probe_button],
                 spacing=10,
-                wrap=True,
             ),
             points_hint_text,
             ft.Container(height=8),
-            ft.Row(
+            SafeWrapRow(
                 [last_probe_text_ctrl, progress_text_ctrl],
                 spacing=10,
-                wrap=True,
             ),
             ft.Container(height=8),
             ft.Row(
