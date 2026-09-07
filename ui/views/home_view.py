@@ -62,12 +62,8 @@ def HomeView(
     # 兼容 app_layout 命令式调用, 当前不使用 (原命令式实现亦未调用)
     _ = on_run_strategy
 
-    logger.debug("[HomeView] construction start, active=%s", active)
-
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
-    logger.debug("[HomeView] calling use_viewmodel(HomeViewModel)")
     state, vm = use_viewmodel(HomeViewModel)
-    logger.debug("[HomeView] use_viewmodel returned, state.loading=%s", getattr(state, "loading", "unknown"))
 
     # --- i18n / theme 订阅 (自动重渲染) ---
     ft.use_state(get_observable_state)
@@ -281,7 +277,6 @@ def HomeView(
             ]
         )
 
-    logger.debug("[HomeView] construction complete, returning Container")
     return ft.Container(
         content=ft.Column(
             safe_controls(content_controls),
