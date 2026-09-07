@@ -313,7 +313,47 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.flush_persistence = AsyncMock()
             mock_tm._instance = mock_instance
             await coord._step2_flush_db_writes()
-            mock_instance.flush_persistence.assert_called_once()
+            mock_instance.flush_persistence.assert_called_once_with(timeout_s=1.5)
+
+    @pytest.mark.asyncio
+    async def test_step2_flush_db_timeout_translates_to_runtime_error_and_logs(self, caplog):
+        """CON-10: flush_persistence 内部 1.5s 超时应转译为 RuntimeError 并记录明确诊断日志。"""
+        import logging
+
+        coord = ShutdownCoordinator()
+        with (
+            patch("services.task_manager.TaskManager") as mock_tm,
+            caplog.at_level(logging.WARNING),
+        ):
+            mock_instance = MagicMock()
+            mock_instance.flush_persistence = AsyncMock(
+                side_effect=TimeoutError("Task persistence flush timed out with 2 pending write(s)")
+            )
+            mock_tm._instance = mock_instance
+            with pytest.raises(RuntimeError, match="Task persistence flush timed out \\(internal 1.5s limit\\)"):
+                await coord._step2_flush_db_writes()
+
+            assert "TaskManager.flush_persistence timed out (1.5s limit reached)" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_step2_flush_timeout_not_reported_as_step_timeout(self):
+        """CON-10: 验证在 _run_async_step 层面，内部刷盘超时不会被标记为步骤整体 timed_out=True。"""
+        coord = ShutdownCoordinator()
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_instance = MagicMock()
+            mock_instance.flush_persistence = AsyncMock(
+                side_effect=TimeoutError("Task persistence flush timed out with 1 pending write(s)")
+            )
+            mock_tm._instance = mock_instance
+            result = await coord._run_async_step(
+                name="Step 2",
+                step=coord._step2_flush_db_writes,
+                step_timeout_s=2.0,
+                critical=True,
+            )
+            assert result.ok is False
+            assert result.timed_out is False
+            assert "Task persistence flush timed out (internal 1.5s limit)" in result.error
 
     @pytest.mark.asyncio
     async def test_step3_close_processor_no_instance(self):
