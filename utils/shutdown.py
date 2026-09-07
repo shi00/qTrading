@@ -398,8 +398,17 @@ class ShutdownCoordinator:
             logger.info("[Shutdown]   - TaskManager not initialized, skipping flush.")
             return
 
-        await TaskManager._instance.flush_persistence(timeout_s=1.5)
-        logger.info("[Shutdown]   - Task persistence flush completed.")
+        try:
+            await TaskManager._instance.flush_persistence(timeout_s=1.5)
+            logger.info("[Shutdown]   - Task persistence flush completed.")
+        except TimeoutError as e:
+            # CON-10: 区分内部 1.5s 刷盘超时与 Step 2 整体 2.0s 预算超时，
+            # 避免被外层 _run_async_step 误报为 "Step 2 timed out after 2.0s"。
+            logger.warning(
+                "[Shutdown] TaskManager.flush_persistence timed out (1.5s limit reached): %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            raise RuntimeError(f"Task persistence flush timed out (internal 1.5s limit): {e}") from e
 
     async def _step3_close_processor(self):
         logger.info("[Shutdown] Step 3: Closing DataProcessor...")
