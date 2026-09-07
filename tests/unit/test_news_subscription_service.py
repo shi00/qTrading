@@ -1190,3 +1190,50 @@ class TestFetchAndNotify:
         ):
             await svc._fetch_and_notify()
         assert len(svc._seen_hashes) <= svc._MAX_SEEN
+
+
+class TestProcessingQueueLoopLocal:
+    """CON-07: processing_queue property resolves dynamically to current loop."""
+
+    def test_queue_is_none_before_start(self):
+        svc = NewsSubscriptionService()
+        assert svc.processing_queue is None
+
+    @pytest.mark.asyncio
+    async def test_queue_resolves_dynamically_to_current_loop(self):
+        svc = NewsSubscriptionService()
+        svc._queue_active = True
+        q1 = svc.processing_queue
+        assert isinstance(q1, asyncio.Queue)
+        # Same loop gets identical instance
+        assert svc.processing_queue is q1
+
+        # Across a different loop in another thread, it gets a separate loop-local instance
+        def _in_other_thread():
+            other_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(other_loop)
+
+                async def _get_queue():
+                    return svc.processing_queue
+
+                return other_loop.run_until_complete(_get_queue())
+            finally:
+                other_loop.close()
+                asyncio.set_event_loop(None)
+
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            q2 = executor.submit(_in_other_thread).result()
+
+        assert isinstance(q2, asyncio.Queue)
+        assert q1 is not q2
+
+    def test_queue_setter_override_and_clear(self):
+        svc = NewsSubscriptionService()
+        mock_q = MagicMock()
+        svc.processing_queue = mock_q
+        assert svc.processing_queue is mock_q
+        svc.processing_queue = None
+        assert svc.processing_queue is None

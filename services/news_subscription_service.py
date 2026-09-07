@@ -70,6 +70,8 @@ class NewsSubscriptionService:
             inst._alert_listeners.clear()
             # M9-001: 用 setattr 替代 .clear()，兼容测试用 __new__ 绕过 __init__ 时属性未初始化场景
             inst._listener_errors = {}
+            inst._custom_queue = None
+            inst._queue_active = False
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -100,8 +102,9 @@ class NewsSubscriptionService:
             self._last_news_time = None
             self._last_news_content = None
 
-            # Async Queue
-            self.processing_queue = None
+            # CON-07: loop-local Queue state
+            self._custom_queue: asyncio.Queue | None = None
+            self._queue_active: bool = False
 
             # Strong references to prevent GC from killing background tasks
             self._background_tasks = set()
@@ -146,6 +149,29 @@ class NewsSubscriptionService:
                 logger.info("[NewsService] Removed news listener: %s", callback)
             except KeyError:
                 pass
+
+    @staticmethod
+    def _queue_factory() -> asyncio.Queue:
+        return asyncio.Queue(maxsize=500)
+
+    @property
+    def processing_queue(self) -> asyncio.Queue | None:
+        """CON-07: loop-local Queue property.
+
+        Dynamically resolves from get_loop_local() when active, preventing
+        cross-loop reuse when the singleton is accessed across different event loops.
+        Supports explicit assignment (e.g. in tests) via setter.
+        """
+        if self._custom_queue is not None:
+            return self._custom_queue
+        if not self._queue_active:
+            return None
+        return get_loop_local("news_processing_queue", self._queue_factory)
+
+    @processing_queue.setter
+    def processing_queue(self, queue: asyncio.Queue | None) -> None:
+        self._custom_queue = queue
+        self._queue_active = queue is not None
 
     async def _safe_queue_put(self, item: dict):
         """
@@ -216,6 +242,8 @@ class NewsSubscriptionService:
         # 清理状态，确保下次 start() 时能正确执行首次同步
         self._last_news_time = None
         self._last_news_content = None
+        self._queue_active = False
+        self._custom_queue = None
 
         logger.info("[NewsService] Stopped news polling service (async graceful)")
 
@@ -230,11 +258,9 @@ class NewsSubscriptionService:
 
         self._running = True
 
-        # Use loop-local Queue and Lock to avoid cross-loop reuse issues
-        def _queue_factory():
-            return asyncio.Queue(maxsize=500)
-
-        self.processing_queue = get_loop_local("news_processing_queue", _queue_factory)
+        # CON-07: 激活 loop-local Queue property，动态绑定当前事件循环
+        self._queue_active = True
+        self._custom_queue = None
 
         poll_task = asyncio.create_task(self._poll_loop())
         self._background_tasks.add(poll_task)
