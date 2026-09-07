@@ -974,7 +974,7 @@ class TestTaskManagerPersistTask:
         mgr._loop.is_running.return_value = True
         t = AppTask(name="test")
 
-        def fake_sched(coro):
+        def fake_sched(coro, on_drop=None):
             if hasattr(coro, "close"):
                 coro.close()
             return True
@@ -1270,7 +1270,7 @@ class TestTaskManagerQueuePersistSnapshot:
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
 
-        def fake_sched(coro):
+        def fake_sched(coro, on_drop=None):
             if hasattr(coro, "close"):
                 coro.close()
             return True

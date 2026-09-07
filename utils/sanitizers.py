@@ -8,12 +8,29 @@
 - DataFrame实际数据
 """
 
+from __future__ import annotations
+
 import logging
 import re
+import sys
+from typing import TYPE_CHECKING, TypeGuard
 
-import pandas as pd
+if TYPE_CHECKING:
+    import pandas as pd
 
 _logger = logging.getLogger(__name__)
+
+
+def _is_dataframe(obj: object) -> TypeGuard[pd.DataFrame]:
+    """查询式判断 obj 是否为 pandas DataFrame，而不触发 pandas 导入。
+
+    因 pandas DataFrame 实例存在必然意味着 pandas 已加载（存在于 ``sys.modules``），
+    故 pandas 未加载时本函数返回 False 与 ``isinstance(obj, pd.DataFrame)`` 完全等价
+    （PRF-01：避免 ``utils.sanitizers`` 因 pandas 顶层导入而成为横切重依赖枢纽）。
+    ``TypeGuard`` 让调用点得以在真分支内收窄 obj 为 DataFrame（pandas 仅类型引用）。
+    """
+    pd_mod = sys.modules.get("pandas")
+    return pd_mod is not None and isinstance(obj, pd_mod.DataFrame)
 
 
 class DataSanitizer:
@@ -96,7 +113,7 @@ class DataSanitizer:
         if df is None:
             return "None"
 
-        if not isinstance(df, pd.DataFrame):
+        if not _is_dataframe(df):
             return f"{type(df).__name__}"
 
         if df.empty:
@@ -323,7 +340,7 @@ class DataSanitizer:
                 else:
                     result[k] = "***"
             # DataFrame特殊处理
-            elif isinstance(v, pd.DataFrame):
+            elif _is_dataframe(v):
                 result[k] = DataSanitizer.sanitize_dataframe(v)
             elif isinstance(v, dict):
                 result[k] = DataSanitizer.sanitize_dict(v, sensitive_keys)
@@ -374,7 +391,7 @@ class DataSanitizer:
                 for _secret in list(DataSanitizer._known_secrets):
                     if _secret in arg:
                         arg = arg.replace(_secret, "***")
-            if isinstance(arg, pd.DataFrame):
+            if _is_dataframe(arg):
                 clean_args.append(DataSanitizer.sanitize_dataframe(arg))
             elif isinstance(arg, str) and len(arg) > 100:
                 clean_args.append(f"{arg[:50]}...(truncated)")
