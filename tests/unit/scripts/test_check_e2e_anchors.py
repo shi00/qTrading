@@ -23,6 +23,7 @@ from check_e2e_anchors import (  # noqa: E402 - sys.path 注入后导入
     _check_eids_refs_in_tree,
     _extract_eids_namespaces,
     check_eids_refs,
+    check_unused_eids,
     main,
 )
 
@@ -258,6 +259,47 @@ class TestCheckEidsRefsIntegration:
         assert check_eids_refs() == []
 
 
+class TestCheckUnusedEids:
+    """UIX-18: check_unused_eids 门禁测试。"""
+
+    def test_unreferenced_eid_detected(self, tmp_path):
+        """未引用的 EID 且无 # reserved 注释时报错。"""
+        eids_file = tmp_path / "e2e_ids.py"
+        eids_file.write_text(
+            "class _DemoIds:\n    FOO = 1\n    UNREFERENCED = 2\nclass EIDS:\n    DEMO = _DemoIds\n",
+            encoding="utf-8",
+        )
+        usage_dir = tmp_path / "ui"
+        usage_dir.mkdir()
+        (usage_dir / "view.py").write_text(
+            "x = EIDS.DEMO.FOO\n",
+            encoding="utf-8",
+        )
+        errors = check_unused_eids(eids_path=eids_file, scan_dirs=("ui",), root=tmp_path)
+        assert len(errors) == 1
+        assert "EIDS.DEMO.UNREFERENCED" in errors[0]
+
+    def test_reserved_eid_permitted(self, tmp_path):
+        """未引用的 EID 带有 # reserved: 注释时允许通过。"""
+        eids_file = tmp_path / "e2e_ids.py"
+        eids_file.write_text(
+            "class _DemoIds:\n"
+            "    FOO = 1\n"
+            "    RESERVED = 2  # reserved: planned for Task 4\n"
+            "class EIDS:\n"
+            "    DEMO = _DemoIds\n",
+            encoding="utf-8",
+        )
+        usage_dir = tmp_path / "ui"
+        usage_dir.mkdir()
+        (usage_dir / "view.py").write_text(
+            "x = EIDS.DEMO.FOO\n",
+            encoding="utf-8",
+        )
+        errors = check_unused_eids(eids_path=eids_file, scan_dirs=("ui",), root=tmp_path)
+        assert errors == []
+
+
 # ============================================================================
 # 契约测试：当前代码库应通过所有 EIDS 引用检查
 # ============================================================================
@@ -270,6 +312,11 @@ class TestContract:
         """check_eids_refs() 在当前代码库应返回空 list（无违规）。"""
         errors = check_eids_refs()
         assert errors == [], "EIDS 引用违规:\n  " + "\n  ".join(errors)
+
+    def test_check_unused_eids_passes_on_clean_repo(self):
+        """UIX-18: check_unused_eids() 在当前代码库应返回空 list（无悬空死锚点）。"""
+        errors = check_unused_eids()
+        assert errors == [], "EIDS 未引用或未标注 reserved:\n  " + "\n  ".join(errors)
 
     def test_main_returns_zero_on_clean_repo(self):
         """main() 在当前代码库应返回 0。"""
