@@ -83,6 +83,9 @@ def _walk_controls(root: Any) -> list[Any]:
     content_attr = getattr(root, "content", None)
     if isinstance(content_attr, (ft.Control, Component)):
         result.extend(_walk_controls(content_attr))
+    error_attr = getattr(root, "error", None)
+    if isinstance(error_attr, (ft.Control, Component)):
+        result.extend(_walk_controls(error_attr))
     return result
 
 
@@ -1124,6 +1127,28 @@ class TestValidationUX05:
         )
         _invoke(run_btn.on_click, _make_event())
         assert not on_run.called
+
+    def test_field_errors_associated_to_text_field_error_slot(self) -> None:
+        """UIX-12: 字段级错误通过 ft.TextField(error=...) 原生插槽关联，满足无障碍语义契约。"""
+        _, _, result, component = _render_panel()
+        capital_field = _find_text_field(result, "i18n[backtest_initial_capital]")
+        positions_field = _find_text_field(result, "i18n[backtest_max_positions]")
+
+        # 默认无错误时 error 插槽为 None
+        assert capital_field.error is None
+        assert positions_field.error is None
+
+        # 非法输入时，error 插槽挂载 ft.Text 错误节点
+        _invoke(capital_field.on_change, _make_event("invalid"))
+        _invoke(positions_field.on_change, _make_event("-5"))
+        invalid_result = _rerender(component)
+        new_capital_field = _find_text_field(invalid_result, "i18n[backtest_initial_capital]")
+        new_positions_field = _find_text_field(invalid_result, "i18n[backtest_max_positions]")
+
+        assert isinstance(new_capital_field.error, ft.Text)
+        assert new_capital_field.error.value == "i18n[backtest_error_invalid_number]"
+        assert isinstance(new_positions_field.error, ft.Text)
+        assert new_positions_field.error.value == "i18n[backtest_error_positions_positive]"
 
 
 # ============================================================================
