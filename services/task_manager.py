@@ -200,6 +200,7 @@ class TaskManager:
             self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
             self._persist_pending_count = 0
             self._persist_counter_lock = threading.Lock()
+            self._semaphore_needs_reset: bool = False
 
             self.__class__._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
@@ -208,6 +209,13 @@ class TaskManager:
         """Lazily create semaphore bound to the current event loop.
         Concurrency limit follows ThreadPoolManager's CPU pool capacity,
         since most tasks offload heavy work there via run_async."""
+        if self._semaphore_needs_reset:
+            running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
+            if running_count == 0:
+                self._semaphore_needs_reset = False
+                del_loop_local("task_manager_semaphore")
+                logger.info("[TaskManager] Deferred concurrency reload applied in _get_semaphore")
+
         limit = ConfigHandler.get_max_concurrent_tasks()
         if limit <= 0:
             try:
@@ -255,12 +263,41 @@ class TaskManager:
         self._subscriber_error_counts.pop(callback, None)
 
     def reload_config(self):
-        """S1-1 fix: Reset semaphore so new concurrency limit takes effect on next _get_semaphore call."""
+        """CON-05: 优雅热更新并发配置。
+
+        若当前有任务正在运行（持有信号量许可），直接删除信号量会导致新任务在新信号量中立即执行，
+        在途旧任务 + 新任务并发数突破配置上限。因此若存在 RUNNING 任务，推迟至所有运行中任务退出后再重置；
+        若当前无活动任务，则立即重置生效。
+        """
+        running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
+        if running_count > 0:
+            self._semaphore_needs_reset = True
+            logger.info(
+                "[TaskManager] Concurrency reload deferred: %d task(s) currently running. "
+                "Will reset semaphore once all running tasks complete.",
+                running_count,
+            )
+        else:
+            self._semaphore_needs_reset = False
+            self._reset_semaphore_immediate()
+            logger.info("[TaskManager] Semaphore reset immediately (no active tasks)")
+
+    def _reset_semaphore_immediate(self):
+        """立即重置 loop-local 信号量。"""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(lambda: del_loop_local("task_manager_semaphore"))
         else:
             del_loop_local("task_manager_semaphore")
-        logger.info("[TaskManager] Semaphore reset, will reinitialize with new config on next task")
+
+    def _check_and_reset_semaphore_if_needed(self):
+        """CON-05: 检查并执行推迟的信号量重置。"""
+        if not self._semaphore_needs_reset:
+            return
+        running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
+        if running_count == 0:
+            self._semaphore_needs_reset = False
+            self._reset_semaphore_immediate()
+            logger.info("[TaskManager] Deferred concurrency reload applied after all running tasks finished")
 
     def _notify_subscribers(self):
         """Broadcast current tasks snapshot to all listeners. Safe to call from UI tread if using page.run_task."""
@@ -709,6 +746,7 @@ class TaskManager:
             self._notify_subscribers()
             self._evict_on_complete(task.id)
             clear_correlation_id()
+            self._check_and_reset_semaphore_if_needed()
 
     # --- Persistence ---
 
