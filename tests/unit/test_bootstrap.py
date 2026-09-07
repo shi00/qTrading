@@ -1073,3 +1073,102 @@ class TestBootstrapDatabaseUrlWarning:
         assert "shell profile" in source, (
             f"prepare_database_runtime 警告文案应建议清理 shell profile，实际源码片段：\n{source[:2000]}"
         )
+
+
+class TestStopStartedServicesCancellation:
+    """CON-09: 验证启动回滚时受 shield 保护并完整停止已启动服务。"""
+
+    @pytest.mark.asyncio
+    async def test_stop_started_services_reverse_order(self):
+        """验证已启动服务按逆序释放。"""
+        from app.bootstrap import _stop_started_services
+
+        call_order: list[str] = []
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.stop.side_effect = lambda: call_order.append("scheduler")
+
+        mock_news = MagicMock()
+        mock_news.stop_async = AsyncMock(side_effect=lambda: call_order.append("news"))
+
+        mock_market = MagicMock()
+        mock_market.stop_async = AsyncMock(side_effect=lambda: call_order.append("market_data"))
+
+        with (
+            patch("app.bootstrap.SchedulerService", return_value=mock_scheduler),
+            patch("app.bootstrap.NewsSubscriptionService", return_value=mock_news),
+            patch("app.bootstrap.MarketDataService", return_value=mock_market),
+        ):
+            await _stop_started_services(["scheduler", "news", "market_data"])
+
+        assert call_order == ["market_data", "news", "scheduler"]
+
+    @pytest.mark.asyncio
+    async def test_stop_started_services_single_cancellation_logs_warning_and_continues(self, caplog):
+        """单个服务在 stop 时抛出 CancelledError，记录 warning 并继续清理剩余服务。"""
+        import logging
+        from app.bootstrap import _stop_started_services
+
+        mock_scheduler = MagicMock()
+        mock_news = MagicMock()
+        mock_news.stop_async = AsyncMock(side_effect=asyncio.CancelledError("stop cancelled"))
+        mock_market = MagicMock()
+        mock_market.stop_async = AsyncMock()
+
+        with (
+            patch("app.bootstrap.SchedulerService", return_value=mock_scheduler),
+            patch("app.bootstrap.NewsSubscriptionService", return_value=mock_news),
+            patch("app.bootstrap.MarketDataService", return_value=mock_market),
+            caplog.at_level(logging.WARNING),
+        ):
+            await _stop_started_services(["scheduler", "news", "market_data"])
+
+        mock_market.stop_async.assert_awaited_once()
+        mock_news.stop_async.assert_awaited_once()
+        mock_scheduler.stop.assert_called_once_with()
+        assert "cancelled while stopping service news" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_startup_cancellation_shield_wait_cleans_all(self):
+        """外层任务被 cancel 时，回滚 shield + wait 范式确保所有服务完整释放，且 CancelledError 不被吞没。"""
+        from app.bootstrap import initialize_services
+
+        mock_cache = MagicMock()
+        mock_cache.init_db = AsyncMock()
+        mock_cache.engine = MagicMock()
+
+        mock_task_mgr = MagicMock()
+        mock_task_mgr.init_db = AsyncMock()
+
+        mock_scheduler = MagicMock()
+        mock_news = MagicMock()
+        mock_news.start = AsyncMock()
+        mock_market = MagicMock()
+
+        call_order: list[str] = []
+        mock_scheduler.stop.side_effect = lambda: call_order.append("scheduler")
+        mock_news.stop_async = AsyncMock(side_effect=lambda: call_order.append("news"))
+        mock_market.stop_async = AsyncMock(side_effect=lambda: call_order.append("market_data"))
+
+        # 模拟 MarketDataService.start() 时外部 task 抛出 CancelledError
+        async def cancel_on_market_start():
+            raise asyncio.CancelledError("outer cancelled during start")
+
+        mock_market.start = AsyncMock(side_effect=cancel_on_market_start)
+
+        with (
+            patch("app.bootstrap.TaskManager", return_value=mock_task_mgr),
+            patch("app.bootstrap._register_scheduler_jobs"),
+            patch("app.bootstrap.SchedulerService", return_value=mock_scheduler),
+            patch("app.bootstrap.NewsSubscriptionService", return_value=mock_news),
+            patch("app.bootstrap.MarketDataService", return_value=mock_market),
+            patch("utils.app_env.is_e2e_mode", return_value=False),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await initialize_services(mock_cache)
+
+        # 验证回滚正常触发且逆序释放了之前成功启动的服务
+        assert "news" in call_order
+        assert "scheduler" in call_order
+        mock_news.stop_async.assert_awaited_once()
+        mock_scheduler.stop.assert_called_once_with()

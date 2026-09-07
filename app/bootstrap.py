@@ -191,9 +191,15 @@ async def initialize_services(
             await MarketDataService().start()
             started.append("market_data")
         except BaseException:
-            # TD-P2：启动阶段部分服务成功即后续失败 → 逆序停止已启动服务防资源泄漏。
-            # BaseException 覆盖 CancelledError（R2）与系统级异常；清理后 re-raise 原始异常。
-            await _stop_started_services(started)
+            # TD-P2 / CON-09：启动阶段部分服务成功即后续失败 → 逆序停止已启动服务防资源泄漏。
+            # 采用 shield + asyncio.wait 范式，确保外层收到取消信号时回滚清理任务依然执行完毕，不遗留孤儿服务。
+            # 清理完成后 re-raise 原始异常（R2 合规）。
+            cleanup_task = asyncio.create_task(_stop_started_services(started))
+            try:
+                await asyncio.shield(cleanup_task)
+            except BaseException:
+                await asyncio.wait([cleanup_task])
+                raise
             raise
 
         await _warmup_tushare_capabilities()
@@ -254,11 +260,17 @@ async def _stop_started_services(started: list[str]) -> None:
             elif name == "market_data":
                 await MarketDataService().stop_async()
         except BaseException as e:  # noqa: BLE001  # [reason: 清理阶段防御性捕获全部异常（含取消）以保证后续服务仍被释放]
-            logger.warning(
-                "[Bootstrap] failed to stop startup service %s after startup failure: %s",
-                name,
-                DataSanitizer.sanitize_error(e),
-            )
+            if isinstance(e, asyncio.CancelledError):
+                logger.warning(
+                    "[Bootstrap] cancelled while stopping service %s during startup rollback, continuing with remaining services",
+                    name,
+                )
+            else:
+                logger.warning(
+                    "[Bootstrap] failed to stop startup service %s after startup failure: %s",
+                    name,
+                    DataSanitizer.sanitize_error(str(e)),
+                )
 
 
 async def _warmup_tushare_capabilities() -> None:
