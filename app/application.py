@@ -103,7 +103,8 @@ class ApplicationSession:
         """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。"""
         if self.coordinator is not None:
             try:
-                await self.coordinator.do_cleanup()
+                # 生产停机统一预算：watchdog 70s / cleanup 60s / 单步 35s，容纳 Step 8 PG 停止（CON-11）
+                await self.coordinator.do_cleanup(timeout_s=60.0, step_timeout_s=35.0)
             except Exception:
                 logger.exception("[App] Startup rollback: ShutdownCoordinator cleanup failed")
         if self.cache_manager is not None:

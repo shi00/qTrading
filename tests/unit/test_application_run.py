@@ -291,7 +291,7 @@ class TestApplicationSession:
         result = await session.__aexit__(type(Exception), Exception("boom"), None)
 
         assert result is False  # 不吞没异常
-        session.coordinator.do_cleanup.assert_awaited_once()
+        session.coordinator.do_cleanup.assert_awaited_once_with(timeout_s=60.0, step_timeout_s=35.0)
         session.cache_manager.close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -320,7 +320,7 @@ class TestApplicationSession:
         result = await session.__aexit__(type(Exception), Exception("boom"), None)
 
         assert result is False  # 原始异常继续传播
-        session.coordinator.do_cleanup.assert_awaited_once()
+        session.coordinator.do_cleanup.assert_awaited_once_with(timeout_s=60.0, step_timeout_s=35.0)
         session.cache_manager.close.assert_awaited_once()
 
 
