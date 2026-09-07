@@ -185,6 +185,39 @@ def classify_error(e: Exception, context: str = "general") -> dict:
     error_str = str(e).lower()
     error_type = type(e).__name__
 
+    if context == "sync":
+        _note_message_fallback(e, context)
+        if any(
+            kw in error_str
+            for kw in (
+                "token",
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "权限不足",
+                "鉴权失败",
+                "认证失败",
+                "未授权",
+                "非法token",
+                "无效token",
+            )
+        ):
+            return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
+        if any(kw in error_str for kw in ("quota", "402", "insufficient_quota", "积分不足", "积分", "credit")):
+            return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota"}
+        if any(kw in error_str for kw in ("asyncpg", "postgres", "database", "sqlite", "数据库")) or (
+            _ASYNCPG_AVAILABLE and isinstance(e, getattr(asyncpg, "PostgresError", ()))
+        ):
+            db_info = classify_error(e, context="db")
+            if db_info.get("code") != "unknown":
+                return db_info
+            return {"code": "db", "message_key": "db_err_unknown"}
+        gen_info = classify_error(e, context="general")
+        if gen_info.get("code") != "unknown":
+            return gen_info
+        return {"code": "unknown", "message_key": "common_op_fail"}
+
     if context == "token":
         _note_message_fallback(e, context)
         if "token" in error_str and ("invalid" in error_str or "not set" in error_str):

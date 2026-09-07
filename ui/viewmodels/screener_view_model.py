@@ -657,7 +657,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             # 仅当确有重试中的占位卡名时还原为错误态，后续 on_result/on_card_error 均不会再来。
             # 还原重试前的原始错误文案（VM 不感知 locale，§3.2），不调用 I18n。
             if self._retrying_name:
-                self._on_card_error(self._retrying_name, self._retrying_prev_error or "AI 分析未完成")
+                self._on_card_error(self._retrying_name, self._retrying_prev_error or "screener_ai_incomplete")
             self._retrying_name = None
             self._retrying_prev_error = None
             # 清空重试上下文（防止 retry_single 完成后回调污染新策略）

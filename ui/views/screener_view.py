@@ -319,7 +319,7 @@ def build_stream_card(card: StreamCard, on_retry: typing.Callable[[str], None]) 
                         spacing=8,
                     ),
                     ft.Text(
-                        card.error,
+                        I18n.get(card.error, default=card.error) if card.error else "",
                         size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.ERROR,
                         no_wrap=False,

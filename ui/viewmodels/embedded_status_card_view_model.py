@@ -57,13 +57,7 @@ class EmbeddedStatusCardViewModel(ObservableViewModelMixin[EmbeddedStatusCardSta
         self._subscribers: list = []
         # 初始化默认状态: embedded 模式已就绪
         self._state = EmbeddedStatusCardState(
-            status_message=Message(
-                "embedded_pg_ready",
-                {"default": "本地数据库已自动准备"},
-            ),
+            status_message=Message("embedded_pg_ready"),
             status_type="success",
-            info_message=Message(
-                "embedded_pg_no_config_needed",
-                {"default": "无需配置主机/端口/密码"},
-            ),
+            info_message=Message("embedded_pg_no_config_needed"),
         )

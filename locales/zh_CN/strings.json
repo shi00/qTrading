@@ -120,6 +120,7 @@
     "screener_auto_save": "自动保存复盘记录",
     "screener_ai_log_title": "AI 思考过程日志 (Real-time Reasoning)",
     "screener_ai_log_subtitle": "点击展开查看 AI 详细推理链",
+    "screener_ai_incomplete": "AI 分析未完成",
     "screener_page_prev": "上一页",
     "screener_page_next": "下一页",
     "screener_log_title": "执行日志",
