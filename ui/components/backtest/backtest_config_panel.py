@@ -289,6 +289,26 @@ def BacktestConfigPanel(
         on_click=safe_on_click(_show_end_picker),
     )
 
+    # --- UX-05 / UIX-12: 字段级错误提示 (使用 ft.TextField(error=...) 原生插槽程序化关联) ---
+    def _field_error(field: str) -> ft.Text | None:
+        error_key = validation_errors.get(field)
+        if not error_key:
+            return None
+        return ft.Text(
+            I18n.get(error_key),
+            color=AppColors.ERROR,
+            size=AppStyles.FONT_SIZE_BODY_SM,
+        )
+
+    capital_error = _field_error("initial_capital")
+    positions_error = _field_error("max_positions")
+    date_range_error = ft.Text(
+        I18n.get(validation_errors["date_range"]) if "date_range" in validation_errors else "",
+        color=AppColors.ERROR,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        visible="date_range" in validation_errors,
+    )
+
     def _on_initial_capital_change(e: ft.ControlEvent) -> None:
         set_initial_capital(get_control_value(e.control, ft.TextField) or "")
 
@@ -301,6 +321,7 @@ def BacktestConfigPanel(
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
             color=AppColors.INPUT_TEXT,
+            error=capital_error,
             on_change=safe_on_change(_on_initial_capital_change),
             # D19: Enter 提交 → 触发运行回测 (表单主操作, 与 Run 按钮同 handler)
             on_submit=safe_on_change(_on_run_click),
@@ -335,29 +356,10 @@ def BacktestConfigPanel(
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
+        error=positions_error,
         on_change=safe_on_change(_on_max_positions_change),
         # D19: Enter 提交 → 触发运行回测 (表单主操作, 与 Run 按钮同 handler)
         on_submit=safe_on_change(_on_run_click),
-    )
-
-    # --- UX-05: 字段错误提示 (声明式常驻构造, visible 驱动; flet 0.86.5 无 TextField.error_text) ---
-    # 常驻构造: 无错误时 content 为空串 (visible=False), 避免条件插入破坏响应式布局后重排
-    def _field_error(field: str) -> ft.Text:
-        error_key = validation_errors.get(field)
-        return ft.Text(
-            I18n.get(error_key) if error_key else "",
-            color=AppColors.ERROR,
-            size=AppStyles.FONT_SIZE_BODY_SM,
-            visible=field in validation_errors,
-        )
-
-    capital_error = _field_error("initial_capital")
-    positions_error = _field_error("max_positions")
-    date_range_error = ft.Text(
-        I18n.get(validation_errors["date_range"]) if "date_range" in validation_errors else "",
-        color=AppColors.ERROR,
-        size=AppStyles.FONT_SIZE_BODY_SM,
-        visible="date_range" in validation_errors,
     )
 
     def _on_commission_change(val: float) -> None:
@@ -499,7 +501,7 @@ def BacktestConfigPanel(
                 ft.ResponsiveRow(
                     [
                         ft.Column(
-                            [initial_capital_input, capital_error],
+                            [initial_capital_input],
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
@@ -509,7 +511,7 @@ def BacktestConfigPanel(
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                         ft.Column(
-                            [max_position_input, positions_error],
+                            [max_position_input],
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
