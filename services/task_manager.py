@@ -848,20 +848,34 @@ class TaskManager:
         with self._persist_counter_lock:
             self._persist_pending_count += 1
 
+        def _decrement():
+            with self._persist_counter_lock:
+                self._persist_pending_count = max(0, self._persist_pending_count - 1)
+
         async def _tracked_persist():
             try:
                 await self._persist_snapshot(snapshot)
             finally:
-                with self._persist_counter_lock:
-                    self._persist_pending_count = max(0, self._persist_pending_count - 1)
+                _decrement()
 
-        scheduled = self._schedule_coro(_tracked_persist())
-        if not scheduled:
-            with self._persist_counter_lock:
-                self._persist_pending_count = max(0, self._persist_pending_count - 1)
+        self._schedule_coro(_tracked_persist(), on_drop=_decrement)
 
-    def _schedule_coro(self, coro):
-        """Schedule a coroutine on the main event loop.  Thread-safe."""
+    def _schedule_coro(self, coro, on_drop: Callable[[], None] | None = None):
+        """Schedule a coroutine on the main event loop.  Thread-safe.
+
+        If the coroutine cannot be scheduled or fails to launch, on_drop (if provided)
+        is invoked to safely release any reserved counters or resources.
+        """
+
+        def _handle_drop(msg: str):
+            coro.close()
+            if on_drop is not None:
+                try:
+                    on_drop()
+                except Exception:
+                    logger.exception("[TaskManager] on_drop callback failed: %s", msg)
+            logger.debug(msg)
+
         loop = self._loop
         if loop and loop.is_running():
 
@@ -869,12 +883,9 @@ class TaskManager:
                 try:
                     task = loop.create_task(coro)
                 except (RuntimeError, TypeError, ValueError):
-                    # RuntimeError: loop closed between is_running() check and create_task
-                    # TypeError: coro is not a coroutine/awaitable (defensive against
-                    #            closed-coroutine or non-awaitable edge cases)
-                    # ValueError: coro has already been awaited
-                    coro.close()
-                    logger.debug("[TaskManager] Loop closed or invalid coro in _launch, dropped.")
+                    # CON-06: loop 在 is_running() 与 create_task 之间关闭或非合法 coro 时，
+                    # 触发 _handle_drop 执行补偿回调，防止持久化计数器泄漏导致停机 Step 2 恒超时
+                    _handle_drop("[TaskManager] Loop closed or invalid coro in _launch, dropped.")
                     return
                 # Keep a strong reference to the task to prevent garbage collection
                 self._background_tasks.add(task)
@@ -884,12 +895,10 @@ class TaskManager:
                 loop.call_soon_threadsafe(_launch)
             except RuntimeError:
                 # Loop closed between is_running() check and call_soon_threadsafe
-                coro.close()
-                logger.debug("[TaskManager] Loop closed before call_soon_threadsafe, coroutine dropped.")
+                _handle_drop("[TaskManager] Loop closed before call_soon_threadsafe, coroutine dropped.")
                 return False
             return True
-        coro.close()
-        logger.debug("[TaskManager] No event loop available, coroutine dropped.")
+        _handle_drop("[TaskManager] No event loop available, coroutine dropped.")
         return False
 
     async def flush_persistence(self, timeout_s: float = 1.5):

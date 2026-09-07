@@ -1757,6 +1757,45 @@ class TestTaskManagerScheduleCoroErrorPaths:
         assert result is True  # call_soon_threadsafe 成功了
         mock_coro.close.assert_called_once_with()  # noqa: weak-assertion close() 无参数，仅需验证被调用一次
 
+    @pytest.mark.asyncio
+    async def test_schedule_coro_on_drop_invoked_on_launch_failure(self):
+        """CON-06: _launch 中 create_task 失败时，on_drop 回调必须被调用。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.create_task.side_effect = RuntimeError("loop closed")
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+
+        dropped = False
+
+        def _on_drop():
+            nonlocal dropped
+            dropped = True
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro, on_drop=_on_drop)
+        assert result is True
+        assert dropped is True
+
+    @pytest.mark.asyncio
+    async def test_queue_persist_snapshot_counter_does_not_leak_on_launch_failure(self):
+        """CON-06: 当 _launch 中 create_task 失败时，_persist_pending_count 必须递减归零。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.create_task.side_effect = RuntimeError("loop closed")
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+
+        assert mgr._persist_pending_count == 0
+        mgr._queue_persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None))
+        assert mgr._persist_pending_count == 0
+
 
 class TestTaskManagerPersistSnapshotException:
     """覆盖 _persist_snapshot 异常分支。"""
