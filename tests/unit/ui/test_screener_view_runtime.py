@@ -458,16 +458,6 @@ class _FakeScreenerViewModel:
         self.method_calls.append("switch_to_realtime")
         self._set_state(mode="REALTIME")
 
-    def clear_filters(self) -> None:
-        """P1-3 批次 2 #71: Mock clear_filters (EmptyState on_cta 回调)."""
-        self.method_calls.append("clear_filters")
-        self._set_state(
-            page_no=1,
-            sort_column=None,
-            sort_ascending=True,
-            tier_hint=None,
-        )
-
     def subscribe_task_manager(self) -> None:
         self.method_calls.append("subscribe_task_manager")
 

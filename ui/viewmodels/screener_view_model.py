@@ -1164,24 +1164,6 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if new_size > 0 and new_size != self._state.page_size:
             self._update_pagination(page_size=new_size, page_no=1)
 
-    def clear_filters(self) -> None:
-        """重置筛选/排序/分页/档位提示至默认值 (P1-3 #71).
-
-        EmptyState 的 ``on_cta`` 回调调用本命令，清空当前筛选状态以便用户重新执行策略。
-        不清除 ``_full_results`` (保留上次结果供用户参考); 重置 state 中的
-        ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` /
-        ``stock_filter`` 字段 (UX-04), 分页按全量重算保持状态自洽。
-        """
-        # C2b H1: 清空筛选/排序后经唯一 owner 单帧原子重算分页与当前页切片
-        # (page_no 不得直写 _set_state: 第 2 轮对抗检视 M-1 消除陈旧中间帧)
-        self._update_pagination(
-            page_no=1,
-            sort_column=None,
-            sort_ascending=True,
-            tier_hint=None,
-            stock_filter="",
-        )
-
     # --- Stock code filter (UX-04 P2-01) ---
 
     def _get_filtered_results(self, stock_filter: str | None = None) -> pd.DataFrame | None:
