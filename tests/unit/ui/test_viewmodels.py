@@ -531,14 +531,17 @@ class TestScreenerViewModelSortHelper:
 
 class TestScreenerViewModelChangePage:
     def test_valid_page(self, screener_vm):
-        screener_vm._set_state(page_no=1, total_pages=3)
+        screener_vm._full_results = pd.DataFrame({"a": range(100)})
+        screener_vm._update_pagination()  # 3 页 (100/50)
         screener_vm.change_page(1)
         assert screener_vm.state.page_no == 2
 
     def test_out_of_range(self, screener_vm):
-        screener_vm._set_state(page_no=3, total_pages=3)
-        screener_vm.change_page(1)
-        assert screener_vm.state.page_no == 3
+        screener_vm._full_results = pd.DataFrame({"a": range(100)})
+        screener_vm._update_pagination()
+        screener_vm._set_state(page_no=2)
+        screener_vm.change_page(1)  # 2+1=3 == total_pages(2) → 越界拒换
+        assert screener_vm.state.page_no == 2
 
 
 class TestScreenerViewModelChangePageSize:
@@ -560,16 +563,17 @@ class TestScreenerViewModelChangePageSize:
 
 class TestScreenerViewModelGetCurrentPageData:
     def test_returns_correct_slice(self, screener_vm):
+        """current_page_rows 锁定当前页切片 (C2b 消除双轨制, View 只读 state 快照)."""
         screener_vm._full_results = pd.DataFrame({"a": range(10)})
-        screener_vm._set_state(page_no=2, page_size=3)
-        result = screener_vm.get_current_page_data()
-        assert list(result["a"]) == [3, 4, 5]
+        screener_vm._set_state(page_no=1, page_size=3)
+        screener_vm._update_pagination()
+        result = screener_vm.state.current_page_rows
+        assert [r.values["a"] for r in result] == [0, 1, 2]
 
     def test_empty_when_none(self, screener_vm):
         screener_vm._full_results = None
-        result = screener_vm.get_current_page_data()
-        assert isinstance(result, pd.DataFrame)
-        assert result.empty
+        screener_vm._update_pagination()
+        assert screener_vm.state.current_page_rows == ()
 
 
 class TestScreenerViewModelSwitchToHistory:

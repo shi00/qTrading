@@ -54,7 +54,6 @@ class FakeScreenerState:
     tier_hint: str | None = None
     mode: str = "REALTIME"
     task_unlocked: bool = False
-    data_version: int = 0
     strategies_loaded: bool = False
     strategies_with_dep: dict = field(default_factory=dict)
     strategy_desc: Message | None = None
@@ -65,6 +64,8 @@ class FakeScreenerState:
     status_action_key: str | None = None
     is_retrying: bool = False
     stock_filter: str = ""
+    # C2b: 当前页 locale-neutral 原始行 (View 只读 state 快照)
+    current_page_rows: tuple = ()
 
 
 class FakeScreenerViewModel:
@@ -117,12 +118,6 @@ class FakeScreenerViewModel:
 
     def unsubscribe_task_manager(self) -> None:
         self.method_calls.append("unsubscribe_task_manager")
-
-    def get_current_page_data(self) -> Any:
-        """返回空 DataFrame（避免表格渲染失败）。"""
-        import pandas as pd
-
-        return pd.DataFrame()
 
     def get_strategy_params(self, key: str | None) -> list:
         return []
