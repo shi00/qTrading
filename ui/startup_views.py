@@ -646,10 +646,7 @@ def StartupView(
     if state == StartupState.READY:
         from ui.app_layout import AppLayout
 
-        logger.info("[StartupView] state=READY, rendering AppLayout")
-        result = AppLayout()
-        logger.info("[StartupView] AppLayout rendered, returning")
-        return result
+        return AppLayout()
     if state == StartupState.NEED_ONBOARDING:
         return _build_onboarding_view(controller.onboarding_complete)
     if state == StartupState.INIT_FAILED:

@@ -1251,6 +1251,83 @@ def check_R16_vm_init_singleton_construction() -> list[str]:
 
 
 # ============================================================================
+# UIX-10: 声明式组件渲染期副作用检查（禁止 @ft.component 顶层调用 logger/print）
+# ============================================================================
+
+_LOG_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "exception", "log"})
+
+
+def _is_component_decorator(dec: ast.expr) -> bool:
+    if isinstance(dec, ast.Attribute) and dec.attr == "component":
+        return True
+    if isinstance(dec, ast.Name) and dec.id == "component":
+        return True
+    if isinstance(dec, ast.Call):
+        return _is_component_decorator(dec.func)
+    return False
+
+
+def _iter_top_level_calls(stmt: ast.stmt) -> typing.Iterator[ast.Call]:
+    stack: list[ast.AST] = [stmt]
+    while stack:
+        curr = stack.pop()
+        if isinstance(curr, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(curr, ast.Call):
+            yield curr
+        for child in ast.iter_child_nodes(curr):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.append(child)
+
+
+def _check_no_render_side_effects_in_tree(tree: ast.AST, source_path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        rel = source_path
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not any(_is_component_decorator(dec) for dec in node.decorator_list):
+            continue
+
+        for stmt in node.body:
+            for call in _iter_top_level_calls(stmt):
+                func = call.func
+                if isinstance(func, ast.Name) and func.id == "print":
+                    errors.append(
+                        f"UI 渲染期副作用 (UIX-10): {rel}:{call.lineno} @ft.component '{node.name}' "
+                        f"顶层调用 print()。渲染必须为纯函数，副作用应移入 use_effect 或事件回调中。"
+                    )
+                elif isinstance(func, ast.Attribute) and func.attr in _LOG_METHODS:
+                    val = func.value
+                    if (isinstance(val, ast.Name) and "logger" in val.id.lower()) or (
+                        isinstance(val, ast.Attribute) and "logger" in val.attr.lower()
+                    ):
+                        errors.append(
+                            f"UI 渲染期副作用 (UIX-10): {rel}:{call.lineno} @ft.component '{node.name}' "
+                            f"顶层调用 logger.{func.attr}()。渲染必须为纯函数，副作用日志应移入 use_effect 或事件回调中。"
+                        )
+    return errors
+
+
+def check_no_component_render_side_effects() -> list[str]:
+    """UIX-10: 扫描 ui/ 下 @ft.component 函数体顶层是否存在 logger/print 副作用。"""
+    errors: list[str] = []
+    target_dir = ROOT / "ui"
+    if not target_dir.exists():
+        return errors
+    for p in _iter_py_files(target_dir):
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        errors.extend(_check_no_render_side_effects_in_tree(tree, p))
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -1271,6 +1348,7 @@ def main() -> int:
         ("R_no_bare_font_size_in_ui", check_R_no_bare_font_size_in_ui()),
         ("R_tushare_token_log", check_R_tushare_token_log()),
         ("R_lazy_import_whitelist", check_R_lazy_import_whitelist()),
+        ("UI 渲染期副作用 (UIX-10)", check_no_component_render_side_effects()),
     ]
     # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr
     check_R4_fstring_sql()
@@ -1285,7 +1363,7 @@ def main() -> int:
         return 1
 
     print(
-        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08）"
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用）"
     )
     return 0
 

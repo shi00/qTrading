@@ -1565,3 +1565,70 @@ class TestLazyImportWhitelist:
         )
         assert len(errors) == 1
         assert "services" in errors[0]
+
+
+class TestNoComponentRenderSideEffects:
+    """UIX-10: 声明式组件顶层渲染期副作用检查测试。"""
+
+    def test_component_top_level_logger_flagged(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import flet as ft\n"
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n\n"
+            "@ft.component\n"
+            "def MyView():\n"
+            '    logger.info("rendering")\n'
+            "    return ft.Text('hello')\n"
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert len(errors) == 1
+        assert "UI 渲染期副作用" in errors[0]
+        assert "logger.info" in errors[0]
+
+    def test_component_top_level_print_flagged(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = "import flet as ft\n\n@ft.component\ndef MyView():\n    print(\"debug\")\n    return ft.Text('hello')\n"
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert len(errors) == 1
+        assert "UI 渲染期副作用" in errors[0]
+        assert "print" in errors[0]
+
+    def test_component_nested_handler_logger_allowed(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import flet as ft\n"
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n\n"
+            "@ft.component\n"
+            "def MyView():\n"
+            "    def _on_click(e):\n"
+            '        logger.info("clicked")\n'
+            "    return ft.Button(on_click=_on_click)\n"
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert errors == []
+
+    def test_non_component_top_level_logger_allowed(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n\n"
+            "def helper():\n"
+            '    logger.info("helper called")\n'
+            "    return 1\n"
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "helper.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert errors == []
