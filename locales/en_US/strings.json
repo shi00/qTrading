@@ -116,6 +116,7 @@
     "screener_auto_save": "Auto Save History",
     "screener_ai_log_title": "AI Reasoning Log (Real-time)",
     "screener_ai_log_subtitle": "Click to expand AI reasoning chain",
+    "screener_ai_incomplete": "AI analysis incomplete",
     "screener_page_prev": "Prev",
     "screener_page_next": "Next",
     "screener_log_title": "Execution Log",

@@ -274,28 +274,32 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             (message, action_key) — action_key 为 snack action 按钮的 i18n key,
             None 表示无 action 按钮.
         """
-        error_str = str(ex).lower()
-
-        # Token 鉴权错误 → 重新探测积分
-        if any(kw in error_str for kw in ("token", "403", "401", "unauthorized", "forbidden")):
-            info = classify_error(ex, context="token")
-            return Message(info["message_key"]), "snack_action_probe_credits"
-
-        # 积分/配额错误 → 重新探测积分
-        if any(kw in error_str for kw in ("quota", "402", "积分不足")):
-            info = classify_error(ex, context="llm")
-            return Message(info["message_key"]), "snack_action_probe_credits"
-
-        # DB 错误 → 检查健康
-        if any(kw in error_str for kw in ("asyncpg", "postgres", "数据库", "database")):
-            info = classify_error(ex, context="db")
-            return Message(info["message_key"]), "snack_action_check_health"
-
-        # 网络/通用错误 → 检查健康 (网络类) 或无 action (未知)
-        info = classify_error(ex, context="general")
+        info = classify_error(ex, context="sync")
         code = info.get("code", "unknown")
-        if code in ("network", "timeout", "server", "dns", "ssl", "connection"):
-            return Message(info["message_key"]), "snack_action_check_health"
+
+        # Token 鉴权错误 / 积分配额错误 → 重新探测积分
+        if code in ("invalid", "insufficient_quota"):
+            return Message(info.get("message_key", "wizard_err_token_invalid")), "snack_action_probe_credits"
+
+        # DB 错误 / 网络或服务类错误 → 检查健康
+        if code in (
+            "db",
+            "refused",
+            "auth",
+            "not_found",
+            "interrupted",
+            "proxy",
+            "orphaned_revision",
+            "embedded_start_failed",
+            "password_error",
+            "network",
+            "timeout",
+            "server",
+            "dns",
+            "ssl",
+            "connection",
+        ):
+            return Message(info.get("message_key", "common_err_network")), "snack_action_check_health"
 
         # 未知错误 → 无 action
         return Message("common_op_fail"), None
