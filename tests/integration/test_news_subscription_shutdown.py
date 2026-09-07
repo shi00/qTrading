@@ -76,8 +76,12 @@ async def test_stop_async_drains_queue_before_cancel_processing():
 
     svc._processing_task = asyncio.create_task(_fake_processing())
 
+    # CON-07: processing_queue 是 loop-local property，stop 后会解绑并返回 None，
+    # 故在停机前捕获底层队列引用，停机后对引用断言 drain 完成。
+    drained_queue = svc.processing_queue
     await svc.stop_async(drain_timeout=1.0)
 
     assert svc._running is False
     assert svc._processing_task is None
-    assert svc.processing_queue.qsize() == 0
+    assert svc.processing_queue is None
+    assert drained_queue.qsize() == 0
