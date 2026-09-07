@@ -1167,7 +1167,7 @@ class TestCurrentPageRows:
         row = ScreenerRow()
         assert isinstance(row.values, MappingProxyType)
         with pytest.raises(TypeError) as exc_info:
-            row.values.__setitem__("any", 1)  # type: ignore[attr-defined]  # MappingProxyType 只读, 无 __setitem__
+            row.values["any"] = 1  # type: ignore[index]  # mappingproxy 只读, 赋值抛 TypeError (预期)
         assert "does not support item assignment" in str(exc_info.value)
         assert row.values == {}, "写入被拒且内容保持不变"
 
