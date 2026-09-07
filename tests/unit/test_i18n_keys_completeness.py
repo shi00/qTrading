@@ -232,6 +232,54 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             f"Found {len(violations)} I18n.get() calls with CJK fallback defaults:\n" + "\n".join(violations),
         )
 
+    def test_no_new_unreferenced_i18n_keys(self):
+        """UIX-16: Ratchet baseline gate for dead / unreferenced i18n keys.
+
+        Every key defined in locales/zh_CN/strings.json must appear in Python AST string constants
+        across the project, or be registered in tests/i18n_dead_keys_baseline.json.
+        New unreferenced keys are forbidden. The total unreferenced key count is ratcheted:
+        it may only stay equal or decrease over time.
+        """
+        project_root = Path(__file__).parent.parent.parent
+        baseline_path = project_root / "tests" / "i18n_dead_keys_baseline.json"
+        self.assertTrue(baseline_path.exists(), f"Missing i18n dead keys baseline: {baseline_path}")
+
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline_data = json.load(f)
+            baseline_keys = set(baseline_data.get("keys", []))
+            baseline_count = baseline_data.get("count", len(baseline_keys))
+
+        zh_keys = self._load_keys("zh_CN")
+
+        used_strings: set[str] = set()
+        scanned_dirs = ["ui", "core", "data", "services", "strategies", "utils", "app", "tests"]
+        for d in scanned_dirs:
+            target_dir = project_root / d
+            if not target_dir.exists():
+                continue
+            for py_file in target_dir.rglob("*.py"):
+                try:
+                    tree = ast.parse(py_file.read_text(encoding="utf-8", errors="ignore"), filename=str(py_file))
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                            used_strings.add(node.value)
+                except Exception:
+                    pass
+
+        unreferenced_keys = zh_keys - used_strings
+        new_unreferenced = unreferenced_keys - baseline_keys
+
+        self.assertFalse(
+            new_unreferenced,
+            f"New unreferenced / dead i18n keys detected (not in baseline or code): {sorted(new_unreferenced)[:20]}",
+        )
+        self.assertLessEqual(
+            len(unreferenced_keys),
+            baseline_count,
+            f"Unreferenced i18n keys count ({len(unreferenced_keys)}) exceeded baseline ({baseline_count}). "
+            f"Ratchet invariant violated: dead key count may only decrease.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
