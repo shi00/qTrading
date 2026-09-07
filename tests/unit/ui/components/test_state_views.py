@@ -5,7 +5,7 @@ from pathlib import Path
 import flet as ft
 import pytest
 
-from ui.components.state_views import EmptyState, ErrorState
+from ui.components.state_views import EmptyState, ErrorState, LoadingState
 from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
@@ -20,10 +20,14 @@ class TestStateViewsContract:
     def test_error_state_is_ft_component(self):
         assert hasattr(ErrorState, "__wrapped__")
 
+    def test_loading_state_is_ft_component(self):
+        assert hasattr(LoadingState, "__wrapped__")
+
     def test_no_class_inheritance(self):
         source = Path("ui/components/state_views.py").read_text(encoding="utf-8")
         assert "class EmptyState(" not in source
         assert "class ErrorState(" not in source
+        assert "class LoadingState(" not in source
 
     def test_no_did_mount_will_unmount_update(self):
         source = Path("ui/components/state_views.py").read_text(encoding="utf-8")
@@ -44,6 +48,7 @@ class TestStateViewsContract:
 
         assert "EmptyState" in state_views.__all__
         assert "ErrorState" in state_views.__all__
+        assert "LoadingState" in state_views.__all__
 
 
 class TestEmptyStateRender:
@@ -412,3 +417,73 @@ class TestCtaIcon:
         cta_btn = container.content.controls[1]
         assert isinstance(cta_btn, ft.TextButton)
         assert cta_btn.icon == ft.Icons.FEEDBACK
+
+
+class TestLoadingStateRender:
+    """LoadingState 组件体渲染测试 (UIX-14)."""
+
+    def test_default_props_renders_progress_ring(self, mock_i18n_state, mock_app_colors_state):
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(LoadingState)
+        container = render_once(c)
+        assert container.expand is True
+        col = container.content
+        assert len(col.controls) == 1
+        ring = col.controls[0]
+        assert isinstance(ring, ft.ProgressRing)
+        assert ring.width == 48  # AppStyles.ICON_SIZE_XL
+        assert ring.height == 48
+        assert ring.stroke_width == 4.0
+        assert ring.color == AppColors.PRIMARY
+
+    def test_message_renders_text(self, mock_i18n_state, mock_app_colors_state):
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(LoadingState, message="Loading data...")
+        container = render_once(c)
+        col = container.content
+        assert len(col.controls) == 2
+        assert isinstance(col.controls[0], ft.ProgressRing)
+        msg_text = col.controls[1]
+        assert isinstance(msg_text, ft.Text)
+        assert msg_text.value == "Loading data..."
+
+    def test_custom_size_and_color_and_expand(self, mock_i18n_state, mock_app_colors_state):
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(LoadingState, size=24, color="red", stroke_width=2.5, expand=False)
+        container = render_once(c)
+        assert container.expand is False
+        ring = container.content.controls[0]
+        assert ring.width == 24
+        assert ring.height == 24
+        assert ring.stroke_width == 2.5
+        assert ring.color == "red"
+
+    def test_cancel_button_renders_when_callback_and_text_provided(self, mock_i18n_state, mock_app_colors_state):
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        cancelled = []
+        c = make_component(
+            LoadingState,
+            message="Please wait",
+            on_cancel=lambda: cancelled.append(True),
+            cancel_text="Cancel",
+        )
+        container = render_once(c)
+        col = container.content
+        assert len(col.controls) == 3
+        cancel_btn = col.controls[2]
+        assert isinstance(cancel_btn, ft.TextButton)
+        assert cancel_btn.content == "Cancel"
+        assert cancel_btn.icon == ft.Icons.CLOSE
+
+    def test_cancel_missing_text_does_not_render_button(self, mock_i18n_state, mock_app_colors_state):
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(LoadingState, on_cancel=lambda: None)
+        container = render_once(c)
+        col = container.content
+        # 仅 ProgressRing，无 cancel button
+        assert len(col.controls) == 1

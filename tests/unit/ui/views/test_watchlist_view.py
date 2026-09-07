@@ -108,9 +108,21 @@ def _make_row(
 
 def _collect_all_controls(root: ft.Control | None) -> list[ft.Control]:
     """深度优先遍历控件树（参考 test_task_center_view._collect_all_controls）。"""
-    if root is None or not isinstance(root, ft.Control):
+    from flet.components.component import Component
+
+    if root is None or not isinstance(root, (ft.Control, Component)):
         return []
     result: list[ft.Control] = [root]
+
+    if isinstance(root, Component):
+        try:
+            from tests.unit.ui.component_renderer import render_once
+
+            root._state.mounted = True
+            rendered = render_once(root)
+            result.extend(_collect_all_controls(rendered))
+        except Exception:
+            pass
     for attr in ("controls", "items", "tabs"):
         children = getattr(root, attr, None)
         if isinstance(children, list):

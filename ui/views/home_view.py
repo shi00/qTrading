@@ -26,7 +26,7 @@ import flet as ft
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
-from ui.components.state_views import ErrorState
+from ui.components.state_views import ErrorState, LoadingState
 from ui.cache_cleared_state import get_cache_cleared_state
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -255,14 +255,7 @@ def HomeView(
             )
         )
     elif state.is_loading:
-        content_controls.append(
-            ft.Container(
-                content=ft.ProgressRing(width=48, height=48, stroke_width=4),
-                alignment=ft.Alignment.CENTER,
-                expand=True,
-                padding=AppStyles.EMPTY_STATE_PADDING,
-            )
-        )
+        content_controls.append(LoadingState())
     else:
         content_controls.extend(
             [

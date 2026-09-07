@@ -18,6 +18,7 @@ import flet as ft
 
 from core.i18n import Message
 from ui.components.flet_type_helpers import safe_on_click
+from ui.components.state_views import EmptyState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
@@ -406,34 +407,11 @@ def TaskCenterView(active: bool = True) -> ft.Container:
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
-    # --- Empty state ---
-    empty_view = ft.Container(
-        content=ft.Column(
-            [
-                ft.Icon(
-                    ft.Icons.INBOX_OUTLINED,
-                    size=AppStyles.ICON_SIZE_XXL,
-                    color=AppColors.TEXT_HINT,
-                ),
-                ft.Text(
-                    I18n.get("task_empty_title"),
-                    size=AppStyles.FONT_SIZE_HEADLINE,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_SECONDARY,
-                ),
-                ft.Text(
-                    I18n.get("task_empty_subtitle"),
-                    size=AppStyles.FONT_SIZE_BODY,
-                    color=AppColors.TEXT_HINT,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=8,
-        ),
-        alignment=ft.Alignment.CENTER,
-        expand=True,
-        padding=ft.Padding.only(top=60),
+    # --- Empty state (UIX-14: 消除手工复制，统一复用 EmptyState) ---
+    empty_view = EmptyState(
+        icon=ft.Icons.INBOX_OUTLINED,
+        title=I18n.get("task_empty_title"),
+        message=I18n.get("task_empty_subtitle"),
     )
 
     # --- Scrollable area ---
