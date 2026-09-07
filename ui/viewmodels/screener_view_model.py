@@ -425,6 +425,7 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     "label_key": "ai_system_prompt",
                     "type": "textarea",
                     "default": "",  # UI uses vm.get_base_prompt to map the value dynamically
+                    "group": "advanced",
                 },
             )
 
