@@ -175,7 +175,7 @@ class TestClampWidth:
 
 
 class TestAssertTablePositiveSize:
-    """零尺寸护栏 (UIX-13 C5): PaginatedTable 结构尺寸不变量 (PR373 视口塌陷防护)。"""
+    """表格结构尺寸完整性校验 (UIX-13 C5): PaginatedTable 结构尺寸不变量。"""
 
     def test_ok_with_normal_layout(self):
         """正常结构尺寸 (total_w >= MIN_TABLE_WIDTH, 正的表头/行高) 不抛。"""

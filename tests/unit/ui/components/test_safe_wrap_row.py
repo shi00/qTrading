@@ -47,6 +47,16 @@ class TestSafeWrapRowContract:
         with pytest.raises(ValueError, match="expand=True 与 wrap=True 冲突"):
             SafeWrapRow(controls=[box])
 
+    def test_allows_expand_inside_bounded_container(self) -> None:
+        """显式声明 width 与 height 的有界容器内部 flex 属局部安全布局，予以放行。"""
+        bounded_box = ft.Container(
+            width=200,
+            height=300,
+            content=ft.Column(controls=[ft.Text("title"), ft.Container(expand=True)]),
+        )
+        row = SafeWrapRow(controls=[bounded_box])
+        assert len(row.controls) == 1
+
 
 class TestIterChildren:
     """_iter_children 遍历 controls 列表与 content 单控件。"""

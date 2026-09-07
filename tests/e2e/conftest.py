@@ -14,6 +14,7 @@ import sys
 import tarfile
 import time
 import typing
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from unittest.mock import MagicMock
@@ -1518,6 +1519,7 @@ def _e2e_app_dep(request) -> AppServer:
         return typing.cast(AppServer, request.getfixturevalue("flet_app_ro"))
 
 
+@asynccontextmanager
 async def _e2e_page_with_viewport(
     e2e_browser, app: AppServer, request, *, viewport: tuple[int, int]
 ) -> typing.AsyncGenerator[FletPage]:
@@ -1546,12 +1548,14 @@ async def _e2e_page_with_viewport(
             allow_module_level=False,
         )
 
-    yield fp
-    failed = any(
-        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
-    await _teardown_page(fp, request, failed=failed)
+    try:
+        yield fp
+    finally:
+        failed = any(
+            getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+            for when in ("setup", "call")
+        )
+        await _teardown_page(fp, request, failed=failed)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -1570,7 +1574,7 @@ async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
     loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
     fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
     """
-    async for fp in _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1400, 900)):
+    async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1400, 900)) as fp:
         yield fp
 
 
@@ -1581,7 +1585,7 @@ async def e2e_page_1280x720(e2e_browser, _e2e_app_dep: AppServer, request):
     与 e2e_page 共用生命周期（read-only pool + 播种），仅视口不同；用于断言
     最小宽度下主要视图无塌陷（PR373 视口塌陷回归防护）。
     """
-    async for fp in _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1280, 720)):
+    async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1280, 720)) as fp:
         yield fp
 
 
