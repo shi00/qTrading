@@ -114,8 +114,8 @@ redlines:
   - id: R11
     title: 跨循环复用同步原语
     description: "直接将 asyncio.Event/Lock 作为类属性 (必须通过 get_loop_local() 获取以绑定当前循环)"
-    enforcement: "仅人工评审"
-    automation_coverage: none
+    enforcement: "CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审）"
+    automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
 

@@ -26,4 +26,11 @@
 
 **标准性能红线 (`PerfThreshold`)**: 具体数值见 `utils/log_decorators.py`，涵盖内存计算/DB单查询/外部网络/DB批量IO/AI推理/全局初始化六类场景。
 
+### 线程池任务类型与计算适用判据 (CON-16)
+
+`ThreadPoolManager` 提供 `TaskType.IO` 与 `TaskType.CPU`：
+- `TaskType.IO`：网络、数据库、磁盘等阻塞 IO 操作（高并发，由连接池与背压预算硬钳制，见 `utils/config/db.py::get_max_io_workers()`）。
+- `TaskType.CPU`：**仅适用于释放 Python GIL 的密集计算**（如 Polars 表达式、NumPy 数组计算、C 扩展等）。
+- **纯 Python 密集循环**：纯 Python 循环在线程池内会产生严重 GIL 争抢，不仅无法利用多核，还会争抢事件循环线程导致 UI 卡顿。桌面应用模型下不引入多进程池（避免进程间序列化开销与打包复杂度）；**所有 CPU 密集型计算必须改用 Polars 向量化表达**。
+
 > **操作指引**：修改配置项或调整性能相关阈值，入口见 [CLAUDE.md §1.8 决策树](../../CLAUDE.md#18-任务类型--必读文件-决策树)（「修改配置项 / 性能优化 / 阈值调整」均路由到本节）；完整新增策略/DAO 的落地流程见 [docs/guides/how-to.md](../guides/how-to.md)。

@@ -170,7 +170,7 @@
 | R8 | **废弃 API** | 批量写入必须使用 `_save_upsert`；`_write_db` 不提供批量参数 | CI-test（结构性签名强制 + filterwarnings error::DeprecationWarning 通用辅助门禁） |
 | R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) | 安全扫描 + 仅人工评审 |
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
-| R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | 仅人工评审 |
+| R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审） |
 | R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
 | R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` 驱动循环同步，结构上不可漏改） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度） |
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
@@ -179,7 +179,7 @@
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 
-> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R4/R12/R13/R14/R15/R16（VM 构造单例切面）已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）。R16 其余维度（事件处理器内同步 IO 等）误报风险高，仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R2 由 `tests/unit/test_no_cancelled_error_swallow.py` AST 扫描守护；R4/R12/R13/R14/R15/R16（VM 构造单例切面）已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R11 由 `tests/unit/test_no_class_attr_asyncio_primitives.py` AST 扫描守护类与实例属性构造点。R16 其余维度（事件处理器内同步 IO 等）及 R11 缓存点/跨循环使用仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
 > **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
 > - `INVARIANT`：不可豁免的无条件安全不变量；
