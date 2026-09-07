@@ -2916,6 +2916,8 @@ class TestTableDataMemo:
         """
         env = screener_view_env
         fake_vm = env["fake_vm"]
+        initial_rows = fake_vm.state.current_page_rows
+        assert initial_rows, "初始环境应有切片数据"
 
         # 清空数据 → EmptyState (memo 失效)
         fake_vm._set_current_page_rows(pd.DataFrame())
@@ -2924,10 +2926,10 @@ class TestTableDataMemo:
         assert counting_build["n"] == 0
         assert "on_sort" not in env["captured_callbacks"], "空态应渲染 EmptyState 而非表格"
 
-        # 恢复数据 → 必须重算, 不得命中空态前旧 memo
-        fake_vm._set_current_page_rows(pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]}))
+        # 对抗性断言: 恢复与清空前完全相同对象引用的行切片 (验证 memo 被彻底置空, 即使对象引用相同也必须重算)
+        fake_vm._set_state(current_page_rows=initial_rows, total_items=len(initial_rows), total_pages=1)
         _rerender(env)
-        assert counting_build["n"] == 1, "空态失效后恢复数据应重算 (防陈旧命中)"
+        assert counting_build["n"] == 1, "空态使 memo 失效后, 恢复原相同引用行也必须重算 (防陈旧命中)"
 
     def test_locale_change_invalidates(self, screener_view_env, counting_build) -> None:
         """locale 切换 → 重算 (unit_yi/unit_wan 等格式化字符串 locale 相关, 防旧 locale 残留)."""

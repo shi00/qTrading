@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -159,6 +160,33 @@ class TestSortDirectionConsistency:
         new_col, new_asc = next_sort_state("A", False, "B")
         assert new_col == "B"
         assert new_asc is True
+
+    @pytest.mark.asyncio
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    async def test_sort_data_atomic_frame_no_stale_intermediate(self, mock_dp, mock_sm, mock_rm):
+        """第 3 轮对抗检视: sort_data 单帧原子化 — 消除「loading=False + 旧未排序切片」中间帧."""
+        vm = ScreenerViewModel()
+        vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
+        vm._update_pagination()
+        assert _row_vals(vm.state.current_page_rows, "A") == [3, 1, 2]
+
+        snapshots = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
+            await vm.sort_data("A", ascending=True)
+
+        # 必须恰好 2 帧: 帧 0 进入 loading=True, 帧 1 原子产出排序结果 + loading=False
+        assert len(snapshots) == 2
+        assert snapshots[0].loading is True
+        assert snapshots[1].loading is False
+        assert snapshots[1].sort_column == "A"
+        assert snapshots[1].sort_ascending is True
+        assert snapshots[1].page_no == 1
+        assert _row_vals(snapshots[1].current_page_rows, "A") == [1, 2, 3]
 
 
 class TestScreenerViewModelDispose:
@@ -1132,6 +1160,40 @@ class TestCurrentPageRows:
         assert vm.state.current_page_rows is not ref1  # 新引用 (View memo 必重建)
         assert _row_vals(vm.state.current_page_rows, "A") == [1, 2]
 
+    def test_default_values_is_read_only_mapping(self):
+        """第 3 轮对抗检视: ScreenerRow 默认构造也是只读映射, 保证类型不可变契约."""
+        from ui.viewmodels.screener_view_model import ScreenerRow
+
+        row = ScreenerRow()
+        assert isinstance(row.values, MappingProxyType)
+        with pytest.raises(TypeError) as exc_info:
+            row.values.__setitem__("any", 1)  # type: ignore[attr-defined]  # MappingProxyType 只读, 无 __setitem__
+        assert "does not support item assignment" in str(exc_info.value)
+        assert row.values == {}, "写入被拒且内容保持不变"
+
+    def test_row_equality_handles_nan(self):
+        """第 3 轮对抗检视: ScreenerRow 支持包含 float('nan') 的等价性判定."""
+        from ui.viewmodels.screener_view_model import ScreenerRow
+
+        r1 = ScreenerRow(values=MappingProxyType({"pe": float("nan"), "code": "000001"}))
+        r2 = ScreenerRow(values=MappingProxyType({"pe": float("nan"), "code": "000001"}))
+        r3 = ScreenerRow(values=MappingProxyType({"pe": 10.5, "code": "000001"}))
+
+        assert r1 == r2
+        assert hash(r1) == hash(r2)
+        assert r1 != r3
+
+    def test_unchanged_slice_with_nan_reuses_reference(self, vm):
+        """第 3 轮对抗检视: 真实 A 股数据常含 NaN (亏损/无分红), 切片内容未变时仍应复用引用命中 memo."""
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "pe_ttm": [float("nan")]})
+        vm._update_pagination()
+        ref1 = vm.state.current_page_rows
+
+        # 再次更新 (切片内容等价, 仅追加其他页数据)
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "pe_ttm": [float("nan"), 15.0]})
+        vm._update_pagination(page_size=1)
+        assert vm.state.current_page_rows is ref1
+
 
 class TestChangePage:
     def test_increment_within_bounds(self, vm):
@@ -2038,6 +2100,84 @@ class TestScreenerViewModelMessageParamsPurity:
         assert "name_key" in msg.params, "params 必须含 name_key (i18n key, R.2.3)"
         assert msg.params["name_key"] == "test_strategy_name_key"
         assert "name" not in msg.params, "params 不应含 name (翻译字符串, §3.2)"
+
+    @pytest.mark.asyncio
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    async def test_run_strategy_initial_atomic_frame(self, mock_dp, mock_sm, mock_rm):
+        """第 3 轮对抗检视: run_strategy 初始重置单帧原子化 — 消除「loading=False + 空切片」闪烁帧."""
+        vm = ScreenerViewModel()
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        vm._update_pagination()
+        assert len(vm.state.current_page_rows) == 2
+
+        mock_strat = MagicMock()
+        mock_strat.name_key = "test_strat"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strat)
+
+        snapshots = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(return_value="test_task_id")
+            await vm.run_strategy("test_strat", save_results=False)
+
+        # 帧 0: clear_stream_cards (旧数据还在); 帧 1: loading=True 且清空表格原子落入同一帧
+        # 绝不存在 loading=False 且 current_page_rows=() 的中间闪烁帧
+        assert len(snapshots) == 2
+        assert snapshots[0].loading is False
+        assert len(snapshots[0].current_page_rows) == 2
+        assert snapshots[1].loading is True
+        assert snapshots[1].current_page_rows == ()
+        assert not any(s.loading is False and s.current_page_rows == () for s in snapshots)
+
+    @pytest.mark.asyncio
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    async def test_run_strategy_screening_empty_results_atomic_frame(self, mock_dp, mock_sm, mock_rm):
+        """第 3 轮对抗检视: run_strategy 筛选空结果单帧原子退出."""
+        vm = ScreenerViewModel()
+        vm._full_results = pd.DataFrame({"A": [1, 2]})
+        vm._update_pagination()
+        assert len(vm.state.current_page_rows) == 2
+
+        mock_strat = MagicMock()
+        mock_strat.name_key = "test_strat"
+        mock_strat.filter = AsyncMock(return_value=pd.DataFrame())
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strat)
+
+        vm.data_processor = MagicMock()
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        submitted_coros = []
+
+        def mock_submit(name=None, coroutine_factory: Callable | None = None, **kwargs):
+            assert coroutine_factory is not None, "submit_task 必须携带 coroutine_factory"
+            submitted_coros.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        snapshots = []
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = mock_submit
+            mock_tm.return_value.update_progress = MagicMock()
+            await vm.run_strategy("test_strat", save_results=False)
+
+        vm.subscribe(lambda s: snapshots.append(s))
+        for coro in submitted_coros:
+            await coro
+
+        # 空结果退出时必须单帧原子通知: loading=False, current_page_rows=(), 状态为 screener_no_results
+        assert len(snapshots) == 1
+        assert snapshots[0].loading is False
+        assert snapshots[0].current_page_rows == ()
+        assert snapshots[0].status_message.key == "screener_no_results"
 
     def test_no_i18n_get_in_message_params(self):
         """R.2.3 契约守护: VM 源码中 Message(...) 调用不应在 params 中包含 I18n.get(...) 调用.

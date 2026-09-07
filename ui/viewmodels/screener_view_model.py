@@ -3,6 +3,7 @@ import datetime
 import inspect
 import io
 import logging
+import math
 import time
 import typing
 from collections.abc import Callable, Mapping
@@ -132,6 +133,9 @@ class StrategyDepRow:
     missing_apis: tuple[str, ...] = ()
 
 
+_EMPTY_ROW_MAPPING: Mapping[str, Any] = MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class ScreenerRow:
     """当前页单行原始数据 (C2b 消除双轨制, locale-neutral).
@@ -141,7 +145,34 @@ class ScreenerRow:
     按当前 locale 格式化 unit_yi/wan 等展示。frozen 契约 + 只读映射保证不可变。
     """
 
-    values: Mapping[str, Any] = field(default_factory=dict)
+    values: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_ROW_MAPPING)
+
+    def __eq__(self, other: object) -> bool:
+        """NaN 感知的等价性比较 (第 3 轮对抗检视).
+
+        Python 原生 ``nan == nan`` 恒为 False; A 股策略结果中亏损/无分红/未分析等字段
+        普遍包含 NaN。若按原生比较, 切片中只要有任一 NaN 字段就会导致
+        ``rows == self._state.current_page_rows`` 恒为 False, 击穿流式输出时的切片引用复用与 View memo。
+        本方法在 keys 完全一致前提下, 将 float('nan') 视作等价。
+        """
+        if self is other:
+            return True
+        if not isinstance(other, ScreenerRow):
+            return False
+        if self.values.keys() != other.values.keys():
+            return False
+        for k, v1 in self.values.items():
+            v2 = other.values[k]
+            if v1 is v2 or v1 == v2:
+                continue
+            if isinstance(v1, float) and isinstance(v2, float) and math.isnan(v1) and math.isnan(v2):
+                continue
+            return False
+        return True
+
+    def __hash__(self) -> int:
+        """对齐 frozen dataclass 哈希契约 (保证 a == b => hash(a) == hash(b))."""
+        return hash(tuple(self.values.keys()))
 
 
 @dataclass(frozen=True)
@@ -966,8 +997,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
                     return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()
-                self._update_pagination(page_no=1)
-                self._set_state(
+                # C2b H1: 无结果退出路径经唯一 owner 单帧原子产出 (空切片 + loading=False + 提示),
+                # 避免分两帧触发重复通知 (第 3 轮对抗检视)
+                self._update_pagination(
+                    page_no=1,
                     loading=False,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
@@ -1017,9 +1050,10 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         # Reset Local UI State
         self._full_results = None
         self._ai_buffer = []
-        # C2b H1: 清空结果后经唯一 owner 重算分页与当前页切片 (空表 + loading 转圈, 不残留旧帧)
-        self._update_pagination(page_no=1)
-        self._set_state(
+        # C2b H1: 清空结果后经唯一 owner 单帧原子产出 (空切片 + loading=True + 状态消息),
+        # 避免「loading=False + 空切片」导致 View 闪烁渲染 EmptyState (第 3 轮对抗检视)
+        self._update_pagination(
+            page_no=1,
             loading=True,
             # §3.2: VM 只产出 i18n key (name_key), View 渲染时翻译为当前 locale 策略名.
             # 避免 VM 持有翻译字符串导致 locale 切换后 state 残留旧 locale 翻译.
@@ -1093,13 +1127,14 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             )
 
             self._full_results = sorted_df
-            self._set_state(
+            # C2b H1: 排序变更后经唯一 owner 单帧原子重算分页与当前页切片
+            # (第 2 轮对抗检视 M-1: 消除「loading=False + 旧未排序切片」陈旧中间帧)
+            self._update_pagination(
+                page_no=1,
                 sort_column=sort_column,
                 sort_ascending=sort_ascending,
                 loading=False,
             )
-            # C2b H1: 排序变更后经唯一 owner 重算分页与当前页切片
-            self._update_pagination(page_no=1)
 
         except Exception as e:
             logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
