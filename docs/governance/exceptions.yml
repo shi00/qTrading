@@ -23,4 +23,143 @@
 #   - 禁止删除或复用已废弃例外编号 (append-only)
 #   - 例外到期或触发移除条件后, 必须从本文件移除并同步清理引用
 
-exceptions: []
+# GDR-01 修复：补录契约 5 ignore_imports 现存 15 条 R1 例外（EX-0001~EX-0015），
+# 使「例外唯一注册入口」名副其实；pyproject.toml 契约 5 注释逐条回指 EX id。
+# 方向性违规（scheduler_service → strategies/services）按 review01-A2/A6 夜间预测下沉消除；
+# 循环打破型（config.db ↔ db_config_service）随按域拆分迁移；关机/采集型 lazy import 保留但须带注释。
+exceptions:
+  # EX-0001: utils/config/db.py -> data.persistence.db_config_service（循环打破）
+  - id: EX-0001
+    rule_id: R1
+    paths: ["utils/config/db.py"]
+    reason: "config_handler ↔ db_config_service 循环打破。review05-E11 将 db 逻辑自 utils/config_handler 按域拆分迁至 utils/config/db.py，为保持现有单测 mock 有效，经 utils.config_handler 间接引用 data 层（函数内 lazy import 带 # lazy-import: 注释）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "随按域拆分完成 data 域归属迁移、utils/config/db.py 迁出 utils 层时移除（review05-E11 后续拆分计划锚点）。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0001）。"
+  # EX-0002: utils/diagnostics.py -> data.data_processor（采集访问业务单例）
+  - id: EX-0002
+    rule_id: R1
+    paths: ["utils/diagnostics.py"]
+    reason: "diagnostics 采集时访问业务单例 data.data_processor（A2 评估下沉到 services/diagnostics，函数内 lazy import 带 # lazy-import: 注释）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "diagnostics 采集逻辑下沉至 services/diagnostics 后移除（review01-A2 评估计划锚点）。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0002）。"
+  # EX-0003: utils/diagnostics.py -> services.task_manager（采集访问业务单例）
+  - id: EX-0003
+    rule_id: R1
+    paths: ["utils/diagnostics.py"]
+    reason: "diagnostics 采集时访问业务单例 services.task_manager（A2 评估下沉到 services/diagnostics，函数内 lazy import 带 # lazy-import: 注释）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "diagnostics 采集逻辑下沉至 services/diagnostics 后移除（review01-A2 评估计划锚点）。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0003）。"
+  # EX-0004: utils/scheduler_service.py -> data.cache.cache_manager（启动性能优化）
+  - id: EX-0004
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态），启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入、scheduler_service 不再按需加载 data/services 后移除（review01-A2 夜间预测下沉已完成，本条目为剩余的启动性能 lazy import）。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0004）。"
+  # EX-0005: utils/scheduler_service.py -> data.data_processor（启动性能优化）
+  - id: EX-0005
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0005）。"
+  # EX-0006: utils/scheduler_service.py -> data.persistence.app_state_service（启动性能优化）
+  - id: EX-0006
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0006）。"
+  # EX-0007: utils/scheduler_service.py -> services.task_manager（启动性能优化）
+  - id: EX-0007
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0007）。"
+  # EX-0008: utils/shutdown.py -> data.data_processor（关机按需加载）
+  - id: EX-0008
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "关机编排重构为显式依赖注入（关闭步骤经 app 层注入关闭处理器）后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0008）。"
+  # EX-0009: utils/shutdown.py -> data.domain_services.market_data_service（关机按需加载）
+  - id: EX-0009
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0009）。"
+  # EX-0010: utils/shutdown.py -> data.persistence.data_explorer_query_client（关机按需加载）
+  - id: EX-0010
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0010）。"
+  # EX-0011: utils/shutdown.py -> data.persistence.embedded_postgres.service（关机按需加载）
+  - id: EX-0011
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0011）。"
+  # EX-0012: utils/shutdown.py -> services.embedded_pg_maintenance_service（关机按需加载）
+  - id: EX-0012
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0012）。"
+  # EX-0013: utils/shutdown.py -> services.local_model_manager（关机按需加载）
+  - id: EX-0013
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0013）。"
+  # EX-0014: utils/shutdown.py -> services.news_subscription_service（关机按需加载）
+  - id: EX-0014
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0014）。"
+  # EX-0015: utils/shutdown.py -> services.task_manager（关机按需加载）
+  - id: EX-0015
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008：shutdown 关机步骤按需加载（A2 标注 lazy-import，保留）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（GDR-01 修复）
+    removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0015）。"

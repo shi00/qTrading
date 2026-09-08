@@ -1836,14 +1836,47 @@ def _load_exception_ids() -> list[str] | None:
     return [e["id"] for e in data["exceptions"] if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
+def _load_exception_r1_count() -> int:
+    """统计 exceptions.yml 中 rule_id=R1 的例外数；解析失败或结构非法返回 -1（调用方跳过断言）。"""
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return -1
+    if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
+        return -1
+    return sum(1 for e in data["exceptions"] if isinstance(e, dict) and e.get("rule_id") == "R1")
+
+
+def _load_contract5_ignore_imports() -> list[str] | None:
+    """加载 pyproject.toml 契约 5（R1: utils must not import business layers）ignore_imports 条目。
+
+    GDR-01 数量闭环：回指注释（方向 1）只校验「引用的 EX id 已登记」，新增 ignore 条目但忘写
+    EX 注释时不产生 EX 文本引用、方向 1/2 均不报，本加载器配合方向 3 断言强制条目级同步。
+    解析失败返回 None（调用方跳过断言）；契约不存在返回空列表（视为无 ignore 条目）。
+    """
+    try:
+        with open(PYPROJECT_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    for contract in cfg.get("tool", {}).get("importlinter", {}).get("contracts", []):
+        if contract.get("name") == "R1: utils must not import business layers":
+            return [str(i) for i in contract.get("ignore_imports", [])]
+    return []
+
+
 def _scan_exception_refs() -> set[str]:
     """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身与归档/记录/评测豁免目录）。
 
-    consumer 为 CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（活文档）；归档/记录/评测目录
-    由 _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
+    consumer 为 CLAUDE.md + CONTRIBUTING.md + pyproject.toml + docs/**/*.md（活文档）；
+    pyproject.toml 契约 5 ignore_imports 注释回指 EX id（GDR-01），纳入消费语料后方向 2
+    「登记必须被消费」对真实登记的例外不再误报孤儿；归档/记录/评测目录由
+    _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
     """
     refs: set[str] = set()
-    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH]
+    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH, PYPROJECT_PATH]
     for path in DOCS_README_PATH.parent.rglob("*.md"):
         if path == EXCEPTIONS_YAML_PATH:
             continue
@@ -1880,6 +1913,17 @@ def check_governance_id_references() -> list[str]:
     # 方向 2: 孤儿登记（已登记但从未被消费文档引用）
     for ex_id in sorted(registered - refs):
         errors.append(f"治理 id 引用: {ex_id} 已在 exceptions.yml 登记，但从未被任何消费文档引用")
+    # 方向 3（GDR-01 数量闭环）: 契约 5 ignore_imports 条目数必须等于 exceptions.yml 中
+    # rule_id=R1 登记数。新增 ignore 条目忘写 EX 注释时不产生 EX 文本引用（方向 1/2 均不报），
+    # 本断言强制条目级同步，堵住「例外游离于注册表之外」的复发路径。
+    ignore_entries = _load_contract5_ignore_imports()
+    if ignore_entries is not None:
+        r1_count = _load_exception_r1_count()
+        if r1_count >= 0 and len(ignore_entries) != r1_count:
+            errors.append(
+                f"治理 id 引用: pyproject.toml 契约 5 ignore_imports 条目数 {len(ignore_entries)} "
+                f"!= exceptions.yml 中 rule_id=R1 登记数 {r1_count}（新增/删除 ignore 条目必须同步登记或回指 EX id）"
+            )
 
     return errors
 
