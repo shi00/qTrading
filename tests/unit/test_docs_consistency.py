@@ -3787,6 +3787,108 @@ class TestCoreModulesCompleteness:
         assert "未找到 core/ 模块清单声明" in errors[0]
 
 
+class TestGovernanceIdGlossary:
+    """GDR-09: 自动加载文档（CLAUDE.md/AGENTS.md）中出现的治理 ID 必须已在 governance-ids.md 登记."""
+
+    def test_glossary_passes_on_current_repo(self):
+        """真实仓库：自动加载文档中出现的治理 ID 全部已登记（无错误）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        errors = check_governance_id_glossary()
+        assert errors == [], f"治理 ID 对照表检查应通过，实际报错: {errors}"
+
+    def test_detects_unregistered_id_in_claude(self, tmp_path, monkeypatch):
+        """CLAUDE.md 出现未登记 ID（如新增 P9-99）→ 报错."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("新增规则引用 P9-99（未登记）\n", encoding="utf-8")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# no ids\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+
+        errors = check_governance_id_glossary()
+        assert any("P9-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"应检出未登记 ID, got: {errors}"
+        )
+
+    def test_detects_unregistered_id_in_agents(self, tmp_path, monkeypatch):
+        """AGENTS.md 出现未登记 ID（如新增 DOC-99）→ 报错."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| DOC-04 | 决策树镜像 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no ids\n", encoding="utf-8")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("引用 DOC-99（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+
+        errors = check_governance_id_glossary()
+        assert any("DOC-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"应检出未登记 ID, got: {errors}"
+        )
+
+    def test_missing_glossary_reports_error(self, tmp_path, monkeypatch):
+        """对照表文件缺失 → 报错（不静默通过）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        missing = tmp_path / "no-such" / "governance-ids.md"
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 P2-07\n", encoding="utf-8")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# no ids\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", missing)
+
+        errors = check_governance_id_glossary()
+        assert len(errors) == 1
+        assert "不存在或无法解析" in errors[0]
+
+    def test_all_registered_ids_pass(self, tmp_path, monkeypatch):
+        """文档中所有 ID 均已登记 → 无错误."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n"
+            "| P2-07 | 元数据统一格式 |\n"
+            "| DOC-04 | 决策树镜像 |\n"
+            "| GDR-06 | Flet 版本号 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 P2-07 与 DOC-04\n", encoding="utf-8")
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("引用 GDR-06\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+
+        errors = check_governance_id_glossary()
+        assert errors == [], f"全部已登记应通过, got: {errors}"
+
+
 class TestAdrIndexCompleteness:
     """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""
 
