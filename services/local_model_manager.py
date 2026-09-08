@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import logging
 import multiprocessing
 import os
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -180,13 +182,28 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             result_queue.put(("error", f"{sanitized}\n{traceback.format_exc()}"))
 
 
+def _probe_llama_cpp() -> bool:
+    """探测 llama_cpp 是否可用，仅解析模块元数据而不加载模块（PRF-04）。
+
+    1. 优先复用 sys.modules（兼容已导入模块及测试中的 Mock 替身，规避无 __spec__ 时的 ValueError）；
+    2. 若 sys.modules 中显式为 None（Python 标准的不可导入标记），返回 False；
+    3. 否则通过 importlib.util.find_spec 探测元数据，防御常见导入异常。
+    """
+    mod = sys.modules.get("llama_cpp")
+    if mod is not None:
+        return True
+    if "llama_cpp" in sys.modules:
+        return False
+    try:
+        return importlib.util.find_spec("llama_cpp") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
 # PRF-04: 用 find_spec 代替 import_module 探测 llama_cpp——find_spec 仅解析模块
 # 元数据（ModuleSpec），不会真正加载模块；仅当其已安装时返回非 None。真正触发
 # 加载发生在 _persistent_worker 内的运行时 import，此处仅做可用性判定。
-try:
-    _HAS_LLAMA_CPP = importlib.util.find_spec("llama_cpp") is not None
-except (ImportError, AttributeError):
-    _HAS_LLAMA_CPP = False
+_HAS_LLAMA_CPP = _probe_llama_cpp()
 if not _HAS_LLAMA_CPP:
     logger.warning(
         "llama-cpp-python not installed. Embedded AI features will be disabled.",

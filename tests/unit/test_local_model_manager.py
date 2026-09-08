@@ -16,6 +16,7 @@ from services.local_model_manager import (
     _HAS_LLAMA_CPP,
     _SENTINEL,
     _persistent_worker,
+    _probe_llama_cpp,
     _validate_model_file,
 )
 
@@ -2321,7 +2322,7 @@ class TestPayloadSanitization:
                 assert sensitive_path not in str(exc_info.value)
 
 
-def test_local_model_manager_probe_does_not_load_llama_cpp(tmp_path, monkeypatch):
+def test_local_model_manager_probe_does_not_load_llama_cpp():
     """PRF-04: 模块级 llama_cpp 探测改用 find_spec，不应触发模块加载。
 
     在独立子进程中 import services.local_model_manager，断言：
@@ -2330,13 +2331,14 @@ def test_local_model_manager_probe_does_not_load_llama_cpp(tmp_path, monkeypatch
 
     通过独立子进程执行，避免当前测试进程已加载 llama_cpp 造成干扰。
     """
+    import os
     import subprocess
     import sys
 
     subprocess_code = (
         "import sys\n"
-        "import importlib.util\n"
         "import services.local_model_manager as m\n"
+        "import importlib.util\n"
         "assert 'llama_cpp' not in sys.modules, 'local_model_manager import 不应加载 llama_cpp'\n"
         "expected = importlib.util.find_spec('llama_cpp') is not None\n"
         "assert m._HAS_LLAMA_CPP is expected, '探测结果与 find_spec 语义应一致'\n"
@@ -2345,11 +2347,61 @@ def test_local_model_manager_probe_does_not_load_llama_cpp(tmp_path, monkeypatch
     # test_local_model_manager.py 位于 tests/unit/，上溯 2 级即仓库根，用作子进程 cwd
     # 以保证子进程从仓库根解析 services.local_model_manager。
     _repo_root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "-c", subprocess_code],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
         cwd=str(_repo_root),
     )
     assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
     assert "OK: llama_cpp not loaded" in result.stdout
+
+
+class TestLlamaCppProbe:
+    """PRF-04: _probe_llama_cpp 的边界与容错场景测试。"""
+
+    def test_probe_when_sys_modules_has_mock_without_spec(self, monkeypatch):
+        """当 sys.modules['llama_cpp'] 为无 __spec__ 的 Mock 对象时，探测应判定为可用且不崩溃。"""
+        import sys
+
+        mock_mod = MagicMock()
+        # 确保模拟的模块不含 __spec__ 属性，触发原生 find_spec 的 ValueError 风险路径
+        del mock_mod.__spec__
+        monkeypatch.setitem(sys.modules, "llama_cpp", mock_mod)
+        assert _probe_llama_cpp() is True
+
+    def test_probe_when_sys_modules_explicitly_none(self, monkeypatch):
+        """当 sys.modules['llama_cpp'] 显式置为 None（模拟不可导入占位符）时，探测应返回 False。"""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "llama_cpp", None)
+        assert _probe_llama_cpp() is False
+
+    def test_probe_when_find_spec_returns_none(self, monkeypatch):
+        """当 find_spec 返回 None（未安装）时，探测应返回 False。"""
+        import sys
+
+        monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+        with patch("importlib.util.find_spec", return_value=None):
+            assert _probe_llama_cpp() is False
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ImportError("no module"),
+            AttributeError("no util"),
+            ValueError("spec not set"),
+        ],
+    )
+    def test_probe_when_find_spec_raises_exceptions(self, monkeypatch, exc):
+        """当 find_spec 抛出常见导入相关异常时，探测应安全捕获并返回 False。"""
+        import sys
+
+        monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+        with patch("importlib.util.find_spec", side_effect=exc):
+            assert _probe_llama_cpp() is False
