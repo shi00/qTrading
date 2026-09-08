@@ -7,12 +7,14 @@ import asyncio
 import datetime
 import inspect
 import logging
+import math
 import pytest
-from typing import cast
+from typing import cast, Any
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
 import sqlalchemy as sa
+from decimal import Decimal
 from sqlalchemy import Date
 
 from data.persistence.daos.base_dao import (
@@ -20,6 +22,7 @@ from data.persistence.daos.base_dao import (
     EngineDisposedError,
     DatabaseQueryError,
     _build_df_normalized,
+    _normalize_records_frame,
 )
 from data.persistence.write_quality import WriteQuality
 
@@ -3535,3 +3538,142 @@ class TestSaveUpsertCoerceGate:
         assert captured[0]["dt"] == datetime.date(2024, 1, 1)
         assert any("日期字段无法解析已置 NULL" in r.message for r in caplog.records)
         assert WriteQuality().is_degraded("test_table") is True
+
+
+def _count_real_null(records: list[dict[str, Any]]) -> int:
+    """统计真正的 NaN/NaT 残留（None 不为 NULL，不计入）。"""
+    n = 0
+    for rec in records:
+        for v in rec.values():
+            if v is None:
+                continue
+            if (isinstance(v, float) and math.isnan(v)) or v is pd.NaT:
+                n += 1
+    return n
+
+
+class TestNormalizeRecordsFrame:
+    """PRF-03: 提取的 _normalize_records_frame 单趟整帧归一化正确性。
+
+    锁定「数值/字符串/NaT 的 NULL 统一由整帧 astype(object).where(notna, None)」
+    与「仅删除逐列数值列冗余归一」后的输出等价性，覆盖报告强调的
+    Decimal / pd.NA / 字符串字面量 "nan" 混入场景。
+    """
+
+    def test_numeric_nan_to_none_no_residual(self):
+        df = pd.DataFrame(
+            {
+                "a_float": [1.0, np.nan, 3.0, None],
+                "a_int": [1, 2, 3, 4],
+                "a_bool": [True, False, True, np.nan],
+            }
+        )
+        records, _ = _normalize_records_frame(df, [], [])
+        assert records[1]["a_float"] is None
+        assert records[3]["a_bool"] is None
+        assert records[0]["a_float"] == 1.0
+        assert _count_real_null(records) == 0
+
+    def test_decimal_preserved(self):
+        df = pd.DataFrame({"amt": pd.Series([Decimal("0.01"), None], dtype=object)})
+        records, _ = _normalize_records_frame(df, [], [])
+        assert records[0]["amt"] == Decimal("0.01")
+        assert records[1]["amt"] is None
+
+    def test_string_literal_nan_preserved(self):
+        """字符串字面量 "nan" 不是 NaN，整帧归一后必须保留。"""
+        df = pd.DataFrame({"code": ["nan", "ABC", np.nan]})
+        records, _ = _normalize_records_frame(df, [], [])
+        assert records[0]["code"] == "nan"
+        assert records[1]["code"] == "ABC"
+        assert records[2]["code"] is None
+
+    def test_pd_na_to_none(self):
+        df = pd.DataFrame({"note": [pd.NA, "x", None]})
+        records, _ = _normalize_records_frame(df, [], [])
+        assert records[0]["note"] is None
+        assert records[1]["note"] == "x"
+        assert records[2]["note"] is None
+
+    def test_date_col_becomes_datetime_date(self):
+        df = pd.DataFrame({"trade_date": ["2024-01-01", "not-a-date", "2024-01-03"]})
+        records, coerce_stats = _normalize_records_frame(df, ["trade_date"], [])
+        assert records[0]["trade_date"] == datetime.date(2024, 1, 1)
+        assert records[2]["trade_date"] == datetime.date(2024, 1, 3)
+        # 无法解析日期被 coerce 置 NULL，且登记告警样本
+        assert records[1]["trade_date"] is None
+        assert "trade_date" in coerce_stats
+        assert coerce_stats["trade_date"]["count"] == 1
+
+    def test_datetime_col_null_to_none(self):
+        df = pd.DataFrame({"event_ts": pd.to_datetime(["2024-01-01 10:00", "2024-01-02 11:00", "2024-01-03 12:00"])})
+        df.loc[2, "event_ts"] = pd.NaT
+        records, _ = _normalize_records_frame(df, [], ["event_ts"])
+        assert records[0]["event_ts"] is not None
+        assert records[2]["event_ts"] is None
+        assert _count_real_null(records) == 0
+
+    def test_non_target_datetime64_ns_to_native_datetime(self):
+        """非 target 的 datetime64[ns] 列仍需转 Python datetime 并去除 tz（该分支不可删）。"""
+        df = pd.DataFrame({"ts": pd.to_datetime(["2024-01-01 10:00", "2024-01-01 11:00"]).astype("datetime64[ns]")})
+        df.loc[1, "ts"] = pd.NaT
+        records, _ = _normalize_records_frame(df, [], [])
+        assert records[0]["ts"] == datetime.datetime(2024, 1, 1, 10, 0)
+        assert records[1]["ts"] is None
+
+    def test_combined_realistic_payload_no_residual(self):
+        """报告强调的真实 DAO 载荷混入场景：全部 NA 归一为 None 且零真实残留。"""
+        df = pd.DataFrame(
+            {
+                "trade_date": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "event_ts": pd.to_datetime(["2024-01-01 10:00", "2024-01-02 11:00", "2024-01-03 12:00"]),
+                "open": [np.nan, 1.5, 3.0],
+                "volume": [1_000, np.nan, 3_000],
+                "ts_code": ["nan", "000001.SZ", pd.NA],
+                "fee": [Decimal("0.01"), Decimal("0.02"), Decimal("0.03")],
+            }
+        )
+        df.loc[2, "event_ts"] = pd.NaT
+        records, _ = _normalize_records_frame(df, ["trade_date"], ["event_ts"])
+        assert len(records) == 3
+        assert records[0]["open"] is None
+        assert records[1]["volume"] is None
+        assert records[0]["ts_code"] == "nan"  # 字符串字面量保留
+        assert records[2]["ts_code"] is None  # pd.NA 归一为 None
+        assert records[0]["trade_date"] == datetime.date(2024, 1, 1)
+        assert records[2]["event_ts"] is None
+        assert all(isinstance(r["fee"], Decimal) for r in records)
+        assert _count_real_null(records) == 0
+
+    def test_timezone_aware_datetime_converted_to_naive_datetime_and_nat_to_none(self):
+        """PRF-03 补齐: 覆盖 PR 承诺的「时区 + NaT 混入」场景，验证 tz 剥离与多精度 datetime 原生转换。"""
+        df = pd.DataFrame(
+            {
+                "ts_tz": pd.to_datetime(pd.Series(["2024-01-01 10:00:00+08:00", None])),
+                "ts_us": pd.to_datetime(pd.Series(["2024-01-02 11:00:00", None])),  # pandas 2.0+ 默认 us 精度
+            }
+        )
+        records, _ = _normalize_records_frame(df, [], [])
+        # ts_tz 必须转换为 naive datetime.datetime，且 tzinfo 为 None
+        assert type(records[0]["ts_tz"]) is datetime.datetime
+        assert records[0]["ts_tz"].tzinfo is None
+        assert records[0]["ts_tz"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
+        assert records[1]["ts_tz"] is None
+
+        # ts_us 也必须转换为原生 datetime.datetime
+        assert type(records[0]["ts_us"]) is datetime.datetime
+        assert records[0]["ts_us"].tzinfo is None
+        assert records[0]["ts_us"] == datetime.datetime(2024, 1, 2, 11, 0, 0)
+        assert records[1]["ts_us"] is None
+
+        assert _count_real_null(records) == 0
+
+    def test_target_datetime_col_with_timezone_stripped_to_naive(self):
+        """target_datetime_cols 若传入带时区时间戳/字符串，也应剥离时区转为 naive datetime。"""
+        df = pd.DataFrame({"event_time": ["2024-01-01 10:00:00+08:00", None]})
+        records, _ = _normalize_records_frame(df, [], ["event_time"])
+        assert type(records[0]["event_time"]) is datetime.datetime
+        assert records[0]["event_time"].tzinfo is None
+        assert records[0]["event_time"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
+        assert records[1]["event_time"] is None
+        assert _count_real_null(records) == 0
