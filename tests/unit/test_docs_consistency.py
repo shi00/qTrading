@@ -3293,7 +3293,27 @@ class TestReviewsIndexCompleteness:
         monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
 
         errors = check_reviews_index_completeness()
-        assert any("new-methodology.md" in e and "未登记" in e for e in errors), f"应检出未登记, got: {errors}"
+        assert any("new-methodology.md" in e and "未登记顶层方法论文档" in e for e in errors), (
+            f"应检出未登记, got: {errors}"
+        )
+
+    def test_detects_unregistered_review_report_doc_distinguished_message(self, tmp_path, monkeypatch):
+        """GDR-03: 日期前缀检视报告文件未登记时，应提示轮次表未登记与落根目录指引."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        reviews_dir.mkdir(parents=True)
+        (reviews_dir / "README.md").write_text("# Index\n[ai-review.md](./ai-review.md)\n", encoding="utf-8")
+        (reviews_dir / "ai-review.md").write_text("# A\n", encoding="utf-8")
+        (reviews_dir / "2026-09-08-scope.md").write_text("# Report\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_index_completeness()
+        assert any("2026-09-08-scope.md" in e and "轮次表未登记顶层检视文件" in e for e in errors), (
+            f"应区分检视文件错误提示, got: {errors}"
+        )
 
     def test_detects_phantom_link(self, tmp_path, monkeypatch):
         """README 引用不存在的 docs/reviews/ 内文档 → 报错（幽灵链接）."""
