@@ -1791,9 +1791,15 @@ def check_reviews_index_completeness() -> list[str]:
             if url_basename.endswith(".md") and url_basename != "README.md":
                 referenced_files.add(url_basename)
 
-    # 未登记的顶层方法论文档
+    # 未登记的顶层文档（按前缀区分方法论文档与轮次报告摘要）
     for fname in sorted(actual_files - referenced_files):
-        errors.append(f"检视方法论文档登记: docs/reviews/README.md 未登记顶层方法论文档 '{fname}'")
+        if re.match(r"^\d{4}-\d{2}-\d{2}", fname):
+            errors.append(
+                f"检视文档登记: docs/reviews/README.md 轮次表未登记顶层检视文件 '{fname}'"
+                "（过程报告正文请落根目录 reviews/，如确需入库请在 README.md 登记）"
+            )
+        else:
+            errors.append(f"检视方法论文档登记: docs/reviews/README.md 未登记顶层方法论文档 '{fname}'")
     # 幽灵链接（README 引用不存在的 docs/reviews/ 内文档）
     for fname in sorted(referenced_files - actual_files):
         errors.append(f"检视方法论文档登记: docs/reviews/README.md 引用了不存在的文档 '{fname}'")
