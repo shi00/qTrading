@@ -1535,7 +1535,7 @@ def _extract_decision_tree_targets(claude_content: str) -> set[str]:
         if len(cols) < 2:
             continue
         entry_col = cols[2] if len(cols) >= 3 else cols[1]
-        for token in re.findall(r"(?:\./)?(?:docs/[\w.\-/]+\.md|CONTRIBUTING\.md)", entry_col):
+        for token in re.findall(r"(?:\./)?(?:(?:docs|requirements)/[\w.\-/]+\.md|CONTRIBUTING\.md)", entry_col):
             targets.add(token.removeprefix("./"))
     return targets
 
