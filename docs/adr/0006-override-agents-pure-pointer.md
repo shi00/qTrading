@@ -35,4 +35,4 @@
 - **正向**：只自动加载 `AGENTS.md` 的工具在进入首条被拦截前的成本，从「是否愿意打开 CLAUDE.md」降为「是否遵守明文的不可豁免红线」；门禁从机制上防止生成区块与 `redlines.yml` 漂移。
 - **代价**：`AGENTS.md` 行数从 9 行增至约 30 行；新增一个 `check_agents_md_sync()` 检查函数接入 `docs-consistency` hook。
 - **维护契约**：新增 `INVARIANT` 红线时，必须同时更新 `AGENTS.md` 生成区块（由 `docs-consistency` hook 兜底）；变更 `redlines.yml` 时不得手工修改生成区块，应改正本后同步。
-- **边界**：`AGENTS.md` 不承载 `rule_type` 为 `DEFAULT` / `NEW_CODE` / `MIGRATION_TARGET` / `EXCEPTIONABLE` 的其他红线，避免入口膨胀；这些规则仍由 `CLAUDE.md` / `redlines.yml` 承载。
+- **边界**：`AGENTS.md` 不承载 `rule_type` 为 `DEFAULT` / `NEW_CODE` / `MIGRATION_TARGET` / `EXCEPTIONABLE` 的其他红线，避免入口膨胀；这些规则仍由 `CLAUDE.md` / `redlines.yml` 承载。Context 点名的 R1（架构越界）与 R16（UI 阻塞主循环）虽属高成本风险，但已有独立自动化兜底、不依赖文档提示即可生效，故不纳入最小安全集：R1 由 import-linter 6 条契约在 pre-commit 与 CI 双重拦截；R16 由 pre-commit `redlines-check` hook 部分守护（ViewModel `__init__` 构造已注册单例切面）并在 CI 全量测试暴露。最小安全集的定位是「工具链未读取 `CLAUDE.md` 时唯一生效的底线」，对已有自动化拦截的规则无需重复收录（GDR-10）。
