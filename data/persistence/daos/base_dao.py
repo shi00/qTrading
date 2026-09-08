@@ -55,21 +55,21 @@ def _build_df_normalized(rows, cols):
 
 
 def _normalize_records_frame(
-    df_slice: typing.Any,
+    df_slice: pd.DataFrame,
     target_date_cols: list[str],
     target_datetime_cols: list[str],
-) -> tuple[list[dict], dict[str, dict]]:
+) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:
     """把 DataFrame 归一化为与目标表列型匹配的 records + 日期 coerce 统计（PRF-03）。
 
     写入路径统一入口：供 batch upsert 的 CPU 线程池整体提交。
-    单趟向量化归一：①日期 coerce → ②仅 datetime64[ns] 转换 → ③整帧
-    ``astype(object).where(notna, None)``。数值列/字符串/NaT 的 NULL 归一由
-    整帧③统一完成，不再逐列重复（删除冗余的逐列数值列归一阶段）。
+    单趟向量化归一：①日期 coerce → ②datetime64（各精度/时区）转为 Python 原生
+    naive datetime 并去除 tz → ③整帧 ``astype(object).where(notna, None)``。
+    数值列/字符串/NaT 的 NULL 归一由整帧③统一完成，不再逐列重复（删除冗余的逐列数值列归一阶段）。
     """
     df_clean = df_slice.copy()
 
     # DAT-03: 统计日期列 coerce（无法解析被置 NULL）的告警样本，而非静默丢弃
-    coerce_stats: dict[str, dict] = {}
+    coerce_stats: dict[str, dict[str, typing.Any]] = {}
 
     for col in df_clean.columns:
         if col in target_date_cols or col in target_datetime_cols:
@@ -84,11 +84,16 @@ def _normalize_records_frame(
             df_clean[col] = converted.dt.date if col in target_date_cols else converted
 
     for col in df_clean.columns:
-        # 仅 datetime64[ns]（非 target 的时间戳列）需转 Python datetime 并去除 tz；
-        # 数值/字符串的 NULL 归一由下方整帧③统一完成（PRF-03：删除逐列数值列冗余归一）。
-        if df_clean[col].dtype == "datetime64[ns]":
-            df_clean[col] = (
-                df_clean[col].dt.to_pydatetime().map(lambda v: v.replace(tzinfo=None) if v is not None else None)
+        # datetime64 列（含非 target 时间戳、各精度 ns/us/ms/s 及带时区列）转为 Python 原生 naive datetime 并去除 tz；
+        # 数值/字符串/NaT 的 NULL 归一由下方整帧③统一完成（PRF-03：删除逐列数值列冗余归一）。
+        if pd.api.types.is_datetime64_any_dtype(df_clean[col].dtype):
+            df_clean[col] = pd.Series(
+                [
+                    v.replace(tzinfo=None) if v is not None and not pd.isna(v) else None
+                    for v in df_clean[col].dt.to_pydatetime()
+                ],
+                index=df_clean.index,
+                dtype=object,
             )
 
     # DAT-04 + PRF-03: 整帧单趟向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
@@ -97,7 +102,7 @@ def _normalize_records_frame(
     mask = df_clean.notna()
     df_clean = df_clean.astype(object).where(mask, None)
 
-    records = df_clean.to_dict(orient="records")
+    records = typing.cast(list[dict[str, typing.Any]], df_clean.to_dict(orient="records"))
 
     return records, coerce_stats
 
@@ -766,7 +771,9 @@ class BaseDao:
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
         # Extracting out the CPU intensive conversion to allow async offloading
-        def _prepare_records(df_slice: typing.Any) -> tuple[list[dict], dict[str, dict]]:
+        def _prepare_records(
+            df_slice: pd.DataFrame,
+        ) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:
             return _normalize_records_frame(df_slice, target_date_cols, target_datetime_cols)
 
         records, coerce_stats = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)

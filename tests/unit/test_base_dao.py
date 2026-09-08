@@ -9,7 +9,7 @@ import inspect
 import logging
 import math
 import pytest
-from typing import cast
+from typing import cast, Any
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import numpy as np
@@ -3540,7 +3540,7 @@ class TestSaveUpsertCoerceGate:
         assert WriteQuality().is_degraded("test_table") is True
 
 
-def _count_real_null(records: list[dict]) -> int:
+def _count_real_null(records: list[dict[str, Any]]) -> int:
     """统计真正的 NaN/NaT 残留（None 不为 NULL，不计入）。"""
     n = 0
     for rec in records:
@@ -3643,4 +3643,37 @@ class TestNormalizeRecordsFrame:
         assert records[0]["trade_date"] == datetime.date(2024, 1, 1)
         assert records[2]["event_ts"] is None
         assert all(isinstance(r["fee"], Decimal) for r in records)
+        assert _count_real_null(records) == 0
+
+    def test_timezone_aware_datetime_converted_to_naive_datetime_and_nat_to_none(self):
+        """PRF-03 补齐: 覆盖 PR 承诺的「时区 + NaT 混入」场景，验证 tz 剥离与多精度 datetime 原生转换。"""
+        df = pd.DataFrame(
+            {
+                "ts_tz": pd.to_datetime(pd.Series(["2024-01-01 10:00:00+08:00", None])),
+                "ts_us": pd.to_datetime(pd.Series(["2024-01-02 11:00:00", None])),  # pandas 2.0+ 默认 us 精度
+            }
+        )
+        records, _ = _normalize_records_frame(df, [], [])
+        # ts_tz 必须转换为 naive datetime.datetime，且 tzinfo 为 None
+        assert type(records[0]["ts_tz"]) is datetime.datetime
+        assert records[0]["ts_tz"].tzinfo is None
+        assert records[0]["ts_tz"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
+        assert records[1]["ts_tz"] is None
+
+        # ts_us 也必须转换为原生 datetime.datetime
+        assert type(records[0]["ts_us"]) is datetime.datetime
+        assert records[0]["ts_us"].tzinfo is None
+        assert records[0]["ts_us"] == datetime.datetime(2024, 1, 2, 11, 0, 0)
+        assert records[1]["ts_us"] is None
+
+        assert _count_real_null(records) == 0
+
+    def test_target_datetime_col_with_timezone_stripped_to_naive(self):
+        """target_datetime_cols 若传入带时区时间戳/字符串，也应剥离时区转为 naive datetime。"""
+        df = pd.DataFrame({"event_time": ["2024-01-01 10:00:00+08:00", None]})
+        records, _ = _normalize_records_frame(df, [], ["event_time"])
+        assert type(records[0]["event_time"]) is datetime.datetime
+        assert records[0]["event_time"].tzinfo is None
+        assert records[0]["event_time"] == datetime.datetime(2024, 1, 1, 10, 0, 0)
+        assert records[1]["event_time"] is None
         assert _count_real_null(records) == 0
