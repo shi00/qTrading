@@ -3771,3 +3771,42 @@ class TestCoreModulesCompleteness:
         errors = check_core_modules_completeness()
         assert len(errors) == 1
         assert "未找到 core/ 模块清单声明" in errors[0]
+
+
+class TestAdrIndexCompleteness:
+    """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""
+
+    def test_adr_index_pass_on_current_repo(self):
+        from check_docs_consistency import check_adr_index_completeness
+
+        errors = check_adr_index_completeness()
+        assert errors == [], "当前仓库 ADR 索引应全覆盖，实际报错:\n  " + "\n  ".join(errors)
+
+    def test_detects_uncovered_adr(self, monkeypatch):
+        from check_docs_consistency import CONTRIBUTING_PATH, check_adr_index_completeness
+
+        real_text = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+        # 故意移除 0006 的引用
+        tampered_text = real_text.replace("0006-override-agents-pure-pointer.md", "ignore-me.md")
+        monkeypatch.setattr(
+            "pathlib.Path.read_text",
+            lambda self, encoding="utf-8": tampered_text if self.name == "CONTRIBUTING.md" else real_text,
+        )
+
+        errors = check_adr_index_completeness()
+        assert any("未登记 ADR 文档 '0006-override-agents-pure-pointer.md'" in e for e in errors)
+
+    def test_detects_ghost_adr(self, monkeypatch):
+        from check_docs_consistency import CONTRIBUTING_PATH, check_adr_index_completeness
+
+        real_text = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+        # 故意增加不存在的 ADR 引用
+        ghost_entry = "- [0099-ghost.md](./docs/adr/0099-ghost.md) — 幽灵 ADR\n"
+        tampered_text = real_text + "\n" + ghost_entry
+        monkeypatch.setattr(
+            "pathlib.Path.read_text",
+            lambda self, encoding="utf-8": tampered_text if self.name == "CONTRIBUTING.md" else real_text,
+        )
+
+        errors = check_adr_index_completeness()
+        assert any("引用了不存在的 ADR 文档 '0099-ghost.md'" in e for e in errors)
