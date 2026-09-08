@@ -37,6 +37,7 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.viewmodels import Message
+from ui.viewmodels.history_mode_mixin import HistoryModeMixin
 from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
@@ -3299,3 +3300,54 @@ class TestStockFilterUX04:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
         assert any("run_strategy:value" in c for c in fake_vm.method_calls), "Enter 提交应触发策略运行"
+
+
+class TestBuildHistoryTreeRowsVectorized:
+    """PRF-09: _build_history_tree_rows 由 iterrows 改写为 to_numpy 后保持等价输出。"""
+
+    def test_groups_by_trade_date(self) -> None:
+        df = pd.DataFrame(
+            {
+                "run_id": ["r1", "r2", "r3"],
+                "trade_date": ["20250728", "20250728", "20250727"],
+                "strategy_name": ["sx", "sy", "sx"],
+                "cnt": [2, 3, 5],
+            }
+        )
+        rows = HistoryModeMixin._build_history_tree_rows(df)
+        assert len(rows) == 2
+        # trade_date DESC? 原实现按 dict 插入序 (df 行序) 分组, 需按原序断言
+        by_date = {r.d_key: r for r in rows}
+        assert set(by_date) == {"20250728", "20250727"}
+        assert by_date["20250728"].total_cnt == 5
+        assert {s.strategy_name for s in by_date["20250728"].strategies} == {"sx", "sy"}
+        assert by_date["20250727"].total_cnt == 5
+
+    def test_non_trivial_str_and_int_coercion(self) -> None:
+        """数值型 cnt 与整型日期仍按 str/int 归一 (与 iterrows 版本取列一致)。"""
+        df = pd.DataFrame(
+            {
+                "run_id": [123, 456],
+                "trade_date": [20250701, 20250701],
+                "strategy_name": ["sx", "sx"],
+                "cnt": [10.0, 4.0],
+            }
+        )
+        rows = HistoryModeMixin._build_history_tree_rows(df)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.total_cnt == 14
+        assert all(isinstance(s.run_id, str) for s in row.strategies)
+
+    def test_empty_dataframe_returns_empty_tuple(self) -> None:
+        """空 DataFrame (无列或空行) 及 None 均返回空元组。"""
+        assert HistoryModeMixin._build_history_tree_rows(pd.DataFrame()) == ()
+        assert HistoryModeMixin._build_history_tree_rows(None) == ()  # type: ignore[arg-type]
+
+    def test_missing_required_column_raises_key_error(self) -> None:
+        """非空 DataFrame 缺少必要列时抛出标准 KeyError (而非 ValueError)。"""
+        import pytest
+
+        df = pd.DataFrame({"trade_date": ["20250728"]})
+        with pytest.raises(KeyError, match="strategy_name"):
+            HistoryModeMixin._build_history_tree_rows(df)

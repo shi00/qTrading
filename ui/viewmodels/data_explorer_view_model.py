@@ -730,7 +730,11 @@ def _df_to_table_rows(df: pd.DataFrame, columns: tuple[str, ...]) -> tuple[Table
     """
     if df is None or df.empty or not columns:
         return ()
-    return tuple(TableRow(values=tuple(row.get(col) for col in columns)) for _, row in df.iterrows())
+    # PRF-09: 避免 iterrows (每行构造 Series, 慢 ~17x); 列切片 + zip 批量构造, 缺列补 None
+    col_map = {col: i for i, col in enumerate(df.columns)}
+    arr = df.to_numpy(dtype=object)
+    cols_data = [arr[:, col_map[c]] if c in col_map else [None] * len(df) for c in columns]
+    return tuple(TableRow(values=v) for v in zip(*cols_data, strict=True))
 
 
 def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
@@ -753,7 +757,8 @@ def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
 
     # data 预期为 pd.DataFrame
     columns = tuple(str(col) for col in data.columns)
-    rows = tuple(SqlResultRow(values=tuple(row[col] for col in data.columns)) for _, row in data.iterrows())
+    # PRF-09: 避免 iterrows; itertuples(index=False, name=None) 列序与 data.columns 严格一致 (row 已为 tuple)
+    rows = tuple(SqlResultRow(values=row) for row in data.itertuples(index=False, name=None))
     return {
         "sql_success": success,
         "sql_result_columns": columns,
