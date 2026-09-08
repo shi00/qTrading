@@ -37,7 +37,12 @@ class PerfThreshold:
     # 参数绑定，量级与纯单查询不同，故以此为独立命名常量而非引用通用档位。
     DAO_READ_MS = 500  # _read_db 单次读原语
     DAO_WRITE_MS = 2000  # _write_sql 单次写原语
-    DAO_UPSERT_MS = 2000  # _save_upsert 批量 upsert 原语
+    DAO_UPSERT_MS = 20000  # _save_upsert 批量 upsert 原语
+    # PRF-07 端到端实测校准（本机内置 PG 16.14.0，6 列 Numeric/date/datetime）：
+    # _save_upsert 整趟（转换+真实批量 INSERT）10万行 median 8.2s / 20万行 median 12.5s、max 13.0s，
+    # 耗时随行数近似线性。原 2000ms 使 ≥5万行真实批量常态化"Slow UPSERT"误报；取 20000ms 容纳
+    # 实测最大批量并留 ~60% 余量以捕获显著退化。该常量仅 _save_upsert 使用（内层 elapsed + 外层
+    # 装饰器，见 base_dao.py），不放大其它大量共用的通用批量档（DB_BULK_IO 覆盖 60+ 处，别碰）。
 
 
 class UILogger:

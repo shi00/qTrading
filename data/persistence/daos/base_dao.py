@@ -682,7 +682,7 @@ class BaseDao:
         """
         return ",".join(['"' + c.replace('"', '""') + '"' for c in columns])
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    @log_async_operation(threshold_ms=PerfThreshold.DAO_UPSERT_MS)
     async def _save_upsert(
         self,
         df: pd.DataFrame,
@@ -773,7 +773,8 @@ class BaseDao:
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
-        # Extracting out the CPU intensive conversion to allow async offloading
+        # PRF-07/PRF-10：写库转换复用模块级 _normalize_records_frame（含 NULL 归一），
+        # 此处以局部闭包携带列型集合，仅把 CPU 密集转换 offload 到线程池，避免阻塞事件循环（R16）。
         def _prepare_records(
             df_slice: pd.DataFrame,
         ) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:

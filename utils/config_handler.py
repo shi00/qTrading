@@ -6,7 +6,6 @@ import logging
 import os
 from typing import TypeVar
 
-import keyring
 from readerwriterlock import rwlock
 
 import config
@@ -566,3 +565,17 @@ class ConfigHandler:
 # 必须在本 facade 的 ``ConfigHandler`` 定义之后再导入，以避免循环导入
 # （domain → utils.config_handler；见 utils/config/*.py 顶部 docstring）。
 from utils.config import app_prefs, db, llm, secrets, storage, sync  # noqa: E402
+
+
+def __getattr__(name: str):
+    """PRF-07: 惰性 re-export ``keyring``，避免 ``utils.logger`` 轻量导入链提前加载重库。
+
+    原来在模块级 ``import keyring``，导致仅需日志的代码路径即拉载 keyring。
+    keyring 仅在 config 领域模块与单测 mock（``patch("utils.config_handler.keyring")``）
+    访问时使用，故改为首次访问时才加载，维持 re-export 语义与 patch 兼容。
+    """
+    if name == "keyring":
+        import keyring
+
+        return keyring
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

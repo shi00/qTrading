@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -35,6 +36,8 @@ _SUBPROCESS_CODE = (
     "assert 'app.application' not in sys.modules, 'import main 不应加载 app.application'\n"
     "assert 'data.persistence.models' not in sys.modules, 'import main 不应加载数据层模型'\n"
     "assert 'pandas' not in sys.modules, 'import main 不应加载 pandas（横切重依赖）'\n"
+    "assert 'keyring' not in sys.modules, 'import main 不应加载 keyring'\n"
+    "assert 'asyncpg' not in sys.modules, 'import main 不应加载 asyncpg'\n"
     "print('OK: main import 保持首帧最小导入')\n"
 )
 
@@ -72,3 +75,98 @@ def test_main_function_contains_deferred_imports() -> None:
         "from utils.logger import setup_logging",
     ):
         assert stmt in source, f"main() 源码应含延迟导入: {stmt}"
+
+
+# PRF-07：main 顶层仅保留 multiprocessing/os/flet（实测约 207 模块）。上限取宽松值，
+# 用于防 app.application（1300+ 模块）级重导入回流入顶层；此断言防量级回归而非精确计数。
+_MAIN_MODULE_COUNT_LIMIT = 400
+
+# PRF-07：utils.logger 属轻量启动链，不应提前拉下载重库。以运行时 sys.modules 断言守护
+# PRF-01（pandas 惰性）、PRF-07（keyring 惰性 re-export）；asyncpg/httpx 的惰性（PRF-14）
+# 位于 error_classifier，由下方独立门禁专门守护（utils.logger 导入链不经过该模块）。
+# 用运行时断言而非 AST 扫描（字符串式 import 规避 AST 可见性，见 PRF-04）。
+_UTILS_LOGGER_HEAVY_MODULES = ("pandas", "keyring")
+
+
+def test_import_main_module_count_bounded() -> None:
+    """import main 后 sys.modules 总量不超宽松上限（PRF-07）。"""
+    code = "import sys\nimport main\nprint(len(sys.modules))\n"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
+        cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    count = int(result.stdout.strip())
+    assert count <= _MAIN_MODULE_COUNT_LIMIT, (
+        f"import main 加载模块数 {count} 超过上限 {_MAIN_MODULE_COUNT_LIMIT}，"
+        "疑似重导入回流（如 app.application 移回顶层）"
+    )
+
+
+def test_import_utils_logger_does_not_load_heavy_imports() -> None:
+    """import utils.logger 不加载 pandas/keyring/asyncpg（PRF-07 运行时门禁）。"""
+    code = (
+        "import sys\n"
+        "import utils.logger\n"
+        f"heavy={list(_UTILS_LOGGER_HEAVY_MODULES)!r}\n"
+        "loaded = sorted(m for m in heavy if m in sys.modules)\n"
+        "print('loaded=' + repr(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
+        cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    assert loaded_modules(result.stdout) == [], (
+        f"import utils.logger 不应加载重依赖，实际加载: {loaded_modules(result.stdout)}"
+    )
+
+
+# PRF-14：error_classifier 的 asyncpg/httpx 惰性加载需独立门禁——utils.logger / main 导入链
+# 均不经过 error_classifier，必须在干净子进程直接导入该模块并断言两库未加载，才能守住 PRF-14。
+# 若不设此门禁，asyncpg/httpx 被移回 error_classifier 模块级也不会有任何 sys.modules 守护告警
+# （检视发现的 PRF-07 覆盖缺口）。
+_ERROR_CLASSIFIER_HEAVY_MODULES = ("asyncpg", "httpx")
+
+
+def test_import_error_classifier_does_not_load_asyncpg_httpx() -> None:
+    """import utils.error_classifier 不加载 asyncpg/httpx（PRF-14 门禁，补 PRF-07 覆盖缺口）。"""
+    code = (
+        "import sys\n"
+        "import utils.error_classifier\n"
+        f"heavy={list(_ERROR_CLASSIFIER_HEAVY_MODULES)!r}\n"
+        "loaded = sorted(m for m in heavy if m in sys.modules)\n"
+        "print('loaded=' + repr(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
+        cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    assert loaded_modules(result.stdout) == [], (
+        f"import utils.error_classifier 不应加载 asyncpg/httpx，实际加载: {loaded_modules(result.stdout)}"
+    )
+
+
+def loaded_modules(stdout: str) -> list[str]:
+    """解析子进程打印的已加载重依赖列表。"""
+    for line in stdout.splitlines():
+        if line.startswith("loaded="):
+            text = line[len("loaded=") :].strip()
+            return ast.literal_eval(text)
+    return ["<无法解析子进程输出>"]

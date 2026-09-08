@@ -329,7 +329,7 @@ class TestSlowQueryThresholdConstants:
 
         assert PerfThreshold.DAO_READ_MS == 500
         assert PerfThreshold.DAO_WRITE_MS == 2000
-        assert PerfThreshold.DAO_UPSERT_MS == 2000
+        assert PerfThreshold.DAO_UPSERT_MS == 20000
 
     def test_base_dao_no_parallel_threshold_constants(self):
         import data.persistence.daos.base_dao as base_dao_mod
@@ -1698,7 +1698,7 @@ class TestBaseDaoSaveUpsertExtended:
         dao = BaseDao(mock_engine)
         n_rows = 1200
 
-        def mock_prepare_records(task_type, fn, df_slice):
+        def mock_prepare_records(task_type, fn, df_slice, *_):
             return ([{"a": i} for i in range(len(df_slice))], {})
 
         with (
@@ -1733,7 +1733,7 @@ class TestBaseDaoSaveUpsertExtended:
         dao = BaseDao(mock_engine)
         n_rows = 700
 
-        def mock_prepare_records(task_type, fn, df_slice):
+        def mock_prepare_records(task_type, fn, df_slice, *_):
             return ([{"a": i} for i in range(len(df_slice))], {})
 
         with (
@@ -3477,7 +3477,7 @@ class TestLogAsyncOperationCoverage:
 
     @pytest.mark.asyncio
     async def test_save_upsert_slow_operation_triggers_warning(self, caplog):
-        """DoD ④: _save_upsert 慢操作（>5000ms threshold）触发 @log_async_operation WARNING。"""
+        """DoD ④: _save_upsert 慢操作（>DAO_UPSERT_MS threshold）触发 @log_async_operation WARNING。"""
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_table = MagicMock()
@@ -3491,7 +3491,7 @@ class TestLogAsyncOperationCoverage:
 
         def mock_perf_counter():
             call_count[0] += 1
-            return (call_count[0] - 1) * 6.0
+            return (call_count[0] - 1) * 21.0
 
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
@@ -3512,9 +3512,9 @@ class TestLogAsyncOperationCoverage:
             with caplog.at_level(logging.WARNING):
                 result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
                 assert result == 1
-            slow_warnings = [r for r in caplog.records if "SLOW" in r.message and ">5000ms" in r.message]
+            slow_warnings = [r for r in caplog.records if "SLOW" in r.message and ">20000ms" in r.message]
             assert len(slow_warnings) >= 1, (
-                f"Expected @log_async_operation SLOW warning with '>5000ms', "
+                f"Expected @log_async_operation SLOW warning with '>20000ms', "
                 f"got records: {[r.message for r in caplog.records]}"
             )
 

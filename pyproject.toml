@@ -67,6 +67,7 @@ dev = [
     "pytest-xdist>=3.5.0",
     "pytest-rerunfailures>=14.0",
     "pytest-randomly>=3.15.0",
+    "pytest-benchmark>=5.0.0",  # PRF-07: 写库热路径 _prepare_records 性能定基（xdist 激活时自动禁用测量，定向 -n0 运行）
     "pytest-timeout>=2.3.0",  # Diagnose CI integration test hang (xdist worker deadlock)
     "pytest-json-report>=1.5.0",  # JSON report for scripts/detect_flaky.py
     "ruff>=0.16.2",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
