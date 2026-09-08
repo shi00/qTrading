@@ -2635,6 +2635,20 @@ class TestCanonicalTopicsYamlConsistency:
         errors = check_canonical_topics_consistency()
         assert errors == [], "当前项目配置应通过 canonical-topics.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
+    def test_release_and_packaging_canonical_topics_exist(self):
+        """GDR-08: release 与 packaging 主题存在且决策树映射与合并白名单正确绑定."""
+        from check_docs_consistency import _DECISION_TREE_MERGED_IDS, _load_canonical_topics
+
+        topics = _load_canonical_topics()
+        assert topics is not None
+        topic_map = {t["id"]: t for t in topics}
+        assert "release" in topic_map
+        assert "packaging" in topic_map
+        assert topic_map["release"]["canonical"] == "docs/guides/ci-cd.md"
+        assert topic_map["packaging"]["canonical"] == "docs/guides/dependency-management.md"
+        assert "docs/guides/ci-cd.md" in _DECISION_TREE_MERGED_IDS
+        assert _DECISION_TREE_MERGED_IDS["docs/guides/ci-cd.md"] == {"ci-deps", "release"}
+
     def test_detects_missing_required_field(self, tmp_path, monkeypatch):
         """缺少必填字段时应报错."""
         from check_docs_consistency import check_canonical_topics_consistency

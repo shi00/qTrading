@@ -105,3 +105,13 @@ topics:
   - id: governance-docs
     title: 修改治理文档 / 规则
     canonical: docs/adr/0002-document-layering.md
+
+  - id: release
+    title: 版本发布 / Release 管理
+    canonical: docs/guides/ci-cd.md
+    note: 见 ci-cd.md「版本发布流程与 Release 管理」
+
+  - id: packaging
+    title: 打包分发 / PyInstaller 构建
+    canonical: docs/guides/dependency-management.md
+    note: 见 dependency-management.md「PyInstaller 打包」

@@ -30,6 +30,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`。Python `3.14` 因上游 `litellm` 限制 `Requires-Python <3.14`，暂时无法安装项目依赖，故仅在 `lint-fast` job 中作为 experimental 矩阵项运行（详见 [已知架构技术债](../debt/known-technical-debt.md) 中的 litellm 限制条目）。
 
+### 版本发布流程与 Release 管理
+
 发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → GitHub Release 发布。
 
 **其他 workflow**: CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、自动化 Release PR (`release-please.yml`)、依赖更新机器人 (`renovate.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)。
