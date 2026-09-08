@@ -24,8 +24,12 @@ class StepResult:
     error: str = ""
 
 
+# 停机步骤定义：(步骤名, 方法名, 是否关键步骤, 默认超时秒数)
+# 注意：_run_cleanup_steps 使用 effective_timeout = min(default_timeout, step_timeout_s)。
+# 步骤 0~7 的默认超时均 <= 6.0s，因此调用方传入的 step_timeout_s (如 35.0s) 实际仅对 Step 8 (35.0s) 生效，
+# 步骤 0~7 始终受各自定义的默认超时上限保护，无法被外部放宽。
 _CLEANUP_STEPS = [
-    ("Step 0", "_step0_cancel_tasks", True, 4.0),
+    ("Step 0", "_step0_cancel_tasks", True, 6.0),
     ("Step 1", "_step1_stop_services", True, 5.0),
     ("Step 2", "_step2_flush_db_writes", True, 2.0),
     ("Step 3", "_step3_close_processor", True, 3.0),
@@ -356,7 +360,9 @@ class ShutdownCoordinator:
                 # 用 asyncio.wait（而非 gather(return_exceptions=True)）等待 drain：
                 # wait 不会重新抛出任务异常，符合"不传播 CancelledError 到 _step0"
                 # 的需求，且不违反 R2（未用 except 吞没 CancelledError）。
-                await asyncio.wait(pending, timeout=2.0)
+                # CON-03: timeout 调谐为 1.5s，配合 TaskManager 的 2.5s join + 1.0s persist，
+                # 子超时之和 5.0s 严格小于 Step 0 的 6.0s 默认预算，预留 1.0s 抖动余量。
+                await asyncio.wait(pending, timeout=1.5)
             self._registered_tasks.clear()
 
         from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈

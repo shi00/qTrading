@@ -937,6 +937,32 @@ class TestTaskManagerCancelAllRunningAsync:
 
         sig = inspect.signature(TaskManager.cancel_all_running_async)
         assert sig.parameters["join_timeout"].default == 3.0
+        assert sig.parameters["persist_timeout"].default == 1.0
+
+    @pytest.mark.asyncio
+    async def test_persist_timeout_bounds_unresponsive_database_writes(self, caplog):
+        """CON-03: persist_timeout 限制数据库写入时长，超时记录 warning 且不阻塞整体取消。"""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+
+        async def _hanging_persist(task):
+            await asyncio.sleep(10.0)
+
+        with (
+            patch.object(mgr, "_persist_task_async", side_effect=_hanging_persist),
+            caplog.at_level(logging.WARNING, logger="services.task_manager"),
+        ):
+            # 传入极短 persist_timeout=0.02
+            start = asyncio.get_running_loop().time()
+            await mgr.cancel_all_running_async(join_timeout=0.1, persist_timeout=0.02)
+            elapsed = asyncio.get_running_loop().time() - start
+
+            # 验证执行时间受控（小于 0.5s，不被 hanging persist 阻塞 10s）
+            assert elapsed < 0.5
+            assert t.status == TaskStatus.CANCELLED
+            assert any("persistence timed out" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_completed_asyncio_task_not_joined(self):
