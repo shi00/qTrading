@@ -378,7 +378,7 @@ CLAUDE.md §1.5 保留「非平凡逻辑必须验证」与「交付收尾原则�
 
 | 维度 | 技术选型 |
 |------|---------|
-| **UI 框架** | Flet V1（版本见 [`pyproject.toml`](./pyproject.toml)，含 `flet` / `flet-desktop` / `flet-charts` 三包；Flet 1.0 alpha/beta 阶段，Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型） |
+| **UI 框架** | Flet V1（版本见 [`pyproject.toml`](./pyproject.toml)，含 `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` / `flet-mcp` 五包；Flet 1.0 alpha/beta 阶段，Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型） |
 | **计算引擎** | Polars (策略层向量化) + Pandas (DAO 层 / 数据同步层) |
 | **数据库** | PostgreSQL 16.14.0 + SQLAlchemy 2.0 (asyncpg) |
 | **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |
@@ -396,7 +396,7 @@ CLAUDE.md §1.5 保留「非平凡逻辑必须验证」与「交付收尾原则�
 CLAUDE.md §4.1 仅保留分层架构的依赖方向与禁止反向依赖规则，本节给出完整目录树：
 
 ```text
-core/             ← 架构核心层 (i18n，不依赖任何其他层)
+core/             ← 架构核心层 (基础类型、异常定义、i18n、Prompt 模板，不依赖任何其他层)
 app/              ← 引导层 (bootstrap: 启动初始化、服务编排，仅 main.py 调用)
 data/             ← 数据层 (DAO、同步策略、外部数据源、领域服务、缓存管理)
   ├── cache/             缓存管理器 (CacheManager 单例，DAO 统一入口、引擎管理)
@@ -416,6 +416,11 @@ tests/            ← 测试目录 (unit/ 单元测试, integration/ 集成测�
 scripts/          ← 工具脚本 (覆盖率检查、安全审计、依赖同步等)
 locales/          ← 国际化资源文件
 man/              ← 架构专题文档 (数据库账号分离、表分区策略)
+alembic/          ← 数据库迁移版本脚本与环境配置
+docs/             ← 架构设计、ADR 决策、操作指南与治理文档
+requirements/     ← 业务需求说明与规范
+resources/        ← 应用静态资源与打包物料
+sidecars/         ← 跨进程/跨语言独立辅助进程与服务
 ```
 
 **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
