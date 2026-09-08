@@ -37,6 +37,9 @@
    core/*.py 文件一致。
 19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
    决策文档。
+20. 书名号章节引用一致性检查（GDR-13）：扫描受检 markdown 中形如 `<文档路径>「<章节名>」`
+   的引用，断言目标文档存在同名标题（或标题以「：」+ 章节名 结尾，容忍「第三部分：实现规范手册」
+   这类前缀修饰）；章节改名或删除时不再无报警。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -2106,6 +2109,53 @@ def check_governance_id_glossary() -> list[str]:
     return errors
 
 
+# GDR-13: 书名号式章节引用——形如 `<文档路径>「<章节名>」`（如 `CONTRIBUTING.md「错误处理标准模式」`）。
+# 这类引用不是 markdown 链接，check_anchor_dead_links / check_relative_dead_links 均扫不到；
+# 章节改名或删除时若无本检查，将无任何报警。引用路径以仓库根相对形式书写（不含 `./` 前缀），
+# 与 CLAUDE.md §1.8 决策树「必读入口」列的裸路径文本形态一致（见 _extract_decision_tree_targets）。
+_GUILLEMET_REF_PATTERN = re.compile(r"(?<![\w./-])([\w./-]+\.md)\s*「([^」]+)」")
+
+
+def _extract_heading_texts(content: str) -> set[str]:
+    """提取 markdown 全部标题的原文（保留序号/前缀，如「### 7. 新增回测配置」）。"""
+    headings: set[str] = set()
+    for line in content.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if m:
+            headings.add(m.group(2))
+    return headings
+
+
+def check_guillemet_references() -> list[str]:
+    """检查项 20：书名号式章节引用一致性（GDR-13）。
+
+    扫描 CHECKED_DOCS 中形如 `<文档路径>「<章节名>」` 的引用，断言目标文档存在同名标题。
+    匹配规则：目标标题等于章节名，或目标标题以「：」+ 章节名 结尾（容忍「第三部分：实现规范手册」
+    这类「第 N 部分」前缀修饰）。markdown 链接 `[text「章节」](./path#anchor)` 内的书名号
+    由锚点门禁 check_anchor_dead_links 覆盖，本检查跳过（避免重复报警与「链接文本 ≠ 标题」误报）。
+    """
+    errors: list[str] = []
+    for doc in CHECKED_DOCS:
+        if not doc.exists():
+            continue
+        content = doc.read_text(encoding="utf-8")
+        # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖
+        text = re.sub(r"\[[^\]]*\]\([^)]*\)", "", content)
+        for m in _GUILLEMET_REF_PATTERN.finditer(text):
+            raw_path, section = m.group(1), m.group(2).strip()
+            target = ROOT / raw_path
+            if not target.exists():
+                errors.append(f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在")
+                continue
+            headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
+            if not any(h == section or h.endswith(f"：{section}") for h in headings):
+                errors.append(
+                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                    f"（现有标题示例: {sorted(headings)[:6]}）"
+                )
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -2140,6 +2190,8 @@ def main() -> int:
     all_errors.extend(check_core_modules_completeness())
     # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后
     all_errors.extend(check_governance_id_glossary())
+    # 书名号式章节引用：补上锚点/相对链接门禁之外的最后一类跨文档引用（GDR-13）
+    all_errors.extend(check_guillemet_references())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -2153,7 +2205,8 @@ def main() -> int:
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
-        "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / ADR 索引完整性）"
+        "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
+        "ADR 索引完整性）"
     )
     return 0
 

@@ -3926,3 +3926,81 @@ class TestAdrIndexCompleteness:
 
         errors = check_adr_index_completeness()
         assert any("引用了不存在的 ADR 文档 '0099-ghost.md'" in e for e in errors)
+
+
+class TestGuillemetReferences:
+    """GDR-13: 书名号式章节引用（<文档路径>「<章节名>」）必须指向目标文档真实标题."""
+
+    def _setup(self, tmp_path, monkeypatch, claude_text: str, contributing_text: str):
+        """构造临时仓库：CLAUDE.md 为受检文档，CONTRIBUTING.md 为目标文档。"""
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        (tmp_path / "CONTRIBUTING.md").write_text(contributing_text, encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(claude_text, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+        from check_docs_consistency import check_guillemet_references
+
+        return check_guillemet_references
+
+    def test_passes_on_current_repo(self):
+        """真实仓库：全部书名号引用均指向存在的标题（无错误）。"""
+        from check_docs_consistency import check_guillemet_references
+
+        errors = check_guillemet_references()
+        assert errors == [], "书名号引用检查应通过，实际报错:\n  " + "\n  ".join(errors)
+
+    def test_accepts_exact_heading(self, tmp_path, monkeypatch):
+        """章节名与目标文档标题同名 → 通过。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 CONTRIBUTING.md「错误处理标准模式」\n",
+            "## 错误处理标准模式\n",
+        )
+        assert check() == []
+
+    def test_accepts_prefixed_heading(self, tmp_path, monkeypatch):
+        """章节名是目标标题的「：」后缀（如「实现规范手册」→「第三部分：实现规范手册」）→ 通过。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "遵守 CONTRIBUTING.md「实现规范手册」\n",
+            "# 第三部分：实现规范手册\n",
+        )
+        assert check() == []
+
+    def test_detects_dead_reference(self, tmp_path, monkeypatch):
+        """目标文档存在但无同名标题 → 报错（GDR-13 核心反例）。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 CONTRIBUTING.md「文档一致性校验」\n",
+            "## 数据库设置\n",
+        )
+        errors = check()
+        assert len(errors) == 1
+        assert "CONTRIBUTING.md「文档一致性校验」" in errors[0]
+        assert "无同名标题" in errors[0]
+
+    def test_detects_missing_target_doc(self, tmp_path, monkeypatch):
+        """目标文档不存在 → 报错。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 docs/guides/how-to.md「7. 新增回测配置」\n",
+            "## 数据库设置\n",
+        )
+        errors = check()
+        assert len(errors) == 1
+        assert "docs/guides/how-to.md「7. 新增回测配置」" in errors[0]
+        assert "不存在" in errors[0]
+
+    def test_skips_markdown_link_text(self, tmp_path, monkeypatch):
+        """markdown 链接内的书名号由锚点门禁覆盖，本检查跳过（避免重复报警）。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "[CONTRIBUTING.md「不存在的章节」](./CONTRIBUTING.md#不存在)\n",
+            "## 数据库设置\n",
+        )
+        assert check() == []
