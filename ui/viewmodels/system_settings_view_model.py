@@ -18,7 +18,6 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -106,7 +105,7 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         # 默认使用模块级 ConfigHandler/ThreadPoolManager（与原 system_tab 行为一致）
         # 通过 _load_config_to_state 同步初始化 state
         self._state = SystemSettingsState()
-        self._subscribers: list[Callable[[SystemSettingsState], None]] = []
+        self._init_mixin_fields()
         self._load_config_to_state()
 
     # --- Config loading ---

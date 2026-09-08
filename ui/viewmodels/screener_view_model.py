@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from collections.abc import Callable
 from types import MappingProxyType
 
 import pandas as pd
@@ -102,7 +101,7 @@ class ScreenerViewModel(
 
         # Immutable state + subscribers (§3.0.1)
         self._state: ScreenerState = ScreenerState()
-        self._subscribers: list[Callable[[ScreenerState], None]] = []
+        self._init_mixin_fields()
 
         # Internal mutable data (双轨制, not in state)
         self._full_results: pd.DataFrame | None = None
@@ -136,9 +135,6 @@ class ScreenerViewModel(
         self._retrying_prev_error: str | None = None
         # 当前重试 task 引用（schedule_retry 记录，select_strategy 仅取消它，避免误cancel其它后台任务）
         self._retry_task: asyncio.Task | None = None
-
-        # Mixin 字段初始化（跨线程修复）
-        self._init_mixin_fields()
 
     async def _ensure_processor(self) -> DataProcessor:
         """懒构造 DataProcessor（IO 线程池 offload），避免阻塞 UI 主线程 (R16)。

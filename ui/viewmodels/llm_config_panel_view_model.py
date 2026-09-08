@@ -107,7 +107,7 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
         self._on_reload_service = on_reload_service
         self._on_loading_change = on_loading_change
         self._state = LLMConfigState()
-        self._subscribers: list[Callable[[LLMConfigState], None]] = []
+        self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
 

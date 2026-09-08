@@ -147,7 +147,7 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
         self._on_test_connection = on_test_connection
         self._on_save = on_save
         self._state = FailoverConfigState()
-        self._subscribers: list[Callable[[FailoverConfigState], None]] = []
+        self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载 failover 列表）
         self._state = replace(self._state, failover_items=tuple(_load_failover_items_sync()))
 

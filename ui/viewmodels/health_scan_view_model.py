@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,7 +101,6 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
     def __init__(self, data_processor: DataProcessor | None = None) -> None:
         self._data_processor = data_processor
         self._state: HealthScanState = HealthScanState()
-        self._subscribers: list[Callable[[HealthScanState], None]] = []
         # 保留 _futures 集合用于测试契约稳定性（当前 on_progress 已不再写入，
         # 但测试手动填充调用 cancel_pending_futures 的断言仍需该属性存在）。
         self._futures: set[asyncio.Future] = set()

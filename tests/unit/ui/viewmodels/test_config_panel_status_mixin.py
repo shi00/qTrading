@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -51,7 +50,7 @@ class _DummyConfigVM(ConfigPanelViewModelBase[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
+        self._init_mixin_fields()
 
 
 # ============================================================

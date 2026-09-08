@@ -81,11 +81,11 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
     def __init__(self) -> None:
         # --- State snapshot + subscribers ---
         self._state: SystemState = SystemState()
-        self._subscribers: list[Callable[[SystemState], None]] = []
+        self._init_mixin_fields()
 
     def dispose(self):
         """清理资源。"""
-        self._subscribers.clear()
+        super().dispose()
         self._state = SystemState()
 
     def get_current_tier(self) -> str:

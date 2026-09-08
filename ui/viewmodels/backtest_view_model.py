@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -230,7 +230,6 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             available_strategies=_strategies,
             selected_strategy_key=next((k for k, _ in _strategies), None),
         )
-        self._subscribers: list[Callable[[BacktestState], None]] = []
         # P2-1: 跟踪 fire-and-forget task 生命周期，dispose 时取消避免孤儿 (对齐 ScreenerViewModel)
         self._background_tasks: set = set()
         self._init_mixin_fields()  # F3-08: 初始化 mixin 字段 (锁/loop/disposed flag)

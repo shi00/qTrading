@@ -107,7 +107,6 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         # Internal state (frozen snapshot)
         self._state = HomeState()
-        self._subscribers: list[Callable[[HomeState], None]] = []
 
         # Concurrency Control
         self._load_generation = 0  # Prevent race conditions
