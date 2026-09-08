@@ -95,7 +95,7 @@ repos:
         pass_filenames: false
 
       - id: redline-check
-        name: Redline automation check (R4/R12/R13/R14/R15 + UI bare colors)
+        name: Redline automation check (R4/R9/R12/R13/R14/R15/R16 + UI bare colors)
         entry: python scripts/check_redlines.py
         language: system
         files: ^(core|data|services|strategies|utils|app|ui)/.*\.py$|^scripts/check_redlines\.py$|^\.pre-commit-config\.yaml$
