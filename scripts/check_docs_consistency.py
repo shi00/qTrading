@@ -35,6 +35,8 @@
    方法论与轮次清单一跳可达（结论正文落根 reviews/ 为本地 gitignored 产物，不入仓库）。
 18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
    core/*.py 文件一致。
+19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
+   决策文档。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -96,6 +98,9 @@ FLET_HUB_PATH = FLET_DOCS_DIR / "README.md"
 # docs/reviews/ 目录与索引入口（DOC-07 检视方法论文档登记）
 REVIEWS_DOCS_DIR = ROOT / "docs" / "reviews"
 REVIEWS_README_PATH = REVIEWS_DOCS_DIR / "README.md"
+
+# docs/adr/ 目录（GDR-12 ADR 决策文档文件级登记）
+ADR_DOCS_DIR = ROOT / "docs" / "adr"
 
 # 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
 # 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
@@ -1811,6 +1816,61 @@ def check_reviews_index_completeness() -> list[str]:
     return errors
 
 
+# --- GDR-12: ADR 文件级索引完整性（CONTRIBUTING.md 文件级登记全部 docs/adr/*.md）---
+def check_adr_index_completeness() -> list[str]:
+    """检查项：ADR 决策文档文件级索引完整性（GDR-12）。
+
+    确保 CONTRIBUTING.md「docs/adr/」小节文件级登记了 docs/adr/*.md 全部 ADR 文档，
+    防止新增 ADR 因仅有目录级引用而成为不可发现的暗坑。
+    """
+    errors: list[str] = []
+    if not ADR_DOCS_DIR.is_dir():
+        return [f"ADR 目录不存在: {ADR_DOCS_DIR}"]
+    if not CONTRIBUTING_PATH.exists():
+        return [f"CONTRIBUTING.md 不存在: {CONTRIBUTING_PATH}"]
+
+    contributing_content = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+
+    # 枚举 docs/adr/ 下全部 *.md（排除 README 自身）
+    actual_files: set[str] = set()
+    for path in ADR_DOCS_DIR.glob("*.md"):
+        if path.name == "README.md":
+            continue
+        actual_files.add(path.name)
+
+    # 提取 CONTRIBUTING.md 中指向 docs/adr/*.md 文件的链接的文件名集合
+    referenced_files: set[str] = set()
+    in_code_block = False
+    for line in contributing_content.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        for m in _MD_LINK_PATTERN.finditer(line):
+            url = m.group(2).strip()
+            if url.startswith(("http://", "https://", "mailto:")):
+                continue
+            url_path = url.split("#", 1)[0].split("?", 1)[0]
+            if not url_path:
+                continue
+            target_path = (CONTRIBUTING_PATH.parent / url_path).resolve()
+            try:
+                rel = target_path.relative_to(ADR_DOCS_DIR)
+            except ValueError:
+                continue  # 目标在 docs/adr/ 外，跳过
+            if len(rel.parts) == 1 and rel.name.endswith(".md"):
+                referenced_files.add(rel.name)
+
+    # 未登记的 ADR 文档
+    for fname in sorted(actual_files - referenced_files):
+        errors.append(f"ADR 索引完整性: CONTRIBUTING.md 未登记 ADR 文档 '{fname}'")
+    # 幽灵链接（CONTRIBUTING.md 引用不存在的 docs/adr/ 内文档）
+    for fname in sorted(referenced_files - actual_files):
+        errors.append(f"ADR 索引完整性: CONTRIBUTING.md 引用了不存在的 ADR 文档 '{fname}'")
+    return errors
+
+
 # --- DOC-09: 治理 id 引用一致性（EX-\d{4} 双向：注册表 ↔ 消费文档）---
 # 宪法曾引用未登记的 EX-0001（复现 GOV-01，DOC-09）。本检查把「引用必须落在注册表、
 # 登记必须被消费」沉淀为机制：任一方向漂移即报错，防止悬空/孤儿例外长期存活。
@@ -2020,6 +2080,7 @@ def main() -> int:
     all_errors.extend(check_canonical_routing())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
+    all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_governance_id_references())
     all_errors.extend(check_core_modules_completeness())
 
@@ -2035,7 +2096,7 @@ def main() -> int:
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
-        "治理 id 引用一致性 / core 模块清单完整性）"
+        "治理 id 引用一致性 / core 模块清单完整性 / ADR 索引完整性）"
     )
     return 0
 
