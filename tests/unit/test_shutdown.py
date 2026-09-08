@@ -60,7 +60,7 @@ class TestCleanupSteps:
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
-        assert _CLEANUP_STEPS[0][3] == 4.0
+        assert _CLEANUP_STEPS[0][3] == 6.0
         assert _CLEANUP_STEPS[4][2] is False
         assert _CLEANUP_STEPS[4][3] == 1.0
 
@@ -74,8 +74,7 @@ class TestCleanupSteps:
     def test_total_step_timeouts_within_overall_budget(self):
         """ASYNC-005: Sum of step timeouts must fit within production window shutdown budget.
 
-        Phase 2 Step 8 (_step8_stop_embedded_postgres, 35.0s) 加入后，步骤超时和 = 55.0s。
-        生产路径 perform_window_shutdown 使用 do_cleanup(timeout_s=60.0) 容纳 55s + 5s margin；
+        生产路径 perform_window_shutdown 使用 do_cleanup(timeout_s=60.0) 容纳 57s + 3s margin；
         此处校验 sum <= 65.0s (60.0s do_cleanup 整体超时 + 5.0s CI 抖动 margin)。
         """
         total_step_time = sum(step[3] for step in _CLEANUP_STEPS)
@@ -90,6 +89,35 @@ class TestCleanupSteps:
         # cancel_all_running_async default join_timeout is 3.0s
         # Step 0 needs to cover: cancel + persist + join
         assert step0_timeout >= 3.0, f"Step 0 timeout ({step0_timeout}s) must be >= join_timeout (3.0s)"
+
+    def test_step0_timeout_budget_consistency(self):
+        """CON-03: Step 0 声明预算必须覆盖内部子超时之和并留有余量。"""
+        step0_timeout = _CLEANUP_STEPS[0][3]
+        # Step 0 内部子超时：_registered_tasks wait (1.5s) + persist_timeout (1.0s) + join_timeout (3.0s) = 5.5s
+        internal_sub_timeouts_sum = 1.5 + 1.0 + 3.0
+        assert step0_timeout >= 6.0, f"Step 0 timeout ({step0_timeout}s) should be >= 6.0s to avoid spurious timeout"
+        assert step0_timeout > internal_sub_timeouts_sum, (
+            f"Step 0 budget ({step0_timeout}s) must strictly exceed internal sub-timeouts ({internal_sub_timeouts_sum}s)"
+        )
+
+    def test_production_cleanup_call_sites_budget_self_consistency(self):
+        """CON-03: 生产四个调用点的超时预算必须自洽且小于总超时。"""
+        call_sites = [
+            ("main_shutdown", 60.0, 35.0, 70.0),
+            ("disconnect", 60.0, 35.0, 70.0),
+            ("upgrade_exit", 5.0, 10.0, None),
+            ("startup_rollback", 60.0, 35.0, None),
+        ]
+        for name, timeout_s, step_timeout_s, watchdog_timeout in call_sites:
+            effective_sum = sum(min(step[3], step_timeout_s) for step in _CLEANUP_STEPS)
+            if name != "upgrade_exit":
+                assert effective_sum <= timeout_s, (
+                    f"[{name}] effective step sum ({effective_sum}s) exceeds do_cleanup timeout ({timeout_s}s)"
+                )
+            if watchdog_timeout is not None:
+                assert timeout_s < watchdog_timeout, (
+                    f"[{name}] do_cleanup timeout ({timeout_s}s) must be strictly less than watchdog ({watchdog_timeout}s)"
+                )
 
 
 class TestShutdownCoordinatorInit:

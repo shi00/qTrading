@@ -562,7 +562,7 @@ class TaskManager:
         self._notify_subscribers()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def cancel_all_running_async(self, join_timeout: float = 3.0):
+    async def cancel_all_running_async(self, join_timeout: float = 3.0, persist_timeout: float = 1.0):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes.
 
@@ -570,6 +570,8 @@ class TaskManager:
             join_timeout: Max seconds to wait for cancelled tasks to finish
                 their finally blocks. Prevents Step 3 (DB close) from
                 racing against still-running task runners.
+            persist_timeout: Max seconds to wait for task persistence writes
+                (CON-03). Prevents unbounded blocking if DB pool is congested.
         """
         active_ids = [tid for tid, t in self._tasks.items() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)]
         persist_coros = []
@@ -590,7 +592,17 @@ class TaskManager:
                 tasks_to_join.append(task._asyncio_task)
             persist_coros.append(self._persist_task_async(task))
         if persist_coros:
-            await gather_for_shutdown_cleanup(*persist_coros)
+            try:
+                await asyncio.wait_for(
+                    gather_for_shutdown_cleanup(*persist_coros),
+                    timeout=persist_timeout,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "[TaskManager] Task status persistence timed out after %.1fs during cancellation (%s writes in-flight)",
+                    persist_timeout,
+                    len(persist_coros),
+                )
         # Wait for cancelled task runners to exit their finally blocks,
         # ensuring they don't access DAOs after DB engine is disposed.
         if tasks_to_join:
