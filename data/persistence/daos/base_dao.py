@@ -994,7 +994,9 @@ class BaseDao:
                 Use suppress_errors=False for critical paths where "query failed"
                 must not be confused with "no data".
             max_rows: Safety valve - if set, raises ValueError when result
-                      exceeds this row count to prevent accidental full-table loads
+                      exceeds this row count to prevent accidental full-table loads.
+                      PRF-06: the constraint is pushed down to a top-level SQL LIMIT
+                      (max_rows+1), so the DB short-circuits before full materialization.
         """
         self._check_engine(context="read")
 
@@ -1007,10 +1009,17 @@ class BaseDao:
         await self._wait_maintenance_guard(context="read")
 
         start_time = time.perf_counter()
+
+        # PRF-06: max_rows 下推至 SQL 层 LIMIT——在 DB 侧截断至 max_rows+1 行，越界即拒绝，
+        # 避免先 fetchall 物化全表后才检查（安全阀在内存峰值过后才生效）。LIMIT 数值为受控 int，无注入面。
+        effective_sql = sql
+        if max_rows is not None:
+            effective_sql = sql.rstrip().rstrip(";").rstrip() + f" LIMIT {max_rows + 1}"
+
         try:
             async with self.engine.connect() as conn:
                 # Execute raw SQL directly via driver to support native $1, $2 placeholders
-                result = await conn.exec_driver_sql(sql, params or ())
+                result = await conn.exec_driver_sql(effective_sql, params or ())
                 # Fetch all rows
                 rows = result.fetchall()
                 cols = list(result.keys())
@@ -1102,6 +1111,10 @@ class BaseDao:
         self._check_engine(context="read")
 
         await self._wait_maintenance_guard(context="read")
+
+        # PRF-06: max_rows 下推至 limit()——DB 侧截断至 max_rows+1 行，避免全量物化后才检查。
+        if max_rows is not None:
+            stmt = stmt.limit(max_rows + 1)
 
         start_time = time.perf_counter()
         df: pd.DataFrame = pd.DataFrame()
