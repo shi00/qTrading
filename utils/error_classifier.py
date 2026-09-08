@@ -64,19 +64,45 @@ PERMANENT_ERROR_CODES = {
     "insufficient_quota",
 }
 
-try:
-    import asyncpg  # type: ignore[import-untyped]
+# PRF-14/PRF-07: asyncpg/httpx 由模块级 import 下沉为函数内惰性加载。原模块级 import
+# 使 `import utils.logger` 等轻量导入链提前拉起重库（asyncpg 完整加载 pool/connection），
+# 且 AST 扫描看不到字符串式 import 造成的虚假保证。改在 classify_error 需要 isinstance
+# 判型时才延迟加载，加载结果以一次性标志缓存，避免重复 import。
+_ASYNCPG_LOADED = False
+_HTTXD_LOADED = False
+_ASYNCPG_MODULE = None  # type: ignore[misc] -- 运行时由惰性加载填充，仅判型用
+_HTTPX_MODULE = None  # type: ignore[misc]
 
-    _ASYNCPG_AVAILABLE = True
-except ImportError:
-    _ASYNCPG_AVAILABLE = False
 
-try:
-    import httpx  # type: ignore[import-untyped]
+def _load_asyncpg():
+    """惰性加载 asyncpg 模块（PRF-14）。仅当分类数据库异常需要 isinstance 判定时触发。"""
+    global _ASYNCPG_LOADED, _ASYNCPG_MODULE
+    if _ASYNCPG_LOADED:
+        return _ASYNCPG_MODULE
+    _ASYNCPG_LOADED = True
+    try:
+        import asyncpg  # type: ignore[import-untyped]
 
-    _HTTPX_AVAILABLE = True
-except ImportError:  # pragma: no cover -- httpx 是项目直接依赖，import 失败仅限可选环境
-    _HTTPX_AVAILABLE = False
+        _ASYNCPG_MODULE = asyncpg
+    except ImportError:
+        _ASYNCPG_MODULE = None
+    return _ASYNCPG_MODULE
+
+
+def _load_httpx():
+    """惰性加载 httpx 模块（PRF-14）。仅当分类网络异常需要 isinstance 判定时触发。"""
+    global _HTTXD_LOADED, _HTTPX_MODULE
+    if _HTTXD_LOADED:
+        return _HTTPX_MODULE
+    _HTTXD_LOADED = True
+    try:
+        import httpx  # type: ignore[import-untyped]
+
+        _HTTPX_MODULE = httpx
+    except ImportError:  # pragma: no cover -- httpx 是项目直接依赖，import 失败仅限可选环境
+        _HTTPX_MODULE = None
+    return _HTTPX_MODULE
+
 
 # R16: litellm 是重库（首次 import 可达 18s+）。将模块级 `from litellm.exceptions import`
 # 改为惰性加载，避免 error_classifier 被 services.ai_service 等模块导入时同步触发
@@ -207,7 +233,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         if any(kw in error_str for kw in ("quota", "402", "insufficient_quota", "积分不足", "积分", "credit")):
             return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota"}
         if any(kw in error_str for kw in ("asyncpg", "postgres", "database", "sqlite", "数据库")) or (
-            _ASYNCPG_AVAILABLE and isinstance(e, getattr(asyncpg, "PostgresError", ()))
+            (_apg_general := _load_asyncpg()) is not None and isinstance(e, getattr(_apg_general, "PostgresError", ()))
         ):
             db_info = classify_error(e, context="db")
             if db_info.get("code") != "unknown":
@@ -258,10 +284,10 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             if LiteLLMAPIConnectionError is not None and isinstance(e, LiteLLMAPIConnectionError):
                 return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
 
-        if _HTTPX_AVAILABLE:
-            if isinstance(e, httpx.TimeoutException):
+        if (_httpx_mod := _load_httpx()) is not None:
+            if isinstance(e, _httpx_mod.TimeoutException):
                 return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
-            if isinstance(e, (httpx.ConnectError, httpx.ReadError, httpx.NetworkError)):
+            if isinstance(e, (_httpx_mod.ConnectError, _httpx_mod.ReadError, _httpx_mod.NetworkError)):
                 return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
 
         if isinstance(e, TimeoutError):
@@ -360,15 +386,16 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 "message_key": "db_err_format",
                 "format_args": {"error": error_str},
             }
-        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.InvalidPasswordError):
+        apg = _load_asyncpg()
+        if apg is not None and isinstance(e, apg.InvalidPasswordError):
             return {"code": "auth", "message_key": "db_err_auth"}
-        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.InvalidCatalogNameError):
+        if apg is not None and isinstance(e, apg.InvalidCatalogNameError):
             return {
                 "code": "not_found",
                 "message_key": "db_err_not_found",
                 "format_args": {"database": str(e)},
             }
-        if _ASYNCPG_AVAILABLE and isinstance(e, asyncpg.exceptions.PostgresConnectionError):
+        if apg is not None and isinstance(e, apg.exceptions.PostgresConnectionError):
             return {"code": "refused", "message_key": "db_err_refused"}
         _note_message_fallback(e, context)
         if "password" in error_str or "authentication" in error_str:

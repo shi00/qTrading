@@ -369,6 +369,8 @@ propcache==0.5.2
     #   yarl
 psycopg2-binary==2.9.12
     # via astockscreener (pyproject.toml)
+py-cpuinfo2==10.1.1
+    # via pytest-benchmark
 py-key-value-aio==0.4.5
     # via fastmcp-slim
 py-mini-racer==0.6.0 ; sys_platform == 'linux'
@@ -416,6 +418,7 @@ pytest==9.1.1
     # via
     #   astockscreener (pyproject.toml)
     #   pytest-asyncio
+    #   pytest-benchmark
     #   pytest-cov
     #   pytest-json-report
     #   pytest-metadata
@@ -425,6 +428,8 @@ pytest==9.1.1
     #   pytest-xdist
     #   syrupy
 pytest-asyncio==1.4.0
+    # via astockscreener (pyproject.toml)
+pytest-benchmark==5.3.0
     # via astockscreener (pyproject.toml)
 pytest-cov==7.1.0
     # via astockscreener (pyproject.toml)

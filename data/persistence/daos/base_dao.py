@@ -54,6 +54,57 @@ def _build_df_normalized(rows, cols):
     return normalize_decimal_columns(df)
 
 
+def _prepare_records(
+    df_slice: typing.Any,
+    date_cols: typing.Iterable[str],
+    datetime_cols: typing.Iterable[str],
+) -> tuple[list[dict], dict[str, dict]]:
+    """把 DataFrame 转为可传给驱动的记录序列，并统计日期 coerce 告警（写库转换统一入口）。
+
+    DAT-03/PRF-03：单趟向量化归一 NA（str/numeric/NaT）→ None。从 ``BaseDao._save_upsert``
+    内的闭包提取为模块级纯函数（PRF-07），使该写库热路径可被 pytest-benchmark 定基并被单测，
+    同时作为 PRF-10 "两套记录转换收敛共享归一化" 的落点。
+    """
+    df_clean = df_slice.copy()
+
+    # DAT-03: 统计日期列 coerce（无法解析被置 NULL）的告警样本，而非静默丢弃
+    coerce_stats: dict[str, dict] = {}
+
+    for col in df_clean.columns:
+        if col in date_cols or col in datetime_cols:
+            converted = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
+            bad_mask = converted.isna() & df_clean[col].notna()
+            coerced = int(bad_mask.sum())
+            if coerced > 0:
+                coerce_stats[col] = {
+                    "count": coerced,
+                    "samples": df_clean.loc[bad_mask, col].head(3).tolist(),
+                }
+            df_clean[col] = converted.dt.date if col in date_cols else converted
+
+    for col in df_clean.columns:
+        col_dtype = df_clean[col].dtype
+        is_numeric = isinstance(col_dtype, np.dtype) and (
+            col_dtype == "bool" or np.issubdtype(col_dtype, np.integer) or np.issubdtype(col_dtype, np.floating)
+        )
+        if is_numeric:
+            df_clean[col] = df_clean[col].astype(object).where(df_clean[col].notna(), None)
+        elif col_dtype == "datetime64[ns]":
+            df_clean[col] = (
+                df_clean[col].dt.to_pydatetime().map(lambda v: v.replace(tzinfo=None) if v is not None else None)
+            )
+
+    # DAT-04: 向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
+    # astype(object) 后再按 notna mask 填 None：None 在 object 列可稳定保存，
+    # 不会被 str/float dtype 自动转回 NaN（`df_clean.where(notna, None)` 单独用会失败）。
+    mask = df_clean.notna()
+    df_clean = df_clean.astype(object).where(mask, None)
+
+    records = df_clean.to_dict(orient="records")
+
+    return records, coerce_stats
+
+
 class BaseDao:
     _maintenance_event = None
 
@@ -626,7 +677,7 @@ class BaseDao:
         """
         return ",".join(['"' + c.replace('"', '""') + '"' for c in columns])
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    @log_async_operation(threshold_ms=PerfThreshold.DAO_UPSERT_MS)
     async def _save_upsert(
         self,
         df: pd.DataFrame,
@@ -717,50 +768,11 @@ class BaseDao:
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
-        # Extracting out the CPU intensive conversion to allow async offloading
-        def _prepare_records(df_slice: typing.Any) -> tuple[list[dict], dict[str, dict]]:
-            df_clean = df_slice.copy()
-
-            # DAT-03: 统计日期列 coerce（无法解析被置 NULL）的告警样本，而非静默丢弃
-            coerce_stats: dict[str, dict] = {}
-
-            for col in df_clean.columns:
-                if col in target_date_cols or col in target_datetime_cols:
-                    converted = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
-                    bad_mask = converted.isna() & df_clean[col].notna()
-                    coerced = int(bad_mask.sum())
-                    if coerced > 0:
-                        coerce_stats[col] = {
-                            "count": coerced,
-                            "samples": df_clean.loc[bad_mask, col].head(3).tolist(),
-                        }
-                    df_clean[col] = converted.dt.date if col in target_date_cols else converted
-
-            for col in df_clean.columns:
-                col_dtype = df_clean[col].dtype
-                is_numeric = isinstance(col_dtype, np.dtype) and (
-                    col_dtype == "bool" or np.issubdtype(col_dtype, np.integer) or np.issubdtype(col_dtype, np.floating)
-                )
-                if is_numeric:
-                    df_clean[col] = df_clean[col].astype(object).where(df_clean[col].notna(), None)
-                elif col_dtype == "datetime64[ns]":
-                    df_clean[col] = (
-                        df_clean[col]
-                        .dt.to_pydatetime()
-                        .map(lambda v: v.replace(tzinfo=None) if v is not None else None)
-                    )
-
-            # DAT-04: 向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
-            # astype(object) 后再按 notna mask 填 None：None 在 object 列可稳定保存，
-            # 不会被 str/float dtype 自动转回 NaN（`df_clean.where(notna, None)` 单独用会失败）。
-            mask = df_clean.notna()
-            df_clean = df_clean.astype(object).where(mask, None)
-
-            records = df_clean.to_dict(orient="records")
-
-            return records, coerce_stats
-
-        records, coerce_stats = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
+        # PRF-07: 写库转换（含 NULL 归一）已提取为模块级 _prepare_records，便于基准与单测；
+        # 此处仅把 CPU 密集转换 offload 到线程池，避免阻塞事件循环（R16）。
+        records, coerce_stats = await ThreadPoolManager().run_async(
+            TaskType.CPU, _prepare_records, df_slice, target_date_cols, target_datetime_cols
+        )
 
         total_coerced = sum(s["count"] for s in coerce_stats.values())
         if total_coerced > 0:
