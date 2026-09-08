@@ -5,8 +5,9 @@
 
 集成策略（与 xdist 并存）：
 - 本项目 pytest addopts 强制 ``-n auto --dist=loadgroup``。pytest-benchmark 检测到 xdist
-  激活时**自动禁用测量**（仅打印 warning，测试仍正常执行通过），因此常规 xdist 全量跑
-  不会因本文件增加时长或产生 janky 基准数据。
+  激活时自动禁用测量（仅打印 warning），但 **``benchmark()`` 仍会执行被封装的函数**——因此
+  本文件在 xdist 下自动退至 2 万行小帧（见 ``_bench_df``），避免每次常规全量跑平白多出
+  数十秒的 20 万行转换；此模式只跑通不产出测量。
 - 要获得真实测量数据（用于 PerfThreshold 校准与趋势观察），定向不带 xdist 运行：
   ``python -m pytest tests/unit/test_base_dao_perf.py -n0 --benchmark-autosave``。
 """
@@ -14,6 +15,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 import pandas as pd
@@ -41,8 +43,15 @@ def _sample_df() -> pd.DataFrame:
     )
 
 
-def _bench_df(n: int = 200_000) -> pd.DataFrame:
-    """写库基准帧：20 万行 × 6 列，仿真真实批量载荷（含 2% 数值 NaN）。"""
+def _bench_df(n: int | None = None) -> pd.DataFrame:
+    """写库基准帧（默认 20 万行 × 6 列，仿真真实批量载荷，含 2% 数值 NaN）。
+
+    xdist 全量跑时自动退到 2 万行小帧：pytest-benchmark 在 xdist 下虽禁用测量，但
+    ``benchmark(callable)`` 仍会执行被封装的函数，用大帧会平白拖慢每次常规 CI 全量跑；
+    仅 -n0 定向基准（真测量）才使用基准尺寸。
+    """
+    if n is None:
+        n = 20_000 if os.environ.get("PYTEST_XDIST_WORKER") else 200_000
     rng = np.random.default_rng(42)
     df = pd.DataFrame(
         {
@@ -79,9 +88,10 @@ def test_prepare_records_null_normalization_equivalence() -> None:
     assert records[1]["code"] is None
     assert records[1]["amount"] == 500.0
     # date 列归一为 datetime.date 对象（DB Date 列专用），int/str 列原样保留
-    assert isinstance(records[0]["dt"], object) and str(records[0]["dt"]).startswith("2024-01-01")
+    assert str(records[0]["dt"]).startswith("2024-01-01")
     assert records[0]["qty"] == 100
-    assert coerce_stats == {} or isinstance(coerce_stats, dict)
+    # 样本日期列均合法，不产生任何 coerce 告警（若出现说明 date cols 分类回归）
+    assert coerce_stats == {}
 
 
 @pytest.mark.benchmark(group="write_path", min_rounds=3, max_time=2.0, warmup=True)
@@ -89,7 +99,8 @@ def test_prepare_records_write_path_bench(benchmark) -> None:
     """写库转换基准：PRF-07 定基（20 万行 × 6 列）。
 
     本测试是"定基存续化"而非硬门禁——超时阈值由 PRF-07-5 的 PerfThreshold 校准承担，
-    此处在 xdist 全量跑时自动禁用测量，定向 ``-n0`` 运行才产出真实数据。
+    常规 xdist 全量跑下自动禁用测量并退至 2 万行小帧（见 ``_bench_df``），
+    仅定向 ``-n0`` 运行才用基准尺寸并产出真实数据。
     """
     df = _bench_df()
 

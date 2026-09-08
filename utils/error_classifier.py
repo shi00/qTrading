@@ -68,18 +68,19 @@ PERMANENT_ERROR_CODES = {
 # 使 `import utils.logger` 等轻量导入链提前拉起重库（asyncpg 完整加载 pool/connection），
 # 且 AST 扫描看不到字符串式 import 造成的虚假保证。改在 classify_error 需要 isinstance
 # 判型时才延迟加载，加载结果以一次性标志缓存，避免重复 import。
-_ASYNCPG_LOADED = False
-_HTTXD_LOADED = False
-_ASYNCPG_MODULE = None  # type: ignore[misc] -- 运行时由惰性加载填充，仅判型用
-_HTTPX_MODULE = None  # type: ignore[misc]
+# 惰性加载哨兵：模块未尝试导入时以此为占位；成功填充实际模块、失败置 None。
+# 相比"一次性标志先于 import 置位"的旧实现，哨兵方案在 import 成功后才改变状态，
+# 避免并发首载窗口内另一线程读到 None 将重库判为不可用（importlib 内部自带锁）。
+_NOT_LOADED = object()
+_ASYNCPG_MODULE: object = _NOT_LOADED
+_HTTPX_MODULE: object = _NOT_LOADED
 
 
-def _load_asyncpg():
+def _load_asyncpg() -> Any:
     """惰性加载 asyncpg 模块（PRF-14）。仅当分类数据库异常需要 isinstance 判定时触发。"""
-    global _ASYNCPG_LOADED, _ASYNCPG_MODULE
-    if _ASYNCPG_LOADED:
+    global _ASYNCPG_MODULE
+    if _ASYNCPG_MODULE is not _NOT_LOADED:
         return _ASYNCPG_MODULE
-    _ASYNCPG_LOADED = True
     try:
         import asyncpg  # type: ignore[import-untyped]
 
@@ -89,12 +90,11 @@ def _load_asyncpg():
     return _ASYNCPG_MODULE
 
 
-def _load_httpx():
+def _load_httpx() -> Any:
     """惰性加载 httpx 模块（PRF-14）。仅当分类网络异常需要 isinstance 判定时触发。"""
-    global _HTTXD_LOADED, _HTTPX_MODULE
-    if _HTTXD_LOADED:
+    global _HTTPX_MODULE
+    if _HTTPX_MODULE is not _NOT_LOADED:
         return _HTTPX_MODULE
-    _HTTXD_LOADED = True
     try:
         import httpx  # type: ignore[import-untyped]
 
