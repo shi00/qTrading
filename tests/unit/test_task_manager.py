@@ -2020,3 +2020,82 @@ class TestRetryTask:
         )
         # 显式确认 unique_key 未被传入（retry 不使用唯一键去重）
         assert "unique_key" not in mock_submit.call_args.kwargs
+
+
+class TestTaskManagerQueuedCancellation:
+    """CON-04: 排队期取消失效与 RUNNING 状态语义校准测试。"""
+
+    @pytest.mark.asyncio
+    async def test_task_status_remains_queued_until_semaphore_acquired(self):
+        """任务在获取信号量前保持 QUEUED 状态，获取信号量后才转为 RUNNING。"""
+        mgr = TaskManager()
+        loop = asyncio.get_running_loop()
+        mgr._loop = loop
+
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 占满信号量
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            factory_called = False
+
+            async def _worker(task_id: str):
+                nonlocal factory_called
+                factory_called = True
+
+            tid = mgr.submit_task("QueuedTask", "test", _worker, cancellable=True)
+            assert tid is not None
+            # 等待 call_soon_threadsafe 派发 _enqueue 并创建 runner
+            await asyncio.sleep(0.02)
+
+            task = mgr.get_task(tid)
+            assert task is not None
+            # 此时任务由于拿不到信号量，必须保持 QUEUED 状态，且 asyncio_task 已捕获
+            assert task.status == TaskStatus.QUEUED
+            assert task._asyncio_task is not None
+            assert factory_called is False
+
+            # 释放信号量让任务获取并执行
+            sem.release()
+            await asyncio.sleep(0.05)
+            assert factory_called is True
+            assert task.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_queued_task_cancellation_cancels_asyncio_task_and_skips_user_coro(self):
+        """排队等待信号量的任务被取消时，立即响应取消且绝不执行业务逻辑。"""
+        mgr = TaskManager()
+        loop = asyncio.get_running_loop()
+        mgr._loop = loop
+
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 占满信号量
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            worker_executed = False
+
+            async def _worker(task_id: str):
+                nonlocal worker_executed
+                worker_executed = True
+
+            tid = mgr.submit_task("QueuedCancelTask", "test", _worker, cancellable=True)
+            assert tid is not None
+            await asyncio.sleep(0.02)
+
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.QUEUED
+            assert task._asyncio_task is not None
+
+            # 在排队阶段调用取消
+            mgr.cancel_task(tid)
+            await asyncio.sleep(0.02)
+
+            assert task.status == TaskStatus.CANCELLED
+
+            # 释放信号量
+            sem.release()
+            await asyncio.sleep(0.05)
+
+            # 确认业务逻辑绝未被执行
+            assert worker_executed is False
+            assert task.status == TaskStatus.CANCELLED
