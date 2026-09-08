@@ -2319,3 +2319,37 @@ class TestPayloadSanitization:
                 # 上游 ai_service.py 在 _log(..., exc_info=True) 时会输出完整 traceback
                 # （含 RuntimeError 消息体），未脱敏 payload 会经此路径泄露。
                 assert sensitive_path not in str(exc_info.value)
+
+
+def test_local_model_manager_probe_does_not_load_llama_cpp(tmp_path, monkeypatch):
+    """PRF-04: 模块级 llama_cpp 探测改用 find_spec，不应触发模块加载。
+
+    在独立子进程中 import services.local_model_manager，断言：
+    1. 模块导入后 ``llama_cpp`` 不在 ``sys.modules``（探测仅解析元数据，不加载模块）；
+    2. 模块级 ``_HAS_LLAMA_CPP`` 与 ``find_spec("llama_cpp") is not None`` 语义一致。
+
+    通过独立子进程执行，避免当前测试进程已加载 llama_cpp 造成干扰。
+    """
+    import subprocess
+    import sys
+
+    subprocess_code = (
+        "import sys\n"
+        "import importlib.util\n"
+        "import services.local_model_manager as m\n"
+        "assert 'llama_cpp' not in sys.modules, 'local_model_manager import 不应加载 llama_cpp'\n"
+        "expected = importlib.util.find_spec('llama_cpp') is not None\n"
+        "assert m._HAS_LLAMA_CPP is expected, '探测结果与 find_spec 语义应一致'\n"
+        "print('OK: llama_cpp not loaded')\n"
+    )
+    # test_local_model_manager.py 位于 tests/unit/，上溯 2 级即仓库根，用作子进程 cwd
+    # 以保证子进程从仓库根解析 services.local_model_manager。
+    _repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-c", subprocess_code],
+        capture_output=True,
+        text=True,
+        cwd=str(_repo_root),
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    assert "OK: llama_cpp not loaded" in result.stdout

@@ -180,11 +180,14 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             result_queue.put(("error", f"{sanitized}\n{traceback.format_exc()}"))
 
 
+# PRF-04: 用 find_spec 代替 import_module 探测 llama_cpp——find_spec 仅解析模块
+# 元数据（ModuleSpec），不会真正加载模块；仅当其已安装时返回非 None。真正触发
+# 加载发生在 _persistent_worker 内的运行时 import，此处仅做可用性判定。
 try:
-    importlib.import_module("llama_cpp")
-    _HAS_LLAMA_CPP = True
+    _HAS_LLAMA_CPP = importlib.util.find_spec("llama_cpp") is not None
 except (ImportError, AttributeError):
     _HAS_LLAMA_CPP = False
+if not _HAS_LLAMA_CPP:
     logger.warning(
         "llama-cpp-python not installed. Embedded AI features will be disabled.",
     )
