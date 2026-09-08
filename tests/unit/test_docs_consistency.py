@@ -689,6 +689,17 @@ class TestDocsConsistencyScriptExtensions:
         errors = check_flet_version_drift()
         assert any("0.85.3" in e for e in errors), f"Should detect 0.85.3 near 'flet': {errors}"
 
+    def test_flet_version_drift_detects_v_prefix_variant(self, tmp_path, monkeypatch):
+        """Flet 上下文中含 v 前缀变体（如 v1.2.3）也应被检测到（对抗检视 GDR-06 P1）。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n升级到 Flet v1.2.3 修复问题。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert any("1.2.3" in e for e in errors), f"Should detect v-prefixed 1.2.3: {errors}"
+
 
 class TestRedlinesYamlConsistency:
     """C5 第二阶段 3b: redlines.yml 机器可读映射一致性校验 (ADR-0003 推翻 3b 决策后落地)。

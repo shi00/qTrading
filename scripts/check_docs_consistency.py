@@ -447,7 +447,8 @@ def _get_flet_locked_versions() -> set[str]:
 def check_flet_version_drift() -> list[str]:
     """检查项 5：Flet 版本漂移检查（CLAUDE.md §3.2 文档 SHALL NOT 硬编码 Flet 补丁版本号）。
 
-    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号。
+    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号
+    （含可选 `v` 前缀变体，如 `v1.2.3`，对抗检视 GDR-06 P1）。
     根据规范，任何在 Flet 上下文中出现的具体补丁版本号都应报错（不论是否与 pyproject.toml 锁定版本一致）。
 
     报错格式：``{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}``
@@ -457,7 +458,8 @@ def check_flet_version_drift() -> list[str]:
     # 取代表版本（三包通常锁定同一版本）用于报错信息
     actual_ver = next(iter(locked_versions)) if locked_versions else "unknown"
 
-    version_pattern = re.compile(r"\b\d+\.\d+\.\d+\b")
+    # GDR-06 P1：`v?` 兼容 "Flet v1.2.3" 形式（`\b` 在 v 前、v 与数字间无边界，裸 \d+ 正则漏检）
+    version_pattern = re.compile(r"\bv?\d+\.\d+\.\d+\b")
     # Flet 关键词正则：匹配 "Flet" 或 "flet"（word boundary 防止匹配 "fletch" 等）
     flet_keyword_pattern = re.compile(r"\b[Ff]let\b")
 
