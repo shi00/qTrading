@@ -205,13 +205,16 @@ class TaskManager:
             self.__class__._initialized = True
             logger.info("[TaskManager] Initialized global task manager.")
 
+    def _get_active_task_count(self) -> int:
+        """Count active tasks that are either running or queued (holding or waiting for semaphore)."""
+        return sum(1 for t in self._tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED))
+
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Lazily create semaphore bound to the current event loop.
         Concurrency limit follows ThreadPoolManager's CPU pool capacity,
         since most tasks offload heavy work there via run_async."""
         if self._semaphore_needs_reset:
-            running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
-            if running_count == 0:
+            if self._get_active_task_count() == 0:
                 self._semaphore_needs_reset = False
                 del_loop_local("task_manager_semaphore")
                 logger.info("[TaskManager] Deferred concurrency reload applied in _get_semaphore")
@@ -265,17 +268,17 @@ class TaskManager:
     def reload_config(self):
         """CON-05: 优雅热更新并发配置。
 
-        若当前有任务正在运行（持有信号量许可），直接删除信号量会导致新任务在新信号量中立即执行，
-        在途旧任务 + 新任务并发数突破配置上限。因此若存在 RUNNING 任务，推迟至所有运行中任务退出后再重置；
+        若当前有任务正在运行或排队（持有或等待信号量许可），直接删除信号量会导致新任务在新信号量中立即执行，
+        在途旧任务 + 新任务并发数突破配置上限。因此若存在活动任务（RUNNING / QUEUED），推迟至所有任务退出后再重置；
         若当前无活动任务，则立即重置生效。
         """
-        running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
-        if running_count > 0:
+        active_count = self._get_active_task_count()
+        if active_count > 0:
             self._semaphore_needs_reset = True
             logger.info(
-                "[TaskManager] Concurrency reload deferred: %d task(s) currently running. "
-                "Will reset semaphore once all running tasks complete.",
-                running_count,
+                "[TaskManager] Concurrency reload deferred: %d task(s) currently active (running/queued). "
+                "Will reset semaphore once all active tasks complete.",
+                active_count,
             )
         else:
             self._semaphore_needs_reset = False
@@ -293,11 +296,10 @@ class TaskManager:
         """CON-05: 检查并执行推迟的信号量重置。"""
         if not self._semaphore_needs_reset:
             return
-        running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
-        if running_count == 0:
+        if self._get_active_task_count() == 0:
             self._semaphore_needs_reset = False
             self._reset_semaphore_immediate()
-            logger.info("[TaskManager] Deferred concurrency reload applied after all running tasks finished")
+            logger.info("[TaskManager] Deferred concurrency reload applied after all active tasks finished")
 
     def _notify_subscribers(self):
         """Broadcast current tasks snapshot to all listeners. Safe to call from UI tread if using page.run_task."""
@@ -418,6 +420,7 @@ class TaskManager:
 
         # Keep a strong reference to the task to prevent garbage collection
         coro_task = asyncio.create_task(self._task_runner(task.id))
+        task._asyncio_task = coro_task
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
@@ -681,7 +684,7 @@ class TaskManager:
                         task.status = TaskStatus.CANCELLED
                     task.description = Message("task_cancelled_desc")
                     logger.info("[TaskManager] Task [%s] cancelled while queued, skipping execution", task.id)
-                    return
+                    raise asyncio.CancelledError()
 
                 # CON-04: 真正获取信号量许可后才转换为 RUNNING 状态，修正排队期状态语义
                 task.status = TaskStatus.RUNNING
@@ -916,12 +919,7 @@ class TaskManager:
             finally:
                 _decrement()
 
-        try:
-            scheduled = self._schedule_coro(_tracked_persist(), on_drop=_decrement)
-        except TypeError:
-            # 兼容存量测试中仅接受单个参数 (coro) 的 mock side_effect
-            scheduled = self._schedule_coro(_tracked_persist())
-
+        scheduled = self._schedule_coro(_tracked_persist(), on_drop=_decrement)
         if not scheduled:
             _decrement()
 

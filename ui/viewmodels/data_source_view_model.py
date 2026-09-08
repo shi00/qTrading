@@ -528,7 +528,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     def execute_clear_cache(self):
         """Execute cache clear (called by View after user confirms)."""
         running = [
-            t for t in self._tm.get_all_tasks() if t.status == TaskStatus.RUNNING and t.unique_key != "cache_clear"
+            t
+            for t in self._tm.get_all_tasks()
+            if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED) and t.unique_key != "cache_clear"
         ]
         if running:
             self._emit_snack(Message("ds_clear_cache_syncing"), "warning")
