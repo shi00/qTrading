@@ -159,14 +159,24 @@ class HistoryModeMixin:
         策略名 strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2).
         """
         # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
+        # PRF-09: 避免 iterrows (每行构造 Series, 慢 ~17x); get_history_tree 列固定为
+        # run_id/trade_date/strategy_name/cnt, to_numpy 列索引等价取列
+        cols = list(df.columns)
+        i_date, i_name, i_run, i_cnt = (
+            cols.index("trade_date"),
+            cols.index("strategy_name"),
+            cols.index("run_id"),
+            cols.index("cnt"),
+        )
+        arr = df.to_numpy(dtype=object)
         tree: dict[str, list[StrategyRunRow]] = {}
-        for _, row in df.iterrows():
-            date = str(row["trade_date"])
+        for i in range(len(df)):
+            date = str(arr[i, i_date])
             tree.setdefault(date, []).append(
                 StrategyRunRow(
-                    strategy_name=str(row["strategy_name"]),
-                    run_id=str(row["run_id"]),
-                    cnt=int(row["cnt"]),
+                    strategy_name=str(arr[i, i_name]),
+                    run_id=str(arr[i, i_run]),
+                    cnt=int(arr[i, i_cnt]),
                 )
             )
         rows: list[HistoryTreeRow] = []

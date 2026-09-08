@@ -22,6 +22,8 @@ from ui.viewmodels.data_explorer_view_model import (
     SqlErrorInfo,
     SqlResultRow,
     TableRow,
+    _df_to_table_rows,
+    _sql_result_to_state_fields,
 )
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -1004,3 +1006,57 @@ class TestLoadDataFreshness:
         await vm.load_data_freshness()
         assert vm.state.data_latest_date == ""
         assert vm.state.data_lag_days == 0
+
+
+class TestDfToTableRowsVectorized:
+    """PRF-09: _df_to_table_rows 由 iterrows 改写为 to_numpy 后保持等价输出。"""
+
+    def test_columns_key_equals_df_columns(self) -> None:
+        df = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+        rows = _df_to_table_rows(df, ("a", "b"))
+        assert [r.values for r in rows] == [(1, "x"), (2, "y")]
+
+    def test_missing_column_pads_none(self) -> None:
+        """columns 含 df 没有的列时, 该列补 None (保持 row.get 缺列语义)。"""
+        df = pd.DataFrame({"a": [1]})
+        rows = _df_to_table_rows(df, ("a", "b"))
+        assert [r.values for r in rows] == [(1, None)]
+
+    def test_column_order_follows_columns(self) -> None:
+        """输出列序按 columns 而非 df 内部顺序。"""
+        df = pd.DataFrame({"a": [1], "b": [2]})
+        rows = _df_to_table_rows(df, ("b", "a"))
+        assert [r.values for r in rows] == [(2, 1)]
+
+    def test_null_and_date_cells_preserved(self) -> None:
+        """NaN / datetime / NaT 单元格保持原值透传 (不塌缩为 None 时保持 object 语义)。"""
+        import datetime as _dt
+
+        df = pd.DataFrame({"d": [_dt.date(2025, 1, 1), None], "v": [1.5, float("nan")]})
+        rows = _df_to_table_rows(df, ("d", "v"))
+        assert rows[0].values == (_dt.date(2025, 1, 1), 1.5)
+        assert rows[1].values[0] is None
+        assert isinstance(rows[1].values[1], float) and pd.isna(rows[1].values[1])
+
+
+class TestSqlResultToStateFieldsVectorized:
+    """PRF-09: _sql_result_to_state_fields 由 iterrows 改写为 itertuples 后保持等价输出。"""
+
+    def test_rows_match_data_iteration(self) -> None:
+        data = pd.DataFrame({"c1": [1, 2], "c2": ["a", "b"]})
+        fields = _sql_result_to_state_fields({"success": True, "data": data, "error": None})
+        assert fields["sql_result_columns"] == ("c1", "c2")
+        assert [r.values for r in fields["sql_result_rows"]] == [(1, "a"), (2, "b")]
+
+    def test_empty_data_returns_empty_rows(self) -> None:
+        """空 DataFrame 走空分支: columns/rows 均返回空 (与 iterrows 版本一致)。"""
+        data = pd.DataFrame(columns=["c1", "c2"])
+        fields = _sql_result_to_state_fields({"success": True, "data": data, "error": None})
+        assert fields["sql_result_columns"] == ()
+        assert fields["sql_result_rows"] == ()
+
+    def test_none_data_returns_empty(self) -> None:
+        fields = _sql_result_to_state_fields({"success": False, "data": None, "error": "err"})
+        assert fields["sql_result_columns"] == ()
+        assert fields["sql_result_rows"] == ()
+        assert fields["sql_error"] == "err"
