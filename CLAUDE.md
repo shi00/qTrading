@@ -105,6 +105,7 @@
 
 | 任务类型 | 必读入口 |
 |---------|---------|
+| 新增业务功能 / 需求澄清 | [requirements/USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) |
 | 新增/修改策略 | [docs/patterns/strategy-template.md](./docs/patterns/strategy-template.md) |
 | 新增/修改 DAO 或数据表 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md) |
 | 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) |

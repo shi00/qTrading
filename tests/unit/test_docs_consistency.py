@@ -2635,6 +2635,15 @@ class TestCanonicalTopicsYamlConsistency:
         errors = check_canonical_topics_consistency()
         assert errors == [], "当前项目配置应通过 canonical-topics.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
+    def test_requirement_topic_canonical_and_decision_tree_extracted(self):
+        """GDR-04: requirement 主题正本存在且能被 _extract_decision_tree_targets 提取."""
+        from check_docs_consistency import CLAUDE_PATH, _extract_decision_tree_targets
+
+        targets = _extract_decision_tree_targets(CLAUDE_PATH.read_text(encoding="utf-8"))
+        assert "requirements/USER_REQUIREMENTS.md" in targets, (
+            "requirements/USER_REQUIREMENTS.md 应能被 _extract_decision_tree_targets 提取"
+        )
+
     def test_detects_missing_required_field(self, tmp_path, monkeypatch):
         """缺少必填字段时应报错."""
         from check_docs_consistency import check_canonical_topics_consistency
