@@ -323,14 +323,14 @@ class TestCancelStrategy:
 
     def test_cancel_strategy_noop_when_no_active_task(self, vm):
         """_active_task_id 为 None 时 cancel_strategy 不调用 TaskManager.cancel_task."""
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm_cls:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm_cls:
             vm.cancel_strategy()
             mock_tm_cls.assert_not_called()
 
     def test_cancel_strategy_calls_cancel_task_with_correct_id(self, vm):
         """_active_task_id 不为 None 时 cancel_strategy 调用 TaskManager.cancel_task(id)."""
         vm._active_task_id = "task-abc-123"
-        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm_cls:
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm_cls:
             vm.cancel_strategy()
             mock_tm_cls.assert_called_once_with()
             mock_tm_cls.return_value.cancel_task.assert_called_once_with("task-abc-123")
@@ -338,7 +338,7 @@ class TestCancelStrategy:
     def test_cancel_strategy_idempotent_after_clear(self, vm):
         """cancel_strategy 后 _active_task_id 仍保留 (避免重复 cancel 已结束任务需手动清空)."""
         vm._active_task_id = "task-xyz"
-        with patch("ui.viewmodels.screener_view_model.TaskManager"):
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager"):
             vm.cancel_strategy()
         # _active_task_id 不在 cancel_strategy 中清空 (由 _execute_screening finally 清空)
         # 防止 cancel_strategy 假设取消成功后清空, 实际取消异步完成
@@ -518,7 +518,7 @@ class TestPresetManagement:
         from utils.config_handler import ConfigHandler
         from utils.thread_pool import TaskType
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(return_value=True)
 
@@ -561,7 +561,7 @@ class TestPresetManagement:
         """delete_preset 命中时返回 True (ConfigHandler.delete_strategy_preset 返回 True)."""
         from unittest.mock import AsyncMock
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(return_value=True)
 
@@ -573,7 +573,7 @@ class TestPresetManagement:
         """delete_preset 未命中时返回 False (ConfigHandler.delete_strategy_preset 返回 False)."""
         from unittest.mock import AsyncMock
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(return_value=False)
 
@@ -603,7 +603,7 @@ class TestHistoryTreeOffsetProgression:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.screener_dao.get_history_tree = AsyncMock(return_value=df_30)
 
@@ -632,7 +632,7 @@ class TestHistoryTreeOffsetProgression:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as mock_cache_cls:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.screener_dao.get_history_tree = AsyncMock(return_value=df_10)
 
@@ -705,7 +705,7 @@ class TestSortDataErrorHandling:
         # 准备 _full_results 使排序路径可达
         vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]})
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as mock_tpm_cls:
             mock_tpm = mock_tpm_cls.return_value
             mock_tpm.run_async = AsyncMock(side_effect=RuntimeError("sort crashed"))
 

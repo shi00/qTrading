@@ -635,6 +635,17 @@ class TestDataSourceViewModelClearCache:
         _assert_snack(bound_vm, snapshots, "ds_clear_cache_syncing", "warning")
         assert bound_vm.state.is_syncing is False
 
+    def test_rejects_when_queued_tasks(self, bound_vm, snapshots, mock_task_manager):
+        queued_task = MagicMock()
+        queued_task.status = TaskStatus.QUEUED
+        queued_task.unique_key = "daily_sync"
+        mock_task_manager.get_all_tasks.return_value = [queued_task]
+
+        bound_vm.execute_clear_cache()
+
+        _assert_snack(bound_vm, snapshots, "ds_clear_cache_syncing", "warning")
+        assert bound_vm.state.is_syncing is False
+
     async def test_clear_cache_success(self, bound_vm, snapshots, mock_cache, mock_task_manager):
         bound_vm.execute_clear_cache()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)

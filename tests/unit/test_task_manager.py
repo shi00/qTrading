@@ -931,20 +931,29 @@ class TestTaskManagerCancelAllRunningAsync:
             pass
 
     @pytest.mark.asyncio
-    async def test_default_join_timeout_is_3(self):
-        """SHUTDOWN-001: cancel_all_running_async 默认 join_timeout=3.0。"""
+    async def test_default_join_timeout_is_2_5(self):
+        """SHUTDOWN-001/CON-03: cancel_all_running_async 默认 join_timeout=2.5, persist_timeout=1.0。"""
         import inspect
 
         sig = inspect.signature(TaskManager.cancel_all_running_async)
-        assert sig.parameters["join_timeout"].default == 3.0
+        assert sig.parameters["join_timeout"].default == 2.5
         assert sig.parameters["persist_timeout"].default == 1.0
 
     @pytest.mark.asyncio
     async def test_persist_timeout_bounds_unresponsive_database_writes(self, caplog):
-        """CON-03: persist_timeout 限制数据库写入时长，超时记录 warning 且不阻塞整体取消。"""
+        """CON-03: persist_timeout 限制数据库写入时长，超时记录 warning 且不阻塞后续任务 join。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
         t._cancel_event = threading.Event()
+
+        async def _dummy_workload():
+            try:
+                await asyncio.sleep(10.0)
+            except asyncio.CancelledError:
+                pass
+
+        dummy_task = asyncio.create_task(_dummy_workload())
+        t._asyncio_task = dummy_task
         mgr._tasks[t.id] = t
 
         async def _hanging_persist(task):
@@ -954,7 +963,7 @@ class TestTaskManagerCancelAllRunningAsync:
             patch.object(mgr, "_persist_task_async", side_effect=_hanging_persist),
             caplog.at_level(logging.WARNING, logger="services.task_manager"),
         ):
-            # 传入极短 persist_timeout=0.02
+            # 传入极短 persist_timeout=0.02, join_timeout=0.1
             start = asyncio.get_running_loop().time()
             await mgr.cancel_all_running_async(join_timeout=0.1, persist_timeout=0.02)
             elapsed = asyncio.get_running_loop().time() - start
@@ -962,6 +971,7 @@ class TestTaskManagerCancelAllRunningAsync:
             # 验证执行时间受控（小于 0.5s，不被 hanging persist 阻塞 10s）
             assert elapsed < 0.5
             assert t.status == TaskStatus.CANCELLED
+            assert dummy_task.done()
             assert any("persistence timed out" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
@@ -1461,7 +1471,7 @@ class TestTaskManagerSubmitTaskRollback:
         mgr = TaskManager()
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
-        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched):
             result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key2")
         assert result is not None
@@ -1489,7 +1499,7 @@ class TestTaskManagerClearFinishedImplExtras:
         t = AppTask(name="done", status=TaskStatus.COMPLETED, unique_key="key_a")
         mgr._tasks[t.id] = t
         mgr._active_keys.add("key_a")
-        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched):
             mgr._clear_finished_impl()
         assert "key_a" not in mgr._active_keys
@@ -1499,7 +1509,7 @@ class TestTaskManagerClearFinishedImplExtras:
         mgr = TaskManager()
         t = AppTask(name="done", status=TaskStatus.COMPLETED)
         mgr._tasks[t.id] = t
-        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched) as mock_s:
             mgr._clear_finished_impl()
         # 强断言：_schedule_coro 应被调用一次，且参数是 coroutine（_clear_finished_db 任务）
@@ -1511,7 +1521,7 @@ class TestTaskManagerClearFinishedImplExtras:
         mgr = TaskManager()
         t = AppTask(name="running", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched) as mock_s:
             mgr._clear_finished_impl()
         mock_s.assert_not_called()
@@ -2049,7 +2059,7 @@ class TestRetryTask:
 
 
 class TestTaskManagerQueuedCancellation:
-    """CON-04: 排队期取消失效与 RUNNING 状态语义校准测试。"""
+    """CON-04 & 检视修复: 排队期取消、热更新与 RUNNING 状态语义校准测试。"""
 
     @pytest.mark.asyncio
     async def test_task_status_remains_queued_until_semaphore_acquired(self):
@@ -2062,15 +2072,13 @@ class TestTaskManagerQueuedCancellation:
         await sem.acquire()  # 占满信号量
 
         with patch.object(mgr, "_get_semaphore", return_value=sem):
-            factory_called = False
+            worker_started = asyncio.Event()
 
             async def _worker(task_id: str):
-                nonlocal factory_called
-                factory_called = True
+                worker_started.set()
 
             tid = mgr.submit_task("QueuedTask", "test", _worker, cancellable=True)
             assert tid is not None
-            # 等待 call_soon_threadsafe 派发 _enqueue 并创建 runner
             await asyncio.sleep(0.02)
 
             task = mgr.get_task(tid)
@@ -2078,12 +2086,12 @@ class TestTaskManagerQueuedCancellation:
             # 此时任务由于拿不到信号量，必须保持 QUEUED 状态，且 asyncio_task 已捕获
             assert task.status == TaskStatus.QUEUED
             assert task._asyncio_task is not None
-            assert factory_called is False
+            assert not worker_started.is_set()
 
             # 释放信号量让任务获取并执行
             sem.release()
-            await asyncio.sleep(0.05)
-            assert factory_called is True
+            await asyncio.wait_for(worker_started.wait(), timeout=1.0)
+            await asyncio.sleep(0.02)
             assert task.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
@@ -2120,8 +2128,101 @@ class TestTaskManagerQueuedCancellation:
 
             # 释放信号量
             sem.release()
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
 
-            # 确认业务逻辑绝未被执行
+            # 确认业务逻辑绝未被执行，且状态保持 CANCELLED
             assert worker_executed is False
             assert task.status == TaskStatus.CANCELLED
+            assert task.started_at is None
+
+    @pytest.mark.asyncio
+    async def test_queued_task_cancel_event_triggers_semaphore_defense_and_cancels(self):
+        """覆盖 CON-04: 排队期 cancel_event 被置位时，获取信号量后进入防御分支抛 CancelledError 退出。"""
+        mgr = TaskManager()
+        loop = asyncio.get_running_loop()
+        mgr._loop = loop
+
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 占满信号量
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            worker_executed = False
+
+            async def _worker(task_id: str):
+                nonlocal worker_executed
+                worker_executed = True
+
+            tid = mgr.submit_task("QueuedCancelEventTask", "test", _worker, cancellable=True)
+            assert tid is not None
+            await asyncio.sleep(0.02)
+
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.QUEUED
+
+            # 仅置位 cancel_event，不直接 cancel asyncio task，模拟通过 event 发起的取消信号
+            evt = mgr.get_cancel_event(tid)
+            assert evt is not None
+            evt.set()
+
+            # 释放信号量让任务进入 semaphore 上下文
+            sem.release()
+            await asyncio.sleep(0.05)
+
+            # 确认命中了防御分支：抛出 CancelledError，状态为 CANCELLED，未执行业务逻辑
+            assert worker_executed is False
+            assert task.status == TaskStatus.CANCELLED
+            assert task.started_at is None
+
+    @pytest.mark.asyncio
+    async def test_reload_config_deferred_when_tasks_are_queued(self):
+        """F-01: 当有任务处于 QUEUED 状态等待信号量时，reload_config 必须推迟重置信号量。"""
+        mgr = TaskManager()
+        loop = asyncio.get_running_loop()
+        mgr._loop = loop
+
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 占满信号量
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            task_done = asyncio.Event()
+
+            async def _worker(task_id: str):
+                task_done.set()
+
+            tid = mgr.submit_task("QueuedTaskForReload", "test", _worker, cancellable=True)
+            assert tid is not None
+            await asyncio.sleep(0.02)
+
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.QUEUED
+
+            # 此时没有 RUNNING 任务，但有 QUEUED 任务；reload_config 必须推迟重置
+            with patch.object(mgr, "_reset_semaphore_immediate") as mock_reset:
+                mgr.reload_config()
+                assert mgr._semaphore_needs_reset is True
+                mock_reset.assert_not_called()
+
+            # 释放信号量让排队任务完成
+            sem.release()
+            await asyncio.wait_for(task_done.wait(), timeout=1.0)
+            await asyncio.sleep(0.05)
+
+            # 任务执行完毕后，_check_and_reset_semaphore_if_needed 应已重置
+            assert mgr._semaphore_needs_reset is False
+
+    @pytest.mark.asyncio
+    async def test_register_and_run_binds_asyncio_task_immediately(self):
+        """F-05: _register_and_run 创建 runner 时立即绑定 task._asyncio_task。"""
+        mgr = TaskManager()
+        t = AppTask(name="ImmediateBindTask", status=TaskStatus.QUEUED)
+        mgr._tasks[t.id] = t
+
+        assert t._asyncio_task is None
+        mgr._register_and_run(t)
+        assert t._asyncio_task is not None
+        assert not t._asyncio_task.done()
+
+        # 清理创建的 task
+        t._asyncio_task.cancel()

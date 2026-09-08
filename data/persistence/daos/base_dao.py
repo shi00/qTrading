@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import datetime
 import logging
+import re
 import time
 import typing
 from decimal import Decimal
@@ -42,6 +43,8 @@ _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 # review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
 _LONG_TX_ROW_THRESHOLD = 20_000
+# PRF-06: 匹配顶层 LIMIT 子句（排除子查询括号内的 LIMIT），避免重复追加语法错误
+_HAS_TOP_LEVEL_LIMIT = re.compile(r"\bLIMIT\b(?![^()]*\))", re.IGNORECASE)
 
 
 def _build_df_normalized(rows, cols):
@@ -54,24 +57,25 @@ def _build_df_normalized(rows, cols):
     return normalize_decimal_columns(df)
 
 
-def _prepare_records(
-    df_slice: typing.Any,
-    date_cols: typing.Iterable[str],
-    datetime_cols: typing.Iterable[str],
-) -> tuple[list[dict], dict[str, dict]]:
-    """把 DataFrame 转为可传给驱动的记录序列，并统计日期 coerce 告警（写库转换统一入口）。
+def _normalize_records_frame(
+    df_slice: pd.DataFrame,
+    target_date_cols: list[str],
+    target_datetime_cols: list[str],
+) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:
+    """把 DataFrame 归一化为与目标表列型匹配的 records + 日期 coerce 统计（PRF-03）。
 
-    DAT-03/PRF-03：单趟向量化归一 NA（str/numeric/NaT）→ None。从 ``BaseDao._save_upsert``
-    内的闭包提取为模块级纯函数（PRF-07），使该写库热路径可被 pytest-benchmark 定基并被单测，
-    同时作为 PRF-10 "两套记录转换收敛共享归一化" 的落点。
+    写入路径统一入口：供 batch upsert 的 CPU 线程池整体提交。
+    单趟向量化归一：①日期 coerce → ②datetime64（各精度/时区）转为 Python 原生
+    naive datetime 并去除 tz → ③整帧 ``astype(object).where(notna, None)``。
+    数值列/字符串/NaT 的 NULL 归一由整帧③统一完成，不再逐列重复（删除冗余的逐列数值列归一阶段）。
     """
     df_clean = df_slice.copy()
 
     # DAT-03: 统计日期列 coerce（无法解析被置 NULL）的告警样本，而非静默丢弃
-    coerce_stats: dict[str, dict] = {}
+    coerce_stats: dict[str, dict[str, typing.Any]] = {}
 
     for col in df_clean.columns:
-        if col in date_cols or col in datetime_cols:
+        if col in target_date_cols or col in target_datetime_cols:
             converted = pd.to_datetime(df_clean[col], format="mixed", errors="coerce")
             bad_mask = converted.isna() & df_clean[col].notna()
             coerced = int(bad_mask.sum())
@@ -80,27 +84,28 @@ def _prepare_records(
                     "count": coerced,
                     "samples": df_clean.loc[bad_mask, col].head(3).tolist(),
                 }
-            df_clean[col] = converted.dt.date if col in date_cols else converted
+            df_clean[col] = converted.dt.date if col in target_date_cols else converted
 
     for col in df_clean.columns:
-        col_dtype = df_clean[col].dtype
-        is_numeric = isinstance(col_dtype, np.dtype) and (
-            col_dtype == "bool" or np.issubdtype(col_dtype, np.integer) or np.issubdtype(col_dtype, np.floating)
-        )
-        if is_numeric:
-            df_clean[col] = df_clean[col].astype(object).where(df_clean[col].notna(), None)
-        elif col_dtype == "datetime64[ns]":
-            df_clean[col] = (
-                df_clean[col].dt.to_pydatetime().map(lambda v: v.replace(tzinfo=None) if v is not None else None)
+        # datetime64 列（含非 target 时间戳、各精度 ns/us/ms/s 及带时区列）转为 Python 原生 naive datetime 并去除 tz；
+        # 数值/字符串/NaT 的 NULL 归一由下方整帧③统一完成（PRF-03：删除逐列数值列冗余归一）。
+        if pd.api.types.is_datetime64_any_dtype(df_clean[col].dtype):
+            df_clean[col] = pd.Series(
+                [
+                    v.replace(tzinfo=None) if v is not None and not pd.isna(v) else None
+                    for v in df_clean[col].dt.to_pydatetime()
+                ],
+                index=df_clean.index,
+                dtype=object,
             )
 
-    # DAT-04: 向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
+    # DAT-04 + PRF-03: 整帧单趟向量化归一 NA（str/numeric/NaT）→ None，替代逐单元格循环。
     # astype(object) 后再按 notna mask 填 None：None 在 object 列可稳定保存，
     # 不会被 str/float dtype 自动转回 NaN（`df_clean.where(notna, None)` 单独用会失败）。
     mask = df_clean.notna()
     df_clean = df_clean.astype(object).where(mask, None)
 
-    records = df_clean.to_dict(orient="records")
+    records = typing.cast(list[dict[str, typing.Any]], df_clean.to_dict(orient="records"))
 
     return records, coerce_stats
 
@@ -768,11 +773,14 @@ class BaseDao:
         target_date_cols = [c.name for c in table.columns if isinstance(c.type, Date)]
         target_datetime_cols = [c.name for c in table.columns if isinstance(c.type, DateTime)]
 
-        # PRF-07: 写库转换（含 NULL 归一）已提取为模块级 _prepare_records，便于基准与单测；
-        # 此处仅把 CPU 密集转换 offload 到线程池，避免阻塞事件循环（R16）。
-        records, coerce_stats = await ThreadPoolManager().run_async(
-            TaskType.CPU, _prepare_records, df_slice, target_date_cols, target_datetime_cols
-        )
+        # PRF-07/PRF-10：写库转换复用模块级 _normalize_records_frame（含 NULL 归一），
+        # 此处以局部闭包携带列型集合，仅把 CPU 密集转换 offload 到线程池，避免阻塞事件循环（R16）。
+        def _prepare_records(
+            df_slice: pd.DataFrame,
+        ) -> tuple[list[dict[str, typing.Any]], dict[str, dict[str, typing.Any]]]:
+            return _normalize_records_frame(df_slice, target_date_cols, target_datetime_cols)
+
+        records, coerce_stats = await ThreadPoolManager().run_async(TaskType.CPU, _prepare_records, df_slice)
 
         total_coerced = sum(s["count"] for s in coerce_stats.values())
         if total_coerced > 0:
@@ -1006,8 +1014,13 @@ class BaseDao:
                 Use suppress_errors=False for critical paths where "query failed"
                 must not be confused with "no data".
             max_rows: Safety valve - if set, raises ValueError when result
-                      exceeds this row count to prevent accidental full-table loads
+                      exceeds this row count to prevent accidental full-table loads.
+                      PRF-06: the constraint is pushed down to a top-level SQL LIMIT
+                      (max_rows+1), so the DB short-circuits before full materialization.
         """
+        if max_rows is not None and (not isinstance(max_rows, int) or max_rows < 0):
+            raise ValueError(f"[{self.__class__.__name__}] max_rows must be a non-negative integer, got {max_rows!r}")
+
         self._check_engine(context="read")
 
         if params is not None and isinstance(params, list):
@@ -1019,10 +1032,18 @@ class BaseDao:
         await self._wait_maintenance_guard(context="read")
 
         start_time = time.perf_counter()
+
+        # PRF-06: max_rows 下推至 SQL 层 LIMIT——在 DB 侧截断至 max_rows+1 行，越界即拒绝，
+        # 避免先 fetchall 物化全表后才检查（安全阀在内存峰值过后才生效）。LIMIT 数值为受控 int，无注入面。
+        # 若原 SQL 顶层已含 LIMIT，则不重复追加以避免语法错误；追加时换行隔离单行注释。
+        effective_sql = sql
+        if max_rows is not None and not _HAS_TOP_LEVEL_LIMIT.search(sql):
+            effective_sql = sql.rstrip().rstrip(";").rstrip() + f"\nLIMIT {max_rows + 1}"
+
         try:
             async with self.engine.connect() as conn:
                 # Execute raw SQL directly via driver to support native $1, $2 placeholders
-                result = await conn.exec_driver_sql(sql, params or ())
+                result = await conn.exec_driver_sql(effective_sql, params or ())
                 # Fetch all rows
                 rows = result.fetchall()
                 cols = list(result.keys())
@@ -1111,9 +1132,19 @@ class BaseDao:
                 防止无 WHERE/LIMIT 的查询意外物化全表。检查位于 except 之外，
                 不受 suppress_errors=True 影响。
         """
+        if max_rows is not None and (not isinstance(max_rows, int) or max_rows < 0):
+            raise ValueError(f"[{self.__class__.__name__}] max_rows must be a non-negative integer, got {max_rows!r}")
+
         self._check_engine(context="read")
 
         await self._wait_maintenance_guard(context="read")
+
+        # PRF-06: max_rows 下推至 limit()——DB 侧截断至 max_rows+1 行，避免全量物化后才检查。
+        # 仅当原语句无 limit 或原 limit 超过安全阀时才下推截断，保留更严格的业务 limit
+        if max_rows is not None and hasattr(stmt, "limit"):
+            existing_limit = getattr(stmt, "_limit", None)
+            if existing_limit is None or (isinstance(existing_limit, int) and existing_limit > max_rows):
+                stmt = stmt.limit(max_rows + 1)
 
         start_time = time.perf_counter()
         df: pd.DataFrame = pd.DataFrame()

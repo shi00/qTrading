@@ -396,7 +396,10 @@ def mock_rm():
 
 @pytest.fixture
 def mock_tm():
-    with patch("ui.viewmodels.screener_view_model.TaskManager") as cls:
+    with (
+        patch("ui.viewmodels.ai_stream_mixin.TaskManager") as cls,
+        patch("ui.viewmodels.screener_view_model.TaskManager", cls),
+    ):
         instance = MagicMock()
         instance.submit_task.return_value = "task-1"
         cls.return_value = instance
@@ -490,7 +493,7 @@ class TestScreenerViewModelSortData:
     async def test_toggles_ascending(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [3, 1, 2]})
         screener_vm._set_state(sort_column="a", sort_ascending=True)
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as tp_cls:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as tp_cls:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(return_value=pd.DataFrame({"a": [3, 2, 1]}))
             tp_cls.return_value = tp_instance
@@ -507,7 +510,7 @@ class TestScreenerViewModelSortData:
 
     async def test_sorts_data(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [3, 1, 2]})
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as tp_cls:
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as tp_cls:
             tp_instance = MagicMock()
             sorted_df = pd.DataFrame({"a": [1, 2, 3]})
             tp_instance.run_async = AsyncMock(return_value=sorted_df)
@@ -907,7 +910,7 @@ class TestScreenerViewModelRunStrategyExecution:
             }
         )
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+        with patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager") as MockTP:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]}))
             MockTP.return_value = tp_instance
@@ -1014,7 +1017,7 @@ class TestScreenerViewModelFlushAiBuffer:
         screener_vm._ai_buffer = [{"name": "Stock1", "ai_score": 85}]
         screener_vm._flush_pending = True
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+        with patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager") as MockTP:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *args, **kwargs: fn(*args, **kwargs))
             MockTP.return_value = tp_instance
@@ -1049,7 +1052,7 @@ class TestScreenerViewModelFlushAiBuffer:
         screener_vm._ai_buffer = [{"name": "Stock1", "ai_score": 95, "ai_reason": "great", "other": 2}]
         screener_vm._flush_pending = True
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+        with patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager") as MockTP:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *args, **kwargs: fn(*args, **kwargs))
             MockTP.return_value = tp_instance
@@ -1081,7 +1084,7 @@ class TestScreenerViewModelLoadHistoryTree:
                 "cnt": [5, 3, 7],
             }
         )
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
@@ -1103,7 +1106,7 @@ class TestScreenerViewModelLoadHistoryTree:
         assert screener_vm.state.history_tree.has_more is False
 
     async def test_with_empty_data(self, screener_vm):
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=pd.DataFrame())
             MockCM.return_value = cm_instance
@@ -1114,7 +1117,7 @@ class TestScreenerViewModelLoadHistoryTree:
         assert screener_vm.state.history_tree.has_more is False
 
     async def test_with_none_data(self, screener_vm):
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
@@ -1127,7 +1130,7 @@ class TestScreenerViewModelLoadHistoryTree:
     async def test_with_append_uses_state_offset(self, screener_vm):
         # 预设 offset=10 模拟已加载过一页; append=True 时 VM 应将其透传到 cache
         screener_vm._set_state(history_tree=replace(screener_vm.state.history_tree, offset=10))
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
@@ -1140,7 +1143,7 @@ class TestScreenerViewModelLoadHistoryData:
     async def test_with_data_and_ai_score(self, screener_vm):
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "ai_score": [85]})
 
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
@@ -1153,7 +1156,7 @@ class TestScreenerViewModelLoadHistoryData:
 
     async def test_with_data_no_ai_score(self, screener_vm):
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"]})
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
@@ -1162,7 +1165,7 @@ class TestScreenerViewModelLoadHistoryData:
         assert screener_vm.state.sort_column is None
 
     async def test_with_empty_data(self, screener_vm):
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_records = AsyncMock(return_value=pd.DataFrame())
             MockCM.return_value = cm_instance
@@ -1173,7 +1176,7 @@ class TestScreenerViewModelLoadHistoryData:
         assert screener_vm.state.sort_column is None
 
     async def test_with_none_data(self, screener_vm):
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_records = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
@@ -1184,7 +1187,7 @@ class TestScreenerViewModelLoadHistoryData:
 
     async def test_with_strategy_name_and_run_id(self, screener_vm):
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"]})
-        with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.screener_dao.get_history_records = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
@@ -1197,7 +1200,7 @@ class TestScreenerViewModelExportResults:
     async def test_successful_export(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+        with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as MockTP:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(return_value=None)
             MockTP.return_value = tp_instance
@@ -1221,7 +1224,7 @@ class TestScreenerViewModelExportResults:
     async def test_export_exception(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [1]})
 
-        with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as MockTP:
+        with patch("ui.viewmodels.export_mixin.ThreadPoolManager") as MockTP:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(side_effect=PermissionError("denied"))
             MockTP.return_value = tp_instance
