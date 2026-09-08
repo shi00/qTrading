@@ -251,7 +251,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.2 core 层隔离原则
 
-`core/` 是架构核心层，只包含被所有层共享的基础设施 (目前含 `i18n` 与 `prompt_base`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
+`core/` 是架构核心层，只包含被所有层共享的基础设施 (目前含 `errors`、`i18n`、`prompt_base` 与 `startup_types`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
 
 ### 4.3 单例模式
 

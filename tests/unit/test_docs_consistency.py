@@ -3663,3 +3663,61 @@ class TestAgentsDeclaration:
         errors = _check_agents_declaration(content)
         assert len(errors) == 1, f"应报 start_tag 缺失, got: {errors}"
         assert "start_tag 缺失" in errors[0]
+
+
+class TestCoreModulesCompleteness:
+    """GDR-11: 校验 CLAUDE.md §4.2 声明的 core/ 模块与实际文件一致."""
+
+    def test_core_modules_completeness_passes(self):
+        from check_docs_consistency import check_core_modules_completeness
+
+        errors = check_core_modules_completeness()
+        assert errors == [], f"core 模块清单检查应通过，实际报错: {errors}"
+
+    def test_detects_missing_module(self, monkeypatch):
+        from check_docs_consistency import ROOT, check_core_modules_completeness
+
+        real_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        # 故意把 startup_types 从声明中删掉
+        tampered_text = real_text.replace("`startup_types`", "`old_startup`")
+
+        class FakePath:
+            def __init__(self, orig_path):
+                self._orig = orig_path
+
+            def __truediv__(self, other):
+                return self._orig / other
+
+            def exists(self):
+                return True
+
+            def is_dir(self):
+                return self._orig.is_dir()
+
+            def glob(self, pattern):
+                return self._orig.glob(pattern)
+
+            def read_text(self, encoding="utf-8"):
+                if self._orig.name == "CLAUDE.md":
+                    return tampered_text
+                return self._orig.read_text(encoding=encoding)
+
+        # 针对 Path.read_text 打补丁
+        monkeypatch.setattr(
+            "pathlib.Path.read_text",
+            lambda self, encoding="utf-8": tampered_text if self.name == "CLAUDE.md" else real_text,
+        )
+        errors = check_core_modules_completeness()
+        assert any("漏声明 core/ 实际模块" in e for e in errors)
+        assert any("声明了不存在的 core/ 模块" in e for e in errors)
+
+    def test_detects_missing_declaration(self, monkeypatch):
+        from check_docs_consistency import check_core_modules_completeness
+
+        monkeypatch.setattr(
+            "pathlib.Path.read_text",
+            lambda self, encoding="utf-8": "未声明 core 架构核心层",
+        )
+        errors = check_core_modules_completeness()
+        assert len(errors) == 1
+        assert "未找到 core/ 模块清单声明" in errors[0]

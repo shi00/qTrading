@@ -33,6 +33,8 @@
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
    方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
    方法论与轮次清单一跳可达（结论正文落根 reviews/ 为本地 gitignored 产物，不入仓库）。
+18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
+   core/*.py 文件一致。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -1951,6 +1953,33 @@ def check_governance_id_references() -> list[str]:
     return errors
 
 
+def check_core_modules_completeness() -> list[str]:
+    """断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际 core/*.py 文件一致 (GDR-11)."""
+    errors: list[str] = []
+    claude_path = ROOT / "CLAUDE.md"
+    if not claude_path.exists():
+        return ["CLAUDE.md 不存在"]
+    claude_text = claude_path.read_text(encoding="utf-8")
+    m = re.search(r"core/`\s*是架构核心层.*?目前含\s*(.*?)[)）]", claude_text, re.DOTALL)
+    if not m:
+        return ["CLAUDE.md §4.2 未找到 core/ 模块清单声明（如 '目前含 `...`'）"]
+    declared_str = m.group(1)
+    declared_modules = set(re.findall(r"`([a-zA-Z0-9_]+)`", declared_str))
+    core_dir = ROOT / "core"
+    if not core_dir.is_dir():
+        return ["core/ 目录不存在"]
+    actual_modules = {p.stem for p in core_dir.glob("*.py") if p.name != "__init__.py" and not p.name.startswith(".")}
+    missing_in_doc = sorted(actual_modules - declared_modules)
+    extra_in_doc = sorted(declared_modules - actual_modules)
+    if missing_in_doc:
+        errors.append(f"CLAUDE.md §4.2 漏声明 core/ 实际模块: {missing_in_doc}，实际模块包括: {sorted(actual_modules)}")
+    if extra_in_doc:
+        errors.append(
+            f"CLAUDE.md §4.2 声明了不存在的 core/ 模块: {extra_in_doc}，实际模块包括: {sorted(actual_modules)}"
+        )
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -1981,6 +2010,7 @@ def main() -> int:
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_governance_id_references())
+    all_errors.extend(check_core_modules_completeness())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -1993,7 +2023,8 @@ def main() -> int:
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / 治理 id 引用一致性）"
+        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
+        "治理 id 引用一致性 / core 模块清单完整性）"
     )
     return 0
 
