@@ -1721,9 +1721,11 @@ def check_docs_index_completeness() -> list[str]:
     for doc in sorted(docs_root.rglob("*.md")):
         if doc == DOCS_README_PATH:
             continue
-        # 本地产物 / 归档 / 记录目录豁免：Path.rglob 不识别 .gitignore，未跟踪/被忽略产物
-        # 不属于「需进索引的治理活文档」，跳过避免误报「未进索引」。
-        if any(doc.is_relative_to(d) for d in _LOCAL_ARTIFACT_DIRS):
+        # 真实 gitignored 本地产物 / 归档目录豁免：Path.rglob 不识别 .gitignore，未跟踪/被忽略产物
+        # 不属于「需进索引的治理活文档」，跳过避免误报「未进索引」（兼容 _LOCAL_ARTIFACT_DIRS 别名）。
+        if any(doc.is_relative_to(d) for d in _GITIGNORED_ARTIFACT_DIRS) or any(
+            doc.is_relative_to(d) for d in _LOCAL_ARTIFACT_DIRS
+        ):
             continue
         if _docs_doc_covered(doc, index_sources):
             continue
@@ -1812,23 +1814,25 @@ def check_reviews_index_completeness() -> list[str]:
 # 消费语料 = CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（exceptions.yml 自身是注册表非消费者）。
 _EX_ID_PATTERN = re.compile(r"\bEX-\d{4}\b")
 
-# 本地产物 / 归档 / 记录目录（被 git 忽略或未跟踪的非「治理活文档」）。
-# 两个消费者共享：
-#   1) check_governance_id_references() 消费语料豁免（EX 引用）。归档引用的已删 EX 属历史记录，
-#      不参与悬空判断；残留的现存 EX 引用也不得充当活引用掩盖方向 2 的孤儿判定。
-#   2) check_docs_index_completeness() 扫描豁免。`Path.rglob` 不识别 .gitignore，会扫到
-#      本地产物/被忽略文件并误报「未进索引」。与本目录集对齐后，产物目录自动退出索引覆盖校验。
-# 新增此类目录时须在此登记（denylist 安全默认：新活文档自动仍在扫描范围，绝不漏报）。
-_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = (
+# 真实 gitignored 的本地产物 / 归档目录（受 .gitignore 保护，不入版本控制，GDR-07）。
+# 用于 check_docs_index_completeness() 扫描豁免。`Path.rglob` 不识别 .gitignore，
+# 会扫到本地临时产物并误报「未进索引」。本集合严格限定为真实 gitignored 目录。
+_GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
     ROOT / "docs" / "plans" / "archive",
     ROOT / "docs" / "audit",
-    ROOT / "docs" / "task-plans",
-    ROOT / "docs" / "superpowers" / "plans",
-    ROOT / "docs" / "reviews" / "evals",
+    ROOT / "docs" / "superpowers",
 )
 
-# 兼容别名：DOC-09（EX 引用豁免）消费者沿用旧名，指向同一公共产物目录集。
-_EX_REF_EXCLUDED_DIRS: tuple[Path, ...] = _LOCAL_ARTIFACT_DIRS
+# 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
+_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
+
+# EX 引用语料豁免目录（用于 check_governance_id_references()，GDR-07）：
+# 包含全部 gitignored 目录，另加受跟踪但属评测用例/注入测试语料的目录（evals/），
+# 防止评测负例中的历史/演示 EX 编号充当活引用掩盖孤儿判定。
+_EX_REF_EXCLUDED_DIRS: tuple[Path, ...] = (
+    *_GITIGNORED_ARTIFACT_DIRS,
+    ROOT / "docs" / "reviews" / "evals",
+)
 
 
 def _load_exception_ids() -> list[str] | None:
