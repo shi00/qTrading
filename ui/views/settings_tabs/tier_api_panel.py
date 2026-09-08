@@ -75,9 +75,9 @@ def _render_probe_status(api_name: str, available: bool | None, vm: SystemViewMo
             AppColors.ERROR,
         )
     return (
-        ft.Icon(ft.Icons.HELP_OUTLINE, size=AppStyles.FONT_SIZE_LG, color=ft.Colors.ON_SURFACE_VARIANT),
-        ft.Text(I18n.get("sys_tier_not_probed"), size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
-        str(ft.Colors.ON_SURFACE_VARIANT),
+        ft.Icon(ft.Icons.HELP_OUTLINE, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_SECONDARY),
+        ft.Text(I18n.get("sys_tier_not_probed"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+        str(AppColors.TEXT_SECONDARY),
     )
 
 
@@ -131,7 +131,7 @@ def _build_api_list_controls(
                 ft.Container(
                     content=ft.Row(
                         [
-                            ft.Text(api_name, size=AppStyles.FONT_SIZE_BODY_SM, color=ft.Colors.ON_SURFACE),
+                            ft.Text(api_name, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_PRIMARY),
                             *independent_badge,
                         ],
                         spacing=4,
@@ -376,7 +376,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     points_hint_text = ft.Text(
         I18n.get("sys_tier_points_hint"),
         size=AppStyles.FONT_SIZE_CAPTION,
-        color=ft.Colors.ON_SURFACE_VARIANT,
+        color=AppColors.TEXT_SECONDARY,
         italic=True,
     )
 
@@ -391,9 +391,9 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     last_probe_text_ctrl = ft.Text(
         last_probe_text,
         size=AppStyles.FONT_SIZE_CAPTION,
-        color=ft.Colors.ON_SURFACE_VARIANT,
+        color=AppColors.TEXT_SECONDARY,
     )
-    progress_text_ctrl = ft.Text(progress_text, size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.PRIMARY)
+    progress_text_ctrl = ft.Text(progress_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.PRIMARY)
 
     api_list_view = ft.ListView(
         controls=_build_api_list_controls(current_tier, probe_status, vm),
@@ -407,20 +407,20 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         I18n.get("sys_tier_api_list_header"),
         size=AppStyles.FONT_SIZE_BODY,
         weight=ft.FontWeight.BOLD,
-        color=ft.Colors.ON_SURFACE,
+        color=AppColors.TEXT_PRIMARY,
     )
     probe_status_header = ft.Text(
         I18n.get("sys_tier_probe_status_header"),
         size=AppStyles.FONT_SIZE_BODY,
         weight=ft.FontWeight.BOLD,
-        color=ft.Colors.ON_SURFACE,
+        color=AppColors.TEXT_PRIMARY,
     )
 
     panel_title = ft.Text(
         I18n.get("sys_tier_panel_title"),
         size=AppStyles.FONT_SIZE_TITLE,
         weight=ft.FontWeight.BOLD,
-        color=ft.Colors.ON_SURFACE,
+        color=AppColors.TEXT_PRIMARY,
     )
 
     return ft.Column(

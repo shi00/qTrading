@@ -382,9 +382,9 @@ def _build_list_item(
             spacing=2,
         ),
         padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-        border=ft.Border.all(1, ft.Colors.OUTLINE),
+        border=ft.Border.all(1, AppColors.BORDER),
         border_radius=6,
-        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
+        bgcolor=AppColors.SURFACE_VARIANT,
     )
 
 

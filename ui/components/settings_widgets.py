@@ -67,7 +67,7 @@ def MetricCard(
     ft.use_state(AppColors.get_observable_state)
 
     # --- Status row (icon + trend) ---
-    resolved_color = status_color if status_color else ft.Colors.PRIMARY
+    resolved_color = status_color if status_color else AppColors.PRIMARY
     status_controls: list[ft.Control] = []
     if icon:
         status_controls.append(ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_LG, color=resolved_color))
@@ -87,13 +87,13 @@ def MetricCard(
                         label.upper() if label else "",
                         size=AppStyles.FONT_SIZE_CAPTION,
                         weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Text(
                         typing.cast(str, value),
                         size=AppStyles.FONT_SIZE_XL,
                         weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.PRIMARY,
+                        color=AppColors.PRIMARY,
                     ),
                     ft.Row(status_controls, spacing=4, alignment=ft.MainAxisAlignment.START),
                 ],
@@ -103,8 +103,8 @@ def MetricCard(
         expand=True,
         padding=AppStyles.SPACING_LG,
         border_radius=12,
-        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.PRIMARY),
-        border=ft.Border.all(1, ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY)),
+        bgcolor=ft.Colors.with_opacity(0.02, AppColors.PRIMARY),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.PRIMARY)),
     )
 
 
@@ -123,15 +123,15 @@ def ActionChip(
     (pushed by consumer) replacing the old ``set_loading`` imperative API.
     """
     if is_primary:
-        text_color = ft.Colors.ON_PRIMARY
-        bgcolor = ft.Colors.PRIMARY
+        text_color = AppColors.TEXT_ON_PRIMARY
+        bgcolor = AppColors.PRIMARY
         icon_bg_opacity = 0.1
         icon_bg_base = text_color
     else:
-        text_color = ft.Colors.ON_SURFACE
-        bgcolor = ft.Colors.SURFACE
+        text_color = AppColors.TEXT_PRIMARY
+        bgcolor = AppColors.SURFACE
         icon_bg_opacity = 0.05
-        icon_bg_base = ft.Colors.SHADOW
+        icon_bg_base = AppColors.SHADOW
 
     sub_color = ft.Colors.with_opacity(0.8, text_color)
 
@@ -141,7 +141,7 @@ def ActionChip(
             width=16,
             height=16,
             stroke_width=2,
-            color=ft.Colors.ON_PRIMARY if is_primary else ft.Colors.PRIMARY,
+            color=AppColors.TEXT_ON_PRIMARY if is_primary else AppColors.PRIMARY,
         )
         disabled = True
         opacity = 0.8
@@ -238,14 +238,14 @@ def SectionHeader(
                 ft.Container(
                     width=4,
                     height=18,
-                    bgcolor=ft.Colors.SECONDARY,
+                    bgcolor=AppColors.ACCENT,
                     border_radius=2,
                 ),
                 ft.Text(
                     display_title,
                     size=AppStyles.FONT_SIZE_TITLE,
                     weight=ft.FontWeight.BOLD,
-                    color=ft.Colors.ON_SURFACE,
+                    color=AppColors.TEXT_PRIMARY,
                 ),
             ],
             spacing=10,
@@ -283,7 +283,7 @@ def SettingRow(
 
     display_title = I18n.get(title_key) if title_key else title
     display_subtitle = I18n.get(subtitle_key) if subtitle_key else subtitle
-    color = icon_color if icon_color else ft.Colors.PRIMARY
+    color = icon_color if icon_color else AppColors.PRIMARY
 
     icon_container = ft.Container(
         content=ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_XL, color=color),
@@ -301,12 +301,12 @@ def SettingRow(
                         display_title,
                         size=AppStyles.FONT_SIZE_TITLE,
                         weight=ft.FontWeight.BOLD,
-                        color=ft.Colors.ON_SURFACE,
+                        color=AppColors.TEXT_PRIMARY,
                     ),
                     ft.Text(
                         display_subtitle,
                         size=AppStyles.FONT_SIZE_BODY_SM,
-                        color=ft.Colors.ON_SURFACE_VARIANT,
+                        color=AppColors.TEXT_SECONDARY,
                     ),
                 ],
                 spacing=2,

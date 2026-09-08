@@ -383,9 +383,9 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column(
             [
                 row_schedule,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 row_time,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.Row(
                     [
                         ft.Icon(
@@ -431,11 +431,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column(
             [
                 row_ai_schedule,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 row_ai_time,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 row_ai_engine,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.Row(
                     [
                         ft.Icon(
@@ -630,7 +630,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column(
             [
                 row_alerts,
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 row_interval,
             ],
         ),

@@ -388,7 +388,7 @@ def _build_coverage_detail_table(tables: dict) -> ft.Column:
 
     if stock_tables:
         if global_tables:
-            controls.append(ft.Divider(height=20, color=ft.Colors.TRANSPARENT))
+            controls.append(ft.Divider(height=20, color=AppColors.TRANSPARENT))
         controls.append(_build_section_header("health_section_stock"))
         for k in stock_tables:
             controls.append(_create_coverage_row(k, tables[k]))
@@ -480,7 +480,7 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
         content=ft.Column(
             controls=[
                 header,
-                ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=20, color=AppColors.TRANSPARENT),
                 issues_section,
                 metrics,
                 ft.Divider(height=20, color=AppColors.DIVIDER),

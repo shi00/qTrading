@@ -362,6 +362,10 @@ class AppColors:
     BORDER = ft.Colors.OUTLINE
     DIVIDER = ft.Colors.OUTLINE_VARIANT
     ERROR = ft.Colors.ERROR
+    ON_ERROR = ft.Colors.ON_ERROR
+    SHADOW = ft.Colors.SHADOW
+    TERTIARY = ft.Colors.TERTIARY
+    TRANSPARENT = ft.Colors.TRANSPARENT
 
     # ====================================================================
     # Layer 2: 业务自定义色 (Hex 值 — 需手动更新)

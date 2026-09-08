@@ -256,7 +256,7 @@ def _create_overview_card(
         shadow = ft.BoxShadow(
             spread_radius=0,
             blur_radius=8,
-            color=ft.Colors.with_opacity(0.1, ft.Colors.SHADOW),
+            color=ft.Colors.with_opacity(0.1, AppColors.SHADOW),
             offset=ft.Offset(0, 2),
         )
 
@@ -1140,7 +1140,7 @@ def OnboardingWizard(
                         ft.Container(height=5),
                         header_container,
                         step_indicators,
-                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                        ft.Divider(height=10, color=AppColors.TRANSPARENT),
                         ft.Container(
                             content=ft.Column(
                                 [step_content],

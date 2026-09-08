@@ -700,7 +700,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     row_theme = SettingRow(
         icon=safe_icon_str(ft.Icons.COLOR_LENS_ROUNDED),
-        icon_color=ft.Colors.TERTIARY,
+        icon_color=AppColors.TERTIARY,
         title=I18n.get("settings_theme"),
         subtitle=I18n.get("settings_theme_desc"),
         control=theme_dropdown,
@@ -745,7 +745,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
     row_thread_pool = SettingRow(
         icon=safe_icon_str(ft.Icons.MEMORY_ROUNDED),
-        icon_color=ft.Colors.PRIMARY_CONTAINER,
+        icon_color=AppColors.PRIMARY_DARK,
         title=I18n.get("sys_thread_pool_title"),
         subtitle=I18n.get("sys_thread_pool_desc"),
         control=ft.Row(
@@ -784,7 +784,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
     row_proxy = SettingRow(
         icon=safe_icon_str(ft.Icons.PUBLIC_OFF_ROUNDED),
-        icon_color=ft.Colors.SECONDARY,
+        icon_color=AppColors.ACCENT,
         title=I18n.get("settings_no_proxy_domains"),
         subtitle=I18n.get("settings_no_proxy_desc"),
         control=ft.Row(
@@ -831,9 +831,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     core_config_controls.extend(
         [
             row_language,
-            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+            ft.Divider(height=10, color=AppColors.TRANSPARENT),
             row_theme,
-            ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+            ft.Divider(height=10, color=AppColors.TRANSPARENT),
             row_log,
             ft.Divider(
                 height=20,

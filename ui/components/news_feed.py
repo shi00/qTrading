@@ -218,7 +218,7 @@ def _build_news_item(
     elif sentiment == "negative":
         bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN_GREEN)
     else:
-        bg_color = ft.Colors.TRANSPARENT
+        bg_color = AppColors.TRANSPARENT
 
     # 标签行: translated_tag + AI生成 badge (if applicable) + 时间 + 查看个股 link
     tag_row_controls: list[ft.Control] = []

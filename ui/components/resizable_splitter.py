@@ -175,7 +175,7 @@ def ResizableSplitter(
         set_hovered(False)
 
     # --- Render ---
-    hover_color = ft.Colors.with_opacity(0.6, AppColors.PRIMARY) if hovered else ft.Colors.TRANSPARENT
+    hover_color = ft.Colors.with_opacity(0.6, AppColors.PRIMARY) if hovered else AppColors.TRANSPARENT
 
     left_container = ft.Container(
         content=left_content,

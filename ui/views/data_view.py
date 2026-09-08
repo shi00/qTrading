@@ -318,7 +318,7 @@ def _build_loading_widget() -> ft.Container:
         alignment=ft.Alignment.CENTER,
         expand=True,
         padding=AppStyles.EMPTY_STATE_PADDING,
-        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.SHADOW),
+        bgcolor=ft.Colors.with_opacity(0.02, AppColors.SHADOW),
         border_radius=12,
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
     )
@@ -916,7 +916,7 @@ def TableViewerTab(
     toolbar_content = ft.Row(
         [
             table_selector,
-            ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),
+            ft.VerticalDivider(width=10, color=AppColors.TRANSPARENT),
             ft.Container(
                 content=ft.Row(
                     [filter_col, filter_op, filter_val, btn_query, btn_clear_filter, btn_refresh],
@@ -985,7 +985,7 @@ def TableViewerTab(
         controls.append(
             anchored(
                 EIDS.DATA.TABLE_READY,
-                ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.TRANSPARENT),
+                ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TRANSPARENT),
             )
         )
     return ft.Column(
