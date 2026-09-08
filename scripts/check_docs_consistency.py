@@ -1499,6 +1499,7 @@ _DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
     "docs/patterns/config-quality-perf.md": {"performance", "config"},
     "docs/guides/testing.md": {"testing", "e2e-testing"},
     "docs/guides/how-to.md": {"backtest", "embedded-pg"},
+    "docs/guides/ci-cd.md": {"ci-deps", "release"},
 }
 
 
