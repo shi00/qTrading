@@ -3338,3 +3338,16 @@ class TestBuildHistoryTreeRowsVectorized:
         row = rows[0]
         assert row.total_cnt == 14
         assert all(isinstance(s.run_id, str) for s in row.strategies)
+
+    def test_empty_dataframe_returns_empty_tuple(self) -> None:
+        """空 DataFrame (无列或空行) 及 None 均返回空元组。"""
+        assert HistoryModeMixin._build_history_tree_rows(pd.DataFrame()) == ()
+        assert HistoryModeMixin._build_history_tree_rows(None) == ()  # type: ignore[arg-type]
+
+    def test_missing_required_column_raises_key_error(self) -> None:
+        """非空 DataFrame 缺少必要列时抛出标准 KeyError (而非 ValueError)。"""
+        import pytest
+
+        df = pd.DataFrame({"trade_date": ["20250728"]})
+        with pytest.raises(KeyError, match="strategy_name"):
+            HistoryModeMixin._build_history_tree_rows(df)

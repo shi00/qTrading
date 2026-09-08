@@ -1038,6 +1038,19 @@ class TestDfToTableRowsVectorized:
         assert rows[1].values[0] is None
         assert isinstance(rows[1].values[1], float) and pd.isna(rows[1].values[1])
 
+    def test_nullable_pandas_na_and_nat_handling(self) -> None:
+        """ExtensionArray (<NA>/NaT) 与多种缺失值透传保持一致。"""
+        df = pd.DataFrame(
+            {
+                "int_na": pd.Series([1, None], dtype="Int64"),
+                "str_na": pd.Series(["hello", None], dtype="string"),
+            }
+        )
+        rows = _df_to_table_rows(df, ("int_na", "str_na"))
+        assert len(rows) == 2
+        assert rows[0].values == (1, "hello")
+        assert pd.isna(rows[1].values[0]) and pd.isna(rows[1].values[1])
+
 
 class TestSqlResultToStateFieldsVectorized:
     """PRF-09: _sql_result_to_state_fields 由 iterrows 改写为 itertuples 后保持等价输出。"""

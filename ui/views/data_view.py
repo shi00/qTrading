@@ -175,7 +175,7 @@ def _show_toast(
 
 def _format_cell_value(val: object, col_name: str) -> str:
     """格式化单元格值 (None/NaN → '-', 日期格式化)。"""
-    if val is None or (isinstance(val, float) and pd.isna(val)):
+    if val is None or (not isinstance(val, (list, tuple, dict, set)) and pd.isna(typing.cast(typing.Any, val)) is True):
         return "-"
     if "date" in col_name.lower():
         if isinstance(val, (datetime.date, datetime.datetime)):

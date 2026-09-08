@@ -110,6 +110,15 @@ class TestFormatCellValue:
 
         assert _format_cell_value(float("nan"), "col") == "-"
 
+    def test_pandas_na_and_nat_returns_dash(self):
+        """pd.NA 和 pd.NaT 均返回 '-'。"""
+        import pandas as pd
+
+        from ui.views.data_view import _format_cell_value
+
+        assert _format_cell_value(pd.NA, "col") == "-"
+        assert _format_cell_value(pd.NaT, "col") == "-"
+
     def test_date_column_formats_datetime(self):
         """date 列的 datetime 对象格式化为 YYYY-MM-DD。"""
         from ui.views.data_view import _format_cell_value
