@@ -781,569 +781,323 @@ def build_history_tree(
     )
 
 
-@ft.component
-def ScreenerView(
-    initial_strategy: str | None = None,
-    active: bool = True,
-    stock_filter_request: tuple[str, int] | None = None,
-) -> ft.Container:
-    """选股视图 (声明式).
-
-    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
-    - ``use_viewmodel(factory=lambda: ScreenerViewModel())`` 内部模式实例化
-    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-    - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``
-    - PubSub (TaskManager) 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
-    - LLM 流式 Markdown 卡片从 ``state.stream_cards`` 渲染 (VM 侧节流 flush, state-driven)
-    - page 访问用 ``ft.context.page`` (try/except 守卫)
+async def _execute_screener_export(
+    vm: ScreenerViewModel,
+    file_picker: ft.FilePicker | None,
+    page: ft.Page | None,
+    format_: str,
+) -> None:
+    """Export current results to CSV or Excel.
 
     Args:
-        initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
-        stock_filter_request: 深度链接股票代码过滤请求 (UX-04, (code, seq) 元组,
-            app_layout 深链 "screener:<code>" 透传; seq 递增保证重复深链触发 effect)
+        vm: ScreenerViewModel
+        file_picker: FilePicker instance
+        page: Page instance
+        format_: "csv" or "excel"
     """
-    # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
-    state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
-    # FR-UX-004, Task 4.2: 关注列表 VM (详情对话框「加入关注」按钮消费)
-    _wl_state, wl_vm = use_viewmodel(factory=lambda: WatchlistViewModel())
-
-    # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(get_observable_state)
-    ft.use_state(AppColors.get_observable_state)
-
-    # --- 本地 UI 状态 (R.2.2: selected_strategy/tier_hint 已迁入 VM state;
-    #                     R.2.4: mode/page_size 已迁入 VM state;
-    #                     R.2.6.1: strategies_loaded/strategy_options 已迁入 VM state;
-    #                     R.2.6.2: strategy_desc/strategy_desc_color 已迁入 VM state;
-    #                     R.2.6.3: status_msg/status_color 已迁入 VM state;
-    #                     Task 3.2: progress_visible/run_disabled/export_disabled 改为派生;
-    #                               历史树 rows/offset/has_more/loading 迁入 VM state.history_tree) ---
-    # --- 策略参数 (D3: 草稿下沉 VM, 消除 params_ref + _params_version 双轨) ---
-    # 参数值存 VM state.strategy_params (不可变快照), 更新经 vm.set_strategy_param;
-    # 切换策略经 vm.init_strategy_params 重置, 保证草稿与 selected_strategy 同步.
-    detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
-    pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
-
-    # D19: AI system prompt 保存校验失败的 inline 错误 (纯 UI 显示态, 校验逻辑仍在 VM)。
-    prompt_error, set_prompt_error = ft.use_state("")
-
-    # B14: slider 描述更新 debounce (asyncio.Task 引用)。
-    desc_timer_ref = ft.use_ref(lambda: None)
-
-    # B12: 表格渲染 memo (memo_key, vt_columns, formatted_rows)。
-    # AI 流式更新触发高频 re-render 时, 数据/分页未变则跳过 _build_table_data 重算。
-    # use_ref(lambda: None) 会推断为 MutableRef[None] 无法持 tuple, 故 helper 显式返回 tuple | None。
-    def _init_table_memo() -> tuple | None:
-        return None
-
-    table_memo_ref = ft.use_ref(_init_table_memo)
-
-    # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
-    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
-
-    def _setup_file_picker() -> None:
-        if not active:
-            return
-        page = _get_page()
-        if page is not None and file_picker is not None and file_picker not in page.services:
-            page.services.append(file_picker)
-
-    def _cleanup_file_picker() -> None:
-        page = _get_page()
-        if page is not None and file_picker in page.services:
-            page.services.remove(file_picker)
-
-    ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
-
-    # --- PubSub (TaskManager) 订阅/退订 ---
-
-    def _setup_task_manager() -> None:
-        if not active:
-            return
-        vm.subscribe_task_manager()
-
-    def _cleanup_task_manager() -> None:
-        vm.unsubscribe_task_manager()
-
-    ft.use_effect(_setup_task_manager, dependencies=[active], cleanup=_cleanup_task_manager)
-
-    # --- 策略加载 (mount 时执行一次, R.2.6.1: VM.load_strategies 内聚) ---
-
-    async def _load_strategies_async() -> None:
-        if not active:
-            return
-        vm.load_strategies()
-
-    ft.use_effect(_load_strategies_async, dependencies=[active])
-
-    # --- 深度链接 (策略加载后执行 pending_strategy) ---
-
-    async def _execute_pending_strategy() -> None:
-        if not active:
-            return
-        if not state.strategies_loaded or not pending_strategy:
-            return
-        key = pending_strategy
-        set_pending_strategy(None)
-        # 验证策略存在 (R.2.6.1: 从 state.strategies_with_dep 检查, D10: strategy 行对象序列)
-        if not any(r.key == key for r in state.strategies_with_dep):
-            logger.warning("[ScreenerView] Pending strategy %s not found.", key)
-            return
-        # 选中策略 (R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state)
-        vm.select_strategy(key)
-        # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
-        vm.update_strategy_desc(key)
-        # D3: 初始化参数默认值 (VM 内聚, 保证草稿与 selected_strategy 同步)
-        vm.init_strategy_params(key)
-        # 执行 (VM 在 run_strategy 开始时自动清空 stream_cards)
+    UILogger.log_action("ScreenerView", "Click", f"btn_export_{format_}")
+    df = vm.get_export_data()
+    if df is None:
+        if page is not None:
+            _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
+        return
+    timestamp = get_now().strftime("%Y%m%d_%H%M%S")
+    ext = "csv" if format_ == "csv" else "xlsx"
+    default_filename = f"screener_results_{timestamp}.{ext}"
+    is_web = page is not None and page.web
+    if is_web:
         try:
-            await vm.run_strategy(key, params=dict(vm.state.strategy_params))
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(
-                "[ScreenerView] Pending strategy execution failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
-            )
-
-    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
-
-    # --- UX-04: 应用外部导航深链的股票代码过滤请求 (home/watchlist "查看个股") ---
-    def _apply_stock_filter_request() -> None:
-        if stock_filter_request is None:
-            return
-        code, _seq = stock_filter_request
-        if code:
-            vm.set_stock_filter(code)
-
-    ft.use_effect(_apply_stock_filter_request, dependencies=[stock_filter_request])
-
-    # --- 事件 handler ---
-
-    def _on_strategy_change(e: ft.ControlEvent) -> None:
-        new_val = get_control_value(e.control, ft.Dropdown) if e and e.control else None
-        UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
-        # R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state
-        # Task 3.2: run_disabled 改为派生 (state.loading or not state.selected_strategy)
-        vm.select_strategy(new_val)
-        # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
-        vm.update_strategy_desc(new_val)
-        # D3: 初始化参数默认值 (VM 内聚); 取消选中时清空草稿
-        if new_val:
-            vm.init_strategy_params(new_val)
-        else:
-            vm.reset_strategy_params()
-
-    async def _on_run_click(e: ft.ControlEvent) -> None:
-        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={state.selected_strategy}")
-        if not state.selected_strategy:
-            return
-        # Task 3.2: run_disabled 改为派生, VM run_strategy 内部设置 loading=True 自动禁用
-        try:
-            params = dict(vm.state.strategy_params)  # D3: VM state 最新快照 (消除 View 双轨)
-            await vm.run_strategy(state.selected_strategy, params=params)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("[ScreenerView] Run strategy failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
-
-    def _on_run_click_sync(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_on_run_click, e)
-
-    def _on_cancel_click_sync(e: ft.ControlEvent) -> None:
-        # Task 3.2: cancel_strategy 是线程安全的 (call_soon_threadsafe), 可直接在 UI 线程调用
-        vm.cancel_strategy()
-
-    def _on_backtest_click_sync(e: ft.ControlEvent) -> None:
-        """Task 8.3: 选股→回测参数透传 — 暂存 strategy_key + params 并跳转回测页."""
-        UILogger.log_action("ScreenerView", "Click", "btn_jump_backtest")
-        if not state.selected_strategy:
-            return
-        set_pending_prefill(
-            state.selected_strategy,
-            params=dict(vm.state.strategy_params),  # D3: VM state 最新快照
-        )
-        page = _get_page()
-        if page is not None:
-            page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
-
-    def _on_go_sync_click(e: ft.ControlEvent) -> None:
-        """UX-02 (P0-01): 质量门失败恢复动作 — 深链到设置页数据源子页.
-
-        当前唯一 action key "screener_action_go_sync" 的目标即数据源同步区;
-        未来新增其他 action key 时需按 key 分派目标 (参照 data_source_tab.py
-        snack.action_key 分支范式), 本按钮 visible 仅绑定该 key.
-        """
-        UILogger.log_action("ScreenerView", "Click", "btn_go_sync")
-        page = _get_page()
-        if page is not None:
-            page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
-
-    async def _on_sort(col_id: str, new_asc: bool) -> None:
-        try:
-            await vm.sort_data(col_id, new_asc)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("[ScreenerView] Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
-
-    def _on_virtual_sort(col_id: str, new_asc: bool) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_on_sort, col_id, new_asc)
-
-    async def _do_export(format_: str) -> None:
-        """Export current results to CSV or Excel.
-
-        Args:
-            format_: "csv" or "excel"
-        """
-        UILogger.log_action("ScreenerView", "Click", f"btn_export_{format_}")
-        df = vm.get_export_data()
-        if df is None:
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
-            return
-        timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-        ext = "csv" if format_ == "csv" else "xlsx"
-        default_filename = f"screener_results_{timestamp}.{ext}"
-        # Flet 0.86+ Web 模式: save_file 必须传 src_bytes, 否则抛 ValueError.
-        # Flet 用 Blob + <a download>.click() 触发浏览器下载 (Playwright 可捕获 download 事件).
-        # 桌面端: save_file 打开原生对话框返回路径, VM 写文件 (原逻辑保留).
-        page = _get_page()
-        is_web = page is not None and page.web
-        if is_web:
-            try:
-                # R16: df.to_csv/to_excel 是 CPU 密集操作, 通过 VM 方法 offload 到 CPU 线程池
-                src_bytes, error = await vm.export_results_bytes(format_)
-                if src_bytes is None:
-                    if page is not None:
-                        _safe_show_toast(page, I18n.get("data_export_fail"), "error")
-                    return
-                if file_picker is None:
-                    return
-                await file_picker.save_file(
-                    dialog_title=I18n.get("data_export_save_title"),
-                    file_name=default_filename,
-                    allowed_extensions=[ext],
-                    src_bytes=src_bytes,
-                )
-                if page is not None:
-                    _safe_show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
-            except asyncio.CancelledError:
-                raise
-            except Exception as ex:
-                logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+            # R16: df.to_csv/to_excel 是 CPU 密集操作, 通过 VM 方法 offload 到 CPU 线程池
+            src_bytes, error = await vm.export_results_bytes(format_)
+            if src_bytes is None:
                 if page is not None:
                     _safe_show_toast(page, I18n.get("data_export_fail"), "error")
-            return
-
-        if file_picker is None:
-            return
-        filepath = await file_picker.save_file(
-            dialog_title=I18n.get("data_export_save_title"),
-            file_name=default_filename,
-            allowed_extensions=[ext],
-        )
-        if not filepath:
-            return
-        # Task 3.2: export_disabled 改为派生 (UX-04: 基于 vm.has_export_data 全量判据), 不再手动 set
-        try:
-            if format_ == "csv":
-                path, error = await vm.export_results(filepath)
-            else:
-                path, error = await vm.export_results_excel(filepath)
-            page = _get_page()
-            if path:
-                filename = os.path.basename(filepath)
-                if page is not None:
-                    # P2-10: 导出成功 toast 附"打开文件夹" action (仅桌面端, Web 端走浏览器下载无此需求)
-                    _safe_show_toast(
-                        page,
-                        I18n.get("data_export_success", file=filename),
-                        "success",
-                        action_text=I18n.get("data_export_open_folder"),
-                        on_action=lambda: page.run_task(open_export_folder, filepath),
-                    )
-            elif page is not None:
-                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                return
+            if file_picker is None:
+                return
+            await file_picker.save_file(
+                dialog_title=I18n.get("data_export_save_title"),
+                file_name=default_filename,
+                allowed_extensions=[ext],
+                src_bytes=src_bytes,
+            )
+            if page is not None:
+                _safe_show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
-            page = _get_page()
             if page is not None:
                 _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+        return
 
-    def _on_export_csv_click(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_export, "csv")
-
-    def _on_export_excel_click(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_export, "excel")
-
-    def _on_stock_filter_change(e: ft.ControlEvent) -> None:
-        # UX-04: on_change 原值入 state (不 strip, 匹配时才 strip), 消除受控输入光标跳动
-        UILogger.log_action("ScreenerView", "Input", "stock_filter")
-        vm.set_stock_filter(get_control_value(e.control, ft.TextField) or "")
-
-    def _on_page_size_change(e: ft.ControlEvent) -> None:
-        try:
-            new_size = int(get_control_value(e.control, ft.Dropdown) if e and e.control else 50)
-            vm.change_page_size(new_size)
-        except (ValueError, TypeError):
-            pass
-
-    def _on_prev_page(e: ft.ControlEvent) -> None:
-        vm.change_page(-1)
-
-    def _on_next_page(e: ft.ControlEvent) -> None:
-        vm.change_page(1)
-
-    def _on_mode_change(e: ft.ControlEvent) -> None:
-        selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
-        if not selected:
-            return
-        new_mode = list(selected)[0]
-        UILogger.log_action("ScreenerView", "Toggle", f"mode={new_mode}")
-        if new_mode == state.mode:
-            return
-        if new_mode == "HISTORY":
-            vm.switch_to_history()
-            # Task 3.2: history_tree state 由 VM switch_to_history 重置, View 仅触发加载
-            page = _get_page()
-            if page is not None:
-                page.run_task(_load_history_tree, False)
+    if file_picker is None:
+        return
+    filepath = await file_picker.save_file(
+        dialog_title=I18n.get("data_export_save_title"),
+        file_name=default_filename,
+        allowed_extensions=[ext],
+    )
+    if not filepath:
+        return
+    try:
+        if format_ == "csv":
+            path, error = await vm.export_results(filepath)
         else:
-            vm.switch_to_realtime()
-
-    async def _load_history_tree(append: bool) -> None:
-        """加载历史树数据 (Task 3.2: VM 更新 state.history_tree, View 不再处理 items)."""
-        try:
-            await vm.load_history_tree(append=append)
-        except asyncio.CancelledError:
-            raise
-        except Exception as ex:
-            logger.error("[ScreenerView] History tree load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            page = _get_page()
+            path, error = await vm.export_results_excel(filepath)
+        if path:
+            filename = os.path.basename(filepath)
             if page is not None:
-                _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
-
-    def _on_load_more_history(e: ft.ControlEvent) -> None:
-        page = _get_page()
+                _safe_show_toast(
+                    page,
+                    I18n.get("data_export_success", file=filename),
+                    "success",
+                    action_text=I18n.get("data_export_open_folder"),
+                    on_action=lambda: page.run_task(open_export_folder, filepath),
+                )
+        elif page is not None:
+            _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
         if page is not None:
-            page.run_task(_load_history_tree, True)
+            _safe_show_toast(page, I18n.get("data_export_fail"), "error")
 
-    async def _load_history_for_date(trade_date: str, strategy_name: str | None, run_id: str | None) -> None:
-        # Task 3.2: progress_visible 改为派生 (state.loading), VM load_history_data 内聚 loading 管理
-        if isinstance(trade_date, (datetime.date, datetime.datetime)):
-            display = trade_date.strftime("%Y-%m-%d")
-            trade_date = display
-        else:
-            ts = str(trade_date)
-            display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-        # R.2.6.3: 传 raw strategy_name 给 VM, View 渲染时翻译 (§3.2 VM 不感知 locale)
-        vm.set_history_viewing_status(display, strategy_name=strategy_name, run_id=run_id)
-        try:
-            await vm.load_history_data(trade_date, strategy_name, run_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as ex:
-            logger.error(
-                "[ScreenerView] Load history for date failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
-            )
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
-    def _on_tree_item_click(trade_date: str, strategy_name: str | None = None, run_id: str | None = None) -> None:
-        page = _get_page()
+async def _execute_load_history_tree(
+    vm: ScreenerViewModel,
+    page: ft.Page | None,
+    append: bool,
+) -> None:
+    """加载历史树数据 (Task 3.2: VM 更新 state.history_tree, View 不再处理 items)."""
+    try:
+        await vm.load_history_tree(append=append)
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] History tree load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            page.run_task(_load_history_for_date, trade_date, strategy_name, run_id)
+            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
-    def _on_row_click(row_data: dict) -> None:
-        """行点击 → 打开详情对话框。
 
-        #423: 通过 formatted_row 携带的 _raw 引用反查原始行 (含隐藏列),
-        避免 ts_code 同名多行时字典反查错行. _raw 缺失时 fallback 到 row_data 本身.
-        """
-        raw_data = row_data.get("_raw", row_data)
-        set_detail_dialog_data(typing.cast(typing.Any, raw_data))
-
-    def _on_detail_close() -> None:
-        set_detail_dialog_data(None)
-
-    # FR-UX-004, Task 4.2: 加入关注 (详情对话框按钮 → WatchlistViewModel)
-    async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
-        try:
-            await wl_vm.add_to_watchlist(ts_code, stock_name)
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_added"), "success")
-        except asyncio.CancelledError:
-            raise
-        except Exception as ex:
-            logger.error("[ScreenerView] Add to watchlist failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
-
-    def _on_add_to_watchlist(ts_code: str, stock_name: str) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_add_to_watchlist, ts_code, stock_name)
-
-    # --- 参数面板 helper ---
-
-    def _update_param(name: str, value) -> None:
-        vm.set_strategy_param(name, value)  # D3: 参数草稿下沉 VM, state-driven 自动重渲染
-        # D19: 用户编辑 AI system prompt 时清除 inline 错误 (编辑后重新保存会重新校验)
-        if name == "ai_system_prompt" and prompt_error:
-            set_prompt_error("")
-
-    def _on_slider_value_change(name: str, val: float) -> None:
-        # B14: 参数更新立即生效；仅描述更新 debounce 150ms（高频拖动不重复调 update_strategy_desc）。
-        _update_param(name, val)
-        if state.selected_strategy:
-            _schedule_desc_update(state.selected_strategy)
-
-    async def _debounced_desc_update(strat) -> None:
-        try:
-            await asyncio.sleep(0.15)
-            vm.update_strategy_desc(strat, params=dict(vm.state.strategy_params))
-        except asyncio.CancelledError:
-            raise  # R2: 取消传播
-
-    def _schedule_desc_update(strat) -> None:
-        prev = desc_timer_ref.current
-        if prev is not None:
-            prev.cancel()
-        task = asyncio.create_task(_debounced_desc_update(strat))
-        desc_timer_ref.current = task
-        task.add_done_callback(lambda t: _clear_desc_timer(task) if desc_timer_ref.current is task else None)
-
-    def _clear_desc_timer(task) -> None:
-        # MutableRef 仅含 current 槽，无 clear()；仅当仍是本任务时清除，避免误清新任务引用。
-        if desc_timer_ref.current is task:
-            desc_timer_ref.current = None
-
-    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField | None) -> None:
-        # Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
-        # vm.reset_strategy_prompt (返回 base_prompt 字符串), View 仅更新 UI state + 展示反馈.
-        try:
-            new_val = await vm.reset_strategy_prompt(strat)
-            _update_param("ai_system_prompt", new_val)
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("ai_settings_restored"), "info")
-        except asyncio.CancelledError:
-            raise
-        except Exception as ex:
-            logger.error(
-                "[ScreenerView] Restore default prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
-            )
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
-
-    async def _do_save_prompt_async(strat: str) -> None:
-        # Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
-        # vm.save_strategy_prompt (返回 (success, error_key)), View 仅展示反馈.
-        try:
-            prompt_val = (vm.state.strategy_params).get("ai_system_prompt", "") or ""
-            success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
-            page = _get_page()
-            if page is None:
-                return
-            if success:
-                set_prompt_error("")  # D19: 成功保存时清除 inline 错误
-                UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
-                _safe_show_toast(page, I18n.get("ai_settings_saved"), "success")
-            else:
-                from utils.prompt_guard import MAX_PROMPT_LENGTH
-
-                assert error_key is not None  # validate_prompt 失败时返回 (False, warning)
-                msg = I18n.get(error_key, error_key)
-                if error_key == "prompt_err_length":
-                    msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                # D19: 客户端校验失败 → inline 错误 (持续显示在被校验字段旁, 优于会消失的 SnackBar)
-                set_prompt_error(msg)
-        except asyncio.CancelledError:
-            raise
-        except Exception as ex:
-            logger.error("[ScreenerView] Save prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            page = _get_page()
-            if page is not None:
-                _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
-
-    def _on_restore_prompt(strat: str) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_restore_default_async, strat, None)
-
-    def _on_save_prompt(strat: str) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_save_prompt_async, strat)
-
-    # --- 派生渲染数据 ---
-
-    # 状态栏: 从 VM state.status_message 渲染 (R.2.6.3: 单源真相, §3.2 VM 只产出 i18n key + params)
-    status_text_value = _render_status_message(state.status_message)
-    status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
-
-    # 表格数据: 从 VM 读当前页 locale-neutral 原始行 (C2b 消除双轨制)。
-    # memo 以 current_page_rows 引用同一性 + locale 为 key: 内容帧变化 → VM 生成新切片引用
-    # → 重格式化; 仅 total_*/状态变化而当前页内容未变 → 引用复用 (VM _update_pagination 去重)
-    # → 命中 memo 不重复格式化。locale 必须入 key: _format_cell_value 输出 unit_yi/unit_wan 等
-    # locale 相关字符串, 切换语言后需按新 locale 重格式化。
-    # 空态前置判定: 无行 (current_page_rows=()) 时直接置 memo=None, 防空态→恢复数据即新引用
-    # 触发重算 (防陈旧命中, 等价原 data_version 的 run 重置/无结果窗口)。
-    current_page_rows = state.current_page_rows
-    memo = table_memo_ref.current
-    if current_page_rows:
-        if memo is not None and memo[0] is current_page_rows and memo[1] == get_observable_state().locale:
-            vt_columns, formatted_rows = memo[2], memo[3]
-        else:
-            vt_columns, formatted_rows = _build_table_data(current_page_rows, vm)
-            table_memo_ref.current = (current_page_rows, get_observable_state().locale, vt_columns, formatted_rows)
+async def _execute_load_history_for_date(
+    vm: ScreenerViewModel,
+    page: ft.Page | None,
+    trade_date: str | datetime.date | datetime.datetime,
+    strategy_name: str | None,
+    run_id: str | None,
+) -> None:
+    """加载指定日期的历史选股结果."""
+    if isinstance(trade_date, (datetime.date, datetime.datetime)):
+        display = trade_date.strftime("%Y-%m-%d")
+        trade_date = display
     else:
-        vt_columns = []
-        formatted_rows = []
-        table_memo_ref.current = None
+        ts = str(trade_date)
+        display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
+    vm.set_history_viewing_status(display, strategy_name=strategy_name, run_id=run_id)
+    try:
+        await vm.load_history_data(trade_date, strategy_name, run_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] Load history for date failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
-    # 分页信息
-    page_no = state.page_no
-    total_pages = state.total_pages
 
-    # Task 3.2: 派生状态 (单源真相: state.loading / state.selected_strategy)
-    progress_visible = state.loading
-    run_disabled = state.loading or state.is_retrying or not state.selected_strategy
-    # UX-04: 导出按钮判据用全量结果 (has_export_data), 与过滤后 total_items 解耦 —
-    # 过滤无匹配时按钮仍可用 (全量数据可导出), 语义为 "有结果可导出"
-    export_btn_disabled = not vm.has_export_data
+async def _execute_add_to_watchlist(
+    wl_vm: WatchlistViewModel,
+    page: ft.Page | None,
+    ts_code: str,
+    stock_name: str,
+) -> None:
+    """FR-UX-004, Task 4.2: 加入关注."""
+    try:
+        await wl_vm.add_to_watchlist(ts_code, stock_name)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("watchlist_added"), "success")
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] Add to watchlist failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
 
-    # --- 构建流式卡片控件 ---
 
-    def _on_retry_click(name: str) -> None:
-        """UX-2.3: 重试按钮点击：调 vm.schedule_retry（同步签名，内部 loop.create_task）。
+async def _execute_restore_default_prompt(
+    vm: ScreenerViewModel,
+    page: ft.Page | None,
+    strat: str,
+    on_update_param: typing.Callable[[str, typing.Any], None],
+) -> None:
+    """恢复默认 AI Prompt."""
+    try:
+        new_val = await vm.reset_strategy_prompt(strat)
+        on_update_param("ai_system_prompt", new_val)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("ai_settings_restored"), "info")
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error(
+            "[ScreenerView] Restore default prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+        )
+        if page is not None:
+            _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
-        task 加入 VM._background_tasks 跟踪，dispose 时自动取消。
-        """
-        vm.schedule_retry(name)
 
-    # --- 构建历史树控件 ---
+async def _execute_save_prompt(
+    vm: ScreenerViewModel,
+    page: ft.Page | None,
+    strat: str,
+    set_prompt_error: typing.Callable[[str], None],
+) -> None:
+    """保存 AI Prompt."""
+    try:
+        prompt_val = (vm.state.strategy_params).get("ai_system_prompt", "") or ""
+        success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
+        if page is None:
+            return
+        if success:
+            set_prompt_error("")
+            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+            _safe_show_toast(page, I18n.get("ai_settings_saved"), "success")
+        else:
+            from utils.prompt_guard import MAX_PROMPT_LENGTH
 
-    # --- 构建 UI ---
+            assert error_key is not None
+            msg = I18n.get(error_key, error_key)
+            if error_key == "prompt_err_length":
+                msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+            set_prompt_error(msg)
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] Save prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
+
+async def _execute_pending_strategy_run(vm: ScreenerViewModel, key: str) -> None:
+    """选中并执行挂起策略."""
+    vm.select_strategy(key)
+    vm.update_strategy_desc(key)
+    vm.init_strategy_params(key)
+    try:
+        await vm.run_strategy(key, params=dict(vm.state.strategy_params))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(
+            "[ScreenerView] Pending strategy execution failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+        )
+
+
+def _handle_backtest_jump(state: ScreenerState, vm: ScreenerViewModel, page: ft.Page | None) -> None:
+    """选股→回测参数透传跳转."""
+    UILogger.log_action("ScreenerView", "Click", "btn_jump_backtest")
+    if not state.selected_strategy:
+        return
+    set_pending_prefill(state.selected_strategy, params=dict(vm.state.strategy_params))
+    if page is not None:
+        page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "backtest")
+
+
+def _handle_go_sync(page: ft.Page | None) -> None:
+    """质量门失败恢复动作 — 跳转数据源同步."""
+    UILogger.log_action("ScreenerView", "Click", "btn_go_sync")
+    if page is not None:
+        page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings:data")
+
+
+def _handle_page_size_change(vm: ScreenerViewModel, e: ft.ControlEvent) -> None:
+    """分页大小变更处理."""
+    try:
+        vm.change_page_size(int(get_control_value(e.control, ft.Dropdown) if e and e.control else 50))
+    except (ValueError, TypeError):
+        pass
+
+
+def _handle_update_param(
+    vm: ScreenerViewModel,
+    name: str,
+    value: typing.Any,
+    prompt_err: str,
+    set_err: typing.Callable[[str], None],
+) -> None:
+    """策略参数更新处理."""
+    vm.set_strategy_param(name, value)
+    if name == "ai_system_prompt" and prompt_err:
+        set_err("")
+
+
+def _sync_file_picker_service(page: ft.Page | None, picker: ft.FilePicker | None, attach: bool) -> None:
+    """注册或移除 FilePicker 服务."""
+    if page is not None and picker is not None:
+        if attach and picker not in page.services:
+            page.services.append(picker)
+        elif not attach and picker in page.services:
+            page.services.remove(picker)
+
+
+async def _debounced_desc_update(vm: ScreenerViewModel, strat: str) -> None:
+    """B14: 参数拖动防抖更新策略描述."""
+    try:
+        await asyncio.sleep(0.15)
+        vm.update_strategy_desc(strat, params=dict(vm.state.strategy_params))
+    except asyncio.CancelledError:
+        raise
+
+
+def _schedule_desc_update(timer_ref: ft.Ref, vm: ScreenerViewModel, strat: str) -> None:
+    """调度策略描述防抖更新."""
+    prev = timer_ref.current
+    if prev is not None:
+        prev.cancel()
+    task = asyncio.create_task(_debounced_desc_update(vm, strat))
+    timer_ref.current = task
+    task.add_done_callback(lambda t: _clear_desc_timer(timer_ref, task))
+
+
+def _clear_desc_timer(timer_ref: ft.Ref, task: asyncio.Task) -> None:
+    """清理已完成的防抖任务引用."""
+    if timer_ref.current is task:
+        timer_ref.current = None
+
+
+def _resolve_table_data(
+    current_page_rows: tuple[ScreenerRow, ...],
+    memo_ref: ft.Ref[tuple | None],
+    vm: ScreenerViewModel,
+) -> tuple[list, list[dict]]:
+    """解析表格列与行数据 (带基于引用与 locale 的 memo 缓存)."""
+    if not current_page_rows:
+        memo_ref.current = None
+        return [], []
+    memo = memo_ref.current
+    if memo is not None and memo[0] is current_page_rows and memo[1] == get_observable_state().locale:
+        return memo[2], memo[3]
+    vt_columns, formatted_rows = _build_table_data(current_page_rows, vm)
+    memo_ref.current = (current_page_rows, get_observable_state().locale, vt_columns, formatted_rows)
+    return vt_columns, formatted_rows
+
+
+def _build_screener_control_card(
+    state: ScreenerState,
+    vm: ScreenerViewModel,
+    *,
+    status_text_value: str,
+    status_text_color: str,
+    progress_visible: bool,
+    run_disabled: bool,
+    export_btn_disabled: bool,
+    prompt_error: str,
+    handlers: dict[str, typing.Any],
+) -> ft.Container:
+    """构建顶部控制卡 (标题栏/模式切换/策略下拉/参数面板/操作按钮)."""
     is_realtime = state.mode == "REALTIME"
 
-    # 1. 顶部控制区
     title_row = ft.Row(
         safe_controls(
             [
@@ -1369,7 +1123,7 @@ def ScreenerView(
                         ),
                     ],
                     selected=[state.mode],
-                    on_change=safe_on_change(_on_mode_change),
+                    on_change=safe_on_change(handlers["on_mode_change"]),
                 ),
             ]
         ),
@@ -1377,7 +1131,6 @@ def ScreenerView(
         spacing=10,
     )
 
-    # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
     strategy_label = I18n.get("select_strategy")
     strategy_options = _build_strategy_options(state.strategies_with_dep)
     strategy_dropdown = anchored(
@@ -1386,7 +1139,7 @@ def ScreenerView(
             label=strategy_label,
             options=strategy_options,
             value=state.selected_strategy,
-            on_select=safe_on_select(_on_strategy_change),
+            on_select=safe_on_select(handlers["on_strategy_change"]),
             width=AppStyles.calc_dropdown_width(strategy_options, label=strategy_label),
             text_size=AppStyles.FONT_SIZE_LG,
             bgcolor=AppColors.INPUT_BG,
@@ -1396,8 +1149,6 @@ def ScreenerView(
         ),
     )
 
-    # UX-04: 股票代码过滤输入 — 并入策略下拉同一行 (避免增加主体/表格垂直高度,
-    # 挤占 PaginatedTable 视口导致 E2E 行点击塌陷)。
     stock_filter_field = ft.TextField(
         label=I18n.get("screener_filter_stock"),
         value=state.stock_filter,
@@ -1406,9 +1157,8 @@ def ScreenerView(
         focused_border_color=AppColors.PRIMARY,
         text_size=AppStyles.FONT_SIZE_BODY,
         width=AppStyles.CONTROL_WIDTH_SM,
-        on_change=safe_on_change(_on_stock_filter_change),
-        # D19: Enter 提交 → 触发策略运行 (表单主操作)
-        on_submit=safe_on_change(_on_run_click_sync),
+        on_change=safe_on_change(handlers["on_stock_filter_change"]),
+        on_submit=safe_on_change(handlers["on_run_click_sync"]),
     )
     filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
 
@@ -1431,12 +1181,12 @@ def ScreenerView(
             *build_params_panel(
                 state,
                 vm,
-                state.strategy_params,
-                _on_slider_value_change,
-                _update_param,
-                _on_save_prompt,
-                _on_restore_prompt,
-                prompt_error,  # D19: AI prompt inline 错误透传
+                dict(state.strategy_params),
+                handlers["on_slider_value_change"],
+                handlers["on_update_param"],
+                handlers["on_save_prompt"],
+                handlers["on_restore_prompt"],
+                prompt_error,
             ),
         ],
         spacing=10,
@@ -1445,15 +1195,13 @@ def ScreenerView(
 
     left_controls = ft.Column([title_row, realtime_controls], spacing=10)
 
-    # UX-02 (P0-01): 质量门失败态恢复动作 — status_action_key 即 i18n key (tier_hint 同范式),
-    # 非空时渲染「前往同步」按钮, 深链到设置页数据源子页
     go_sync_btn = ft.TextButton(
         content=I18n.get(state.status_action_key) if state.status_action_key else "",
         icon=ft.Icons.SYNC,
         style=ft.ButtonStyle(color=AppColors.PRIMARY),
         height=30,
         visible=state.status_action_key is not None,
-        on_click=safe_on_click(_on_go_sync_click),
+        on_click=safe_on_click(handlers["on_go_sync_click"]),
     )
 
     status_row = ft.Row(
@@ -1466,12 +1214,11 @@ def ScreenerView(
         spacing=10,
     )
 
-    # Task 3.2: loading 时切换为停止按钮 (STOP icon + cancel handler, 可点击)
     if state.loading:
         run_btn = ft.Button(
             content=I18n.get("stop_screening"),
             icon=ft.Icons.STOP,
-            on_click=safe_on_click(_on_cancel_click_sync),
+            on_click=safe_on_click(handlers["on_cancel_click_sync"]),
             disabled=False,
             style=AppStyles.primary_button(),
             height=45,
@@ -1483,7 +1230,7 @@ def ScreenerView(
             ft.Button(
                 content=I18n.get("run_screening"),
                 icon=ft.Icons.PLAY_ARROW,
-                on_click=safe_on_click(_on_run_click_sync),
+                on_click=safe_on_click(handlers["on_run_click_sync"]),
                 disabled=run_disabled,
                 style=AppStyles.primary_button(),
                 height=45,
@@ -1495,7 +1242,7 @@ def ScreenerView(
         ft.Button(
             content=I18n.get("screener_export"),
             icon=ft.Icons.DOWNLOAD,
-            on_click=safe_on_click(_on_export_csv_click),
+            on_click=safe_on_click(handlers["on_export_csv_click"]),
             disabled=export_btn_disabled,
             style=AppStyles.outline_button(),
             height=45,
@@ -1506,17 +1253,16 @@ def ScreenerView(
         ft.Button(
             content=I18n.get("data_export_excel"),
             icon=ft.Icons.TABLE_VIEW,
-            on_click=safe_on_click(_on_export_excel_click),
+            on_click=safe_on_click(handlers["on_export_excel_click"]),
             disabled=export_btn_disabled,
             style=AppStyles.outline_button(),
             height=45,
         ),
     )
-    # Task 8.3: 选股→回测跳转按钮 (仅 realtime 模式 + 选中策略时可用)
     backtest_btn = ft.Button(
         content=I18n.get("screener_run_backtest"),
         icon=ft.Icons.SCIENCE,
-        on_click=safe_on_click(_on_backtest_click_sync),
+        on_click=safe_on_click(handlers["on_backtest_click_sync"]),
         disabled=run_disabled or not is_realtime,
         style=AppStyles.outline_button(),
         height=45,
@@ -1527,17 +1273,13 @@ def ScreenerView(
         [
             status_row,
             ft.Row([export_btn, export_excel_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
-            # backtest_btn 独立一行右对齐：与导出/执行按钮同行会加宽 right_controls ~109px,
-            # 压缩左侧 left_controls 使参数面板宽度受控, 表体视口被压到 0 →
-            # 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
-            # 独立成行只增加 right_controls 固有高度, 不改变宽度。
             ft.Row([backtest_btn], alignment=ft.MainAxisAlignment.END),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         horizontal_alignment=ft.CrossAxisAlignment.END,
     )
 
-    control_card = ft.Container(
+    return ft.Container(
         content=ft.Row(
             [ft.Container(content=left_controls, expand=True), right_controls],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1546,13 +1288,28 @@ def ScreenerView(
         **AppStyles.dashboard_card(padding=AppStyles.SPACING_XL),
     )
 
-    # 2. 表格区
+
+def _build_screener_table_card(
+    *,
+    state: ScreenerState,
+    formatted_rows: list[dict],
+    vt_columns: list,
+    on_prev_page: typing.Callable[[ft.ControlEvent], None],
+    on_next_page: typing.Callable[[ft.ControlEvent], None],
+    on_page_size_change: typing.Callable[[ft.ControlEvent], None],
+    on_virtual_sort: typing.Callable[[str, bool], None],
+    on_row_click: typing.Callable[[dict], None],
+) -> ft.Container:
+    """构建表格卡片区 (包含虚拟化表格/分页栏/空态)."""
+    page_no = state.page_no
+    total_pages = state.total_pages
+
     pagination_row = ft.Row(
         safe_controls(
             [
                 ft.IconButton(
                     ft.Icons.CHEVRON_LEFT,
-                    on_click=safe_on_click(_on_prev_page),
+                    on_click=safe_on_click(on_prev_page),
                     icon_color=AppColors.PRIMARY,
                     disabled=page_no <= 1,
                     tooltip=I18n.get("screener_page_prev"),
@@ -1563,7 +1320,7 @@ def ScreenerView(
                 ),
                 ft.IconButton(
                     ft.Icons.CHEVRON_RIGHT,
-                    on_click=safe_on_click(_on_next_page),
+                    on_click=safe_on_click(on_next_page),
                     icon_color=AppColors.PRIMARY,
                     disabled=page_no >= total_pages,
                     tooltip=I18n.get("screener_page_next"),
@@ -1576,20 +1333,15 @@ def ScreenerView(
                     width=AppStyles.CONTROL_WIDTH_SM,
                     dense=True,
                     text_size=AppStyles.FONT_SIZE_BODY,
-                    on_select=safe_on_select(_on_page_size_change),
+                    on_select=safe_on_select(on_page_size_change),
                 ),
             ]
         ),
         alignment=ft.MainAxisAlignment.CENTER,
     )
 
-    # P1-3 批次 2 #70/#71: 表格空态分支 (formatted_rows 为空且非 loading 时显示 EmptyState)
-    # Task 3.5: 移除误导性 CTA (clear_filters 不清结果集也不触发重运行),
-    # 用户可通过工具栏的运行按钮重新执行策略
     table_content: ft.Control
     if not formatted_rows and not state.loading:
-        # UX-04: 过滤框并入控制卡下拉行 (见 realtime_controls), 表格区不再内嵌,
-        # 过滤无结果 → 可清空恢复, 不锁死恢复路径。
         table_content = ft.Column(
             [
                 ft.Container(
@@ -1612,8 +1364,8 @@ def ScreenerView(
                     columns=vt_columns,
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
-                    on_sort=_on_virtual_sort,
-                    on_row_click=_on_row_click,
+                    on_sort=on_virtual_sort,
+                    on_row_click=on_row_click,
                     col_anchor=EIDS.SCREENER.column_header,
                     row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
                 ),
@@ -1624,16 +1376,21 @@ def ScreenerView(
             expand=True,
         )
 
-    table_card = ft.Container(
+    return ft.Container(
         content=table_content,
         **AppStyles.dashboard_card(padding=0),
-        # expand=2: 表格区分得 main_body 剩余高度的 2/3 (log_card 1/3)。
-        # 1:1 均分时控制卡内容稍高 (如参数面板换行) 就会把表体视口压到 0,
-        # 虚拟化行不构建 → 行文本从语义树消失 (PR #373 E2E 回归根因)。
         expand=2,
     )
 
-    # 3. AI 分析报告区 (仅 REALTIME 模式)
+
+def _build_screener_log_card(
+    *,
+    stream_cards: tuple[StreamCard, ...],
+    stream_cards_truncated: bool,
+    is_realtime: bool,
+    on_retry_click: typing.Callable[[str], None],
+) -> ft.Container:
+    """构建 AI 流式分析卡片区 (仅 REALTIME 模式有效)."""
     log_column_controls: list[ft.Control] = [
         ft.Text(
             I18n.get("ai_analysis_report"),
@@ -1643,7 +1400,7 @@ def ScreenerView(
         ),
         ft.Container(
             content=ft.Column(
-                [build_stream_card(c, _on_retry_click) for c in state.stream_cards],
+                [build_stream_card(c, on_retry_click) for c in stream_cards],
                 expand=True,
                 spacing=4,
                 scroll=ft.ScrollMode.ALWAYS,
@@ -1654,8 +1411,7 @@ def ScreenerView(
             expand=True,
         ),
     ]
-    # Task 8.4: 卡片截断提示 — 超过 _MAX_LOG_CARDS 时显示折叠提示
-    if state.stream_cards_truncated:
+    if stream_cards_truncated:
         log_column_controls.append(
             ft.Text(
                 I18n.get("ai_cards_truncated_hint").format(max=_MAX_LOG_CARDS),
@@ -1664,68 +1420,319 @@ def ScreenerView(
                 text_align=ft.TextAlign.CENTER,
             )
         )
-    log_card = ft.Container(
-        content=ft.Column(
-            log_column_controls,
-            spacing=5,
-        ),
-        # 仅当有流式/AI 卡片时展开抢占高度; 否则折叠, 避免挤压表格视口
-        # (PR #591 E2E 回归根因: 空 log_card 占 1/3 高度 → 表格行视口高度塌陷)。
-        expand=bool(state.stream_cards),
+    return ft.Container(
+        content=ft.Column(log_column_controls, spacing=5),
+        expand=bool(stream_cards),
         padding=ft.Padding.only(top=10),
         visible=is_realtime,
     )
 
-    # 4. 右侧内容 (表格 + 日志)
+
+def _build_screener_main_body(
+    *,
+    is_realtime: bool,
+    table_card: ft.Container,
+    log_card: ft.Container,
+    history_tree: typing.Any,
+    on_tree_item_click: typing.Callable[[str, str | None, str | None], None],
+    on_load_more_history: typing.Callable[[ft.ControlEvent], None],
+    on_load_width: typing.Callable[[], int | None],
+    on_persist_width: typing.Callable[[int], None],
+) -> ft.Control:
+    """构建选股视图主体 (REALTIME 单栏 vs HISTORY 分割器)."""
     right_content = ft.Column(
         [table_card, log_card] if is_realtime else [table_card],
         expand=True,
         spacing=10,
     )
-
-    # 5. 主布局: REALTIME 模式无侧栏; HISTORY 模式 ResizableSplitter(历史树 + 右侧)
     if is_realtime:
-        main_body = right_content
-    else:
-        main_body = ResizableSplitter(
-            left_content=build_history_tree(
-                state.history_tree.rows,
-                state.history_tree.offset,
-                state.history_tree.has_more,
-                _on_tree_item_click,
-                _on_load_more_history,
-            ),
-            right_content=right_content,
-            config_key="ui_splitter_screener_history",
-            default_width=250,
-            min_width=220,
-            max_width=420,
-            collapsible=True,
-            collapsed=False,
-            on_load_width=lambda: vm.get_splitter_width("ui_splitter_screener_history", 250),
-            on_persist_width=lambda w: vm.persist_splitter_width("ui_splitter_screener_history", w),
-        )
+        return right_content
 
-    # 6. 详情对话框 (条件渲染)
-    dialog_control: ft.Control | None = None
-    if detail_dialog_data is not None:
-        page = _get_page()
-        dialog_control = StockDetailDialog(
-            stock_data=detail_dialog_data,
-            data_processor=vm.data_processor,
-            page=page,
-            open_state=True,
-            on_close=_on_detail_close,
-            on_add_to_watchlist=_on_add_to_watchlist,
-        )
+    return ResizableSplitter(
+        left_content=build_history_tree(
+            history_tree.rows,
+            history_tree.offset,
+            history_tree.has_more,
+            on_tree_item_click,
+            on_load_more_history,
+        ),
+        right_content=right_content,
+        config_key="ui_splitter_screener_history",
+        default_width=250,
+        min_width=220,
+        max_width=420,
+        collapsible=True,
+        collapsed=False,
+        on_load_width=on_load_width,
+        on_persist_width=on_persist_width,
+    )
 
-    content_controls = [control_card, main_body]
-    if dialog_control is not None:
-        content_controls.append(dialog_control)
+
+def _build_stock_detail_dialog(
+    *,
+    detail_dialog_data: typing.Any,
+    data_processor: typing.Any,
+    page: ft.Page | None,
+    on_close: typing.Callable[[], None],
+    on_add_to_watchlist: typing.Callable[[str, str], None],
+) -> ft.Control | None:
+    """按需构建股票详情对话框."""
+    if detail_dialog_data is None:
+        return None
+    return StockDetailDialog(
+        stock_data=detail_dialog_data,
+        data_processor=data_processor,
+        page=page,
+        open_state=True,
+        on_close=on_close,
+        on_add_to_watchlist=on_add_to_watchlist,
+    )
+
+
+@ft.component
+def ScreenerView(
+    initial_strategy: str | None = None,
+    active: bool = True,
+    stock_filter_request: tuple[str, int] | None = None,
+) -> ft.Container:
+    """选股视图 (声明式)."""
+    state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
+    _wl_state, wl_vm = use_viewmodel(factory=lambda: WatchlistViewModel())
+
+    ft.use_state(get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
+
+    detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
+    pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
+    prompt_error, set_prompt_error = ft.use_state("")
+    desc_timer_ref = ft.use_ref(lambda: None)
+    table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
+    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+
+    ft.use_effect(
+        lambda: _sync_file_picker_service(_get_page(), file_picker, True) if active else None,
+        dependencies=[active],
+        cleanup=lambda: _sync_file_picker_service(_get_page(), file_picker, False),
+    )
+
+    ft.use_effect(
+        lambda: vm.subscribe_task_manager() if active else None,
+        dependencies=[active],
+        cleanup=vm.unsubscribe_task_manager,
+    )
+
+    ft.use_effect(lambda: vm.load_strategies() if active else None, dependencies=[active])
+
+    async def _execute_pending_strategy() -> None:
+        if not active or not state.strategies_loaded or not pending_strategy:
+            return
+        key = pending_strategy
+        set_pending_strategy(None)
+        if not any(r.key == key for r in state.strategies_with_dep):
+            logger.warning("[ScreenerView] Pending strategy %s not found.", key)
+            return
+        await _execute_pending_strategy_run(vm, key)
+
+    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
+
+    ft.use_effect(
+        lambda: (
+            vm.set_stock_filter(stock_filter_request[0]) if stock_filter_request and stock_filter_request[0] else None
+        ),
+        dependencies=[stock_filter_request],
+    )
+
+    def _on_strategy_change(e: ft.ControlEvent) -> None:
+        new_val = get_control_value(e.control, ft.Dropdown) if e and e.control else None
+        UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
+        vm.select_strategy(new_val)
+        vm.update_strategy_desc(new_val)
+        if new_val:
+            vm.init_strategy_params(new_val)
+        else:
+            vm.reset_strategy_params()
+
+    async def _on_run_click(e: ft.ControlEvent) -> None:
+        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={state.selected_strategy}")
+        if not state.selected_strategy:
+            return
+        try:
+            await vm.run_strategy(state.selected_strategy, params=dict(vm.state.strategy_params))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[ScreenerView] Run strategy failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
+
+    def _on_run_click_sync(e: ft.ControlEvent) -> None:
+        if page := _get_page():
+            page.run_task(_on_run_click, e)
+
+    async def _on_sort(col_id: str, new_asc: bool) -> None:
+        try:
+            await vm.sort_data(col_id, new_asc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("[ScreenerView] Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+
+    def _on_virtual_sort(col_id: str, new_asc: bool) -> None:
+        if page := _get_page():
+            page.run_task(_on_sort, col_id, new_asc)
+
+    async def _do_export(format_: str) -> None:
+        await _execute_screener_export(vm, file_picker, _get_page(), format_)
+
+    def _on_export_csv_click(e: ft.ControlEvent) -> None:
+        if page := _get_page():
+            page.run_task(_do_export, "csv")
+
+    def _on_export_excel_click(e: ft.ControlEvent) -> None:
+        if page := _get_page():
+            page.run_task(_do_export, "excel")
+
+    def _on_stock_filter_change(e: ft.ControlEvent) -> None:
+        UILogger.log_action("ScreenerView", "Input", "stock_filter")
+        vm.set_stock_filter(get_control_value(e.control, ft.TextField) or "")
+
+    def _on_page_size_change(e: ft.ControlEvent) -> None:
+        _handle_page_size_change(vm, e)
+
+    async def _load_history_tree(append: bool) -> None:
+        await _execute_load_history_tree(vm, _get_page(), append)
+
+    def _on_load_more_history(e: ft.ControlEvent) -> None:
+        if page := _get_page():
+            page.run_task(_load_history_tree, True)
+
+    def _on_mode_change(e: ft.ControlEvent) -> None:
+        selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
+        if not selected:
+            return
+        new_mode = list(selected)[0]
+        UILogger.log_action("ScreenerView", "Toggle", f"mode={new_mode}")
+        if new_mode == state.mode:
+            return
+        if new_mode == "HISTORY":
+            vm.switch_to_history()
+            if page := _get_page():
+                page.run_task(_load_history_tree, False)
+        else:
+            vm.switch_to_realtime()
+
+    async def _load_history_for_date(trade_date: str, strategy_name: str | None, run_id: str | None) -> None:
+        await _execute_load_history_for_date(vm, _get_page(), trade_date, strategy_name, run_id)
+
+    def _on_tree_item_click(trade_date: str, strategy_name: str | None = None, run_id: str | None = None) -> None:
+        if page := _get_page():
+            page.run_task(_load_history_for_date, trade_date, strategy_name, run_id)
+
+    def _on_row_click(row_data: dict) -> None:
+        set_detail_dialog_data(typing.cast(typing.Any, row_data.get("_raw", row_data)))
+
+    async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
+        await _execute_add_to_watchlist(wl_vm, _get_page(), ts_code, stock_name)
+
+    def _on_add_to_watchlist(ts_code: str, stock_name: str) -> None:
+        if page := _get_page():
+            page.run_task(_do_add_to_watchlist, ts_code, stock_name)
+
+    def _update_param(name: str, val: typing.Any) -> None:
+        _handle_update_param(vm, name, val, prompt_error, set_prompt_error)
+
+    def _on_slider_value_change(name: str, val: float) -> None:
+        _update_param(name, val)
+        if state.selected_strategy:
+            _schedule_desc_update(desc_timer_ref, vm, state.selected_strategy)
+
+    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField | None) -> None:
+        await _execute_restore_default_prompt(vm, _get_page(), strat, _update_param)
+
+    async def _do_save_prompt_async(strat: str) -> None:
+        await _execute_save_prompt(vm, _get_page(), strat, set_prompt_error)
+
+    def _on_restore_prompt(strat: str) -> None:
+        if page := _get_page():
+            page.run_task(_do_restore_default_async, strat, None)
+
+    def _on_save_prompt(strat: str) -> None:
+        if page := _get_page():
+            page.run_task(_do_save_prompt_async, strat)
+
+    status_text_value = _render_status_message(state.status_message)
+    status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
+    vt_columns, formatted_rows = _resolve_table_data(state.current_page_rows, table_memo_ref, vm)
+
+    progress_visible = state.loading
+    run_disabled = state.loading or state.is_retrying or not state.selected_strategy
+    export_btn_disabled = not vm.has_export_data
+    is_realtime = state.mode == "REALTIME"
+
+    control_card = _build_screener_control_card(
+        state,
+        vm,
+        status_text_value=status_text_value,
+        status_text_color=status_text_color,
+        progress_visible=progress_visible,
+        run_disabled=run_disabled,
+        export_btn_disabled=export_btn_disabled,
+        prompt_error=prompt_error,
+        handlers={
+            "on_mode_change": _on_mode_change,
+            "on_strategy_change": _on_strategy_change,
+            "on_stock_filter_change": _on_stock_filter_change,
+            "on_run_click_sync": _on_run_click_sync,
+            "on_cancel_click_sync": lambda _: vm.cancel_strategy(),
+            "on_slider_value_change": _on_slider_value_change,
+            "on_update_param": _update_param,
+            "on_save_prompt": _on_save_prompt,
+            "on_restore_prompt": _on_restore_prompt,
+            "on_go_sync_click": lambda _: _handle_go_sync(_get_page()),
+            "on_export_csv_click": _on_export_csv_click,
+            "on_export_excel_click": _on_export_excel_click,
+            "on_backtest_click_sync": lambda _: _handle_backtest_jump(state, vm, _get_page()),
+        },
+    )
+
+    table_card = _build_screener_table_card(
+        state=state,
+        formatted_rows=formatted_rows,
+        vt_columns=vt_columns,
+        on_prev_page=lambda _: vm.change_page(-1),
+        on_next_page=lambda _: vm.change_page(1),
+        on_page_size_change=_on_page_size_change,
+        on_virtual_sort=_on_virtual_sort,
+        on_row_click=_on_row_click,
+    )
+
+    log_card = _build_screener_log_card(
+        stream_cards=state.stream_cards,
+        stream_cards_truncated=state.stream_cards_truncated,
+        is_realtime=is_realtime,
+        on_retry_click=lambda name: vm.schedule_retry(name),
+    )
+
+    main_body = _build_screener_main_body(
+        is_realtime=is_realtime,
+        table_card=table_card,
+        log_card=log_card,
+        history_tree=state.history_tree,
+        on_tree_item_click=_on_tree_item_click,
+        on_load_more_history=_on_load_more_history,
+        on_load_width=lambda: int(vm.get_splitter_width("ui_splitter_screener_history", 250)),
+        on_persist_width=lambda w: vm.persist_splitter_width("ui_splitter_screener_history", w),
+    )
+
+    dialog_control = _build_stock_detail_dialog(
+        detail_dialog_data=detail_dialog_data,
+        data_processor=vm.data_processor,
+        page=_get_page(),
+        on_close=lambda: set_detail_dialog_data(None),
+        on_add_to_watchlist=_on_add_to_watchlist,
+    )
 
     return ft.Container(
         content=ft.Column(
-            content_controls,
+            [control_card, main_body, *([dialog_control] if dialog_control is not None else [])],
             expand=True,
             spacing=15,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
