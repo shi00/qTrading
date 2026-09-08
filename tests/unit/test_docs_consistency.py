@@ -1178,6 +1178,13 @@ class TestEnforcementMapping:
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N1 正例不应报错, got: {errors}"
 
+    def test_r9_enforcement_triggers_n1_and_n4(self):
+        """GDR-05: 真实 redlines.yml 中 R9 的 enforcement 包含 check_redlines.py 与安全扫描，均通过 N1 与 N4."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        errors = check_enforcement_mapping()
+        assert errors == [], f"check_enforcement_mapping 应通过, got: {errors}"
+
     def test_n1_check_redlines_script_missing(self):
         """N1: hook + entry 正确但 scripts/check_redlines.py 文件不存在 → 报错."""
         from check_docs_consistency import (

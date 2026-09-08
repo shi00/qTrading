@@ -98,7 +98,7 @@ redlines:
   - id: R9
     title: 敏感信息泄露
     description: "日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 DataSanitizer 脱敏)"
-    enforcement: "安全扫描 + 仅人工评审"
+    enforcement: "安全扫描 + pre-commit（check_redlines.py，静态脱敏检查） + 仅人工评审"
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
