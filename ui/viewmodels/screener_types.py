@@ -18,10 +18,23 @@ import pandas as pd
 
 from ui.viewmodels import Message
 
-# Stream card throttle and limit (moved from View, VM owns card lifecycle)
-# NOTE(lazy): 流式节流 50ms (~20fps) 平衡流畅度与 reconcile 压力. ceiling: 策略结果行数 >5000 时 20fps 可能卡顿. upgrade: 行数突破 ceiling 或用户反馈卡顿时改 33ms/动态节流.
-_STREAM_THROTTLE = 0.05  # seconds
-_MAX_LOG_CARDS = 10
+# Stream card limit (moved from View, VM owns card lifecycle)
+MAX_LOG_CARDS = 10
+_MAX_LOG_CARDS = MAX_LOG_CARDS  # 向后兼容别名
+
+__all__ = [
+    "MAX_LOG_CARDS",
+    "_MAX_LOG_CARDS",
+    "LogEntry",
+    "StreamCard",
+    "StrategyRunRow",
+    "HistoryTreeRow",
+    "HistoryTreeState",
+    "RealtimeSnapshot",
+    "StrategyDepRow",
+    "ScreenerRow",
+    "ScreenerState",
+]
 
 
 @dataclass(frozen=True)

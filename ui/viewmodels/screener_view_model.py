@@ -21,6 +21,7 @@ from ui.viewmodels.export_mixin import ExportMixin
 from ui.viewmodels.history_mode_mixin import HistoryModeMixin
 from ui.viewmodels.pagination_sorting_mixin import PaginationSortingMixin
 from ui.viewmodels.screener_types import (
+    MAX_LOG_CARDS,  # re-export
     HistoryTreeRow,  # re-export
     HistoryTreeState,  # re-export
     LogEntry,  # re-export
@@ -55,6 +56,7 @@ __all__ = [
     "LogEntry",
     "RealtimeSnapshot",
     "TASK_NAME_PREFIX",
+    "MAX_LOG_CARDS",
     "_MAX_LOG_CARDS",
 ]
 
@@ -199,6 +201,7 @@ class ScreenerViewModel(
 
         self._full_results = None
         self._ai_buffer = []
+        self._discarded_buffer.clear()
         self._realtime_snapshot = None
         self._state = ScreenerState()
 
@@ -217,7 +220,8 @@ class ScreenerViewModel(
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("[ScreenerVM] Background task failed: %s", DataSanitizer.sanitize_error(exc), exc_info=exc)
+            err_msg = DataSanitizer.sanitize_error(exc) if isinstance(exc, Exception) else str(exc)
+            logger.error("[ScreenerVM] Background task failed: %s", err_msg, exc_info=exc)
 
     # --- Splitter width persistence (P1-1/P2-1: View 不再直接 import ConfigHandler) ---
 

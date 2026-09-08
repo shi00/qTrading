@@ -145,7 +145,7 @@ UI 层实际并存四种状态机制，本表是"什么状态放哪里"的正本
 | `ui/viewmodels/export_mixin.py` | CSV / Excel / bytes 导出 |
 | `ui/viewmodels/screener_view_model.py` | 组合类：跨职责编排、异步基建、splitter 持久化；**再导出** `ScreenerRow`/`ScreenerState` 等，保持既有 `from ...screener_view_model import X` 接口不变 |
 
-**新装约束**：新增 mixin 不得跨 mixin 直接调用对方私有方法；共享状态一律经 `screener_types` 定义；组合类保持为唯一 `use_viewmodel` 消费入口。
+**新装约束**：各职责 mixin 作为 ScreenerViewModel 的内部切片，不得跨 mixin 随意篡改对方私有状态机（如重试生命周期内聚于 AIStreamMixin，外部经 `cancel_retry()` 统一协调）；分页切片唯一由 PaginationSortingMixin._update_pagination 产出；公共状态数据结构一律经 screener_types 定义；组合类保持为唯一 use_viewmodel 消费入口。
 
 ### 存量技术债
 

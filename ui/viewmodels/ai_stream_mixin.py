@@ -18,8 +18,9 @@ import inspect
 import logging
 import time
 import typing
+from collections.abc import Callable, Coroutine
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -31,12 +32,20 @@ from ui.viewmodels.screener_types import (
     ScreenerState,
     StreamCard,
     _MAX_LOG_CARDS,
-    _STREAM_THROTTLE,
 )
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
+if TYPE_CHECKING:
+    from data.data_processor import DataProcessor
+    from data.persistence.review_manager import ReviewManager
+    from strategies.all_strategies import StrategyManager
+
 logger = logging.getLogger(__name__)
+
+# Stream card throttle
+# NOTE(lazy): 流式节流 50ms (~20fps) 平衡流畅度与 reconcile 压力. ceiling: 策略结果行数 >5000 时 20fps 可能卡顿. upgrade: 行数突破 ceiling 或用户反馈卡顿时改 33ms/动态节流.
+_STREAM_THROTTLE = 0.05  # seconds
 
 
 class AIStreamMixin:
@@ -45,6 +54,29 @@ class AIStreamMixin:
     AI_UPDATE_INTERVAL = 0.5  # Seconds
 
     _state: ScreenerState
+    _full_results: pd.DataFrame | None
+    _ai_buffer: list[dict]
+    _discarded_buffer: list[dict]
+    _stream_buffers: dict[str, dict]
+    _last_ai_update: float
+    _flush_pending: bool
+    _background_tasks: set[asyncio.Task]
+    _strategy_submitted: bool
+    _active_task_id: str | None
+    _last_ai_context: dict | None
+    _last_strategy_key: str | None
+    _retrying: bool
+    _retrying_name: str | None
+    _retrying_prev_error: str | None
+    _retry_task: asyncio.Task | None
+    strategy_mgr: StrategyManager
+    review_mgr: ReviewManager
+    _set_state: Callable[..., None]
+    _update_pagination: Callable[..., None]
+    _sort_helper: Callable[..., Any]
+    _ensure_processor: Callable[[], Coroutine[Any, Any, DataProcessor]]
+    _get_loop_or_none: Callable[[], asyncio.AbstractEventLoop | None]
+    _on_background_task_done: Callable[[asyncio.Task], None]
 
     def clear_stream_cards(self) -> None:
         """Clear all stream cards and buffers (called on new run)."""
@@ -203,6 +235,26 @@ class AIStreamMixin:
         self._retry_task = task
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
+
+    def cancel_retry(self) -> None:
+        """UX-2.3: 取消当前正在执行的单股重试任务并清理重试状态上下文。"""
+        if not self._retrying:
+            return
+        if self._retry_task is not None and not self._retry_task.done():
+            self._retry_task.cancel()
+        self._retry_task = None
+        self._retrying = False
+        # P1-1: 取消重试后终结占位卡（否则 is_analyzing=True 卡永久停留在"分析中"旋转假死）。
+        # 仅当确有重试中的占位卡名时还原为错误态，后续 on_result/on_card_error 均不会再来。
+        # 还原重试前的原始错误文案（VM 不感知 locale，§3.2），不调用 I18n。
+        if self._retrying_name:
+            self._on_card_error(self._retrying_name, self._retrying_prev_error or "screener_ai_incomplete")
+        self._retrying_name = None
+        self._retrying_prev_error = None
+        # 清空重试上下文（防止 retry_single 完成后回调污染新策略）
+        self._last_ai_context = None
+        self._last_strategy_key = None
+        self._set_state(is_retrying=False)
 
     # --- AI Streaming Handlers ---
 

@@ -249,6 +249,25 @@ class TestScreenerViewModelDisposeBackgroundTasks:
         assert vm.state == original  # state 未变
         assert calls == []  # subscriber 未被调用
 
+    def test_dispose_clears_discarded_buffer(self, vm):
+        """dispose 清空 _discarded_buffer 内存缓存."""
+        vm._discarded_buffer = [{"item": 1}, {"item": 2}]
+        vm.dispose()
+        assert vm._discarded_buffer == []
+
+    def test_max_log_cards_exports(self):
+        """验证 MAX_LOG_CARDS 与 _MAX_LOG_CARDS 正常导出且对齐."""
+        from ui.viewmodels.screener_types import MAX_LOG_CARDS, _MAX_LOG_CARDS
+        from ui.viewmodels.screener_view_model import (
+            MAX_LOG_CARDS as VM_MAX_LOG_CARDS,
+            _MAX_LOG_CARDS as VM_UNDERSCORE_MAX_LOG_CARDS,
+        )
+
+        assert MAX_LOG_CARDS == 10
+        assert _MAX_LOG_CARDS == 10
+        assert VM_MAX_LOG_CARDS == 10
+        assert VM_UNDERSCORE_MAX_LOG_CARDS == 10
+
     @pytest.mark.asyncio
     async def test_dispose_retains_task_reference_until_done_callback(self, vm):
         """DoD #2: dispose 取消任务但保留引用至 done callback 完成 (不立即 clear)."""

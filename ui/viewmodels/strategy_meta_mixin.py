@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
-
+from collections.abc import Callable
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import ScreenerState, StrategyDepRow
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
+
+if TYPE_CHECKING:
+    from strategies.all_strategies import StrategyManager
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,9 @@ class StrategyMetaMixin:
     """策略元数据与 tier 提示职责（C3-6）。组合进 ``ScreenerViewModel``。"""
 
     _state: ScreenerState
+    strategy_mgr: StrategyManager
+    _set_state: Callable[..., None]
+    cancel_retry: Callable[[], None]
 
     async def get_strategies(self) -> dict[str, str]:
         return self.strategy_mgr.get_all_names()
@@ -202,22 +208,8 @@ class StrategyMetaMixin:
         Args:
             key: 策略 key, None 表示清空选择
         """
-        # UX-2.3 v4 P0-2: 重试中切换策略 → 只取消重试 task（不取消 persist_splitter_width / _flush_ai_buffer 等其它后台任务）
-        if self._retrying:
-            if self._retry_task is not None and not self._retry_task.done():
-                self._retry_task.cancel()
-            self._retry_task = None
-            self._retrying = False
-            # P1-1: 取消重试后终结占位卡（否则 is_analyzing=True 卡永久停留在"分析中"旋转假死）。
-            # 仅当确有重试中的占位卡名时还原为错误态，后续 on_result/on_card_error 均不会再来。
-            # 还原重试前的原始错误文案（VM 不感知 locale，§3.2），不调用 I18n。
-            if self._retrying_name:
-                self._on_card_error(self._retrying_name, self._retrying_prev_error or "screener_ai_incomplete")
-            self._retrying_name = None
-            self._retrying_prev_error = None
-            # 清空重试上下文（防止 retry_single 完成后回调污染新策略）
-            self._last_ai_context = None
-            self._last_strategy_key = None
+        # UX-2.3 v4 P0-2: 重试中切换策略 → 取消重试任务并清理上下文
+        self.cancel_retry()
         tier_hint = self._compute_tier_hint(key)
         self._set_state(selected_strategy=key, tier_hint=tier_hint, is_retrying=False)
 

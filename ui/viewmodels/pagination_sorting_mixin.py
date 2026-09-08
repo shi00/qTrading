@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import typing
+from collections.abc import Callable
 from types import MappingProxyType
 
 import pandas as pd
@@ -31,6 +32,7 @@ class PaginationSortingMixin:
 
     _state: ScreenerState
     _full_results: pd.DataFrame | None
+    _set_state: Callable[..., None]
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None, **changes) -> None:
         """Recompute pagination fields in state, then notify via _set_state.
@@ -89,7 +91,7 @@ class PaginationSortingMixin:
         end = start + page_size
         page_slice = filtered.iloc[start:end]
         return tuple(
-            ScreenerRow(values=MappingProxyType(dict(record)))
+            ScreenerRow(values=MappingProxyType({str(k): v for k, v in record.items()}))
             for record in page_slice.to_dict("records")  # type: ignore[call-overload]
         )
 

@@ -406,3 +406,52 @@ class TestSelectStrategyDuringRetry:
         assert vm._retrying is False
         assert vm._last_ai_context is None
         assert vm._last_strategy_key is None
+
+
+class TestCancelRetry:
+    """cancel_retry 独立取消重试并恢复状态。"""
+
+    def test_cancel_retry_noop_when_not_retrying(self, vm):
+        vm._retrying = False
+        vm.cancel_retry()
+        assert vm._retrying is False
+
+    def test_cancel_retry_cancels_task_and_resets_card(self, vm):
+        vm._retrying = True
+        vm._retrying_name = "贵州茅台"
+        vm._retrying_prev_error = "网络超时"
+        task = MagicMock(spec=asyncio.Task)
+        task.done.return_value = False
+        vm._retry_task = task
+        vm._set_state(stream_cards=(_make_analyzing_card("贵州茅台"),), is_retrying=True)
+
+        vm.cancel_retry()
+
+        task.cancel.assert_called_once_with()
+        assert vm._retry_task is None
+        assert vm._retrying is False
+        assert vm._retrying_name is None
+        assert vm.state.is_retrying is False
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is False
+        assert card.error == "网络超时"
+
+
+class TestSwitchToHistoryDuringRetry:
+    """switch_to_history 触发时取消重试任务，避免切回后卡片假死。"""
+
+    def test_switch_to_history_cancels_ongoing_retry(self, vm):
+        vm._retrying = True
+        vm._retrying_name = "贵州茅台"
+        vm._retrying_prev_error = "超时"
+        task = MagicMock(spec=asyncio.Task)
+        task.done.return_value = False
+        vm._retry_task = task
+        vm._set_state(stream_cards=(_make_analyzing_card("贵州茅台"),), is_retrying=True)
+
+        vm.switch_to_history()
+
+        task.cancel.assert_called_once_with()
+        assert vm._retry_task is None
+        assert vm._retrying is False
+        assert vm.state.mode == "HISTORY"

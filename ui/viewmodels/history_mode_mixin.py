@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 
 import pandas as pd
@@ -38,11 +39,20 @@ class HistoryModeMixin:
     _state: ScreenerState
     _full_results: pd.DataFrame | None
     _realtime_snapshot: RealtimeSnapshot | None
+    _ai_buffer: list[dict]
+    _stream_buffers: dict[str, dict]
+    _discarded_buffer: list[dict]
+    _set_state: Callable[..., None]
+    _update_pagination: Callable[..., None]
+    cancel_retry: Callable[[], None]
 
     def switch_to_history(self):
         """Switch to HISTORY mode, snapshot current realtime state."""
         if self._state.mode == "HISTORY":
             return
+        # UX-2.3: 切换到历史模式前若有正在进行的单股重试，取消并重置占位卡
+        # 避免后台重试结束后无处回调、切回实时态时卡片永久停留在 is_analyzing
+        self.cancel_retry()
         # Snapshot realtime state
         self._realtime_snapshot = RealtimeSnapshot(
             full_results=self._full_results,
