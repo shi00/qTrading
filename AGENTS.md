@@ -3,7 +3,7 @@
 > **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致）
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离，与 CLAUDE.md 一致）：
 > - owner: 架构维护者
-> - ruleset_version: 1.3.0（规则集版本，与 CLAUDE.md 同步，规则变更时递增）
+> - ruleset_version: 1.3.1（规则集版本，与 CLAUDE.md 同步，规则变更时递增）
 > - review_triggers: 红线新增/变更、Flet 升级、检视报告发布时
 > - canonical_for: 跨工具红线最小安全集（导出镜像，非语义正本）
 

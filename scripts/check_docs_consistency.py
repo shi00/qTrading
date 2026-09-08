@@ -447,7 +447,8 @@ def _get_flet_locked_versions() -> set[str]:
 def check_flet_version_drift() -> list[str]:
     """检查项 5：Flet 版本漂移检查（CLAUDE.md §3.2 文档 SHALL NOT 硬编码 Flet 补丁版本号）。
 
-    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号。
+    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号
+    （含可选 `v` 前缀变体，如 `v1.2.3`，对抗检视 GDR-06 P1）。
     根据规范，任何在 Flet 上下文中出现的具体补丁版本号都应报错（不论是否与 pyproject.toml 锁定版本一致）。
 
     报错格式：``{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}``
@@ -457,7 +458,8 @@ def check_flet_version_drift() -> list[str]:
     # 取代表版本（三包通常锁定同一版本）用于报错信息
     actual_ver = next(iter(locked_versions)) if locked_versions else "unknown"
 
-    version_pattern = re.compile(r"\b\d+\.\d+\.\d+\b")
+    # GDR-06 P1：`[vV]?` 兼容 "Flet v1.2.3" / "Flet V1.2.3" 形式（`\b` 在 v/V 前，裸 \d+ 或纯小写 v? 漏检）
+    version_pattern = re.compile(r"\b[vV]?\d+\.\d+\.\d+\b")
     # Flet 关键词正则：匹配 "Flet" 或 "flet"（word boundary 防止匹配 "fletch" 等）
     flet_keyword_pattern = re.compile(r"\b[Ff]let\b")
 
@@ -1836,14 +1838,66 @@ def _load_exception_ids() -> list[str] | None:
     return [e["id"] for e in data["exceptions"] if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
+def _load_exception_r1_count() -> int:
+    """统计 exceptions.yml 中 rule_id=R1 的例外数；解析失败或结构非法返回 -1（调用方跳过断言）。"""
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return -1
+    if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
+        return -1
+    return sum(1 for e in data["exceptions"] if isinstance(e, dict) and e.get("rule_id") == "R1")
+
+
+def _load_r1_ignore_imports() -> tuple[list[str], list[str]] | None:
+    """加载 pyproject.toml 全部 R1 契约（名称以 'R1:' 开头）的 ignore_imports 条目。
+
+    GDR-01 数量闭环：回指注释（方向 1）只校验「引用的 EX id 已登记」，新增 ignore 条目但忘写
+    EX 注释时不产生 EX 文本引用、方向 1/2 均不报，本加载器配合方向 3 断言强制条目级同步。
+    解析失败返回 None（调用方跳过断言）；返回 (ignore_entries, duplicate_errors)。
+    """
+    try:
+        with open(PYPROJECT_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+    all_entries: list[str] = []
+    duplicate_errors: list[str] = []
+    seen: set[str] = set()
+
+    for contract in cfg.get("tool", {}).get("importlinter", {}).get("contracts", []):
+        name = str(contract.get("name", ""))
+        if name.startswith("R1:"):
+            for item in contract.get("ignore_imports", []):
+                s = str(item)
+                if s in seen:
+                    duplicate_errors.append(f"治理 id 引用: pyproject.toml 契约中 ignore_imports 存在重复条目: '{s}'")
+                else:
+                    seen.add(s)
+                all_entries.append(s)
+
+    return all_entries, duplicate_errors
+
+
+def _load_contract5_ignore_imports() -> list[str] | None:
+    """兼容别名：仅加载契约 5 的 ignore_imports 条目。"""
+    res = _load_r1_ignore_imports()
+    return res[0] if res is not None else None
+
+
 def _scan_exception_refs() -> set[str]:
     """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身与归档/记录/评测豁免目录）。
 
-    consumer 为 CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（活文档）；归档/记录/评测目录
-    由 _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
+    consumer 为 CLAUDE.md + CONTRIBUTING.md + pyproject.toml + docs/**/*.md（活文档）；
+    pyproject.toml 契约 5 ignore_imports 注释回指 EX id（GDR-01），纳入消费语料后方向 2
+    「登记必须被消费」对真实登记的例外不再误报孤儿；归档/记录/评测目录由
+    _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
     """
     refs: set[str] = set()
-    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH]
+    consumers = [CLAUDE_PATH, CONTRIBUTING_PATH, PYPROJECT_PATH]
     for path in DOCS_README_PATH.parent.rglob("*.md"):
         if path == EXCEPTIONS_YAML_PATH:
             continue
@@ -1880,6 +1934,19 @@ def check_governance_id_references() -> list[str]:
     # 方向 2: 孤儿登记（已登记但从未被消费文档引用）
     for ex_id in sorted(registered - refs):
         errors.append(f"治理 id 引用: {ex_id} 已在 exceptions.yml 登记，但从未被任何消费文档引用")
+    # 方向 3（GDR-01 数量闭环）: 全部以 R1: 开头的契约 ignore_imports 条目数必须等于 exceptions.yml 中
+    # rule_id=R1 登记数。新增 ignore 条目忘写 EX 注释时不产生 EX 文本引用（方向 1/2 均不报），
+    # 本断言强制条目级同步，堵住「例外游离于注册表之外」的复发路径。同时检查 ignore_imports 重复条目。
+    r1_res = _load_r1_ignore_imports()
+    if r1_res is not None:
+        ignore_entries, duplicate_errors = r1_res
+        errors.extend(duplicate_errors)
+        r1_count = _load_exception_r1_count()
+        if r1_count >= 0 and len(ignore_entries) != r1_count:
+            errors.append(
+                f"治理 id 引用: pyproject.toml R1 契约 ignore_imports 条目数 {len(ignore_entries)} "
+                f"!= exceptions.yml 中 rule_id=R1 登记数 {r1_count}（新增/删除 ignore 条目必须同步登记或回指 EX id）"
+            )
 
     return errors
 

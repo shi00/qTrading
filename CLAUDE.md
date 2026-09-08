@@ -3,11 +3,11 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-03
+> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-08
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.3.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-03
+> - ruleset_version: 1.3.1（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-09-08
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
@@ -203,6 +203,7 @@
 - `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块大小见 `base_dao.py` 的 `_UPSERT_CHUNK_SIZE`。
 - **数据质量门控**：业务逻辑前必须经过 `@require_quality` 指定所需质量等级（普通策略使用该装饰器；而向量化 `PolarsBaseStrategy` 必须且只能通过类属性 `required_quality_tier` 覆盖默认等级）。
 - Pre-commit hooks 必须在提交前执行并保持通过；新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
+- **Flet 版本号引用（GDR-06）**：治理文档（CLAUDE.md / CONTRIBUTING.md / docs/flet/**）SHALL NOT 硬编码 Flet 补丁版本号（`x.y.z` 形式，含可选 `v` 前缀变体）；该门禁按行扫描、对正文与代码块同样拦截，需引用版本号时以「主版本.次版本」等相对描述代替（由 `check_docs_consistency.py` 的 Flet 版本漂移检查守护）。
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。预期异常、控制流异常和直接传播边界不强制分类；外部 IO 失败在转译、降级、记录或跨层传播时才要求分类。涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装，除非能证明该封装带来实质性价值。

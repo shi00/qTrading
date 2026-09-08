@@ -229,32 +229,45 @@ forbidden_modules = ["ui"]
 # import）。这些违规按 review01-A2/A6 计划逐个消除：方向性违规（scheduler_service →
 # strategies/services）通过夜间预测下沉消除；循环打破型（config_handler ↔ db_config_service）
 # 保留但必须带 # lazy-import: 注释。消除后同步移除对应 ignore 条目。
+# 每条 ignore 的批准记录登记于 docs/governance/exceptions.yml（GDR-01：EX id 逐条回指，
+# 该文件为 R1 架构例外唯一注册入口，见 CLAUDE.md §4.1）。
 [[tool.importlinter.contracts]]
 name = "R1: utils must not import business layers"
 type = "forbidden"
 source_modules = ["utils"]
 forbidden_modules = ["data", "services", "strategies", "ui", "app"]
 ignore_imports = [
-    # config_handler ↔ db_config_service 循环打破（A2 标注 lazy-import，保留）
+    # EX-0001 config_handler ↔ db_config_service 循环打破（A2 标注 lazy-import，保留）
     # review05-E11：该 lazy import 随按域拆分迁至 utils/config/db.py
     "utils.config.db -> data.persistence.db_config_service",
-    # diagnostics 采集时访问业务单例（A2 评估下沉到 services/diagnostics）
+    # EX-0002 diagnostics 采集时访问业务单例（A2 评估下沉到 services/diagnostics）
     "utils.diagnostics -> data.data_processor",
+    # EX-0003
     "utils.diagnostics -> services.task_manager",
-    # scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态，
+    # EX-0004 scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态，
     # 启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释）
     "utils.scheduler_service -> data.cache.cache_manager",
+    # EX-0005
     "utils.scheduler_service -> data.data_processor",
+    # EX-0006
     "utils.scheduler_service -> data.persistence.app_state_service",
+    # EX-0007
     "utils.scheduler_service -> services.task_manager",
-    # shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
+    # EX-0008 shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
     "utils.shutdown -> data.data_processor",
+    # EX-0009
     "utils.shutdown -> data.domain_services.market_data_service",
+    # EX-0010
     "utils.shutdown -> data.persistence.data_explorer_query_client",
+    # EX-0011
     "utils.shutdown -> data.persistence.embedded_postgres.service",
+    # EX-0012
     "utils.shutdown -> services.embedded_pg_maintenance_service",
+    # EX-0013
     "utils.shutdown -> services.local_model_manager",
+    # EX-0014
     "utils.shutdown -> services.news_subscription_service",
+    # EX-0015
     "utils.shutdown -> services.task_manager",
 ]
 
