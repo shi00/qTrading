@@ -17,6 +17,11 @@
 #   - 每个主题只保留一个 canonical 入口, 不复制二级必读清单
 
 topics:
+  - id: requirement
+    title: 新增业务功能 / 需求澄清
+    canonical: requirements/USER_REQUIREMENTS.md
+    note: 个人投资者量化选股需求假设与问题定义
+
   - id: strategy
     title: 新增/修改策略
     canonical: docs/patterns/strategy-template.md

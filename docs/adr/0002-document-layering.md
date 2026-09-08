@@ -4,7 +4,7 @@
 > Date: 2026-07-17
 > Owner: 架构维护者
 > Supersedes: CONTRIBUTING.md 历史版本中「3b/3c 过度工程不做」决策的部分前提（3b 由 ADR-0003 单独推翻）
-> 注：3c 部分后续由 ADR-0005 推翻（详见 ADR-0005）；AGENTS.md 的纯指针定位后续由 ADR-0006 修改（详见 ADR-0006）
+> 注：3c 部分后续由 ADR-0005 推翻（详见 ADR-0005）；AGENTS.md 的纯指针定位后续由 ADR-0006 修改（详见 ADR-0006）；检视报告落盘位置由 2026-09-08 Errata 澄清（详见职责边界约束）。
 
 ## Context
 
@@ -36,7 +36,7 @@ AStockScreener 项目文档在 Phase 2 渐进式披露拆分前存在以下漂�
 - man/ 不再承载 Flet 内容（改为 stub），其他 man/ 专题保留。
 - 文档权威按主题确定正本，而非按目录层级全局覆盖（P1-05 修订，见 CLAUDE.md §1「文档权威性（按主题正本）」）；冲突时先按主题确定正本，再以正本裁决。
 - 新增/修改任何 `docs/` 文档，必须同步登记到 `docs/README.md` 索引。
-- 检视报告统一落 `docs/reviews/<date>-<scope>/` 目录或 `docs/reviews/<date>-<scope>.md` 文件。
+- 检视报告分层落盘（Errata 2026-09-08）：过程性轮次报告正文统一落根目录 `reviews/`（受 `.gitignore` 保护，为本地工作区检视产物，不入版本控制）；仓库内由 `docs/reviews/README.md` 统一维护轮次清单与状态跟踪；确需沉淀入库的专项方法论资产统一落 `docs/reviews/` 并在该 README 中登记。
 - 修改宪法（CLAUDE.md §3）红线表，必须同步更新 `docs/governance/redlines.yml` 机器可读镜像（由 `check_redlines_yaml_consistency` 门禁守护）。
 
 ## Consequences

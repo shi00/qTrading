@@ -1178,6 +1178,13 @@ class TestEnforcementMapping:
         errors = _check_enforcement_invariants(redlines, env)
         assert errors == [], f"N1 正例不应报错, got: {errors}"
 
+    def test_r9_enforcement_triggers_n1_and_n4(self):
+        """GDR-05: 真实 redlines.yml 中 R9 的 enforcement 包含 check_redlines.py 与安全扫描，均通过 N1 与 N4."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        errors = check_enforcement_mapping()
+        assert errors == [], f"check_enforcement_mapping 应通过, got: {errors}"
+
     def test_n1_check_redlines_script_missing(self):
         """N1: hook + entry 正确但 scripts/check_redlines.py 文件不存在 → 报错."""
         from check_docs_consistency import (
@@ -2649,6 +2656,15 @@ class TestCanonicalTopicsYamlConsistency:
         assert "docs/guides/ci-cd.md" in _DECISION_TREE_MERGED_IDS
         assert _DECISION_TREE_MERGED_IDS["docs/guides/ci-cd.md"] == {"ci-deps", "release"}
 
+    def test_requirement_topic_canonical_and_decision_tree_extracted(self):
+        """GDR-04: requirement 主题正本存在且能被 _extract_decision_tree_targets 提取."""
+        from check_docs_consistency import CLAUDE_PATH, _extract_decision_tree_targets
+
+        targets = _extract_decision_tree_targets(CLAUDE_PATH.read_text(encoding="utf-8"))
+        assert "requirements/USER_REQUIREMENTS.md" in targets, (
+            "requirements/USER_REQUIREMENTS.md 应能被 _extract_decision_tree_targets 提取"
+        )
+
     def test_detects_missing_required_field(self, tmp_path, monkeypatch):
         """缺少必填字段时应报错."""
         from check_docs_consistency import check_canonical_topics_consistency
@@ -3307,7 +3323,27 @@ class TestReviewsIndexCompleteness:
         monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
 
         errors = check_reviews_index_completeness()
-        assert any("new-methodology.md" in e and "未登记" in e for e in errors), f"应检出未登记, got: {errors}"
+        assert any("new-methodology.md" in e and "未登记顶层方法论文档" in e for e in errors), (
+            f"应检出未登记, got: {errors}"
+        )
+
+    def test_detects_unregistered_review_report_doc_distinguished_message(self, tmp_path, monkeypatch):
+        """GDR-03: 日期前缀检视报告文件未登记时，应提示轮次表未登记与落根目录指引."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        reviews_dir.mkdir(parents=True)
+        (reviews_dir / "README.md").write_text("# Index\n[ai-review.md](./ai-review.md)\n", encoding="utf-8")
+        (reviews_dir / "ai-review.md").write_text("# A\n", encoding="utf-8")
+        (reviews_dir / "2026-09-08-scope.md").write_text("# Report\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_index_completeness()
+        assert any("2026-09-08-scope.md" in e and "轮次表未登记顶层检视文件" in e for e in errors), (
+            f"应区分检视文件错误提示, got: {errors}"
+        )
 
     def test_detects_phantom_link(self, tmp_path, monkeypatch):
         """README 引用不存在的 docs/reviews/ 内文档 → 报错（幽灵链接）."""

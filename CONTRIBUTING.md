@@ -608,7 +608,11 @@ except Exception as e:
 
 ## 文档索引
 
-> 本节列出 docs/ 下全部子文档，作为 CONTRIBUTING.md 入口索引的补充。完整目录结构见 [docs/README.md](./docs/README.md)。
+> 本节列出 docs/ 下全部子文档及需求正本，作为 CONTRIBUTING.md 入口索引的补充。完整目录结构见 [docs/README.md](./docs/README.md)。
+
+### requirements/ — 用户需求
+
+- [USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) — 个人投资者量化选股需求正本与问题定义
 
 ### docs/guides/ — 流程类指南
 
