@@ -2546,6 +2546,76 @@ class TestBaseDaoReadDbMaxRowsAndParams:
                 await dao._read_db("SELECT 1", max_rows=10)
 
     @pytest.mark.asyncio
+    async def test_max_rows_pushes_limit_to_sql(self):
+        """PRF-06: max_rows 下推——原生 SQL 应追加顶层 LIMIT（DB 侧截断）。"""
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_result.keys.return_value = []
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame())
+            await dao._read_db("SELECT id FROM t ORDER BY id", max_rows=10)
+            got_sql = mock_conn.exec_driver_sql.call_args[0][0]
+            assert got_sql == "SELECT id FROM t ORDER BY id\nLIMIT 11"
+
+    @pytest.mark.asyncio
+    async def test_max_rows_with_existing_limit_does_not_duplicate_limit(self):
+        """PRF-06: 原生 SQL 已含 LIMIT 时，不得重复追加 LIMIT 导致语法错误。"""
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_result.keys.return_value = []
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame())
+            await dao._read_db("SELECT id FROM t ORDER BY id LIMIT 20", max_rows=50)
+            got_sql = mock_conn.exec_driver_sql.call_args[0][0]
+            assert got_sql == "SELECT id FROM t ORDER BY id LIMIT 20"
+
+    @pytest.mark.asyncio
+    async def test_max_rows_with_trailing_comment_uses_newline(self):
+        """PRF-06: 原生 SQL 尾随单行注释时，追加的 LIMIT 必须位于新行，避免被注释吞没。"""
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_result.keys.return_value = []
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame())
+            await dao._read_db("SELECT id FROM t -- 按主键查询\n", max_rows=10)
+            got_sql = mock_conn.exec_driver_sql.call_args[0][0]
+            assert got_sql == "SELECT id FROM t -- 按主键查询\nLIMIT 11"
+
+    @pytest.mark.asyncio
+    async def test_max_rows_negative_raises_value_error(self):
+        """PRF-06: 负数或非整数 max_rows 应立即抛出 ValueError。"""
+        dao = BaseDao(MagicMock())
+        with pytest.raises(ValueError, match="non-negative integer"):
+            await dao._read_db("SELECT 1", max_rows=-1)
+
+    @pytest.mark.asyncio
     async def test_list_params_converted_to_tuple(self):
         mock_conn = AsyncMock()
         mock_result = MagicMock()
@@ -2788,7 +2858,7 @@ class TestReadDbSelectMaxRows:
                 return_value=pd.DataFrame([(i,) for i in range(5)], columns=["id"])
             )
             with pytest.raises(ValueError, match="max_rows"):
-                await dao._read_db_select("SELECT 1", max_rows=3)
+                await dao._read_db_select(sa.select(sa.literal_column("1").label("id")), max_rows=3)
 
     @pytest.mark.asyncio
     async def test_within_max_rows_returns_df(self):
@@ -2799,8 +2869,64 @@ class TestReadDbSelectMaxRows:
         ):
             mock_cm._instance = None
             mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
-            df = await dao._read_db_select("SELECT 1", max_rows=10)
+            df = await dao._read_db_select(sa.select(sa.literal_column("1").label("id")), max_rows=10)
             assert len(df) == 1
+
+    @pytest.mark.asyncio
+    async def test_max_rows_pushes_limit_to_stmt(self):
+        """PRF-06: max_rows 下推——传给 DB 的 stmt 应带 limit 子句（DB 侧截断）。"""
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            stmt_in = sa.select(sa.literal_column("1").label("id"))
+            await dao._read_db_select(stmt_in, max_rows=10)
+            mock_conn = mock_engine.connect.return_value.__aenter__.return_value
+            passed = mock_conn.execute.call_args[0][0]
+            assert passed._limit == 11, "max_rows=10 应下推为 limit(11)"
+
+    @pytest.mark.asyncio
+    async def test_read_db_select_preserves_smaller_limit(self):
+        """PRF-06: 业务 stmt 自带更小 limit(5) 时，max_rows=100 不得放大为 101。"""
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            stmt_in = sa.select(sa.literal_column("1").label("id")).limit(5)
+            await dao._read_db_select(stmt_in, max_rows=100)
+            mock_conn = mock_engine.connect.return_value.__aenter__.return_value
+            passed = mock_conn.execute.call_args[0][0]
+            assert passed._limit == 5, f"更小的 limit(5) 被错误覆盖为 {passed._limit}"
+
+    @pytest.mark.asyncio
+    async def test_read_db_select_caps_larger_limit(self):
+        """PRF-06: 业务 stmt limit(200) 大于 max_rows=100 时，应下推截断为 limit(101)。"""
+        dao, mock_engine = self._mk(1)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = None
+            mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame([(1,)], columns=["id"]))
+            stmt_in = sa.select(sa.literal_column("1").label("id")).limit(200)
+            await dao._read_db_select(stmt_in, max_rows=100)
+            mock_conn = mock_engine.connect.return_value.__aenter__.return_value
+            passed = mock_conn.execute.call_args[0][0]
+            assert passed._limit == 101, f"超限 limit(200) 未被截断为 101，实际为 {passed._limit}"
+
+    @pytest.mark.asyncio
+    async def test_read_db_select_negative_raises_value_error(self):
+        """PRF-06: 负数 max_rows 在 _read_db_select 中应立即抛出 ValueError。"""
+        dao, _ = self._mk(1)
+        stmt_in = sa.select(sa.literal_column("1").label("id"))
+        with pytest.raises(ValueError, match="non-negative integer"):
+            await dao._read_db_select(stmt_in, max_rows=-5)
 
 
 class TestSaveUpsertLongTx:
