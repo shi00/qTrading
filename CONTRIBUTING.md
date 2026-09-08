@@ -169,6 +169,8 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 >
 > **新特性开发请使用 worktree 隔离**，避免在主工作区直接开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md) 中的「Worktree 强制使用」）。
 >
+### 文档一致性校验
+
 > **`docs-consistency` hook → 脚本/函数映射**：文档一致性校验由 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml) 的 `docs-consistency` hook（`entry: python scripts/check_docs_consistency.py`）触发，整脚本全量运行各一致性检查函数；其中 `check_agents_md_sync()` 守护 AGENTS.md 生成区块与 [redlines.yml](./docs/governance/redlines.yml) 的一致性——AGENTS.md 声明句所指「文档一致性校验」即此函数。
 
 ## 数据库设置
