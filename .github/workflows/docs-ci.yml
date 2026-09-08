@@ -7,12 +7,14 @@ on:
       - 'docs/**'
       - '**/*.md'
       - '.github/workflows/docs-ci.yml'
-      # GDR-02：enforcement 映射校验（N1~N5）的事实源文件，改动时应重跑 docs 一致性检查
+      # GDR-02：enforcement 映射校验（N1~N5）的事实源文件及脚本自身，改动时应重跑 docs 一致性检查
       - '.github/workflows/gitleaks.yml'
       - '.github/workflows/ci_cd.yml'
       - '.pre-commit-config.yaml'
       - '.gitleaks.toml'
       - 'pyproject.toml'
+      - 'scripts/check_docs_consistency.py'
+      - 'tests/unit/test_docs_consistency.py'
   workflow_dispatch:
 
 permissions:

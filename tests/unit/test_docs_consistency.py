@@ -700,6 +700,17 @@ class TestDocsConsistencyScriptExtensions:
         errors = check_flet_version_drift()
         assert any("1.2.3" in e for e in errors), f"Should detect v-prefixed 1.2.3: {errors}"
 
+    def test_flet_version_drift_detects_uppercase_v_prefix_variant(self, tmp_path, monkeypatch):
+        """Flet 上下文中含大写 V 前缀变体（如 V1.2.3）也应被检测到。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n升级到 Flet V1.2.3 修复问题。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert any("1.2.3" in e for e in errors), f"Should detect uppercase V-prefixed 1.2.3: {errors}"
+
 
 class TestRedlinesYamlConsistency:
     """C5 第二阶段 3b: redlines.yml 机器可读映射一致性校验 (ADR-0003 推翻 3b 决策后落地)。
@@ -3407,6 +3418,132 @@ class TestGovernanceIdReferences:
 
         errors = check_governance_id_references()
         assert any("条目数" in e and "!=" in e for e in errors), f"应检出数量不匹配, got: {errors}"
+
+    def test_detects_pyproject_dangling_reference(self, tmp_path, monkeypatch):
+        """pyproject.toml 自身出现未登记的 EX id 引用时，应被检出为悬空引用."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs" / "governance"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "exceptions.yml").write_text("exceptions: []\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX reference\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX reference\n", encoding="utf-8")
+        tmp_proj = tmp_path / "pyproject.toml"
+        tmp_proj.write_text(
+            "[[tool.importlinter.contracts]]\n"
+            "name = 'R1: utils must not import business layers'\n"
+            "type = 'forbidden'\n"
+            "source_modules = ['utils']\n"
+            "forbidden_modules = ['data']\n"
+            "# 引用未在 exceptions.yml 登记的 EX-9999\n"
+            "ignore_imports = []\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", tmp_proj)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", tmp_path / "docs" / "README.md")
+
+        errors = check_governance_id_references()
+        assert any("EX-9999" in e and "未在 exceptions.yml 登记" in e for e in errors), (
+            f"应检出 pyproject.toml 悬空引用, got: {errors}"
+        )
+
+    def test_multi_contract_r1_ignore_count_pass(self, tmp_path, monkeypatch):
+        """多个 R1 契约的 ignore_imports 条目数之和 = exceptions.yml 中 rule_id=R1 登记数 → 通过."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs" / "governance"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "exceptions.yml").write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n    rule_id: R1\n    reason: x\n    owner: n\n    approved_by: n\n"
+            "    removal_trigger: x\n    verification: x\n    paths:\n      - CONTRIBUTING.md\n"
+            "  - id: EX-0002\n    rule_id: R1\n    reason: x\n    owner: n\n    approved_by: n\n"
+            "    removal_trigger: x\n    verification: x\n    paths:\n      - CONTRIBUTING.md\n",
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX\n", encoding="utf-8")
+        # 契约 2 有 1 条 ignore (EX-0001)，契约 5 有 1 条 ignore (EX-0002)，总计 2 条，匹配 exceptions.yml 中 2 条 R1
+        tmp_proj = tmp_path / "pyproject.toml"
+        tmp_proj.write_text(
+            "[[tool.importlinter.contracts]]\n"
+            "name = 'R1: data must not import services/strategies/ui'\n"
+            "type = 'forbidden'\n"
+            "source_modules = ['data']\n"
+            "forbidden_modules = ['services']\n"
+            "# EX-0001\n"
+            "ignore_imports = ['data.x -> services.y']\n"
+            "\n"
+            "[[tool.importlinter.contracts]]\n"
+            "name = 'R1: utils must not import business layers'\n"
+            "type = 'forbidden'\n"
+            "source_modules = ['utils']\n"
+            "forbidden_modules = ['data']\n"
+            "# EX-0002\n"
+            "ignore_imports = ['utils.x -> data.y']\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", tmp_proj)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", tmp_path / "docs" / "README.md")
+
+        errors = check_governance_id_references()
+        assert errors == [], f"多契约 R1 ignore 组合与登记数一致时应通过, got: {errors}"
+
+    def test_detects_duplicate_ignore_imports(self, tmp_path, monkeypatch):
+        """R1 契约的 ignore_imports 包含重复条目时 → 报错."""
+        from check_docs_consistency import check_governance_id_references
+
+        docs_dir = tmp_path / "docs" / "governance"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "exceptions.yml").write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n    rule_id: R1\n    reason: x\n    owner: n\n    approved_by: n\n"
+            "    removal_trigger: x\n    verification: x\n    paths:\n      - CONTRIBUTING.md\n"
+            "  - id: EX-0002\n    rule_id: R1\n    reason: x\n    owner: n\n    approved_by: n\n"
+            "    removal_trigger: x\n    verification: x\n    paths:\n      - CONTRIBUTING.md\n",
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# no EX\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no EX\n", encoding="utf-8")
+        # 契约 5 出现重复 ignore_imports 条目
+        tmp_proj = tmp_path / "pyproject.toml"
+        tmp_proj.write_text(
+            "[[tool.importlinter.contracts]]\n"
+            "name = 'R1: utils must not import business layers'\n"
+            "type = 'forbidden'\n"
+            "source_modules = ['utils']\n"
+            "forbidden_modules = ['data']\n"
+            "# EX-0001\n"
+            "# EX-0002\n"
+            "ignore_imports = [\n"
+            "    'utils.x -> data.y',\n"
+            "    'utils.x -> data.y',\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", docs_dir / "exceptions.yml")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", tmp_proj)
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", tmp_path / "docs" / "README.md")
+
+        errors = check_governance_id_references()
+        assert any("重复" in e for e in errors), f"应检出重复 ignore 条目, got: {errors}"
 
     def test_excluded_dir_refs_do_not_trigger_dangling(self, tmp_path, monkeypatch):
         """归档/豁免目录中的 EX 引用不参与悬空校验（不构成治理消费）."""
