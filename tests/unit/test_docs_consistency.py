@@ -3269,6 +3269,20 @@ class TestDocsIndexCompleteness:
 
         assert check_docs_index_completeness() == [], "本地产物目录内文档应豁免索引覆盖校验"
 
+    def test_artifact_dirs_constants_split(self):
+        """GDR-07: _GITIGNORED_ARTIFACT_DIRS 仅含真实 gitignored 目录，_EX_REF_EXCLUDED_DIRS 额外含 evals."""
+        from check_docs_consistency import (
+            ROOT,
+            _EX_REF_EXCLUDED_DIRS,
+            _GITIGNORED_ARTIFACT_DIRS,
+            _LOCAL_ARTIFACT_DIRS,
+        )
+
+        assert ROOT / "docs" / "task-plans" not in _GITIGNORED_ARTIFACT_DIRS
+        assert ROOT / "docs" / "reviews" / "evals" not in _GITIGNORED_ARTIFACT_DIRS
+        assert ROOT / "docs" / "reviews" / "evals" in _EX_REF_EXCLUDED_DIRS
+        assert _LOCAL_ARTIFACT_DIRS == _GITIGNORED_ARTIFACT_DIRS
+
 
 class TestReviewsIndexCompleteness:
     """检视方法论文档登记（DOC-07）：docs/reviews/README.md 以文件级链接登记顶层方法论."""
