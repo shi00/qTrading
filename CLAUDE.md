@@ -12,6 +12,7 @@
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
+> **治理 ID 说明（GDR-09）**：正文括注的治理 ID（如 `P2-07` / `DOC-04` / `review01-A2` / `GDR-06`）为内部溯源标记，读者无需解析即可理解条款；如需溯源，见 [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) 对照表。
 
 ---
 
@@ -285,3 +286,4 @@ app → 编排所有层，仅被 main.py 调用
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
 | AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |
+| 治理 ID 对照表（P2/DOC/GDR/review 系列 ID → 一句话含义） | [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) |

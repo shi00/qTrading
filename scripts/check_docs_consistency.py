@@ -2051,6 +2051,61 @@ def check_core_modules_completeness() -> list[str]:
     return errors
 
 
+# --- GDR-09: 治理 ID 对照表一致性（自动加载文档中的治理 ID 必须已登记）---
+# 自动加载文档（CLAUDE.md / AGENTS.md）中的治理 ID（P2-07 / DOC-04 / review01-A2 / GDR-06 等）
+# 对每个新会话都是上下文噪声：指向的检视报告正文多为 gitignored 本地产物，读不到。GDR-09
+# 建立 docs/governance/governance-ids.md 对照表，本检查守护「自动加载文档中出现的 ID 必须已
+# 登记」，防止新增 ID 不登记（GDR-11 批评的「无门禁事实性漂移」）。
+_GOVERNANCE_ID_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])((?:P\d+-\d+)|(?:DOC-\d+)|(?:GDR-\d+)|(?:GOV-\d+)|(?:UX-\d+)|(?:review\d+-[A-Za-z0-9]+))(?![A-Za-z0-9])"
+)
+GOVERNANCE_IDS_PATH = ROOT / "docs" / "governance" / "governance-ids.md"
+
+
+def _load_glossary_ids() -> set[str] | None:
+    """加载 governance-ids.md 对照表已登记 ID；文件缺失或无法解析返回 None。"""
+    path = GOVERNANCE_IDS_PATH
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    ids: set[str] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        m = _GOVERNANCE_ID_PATTERN.search(cells[0])
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def check_governance_id_glossary() -> list[str]:
+    """检查项 19：治理 ID 对照表一致性（GDR-09）。
+
+    自动加载文档（CLAUDE.md + AGENTS.md）中出现的治理 ID 必须全部已在
+    docs/governance/governance-ids.md 登记——新会话读不到 gitignored 检视报告，
+    未登记 ID 即纯上下文噪声且诱发臆测（违反 §1.10 反幻觉护栏精神）。
+    """
+    errors: list[str] = []
+    registered = _load_glossary_ids()
+    if registered is None:
+        errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
+        return errors
+    refs: set[str] = set()
+    for path in (CLAUDE_PATH, AGENTS_PATH):
+        if path.exists():
+            refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
+    for gov_id in sorted(refs - registered):
+        errors.append(f"治理 ID 对照表: {gov_id} 出现在自动加载文档中，但未在 governance-ids.md 登记")
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -2083,6 +2138,8 @@ def main() -> int:
     all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_governance_id_references())
     all_errors.extend(check_core_modules_completeness())
+    # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后
+    all_errors.extend(check_governance_id_glossary())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -2096,7 +2153,7 @@ def main() -> int:
         "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
-        "治理 id 引用一致性 / core 模块清单完整性 / ADR 索引完整性）"
+        "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / ADR 索引完整性）"
     )
     return 0
 
