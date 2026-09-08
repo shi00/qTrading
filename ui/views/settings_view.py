@@ -57,7 +57,7 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     return ft.ButtonStyle(
         color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
         icon_color=AppColors.TEXT_ON_PRIMARY if is_selected else AppColors.TEXT_SECONDARY,
-        bgcolor=AppColors.PRIMARY if is_selected else ft.Colors.TRANSPARENT,
+        bgcolor=AppColors.PRIMARY if is_selected else AppColors.TRANSPARENT,
         elevation=0,
         shape=ft.RoundedRectangleBorder(radius=8),
         alignment=ft.Alignment.CENTER,

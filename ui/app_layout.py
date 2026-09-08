@@ -274,7 +274,7 @@ def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
                 content=ft.Text(
                     badge_text,
                     size=AppStyles.FONT_SIZE_CAPTION,
-                    color=ft.Colors.ON_ERROR,
+                    color=AppColors.ON_ERROR,
                     text_align=ft.TextAlign.CENTER,
                     weight=ft.FontWeight.BOLD,
                 ),
@@ -421,7 +421,7 @@ def AppLayout() -> ft.Container:
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
         weight=ft.FontWeight.BOLD,
-        color=ft.Colors.ON_SURFACE,
+        color=AppColors.TEXT_PRIMARY,
         visible=not nav_collapsed,
     )
     brand_header = ft.Container(
@@ -448,8 +448,8 @@ def AppLayout() -> ft.Container:
         extended=not nav_collapsed,
         min_width=80,
         min_extended_width=180,
-        bgcolor=ft.Colors.SURFACE,
-        indicator_color=ft.Colors.PRIMARY,
+        bgcolor=AppColors.SURFACE,
+        indicator_color=AppColors.PRIMARY,
         indicator_shape=ft.RoundedRectangleBorder(radius=4),
         leading=brand_header,
         destinations=_build_nav_destinations(running_count=nav_badge_state.running_count),

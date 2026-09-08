@@ -295,7 +295,7 @@ def _build_task_card(
 
     # --- Card assembly ---
     # Highlight running tasks with left accent border
-    left_border_color = status_color if row.status == TaskStatus.RUNNING else ft.Colors.TRANSPARENT
+    left_border_color = status_color if row.status == TaskStatus.RUNNING else AppColors.TRANSPARENT
 
     card = ft.Container(
         content=ft.Column(

@@ -363,7 +363,7 @@ def ToastManagerView() -> ft.Container:
         right=20,
         bottom=20,
         width=360,
-        bgcolor=ft.Colors.TRANSPARENT,
+        bgcolor=AppColors.TRANSPARENT,
     )
 
 
@@ -458,7 +458,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
     text_control = ft.Text(
         data.message,
         size=AppStyles.FONT_SIZE_LG,
-        color=ft.Colors.ON_SURFACE,
+        color=AppColors.TEXT_PRIMARY,
         width=270,
         max_lines=max_lines,
         overflow=ft.TextOverflow.ELLIPSIS,
@@ -474,7 +474,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                     ft.IconButton(
                         icon=expand_icon,
                         icon_size=AppStyles.FONT_SIZE_TITLE,
-                        icon_color=ft.Colors.PRIMARY,
+                        icon_color=AppColors.PRIMARY,
                         tooltip=expand_tooltip,
                         on_click=lambda e: set_is_expanded(not is_expanded),
                         style=ft.ButtonStyle(padding=0),
@@ -541,7 +541,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                     ft.IconButton(
                         ft.Icons.CLOSE,
                         icon_size=AppStyles.FONT_SIZE_TITLE,
-                        icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                        icon_color=AppColors.TEXT_SECONDARY,
                         on_click=safe_on_click(_on_dismiss_click),
                         tooltip=I18n.get("common_close"),
                     ),
@@ -551,13 +551,13 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
         padding=AppStyles.SPACING_MD,
-        bgcolor=ft.Colors.SURFACE,
+        bgcolor=AppColors.SURFACE,
         border=ft.Border.only(left=ft.BorderSide(4, data.color)),  # type: ignore[untyped]  # [reason: ft.Border.only/ft.BorderSide 类型存根缺失, 返回 Any, flet 类型标注滞后]
         border_radius=8,
         shadow=ft.BoxShadow(
             spread_radius=1,
             blur_radius=10,
-            color=ft.Colors.with_opacity(0.1, ft.Colors.SHADOW),
+            color=ft.Colors.with_opacity(0.1, AppColors.SHADOW),
             offset=ft.Offset(0, 4),
         ),
         offset=ft.Offset(offset_x, 0),

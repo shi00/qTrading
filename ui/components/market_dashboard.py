@@ -246,7 +246,7 @@ def MarketDashboard(
             indices_row,
             ft.Container(height=10),
             concepts_section,
-            ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
+            ft.Divider(height=20, color=AppColors.TRANSPARENT),
         ],
         spacing=10,
     )

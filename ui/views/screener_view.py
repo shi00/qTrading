@@ -776,7 +776,7 @@ def build_history_tree(
             spacing=0,
             expand=True,
         ),
-        bgcolor=ft.Colors.SURFACE,
+        bgcolor=AppColors.SURFACE,
         border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
     )
 

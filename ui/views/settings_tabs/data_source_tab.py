@@ -312,7 +312,7 @@ def _build_health_dashboard(
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
                         ft.Column([metric_sync], col={"sm": 6, "md": 4}),
@@ -406,7 +406,7 @@ def _build_action_console(
         content=ft.Column(
             [
                 SectionHeader(I18n.get("ds_shortcut_console"), title_key="ds_shortcut_console"),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
                         ft.Column([action_full_sync], col={"sm": 12, "md": 4}),
@@ -548,7 +548,7 @@ def _build_historical_card(
             alignment=ft.MainAxisAlignment.CENTER,
             expand=True,
         ),
-        icon_color=ft.Colors.TERTIARY,
+        icon_color=AppColors.TERTIARY,
         title_key="settings_init_data",
         subtitle_key="settings_hint_first_run",
     )
@@ -594,7 +594,7 @@ def _build_data_flow_card() -> ft.Control:
                     spacing=10,
                     alignment=ft.MainAxisAlignment.START,
                 ),
-                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.Row(
                     [
                         ft.Icon(ft.Icons.CLOUD_SYNC, size=AppStyles.FONT_SIZE_LG, color=AppColors.ACCENT),
