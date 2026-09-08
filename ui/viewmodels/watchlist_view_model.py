@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -71,7 +70,6 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     def __init__(self, cache: CacheManager | None = None):
         self.cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
         self._state: WatchlistState = WatchlistState()
-        self._subscribers: list[Callable[[WatchlistState], None]] = []
         self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

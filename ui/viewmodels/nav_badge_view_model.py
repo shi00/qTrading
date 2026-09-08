@@ -20,7 +20,6 @@
 """
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from services.task_manager import AppTask, TaskManager, TaskStatus
@@ -47,7 +46,6 @@ class NavBadgeViewModel(ObservableViewModelMixin[NavBadgeState]):
     def __init__(self):
         self._task_manager = TaskManager()  # noqa: R16 - 持有注册单例引用（幂等工厂），用于订阅任务状态
         self._state = NavBadgeState()
-        self._subscribers: list[Callable[[NavBadgeState], None]] = []
         # Mixin 字段初始化（跨线程修复）- 不再单独维护 self._main_loop
         self._init_mixin_fields()
         # 初次同步获取当前状态

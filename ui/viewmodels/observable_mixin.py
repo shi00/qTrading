@@ -390,119 +390,79 @@ class ViewModelNotifier[T]:
 
 
 class ObservableViewModelMixin[T]:
-    """ViewModel 可观察协议薄门面（review01-A10 组合化）。
+    """ViewModel 可观察协议薄门面（review01-A10 组合化，UIX-09 契约强化）。
 
     内部持有 ``ViewModelNotifier`` 实例承载全部通知状态机；本 mixin 仅做委托，
     保持 ``subscribe`` / ``_set_state`` / ``dispose`` / ``state`` / ``_get_loop_or_none``
-    的既有调用面不变（VM 代码零改动）。子类需在 __init__ 中初始化 ``self._state``，
-    并调用 ``_init_mixin_fields()``（创建 notifier 并绑定宿主）。
+    的既有调用面不变。子类必须在 __init__ 中初始化 ``self._state``，
+    并在末尾调用 ``self._init_mixin_fields()``（创建 notifier 并绑定宿主）。
     """
 
     _state: T
     _notifier: ViewModelNotifier[T]
 
     # ------------------------------------------------------------------
-    # 兼容代理属性：VM/测试对原 mixin 字段的直接访问委托 notifier。
-    # 状态仍封闭在 ViewModelNotifier 内（组合内核），property 仅作透明桥，
-    # 避免 VM 的 `self._subscribers = []` 等初始化覆盖 notifier 内部状态。
+    # 兼容代理属性：供测试与视图模型透明访问内部 notifier 状态
     # ------------------------------------------------------------------
     @property
     def _subscribers(self) -> list[Callable[[T], None]]:
-        self._ensure_notifier()
         return self._notifier._subscribers
-
-    @_subscribers.setter
-    def _subscribers(self, value: list[Callable[[T], None]]) -> None:
-        self._ensure_notifier()
-        self._notifier._subscribers = value
 
     @property
     def _subscribers_lock(self) -> threading.RLock:
-        self._ensure_notifier()
         return self._notifier._subscribers_lock
 
-    @_subscribers_lock.setter
-    def _subscribers_lock(self, value: threading.RLock) -> None:
-        self._ensure_notifier()
-        self._notifier._subscribers_lock = value
+    @property
+    def disposed(self) -> bool:
+        return self._notifier.disposed
 
     @property
-    def _shutdown_lock(self) -> threading.Lock:
-        self._ensure_notifier()
-        return self._notifier._shutdown_lock
+    def _disposed(self) -> bool:
+        return self._notifier.disposed
 
-    @_shutdown_lock.setter
-    def _shutdown_lock(self, value: threading.Lock) -> None:
-        self._ensure_notifier()
-        self._notifier._shutdown_lock = value
+    @_disposed.setter
+    def _disposed(self, value: bool) -> None:
+        self._notifier._disposed = value
 
     @property
     def _main_loop(self) -> asyncio.AbstractEventLoop | None:
-        self._ensure_notifier()
         return self._notifier._main_loop
 
     @_main_loop.setter
     def _main_loop(self, value: asyncio.AbstractEventLoop | None) -> None:
-        self._ensure_notifier()
         self._notifier._main_loop = value
 
     @property
     def _owner_tid(self) -> int:
-        self._ensure_notifier()
         return self._notifier._owner_tid
 
     @_owner_tid.setter
     def _owner_tid(self, value: int) -> None:
-        self._ensure_notifier()
         self._notifier._owner_tid = value
 
     @property
-    def _disposed(self) -> bool:
-        self._ensure_notifier()
-        return self._notifier._disposed
-
-    @_disposed.setter
-    def _disposed(self, value: bool) -> None:
-        self._ensure_notifier()
-        self._notifier._disposed = value
-
-    @property
     def _pending_notifications(self) -> deque:
-        self._ensure_notifier()
         return self._notifier._pending_notifications
 
     @_pending_notifications.setter
     def _pending_notifications(self, value: deque) -> None:
-        self._ensure_notifier()
         self._notifier._pending_notifications = value
 
     @property
     def _pending_notify_handle(self) -> object | None:
-        self._ensure_notifier()
         return self._notifier._pending_notify_handle
 
     @_pending_notify_handle.setter
     def _pending_notify_handle(self, value: object | None) -> None:
-        self._ensure_notifier()
         self._notifier._pending_notify_handle = value
 
     # ------------------------------------------------------------------
-    # 初始化辅助：子类 __init__ 末尾调用本方法
+    # 初始化辅助：子类 __init__ 末尾必须调用本方法
     # ------------------------------------------------------------------
     def _init_mixin_fields(self) -> None:
         """初始化 Notifier 实例（幂等）。"""
         if not hasattr(self, "_notifier"):
             self._notifier = ViewModelNotifier[T](self)
-
-    def _ensure_notifier(self) -> None:
-        """确保 notifier 已初始化（惰性）。
-
-        兼容宿主 __init__ 中在 ``_init_mixin_fields()`` 之前对
-        ``self._subscribers = []`` / ``self._main_loop = None`` 等字段的初始化赋值：
-        此时 notifier 尚未创建，property 桥需先惰性建好再透传，避免 AttributeError。
-        """
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
 
     # ------------------------------------------------------------------
     # 对外只读属性
@@ -517,23 +477,15 @@ class ObservableViewModelMixin[T]:
     # ==================================================================
 
     def subscribe(self, callback: Callable[[T], None]) -> Callable[[], None]:
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         return self._notifier.subscribe(callback)
 
     def _notify(self) -> None:
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         self._notifier.notify()
 
     def dispose(self) -> None:
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         self._notifier.dispose()
 
     def _get_loop_or_none(self) -> asyncio.AbstractEventLoop | None:
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         return self._notifier.get_loop_or_none()
 
     def _dispatch_notification_impl(
@@ -545,12 +497,10 @@ class ObservableViewModelMixin[T]:
         seq: int | None = None,
     ) -> None:
         """统一跨线程调度实现（代理 notifier；测试/VM 可直接调用）。"""
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         self._notifier._dispatch_notification_impl(subs_snap, state_snap, loop, owner_tid, seq)
 
     # ==================================================================
-    # 内部实现（非扩展点，子类不 override；兼容宿主 _disposed 读取）
+    # 内部实现（非扩展点，子类不 override；统一 disposed guard）
     # ==================================================================
 
     def _set_state(self, **changes: Any) -> None:
@@ -560,8 +510,6 @@ class ObservableViewModelMixin[T]:
         委托 ``set_state_and_notify`` 实现「写 state + 捕获快照 + 分配序号」原子绑定
         （CON-03 R1 P1-1），避免直写 + ``_notify()`` 的跨线程过期快照窗口。
         """
-        if not hasattr(self, "_notifier"):
-            self._init_mixin_fields()
         if self._notifier.disposed:
             return
         self._notifier.set_state_and_notify(changes)

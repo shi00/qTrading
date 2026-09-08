@@ -80,7 +80,7 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         self._on_loading_change = on_loading_change
         self._show_internal_loading = show_internal_loading
         self._state = TushareConfigState()
-        self._subscribers: list[Callable[[TushareConfigState], None]] = []
+        self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
 

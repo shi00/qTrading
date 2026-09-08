@@ -191,8 +191,8 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self.on_complete: Callable[[], Awaitable[None]] | None = None
 
         # --- State snapshot + subscribers ---
-        self._subscribers: list[Callable[[OnboardingState], None]] = []
         self._load_config_to_state()
+        self._init_mixin_fields()
 
     # ------------------------------------------------------------------
     # Properties (compat with existing View tests, Phase 4 will remove setters)

@@ -22,7 +22,6 @@ import asyncio
 import logging
 import os
 import typing
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -94,7 +93,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         self._failover_vm = failover_vm
         self._local_vm = local_vm
         self._state = AIBrainSettingsState()
-        self._subscribers: list[Callable[[AIBrainSettingsState], None]] = []
+        self._init_mixin_fields()
         self._load_config_to_state()
 
     # --- 子 VM 回调 commands (Phase 3.2 P1-1: 下沉自 View 模块级函数) ---

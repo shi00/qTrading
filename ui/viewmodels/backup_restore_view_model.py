@@ -85,8 +85,8 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
 
     def __init__(self, maintenance_service: EmbeddedPgMaintenanceService | None = None) -> None:
         self._state = BackupRestoreState()
-        self._subscribers: list = []
         self._maintenance_service = maintenance_service
+        self._init_mixin_fields()
 
     def _get_maintenance_service(self) -> EmbeddedPgMaintenanceService:
         """懒加载 EmbeddedPgMaintenanceService 单例 (DI 优先)."""

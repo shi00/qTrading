@@ -135,11 +135,6 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
         # Internal state (frozen snapshot)
         self._state = DataExplorerState()
-        self._subscribers: list[Callable[[DataExplorerState], None]] = []
-
-        self._disposed = False
-
-        # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
 
     def _set_state(self, **changes: Any) -> None:

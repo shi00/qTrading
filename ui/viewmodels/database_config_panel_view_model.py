@@ -81,7 +81,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
         self._on_loading_change = on_loading_change
         self._load_password = load_password
         self._state = DatabaseConfigState()
-        self._subscribers: list[Callable[[DatabaseConfigState], None]] = []
+        self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
 

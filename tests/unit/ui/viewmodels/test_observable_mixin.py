@@ -50,7 +50,6 @@ class _DefaultVM(ObservableViewModelMixin[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
         # Mixin 跨线程字段（与真实 VM 一致：构造函数末尾初始化）
         self._init_mixin_fields()
 
@@ -65,11 +64,9 @@ class _CustomSubscribeVM(ObservableViewModelMixin[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
+        self._init_mixin_fields()
         self._main_loop: Any = None
         self._custom_subscribe_called = False
-        # Mixin 跨线程字段
-        self._init_mixin_fields()
 
     def subscribe(self, callback: Callable[[_DummyState], None]) -> Callable[[], None]:
         """覆盖 subscribe: 捕获 main loop + 调默认实现。
@@ -116,12 +113,10 @@ class _CustomDisposeVM(ObservableViewModelMixin[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
+        self._init_mixin_fields()
         self._background_tasks: set = set()
         self._disposed = False
         self._custom_cleanup_called = False
-        # Mixin 跨线程字段
-        self._init_mixin_fields()
 
     def dispose(self) -> None:
         """覆盖 dispose: 先标记 disposed + 清理 background tasks, 再调 super().dispose()。"""
@@ -143,10 +138,8 @@ class _CustomSetStateVM(ObservableViewModelMixin[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
-        self._disposed = False
-        # Mixin 跨线程字段
         self._init_mixin_fields()
+        self._disposed = False
 
     def _set_state(self, **changes: Any) -> None:
         """覆盖 _set_state: disposed 时早返。"""
@@ -170,7 +163,6 @@ class _CustomNotifyVM(ObservableViewModelMixin[_DummyState]):
 
     def __init__(self) -> None:
         self._state = _DummyState()
-        self._subscribers: list[Callable[[_DummyState], None]] = []
         self._subscriber_errors: list[str] = []
         # Mixin 跨线程字段
         self._init_mixin_fields()

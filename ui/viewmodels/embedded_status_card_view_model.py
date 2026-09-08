@@ -53,11 +53,10 @@ class EmbeddedStatusCardViewModel(ObservableViewModelMixin[EmbeddedStatusCardSta
     """
 
     def __init__(self) -> None:
-        self._state = EmbeddedStatusCardState()
-        self._subscribers: list = []
         # 初始化默认状态: embedded 模式已就绪
         self._state = EmbeddedStatusCardState(
             status_message=Message("embedded_pg_ready"),
             status_type="success",
             info_message=Message("embedded_pg_no_config_needed"),
         )
+        self._init_mixin_fields()

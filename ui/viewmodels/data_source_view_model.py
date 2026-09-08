@@ -147,7 +147,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
         # --- State snapshot + subscribers ---
         self._state: DataSourceState = DataSourceState()
-        self._subscribers: list[Callable[[DataSourceState], None]] = []
+        self._init_mixin_fields()
 
         # --- Snack seq counter (内部计数, 确保 SnackRow.seq 递增) ---
         self._snack_seq = 0
@@ -222,7 +222,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         """
         self._unsubscribe_from_task_manager()
         self._cancel_all_active_tasks()
-        self._subscribers.clear()
+        super().dispose()
         self._state = DataSourceState()
 
     # --- Emitters (直接 _set_state, 无 dual-track) ---

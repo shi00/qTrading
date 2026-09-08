@@ -17,7 +17,6 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -63,7 +62,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
 
     def __init__(self) -> None:
         self._state = AutomationSettingsState()
-        self._subscribers: list[Callable[[AutomationSettingsState], None]] = []
+        self._init_mixin_fields()
         self._load_config_to_state()
 
     # --- Config loading ---
