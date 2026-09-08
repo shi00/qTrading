@@ -176,7 +176,7 @@ class ShutdownCoordinator:
         self._watchdog_started = False
         self._watchdog_cancel_event = None
 
-    async def do_cleanup(self, timeout_s: float = 20.0, step_timeout_s: float = 5.0) -> bool:
+    async def do_cleanup(self, timeout_s: float = 60.0, step_timeout_s: float = 35.0) -> bool:
         """
         Core cleanup coroutine. Stops all background services, flushes DB writes, closes pools.
 
@@ -368,6 +368,9 @@ class ShutdownCoordinator:
         from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if TaskManager._instance is not None:
+            # CON-03: TaskManager.cancel_all_running_async 默认使用校准后的 join_timeout=2.5, persist_timeout=1.0，
+            # 配合 registered_tasks 的 1.5s，内部子超时之和 5.0s < Step 0 的 6.0s 默认预算，
+            # 预留 1.0s 充裕抖动余量。此处无参调用以完全兼容存量零参数 mock。
             await TaskManager._instance.cancel_all_running_async()
 
     async def _step1_stop_services(self):

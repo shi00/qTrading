@@ -91,33 +91,59 @@ class TestCleanupSteps:
         assert step0_timeout >= 3.0, f"Step 0 timeout ({step0_timeout}s) must be >= join_timeout (3.0s)"
 
     def test_step0_timeout_budget_consistency(self):
-        """CON-03: Step 0 声明预算必须覆盖内部子超时之和并留有余量。"""
+        """CON-03: Step 0 声明预算必须覆盖内部子超时之和并留有至少 1.0s 抖动余量。"""
+        import inspect
+        from services.task_manager import TaskManager
+
+        sig = inspect.signature(TaskManager.cancel_all_running_async)
+        join_timeout = sig.parameters["join_timeout"].default
+        persist_timeout = sig.parameters["persist_timeout"].default
+        registered_drain_timeout = 1.5
+
         step0_timeout = _CLEANUP_STEPS[0][3]
-        # Step 0 内部子超时：_registered_tasks wait (1.5s) + persist_timeout (1.0s) + join_timeout (3.0s) = 5.5s
-        internal_sub_timeouts_sum = 1.5 + 1.0 + 3.0
+        internal_sub_timeouts_sum = registered_drain_timeout + persist_timeout + join_timeout
+
         assert step0_timeout >= 6.0, f"Step 0 timeout ({step0_timeout}s) should be >= 6.0s to avoid spurious timeout"
-        assert step0_timeout > internal_sub_timeouts_sum, (
-            f"Step 0 budget ({step0_timeout}s) must strictly exceed internal sub-timeouts ({internal_sub_timeouts_sum}s)"
+        assert step0_timeout - internal_sub_timeouts_sum >= 1.0, (
+            f"Step 0 budget ({step0_timeout}s) must exceed internal sub-timeouts ({internal_sub_timeouts_sum}s) "
+            f"by at least 1.0s margin for CI/load jitter"
         )
 
     def test_production_cleanup_call_sites_budget_self_consistency(self):
-        """CON-03: 生产四个调用点的超时预算必须自洽且小于总超时。"""
-        call_sites = [
+        """CON-03: 生产调用点与默认配置的超时预算必须自洽。"""
+        # 1. 正常优雅停机路径与默认配置：有效步骤超时和 <= do_cleanup 总超时 < watchdog 超时
+        normal_call_sites = [
             ("main_shutdown", 60.0, 35.0, 70.0),
             ("disconnect", 60.0, 35.0, 70.0),
-            ("upgrade_exit", 5.0, 10.0, None),
             ("startup_rollback", 60.0, 35.0, None),
+            ("default_do_cleanup", 60.0, 35.0, None),
         ]
-        for name, timeout_s, step_timeout_s, watchdog_timeout in call_sites:
+        for name, timeout_s, step_timeout_s, watchdog_timeout in normal_call_sites:
             effective_sum = sum(min(step[3], step_timeout_s) for step in _CLEANUP_STEPS)
-            if name != "upgrade_exit":
-                assert effective_sum <= timeout_s, (
-                    f"[{name}] effective step sum ({effective_sum}s) exceeds do_cleanup timeout ({timeout_s}s)"
-                )
+            assert effective_sum <= timeout_s, (
+                f"[{name}] effective step sum ({effective_sum}s) exceeds do_cleanup timeout ({timeout_s}s)"
+            )
             if watchdog_timeout is not None:
                 assert timeout_s < watchdog_timeout, (
                     f"[{name}] do_cleanup timeout ({timeout_s}s) must be strictly less than watchdog ({watchdog_timeout}s)"
                 )
+
+        # 2. 升级退出路径 (upgrade_exit)：属于异常终止的紧急快速退出路径，
+        # 设计上以 timeout_s=5.0 实施硬截断保护，要求总超时严格小于步骤预算和
+        upgrade_timeout_s = 5.0
+        upgrade_step_timeout_s = 10.0
+        upgrade_effective_sum = sum(min(step[3], upgrade_step_timeout_s) for step in _CLEANUP_STEPS)
+        assert upgrade_timeout_s < upgrade_effective_sum, (
+            f"upgrade_exit 必须运行在硬截断模式 (timeout_s {upgrade_timeout_s}s < effective_sum {upgrade_effective_sum}s)"
+        )
+
+    def test_do_cleanup_default_timeouts(self):
+        """CON-03: do_cleanup 默认参数必须与生产标准配置对齐（60.0s / 35.0s）。"""
+        import inspect
+
+        sig = inspect.signature(ShutdownCoordinator.do_cleanup)
+        assert sig.parameters["timeout_s"].default == 60.0
+        assert sig.parameters["step_timeout_s"].default == 35.0
 
 
 class TestShutdownCoordinatorInit:
