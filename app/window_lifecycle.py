@@ -246,10 +246,9 @@ async def perform_upgrade_exit(
     4. 非 web_mode 时销毁窗口（destroy 失败仅记录日志）
     5. force_exit(1)
     """
-    # upgrade exit 路径：timeout_s=5.0 是整个 cleanup 链的硬上限（asyncio.wait_for 总超时）。
-    # step_timeout_s=10.0 通过 min(default_timeout, step_timeout_s) 仅对 Step 8 (embedded postgres,
-    # default=35.0s) 生效，将其单步预算从默认 5.0s 抬升到 10.0s；Step 0~7 的 default_timeout 均 ≤5.0s
-    # 不受影响。但 Step 8 实际能跑的时间仍受 5.0s 总时长钳制（剩余 = 5.0s - 前序步骤累计耗时）。
+    # upgrade exit 路径：属于异常终止的快速退出模式，timeout_s=5.0 是整个 cleanup 链的硬上限（asyncio.wait_for 总超时）。
+    # step_timeout_s=10.0 通过 min(default_timeout, step_timeout_s) 作用于各步骤（Step 0 为 6.0s，Step 8 为 10.0s，
+    # 其余步骤保持其默认值）。各步骤与 Step 8 实际能执行的时长均受 5.0s 总时长硬性钳制，以确保升级失败后能够迅速退出。
     try:
         cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=10.0)
     except asyncio.CancelledError:

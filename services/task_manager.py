@@ -565,14 +565,14 @@ class TaskManager:
         self._notify_subscribers()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def cancel_all_running_async(self, join_timeout: float = 3.0, persist_timeout: float = 1.0):
+    async def cancel_all_running_async(self, join_timeout: float = 2.5, persist_timeout: float = 1.0):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes.
 
         Args:
             join_timeout: Max seconds to wait for cancelled tasks to finish
-                their finally blocks. Prevents Step 3 (DB close) from
-                racing against still-running task runners.
+                their finally blocks (CON-03: 2.5s to fit Step 0 budget with 1.0s margin).
+                Prevents Step 3 (DB close) from racing against still-running task runners.
             persist_timeout: Max seconds to wait for task persistence writes
                 (CON-03). Prevents unbounded blocking if DB pool is congested.
         """
