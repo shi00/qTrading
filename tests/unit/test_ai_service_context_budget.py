@@ -17,6 +17,7 @@ from services.ai_service import (
     DEFAULT_CONTEXT_WINDOW,
     _apply_context_budget,
     _estimate_tokens,
+    _estimate_tokens_fallback,
     _get_model_context_window,
     _reset_token_estimator,
 )
@@ -82,7 +83,7 @@ class TestEstimateTokens:
             assert token_budget._tiktoken_enc_error is True
             # 第二次：即使 import 恢复，仍走回退（error 已缓存，不再触发 import）
             with patch("builtins.__import__") as mock_imp:
-                assert _estimate_tokens("abc") == 3
+                assert _estimate_tokens("abc") == 1
                 assert mock_imp.call_count == 0  # error 已缓存，不再 import tiktoken
 
     def test_reset_clears_error_flag(self):
@@ -92,6 +93,46 @@ class TestEstimateTokens:
             assert token_budget._tiktoken_enc_error is True
         _reset_token_estimator()
         assert token_budget._tiktoken_enc_error is False
+
+
+class TestTokenEstimatorFallbackCJK:
+    """Issue D5-8: tiktoken 不可用时的分段估算（CJK 1:1，非 CJK 4:1）。"""
+
+    def test_pure_cjk_fallback(self):
+        """纯中文文本回退估算按 1 字符 = 1 token 计量。"""
+        cjk = "平安银行股份有限公司"
+        assert _estimate_tokens_fallback(cjk) == 10
+
+    def test_cjk_with_chinese_punctuation(self):
+        """中文字符与全角标点符号全部被识别为 CJK（1:1）。"""
+        text = "平安银行，好！【优质标的】"
+        # 汉字 8 个，中文标点 5 个（，！【】），共 13 个字符
+        assert _estimate_tokens_fallback(text) == 13
+
+    def test_pure_english_fallback_eliminates_overestimation(self):
+        """纯英文文本按 4 字符 ≈ 1 token 估算，消除 5.56 倍高估。"""
+        # 1340 字符的英文文本
+        english = "This is an in-depth stock analysis financial summary for evaluation purposes only. " * 16
+        # 83 * 16 = 1328 字符
+        tokens = _estimate_tokens_fallback(english)
+        expected = (len(english) + 3) // 4
+        assert tokens == expected
+        # 验证估算 token 远小于字符数（不再按 1:1 高估 5 倍）
+        assert tokens < len(english) // 3
+
+    def test_mixed_cjk_and_ascii(self):
+        """混合文本：CJK 字符与 ASCII 字符分段精确累计。"""
+        # 2 个 CJK ('平安') + 12 个 ASCII (' (000001.SZ)')
+        text = "平安 (000001.SZ)"
+        # CJK = 2, non-CJK = 12 -> (12 + 3) // 4 = 3 -> total = 5
+        assert _estimate_tokens_fallback(text) == 5
+
+    def test_empty_and_short_strings(self):
+        """空字符串为 0，单字符非 CJK 为 1，单字符 CJK 为 1。"""
+        assert _estimate_tokens_fallback("") == 0
+        assert _estimate_tokens_fallback(None) == 0  # type: ignore[arg-type]
+        assert _estimate_tokens_fallback("a") == 1
+        assert _estimate_tokens_fallback("中") == 1
 
 
 # ---------------------------------------------------------------------------

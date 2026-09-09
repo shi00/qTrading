@@ -74,12 +74,14 @@ from services.ai_service.stock_analysis import (
     StockAnalysisService,
 )
 from services.ai_service.token_budget import (
+    CHAR_FALLBACK_NON_CJK_DIV as CHAR_FALLBACK_NON_CJK_DIV,
     CHAR_FALLBACK_TOKENS_DIV as CHAR_FALLBACK_TOKENS_DIV,
     CONTEXT_RESERVE_TOKENS as CONTEXT_RESERVE_TOKENS,
     DEFAULT_CONTEXT_WINDOW as DEFAULT_CONTEXT_WINDOW,
     TokenBudgetService,
     _apply_context_budget as _apply_context_budget,
     _estimate_tokens as _estimate_tokens,
+    _estimate_tokens_fallback as _estimate_tokens_fallback,
     _get_model_context_window as _get_model_context_window,
     _reset_token_estimator as _reset_token_estimator,
 )
