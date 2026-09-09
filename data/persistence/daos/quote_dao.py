@@ -855,6 +855,7 @@ class QuoteDao(BaseDao):
         start_date: datetime.date | str,
         end_date: datetime.date | str,
         tables: list | None = None,
+        attempted_upto: dict[str, str] | None = None,
     ) -> dict[datetime.date, dict]:
         """
         批量评估指定时间范围内每天的数据同步质量。
@@ -865,6 +866,10 @@ class QuoteDao(BaseDao):
             start_date: 开始日期
             end_date: 结束日期
             tables: 要检查的表列表
+            attempted_upto: 稀疏表"已尝试水位"（表名 -> YYYYMMDD，D1-1）。
+                未进 LOW_FREQUENCY_TABLES 的稀疏表，在某日 `date <= attempted_upto[table]`
+                且该表当日 count == 0 时，判为"已尝试且合法为空"，不计入加权评分，
+                避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。
 
         Returns:
             {trade_date: quality_info} 字典，其中 quality_info 包含：
@@ -961,6 +966,27 @@ class QuoteDao(BaseDao):
                         "note": "低频事件表，不计入评分",
                     }
                     continue
+
+                # D1-1：已尝试水位豁免——未进低频白名单的稀疏表，某日已尝试
+                # （date <= attempted_upto[table]）且当日 count == 0 → 判为"已尝试合法为空"，
+                # 不计入加权评分，避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。
+                if count == 0 and attempted_upto:
+                    attempted_str = attempted_upto.get(table)
+                    if attempted_str:
+                        try:
+                            attempted_date = datetime.datetime.strptime(attempted_str, "%Y%m%d").date()
+                        except ValueError:
+                            attempted_date = None
+                        if attempted_date is not None and trade_date <= attempted_date:
+                            result["tables"][table] = {
+                                "count": 0,
+                                "expected": 0,
+                                "ratio": None,
+                                "passed": True,
+                                "exempt": True,
+                                "note": "已尝试且当日合法为空，不计入评分",
+                            }
+                            continue
 
                 if table in FIXED_EXPECTED_TABLES:
                     expected = FIXED_EXPECTED_TABLES[table]
