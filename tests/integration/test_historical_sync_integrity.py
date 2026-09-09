@@ -684,10 +684,11 @@ class TestBreakpointResumeCoreTables:
     @pytest.mark.asyncio
     async def test_resume_includes_auxiliary_tables(self, mock_context):
         """
-        测试断点续传包含辅助表
+        测试断点续传返回表集合包含辅助表
 
-        场景：辅助表（如 block_trade、moneyflow_daily）应在 CORE_RESUME_TABLES 中，
-        确保断点续跑不会跳过缺少辅助表数据的日期
+        场景：辅助表（如 block_trade、moneyflow_daily）仍在 CORE_RESUME_TABLES 中参与同步；
+        但 D1-1 起它们不再参与"已完成日期"交集判定（语义见 TestHistoricalSyncCompletedDates /
+        test_resume_date_complete_when_sparse_table_missing 反向用例）。
         """
         from data.sync.historical import HistoricalSyncStrategy
 
@@ -695,6 +696,28 @@ class TestBreakpointResumeCoreTables:
 
         assert "block_trade" in strategy.CORE_RESUME_TABLES
         assert "moneyflow_daily" in strategy.CORE_RESUME_TABLES
+
+    @pytest.mark.asyncio
+    async def test_resume_date_complete_when_sparse_table_missing(self, mock_context):
+        """
+        D1-1 反向用例：dense 表在该日期有数据、某 sparse 表为空 → 该日期被判定为已完成（可跳过）。
+
+        与旧语义（辅助表缺失即不跳过，见 test_resume_includes_auxiliary_tables 历史 docstring）相反，
+        用于锁定 D1-1 新语义不会随旧断言回退。
+        """
+        from data.sync.historical import HistoricalSyncStrategy
+
+        strategy = HistoricalSyncStrategy(mock_context)
+
+        cached_dates = {
+            "daily_quotes": {datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)},
+            "daily_indicators": {datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)},
+            # 稀疏辅助表缺失：不参与"已完成日期"判定
+            "moneyflow_daily": set(),
+            "block_trade": set(),
+        }
+        completed = strategy._completed_dates(cached_dates)
+        assert completed == {datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)}
 
     @pytest.mark.asyncio
     async def test_resume_marks_missing_quality_as_resync(self, mock_context):

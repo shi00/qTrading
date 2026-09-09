@@ -227,8 +227,10 @@ class LiteLLMClient:
                 if override_llm_config.get("api_key"):
                     request_params["api_key"] = override_llm_config["api_key"]
                 else:
-                    logger.debug(
-                        "[AIService] Cross-provider failover to '%s' has no dedicated API key, using primary key (may fail)",
+                    logger.warning(
+                        "[AIService] Cross-provider failover to '%s' has no dedicated API key; "
+                        "request will not include api_key (LiteLLM may fallback to environment variables). "
+                        "Consider configuring dedicated credentials for this provider.",
                         override_provider,
                     )
                 # Prefer credential's base_url, fallback to LLM_PROVIDERS default

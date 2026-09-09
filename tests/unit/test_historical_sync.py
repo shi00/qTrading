@@ -1504,3 +1504,81 @@ class TestFetchIndicesPermissionError:
         index_calls = [c for c in update_calls if c.args[0] == "index_daily"]
         assert len(index_calls) > 0
         assert index_calls[0].kwargs.get("status") == "skipped_permission"
+
+
+class TestHistoricalSyncCompletedDates:
+    """D1-1：断点续传"已完成日期"判定语义（仅 DENSE 表参与交集）。"""
+
+    def test_dense_present_sparse_missing_returns_dense(self):
+        cached = {
+            "daily_quotes": {"20240612", "20240613", "20240614"},
+            "daily_indicators": {"20240612", "20240613", "20240614"},
+            "moneyflow_daily": set(),
+        }
+        assert HistoricalSyncStrategy._completed_dates(cached) == {"20240612", "20240613", "20240614"}
+
+    def test_dense_disagree_returns_intersection(self):
+        cached = {
+            "daily_quotes": {"20240612", "20240613", "20240614"},
+            "daily_indicators": {"20240612", "20240613"},
+            "moneyflow_daily": {"20240612"},
+        }
+        assert HistoricalSyncStrategy._completed_dates(cached) == {"20240612", "20240613"}
+
+    def test_no_dense_tables_returns_empty(self):
+        cached = {
+            "moneyflow_daily": {"20240612"},
+            "top_list": {"20240612"},
+        }
+        assert HistoricalSyncStrategy._completed_dates(cached) == set()
+
+    def test_dense_all_missing_returns_empty(self):
+        cached = {
+            "daily_quotes": set(),
+            "daily_indicators": set(),
+            "moneyflow_daily": {"20240612"},
+        }
+        assert HistoricalSyncStrategy._completed_dates(cached) == set()
+
+    def test_single_dense_key_present_uses_remaining_dense(self):
+        cached = {
+            "daily_quotes": {"20240612", "20240613"},
+            "moneyflow_daily": {"20240612"},
+        }
+        assert HistoricalSyncStrategy._completed_dates(cached) == {"20240612", "20240613"}
+
+
+class TestHistoricalSyncWatermark:
+    """D1-1：稀疏表"已尝试水位"写入行为。"""
+
+    @pytest.mark.asyncio
+    async def test_record_attempted_upto_writes_app_state(self):
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        with patch("data.sync.historical.set_app_state", new_callable=AsyncMock) as mock_sp:
+            await strategy._record_attempted_upto("moneyflow_daily", datetime.date(2024, 6, 14))
+        mock_sp.assert_awaited_once_with(ctx.cache.engine, "sync_attempted_upto:moneyflow_daily", "20240614")
+
+    @pytest.mark.asyncio
+    async def test_record_attempted_upto_noop_when_no_engine(self):
+        ctx = make_ctx()
+        ctx.cache.engine = None
+        strategy = HistoricalSyncStrategy(ctx)
+        with patch("data.sync.historical.set_app_state", new_callable=AsyncMock) as mock_sp:
+            await strategy._record_attempted_upto("moneyflow_daily", datetime.date(2024, 6, 14))
+        mock_sp.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_snapshot_records_watermark_for_sparse_tables(self):
+        """fetch 成功的稀疏表（含合法空）记水位；dense 表不记。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        with patch.object(strategy, "_record_attempted_upto", new_callable=AsyncMock) as mock_rec:
+            result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        table_args = [c.args[0] for c in mock_rec.await_args_list]
+        assert "moneyflow_daily" in table_args
+        assert "moneyflow_hsgt" in table_args
+        assert "northbound_holding" in table_args
+        assert "daily_quotes" not in table_args
+        assert "daily_indicators" not in table_args
