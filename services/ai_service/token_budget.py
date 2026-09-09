@@ -195,16 +195,15 @@ class TokenBudgetService:
         except Exception as exc:
             # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
             logger.warning(
-                "[AIService] Failover config read failed, using default context budget: %s",
+                "[AIService] Failover config read failed, falling back to active/default context budget: %s",
                 _ai.DataSanitizer.sanitize_error(exc),
             )
             failover_config = {"primary": "", "fallbacks": []}
         primary = failover_config.get("primary", "")
+        primary_override = primary.strip() if isinstance(primary, str) and primary.strip() else None
         # _litellm_config 可能未初始化（如测试以 AIService.__new__ 构造）：
         # 预算计算不应因此阻塞分析，缺失时按默认窗口处理。
         llm_config = getattr(self._service, "_litellm_config", None) or {}
-        if primary:
-            primary_context = _get_model_context_window(llm_config, model_override=primary)
-        else:
-            primary_context = DEFAULT_CONTEXT_WINDOW
+        # 未配置 failover 时（primary 为空），以当前生效模型（llm_config）为准，而非硬编码默认窗口（D5-3）
+        primary_context = _get_model_context_window(llm_config, model_override=primary_override)
         return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
