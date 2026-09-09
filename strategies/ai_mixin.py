@@ -18,8 +18,10 @@ The Mixin handles:
 
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import httpx
 from cachetools import TTLCache
@@ -52,6 +54,20 @@ from utils.time_utils import get_now, to_yyyymmdd_str
 logger = logging.getLogger(__name__)
 
 
+def _dataframe_sizeof(value: Any) -> int:
+    """
+    计算放入 TTLCache 的对象的内存字节数。
+    对 DataFrame 使用 memory_usage(deep=True).sum()，非 DataFrame 使用 sys.getsizeof。
+    最小返回 1，防止 0 大小导致 cachetools 内部除零或状态异常。
+    """
+    if isinstance(value, pd.DataFrame):
+        try:
+            return max(1, int(value.memory_usage(deep=True).sum()))
+        except Exception:
+            return max(1, sys.getsizeof(value, 1024))
+    return max(1, sys.getsizeof(value, 1024))
+
+
 class AIStrategyMixin:
     """
     Mixin class providing sequential AI analysis capability to any strategy.
@@ -82,12 +98,17 @@ class AIStrategyMixin:
     enable_ai_analysis: bool = True
 
     _HISTORY_CACHE_MAX = 4
+    _HISTORY_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB
     _HISTORY_CACHE_TTL = 120
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
-        self._history_cache: TTLCache = TTLCache(maxsize=self._HISTORY_CACHE_MAX, ttl=self._HISTORY_CACHE_TTL)
+        self._history_cache: TTLCache = TTLCache(
+            maxsize=self._HISTORY_CACHE_MAX_BYTES,
+            ttl=self._HISTORY_CACHE_TTL,
+            getsizeof=_dataframe_sizeof,
+        )
         # UX-2.3: 供 retry_single 复用（_last_prefetched 避免重新预取 news）
         self._last_candidates_df: pd.DataFrame | None = None
         self._last_prefetched: PreFetchedContext | None = None
@@ -424,7 +445,15 @@ class AIStrategyMixin:
                     end_date=end_date,
                     suppress_errors=False,
                 )
-                self._history_cache[cache_key] = bulk_history_df
+                if bulk_history_df is not None:
+                    try:
+                        self._history_cache[cache_key] = bulk_history_df
+                    except ValueError:
+                        logger.warning(
+                            "[%s] Bulk history dataframe exceeds cache max size (%d bytes), skipping cache",
+                            self.__class__.__name__,
+                            self._HISTORY_CACHE_MAX_BYTES,
+                        )
             if bulk_history_df is not None and not bulk_history_df.empty:
                 for code, group in bulk_history_df.groupby("ts_code"):
                     prefetched_history[code] = group
