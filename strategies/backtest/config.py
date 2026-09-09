@@ -9,6 +9,7 @@ from typing import Literal
 
 import polars as pl
 
+from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.domain_services.transaction_cost import TransactionCostConfig
 
 
@@ -54,7 +55,7 @@ class BacktestConfig:
     max_position_count: int = 50
     max_single_weight: float = 0.1
 
-    benchmark_code: str = "000300.SH"
+    benchmark_code: str = DEFAULT_BENCHMARK_INDEX
     risk_free_rate: float = 0.02
     fail_fast: bool = True
     disable_ai: bool = True

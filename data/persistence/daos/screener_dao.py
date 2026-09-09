@@ -367,6 +367,7 @@ class ScreenerDao(BaseDao):
             t.c.t5_pct,
             t.c.ai_score,
             t.c.ai_reason,
+            t.c.benchmark_code,
         ).where(
             t.c.prediction_result == label,
             t.c.alpha.isnot(None),
@@ -395,6 +396,7 @@ class ScreenerDao(BaseDao):
         t5_pct: float | None = None,
         t5_price: float | None = None,
         index_pct: float | None = None,
+        benchmark_code: str | None = None,
         alpha: float | None = None,
         review_status: str | None = None,
         conn: typing.Any = None,
@@ -410,20 +412,22 @@ class ScreenerDao(BaseDao):
             logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
             return
 
-        stmt = (
-            sa.update(table)
-            .where(table.c.id == record_id)
-            .values(
-                t1_pct=pct,
-                prediction_result=label,
-                t1_price=t1_price,
-                t5_pct=t5_pct,
-                t5_price=t5_price,
-                index_pct=index_pct,
-                alpha=alpha,
-                review_status=effective_status,
-            )
-        )
+        values: dict[str, typing.Any] = {
+            "t1_pct": pct,
+            "prediction_result": label,
+            "t1_price": t1_price,
+            "t5_pct": t5_pct,
+            "t5_price": t5_price,
+            "index_pct": index_pct,
+            "alpha": alpha,
+            "review_status": effective_status,
+        }
+        # D2-5：基准仅在本复盘拉取到响应对齐的 index_pct 后写入；None 表示调用方无基准上下文
+        # （如 T+5 回填），保持既有值不动，避免用 NULL 覆写已落库的基准。
+        if benchmark_code is not None:
+            values["benchmark_code"] = benchmark_code
+
+        stmt = sa.update(table).where(table.c.id == record_id).values(**values)
 
         # DAT-01: 与 base_dao 一致，维护事件放行后复查引擎，防范 conn 路径 TOCTOU
         # （conn 由裸 engine.begin() 提供，无 _guarded_begin 守卫，须在此复查）

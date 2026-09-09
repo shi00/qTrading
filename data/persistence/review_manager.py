@@ -8,6 +8,7 @@ import uuid
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
+from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
@@ -80,7 +81,7 @@ class ReviewManager:
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
-        index_code = ConfigHandler.get_config("benchmark_index", "000001.SH")
+        index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
         index_cache: dict[str, float | None] = {}
 
         try:
@@ -278,6 +279,7 @@ class ReviewManager:
                             "pct": t1_pct,
                             "label": label,
                             "index_pct": index_pct,
+                            "benchmark_code": index_code,
                             "t1_price": t1_price,
                             "t5_pct": t5_pct,
                             "t5_price": t5_price,
@@ -387,6 +389,7 @@ class ReviewManager:
                             "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
+                            "benchmark": row.get("benchmark_code"),
                             "reason": str(row["ai_reason"])[:50]
                             if row["ai_reason"]  # type: ignore[union-attr]
                             else "",
@@ -407,6 +410,7 @@ class ReviewManager:
                             "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
+                            "benchmark": row.get("benchmark_code"),
                             "reason": str(row["ai_reason"])[:50]
                             if row["ai_reason"]  # type: ignore[union-attr]
                             else "",
@@ -438,7 +442,11 @@ class ReviewManager:
                 alpha_str = f"{w['alpha']:+.1f}"
                 pct_str = f"{w['pct']:+.1f}"
                 reason = w["reason"] or I18n.get("review_ctx_no_reason")
-                xml += f"  - {I18n.get('review_ctx_win_detail', code=w['code'], name=w['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                benchmark = w["benchmark"] or I18n.get("review_ctx_benchmark_na")
+                xml += (
+                    f"  - [{benchmark}] "
+                    f"{I18n.get('review_ctx_win_detail', code=w['code'], name=w['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                )
 
         if losses:
             xml += f"  [{I18n.get('review_ctx_negative')}]\n"
@@ -446,7 +454,11 @@ class ReviewManager:
                 alpha_str = f"{loss['alpha']:+.1f}"
                 pct_str = f"{loss['pct']:+.1f}"
                 reason = loss["reason"] or I18n.get("review_ctx_no_reason")
-                xml += f"  - {I18n.get('review_ctx_loss_detail', code=loss['code'], name=loss['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                benchmark = loss["benchmark"] or I18n.get("review_ctx_benchmark_na")
+                xml += (
+                    f"  - [{benchmark}] "
+                    f"{I18n.get('review_ctx_loss_detail', code=loss['code'], name=loss['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                )
 
         if not wins and not losses:
             xml += f"  {I18n.get('review_ctx_none')}\n"
@@ -474,6 +486,7 @@ class ReviewManager:
                         t5_pct=u["t5_pct"],
                         t5_price=u["t5_price"],
                         index_pct=u["index_pct"],
+                        benchmark_code=u.get("benchmark_code"),
                         alpha=u["alpha"],
                         conn=conn,
                     )
@@ -489,6 +502,7 @@ class ReviewManager:
                         u["pct"],
                         u["label"],
                         index_pct=u["index_pct"],
+                        benchmark_code=u.get("benchmark_code"),
                         t1_price=u["t1_price"],
                         t5_pct=u["t5_pct"],
                         t5_price=u["t5_price"],
@@ -509,6 +523,7 @@ class ReviewManager:
         pct: typing.Any,
         label: typing.Any,
         index_pct: typing.Any = None,
+        benchmark_code: typing.Any = None,
         t1_price: typing.Any = None,
         t5_pct: typing.Any = None,
         t5_price: typing.Any = None,
@@ -524,6 +539,7 @@ class ReviewManager:
             t5_pct=t5_pct,
             t5_price=t5_price,
             index_pct=index_pct,
+            benchmark_code=benchmark_code,
             alpha=alpha,
             review_status=review_status,
         )

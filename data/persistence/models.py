@@ -261,6 +261,10 @@ class ScreeningHistory(Base):
     t5_price = Column(Numeric(12, 4), info={"computed": True})
     t5_pct = Column(Numeric(8, 4), info={"computed": True})
     index_pct = Column(Numeric(8, 4), info={"computed": True})
+    # D2-5：本次复盘实际使用的基准指数代码（Alpha 比较对象，与 index_pct/alpha 同批落库）。
+    # computed=True：由 update_prediction_result 在复盘阶段写入，不由 save_screening_results 产生，
+    # 避免 UPSERT 冲突时用 NULL 覆盖已落库的基准（存量历史行 benchmark_code 为 NULL，表示基准未知）。
+    benchmark_code = Column(String(20), info={"computed": True})
     alpha = Column(Numeric(12, 4), info={"computed": True})
     ai_score = Column(Numeric(12, 4))
     ai_reason = Column(String)

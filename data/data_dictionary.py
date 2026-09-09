@@ -131,6 +131,7 @@ COMMON_COLUMNS = {
     "t5_pct": "col_t5_pct",
     "index_pct": "col_index_pct",
     "alpha": "col_alpha",
+    "benchmark_code": "col_benchmark_code",
     "run_id": "col_run_id",
     "params_snapshot": "col_params_snapshot",
     # Sync Status

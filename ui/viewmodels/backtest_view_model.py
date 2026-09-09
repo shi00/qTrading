@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
@@ -334,7 +335,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         slippage_bps: float = 5.0,
         rebalance_freq: str = "signal",
         max_position_count: int = 50,
-        benchmark_code: str = "000300.SH",
+        benchmark_code: str = DEFAULT_BENCHMARK_INDEX,
         risk_free_rate: float = 0.02,
     ) -> BacktestConfig:
         """创建回测配置。"""
