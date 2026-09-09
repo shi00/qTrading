@@ -22,6 +22,17 @@ from utils.time_utils import get_now
 
 pytestmark = pytest.mark.integration
 
+
+@pytest.fixture(autouse=True)
+def _mock_ai_external_acknowledged_default_true():
+    """与 test_ai_mixin.py / test_lookahead_bias.py 一致：默认 AI 外发已确认。"""
+    with patch(
+        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+        return_value=True,
+    ):
+        yield
+
+
 # ==============================================================================
 # FIXTURES
 # ==============================================================================

@@ -23,6 +23,20 @@ from strategies.oversold_strategy import OversoldStrategy
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _mock_ai_external_acknowledged_default_true():
+    """与 test_ai_mixin.py / test_lookahead_bias.py 一致：默认 AI 外发已确认。
+
+    回测 AI 上下文与 as_of 传递测试默认在 AI 已启用的前提下执行。
+    未确认外发政策的路径由 test_backtest_skips_when_ai_not_acknowledged 专项覆盖。
+    """
+    with patch(
+        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+        return_value=True,
+    ):
+        yield
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def db_cache():
     """Create CacheManager instance with function-loop engine.
@@ -239,6 +253,51 @@ class TestBacktestAIContextIntegration:
             result = await strategy.run_ai_analysis(sample_candidates_df, context)
 
             assert len(captured_calls) > 0 or result is sample_candidates_df
+
+    @pytest.mark.asyncio
+    async def test_backtest_skips_when_ai_not_acknowledged(
+        self,
+        db_cache,
+        mock_data_processor_for_backtest,
+        sample_candidates_df,
+    ):
+        """D5-1: 回测模式下未确认 AI 外发政策时，run_ai_analysis 同样应在最外层跳过 AI 分析，
+        不发起任何外部资讯或学习上下文请求。
+        """
+        strategy = OversoldStrategy()
+        strategy.enable_ai_analysis = True
+
+        trade_date = date(2024, 6, 15)
+        context = {
+            "screening_data": sample_candidates_df,
+            "data_processor": mock_data_processor_for_backtest,
+            "trade_date": trade_date.strftime("%Y%m%d"),
+            "is_backtest": True,
+        }
+
+        with (
+            patch(
+                "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+                return_value=False,
+            ),
+            patch("strategies.ai_mixin.AIService") as mock_ai_cls,
+            patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
+            patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
+            patch(
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
+            ) as mock_lc,
+        ):
+            mock_ai = MagicMock()
+            mock_ai.is_cloud_available.return_value = True
+            mock_ai_cls.return_value = mock_ai
+
+            result = await strategy.run_ai_analysis(sample_candidates_df, context)
+
+            assert result is sample_candidates_df
+            mock_news.assert_not_called()
+            mock_global.assert_not_called()
+            mock_lc.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_backtest_news_fetch_receives_as_of_parameter(
