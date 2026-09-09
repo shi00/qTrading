@@ -353,16 +353,13 @@ class VectorBacktestEngine:
         3. 成交金额计算使用 raw_open/raw_close
         4. 收益计算和技术指标使用 qfq_close
 
-        复权公式与 TechnicalAnalysis._get_qfq_df() 一致：
+        复权公式：
         adjusted_price = raw_price * adj_factor / base_adj_factor
 
-        前视偏差防护与基准一致性：
-        统一使用最新一日的 adj_factor 作为基准（base="latest"），
-        确保在回测引擎、选股策略以及技术分析模块中复权基准完全一致。
-
-        复权说明：
-        - 最新一日 qfq_ratio = adj_factor_Latest / adj_factor_Latest = 1.0（最新一日不调整）
-        - 历史日 qfq_ratio = adj_factor_Dn / adj_factor_Latest（反映历史到最新一日的复权关系）
+        前视偏差防护（PIT）：
+        回测以**回测区间第一交易日**的 adj_factor 为基准（base="first"），
+        使历史绝对价格只依赖该时点及之前可得信息，不依赖期末（未来）除权信息，结果可复现。
+        活体/技术分析展示仍用 latest-base；两者收益率与归一化绩效口径一致，仅绝对量纲不同。
         """
         if "adj_factor" not in quotes_df.columns:
             return quotes_df.with_columns(
@@ -378,9 +375,9 @@ class VectorBacktestEngine:
                 ]
             )
 
-        # Ensure sorted by ts_code and trade_date to guarantee stock contiguous rows and correctness of the latest value in expression
+        # Ensure sorted by ts_code and trade_date to guarantee stock contiguous rows and correctness of the first value in expression
         quotes_df = quotes_df.sort(["ts_code", "trade_date"])
-        qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
+        qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code", ref="first")
 
         return quotes_df.with_columns(
             [

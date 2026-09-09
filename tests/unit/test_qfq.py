@@ -86,6 +86,46 @@ class TestQFQ:
         assert result.height == 0
         assert "qfq_ratio" in result.columns
 
+    def test_qfq_ratio_expr_pit_first_ref(self):
+        # ref="first"（回测 PIT 起点基准）
+        df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": ["20240101", "20240102", "20240103"],
+                "adj_factor": [None, 2.0, 1.0],
+            }
+        )
+        result = df.with_columns(qfq_ratio_expr(ref="first"))
+        ratios = result["qfq_ratio"].to_list()
+        # 首行 None 经 bfill → [2.0, 2.0, 1.0]；base=2.0 => [2/2, 2/2, 1/2]
+        assert ratios == pytest.approx([1.0, 1.0, 0.5])
+
+    def test_qfq_ratio_expr_pit_absolute_invariance(self):
+        # PIT 起点基准：追加未来除权记录不改变历史绝对量纲（可复现）；
+        # 对照 latest 基准会漂移。
+        def ratios(with_future: bool):
+            factors = [1.0, 1.0, 2.0] if not with_future else [1.0, 1.0, 2.0, 4.0]
+            df = pl.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * len(factors),
+                    "trade_date": [f"2024010{i + 1}" for i in range(len(factors))],
+                    "adj_factor": factors,
+                }
+            )
+            pit = df.with_columns(qfq_ratio_expr(ref="first"))["qfq_ratio"].to_list()
+            latest = df.with_columns(qfq_ratio_expr())["qfq_ratio"].to_list()
+            return pit, latest
+
+        pit_short, latest_short = ratios(with_future=False)
+        pit_long, latest_long = ratios(with_future=True)
+
+        # PIT：历史前三行绝对量纲不因未来除权漂移
+        assert pit_short == pytest.approx([1.0, 1.0, 2.0])
+        assert pit_long[:3] == pytest.approx(pit_short)
+        # latest：历史前三行随未来除权漂移
+        assert latest_short == pytest.approx([0.5, 0.5, 1.0])
+        assert latest_long[:3] == pytest.approx([0.25, 0.25, 0.5])
+
     def test_qfq_ratio_series_pandas_all_null(self):
         series = pd.Series([None, None])
         result = qfq_ratio_series(series)
