@@ -450,6 +450,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 raise
 
         total_days = len(trade_dates)
+        # D1-7：seasonal 通过 concurrency_factor 降载；delay_multiplier 服务串行披露同步
+        # （financial.py），此处丢弃 —— historical 并发批同步频率由令牌桶限速管理，
+        # 不再拉长请求间隔，避免与限速叠加导致过慢。
         concurrency_factor, _ = _get_seasonal_adjustments()
         concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(max(1, concurrency))

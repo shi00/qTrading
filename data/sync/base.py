@@ -67,6 +67,11 @@ def _get_seasonal_adjustments() -> tuple[int, float]:
     """
     Get concurrency and delay adjustments based on disclosure season.
 
+    Both fields are consumed by the serial disclosure sync (financial.py);
+    batch/concurrent sync strategies (historical.py) only use concurrency_factor
+    and intentionally discard delay_multiplier (their request frequency is
+    already governed by the token-bucket rate limiter). See D1-7.
+
     Returns:
         Tuple of (concurrency_factor, delay_multiplier):
         - concurrency_factor: 1 for normal, 2 for peak (divide concurrency by this)
