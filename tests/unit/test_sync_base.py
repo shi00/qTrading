@@ -109,6 +109,40 @@ class TestSyncResult:
         r1.merge(r2)
         assert r1.table_stats["daily"]["count"] == 15
 
+    def test_merge_failed_critical_tables_dedup(self):
+        """D1-2: merge() 对 failed_critical_tables 去重 union。"""
+        r1 = SyncResult(failed_critical_tables=["daily_quotes"])
+        r2 = SyncResult(failed_critical_tables=["daily_quotes", "daily_indicators"])
+        r1.merge(r2)
+        assert r1.failed_critical_tables == ["daily_quotes", "daily_indicators"]
+
+    def test_merge_failed_optional_tables(self):
+        """D1-2: merge() 合并 failed_optional_tables 并去重。"""
+        r1 = SyncResult(failed_optional_tables=["limit_list"])
+        r2 = SyncResult(failed_optional_tables=["top_list", "limit_list"])
+        r1.merge(r2)
+        assert r1.failed_optional_tables == ["limit_list", "top_list"]
+
+
+class TestSyncResultCompleteness:
+    """D1-2: is_complete 语义 —— 仅关键表无失败才算完整。"""
+
+    def test_empty_is_complete_true(self):
+        assert SyncResult().is_complete is True
+
+    def test_optional_failure_still_complete(self):
+        r = SyncResult(failed_optional_tables=["limit_list"])
+        assert r.is_complete is True
+
+    def test_critical_failure_not_complete(self):
+        r = SyncResult(failed_critical_tables=["daily_quotes"])
+        assert r.is_complete is False
+
+    def test_critical_failure_overrides_not_errors(self):
+        """is_complete 以 failed_critical_tables 为准，而非 not errors。"""
+        r = SyncResult(errors=["some error"], failed_critical_tables=["daily_quotes"])
+        assert r.is_complete is False
+
 
 class TestSyncResultMergeStatus:
     def test_merge_both_success(self):
@@ -219,6 +253,18 @@ class TestSyncResultToDict:
         d = r.to_dict()
         d["quality_scores"][datetime.date(2024, 1, 2)] = 0.8
         assert len(r.quality_scores) == 1
+
+    def test_completeness_fields_in_dict(self):
+        """D1-2: to_dict() 含完整性字段，且返回副本。"""
+        r = SyncResult(
+            failed_critical_tables=["daily_quotes"],
+            failed_optional_tables=["limit_list"],
+        )
+        d = r.to_dict()
+        assert d["failed_critical_tables"] == ["daily_quotes"]
+        assert d["failed_optional_tables"] == ["limit_list"]
+        d["failed_critical_tables"].append("daily_indicators")
+        assert r.failed_critical_tables == ["daily_quotes"]
 
 
 class TestSyncResultMergeExpectedBases:

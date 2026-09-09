@@ -473,11 +473,17 @@ class SchedulerService:
                 tm.update_progress(task_id, current / total if total else 0, msg)
 
             result = await processor.run_daily_update(progress_callback=_progress)
-            has_errors = hasattr(result, "errors") and bool(result.errors)
-            if has_errors:
-                logger.warning("[Scheduler] Daily update completed with errors, NOT marking done")
-            else:
+            # D1-2: 幂等键以 SyncResult.is_complete 为准（关键表全部成功），而非 not errors/无 is_complete。
+            # is_complete 缺省 False（保守）：即便收到无法判定的结果也不写入幂等键，宁可下次重跑。
+            is_complete = getattr(result, "is_complete", False)
+            if is_complete:
                 await self._mark_daily_update_done_db(today_str)
+            else:
+                logger.warning(
+                    "[Scheduler] Daily update NOT complete (critical=%s, optional=%s), NOT marking done",
+                    getattr(result, "failed_critical_tables", []),
+                    getattr(result, "failed_optional_tables", []),
+                )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
             if result is None:

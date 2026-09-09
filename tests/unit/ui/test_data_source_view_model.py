@@ -548,6 +548,23 @@ class TestDataSourceViewModelFullDailySync:
         _assert_snack(bound_vm, snapshots, "snack_full_sync_done_simple", "success")
         assert bound_vm.state.is_syncing is False
 
+    async def test_daily_sync_partial_optional_emits_warning_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """D1-2: failed_optional_tables 非空 → 发射降级提示 snack，而非当作完整成功。"""
+        mock_processor.run_daily_update = AsyncMock(
+            return_value=SyncResult(added=10, failed_optional_tables=["limit_list", "top_list"])
+        )
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(s.message == Message("snack_sync_partial_sources", {"tables": 2}) for s in snack_msgs)
+        assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
+
 
 class TestDataSourceViewModelAiConceptRebuild:
     def test_execute_sets_sync_busy(self, bound_vm):

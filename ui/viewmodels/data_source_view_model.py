@@ -428,10 +428,18 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     raise
                 except Exception as perm_err:
                     logger.debug("[DataSourceVM] skipped_permission summary failed: %s", perm_err)
-                self._emit_snack(
-                    Message("snack_full_sync_done_simple"),
-                    "success",
-                )
+                # D1-2: 非关键数据源失败时给出降级提示，而非无条件当作完整成功。
+                failed_optional = getattr(result, "failed_optional_tables", []) or []
+                if failed_optional:
+                    self._emit_snack(
+                        Message("snack_sync_partial_sources", {"tables": len(failed_optional)}),
+                        "warning",
+                    )
+                else:
+                    self._emit_snack(
+                        Message("snack_full_sync_done_simple"),
+                        "success",
+                    )
                 return Message("ds_daily_update_done")
             except asyncio.CancelledError:
                 # 不设 is_syncing 守卫: 真实 TaskManager 取消时 handle_task_update

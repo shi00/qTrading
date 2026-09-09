@@ -1039,6 +1039,34 @@ class HistoricalSyncStrategy(ISyncStrategy):
             stk_limit_result,
         )
 
+        # D1-2: 填充完整性维度。仅 sync_result 非空时记录（与 warnings 填充模式一致）。
+        # 显式表名→结果变量映射（不用 locals().get(key+"_result")——变量名不统一，hsgt_flow≠hsgt）。
+        # append 段为同步无 await 的尾部块，asyncio 下单任务整段执行不交错，逐项去重即幂等。
+        if sync_result is not None:
+            failed_statuses = (SYNC_RESULT_FETCH_FAILED, SYNC_RESULT_SAVE_FAILED)
+
+            def _record_failed(target: list[str], rows: dict, table: str):
+                if rows.get("result_status") in failed_statuses and table not in target:
+                    target.append(table)
+
+            for table, rows in {"daily_quotes": quotes_rows, "daily_indicators": basic_rows}.items():
+                _record_failed(sync_result.failed_critical_tables, rows, table)
+            for table, rows in {
+                "limit_list": limit_result,
+                "suspend_d": suspend_result,
+                "margin_daily": margin_result,
+                "moneyflow_daily": mf_result,
+                "northbound_holding": north_result,
+                "moneyflow_hsgt": hsgt_result,
+                "top_list": lhb_result,
+                "top_inst": lhb_inst_result,
+                "block_trade": block_result,
+                "index_daily": index_result,
+                "index_dailybasic": index_basic_result,
+                "stk_limit": stk_limit_result,
+            }.items():
+                _record_failed(sync_result.failed_optional_tables, rows, table)
+
         # S8: 仅当所有 critical 表（quotes + basic）都失败时才 raise，触发 circuit breaker
         # 单个 critical 表失败不阻断其他表同步（错误隔离）
         critical_failure_statuses = (SYNC_RESULT_FETCH_FAILED, SYNC_RESULT_SAVE_FAILED)

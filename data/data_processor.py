@@ -346,7 +346,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback,
         )
 
-    async def sync_daily_market_snapshot(self, trade_date=None, force=False):
+    async def sync_daily_market_snapshot(self, trade_date=None, force=False, sync_result=None):
         """Delegated to HistoricalSyncStrategy"""
         if trade_date is None:
             trade_date = await self.trade_calendar.get_latest_trade_date()
@@ -355,11 +355,19 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 "[DataProcessor] sync_daily_market_snapshot | All calendar sources unavailable. "
                 "Returning cached screening data.",
             )
+            if sync_result is not None:
+                # D1-2: 关键表因日历不可用根本未执行。既非"成功"也非"可重试的失败"，
+                # 但若留空会使 is_complete=True，调度器误写幂等键。
+                # 显式标记未执行的关键表为失败，保守地不写入幂等键。
+                for t in ("daily_quotes", "daily_indicators"):
+                    if t not in sync_result.failed_critical_tables:
+                        sync_result.failed_critical_tables.append(t)
             return await self.get_screening_data(get_now().date())
 
         await self.strategies["historical"].sync_daily_market_snapshot(
             trade_date,
             force=force,
+            sync_result=sync_result,
         )
 
         self._quality_tier = None
@@ -373,12 +381,17 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
     async def run_daily_update(self, progress_callback=None):
         from data.persistence.review_manager import ReviewManager
+        from data.sync.base import SyncResult
 
         await self.init_data()
 
         if progress_callback:
             progress_callback(0.2, 1.0, Message("init_sync_market_snapshot"))
-        result = await self.sync_daily_market_snapshot()
+        sync_result = SyncResult()
+        await self.sync_daily_market_snapshot(sync_result=sync_result)
+        # D1-2: 单日快照成功处理 = 1 个交易日（与 _run_historical_sync 的天语义一致）。
+        # quotes+basic 全失败时策略已内部 raise，此处不会到达，完整性由 failed_critical_tables 承载。
+        sync_result.added = 1
 
         if progress_callback:
             progress_callback(0.5, 1.0, Message("init_sync_financial"))
@@ -391,7 +404,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         if progress_callback:
             progress_callback(1.0, 1.0, Message("init_daily_update_done"))
-        return result
+        return sync_result
 
     @log_async_operation(
         operation_name="run_ai_concept_tagging",
