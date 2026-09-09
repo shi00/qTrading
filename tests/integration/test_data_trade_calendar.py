@@ -388,13 +388,12 @@ class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
     # ==========================================================
 
     async def test_get_start_date_by_trade_days_exceeds_available(self):
-        """Test get_start_date_by_trade_days when requesting more days than available."""
+        """请求超过可用交易日数时返回 None（D2-1），不使用自然日估算。"""
         await self._seed_trade_calendar(datetime.date(2024, 3, 18), datetime.date(2024, 3, 22))
 
         result = await self.service.get_start_date_by_trade_days(datetime.date(2024, 3, 22), 100)
 
-        self.assertIsNotNone(result)
-        self.assertLess(result, datetime.date(2024, 3, 22))  # type: ignore[untyped]
+        self.assertIsNone(result)
 
     async def test_get_prev_trade_date_first_available(self):
         """Test get_prev_trade_date when at first available trading day."""
