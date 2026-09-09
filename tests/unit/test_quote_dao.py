@@ -865,6 +865,106 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             assert result[datetime.date(2024, 6, 15)]["tables"]["limit_list"].get("exempt") is True
 
+    @pytest.mark.asyncio
+    async def test_attempted_upto_exempts_zero_count_sparse_table(self):
+        """D1-1：水位覆盖某日且稀疏表当日 count==0 → 判为"已尝试合法空"，exempt 不计分。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 4800 if table == "daily_quotes" else 0}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "moneyflow_daily"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
+            }
+            result = await dao.get_bulk_sync_quality_scores(
+                "20240615",
+                "20240615",
+                attempted_upto={"moneyflow_daily": "20240615"},
+            )
+            mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
+            assert mf.get("exempt") is True
+            assert result[datetime.date(2024, 6, 15)]["score"] > 0
+
+    @pytest.mark.asyncio
+    async def test_attempted_upto_not_exempt_when_count_positive(self):
+        """D1-1：水位存在但稀疏表当日 count>0 → 仍正常计分（不豁免）。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 4800 if table == "daily_quotes" else 100}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "moneyflow_daily"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
+            }
+            result = await dao.get_bulk_sync_quality_scores(
+                "20240615",
+                "20240615",
+                attempted_upto={"moneyflow_daily": "20240615"},
+            )
+            mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
+            assert mf.get("exempt") is not True
+            assert mf["ratio"] is not None
+            assert mf["count"] == 100
+
+    @pytest.mark.asyncio
+    async def test_attempted_upto_beyond_coverage_still_scores_zero(self):
+        """D1-1：水位未覆盖该日（date > attempted_upto）→ 不作为豁免，按正常 count==0 计分拉低。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 4800 if table == "daily_quotes" else 0}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "moneyflow_daily"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
+            }
+            result = await dao.get_bulk_sync_quality_scores(
+                "20240615",
+                "20240615",
+                attempted_upto={"moneyflow_daily": "20240614"},
+            )
+            mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
+            assert mf.get("exempt") is not True
+            assert mf["ratio"] == 0.0
+
 
 class TestQuoteDaoCoverageGaps:
     @pytest.mark.asyncio

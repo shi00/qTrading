@@ -24,6 +24,7 @@ from data.constants import (
 )
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.app_state_service import get_app_state, set_app_state
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 _CALENDAR_DAY_MULTIPLIER = 365 / 250
 _CALENDAR_DAY_BUFFER = 30
+
+# D1-1：断点续传"已完成日期"判定仅使用被 date_col_map 支持且每交易日必有的 DENSE 表。
+# 其余表（稀疏事件表 / 官方停止披露表 / 无权限表）不参与完成度判定，但仍正常同步。
+_DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
+
+# "已尝试水位"存储键前缀（D1-1）：区分"该表该日已尝试且合法为空"（quality 豁免）
+# 与"从未尝试"（真实缺口）。key 形如 sync_attempted_upto:<table>，value 为 YYYYMMDD。
+_WATERMARK_KEY_PREFIX = "sync_attempted_upto"
 
 
 class HistoricalSyncStrategy(ISyncStrategy):
@@ -89,6 +98,22 @@ class HistoricalSyncStrategy(ISyncStrategy):
             for task in self._active_tasks:
                 if not task.done():
                     task.cancel()
+
+    @staticmethod
+    def _completed_dates(cached_dates_per_table: dict[str, set]) -> set:
+        """已完成日期 = 全部 DENSE 表都有数据的日期，SPARSE 表不参与判定（D1-1）。
+
+        语义边界（如实描述）：
+        - 无任何 DENSE 表可判定时（cached_dates 为空或被能力探测全部过滤），返回空集触发全量重扫；
+        - 若仅部分 DENSE 表 key 存在（如 daily_quotes 被能力过滤而 daily_indicators 仍在），
+          用剩余存在的 DENSE 表交集判定——此时返回的可能非空，不属于"全量重扫"，
+          而是"用可用 DENSE 表判定"。核心价格源 daily_quotes 缺失属异常账户，
+          由 capability 探测与 quality 兜底共同暴露。
+        """
+        dense = [d for t, d in cached_dates_per_table.items() if t in _DENSE_TABLES]
+        if not dense:
+            return set()
+        return set.intersection(*dense)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
@@ -267,10 +292,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             for table in effective_synced_tables:
                 cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
 
-            existing = set()
-            core_dates = [cached_dates_per_table.get(t, set()) for t in effective_resume_tables]
-            if core_dates and all(core_dates):
-                existing = set.intersection(*core_dates)
+            existing = self._completed_dates(cached_dates_per_table)
 
             def normalize_date(d):
                 if isinstance(d, datetime.date):
@@ -296,10 +318,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if dates_to_verify:
                 try:
+                    # D1-1：读取各稀疏表"已尝试水位"，供 quality 评分豁免"已尝试且合法为空"的日期，
+                    # 避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。读取失败由 get_app_state 吞掉。
+                    attempted_upto: dict[str, str] = {}
+                    for table in effective_resume_tables:
+                        if table in _DENSE_TABLES:
+                            continue
+                        wm = await get_app_state(
+                            self.context.cache.engine,
+                            f"{_WATERMARK_KEY_PREFIX}:{table}",
+                        )
+                        if wm:
+                            attempted_upto[table] = wm
+
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=dates_to_verify[0],
                         end_date=dates_to_verify[-1],
                         tables=list(effective_resume_tables),
+                        attempted_upto=attempted_upto or None,
                     )
 
                     for date in dates_to_verify:
@@ -1049,7 +1085,41 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 f"All critical tables (quotes, basic) failed for {trade_date}, triggering circuit breaker"
             )
 
+        # D1-1：记录稀疏表"已尝试水位"——仅记录当日 fetch 成功（含合法空）的表，
+        # 供后续 quality 评分豁免"已尝试且为空"的日期，避免 dense 已完整仍反复 re-sync。
+        # northbound 走独立过滤逻辑，df 非 None（含过滤后空）且保存成功即视为已尝试。
+        _ok_statuses = (SYNC_RESULT_EMPTY, SYNC_RESULT_HAS_DATA)
+        for _res, _tbl in (
+            (mf_result, "moneyflow_daily"),
+            (hsgt_result, "moneyflow_hsgt"),
+            (margin_result, "margin_daily"),
+            (suspend_result, "suspend_d"),
+            (limit_result, "limit_list"),
+            (lhb_result, "top_list"),
+            (lhb_inst_result, "top_inst"),
+            (block_result, "block_trade"),
+            (index_result, "index_daily"),
+            (index_basic_result, "index_dailybasic"),
+            (stk_limit_result, "stk_limit"),
+        ):
+            if isinstance(_res, dict) and _res.get("result_status") in _ok_statuses:
+                await self._record_attempted_upto(_tbl, trade_date)
+        if data_map.get("north") is not None and north_result.get("success"):
+            await self._record_attempted_upto("northbound_holding", trade_date)
+
         return True
+
+    async def _record_attempted_upto(self, table: str, trade_date: datetime.date | None) -> None:
+        """为稀疏表写入"已尝试水位"（D1-1）。
+
+        写失败由 set_app_state 内部吞掉，不阻断同步；engine 未就绪时为 no-op。
+        """
+        if trade_date is None:
+            return
+        engine = getattr(self.context.cache, "engine", None)
+        if engine is None:
+            return
+        await set_app_state(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", trade_date.strftime("%Y%m%d"))
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_moneyflow(self, trade_date: datetime.date | None = None):
