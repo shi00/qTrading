@@ -1003,6 +1003,117 @@ class TestRunAiAnalysis:
                 await s.run_ai_analysis(candidates, context)
 
     @pytest.mark.asyncio
+    async def test_bg_fetch_news_converges_httpx_http_error(self, caplog):
+        """D5-7: 验证 bg_fetch_news 遇到 HTTP 错误/超时时收敛降级为空新闻，不中断个股分析。"""
+        import logging
+        import httpx
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        req = httpx.Request("GET", "https://example.com")
+        http_err = httpx.HTTPStatusError("502 Bad Gateway", request=req, response=httpx.Response(502, request=req))
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=http_err),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 88, "summary": "test", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+            # 核心业务不应被中断，仍应成功完成打分
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 88
+            # 验证 analyze_stock 接收到的 news 为降级后的空列表
+            call_kwargs = mock_ai_instance.analyze_stock.call_args.kwargs
+            call_args = mock_ai_instance.analyze_stock.call_args.args
+            news_arg = (
+                call_kwargs.get("news") if "news" in call_kwargs else (call_args[2] if len(call_args) > 2 else None)
+            )
+            assert news_arg == []
+            # 验证记录了分类降级日志
+            assert "Failed to fetch news" in caplog.text
+            assert "000001.SZ" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_bg_fetch_news_converges_arbitrary_exception(self, caplog):
+        """D5-7: 验证 bg_fetch_news 遇到任意未预期异常（如 JSON/KeyError）时收敛降级。"""
+        import logging
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=KeyError("corrupted_payload")),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 70, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 70
+            assert "Failed to fetch news" in caplog.text
+            assert "000001.SZ" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_analyze_one_guards_against_news_task_unhandled_exception(self, caplog):
+        """D5-7: 验证 analyze_one 在 await news_task 时若遭遇异常也防御性降级，不中断分析。"""
+        import logging
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        async def bad_prefetch_hook(candidates_df, ctx, prefetched):
+            async def failing_news():
+                raise TypeError("unexpected type error in coroutine")
+
+            prefetched.news_tasks["000001.SZ"] = asyncio.create_task(failing_news())
+            return prefetched
+
+        s._prefetch_strategy_specific = bad_prefetch_hook
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 92, "summary": "test", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 92
+            assert "Failed to await news task" in caplog.text
+            assert "000001.SZ" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self, _mock_ai_not_acknowledged):
         """D5-1: 未确认 AI 外发政策时，run_ai_analysis 必须立即在最外层返回，
         绝不发起任何外部网络请求或大量预取数据，通过 on_progress 提示用户确认。
