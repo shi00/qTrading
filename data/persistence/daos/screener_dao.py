@@ -350,6 +350,23 @@ class ScreenerDao(BaseDao):
         df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
         return df if df is not None else pd.DataFrame()
 
+    async def get_unfilled_t5_predictions(self, cutoff_date: datetime.date | str):
+        """返回已满 horizon 交易日但 t5_pct 仍为 NULL 的复盘记录（T+5 延迟回填候选）。
+
+        仅取 T1_DONE（已具备 T+1 标签/基线、只缺 T+5 的记录）；PENDING/NULL 归属 T+1 阶段，
+        由 run_review 处理，避免给未经 T+1 评估的记录预置 COMPLETED 状态（D2-4 范围收敛）。
+        """
+        sql = """
+            SELECT id, ts_code, trade_date
+            FROM screening_history
+            WHERE review_status = $2
+              AND t5_pct IS NULL
+              AND trade_date <= $1
+            ORDER BY trade_date DESC
+        """
+        df = await self._read_db(sql, (self._to_db_date(cutoff_date), REVIEW_STATUS_T1_DONE))
+        return df if df is not None else pd.DataFrame()
+
     async def get_learning_context(
         self,
         limit: int = 3,
@@ -438,6 +455,45 @@ class ScreenerDao(BaseDao):
                 raise
             except Exception as e:
                 logger.warning("[ScreenerDao] Failed to update prediction result: %s", safe_error(e))
+
+    @log_async_operation(
+        operation_name="ScreenerDao.backfill_t5_prediction",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
+    async def backfill_t5_prediction(
+        self,
+        record_id: int,
+        t5_pct: float,
+        t5_price: float | None = None,
+    ):
+        """回填 T+5 复盘指标并推进状态为 COMPLETED（D2-4）。
+
+        仅更新 t5_pct / t5_price / review_status 三个列；绝不触碰 t1_pct、prediction_result、
+        index_pct、alpha 等已确定的 T+1 指标，保证回填链路非破坏性。
+        """
+        self._check_engine()
+        table = Base.metadata.tables.get("screening_history")
+        if table is None:
+            logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
+            return
+
+        stmt = (
+            sa.update(table)
+            .where(table.c.id == record_id)
+            .values(
+                t5_pct=t5_pct,
+                t5_price=t5_price,
+                review_status=REVIEW_STATUS_COMPLETED,
+            )
+        )
+        await self._wait_maintenance_guard(context="backfill_t5_prediction")
+        try:
+            async with self._guarded_begin() as tx_conn:
+                await tx_conn.execute(stmt)
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning("[ScreenerDao] Failed to backfill T+5 prediction: %s", safe_error(e))
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:

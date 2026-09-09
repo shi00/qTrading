@@ -234,6 +234,7 @@ def _register_scheduler_jobs() -> None:
     """
     from strategies.ai_strategy import AISelectionStrategy
     from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
+    from services.scheduled_jobs.review_backfill import build_review_backfill_job
 
     async def _ai_runner(context: dict):
         # 每次执行新建策略实例（与原 SchedulerService._prediction_logic 行为一致）
@@ -241,6 +242,7 @@ def _register_scheduler_jobs() -> None:
         return await strategy.filter(context)
 
     SchedulerService().register_job("nightly_prediction", build_nightly_prediction_job(_ai_runner))
+    SchedulerService().register_job("review_t5_backfill", build_review_backfill_job())
 
 
 async def _stop_started_services(started: list[str]) -> None:
