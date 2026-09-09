@@ -227,6 +227,150 @@ class TestHistoryCacheByteLimitation:
         assert len(s._history_cache) == 0
 
 
+class TestAIConcurrencyStreamFeedback:
+    """Issue D5-6: 并发模式下流式输出状态反馈与实时卡片/进度更新。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_info_progress_and_log_when_concurrency_gt_1(self, caplog):
+        """当并发 > 1 时，on_progress 收到 ai_progress_concurrent_info 且记录提示日志（D5-6）。"""
+        import logging
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        progress_calls = []
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total, msg))
+
+        context = {
+            "data_processor": dp,
+            "on_progress": on_progress,
+        }
+
+        with (
+            caplog.at_level(logging.INFO),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 1
+
+        # 检查初始 progress 消息为 ai_progress_concurrent_info 并携带 concurrency=3
+        assert len(progress_calls) >= 1
+        init_call = progress_calls[0]
+        assert isinstance(init_call[2], Message)
+        assert init_call[2].key == "ai_progress_concurrent_info"
+        assert init_call[2].params.get("concurrency") == 3
+
+        # 检查记录了并发流式受限的解释日志
+        assert "Concurrent analysis enabled" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_single_concurrency_uses_standard_init(self):
+        """当并发 == 1 时，on_progress 收到标准 ai_progress_init（D5-6）。"""
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        progress_calls = []
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total, msg))
+
+        context = {
+            "data_processor": dp,
+            "on_progress": on_progress,
+        }
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 1
+
+        assert len(progress_calls) >= 1
+        init_call = progress_calls[0]
+        assert isinstance(init_call[2], Message)
+        assert init_call[2].key == "ai_progress_init"
+
+    @pytest.mark.asyncio
+    async def test_realtime_on_result_and_on_progress_per_stock(self):
+        """多并发模式下单股完成立即触发 on_result 与 on_progress，无重复调用（D5-6）。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        result_calls = []
+        progress_calls = []
+        c1_completed_event = asyncio.Event()
+
+        def on_result(row):
+            result_calls.append(row)
+            if row.get("ts_code") == "000001.SZ":
+                c1_completed_event.set()
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total))
+
+        context = {
+            "data_processor": dp,
+            "on_result": on_result,
+            "on_progress": on_progress,
+        }
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            ts_code = stock_info.get("ts_code")
+            if ts_code == "000001.SZ":
+                return {"score": 75, "summary": "ok", "decision": "Hold"}
+            else:
+                # 必须等 candidate 1 触发 on_result 并 set event 后才完成；若不是实时触发将死锁超时
+                await asyncio.wait_for(c1_completed_event.wait(), timeout=2.0)
+                return {"score": 85, "summary": "good", "decision": "Buy"}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 2
+
+        # 验证 on_result 被精确调用 2 次（没有多余的重复调用）
+        assert len(result_calls) == 2
+        # 验证包含初始 progress 以及每个任务完成时的 progress (1, 2), (2, 2)
+        assert (1, 2) in progress_calls
+        assert (2, 2) in progress_calls
+
+
 class TestAIStrategyMixinSortForAI:
     def test_single_row(self):
         s = ConcreteStrategy()
