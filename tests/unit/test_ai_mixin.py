@@ -125,6 +125,108 @@ class TestAIStrategyMixinInit:
         assert "test" in s._context_builders
 
 
+class TestHistoryCacheByteLimitation:
+    """Issue D5-5: _history_cache 以字节数限容而非条目数。"""
+
+    def test_history_cache_defaults(self):
+        """AIStrategyMixin 默认初始化为 128MB 字节上限且保留 _HISTORY_CACHE_MAX 兼容（D5-5）。"""
+        from strategies.ai_mixin import AIStrategyMixin
+
+        s = ConcreteStrategy()
+        assert AIStrategyMixin._HISTORY_CACHE_MAX == 4
+        assert AIStrategyMixin._HISTORY_CACHE_MAX_BYTES == 128 * 1024 * 1024
+        assert s._history_cache.maxsize == 128 * 1024 * 1024
+
+    def test_history_cache_tracks_memory_bytes(self):
+        """_history_cache 必须按实际内存字节跟踪容量，currsize 等于 DataFrame 字节数（D5-5）。"""
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        df = pd.DataFrame({"close": [10.0, 11.0, 12.0], "vol": [100, 200, 300]})
+        df_bytes = _dataframe_sizeof(df)
+        assert df_bytes > 50  # 确保不是默认的 1
+
+        s._history_cache["test_key"] = df
+        assert len(s._history_cache) == 1
+        assert s._history_cache.currsize == df_bytes
+
+    def test_history_cache_evicts_by_bytes(self):
+        """当总字节数超过 maxsize 时发生淘汰，防止多个大 DataFrame 造成 OOM（D5-5）。"""
+        from cachetools import TTLCache
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        df1 = pd.DataFrame({"close": list(range(50))})
+        df1_bytes = _dataframe_sizeof(df1)
+
+        # 设置仅能容纳约 1.5 个 df1 的小缓存
+        s._history_cache = TTLCache(maxsize=int(df1_bytes * 1.5), ttl=120, getsizeof=_dataframe_sizeof)
+
+        s._history_cache["k1"] = df1
+        assert "k1" in s._history_cache
+
+        df2 = pd.DataFrame({"close": list(range(50))})
+        s._history_cache["k2"] = df2
+        # k1 应因总字节数超限被 LRU 淘汰
+        assert "k1" not in s._history_cache
+        assert "k2" in s._history_cache
+
+    def test_dataframe_sizeof_fallbacks(self):
+        """_dataframe_sizeof 针对非 DataFrame 及异常情况的安全回退（D5-5）。"""
+        import sys
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        # 非 DataFrame 类型（如字符串、数字、None）
+        str_size = _dataframe_sizeof("test_string")
+        assert str_size == sys.getsizeof("test_string")
+        assert _dataframe_sizeof(None) >= 1
+
+        # DataFrame 模拟 memory_usage 抛错
+        mock_df = MagicMock(spec=pd.DataFrame)
+        mock_df.memory_usage.side_effect = RuntimeError("memory_usage failed")
+        fallback_size = _dataframe_sizeof(mock_df)
+        assert fallback_size >= 1
+
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_oversized_history_skips_cache(self, caplog):
+        """run_ai_analysis 在全量历史超大超出缓存上限时安全跳过缓存并记录 warning（D5-5）。"""
+        import logging
+        from cachetools import TTLCache
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        # 将缓存容量强制设为极小（10 字节），使任何 DataFrame 均超限触发 ValueError
+        s._history_cache = TTLCache(maxsize=10, ttl=120, getsizeof=_dataframe_sizeof)
+
+        dp = _make_mock_dp()
+        dummy_history = pd.DataFrame({"ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"], "close": [10.0, 11.0, 12.0]})
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=dummy_history)
+
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [12.0]})
+        context = {"data_processor": dp}
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # 运行分析：不应崩溃，顺利完成分析
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
+        # 验证触发了跳过缓存的 warning
+        assert "exceeds cache max size" in caplog.text
+        assert len(s._history_cache) == 0
+
+
 class TestAIStrategyMixinSortForAI:
     def test_single_row(self):
         s = ConcreteStrategy()
