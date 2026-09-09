@@ -556,6 +556,31 @@ class TestSchedulerDispatchNightlyPrediction:
         assert "nightly_prediction" not in svc2._registered_jobs
 
 
+class TestSchedulerDispatchReviewBackfill:
+    """D2-4: svc._run_review_backfill 仅调度注册的 job（业务编排已下沉）。
+
+    T+5 回填业务逻辑已迁移至 ``services/scheduled_jobs/review_backfill.py``，
+    对应业务测试见 ``tests/unit/test_review_backfill_job.py``。本类验证 SchedulerService 的
+    依赖注入调度机制（register_job → 调用）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_unregistered_job_warns_and_returns(self):
+        svc = _make_svc()
+        with patch("utils.scheduler_service.logger") as mock_logger:
+            await svc._run_review_backfill()
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert any("not registered" in str(c.args[0]) for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_registered_job_is_invoked_with_svc(self):
+        svc = _make_svc()
+        mock_job = AsyncMock()
+        svc.register_job("review_t5_backfill", mock_job)
+        await svc._run_review_backfill()
+        mock_job.assert_awaited_once_with(svc)
+
+
 class TestScheduleJobsInvalidTime:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_invalid_auto_update_time(self, mock_ch):
@@ -646,7 +671,7 @@ class TestSchedulerStart:
         svc.scheduler.running = False
         svc.start()
         svc.scheduler.start.assert_called_once()
-        assert svc.scheduler.add_job.call_count == 5  # 多次调用预期 (3 schedule_jobs + config_watchdog + load_db_state)
+        assert svc.scheduler.add_job.call_count == 6  # 多次调用预期 (4 schedule_jobs + config_watchdog + load_db_state)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_start_exception(self, mock_ch):

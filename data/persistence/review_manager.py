@@ -20,6 +20,34 @@ from utils.time_utils import get_now, parse_date, to_date
 logger = logging.getLogger(__name__)
 
 
+def _qfq_return_pct(
+    tn_ser: pd.Series,
+    basis_close: float,
+    basis_adj: float | None,
+    has_adj_factor: bool,
+) -> float | None:
+    """基于复权价的持有期收益率：ret = (close_tN/adj_tN) ÷ (close_t0/adj_t0) − 1。
+
+    复权基准 adj_ref 在比率中抵消，结果与基准选择无关（基准免疫）；
+    除权日因 adj 变化自动校正，避免 T+N 裸 close 累计被除权严重失真（D2-3）。
+    无 adj_factor（存量数据/测试替身）时回退原始 close 比率，保持向后兼容。
+    由 run_review 与 backfill_horizon_returns 共用（D2-4 单一实现）。
+    """
+    tn_close_raw = tn_ser.get("close")
+    tn_close = float(tn_close_raw) if bool(pd.notna(tn_close_raw)) else None
+    if tn_close is None:
+        return None
+    if has_adj_factor:
+        tn_adj_raw = tn_ser.get("adj_factor")
+        tn_adj = float(tn_adj_raw) if bool(pd.notna(tn_adj_raw)) else None
+        if tn_adj is None or tn_adj == 0:
+            return None
+        if basis_adj is None or basis_adj == 0:
+            return None
+        return (tn_close / tn_adj) / (basis_close / basis_adj) - 1.0
+    return (tn_close / basis_close) - 1.0
+
+
 class ReviewManager:
     """
     Manages the 'Verification' and 'Correction' phases of the AI loop.
@@ -164,27 +192,6 @@ class ReviewManager:
                 t5_pct: float | None = None
                 t5_price: float | None = None
 
-                def _qfq_return(tn_ser: pd.Series, basis_close: float, basis_adj: float | None) -> float | None:
-                    """基于复权价的持有期收益率：ret = (close_tN/adj_tN) ÷ (close_t0/adj_t0) − 1。
-
-                    复权基准 adj_ref 在比率中抵消，结果与基准选择无关（基准免疫）；
-                    除权日因 adj 变化自动校正，避免 T+5 裸 close 累计被除权严重失真（D2-3）。
-                    无 adj_factor（存量数据/测试替身）时回退原始 close 比率，保持向后兼容。
-                    """
-                    tn_close_raw = tn_ser.get("close")
-                    tn_close = float(tn_close_raw) if bool(pd.notna(tn_close_raw)) else None
-                    if tn_close is None:
-                        return None
-                    if has_adj_factor:
-                        tn_adj_raw = tn_ser.get("adj_factor")
-                        tn_adj = float(tn_adj_raw) if bool(pd.notna(tn_adj_raw)) else None
-                        if tn_adj is None or tn_adj == 0:
-                            return None
-                        if basis_adj is None or basis_adj == 0:
-                            return None
-                        return (tn_close / tn_adj) / (basis_close / basis_adj) - 1.0
-                    return (tn_close / basis_close) - 1.0
-
                 # T+1（真实交易日 +1）
                 if t1_date is not None and (t1_idx := stock_pos.get(t1_date)) is not None:
                     t1_row = df_quotes.iloc[t1_idx]
@@ -192,7 +199,7 @@ class ReviewManager:
                     # 与"停牌缺行不标"同语义，避免把数据不完整的 T+1 误标为 0% 收益。
                     if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
                         continue
-                    t1_ret = _qfq_return(t1_row, t0_close, t0_adj)
+                    t1_ret = _qfq_return_pct(t1_row, t0_close, t0_adj, has_adj_factor)
                     t1_pct = round(t1_ret * 100.0, 4) if t1_ret is not None else None
                     if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
@@ -200,7 +207,7 @@ class ReviewManager:
                 # T+5（真实交易日 +5）
                 if t5_date is not None and (t5_idx := stock_pos.get(t5_date)) is not None:
                     t5_row = df_quotes.iloc[t5_idx]
-                    t5_ret = _qfq_return(t5_row, t0_close, t0_adj)
+                    t5_ret = _qfq_return_pct(t5_row, t0_close, t0_adj, has_adj_factor)
                     t5_pct = round(t5_ret * 100.0, 4) if t5_ret is not None else None
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
@@ -301,6 +308,116 @@ class ReviewManager:
             await self._batch_update_results(updates)
 
         logger.info("[Review] Completed. Updated %s records.", len(updates))
+
+    @log_async_operation(operation_name="t5_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def backfill_horizon_returns(self, horizon: int = 5) -> int:
+        """回填已满 horizon 交易日的 T+N 复权收益（D2-4，T+5 延迟回填）。
+
+        独立于 run_review（其 10 日回看窗会让错过时机的 T+5 永久 NULL）：
+        以 DB 最新交易日为锚（非"今天"），计算最近 N 个交易日集合，回填
+        review_status=T1_DONE 但 t5_pct IS NULL 且已满 horizon 的记录。
+
+        schema 仅沉淀 T+5 列（t5_pct/t5_price），故只支持 horizon==5；其余值记 warning 返回 0。
+        天然幂等（只处理 t5_pct IS NULL），可重复调度，无需额外幂等状态。
+        返回本次回填的记录条数。
+        """
+        valid_horizon = 5
+        if horizon != valid_horizon:
+            logger.warning("[Backfill] Unsupported horizon %s (schema only stores T+5); skip.", horizon)
+            return 0
+
+        latest = await self.cache.quote_dao.get_latest_trade_date()
+        if not latest:
+            logger.info("[Backfill] No latest trade date available; skip.")
+            return 0
+        latest_date = self._normalize_trade_date(latest)
+
+        start_dt = latest_date - datetime.timedelta(days=120)
+        cal_df = await self.cache.stock_dao.get_trade_cal(
+            start_date=start_dt.strftime("%Y%m%d"),
+            end_date=latest_date.strftime("%Y%m%d"),
+            is_open="1",
+        )
+        if cal_df is None or cal_df.empty:
+            logger.info("[Backfill] No trade calendar available; skip.")
+            return 0
+        trade_dates = [self._normalize_trade_date(d) for d in cal_df["cal_date"]]
+        trade_dates.sort()
+        if len(trade_dates) < valid_horizon + 1:
+            logger.info("[Backfill] Too few trade dates (%s) for horizon %d; skip.", len(trade_dates), valid_horizon)
+            return 0
+
+        cutoff_date = trade_dates[-(valid_horizon + 1)]  # 倒数第 horizon+1 个交易日
+        candidates = await self.cache.screener_dao.get_unfilled_t5_predictions(cutoff_date)
+        if candidates is None or candidates.empty:
+            logger.info("[Backfill] No unfilled T+5 candidates up to %s.", cutoff_date)
+            return 0
+
+        all_codes = candidates["ts_code"].unique().tolist()
+        min_date = str(candidates["trade_date"].min())
+        bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
+            ts_code_list=all_codes,
+            start_date=min_date,
+        )
+        if bulk_quotes is None or bulk_quotes.empty:
+            logger.warning("[Backfill] Bulk quotes fetch returned empty.")
+            return 0
+        quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
+
+        market_trade_dates: list[datetime.date] = sorted(
+            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
+        )
+        market_pos = {d: i for i, d in enumerate(market_trade_dates)}
+        has_adj_factor = "adj_factor" in bulk_quotes.columns
+
+        backfilled = 0
+        for _, row in candidates.iterrows():
+            ts_code = row["ts_code"]
+            pred_date = row["trade_date"]
+            pred_date_obj = self._normalize_trade_date(pred_date)
+            df_quotes = quotes_by_code.get(ts_code)
+            if df_quotes is None or df_quotes.empty:
+                continue
+
+            t0_match = df_quotes[df_quotes["trade_date"].astype(object) == pred_date]
+            if t0_match.empty:
+                continue
+            t0_idx = t0_match.index[0]
+            t0_ser = df_quotes.loc[t0_idx]
+            t0_close_raw = t0_ser.get("close")
+            t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
+            if t0_close is None or t0_close == 0:
+                continue
+            t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
+            t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+
+            stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
+            t0_mpos = market_pos.get(pred_date_obj)
+            tn_date = (
+                market_trade_dates[t0_mpos + valid_horizon]
+                if t0_mpos is not None and t0_mpos + valid_horizon < len(market_trade_dates)
+                else None
+            )
+            if tn_date is None or (tn_idx := stock_pos.get(tn_date)) is None:
+                # 停牌等原因致 T+5 缺行：留待复牌后下次回填，不伪造数据
+                continue
+
+            tn_row = df_quotes.iloc[tn_idx]
+            tn_ret = _qfq_return_pct(tn_row, t0_close, t0_adj, has_adj_factor)
+            if tn_ret is None:
+                continue
+            t5_pct = tn_ret * 100.0
+            t5_price = float(tn_row["close"]) if bool(pd.notna(tn_row["close"])) else None
+
+            await self.cache.screener_dao.backfill_t5_prediction(
+                record_id=int(row["id"]),
+                t5_pct=t5_pct,
+                t5_price=t5_price,
+            )
+            backfilled += 1
+
+        logger.info("[Backfill] Backfilled %s T+5 records.", backfilled)
+        return backfilled
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_pending_predictions(self):

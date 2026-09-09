@@ -1815,3 +1815,123 @@ class TestReviewManagerSuspendProtection:
         await rm.run_review()
         # T+1（20240611）停牌缺行 → t1_pct=None → 无标签 → 不更新
         rm._update_result.assert_not_called()
+
+
+class TestBackfillHorizonReturns:
+    """D2-4：T+5 延迟回填 backfill_horizon_returns 逻辑。"""
+
+    def _make_rm(self, mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_unsupported_horizon_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        result = await rm.backfill_horizon_returns(horizon=3)
+        assert result == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_no_latest_date_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=None)
+        result = await rm.backfill_horizon_returns()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_too_few_trade_dates_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240618")
+        cal = pd.DataFrame({"cal_date": ["20240610", "20240611", "20240612", "20240613", "20240614"]})
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal)
+        result = await rm.backfill_horizon_returns()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_no_unfilled_candidates_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240618")
+        cal = pd.DataFrame(
+            {
+                "cal_date": [
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240617",
+                    "20240618",
+                ]
+            }
+        )
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal)
+        mock_cache.screener_dao.get_unfilled_t5_predictions = AsyncMock(return_value=pd.DataFrame())
+        result = await rm.backfill_horizon_returns()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfills_t5_and_returns_count(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240618")
+        cal = pd.DataFrame(
+            {
+                "cal_date": [
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240617",
+                    "20240618",
+                ]
+            }
+        )
+        mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=cal)
+        # cutoff = 倒数第 6 (horizon+1=6) 个交易日 = 20240612；trade_date 20240610 已满 5 交易日
+        mock_cache.screener_dao.get_unfilled_t5_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 7,
+                "trade_date": [
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240617",
+                    "20240618",
+                ],
+                "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8, 9.5],
+                "adj_factor": [1.0] * 7,
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(return_value=None)
+
+        result = await rm.backfill_horizon_returns()
+        assert result == 1
+        mock_cache.screener_dao.backfill_t5_prediction.assert_awaited_once()
+        _, kwargs = mock_cache.screener_dao.backfill_t5_prediction.call_args
+        assert kwargs["record_id"] == 1
+        assert kwargs["t5_pct"] is not None
+        assert kwargs["t5_price"] == 9.8

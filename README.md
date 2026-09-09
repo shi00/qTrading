@@ -22,7 +22,7 @@
 ### 2. 🔄 自进化 AI 闭环
 内置自动化回顾机制，让 AI 越选越准：
 
-* **结果回顾**: 自动跟踪 T+1/T+5 实际回报，计算相对于基准（CSI300/上证指数）的 **Alpha 收益**。
+* **结果回顾**: 自动跟踪 T+1/T+5 实际回报（T+1 即时标签，T+5 延迟回填），计算相对于基准（CSI300/上证指数）的 **Alpha 收益**。
 * **经验学习**: 自动标记"成功案例"与"失误陷阱"，并将历史经验动态注入后续筛选的 Prompt 中，实现策略的自进化。
 
 ### 3. 🛡️ 工业级数据质量网关
@@ -611,9 +611,11 @@ params = AIService._build_litellm_params(llm_config, messages)
 ```python
 from data.persistence.review_manager import ReviewManager
 
-# 自动跟踪选股结果的实际表现
+# 自动跟踪选股结果的实际表现：T+1 即时标签 + T+5 延迟回填
 review = ReviewManager(cache)
 await review.run_review(screener_result_id)
+await review.backfill_horizon_returns()
+# → T+1 当日复盘算 Alpha/标签；T+5 经独立回填任务在满 5 交易日后补全
 # → 计算 Alpha 收益，标记成功/失败案例，注入后续 Prompt
 ```
 

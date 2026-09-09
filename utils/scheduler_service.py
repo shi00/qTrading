@@ -364,7 +364,7 @@ class SchedulerService:
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
-        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh"]:
+        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh", "review_t5_backfill"]:
             existing = self.scheduler.get_job(job_id)
             if existing:
                 existing.remove()
@@ -419,6 +419,16 @@ class SchedulerService:
             dh,
             dm,
         )
+
+        # 4. T+5 Review Backfill Job (Daily, D2-4)
+        # 独立于 run_review：以 DB 最新交易日为锚回填错过时机的 T+5，天然幂等可重复调度。
+        self.scheduler.add_job(
+            self._run_review_backfill,
+            CronTrigger(hour=17, minute=30),
+            id="review_t5_backfill",
+            replace_existing=True,
+        )
+        logger.info("[Scheduler] Scheduled T+5 Review Backfill at 17:30")
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
@@ -563,6 +573,19 @@ class SchedulerService:
         if job_fn is None:
             logger.warning(
                 "[Scheduler] nightly_prediction job not registered (call SchedulerService.register_job)",
+            )
+            return
+        await job_fn(self)
+
+    async def _run_review_backfill(self):
+        """Execute registered T+5 backfill job (D2-4 下沉到 services/scheduled_jobs/review_backfill.py)。
+
+        仅调度已注册的 ``review_t5_backfill`` job，不感知 ReviewManager/TaskManager 等业务类。
+        """
+        job_fn = self._registered_jobs.get("review_t5_backfill")
+        if job_fn is None:
+            logger.warning(
+                "[Scheduler] review_t5_backfill job not registered (call SchedulerService.register_job)",
             )
             return
         await job_fn(self)
