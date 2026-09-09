@@ -978,6 +978,32 @@ class TestDailySnapshotCompleteness:
         result2 = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
         assert result2 is True
 
+    @pytest.mark.asyncio
+    async def test_rows_written_accumulated_from_saved(self):
+        """D1-4: rows_written 累加各表实际落库行数（默认 make_ctx 下 quotes+basic 各 10，其余为空=0）。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.rows_written == 20  # quotes(10) + basic(10)
+        assert sr.days_processed == 0  # 天数由调用方（_run_historical_sync）递增，单日快照不私有递增
+
+    @pytest.mark.asyncio
+    async def test_rows_written_excludes_failed_save(self):
+        """D1-4: save 失败（saved=None）的表不计入 rows_written，仅 quotes+basic 计数。"""
+        ctx = make_ctx()
+        ctx.api.get_limit_list = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"]})
+        )
+        ctx.cache.quote_dao.save_limit_list = AsyncMock(side_effect=RuntimeError("limit save failed"))
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.rows_written == 20  # limit save 失败不计入
+        assert "limit_list" in sr.failed_optional_tables
+
 
 class TestHistoricalSyncConstants:
     def test_synced_tables(self):
@@ -1120,8 +1146,8 @@ class TestResultUpdatedAccumulation:
         assert result.skipped == 2
         # result.updated 不应被跳过数污染（S14 修复前为 result.updated == 2）
         assert result.updated == 0
-        # 没有新同步 → result.added == 0
-        assert result.added == 0
+        # 没有新同步 → result.days_processed == 0
+        assert result.days_processed == 0
 
     @pytest.mark.asyncio
     async def test_low_quality_dates_not_counted_as_skipped(self):
@@ -1323,8 +1349,8 @@ class TestHistoricalSyncOneDayReturnValue:
     """P0-1: sync_one_day 必须检查 sync_daily_market_snapshot 返回值，False 时不计为成功"""
 
     @pytest.mark.asyncio
-    async def test_false_return_does_not_increment_added(self):
-        """sync_daily_market_snapshot 返回 False 时，result.added 不递增"""
+    async def test_false_return_does_not_increment_days_processed(self):
+        """sync_daily_market_snapshot 返回 False 时，result.days_processed 不递增"""
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
         strategy = HistoricalSyncStrategy(ctx)
@@ -1340,11 +1366,11 @@ class TestHistoricalSyncOneDayReturnValue:
                 with patch("data.sync.historical.asyncio.wait_for", new_callable=AsyncMock):
                     result = await strategy.run(days=1)
 
-        assert result.added == 0
+        assert result.days_processed == 0
 
     @pytest.mark.asyncio
-    async def test_true_return_increments_added(self):
-        """sync_daily_market_snapshot 返回 True 时，result.added 正常递增"""
+    async def test_true_return_increments_days_processed(self):
+        """sync_daily_market_snapshot 返回 True 时，result.days_processed 正常递增"""
         ctx = make_ctx()
         ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
         strategy = HistoricalSyncStrategy(ctx)
@@ -1358,7 +1384,7 @@ class TestHistoricalSyncOneDayReturnValue:
             with patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock):
                 result = await strategy.run(days=1)
 
-        assert result.added == 1
+        assert result.days_processed == 1
 
 
 class TestSyncDailyMarketSnapshotCancellation:

@@ -764,7 +764,9 @@ class TestBreakpointResumeCoreTables:
         assert called_date == d2
         # S14 修复：skipped 日期计入 result.skipped 而非 result.updated
         assert result.skipped == 1
-        assert result.added == 1
+        # D1-4 修复：added 语义改为 days_processed（处理交易日数）。d2 因缺质量结果被强制重同步 → 处理 1 个交易日。
+        # added 字段不再由历史同步递增（D1-4 拆分为 days_processed/rows_written），此处断言新语义。
+        assert result.days_processed == 1
 
 
 class TestIncompleteFinancialStocksDetection:

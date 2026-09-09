@@ -50,7 +50,7 @@
     "sched_sync_daily_quotes": "Syncing today's market data...",
     "sched_sync_financial": "Syncing financial reports...",
     "sched_update_review": "Updating strategy review stats...",
-    "sched_daily_done": "Data update complete, {added} new records",
+    "sched_daily_done": "Data update complete: {days} trading day(s), {rows} record(s)",
     "sched_task_daily_update": "Scheduled Data Update ({date})",
     "sched_task_type_daily": "Scheduled Sync",
     "sched_pred_init": "Initializing data...",
