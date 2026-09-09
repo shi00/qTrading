@@ -291,15 +291,10 @@ class AIStrategyMixin:
                 )
             return candidates_df
 
-        # --- Guard: AI External Data Acknowledged? (Task 2.2) ---
-        # NOTE(lazy): ack 状态读取移到 analyze_one 内部检查，避免阻断 cache 预取验证类测试
-        # (lookahead_bias / oversold_prompt_alignment)。ceiling: 该 guard 在并发循环每个候选
-        # 调用一次。upgrade: 改为预读一次后传入 analyze_one，或迁移到 AIService.analyze_stock
-        # 入口检查。
-        ai_external_acknowledged = ConfigHandler.is_ai_external_acknowledged()
-        if not ai_external_acknowledged:
+        # --- Guard: AI External Data Acknowledged? (D5-1) ---
+        if not ConfigHandler.is_ai_external_acknowledged():
             logger.info(
-                "[AIStrategyMixin] AI external data policy not acknowledged — skipping cloud AI calls",
+                "[AIStrategyMixin] AI external data policy not acknowledged — skipping AI analysis (no external requests initiated)",
             )
             if on_progress:
                 on_progress(
@@ -307,6 +302,7 @@ class AIStrategyMixin:
                     0,
                     Message("ai_external_acknowledgment_prompt"),
                 )
+            return candidates_df
 
         # --- Guard: DataProcessor Available? ---
         if dp is None:
@@ -596,9 +592,6 @@ class AIStrategyMixin:
                 on_chunk = on_stream_start(stock_name) if on_stream_start else None
                 if on_card_start:
                     on_card_start(stock_name)
-                # Task 2.2: 未确认 AI 外发政策时跳过云端调用（保持 cache 预取等数据流不变）
-                if not ai_external_acknowledged:
-                    return None  # 预期跳过，不触发 on_card_error
                 try:
                     hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
                     news_list = []

@@ -758,39 +758,44 @@ class TestRunAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self, _mock_ai_not_acknowledged):
-        """Task 2.2: 未确认 AI 外发政策时，run_ai_analysis 应通过 on_progress
-        显示确认引导并返回原始 candidates_df，不调用 AIService.analyze_stock。
-
-        NOTE: ack guard 不阻断 cache 预取 (commit ab16b588), on_progress 会被多次调用
-        (ack prompt → init → progress done). 此处断言 ack prompt 出现在任意一次调用中,
-        而非仅检查最后一次调用 (call_args).
+        """D5-1: 未确认 AI 外发政策时，run_ai_analysis 必须立即在最外层返回，
+        绝不发起任何外部网络请求或大量预取数据，通过 on_progress 提示用户确认。
         """
         s = ConcreteStrategy()
         candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
         on_progress = MagicMock()
         dp = MagicMock()
         context = {"data_processor": dp, "on_progress": on_progress}
-        with patch("strategies.ai_mixin.AIService") as mock_ai:
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.NewsFetcher") as mock_news,
+        ):
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
             mock_ai.return_value = mock_ai_instance
+            mock_news.get_stock_news = AsyncMock()
+            mock_news.get_us_major_moves = AsyncMock()
 
             result = await s.run_ai_analysis(candidates, context)
 
             # 返回原始 candidates（不进行 AI 分析, fallback 到 math-only results）
             assert len(result) == 1
             assert result.iloc[0]["ts_code"] == "000001.SZ"
-            # on_progress 被调用, 确认引导出现在任意一次调用中 (不阻断 cache 预取, 会被后续 init/done 覆盖)
-            # D7: progress_callback 透传 Message(key) 而非已翻译字符串, 断言 Message 对象
+
+            # 验证外部网络调用与大盘资讯完全未被触发 (D5-1 核心合规契约)
+            mock_news.get_stock_news.assert_not_called()
+            mock_news.get_us_major_moves.assert_not_called()
+            dp.cache.quote_dao.get_daily_quotes.assert_not_called()
+            mock_ai_instance.analyze_stock.assert_not_called()
+
+            # on_progress 仅被调用一次以发送引导确认消息，无后续 progress init/done 覆盖
             from ui.viewmodels import Message
 
-            expected_prompt = Message("ai_external_acknowledgment_prompt")
-            messages = [
-                (c.args[2] if len(c.args) >= 3 else c.kwargs.get("message", "")) for c in on_progress.call_args_list
-            ]
-            assert expected_prompt in messages, f"ack prompt not found in on_progress calls; messages={messages}"
-            # AIService.analyze_stock 未被调用
-            mock_ai_instance.analyze_stock.assert_not_called()
+            on_progress.assert_called_once_with(
+                0,
+                0,
+                Message("ai_external_acknowledgment_prompt"),
+            )
 
     @pytest.mark.asyncio
     async def test_cancelled_error_triggers_news_tasks_cleanup_in_finally(self):

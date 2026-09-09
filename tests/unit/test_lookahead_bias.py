@@ -13,6 +13,16 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _mock_ai_external_acknowledged_default_true():
+    """与 test_ai_mixin.py 一致：默认 AI 外发已确认，用于测试 trade_date 预取对齐。"""
+    with patch(
+        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+        return_value=True,
+    ):
+        yield
+
+
 def test_ai_mixin_uses_context_trade_date_first():
     from strategies.ai_mixin import AIStrategyMixin
 
