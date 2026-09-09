@@ -21,6 +21,8 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 # 注意：不覆盖预算外的 <user_custom_instructions>（该块不受预算截断）。
 # 取值 8000：对常见 32k~128k 上下文模型，可为 user 内容保留足够余量。
 CONTEXT_RESERVE_TOKENS = 8000
+# 输出预留 token：为模型生成分析报告 JSON 结论预留基础空间（D5-4）。
+OUTPUT_RESERVE_TOKENS = 4000
 # 回退估算分母：无 tiktoken/离线时用 len(text)//1（保守，不低估 CJK）。
 CHAR_FALLBACK_TOKENS_DIV = 1
 
@@ -153,15 +155,17 @@ class TokenBudgetService:
     def __init__(self, service: AIService) -> None:
         self._service = service
 
-    def _compute_analysis_budget(self) -> int:
-        """计算 user 内容 token 预算（Issue #70）。
+    def _compute_analysis_budget(
+        self,
+        system_messages: list[dict] | None = None,
+        fixed_blocks: str | list[str] | None = None,
+        reserved_output_tokens: int = OUTPUT_RESERVE_TOKENS,
+    ) -> int:
+        """计算 user 内容 token 预算（Issue #70 / D5-4）。
 
-        budget = max(1, primary_context - CONTEXT_RESERVE_TOKENS)。
-        以主模型 context 为基准（P2-3 决策）：长上下文主模型不被短 fallback 拖小，
-        真正解决 Issue #70"长上下文模型被过度裁剪"的痛点。
-        注意：failover 切到更短 context 的 fallback 模型时，本预算不会重算，
-        `_chat_completion_litellm` 仅就实际生效模型 context 记录溢出告警，不重裁。
-        残余风险（已接受）：短 fallback 模型可能收到超窗 prompt，依 provider 行为处置。
+        从模型窗口逐层扣减：窗口 − 输出预留 − system 消息 − 不可裁剪固定块。
+        未显式传入 system_messages/fixed_blocks 时向后兼容回退至保守常数预留。
+        以主模型 context 为基准（P2-3 决策）：长上下文主模型不被短 fallback 拖小。
         """
         # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
         # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
@@ -172,7 +176,7 @@ class TokenBudgetService:
         except Exception as exc:
             # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
             logger.warning(
-                "[AIService] Failover config read failed, using default context budget: %s",
+                "[AIService] Failover config read failed, falling back to active/default context budget: %s",
                 _ai.DataSanitizer.sanitize_error(exc),
             )
             failover_config = {"primary": "", "fallbacks": []}
@@ -184,4 +188,29 @@ class TokenBudgetService:
             primary_context = _get_model_context_window(llm_config, model_override=primary)
         else:
             primary_context = DEFAULT_CONTEXT_WINDOW
-        return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
+
+        if system_messages is None and fixed_blocks is None:
+            # 向后兼容：未提供固定块时，按原保守常数预留扣除
+            return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
+
+        # D5-4：精准扣除 system 消息与不可裁剪固定块
+        system_tokens = sum(
+            _estimate_tokens(m.get("content", "")) for m in (system_messages or []) if isinstance(m, dict)
+        )
+        if isinstance(fixed_blocks, list):
+            fixed_tokens = sum(_estimate_tokens(b) for b in fixed_blocks if b)
+        elif isinstance(fixed_blocks, str):
+            fixed_tokens = _estimate_tokens(fixed_blocks)
+        else:
+            fixed_tokens = 0
+
+        deduct_tokens = system_tokens + fixed_tokens + max(0, reserved_output_tokens)
+        budget = primary_context - deduct_tokens
+        if budget < 1:
+            logger.warning(
+                "[AIService] Fixed prompt + output reserve (%d tokens) exceeds model context window (%d tokens), capping budget to 1",
+                deduct_tokens,
+                primary_context,
+            )
+            return 1
+        return budget

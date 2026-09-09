@@ -392,27 +392,6 @@ class StockAnalysisService:
                 exc_info=True,
             )
 
-        # Issue #70：全局 token 预算分配（primary context - reserve，下限 1；P2-3 决策）。
-        # available_data 不参与预算：它只是存活 section 的"清单"，不承载判断数据，
-        # 预算后按其存活 section 重派生并以 index1 插入（P1-2 修复，避免全量计入预算
-        # 导致紧预算下过度裁剪真实数据段）。
-        budget_tokens = self._service._compute_analysis_budget()
-        user_prompt, surviving_names = _apply_context_budget(sections, budget_tokens)
-
-        # 预算后按存活 section 重派生 labels/available_data（R-A3/R-B3）：
-        # = 已过 filter_available_labels 的集合 ∩ 存活 section，防 manifest 声称已被裁掉的段
-        final_labels = [lbl for lbl in labels if _label_section.get(lbl) in surviving_names]
-        # 经组合根模块属性访问 build_available_data_block：保证测试
-        # patch("services.ai_service.build_available_data_block") 生效。
-        final_available = _ai.build_available_data_block(final_labels)
-        if final_available:
-            # 插入 index1（stock_info 恒 index0 在首位），清单不参与 token 预算
-            first_break = user_prompt.find("\n\n")
-            if first_break == -1:
-                user_prompt = final_available + "\n\n" + user_prompt
-            else:
-                user_prompt = user_prompt[:first_break] + "\n\n" + final_available + user_prompt[first_break:]
-
         system_instruction = (
             _UNIVERSAL_RULES
             + "\n\n"
@@ -432,6 +411,35 @@ class StockAnalysisService:
             {"role": "system", "content": system_instruction},
             {"role": "system", "content": f"<strategy_rules>\n{base_prompt}\n</strategy_rules>"},
         ]
+
+        # D5-4: 收集不可裁剪固定文本块，作为预算扣减依据（避免击穿窗口导致 API 400）
+        fixed_blocks: list[str] = ["<market_data>\n</market_data>"]
+        if sanitized_override:
+            fixed_blocks.append(f"<user_custom_instructions>\n{sanitized_override}\n</user_custom_instructions>")
+        # <available_data> 标签清单的 token 预估（预估上限避免预算前触发 build_available_data_block，P1-1 合规）
+        if labels:
+            fixed_blocks.append(f"<available_data>\n{' '.join(labels)}\n</available_data>")
+
+        # Issue #70 / D5-4：全局 token 预算分配（从主模型窗口逐层扣减：窗口 - 输出预留 - system 消息 - 不可裁剪固定块）
+        budget_tokens = self._service._compute_analysis_budget(
+            system_messages=messages,
+            fixed_blocks=fixed_blocks,
+        )
+        user_prompt, surviving_names = _apply_context_budget(sections, budget_tokens)
+
+        # 预算后按存活 section 重派生 labels/available_data（R-A3/R-B3）：
+        # = 已过 filter_available_labels 的集合 ∩ 存活 section，防 manifest 声称已被裁掉的段
+        final_labels = [lbl for lbl in labels if _label_section.get(lbl) in surviving_names]
+        # 经组合根模块属性访问 build_available_data_block：保证测试
+        # patch("services.ai_service.build_available_data_block") 生效。
+        final_available = _ai.build_available_data_block(final_labels)
+        if final_available:
+            # 插入 index1（stock_info 恒 index0 在首位），清单不参与 token 预算
+            first_break = user_prompt.find("\n\n")
+            if first_break == -1:
+                user_prompt = final_available + "\n\n" + user_prompt
+            else:
+                user_prompt = user_prompt[:first_break] + "\n\n" + final_available + user_prompt[first_break:]
 
         user_content = f"<market_data>\n{user_prompt}\n</market_data>"
         if sanitized_override:
