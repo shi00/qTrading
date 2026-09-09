@@ -143,7 +143,7 @@ class TestRunReviewE2E(unittest.TestCase):
         manager.cache.screener_dao.update_prediction_result.assert_not_called()
 
     @patch("data.persistence.review_manager.ConfigHandler")
-    def test_t0_close_zero_still_writes_t1(self, mock_config):
+    def test_t0_close_zero_skips_and_stays_pending(self, mock_config):
         mock_config.get_config.return_value = "000001.SH"
         pending_df = self._pending_df("20240315")
         quotes_df = pd.DataFrame(
@@ -158,10 +158,8 @@ class TestRunReviewE2E(unittest.TestCase):
         manager = self._make_manager(pending_df, quotes_df, index_df)
 
         asyncio.run(manager.run_review())
-        manager.cache.screener_dao.update_prediction_result.assert_called_once()
-        call_args = manager.cache.screener_dao.update_prediction_result.call_args
-        assert call_args.kwargs["t5_pct"] is None
-        assert call_args.kwargs["t1_price"] == 10.5
+        # D2-3：t0 收盘无效（0）时无可靠收益基准，跳过避免基于脏数据打标签，保持 pending。
+        manager.cache.screener_dao.update_prediction_result.assert_not_called()
 
     @patch("data.persistence.review_manager.ConfigHandler")
     def test_t1_pct_nan_skips_and_stays_pending(self, mock_config):

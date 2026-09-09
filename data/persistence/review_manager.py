@@ -188,8 +188,12 @@ class ReviewManager:
                 # T+1（真实交易日 +1）
                 if t1_date is not None and (t1_idx := stock_pos.get(t1_date)) is not None:
                     t1_row = df_quotes.iloc[t1_idx]
+                    # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标，
+                    # 与"停牌缺行不标"同语义，避免把数据不完整的 T+1 误标为 0% 收益。
+                    if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
+                        continue
                     t1_ret = _qfq_return(t1_row, t0_close, t0_adj)
-                    t1_pct = t1_ret * 100.0 if t1_ret is not None else None
+                    t1_pct = round(t1_ret * 100.0, 4) if t1_ret is not None else None
                     if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
 
@@ -197,7 +201,7 @@ class ReviewManager:
                 if t5_date is not None and (t5_idx := stock_pos.get(t5_date)) is not None:
                     t5_row = df_quotes.iloc[t5_idx]
                     t5_ret = _qfq_return(t5_row, t0_close, t0_adj)
-                    t5_pct = t5_ret * 100.0 if t5_ret is not None else None
+                    t5_pct = round(t5_ret * 100.0, 4) if t5_ret is not None else None
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
 
@@ -260,7 +264,7 @@ class ReviewManager:
                         )
                         continue
 
-                    alpha = t1_pct - index_pct
+                    alpha = round(t1_pct - index_pct, 4)
 
                     label = "DRAW"
                     if alpha > self.alpha_win_threshold:
