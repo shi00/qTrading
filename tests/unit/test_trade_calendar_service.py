@@ -319,19 +319,67 @@ class TestGetStartDateByTradeDays:
         assert result == datetime.date(2024, 1, 15)
 
     @pytest.mark.asyncio
-    async def test_from_trade_dates_list(self):
-        df = pd.DataFrame({"cal_date": [f"202406{i:02d}" for i in range(1, 15)], "is_open": [1] * 14})
-        svc = _make_service(cache_return=df)
-        result = await svc.get_start_date_by_trade_days("20240614", 5)
-        assert result is not None
+    async def test_insufficient_calendar_returns_none(self):
+        # D2-1: DB 无足够日历（DAO 返回 None）时返回 None，绝不回退自然日估算
+        svc = _make_service()
+        result = await svc.get_start_date_by_trade_days("20240614", 120)
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_exception_fallback(self):
+    async def test_exception_returns_none(self):
+        # D2-1: DAO 异常时返回 None，不伪造成功
         svc = _make_service()
         svc._cache.stock_dao.get_start_date_by_trade_days = AsyncMock(side_effect=Exception("error"))
         svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("error"))
         result = await svc.get_start_date_by_trade_days("20240614", 120)
+        assert result is None
+
+
+class TestEstimateStartDateByCalendarDays:
+    @pytest.mark.asyncio
+    async def test_none_end_date(self):
+        svc = _make_service()
+        result = await svc.estimate_start_date_by_calendar_days(None, 120)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_trade_days(self):
+        svc = _make_service()
+        result = await svc.estimate_start_date_by_calendar_days("20240614", 0)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_from_dao(self):
+        svc = _make_service()
+        svc._cache.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 1, 15))
+        result = await svc.estimate_start_date_by_calendar_days("20240614", 120)
+        assert result == datetime.date(2024, 1, 15)
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_list_position(self):
+        # 显式估算 API：DAO 不足时用已可得交易日列表取近似位置
+        df = pd.DataFrame({"cal_date": [f"202406{i:02d}" for i in range(1, 15)], "is_open": [1] * 14})
+        svc = _make_service(cache_return=df)
+        result = await svc.estimate_start_date_by_calendar_days("20240614", 5)
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_rough_start(self):
+        # 无可得交易日时返回自然日外推起点（显式估算 API 的兜底语义）
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        result = await svc.estimate_start_date_by_calendar_days("20240614", 120)
+        assert result == datetime.date(2024, 6, 14) - datetime.timedelta(days=210)
+
+    @pytest.mark.asyncio
+    async def test_dao_exception_still_estimates(self):
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._cache.stock_dao.get_start_date_by_trade_days = AsyncMock(side_effect=Exception("error"))
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        result = await svc.estimate_start_date_by_calendar_days("20240614", 120)
+        assert result == datetime.date(2024, 6, 14) - datetime.timedelta(days=210)
 
 
 class TestGetPrevTradeDate:
