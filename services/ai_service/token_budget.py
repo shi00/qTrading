@@ -97,7 +97,22 @@ def _get_model_context_window(llm_config: dict, model_override: str | None = Non
     return DEFAULT_CONTEXT_WINDOW
 
 
-def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[str, list[str]]:
+class BudgetResult(tuple):
+    """Token 预算裁剪结果元组（兼容 (user_prompt, surviving_names) 双元素解包）。
+
+    扩展提供 section_map 映射（{section_name: section_text}），
+    供调用方实现平级 XML 容器组装（D5-2）。
+    """
+
+    section_map: dict[str, str]
+
+    def __new__(cls, user_prompt: str, surviving_names: list[str], section_map: dict[str, str]):
+        obj = super().__new__(cls, (user_prompt, surviving_names))
+        obj.section_map = section_map
+        return obj
+
+
+def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> BudgetResult:
     """全局 Token 预算分配（Issue #70）。
 
     sections: (name, priority, is_truncatable, text, max_chars, min_chars)
@@ -105,7 +120,7 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
         - is_truncatable: 是否允许被预算迭代削减。
         - max_chars: 初始字符上限（None=不预截断）。
         - min_chars: 迭代削减下限（0=可整体丢弃）。
-    返回 (join 后的有序文本, 存活 section 名列表)。不重写 XML 标签。
+    返回 BudgetResult (join 后的有序文本, 存活 section 名列表, 存活映射)。不重写 XML 标签。
     有限终止：无可减少 section（全部达 min / 不可截断）时停并 logger.warning 接受超限。
     """
     cur: list[list] = []
@@ -120,7 +135,11 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
         return sum(_estimate_tokens(s[3]) for s in secs)
 
     if _total(cur) <= budget_tokens:
-        return "\n\n".join(s[3] for s in cur), [s[0] for s in cur]
+        return BudgetResult(
+            "\n\n".join(s[3] for s in cur),
+            [s[0] for s in cur],
+            {s[0]: s[3] for s in cur},
+        )
 
     # 迭代削减：优先裁优先级最低（priority 数字最大）的可截断 section；
     # 在同一优先级内再裁 token 最大的，避免大体积高优先级段被先掏空。
@@ -139,7 +158,11 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> tuple[st
             break
 
     surviving = [s for s in cur if s[3]]
-    return "\n\n".join(s[3] for s in surviving), [s[0] for s in surviving]
+    return BudgetResult(
+        "\n\n".join(s[3] for s in surviving),
+        [s[0] for s in surviving],
+        {s[0]: s[3] for s in surviving},
+    )
 
 
 class TokenBudgetService:
