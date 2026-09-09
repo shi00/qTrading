@@ -1134,7 +1134,9 @@ class TestReviewManagerCustomThresholds:
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 9.0],
+                    # D2-3：无 adj_factor 时 T+1 用 close 比率（-6%），故 close 取 10→9.4 以保持
+                    # alpha=-8 → DRAW 的原测试意图（与 pct_chg -6 一致，避免 mock 内部不一致）。
+                    "close": [10.0, 9.4],
                     "pct_chg": [1.0, -6.0],
                 }
             )
@@ -1664,3 +1666,152 @@ class TestReviewManagerR9Sanitization:
             assert "sk-test-secret-123" not in formatted, f"R9 违规：日志含明文敏感字段: {formatted}"
             if "api_key" in formatted:
                 assert "api_key=***" in formatted, f"R9 违规：api_key 未脱敏: {formatted}"
+
+
+class TestReviewManagerQfqAdjustedReturn:
+    """D2-3：复盘收益改用复权价计算。
+
+    除权日裸 close 会在 T+5 累积中产生假性暴跌；复权价收益（adj_ref 在比率中抵消，基准免疫）
+    可正确反映真实持有收益。无 adj_factor 时保持向后兼容（close 比率）。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t5_uses_adjusted_price_over_ex_right(self, mock_cm, mock_tc):
+        """20240612 除权（10 送 10：价格 10→5，adj 1.0→0.5）。
+
+        裸 close 累计 T+5 = 5.4/10-1 = -46%（假性暴跌）；复权后 = (5.4/0.5)/(10/1.0)-1 = +8%。
+        断言 t1_pct=5% / t5_pct=+8%，证明除权被复权价校正。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.5, 5.25, 5.3, 5.35, 5.4],
+                "pct_chg": [1.0, 5.0, -50.0, 0.95, 0.94, 0.93],
+                "adj_factor": [1.0, 1.0, 0.5, 0.5, 0.5, 0.5],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        args = rm._update_result.call_args
+        # T+1 无除权：10.5/10.0-1 = 5.0%（pct 为 _update_result 的第 2 位置参数）
+        assert args[0][1] == pytest.approx(5.0)
+        # T+5 复权收益：剔除 10 送 10 除权 → +8.0%（裸 close 会得 -46%）
+        assert args.kwargs["t5_pct"] == pytest.approx(8.0)
+        assert args.kwargs["t5_price"] == pytest.approx(5.4)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t1_uses_adjusted_price_on_ex_right_day(self, mock_cm, mock_tc):
+        """T+1 恰为除权日：close 腰斩但 adj 同步变化 → 复权收益反映真实持有收益（0%），
+        而非裸 close 的 -50%。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        # T+1=20240611 除权：close 10→5（腰斩），adj 1.0→0.5（10 送 10）。真实持有收益 0%。
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": ["20240610", "20240611"],
+                "close": [10.0, 5.0],
+                "pct_chg": [1.0, -50.0],
+                "adj_factor": [1.0, 0.5],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        args = rm._update_result.call_args
+        # (5.0/0.5)/(10.0/1.0)-1 = 0 → 真实持有收益 0%（非 -50%）
+        assert args[0][1] == pytest.approx(0.0)
+
+
+class TestReviewManagerSuspendProtection:
+    """D2-3：停牌个股缺行时，T+N 必须以跨股票并集日历锚定真实交易日。
+
+    停牌当日不产生"伪 T+N"收益，更不得把停牌次日误当 T+1（旧行位置逻辑的错误）。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_suspended_on_t1_skips_review(self, mock_cm, mock_tc):
+        """pred@20240610，真实 T+1=20240611 但该股当日停牌（缺行）→ 应跳过，不产生更新。
+
+        market_trade_dates 由跨股票并集（含 000002.SZ 的 20240611）提供，使 T+1 正确锚定 20240611；
+        旧实现按行位置会把停牌后首日 20240612 误当 T+1 并产生一条错误标签。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4 + ["000002.SZ"] * 5,
+                "trade_date": [
+                    "20240610",
+                    "20240612",
+                    "20240613",
+                    "20240614",  # 000001：20240611 停牌缺行
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",  # 000002：完整日历
+                ],
+                "close": [10.0, 10.5, 10.6, 10.7] + [20.0, 20.1, 20.2, 20.3, 20.4],
+                "pct_chg": [1.0, 5.0, 0.95, 0.94] + [1.0, 0.5, 0.5, 0.5, 0.5],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        # T+1（20240611）停牌缺行 → t1_pct=None → 无标签 → 不更新
+        rm._update_result.assert_not_called()
