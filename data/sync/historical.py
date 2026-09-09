@@ -301,6 +301,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # Breakpoint Resume (Check Cache for all Critical tables)
         # All tables that are synced in sync_daily_market_snapshot
         # Enhanced: Quality Score Verification (Phase 2.4)
+        # D1-8: 进度分母用过滤前交易日总数；跳过日期列表供进度回调逐条上报。
+        # 置于 resume try 之前，异常回退时也保持可用（无跳过时与原分母一致）。
+        original_count = len(trade_dates)
+        skipped_dates: list = []
         try:
             sync_integrity_config = ConfigHandler.get_sync_integrity_config()
             QUALITY_THRESHOLD = sync_integrity_config.get("quality_threshold", 80)
@@ -418,8 +422,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         raise
 
             original_count = len(trade_dates)
+            # D1-8: 收集被跳过的缓存日期列表，供进度上报逐条回调（skip 段）。
+            skipped_dates = [d for d in trade_dates if normalize_date(d) in existing_str]
             trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
-            skipped = original_count - len(trade_dates)
+            skipped = len(skipped_dates)
             result.skipped += skipped
 
             # D1-6：断点续传筛选后的候选日期即"本次实际触及日期"。取其 min/max 作为 report
@@ -450,6 +456,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 raise
 
         total_days = len(trade_dates)
+        # D1-8: 进度分母用过滤前交易日总数；被跳过的缓存日也推进进度，避免增量同步时
+        # （多数日期已缓存）进度条停滞。批次成功段以 progress_base 为基准继续，单调递增且不超 100%。
+        progress_total = original_count
+        progress_base = 0
+        for _sd in skipped_dates:
+            progress_base += 1
+            if progress_callback:
+                progress_callback(
+                    progress_base,
+                    progress_total,
+                    Message("sync_skip_cached", {"date": to_date(_sd).strftime("%Y%m%d")}),
+                )
         # D1-7：seasonal 通过 concurrency_factor 降载；delay_multiplier 服务串行披露同步
         # （financial.py），此处丢弃 —— historical 并发批同步频率由令牌桶限速管理，
         # 不再拉长请求间隔，避免与限速叠加导致过慢。
@@ -506,8 +524,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         failure_window.record(ok=True)
                     if progress_callback:
                         progress_callback(
-                            processed_count,
-                            total_days,
+                            progress_base + processed_count,
+                            progress_total,
                             Message("progress_sync_market", {"date": date_obj.strftime("%Y%m%d")}),
                         )
                 except EngineDisposedError:

@@ -984,6 +984,7 @@
     "progress_sync_prepare": "Preparing...",
     "snack_sync_not_completed": "Sync incomplete, retry",
     "progress_sync_market": "Syncing quotes: {date}",
+    "sync_skip_cached": "Skipping cached: {date}",
     "progress_sync_finance": "Syncing finance: {date}",
     "progress_sync_moneyflow": "Syncing moneyflow: {date}",
     "progress_sync_done": "Sync Complete: {day}",
