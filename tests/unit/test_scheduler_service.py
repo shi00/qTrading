@@ -802,10 +802,11 @@ class TestDailyUpdateLogicClosure:
             assert isinstance(result_msg, str)
 
     @pytest.mark.asyncio
-    async def test_daily_update_logic_with_sync_result_added(self):
+    async def test_daily_update_logic_with_sync_result_days_rows(self):
         svc = _make_svc()
         # D1-2: 用真实 SyncResult 承载完整性；is_complete=True → 写入幂等键
-        mock_result = SyncResult(added=42)
+        # D1-4: 完成消息按 days/rows 双参呈现——42 为条数，1 为交易日数
+        mock_result = SyncResult(days_processed=1, rows_written=42)
         mock_dp = MagicMock()
         mock_dp.trade_calendar = MagicMock()
         mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
@@ -820,7 +821,36 @@ class TestDailyUpdateLogicClosure:
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
             assert isinstance(result_msg, str)
+            # D1-4: 消息应包含条数 42（用户据此判断是否真的拉到数据）
+            assert "42" in result_msg
             assert svc._last_update_date == "20240614"
+
+    @pytest.mark.asyncio
+    async def test_daily_update_empty_day_warns(self):
+        svc = _make_svc()
+        # D1-4: 处理了交易日却 0 行落库（days>0, rows=0）→ 显式警告，区分"拉到空"与"拉到数据"
+        mock_result = SyncResult(days_processed=1, rows_written=0)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with (
+            patches[0] as mock_ch,
+            patches[1],
+            patches[2],
+            patches[3],
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            await factory("test_task")
+            # D1-4: 断言空日警告被触发且携带正确交易日数（1）；未调用时 call_args 为 None 触发 AttributeError，强断言
+            assert mock_warn.call_args.args[1] == 1
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_with_critical_failure_not_marked(self):

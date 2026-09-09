@@ -116,7 +116,9 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
     monkeypatch.setattr(
         sched_mod.I18n,
         "get",
-        staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('added', kwargs.get('date', ''))}"),
+        staticmethod(
+            lambda key, **kwargs: f"{key}:{kwargs.get('days', kwargs.get('date', ''))}:{kwargs.get('rows', '')}"
+        ),
     )
 
     class _FakeTradeCalendar:
@@ -151,7 +153,8 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
 
     factory = holder["factory"]
     msg = await factory("task-id")
-    assert msg == "sched_daily_done:2"
+    # D1-4: DataFrame fallback 路径 — days 未知为 0，rows=DataFrame 行数 2
+    assert msg == "sched_daily_done:0:2"
 
 
 @pytest.mark.asyncio

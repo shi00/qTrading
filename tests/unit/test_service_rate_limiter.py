@@ -75,12 +75,11 @@ class TestTokenBucketConsume(unittest.TestCase):
     def test_consume_insufficient_tokens(self):
         """不足令牌消费 - 需等待（虚拟时钟，不真实 sleep）。
 
-        覆盖 rate_limiter.py:57-96 的 _consume_reserve + consume：
-        - __init__ 调用 time.monotonic() 2 次（line 51, 55）
-        - _consume_reserve 调用 time.monotonic() 1 次（line 63）
-        - consume 调用 time.sleep(wait_time) 1 次（line 96）
+        覆盖 D1-5 原子预留后的 _consume_reserve + consume:
+        - _consume_reserve 令牌不足时返回等待时长且不扣减（余额永不为负）
+        - consume 循环 sleep 并重试，直到能够真正扣减成功
 
-        注意：consume() 的 line 82-92 有 asyncio.get_running_loop() 检查。
+        注意：consume() 有 asyncio.get_running_loop() 检查。
         在 sync 测试中（无运行中事件循环），get_running_loop() 抛出
         RuntimeError("no running event loop")，被 except 捕获后 pass，
         不影响测试。session 级事件循环存在但未"运行"，行为一致。
@@ -96,7 +95,8 @@ class TestTokenBucketConsume(unittest.TestCase):
 
             # 验证虚拟时钟推进（等待令牌补充）
             self.assertGreater(clock.now(), 0)
-            self.assertLess(bucket.tokens, 0)
+            # 原子预留：经等待重试后扣减为 0，但任一时刻余额永不为负
+            self.assertGreaterEqual(bucket.tokens, 0)
 
     def test_consume_all_tokens(self):
         """消费所有令牌"""

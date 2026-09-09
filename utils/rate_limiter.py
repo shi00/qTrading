@@ -55,7 +55,12 @@ class TokenBucket:
         self._last_recovery_time = time.monotonic()
 
     def _consume_reserve(self, tokens):
-        """Internal method to calculate wait time and update tokens under lock"""
+        """原子预留：令牌足够则扣减并返回 0，不足则不扣减并返回需等待的秒数。
+
+        D1-5 修复：原实现令牌不足时仍 ``self.tokens -= tokens`` 使余额转负，
+        高并发瞬间可透支多个令牌击穿 Tushare 硬限流。现改为"要么全额成功要么失败"，
+        不足时不动余额（任意时刻 ``self.tokens >= 0``），调用方须 sleep 后再次调用以真正扣减。
+        """
         if tokens > self.capacity:
             raise ValueError(f"Requested tokens ({tokens}) exceed bucket capacity ({self.capacity})")
 
@@ -67,12 +72,12 @@ class TokenBucket:
             new_tokens = self.tokens + elapsed * self.rate
             self.tokens = min(self.capacity, new_tokens)
 
-            wait_time = 0
             if self.tokens < tokens:
-                wait_time = (tokens - self.tokens) / self.rate
+                # 不足则返回等待时长，不扣减（余额永不为负）
+                return (tokens - self.tokens) / self.rate
 
             self.tokens -= tokens
-            return wait_time
+            return 0.0
 
     def consume(self, tokens=1):
         """
@@ -92,8 +97,9 @@ class TokenBucket:
             pass
 
         wait_time = self._consume_reserve(tokens)
-        if wait_time > 0:
+        while wait_time > 0:
             time.sleep(wait_time)
+            wait_time = self._consume_reserve(tokens)
 
     async def consume_async(self, tokens=1):
         """
@@ -101,8 +107,9 @@ class TokenBucket:
         ST-04: Non-blocking equivalent of consume.
         """
         wait_time = self._consume_reserve(tokens)
-        if wait_time > 0:
+        while wait_time > 0:
             await asyncio.sleep(wait_time)
+            wait_time = self._consume_reserve(tokens)
 
     def reduce_rate(self, factor=0.5):
         """

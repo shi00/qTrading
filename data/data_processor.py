@@ -391,7 +391,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         await self.sync_daily_market_snapshot(sync_result=sync_result)
         # D1-2: 单日快照成功处理 = 1 个交易日（与 _run_historical_sync 的天语义一致）。
         # quotes+basic 全失败时策略已内部 raise，此处不会到达，完整性由 failed_critical_tables 承载。
-        sync_result.added = 1
+        # D1-4: 已重命名为 days_processed（天数语义）；rows_written 已由 sync_daily_market_snapshot 透传填充。
+        sync_result.days_processed = 1
 
         if progress_callback:
             progress_callback(0.5, 1.0, Message("init_sync_financial"))

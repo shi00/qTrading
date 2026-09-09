@@ -67,6 +67,11 @@ def _get_seasonal_adjustments() -> tuple[int, float]:
     """
     Get concurrency and delay adjustments based on disclosure season.
 
+    Both fields are consumed by the serial disclosure sync (financial.py);
+    batch/concurrent sync strategies (historical.py) only use concurrency_factor
+    and intentionally discard delay_multiplier (their request frequency is
+    already governed by the token-bucket rate limiter). See D1-7.
+
     Returns:
         Tuple of (concurrency_factor, delay_multiplier):
         - concurrency_factor: 1 for normal, 2 for peak (divide concurrency by this)
@@ -141,6 +146,8 @@ class SyncResult:
     """
 
     added: int = 0
+    days_processed: int = 0  # D1-4: 处理的交易日数（历史同步语义，区别于 added 的条数）
+    rows_written: int = 0  # D1-4: 实际写入/更新的行数（由各表 saved 累加）
     updated: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
@@ -152,6 +159,10 @@ class SyncResult:
     table_stats: dict[str, dict] = field(default_factory=dict)
     failed_critical_tables: list[str] = field(default_factory=list)
     failed_optional_tables: list[str] = field(default_factory=list)
+    # D1-6：本次历史同步实际触及的日期范围（断点续传筛选后的候选 min/max）。
+    # 供 report 段以触及区间代替全 days 区间聚合质量分；本次无候选时为 None。
+    touched_start: datetime.date | None = None
+    touched_end: datetime.date | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -161,6 +172,8 @@ class SyncResult:
     def merge(self, other: SyncResult):
         """Merge another result into this one."""
         self.added += other.added
+        self.days_processed += other.days_processed
+        self.rows_written += other.rows_written
         self.updated += other.updated
         self.skipped += other.skipped
         self.errors.extend(other.errors)
@@ -208,6 +221,14 @@ class SyncResult:
             else:
                 self.table_stats[table] = stats.copy()
 
+        # D1-6：触及日期范围取并集（min/max）。
+        if other.touched_start is not None:
+            if self.touched_start is None or other.touched_start < self.touched_start:
+                self.touched_start = other.touched_start
+        if other.touched_end is not None:
+            if self.touched_end is None or other.touched_end > self.touched_end:
+                self.touched_end = other.touched_end
+
         # 优先级：cancelled > failed > partial > success。
         # failed 优先级高于 partial：任一子任务 failed 即视整体失败，
         # 避免部分成功掩盖关键失败（如 DB 不可用场景）。
@@ -225,6 +246,10 @@ class SyncResult:
         parts = [f"status={self.status}"]
         if self.added > 0:
             parts.append(f"added={self.added}")
+        if self.days_processed > 0:
+            parts.append(f"days_processed={self.days_processed}")
+        if self.rows_written > 0:
+            parts.append(f"rows_written={self.rows_written}")
         if self.updated > 0:
             parts.append(f"updated={self.updated}")
         if self.skipped > 0:
@@ -242,6 +267,8 @@ class SyncResult:
         return {
             "status": self.status,
             "added": self.added,
+            "days_processed": self.days_processed,
+            "rows_written": self.rows_written,
             "updated": self.updated,
             "skipped": self.skipped,
             "errors": self.errors.copy(),

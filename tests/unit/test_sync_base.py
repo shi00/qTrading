@@ -42,6 +42,8 @@ class TestSyncResult:
     def test_default_values(self):
         result = SyncResult()
         assert result.added == 0
+        assert result.days_processed == 0
+        assert result.rows_written == 0
         assert result.updated == 0
         assert result.skipped == 0
         assert result.errors == []
@@ -53,12 +55,27 @@ class TestSyncResult:
         assert result.updated == 5
         assert result.status == "partial"
 
+    def test_custom_days_rows(self):
+        """D1-4: days_processed/rows_written 独立于 added，各自可定制。"""
+        result = SyncResult(days_processed=3, rows_written=25000, added=0)
+        assert result.days_processed == 3
+        assert result.rows_written == 25000
+        assert result.added == 0
+
     def test_merge_adds_counts(self):
         r1 = SyncResult(added=5, updated=3)
         r2 = SyncResult(added=2, updated=1)
         r1.merge(r2)
         assert r1.added == 7
         assert r1.updated == 4
+
+    def test_merge_adds_days_rows(self):
+        """D1-4: merge 对 days_processed/rows_written 按天/行分别累加。"""
+        r1 = SyncResult(days_processed=1, rows_written=12000)
+        r2 = SyncResult(days_processed=2, rows_written=8000)
+        r1.merge(r2)
+        assert r1.days_processed == 3
+        assert r1.rows_written == 20000
 
     def test_merge_errors(self):
         r1 = SyncResult(errors=["err1"])
@@ -108,6 +125,29 @@ class TestSyncResult:
         r2 = SyncResult(table_stats={"daily": {"count": 5}})
         r1.merge(r2)
         assert r1.table_stats["daily"]["count"] == 15
+
+    def test_merge_touched_range_union(self):
+        """D1-6：merge 时触及日期范围取并集（min/max）。"""
+        r1 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r2 = SyncResult(touched_start=datetime.date(2024, 1, 1), touched_end=datetime.date(2024, 1, 4))
+        r1.merge(r2)
+        assert r1.touched_start == datetime.date(2024, 1, 1)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
+
+    def test_merge_touched_range_none_other(self):
+        """D1-6：对方无触及范围时，自身 touched 保持不变。"""
+        r1 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r1.merge(SyncResult())
+        assert r1.touched_start == datetime.date(2024, 1, 3)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
+
+    def test_merge_touched_range_none_self(self):
+        """D1-6：自身无触及范围时，采用对方范围。"""
+        r1 = SyncResult()
+        r2 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r1.merge(r2)
+        assert r1.touched_start == datetime.date(2024, 1, 3)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
 
     def test_merge_failed_critical_tables_dedup(self):
         """D1-2: merge() 对 failed_critical_tables 去重 union。"""
@@ -197,6 +237,20 @@ class TestSyncResultToSummary:
         r = SyncResult(added=10)
         assert "added=10" in r.to_summary()
 
+    def test_with_days_rows(self):
+        """D1-4: to_summary 含 days_processed/rows_written。"""
+        r = SyncResult(days_processed=3, rows_written=25000)
+        summary = r.to_summary()
+        assert "days_processed=3" in summary
+        assert "rows_written=25000" in summary
+
+    def test_days_rows_zero_omitted(self):
+        """D1-4: 计数为 0 时不展示，避免噪音。"""
+        r = SyncResult()
+        summary = r.to_summary()
+        assert "days_processed" not in summary
+        assert "rows_written" not in summary
+
     def test_with_updated(self):
         r = SyncResult(updated=5)
         assert "updated=5" in r.to_summary()
@@ -241,6 +295,12 @@ class TestSyncResultToDict:
         assert d["added"] == 5
         assert d["status"] == "partial"
         assert d["errors"] == ["e1"]
+
+    def test_days_rows_in_dict(self):
+        """D1-4: to_dict 含 days_processed/rows_written。"""
+        d = SyncResult(days_processed=2, rows_written=9000).to_dict()
+        assert d["days_processed"] == 2
+        assert d["rows_written"] == 9000
 
     def test_returns_copy(self):
         r = SyncResult(errors=["e1"])

@@ -871,11 +871,12 @@ class TestDataProcessorRunDailyUpdate:
             mock_rm.return_value = mock_instance
             result = await dp.run_daily_update()
             dp.init_data.assert_called_once()
-            # D1-2: run_daily_update 返回承载完整性的 SyncResult（added=1，且 is_complete 属性可用）
+            # D1-2: run_daily_update 返回承载完整性的 SyncResult（且 is_complete 属性可用）
+            # D1-4: 单日快照 = days_processed=1；rows_written 由 sync_daily_market_snapshot 透传策略填充
             from data.sync.base import SyncResult
 
             assert isinstance(result, SyncResult)
-            assert result.added == 1
+            assert result.days_processed == 1
             assert result.is_complete is True
 
     @pytest.mark.asyncio

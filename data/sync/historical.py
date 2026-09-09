@@ -181,27 +181,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
             await self._run_historical_sync(days, progress_callback, result)
 
             if result.status in ["success", "partial"]:
-                end_date = await self._get_effective_trade_date()
-                calendar_days = int(days * _CALENDAR_DAY_MULTIPLIER) + _CALENDAR_DAY_BUFFER
-                start_date = end_date - datetime.timedelta(days=calendar_days)
                 try:
-                    effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
-                    quality_results = await self.context.cache.get_bulk_sync_quality_scores(
-                        start_date=start_date,
-                        end_date=end_date,
-                        tables=list(effective_report_tables),
-                    )
-                    for date, quality in quality_results.items():
-                        result.quality_scores[date] = quality.get("score", 0)
-                        result.expected_bases[date] = quality.get("expected_base", 0)
-                        if quality.get("issues"):
-                            result.warnings.extend([f"{date}: {issue}" for issue in quality["issues"][:2]])
+                    # D1-6：用本次实际触及日期范围代替按 days 推算的全区间聚合。
+                    # 断点续传已跳过多数已完成/高质日期，全区间重算成本随历史长度线性增长；
+                    # 本次无候选（全部被续传跳过）时跳过 report 聚合。
+                    if result.touched_start is not None and result.touched_end is not None:
+                        effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
+                        quality_results = await self.context.cache.get_bulk_sync_quality_scores(
+                            start_date=result.touched_start,
+                            end_date=result.touched_end,
+                            tables=list(effective_report_tables),
+                        )
+                        for date, quality in quality_results.items():
+                            result.quality_scores[date] = quality.get("score", 0)
+                            result.expected_bases[date] = quality.get("expected_base", 0)
+                            if quality.get("issues"):
+                                result.warnings.extend([f"{date}: {issue}" for issue in quality["issues"][:2]])
 
-                        tables_info = quality.get("tables", {})
-                        for table, info in tables_info.items():
-                            if table not in result.table_stats:
-                                result.table_stats[table] = {"count": 0}
-                            result.table_stats[table]["count"] += info.get("count", 0)
+                            tables_info = quality.get("tables", {})
+                            for table, info in tables_info.items():
+                                if table not in result.table_stats:
+                                    result.table_stats[table] = {"count": 0}
+                                result.table_stats[table]["count"] += info.get("count", 0)
 
                 except EngineDisposedError:
                     raise
@@ -427,6 +428,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
             skipped = len(skipped_dates)
             result.skipped += skipped
 
+            # D1-6：断点续传筛选后的候选日期即"本次实际触及日期"。取其 min/max 作为 report
+            # 聚合区间，替代 _run_impl 中按 days 推算的全区间重算。筛选后无需再排序（取极值即可），
+            # 但候选可能不连续，中间非触及日期由 get_bulk_sync_quality_scores 返回低分而非抛错。
+            if trade_dates:
+                result.touched_start = min(trade_dates)
+                result.touched_end = max(trade_dates)
+
             if skipped > 0:
                 logger.debug(
                     "[HistoricalSync] Resume | Skipped %s high-quality dates (threshold=%s).",
@@ -460,6 +468,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     progress_total,
                     Message("sync_skip_cached", {"date": to_date(_sd).strftime("%Y%m%d")}),
                 )
+        # D1-7：seasonal 通过 concurrency_factor 降载；delay_multiplier 服务串行披露同步
+        # （financial.py），此处丢弃 —— historical 并发批同步频率由令牌桶限速管理，
+        # 不再拉长请求间隔，避免与限速叠加导致过慢。
         concurrency_factor, _ = _get_seasonal_adjustments()
         concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(max(1, concurrency))
@@ -509,7 +520,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with counter_lock:
                         processed_count += 1
-                        result.added += 1
+                        result.days_processed += 1
                         failure_window.record(ok=True)
                     if progress_callback:
                         progress_callback(
@@ -603,7 +614,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 failed_list.append(date)
                                 return
                             logger.debug("[HistoricalSync] Retry | ✅ Recovered %s", date)
-                            result.added += 1
+                            result.days_processed += 1
                         except EngineDisposedError:
                             raise
                         except Exception as retry_e:
@@ -646,14 +657,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
             pass  # Already logged by CircuitBreaker ERROR above
         elif result.status == "partial":
             logger.warning(
-                "[HistoricalSync] Run | ⚠️ Partial. Added=%s, FailedDates=%s",
-                result.added,
+                "[HistoricalSync] Run | ⚠️ Partial. Days=%s, FailedDates=%s",
+                result.days_processed,
                 len(failed_dates),
             )
         else:
             logger.info(
-                "[HistoricalSync] Run | ✅ Complete. Added=%s, FailedDates=%s",
-                result.added,
+                "[HistoricalSync] Run | ✅ Complete. Days=%s, FailedDates=%s",
+                result.days_processed,
                 len(failed_dates),
             )
 
@@ -1155,6 +1166,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 "stk_limit": stk_limit_result,
             }.items():
                 _record_failed(sync_result.failed_optional_tables, rows, table)
+
+            # D1-4: 累加实际落库行数（各表 saved>0）。saved 为 None 表示 fetch/save 失败，跳过不计。
+            # 空提交（sparse 表合法无数据 / 权限跳过）saved==0，不污染计数。
+            for _result in (
+                quotes_rows,
+                basic_rows,
+                limit_result,
+                suspend_result,
+                margin_result,
+                lhb_result,
+                lhb_inst_result,
+                stk_limit_result,
+                block_result,
+                mf_result,
+                hsgt_result,
+                index_result,
+                index_basic_result,
+                north_result,
+            ):
+                _saved = _result.get("saved") if isinstance(_result, dict) else None
+                if _saved:
+                    sync_result.rows_written += _saved
 
         # S8: 仅当所有 critical 表（quotes + basic）都失败时才 raise，触发 circuit breaker
         # 单个 critical 表失败不阻断其他表同步（错误隔离）

@@ -48,10 +48,10 @@ class TestPriceAdjustment:
         assert result["raw_close"].to_list() == [10.2, 11.2, 12.2]
 
         qfq_close = result["qfq_close"].to_list()
-        # 基准为最新一日 adj_factor=2.0，所以前两日 qfq 减半，第三日 qfq=raw
-        assert qfq_close[0] == pytest.approx(5.1, rel=0.01)
-        assert qfq_close[1] == pytest.approx(5.6, rel=0.01)
-        assert qfq_close[2] == pytest.approx(12.2, rel=0.01)
+        # 基准为回测起点 adj_factor=1.0，所以第一/二日 qfq=raw，第三日 qfq 因 adj=2.0 翻倍
+        assert qfq_close[0] == pytest.approx(10.2, rel=0.01)
+        assert qfq_close[1] == pytest.approx(11.2, rel=0.01)
+        assert qfq_close[2] == pytest.approx(24.4, rel=0.01)
 
     def test_apply_qfq_without_adj_factor(self) -> None:
         quotes_df = pl.DataFrame(
@@ -109,9 +109,9 @@ class TestPriceAdjustment:
         stock1 = result.filter(pl.col("ts_code") == "000001.SZ")
         stock2 = result.filter(pl.col("ts_code") == "000002.SZ")
 
-        # Stock1: 基准为最新一日 adj_factor=2.0, Day2 adj_factor=2.0 → qfq_close = 11.2
-        assert stock1["qfq_close"].to_list()[1] == pytest.approx(11.2, rel=0.01)
-        # Stock2: 基准为最新一日 adj_factor=1.0, Day2 adj_factor=1.0 → qfq_close = 22.2
+        # Stock1: 基准为回测起点 adj_factor=1.0, Day2 adj_factor=2.0 → qfq_close = 11.2*2.0/1.0 = 22.4
+        assert stock1["qfq_close"].to_list()[1] == pytest.approx(22.4, rel=0.01)
+        # Stock2: 基准为回测起点 adj_factor=1.0, Day2 adj_factor=1.0 → qfq_close = 22.2
         assert stock2["qfq_close"].to_list()[1] == pytest.approx(22.2, rel=0.01)
 
     def test_apply_qfq_middle_null_no_jump(self) -> None:
@@ -227,7 +227,7 @@ class TestExRightDate:
         result = engine._apply_qfq(quotes_df)
 
         qfq_close = result["qfq_close"].to_list()
-        base_adj = 0.25  # 最新一日 adj_factor 作为基准
+        base_adj = 0.5  # 回测起点 adj_factor 作为基准
 
         assert qfq_close[0] == pytest.approx(20.2 * 0.5 / base_adj, rel=0.01)
         assert qfq_close[1] == pytest.approx(10.2 * 0.5 / base_adj, rel=0.01)
@@ -274,3 +274,85 @@ class TestExRightDate:
 
         assert gross_amount_day1 == 20000.0
         assert gross_amount_day2 == 10000.0
+
+    def test_apply_qfq_pit_ex_right_no_jump(self) -> None:
+        """回测 PIT（起点基准）下除权日 qfq_close 无跳变。
+
+        场景：除全日 raw 从 10 跳跌到 5（10 送 10），adj_factor 从 1.0 升到 2.0。
+        起点 ref=1.0 → qfq_close = [10, 10, 10]，除权日无假 LOSS；
+        而 raw_close 如实跳跌，证明成交价走 raw 口径。
+        """
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)],
+                "open": [10.0, 5.0, 5.0],
+                "high": [10.5, 5.5, 5.5],
+                "low": [9.5, 4.5, 4.5],
+                "close": [10.0, 5.0, 5.0],
+                "adj_factor": [1.0, 2.0, 2.0],
+            }
+        )
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        result = engine._apply_qfq(quotes_df)
+
+        qfq_close = result["qfq_close"].to_list()
+        raw_close = result["raw_close"].to_list()
+
+        # raw 如实跳跌，成交口径未复权
+        assert raw_close == pytest.approx([10.0, 5.0, 5.0])
+        # qfq 起点基准下除权日无跳变（无假 LOSS）
+        assert qfq_close[1] == pytest.approx(qfq_close[0], rel=0.01)
+        assert qfq_close[2] == pytest.approx(qfq_close[0], rel=0.01)
+
+    def test_pit_vs_latest_returns_identical(self) -> None:
+        """起点-ref 与期末-ref 两种基准下归一化日收益率逐点一致（防行为漂移锚点）。
+
+        证明 D2-2 只改变绝对量纲/复现性，不改变业务收益与选股决策。
+        """
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "trade_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                ],
+                "open": [10.0, 5.0, 5.0, 5.0],
+                "high": [10.5, 5.5, 5.5, 5.5],
+                "low": [9.5, 4.5, 4.5, 4.5],
+                "close": [10.0, 5.0, 5.0, 5.0],
+                "adj_factor": [1.0, 2.0, 2.0, 0.5],
+            }
+        )
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+
+        qfq_first = engine._apply_qfq(quotes_df)["qfq_close"].to_list()  # 回测起点-ref（PIT）
+
+        # 期末-ref（旧实现口径）
+        last_adj = 0.5
+        qfq_last = [
+            (close_ * adj / last_adj) for close_, adj in zip([10.0, 5.0, 5.0, 5.0], [1.0, 2.0, 2.0, 0.5], strict=True)
+        ]
+
+        def daily_returns(prices):
+            return [b / a for a, b in zip(prices[:-1], prices[1:], strict=True)]
+
+        # 两种基准下单日收益率完全一致（绝对量纲不同，但逐差后比值不变）
+        assert daily_returns(qfq_first) == pytest.approx(daily_returns(qfq_last))
+        # 且口径差异确实存在（绝对价不同），证明该测试有区分力
+        assert qfq_first != pytest.approx(qfq_last)

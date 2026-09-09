@@ -319,10 +319,10 @@ class TestApplyQfq:
         assert "qfq_open" in result.columns
 
         qfq_ratio_day1 = result.filter(pl.col("trade_date") == date(2024, 1, 2)).select("qfq_ratio").item()
-        assert qfq_ratio_day1 == 2.0  # 最新一日基准=1.0, ratio=2.0/1.0=2.0
+        assert qfq_ratio_day1 == 1.0  # 回测起点基准=2.0, ratio=2.0/2.0=1.0
 
         qfq_ratio_day3 = result.filter(pl.col("trade_date") == date(2024, 1, 4)).select("qfq_ratio").item()
-        assert qfq_ratio_day3 == 1.0  # 最新一日基准=1.0, ratio=1.0/1.0=1.0
+        assert qfq_ratio_day3 == pytest.approx(0.5)  # 回测起点基准=2.0, ratio=1.0/2.0=0.5
 
     def test_multiple_stocks_different_adj_factors(self):
         engine = self._make_engine()
@@ -344,8 +344,8 @@ class TestApplyQfq:
         assert all(r == 1.0 for r in stock1_ratios)
 
         stock2_ratios = result.filter(pl.col("ts_code") == "000002.SZ").select("qfq_ratio").to_series().to_list()
-        assert stock2_ratios[0] == 2.0  # 最新一日基准=1.0, ratio=2.0/1.0=2.0
-        assert stock2_ratios[1] == 1.0  # 最新一日基准=1.0, ratio=1.0/1.0=1.0
+        assert stock2_ratios[0] == pytest.approx(1.0)  # 回测起点基准=2.0, ratio=2.0/2.0=1.0
+        assert stock2_ratios[1] == pytest.approx(0.5)  # 回测起点基准=2.0, ratio=1.0/2.0=0.5
 
 
 class TestCalcBenchmarkReturns:

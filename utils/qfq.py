@@ -1,24 +1,35 @@
 import polars as pl
 import pandas as pd
+from typing import Literal
 
 
-def qfq_ratio_expr(col_name: str = "adj_factor", group_col: str | None = "ts_code") -> pl.Expr:
+def qfq_ratio_expr(
+    col_name: str = "adj_factor",
+    group_col: str | None = "ts_code",
+    ref: Literal["last", "first"] = "last",
+) -> pl.Expr:
     """
     Calculate Point-in-Time Forward Adjusted Price (QFQ) ratio expression in Polars.
-    Normalizes adjustment factors to the LATEST available date (base="latest").
 
-    If factor values are missing, they are forward filled first to carry forward existing factors.
-    Then backward fill is applied to handle any remaining leading nulls.
+    ``ref`` selects the base factor used to normalize absolute price levels:
+    - ``"last"``  (default): base = latest available date -> live/display and technical analysis.
+    - ``"first"``: base = first trading day -> backtest Point-in-Time, so the absolute price
+      level does NOT depend on future ex-right information (reproducible backtests).
+
+    The base is derived from the FILLED factor series (forward/backward fill), so leading
+    nulls never collapse the group to an unadjusted ratio. If factor values are missing, they
+    are forward filled first to carry forward existing factors, then backward filled to handle
+    any remaining leading nulls.
     """
     expr = pl.col(col_name).forward_fill().backward_fill()
     if group_col:
         filled = expr.over(group_col)
-        latest = expr.last().over(group_col)
+        base = (expr.first() if ref == "first" else expr.last()).over(group_col)
     else:
         filled = expr
-        latest = expr.last()
+        base = expr.first() if ref == "first" else expr.last()
 
-    ratio = pl.when((latest == 0) | latest.is_null()).then(1.0).otherwise(filled / latest)
+    ratio = pl.when((base == 0) | base.is_null()).then(1.0).otherwise(filled / base)
     return ratio.alias("qfq_ratio")
 
 

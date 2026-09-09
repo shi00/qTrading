@@ -487,8 +487,22 @@ class SchedulerService:
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
             if result is None:
-                added = 0
-            elif hasattr(result, "added"):
+                return I18n.get("sched_daily_done", days=0, rows=0)
+            days = getattr(result, "days_processed", None)
+            if days is not None:
+                # D1-4: SyncResult 路径——天数与条数分开展示，避免"天数被当条数"的语义错位。
+                rows = getattr(result, "rows_written", 0)  # type: ignore[union-attr]
+                if rows == 0 and days > 0:
+                    # D1-4: 空日显式警告——处理了交易日却 0 行落库，可能是全市场停牌或权限不足，
+                    # 用户无法仅凭数字区分"拉到数据"与"拉到空"，需显式暴露。
+                    logger.warning(
+                        "[Scheduler] Daily update produced 0 rows across %s trading day(s) "
+                        "— possibly empty market or insufficient permission",
+                        days,
+                    )
+                return I18n.get("sched_daily_done", days=days, rows=rows)
+            # fallback（D1-2 后 run_daily_update 恒返回 SyncResult，以下为防御旧路径）
+            if hasattr(result, "added"):
                 added = getattr(result, "added", 0)  # type: ignore[union-attr]
             elif hasattr(result, "empty"):
                 # DataFrame/Series fallback: treat row count as added amount
@@ -498,7 +512,7 @@ class SchedulerService:
                     added = 0
             else:
                 added = result
-            return I18n.get("sched_daily_done", added=added)
+            return I18n.get("sched_daily_done", days=0, rows=added)
 
         TaskManager().submit_task(
             name=I18n.get("sched_task_daily_update", date=today_str),

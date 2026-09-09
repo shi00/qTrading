@@ -51,7 +51,7 @@
     "sched_sync_daily_quotes": "同步今日行情数据...",
     "sched_sync_financial": "同步财报数据...",
     "sched_update_review": "更新策略回顾统计...",
-    "sched_daily_done": "数据更新完成，新增 {added} 条",
+    "sched_daily_done": "数据更新完成：{days} 个交易日，{rows} 条记录",
     "sched_task_daily_update": "定时数据更新 ({date})",
     "sched_task_type_daily": "定时同步",
     "sched_pred_init": "初始化数据...",
