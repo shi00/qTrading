@@ -109,6 +109,29 @@ class TestSyncResult:
         r1.merge(r2)
         assert r1.table_stats["daily"]["count"] == 15
 
+    def test_merge_touched_range_union(self):
+        """D1-6：merge 时触及日期范围取并集（min/max）。"""
+        r1 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r2 = SyncResult(touched_start=datetime.date(2024, 1, 1), touched_end=datetime.date(2024, 1, 4))
+        r1.merge(r2)
+        assert r1.touched_start == datetime.date(2024, 1, 1)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
+
+    def test_merge_touched_range_none_other(self):
+        """D1-6：对方无触及范围时，自身 touched 保持不变。"""
+        r1 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r1.merge(SyncResult())
+        assert r1.touched_start == datetime.date(2024, 1, 3)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
+
+    def test_merge_touched_range_none_self(self):
+        """D1-6：自身无触及范围时，采用对方范围。"""
+        r1 = SyncResult()
+        r2 = SyncResult(touched_start=datetime.date(2024, 1, 3), touched_end=datetime.date(2024, 1, 5))
+        r1.merge(r2)
+        assert r1.touched_start == datetime.date(2024, 1, 3)
+        assert r1.touched_end == datetime.date(2024, 1, 5)
+
     def test_merge_failed_critical_tables_dedup(self):
         """D1-2: merge() 对 failed_critical_tables 去重 union。"""
         r1 = SyncResult(failed_critical_tables=["daily_quotes"])
