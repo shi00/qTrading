@@ -420,7 +420,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
                     async with counter_lock:
                         processed_count += 1
-                        result.added += 1
+                        result.days_processed += 1
                         consecutive_failures = 0
                     if progress_callback:
                         progress_callback(
@@ -514,7 +514,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 failed_list.append(date)
                                 return
                             logger.debug("[HistoricalSync] Retry | ✅ Recovered %s", date)
-                            result.added += 1
+                            result.days_processed += 1
                         except EngineDisposedError:
                             raise
                         except Exception as retry_e:
@@ -557,14 +557,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
             pass  # Already logged by CircuitBreaker ERROR above
         elif result.status == "partial":
             logger.warning(
-                "[HistoricalSync] Run | ⚠️ Partial. Added=%s, FailedDates=%s",
-                result.added,
+                "[HistoricalSync] Run | ⚠️ Partial. Days=%s, FailedDates=%s",
+                result.days_processed,
                 len(failed_dates),
             )
         else:
             logger.info(
-                "[HistoricalSync] Run | ✅ Complete. Added=%s, FailedDates=%s",
-                result.added,
+                "[HistoricalSync] Run | ✅ Complete. Days=%s, FailedDates=%s",
+                result.days_processed,
                 len(failed_dates),
             )
 
@@ -1066,6 +1066,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 "stk_limit": stk_limit_result,
             }.items():
                 _record_failed(sync_result.failed_optional_tables, rows, table)
+
+            # D1-4: 累加实际落库行数（各表 saved>0）。saved 为 None 表示 fetch/save 失败，跳过不计。
+            # 空提交（sparse 表合法无数据 / 权限跳过）saved==0，不污染计数。
+            for _result in (
+                quotes_rows,
+                basic_rows,
+                limit_result,
+                suspend_result,
+                margin_result,
+                lhb_result,
+                lhb_inst_result,
+                stk_limit_result,
+                block_result,
+                mf_result,
+                hsgt_result,
+                index_result,
+                index_basic_result,
+                north_result,
+            ):
+                _saved = _result.get("saved") if isinstance(_result, dict) else None
+                if _saved:
+                    sync_result.rows_written += _saved
 
         # S8: 仅当所有 critical 表（quotes + basic）都失败时才 raise，触发 circuit breaker
         # 单个 critical 表失败不阻断其他表同步（错误隔离）

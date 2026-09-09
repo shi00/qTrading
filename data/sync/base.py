@@ -141,6 +141,8 @@ class SyncResult:
     """
 
     added: int = 0
+    days_processed: int = 0  # D1-4: 处理的交易日数（历史同步语义，区别于 added 的条数）
+    rows_written: int = 0  # D1-4: 实际写入/更新的行数（由各表 saved 累加）
     updated: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
@@ -161,6 +163,8 @@ class SyncResult:
     def merge(self, other: SyncResult):
         """Merge another result into this one."""
         self.added += other.added
+        self.days_processed += other.days_processed
+        self.rows_written += other.rows_written
         self.updated += other.updated
         self.skipped += other.skipped
         self.errors.extend(other.errors)
@@ -225,6 +229,10 @@ class SyncResult:
         parts = [f"status={self.status}"]
         if self.added > 0:
             parts.append(f"added={self.added}")
+        if self.days_processed > 0:
+            parts.append(f"days_processed={self.days_processed}")
+        if self.rows_written > 0:
+            parts.append(f"rows_written={self.rows_written}")
         if self.updated > 0:
             parts.append(f"updated={self.updated}")
         if self.skipped > 0:
@@ -242,6 +250,8 @@ class SyncResult:
         return {
             "status": self.status,
             "added": self.added,
+            "days_processed": self.days_processed,
+            "rows_written": self.rows_written,
             "updated": self.updated,
             "skipped": self.skipped,
             "errors": self.errors.copy(),
