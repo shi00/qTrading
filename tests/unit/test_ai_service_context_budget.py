@@ -380,6 +380,87 @@ class TestComputeAnalysisBudget:
         assert budget >= 1
 
 
+class TestComputeAnalysisBudgetDeductFixed:
+    """Issue D5-4: 动态扣减 system 消息与不可裁剪固定块。"""
+
+    def _make_svc(self, model="model-test", context=32000):
+        svc = AIService.__new__(AIService)
+        svc._litellm_config = {
+            "provider": "custom",
+            "model": model,
+            "custom_model_contexts": {"custom": {model: context}},
+        }
+        return svc
+
+    def test_system_messages_and_fixed_blocks_deducted(self):
+        """模型窗口逐层扣减：窗口 - 输出预留(4000) - system 消息 - 不可裁剪块（D5-4）。"""
+        svc = self._make_svc(model="model-32k", context=32000)
+        failover = {"primary": "custom/model-32k", "fallbacks": []}
+
+        # 构造约 500 token 的 system message
+        sys_msgs = [
+            {"role": "system", "content": "A" * 500},
+            {"role": "system", "content": "B" * 500},
+        ]
+        # 构造约 200 token 的 fixed block
+        fixed_block = "C" * 200
+
+        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+            budget = svc._compute_analysis_budget(
+                system_messages=sys_msgs,
+                fixed_blocks=fixed_block,
+                reserved_output_tokens=4000,
+            )
+
+        expected_deduct = _estimate_tokens("A" * 500) + _estimate_tokens("B" * 500) + _estimate_tokens("C" * 200) + 4000
+        assert budget == 32000 - expected_deduct
+
+    def test_fixed_blocks_as_list_deducted(self):
+        """fixed_blocks 传入字符串列表时逐项累加扣减（D5-4）。"""
+        svc = self._make_svc(model="model-32k", context=32000)
+        failover = {"primary": "custom/model-32k", "fallbacks": []}
+
+        fixed_list = ["BlockOne " * 10, "BlockTwo " * 20]
+        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+            budget = svc._compute_analysis_budget(
+                fixed_blocks=fixed_list,
+                reserved_output_tokens=2000,
+            )
+
+        expected_deduct = sum(_estimate_tokens(b) for b in fixed_list) + 2000
+        assert budget == 32000 - expected_deduct
+
+    def test_overflow_fixed_blocks_capped_at_one(self, caplog):
+        """当固定提示词 + 预留输出超过模型上下文上限时，保底返回 1 并输出 warning（D5-4 对抗性防护）。"""
+        svc = self._make_svc(model="model-8k", context=8000)
+        failover = {"primary": "custom/model-8k", "fallbacks": []}
+
+        # 超大 system prompt（>8000 tokens，必然溢出 8k 窗口）
+        sys_msgs = [{"role": "system", "content": "SuperLongPrompt " * 4000}]
+
+        import logging
+
+        with (
+            patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover),
+            caplog.at_level(logging.WARNING),
+        ):
+            budget = svc._compute_analysis_budget(
+                system_messages=sys_msgs,
+                reserved_output_tokens=4000,
+            )
+
+        assert budget == 1
+        assert "exceeds model context window" in caplog.text
+
+    def test_backward_compatible_no_args(self):
+        """不传参数时 100% 保持向后兼容性（D5-4）。"""
+        svc = self._make_svc(model="model-32k", context=32000)
+        failover = {"primary": "custom/model-32k", "fallbacks": []}
+        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+            budget = svc._compute_analysis_budget()
+        assert budget == 32000 - CONTEXT_RESERVE_TOKENS
+
+
 # ---------------------------------------------------------------------------
 # analyze_stock 集成
 # ---------------------------------------------------------------------------
@@ -452,3 +533,37 @@ class TestAnalyzeStockBudgetIntegration:
         assert len(calls) == 1
         # 重派生的 labels 不含被裁掉的 news
         assert "ai_label_news" not in calls[0]
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_passes_system_and_fixed_blocks_to_budget(self):
+        """analyze_stock 必须向 _compute_analysis_budget 传入 system_messages 与 fixed_blocks（D5-4）。"""
+        svc = AIService.__new__(AIService)
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+
+        with (
+            patch.object(AIService, "_compute_analysis_budget", return_value=50000) as mock_budget,
+            patch.object(AIService, "is_cloud_available", return_value=True),
+            patch("services.ai_service.ConfigHandler") as mock_ch,
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe_custom"),
+        ):
+            mock_ch.get_ai_system_prompt.return_value = "SYSTEM_STRATEGY_RULES"
+            mock_ch.get_setting.return_value = False
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="override_prompt",
+            )
+
+        assert mock_budget.call_count == 1
+        call_kwargs = mock_budget.call_args.kwargs
+        assert "system_messages" in call_kwargs
+        assert "fixed_blocks" in call_kwargs
+        sys_msgs = call_kwargs["system_messages"]
+        assert len(sys_msgs) >= 2
+        # system messages 包含 strategy_rules
+        assert any("SYSTEM_STRATEGY_RULES" in m["content"] for m in sys_msgs)
+        # fixed_blocks 包含 user_custom_instructions
+        assert any("safe_custom" in str(b) for b in call_kwargs["fixed_blocks"])
