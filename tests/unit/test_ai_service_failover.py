@@ -717,3 +717,79 @@ class TestUnifiedFailoverErrorClassification:
 
                 assert result == {"content": "ok"}
                 assert call_count == 2, "空字符串 httpx.ConnectError 应切卡"
+
+
+class TestCrossProviderFailoverLogWording:
+    """Issue D5-9: 跨供应商 failover 无专属 key 时的警告日志与实际参数行为。"""
+
+    def test_cross_provider_failover_without_dedicated_key_logs_warning_and_omits_api_key(self, caplog):
+        """目标供应商无专属 API key 时，请求不带 api_key，记录 warning 且不再称 using primary key。"""
+        import logging
+        from unittest.mock import MagicMock
+        from services.ai_service.litellm_client import LiteLLMClient
+
+        mock_service = MagicMock()
+        client = LiteLLMClient(mock_service)
+
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "sk-primary-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+        # 模拟目标供应商 openai 未配置 api_key
+        failover_credentials = {"openai": {"api_key": "", "base_url": ""}}
+
+        with caplog.at_level(logging.WARNING):
+            params = client._build_litellm_params(
+                llm_config,
+                messages,
+                model_override="openai/gpt-4o",
+                failover_credentials=failover_credentials,
+            )
+
+        # 验证真实行为：request_params 中不带 api_key
+        assert "api_key" not in params
+        assert params["model"] == "openai/gpt-4o"
+
+        # 验证日志：提升为 WARNING，准确描述实际行为
+        assert "Cross-provider failover to 'openai' has no dedicated API key" in caplog.text
+        assert "request will not include api_key" in caplog.text
+        # 验证删除了具误导性的 "using primary key"
+        assert "using primary key" not in caplog.text
+
+    def test_cross_provider_failover_with_dedicated_key_sets_key_and_no_warning(self, caplog):
+        """目标供应商配置了专属 API key 时，正确使用该专属 key 且不触发警告。"""
+        import logging
+        from unittest.mock import MagicMock
+        from services.ai_service.litellm_client import LiteLLMClient
+
+        mock_service = MagicMock()
+        client = LiteLLMClient(mock_service)
+
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "api_key": "sk-primary-deepseek-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        messages = [{"role": "user", "content": "test"}]
+        failover_credentials = {
+            "openai": {
+                "api_key": "sk-dedicated-openai-key",
+                "base_url": "https://api.openai.com/v1",
+            }
+        }
+
+        with caplog.at_level(logging.WARNING):
+            params = client._build_litellm_params(
+                llm_config,
+                messages,
+                model_override="openai/gpt-4o",
+                failover_credentials=failover_credentials,
+            )
+
+        assert params.get("api_key") == "sk-dedicated-openai-key"
+        assert params["model"] == "openai/gpt-4o"
+        assert "has no dedicated API key" not in caplog.text
