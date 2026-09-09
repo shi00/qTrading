@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import date, datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
+from data.sync.base import SyncResult
 from utils.scheduler_service import SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -803,9 +804,8 @@ class TestDailyUpdateLogicClosure:
     @pytest.mark.asyncio
     async def test_daily_update_logic_with_sync_result_added(self):
         svc = _make_svc()
-        mock_result = MagicMock()
-        mock_result.errors = []
-        mock_result.added = 42
+        # D1-2: 用真实 SyncResult 承载完整性；is_complete=True → 写入幂等键
+        mock_result = SyncResult(added=42)
         mock_dp = MagicMock()
         mock_dp.trade_calendar = MagicMock()
         mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
@@ -820,13 +820,13 @@ class TestDailyUpdateLogicClosure:
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
             assert isinstance(result_msg, str)
+            assert svc._last_update_date == "20240614"
 
     @pytest.mark.asyncio
-    async def test_daily_update_logic_with_errors_not_marked(self):
+    async def test_daily_update_logic_with_critical_failure_not_marked(self):
         svc = _make_svc()
-        mock_result = MagicMock()
-        mock_result.errors = ["some error"]
-        mock_result.added = 10
+        # D1-2: 关键表失败 → is_complete=False → 不写入幂等键（即使 errors 也有值，幂等判定以 failed_critical_tables 为准）
+        mock_result = SyncResult(errors=["some error"], failed_critical_tables=["daily_quotes"])
         mock_dp = MagicMock()
         mock_dp.trade_calendar = MagicMock()
         mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
@@ -841,6 +841,26 @@ class TestDailyUpdateLogicClosure:
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             await factory("test_task")
             assert svc._last_update_date != "20240614"
+
+    @pytest.mark.asyncio
+    async def test_daily_update_logic_optional_failure_still_marked(self):
+        svc = _make_svc()
+        # D1-2: 仅非关键表失败 → is_complete 仍 True → 仍写入幂等键（降级由 UI 提示，不阻断幂等）
+        mock_result = SyncResult(added=30, failed_optional_tables=["limit_list"])
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            await factory("test_task")
+            assert svc._last_update_date == "20240614"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_dataframe_result(self):

@@ -150,6 +150,13 @@ class SyncResult:
     quality_scores: dict[datetime.date, float] = field(default_factory=dict)
     expected_bases: dict[datetime.date, int] = field(default_factory=dict)
     table_stats: dict[str, dict] = field(default_factory=dict)
+    failed_critical_tables: list[str] = field(default_factory=list)
+    failed_optional_tables: list[str] = field(default_factory=list)
+
+    @property
+    def is_complete(self) -> bool:
+        """关键表全部成功才算完整。调度器幂等键必须以此为准，而非 not errors。"""
+        return not self.failed_critical_tables
 
     def merge(self, other: SyncResult):
         """Merge another result into this one."""
@@ -158,6 +165,12 @@ class SyncResult:
         self.skipped += other.skipped
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.failed_critical_tables.extend(
+            t for t in other.failed_critical_tables if t not in self.failed_critical_tables
+        )
+        self.failed_optional_tables.extend(
+            t for t in other.failed_optional_tables if t not in self.failed_optional_tables
+        )
 
         if other.message:
             if self.message:
@@ -237,6 +250,8 @@ class SyncResult:
             "quality_scores": self.quality_scores.copy(),
             "expected_bases": self.expected_bases.copy(),
             "table_stats": self.table_stats.copy(),
+            "failed_critical_tables": self.failed_critical_tables.copy(),
+            "failed_optional_tables": self.failed_optional_tables.copy(),
         }
 
 

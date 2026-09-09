@@ -877,6 +877,59 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert result is True
 
 
+class TestDailySnapshotCompleteness:
+    """D1-2: sync_daily_market_snapshot 填充完整性维度。"""
+
+    @pytest.mark.asyncio
+    async def test_single_critical_table_failure_fills_failed_critical(self):
+        """quotes 失败（single critical）→ failed_critical_tables=["daily_quotes"]，is_complete False，仍返回 True。"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=RuntimeError("quotes fetch failed"))
+        ctx.api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True  # 仅单关键表失败不 raise（S8 错误隔离）
+        assert sr.failed_critical_tables == ["daily_quotes"]
+        assert sr.is_complete is False
+
+    @pytest.mark.asyncio
+    async def test_optional_table_failure_only_fills_optional(self):
+        """非关键表（limit）失败 → 仅 failed_optional_tables 更新，is_complete 仍 True。"""
+        ctx = make_ctx()
+        ctx.api.get_limit_list = AsyncMock(side_effect=RuntimeError("limit fetch failed"))
+        ctx.api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.failed_optional_tables == ["limit_list"]
+        assert sr.failed_critical_tables == []
+        assert sr.is_complete is True
+
+    @pytest.mark.asyncio
+    async def test_all_success_fills_not_self_when_none(self):
+        """全部成功 → 两字段为空，is_complete True；且不传 sync_result 时无副作用。"""
+        ctx = make_ctx()
+        ctx.api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.failed_critical_tables == []
+        assert sr.failed_optional_tables == []
+        assert sr.is_complete is True
+        # 不传 sync_result（standalone）不抛错
+        result2 = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result2 is True
+
+
 class TestHistoricalSyncConstants:
     def test_synced_tables(self):
         assert "daily_quotes" in HistoricalSyncStrategy.SYNCED_TABLES

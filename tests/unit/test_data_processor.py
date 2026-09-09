@@ -161,7 +161,9 @@ class TestDataProcessorSyncDailyMarket:
         dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
         dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
         await dp.sync_daily_market_snapshot()
-        dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once_with("20240614", force=False)
+        dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once_with(
+            "20240614", force=False, sync_result=None
+        )
 
 
 class TestDataProcessorShouldSyncFinancials:
@@ -867,8 +869,65 @@ class TestDataProcessorRunDailyUpdate:
             mock_instance = MagicMock()
             mock_instance.run_review = AsyncMock()
             mock_rm.return_value = mock_instance
-            await dp.run_daily_update()
+            result = await dp.run_daily_update()
             dp.init_data.assert_called_once()
+            # D1-2: run_daily_update 返回承载完整性的 SyncResult（added=1，且 is_complete 属性可用）
+            from data.sync.base import SyncResult
+
+            assert isinstance(result, SyncResult)
+            assert result.added == 1
+            assert result.is_complete is True
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_passthrough_sync_result(self):
+        """D1-2: sync_daily_market_snapshot(sync_result=sr) 将 sr 透传给策略；不传则仍返回 DataFrame。"""
+        dp = _make_dp()
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.get_screening_data = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        hist = MagicMock()
+        hist.sync_daily_market_snapshot = AsyncMock()
+        dp.strategies = {"historical": hist}
+
+        # 传入 sync_result → 透传给策略
+        from data.sync.base import SyncResult
+
+        sr = SyncResult()
+        out_df = await dp.sync_daily_market_snapshot(sync_result=sr)
+        hist.sync_daily_market_snapshot.assert_awaited_once_with(
+            datetime.date(2024, 6, 14), force=False, sync_result=sr
+        )
+        # 公开返回契约仍为 screening DataFrame
+        assert isinstance(out_df, pd.DataFrame)
+        # 不传 sync_result → 策略收到 None，仍返回 DataFrame
+        hist.sync_daily_market_snapshot.reset_mock()
+        out_df2 = await dp.sync_daily_market_snapshot()
+        hist.sync_daily_market_snapshot.assert_awaited_once_with(
+            datetime.date(2024, 6, 14), force=False, sync_result=None
+        )
+        assert isinstance(out_df2, pd.DataFrame)
+
+    @pytest.mark.asyncio
+    async def test_calendar_unavailable_marks_critical_incomplete(self):
+        """D1-2: 日历不可用时快照根本未执行，应标记 critical 失败以免调度器误写幂等键。"""
+        dp = _make_dp()
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        dp.get_screening_data = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        hist = MagicMock()
+        hist.sync_daily_market_snapshot = AsyncMock()
+        dp.strategies = {"historical": hist}
+
+        from data.sync.base import SyncResult
+
+        sr = SyncResult()
+        out_df = await dp.sync_daily_market_snapshot(sync_result=sr)
+        # 快照未执行，策略不应被调用
+        hist.sync_daily_market_snapshot.assert_not_awaited()
+        assert sr.failed_critical_tables == ["daily_quotes", "daily_indicators"]
+        assert sr.is_complete is False
+        # 公开返回契约仍为 screening DataFrame
+        assert isinstance(out_df, pd.DataFrame)
 
     @pytest.mark.asyncio
     async def test_with_callback(self):
