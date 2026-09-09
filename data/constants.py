@@ -64,6 +64,10 @@ FINANCIAL_REPORT_SCHEMA_COLS = [
     "accounts_receiv",  # 应收账款
 ]
 
+# 单一基准正本（D2-5）：复盘 Alpha 与回测超额收益统一以此指数为比较基准。
+# ReviewManager 与 BacktestConfig/backtest_view_model 缺省值共同读取，禁止各自硬编码。
+DEFAULT_BENCHMARK_INDEX = "000985.CSI"
+
 # Major Market Indices to Track
 MAJOR_INDICES = [
     "000001.SH",  # Shanghai Composite

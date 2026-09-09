@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
+from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.persistence.review_manager import ReviewManager
 import pytest
 
@@ -816,7 +817,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             await manager.run_review()
             mock_cache_instance.get_index_daily_range.assert_called_once()
             call_kwargs = mock_cache_instance.get_index_daily_range.call_args.kwargs
-            assert call_kwargs["ts_code_list"] == ["000001.SH"]
+            assert call_kwargs["ts_code_list"] == [DEFAULT_BENCHMARK_INDEX]
             assert call_kwargs["start_date"] == "20240315"
 
         asyncio.run(run_test())
@@ -883,7 +884,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         async def run_test():
             await manager.run_review()
             mock_cache_instance.quote_dao.get_index_daily.assert_called_once_with(
-                ts_code="000001.SH", trade_date=datetime.date(2024, 3, 18)
+                ts_code=DEFAULT_BENCHMARK_INDEX, trade_date=datetime.date(2024, 3, 18)
             )
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
 

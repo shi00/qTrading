@@ -200,6 +200,7 @@ class TestReviewManagerGetLearningContext:
                         "t1_pct": [3.0],
                         "ai_score": [80],
                         "ai_reason": ["good"],
+                        "benchmark_code": ["000985.CSI"],
                     }
                 ),
                 pd.DataFrame(
@@ -210,6 +211,7 @@ class TestReviewManagerGetLearningContext:
                         "t1_pct": [-3.0],
                         "ai_score": [60],
                         "ai_reason": ["bad"],
+                        "benchmark_code": ["000985.CSI"],
                     }
                 ),
             ]
@@ -219,6 +221,34 @@ class TestReviewManagerGetLearningContext:
         result = await rm.get_learning_context()
         assert "正向样本" in result
         assert "负向样本" in result
+        assert "[000985.CSI]" in result
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_learning_context_unknown_benchmark_fallback(self, mock_cm, mock_tc):
+        """D2-5：存量历史行 benchmark_code 为 NULL 时，学习上下文应渲染未知基准回退文案，而非 '[None]'。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "name": ["Test"],
+                    "alpha": [2.0],
+                    "t1_pct": [3.0],
+                    "ai_score": [80],
+                    "ai_reason": ["good"],
+                    "benchmark_code": [None],
+                }
+            )
+        )
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result = await rm.get_learning_context()
+        assert "基准未知" in result
+        assert "[None]" not in result
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")

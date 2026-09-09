@@ -8,6 +8,7 @@ import pytest
 
 from data.constants import (
     CRITICAL_EMPTY_TABLES,
+    DEFAULT_BENCHMARK_INDEX,
     EARNINGS_SEASON_MONTHS,
     FINANCIAL_BATCH_TABLES,
     FINANCIAL_STOCK_TABLES,
@@ -170,6 +171,10 @@ class TestConstantsValues:
         assert "000001.SH" in MAJOR_INDICES
         assert "399001.SZ" in MAJOR_INDICES
         assert len(MAJOR_INDICES) >= 5
+
+    def test_default_benchmark_single_source(self):
+        """D2-5：单一基准正本统一为 000985.CSI（中证全指）。"""
+        assert DEFAULT_BENCHMARK_INDEX == "000985.CSI"
 
     def test_sync_result_constants(self):
         assert SYNC_RESULT_HAS_DATA == "HAS_DATA"

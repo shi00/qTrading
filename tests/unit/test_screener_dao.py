@@ -341,6 +341,53 @@ class TestScreenerDaoUpdatePredictionResult:
         )
         mock_conn.execute.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_benchmark_code_written_when_provided(self):
+        """D2-5：传入 benchmark_code 时，UPDATE 应包含 benchmark_code 列。"""
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+
+        await dao.update_prediction_result(
+            record_id=1,
+            pct=5.0,
+            label="WIN",
+            benchmark_code="000985.CSI",
+        )
+        stmt = mock_conn.execute.call_args.args[0]
+        assert "benchmark_code" in str(stmt)
+
+    @pytest.mark.asyncio
+    async def test_benchmark_code_not_overwritten_when_absent(self):
+        """D2-5：未传入 benchmark_code（如 T+5 回填路径）时不应触碰该列，避免用 NULL 覆写已落库基准。"""
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+
+        await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN", t5_pct=3.0)
+        stmt = mock_conn.execute.call_args.args[0]
+        assert "benchmark_code" not in str(stmt)
+
 
 class TestScreenerDaoSaveScreeningResults:
     @pytest.mark.asyncio
