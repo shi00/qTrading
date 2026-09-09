@@ -111,14 +111,11 @@ class TestTokenEstimatorFallbackCJK:
 
     def test_pure_english_fallback_eliminates_overestimation(self):
         """纯英文文本按 4 字符 ≈ 1 token 估算，消除 5.56 倍高估。"""
-        # 1340 字符的英文文本
         english = "This is an in-depth stock analysis financial summary for evaluation purposes only. " * 16
-        # 83 * 16 = 1328 字符
-        tokens = _estimate_tokens_fallback(english)
-        expected = (len(english) + 3) // 4
-        assert tokens == expected
-        # 验证估算 token 远小于字符数（不再按 1:1 高估 5 倍）
-        assert tokens < len(english) // 3
+        # 83 字符/段 × 16 = 1328 字符；按 4 字符 ≈ 1 token 向上取整 = (1328 + 3) // 4 = 332
+        assert _estimate_tokens_fallback(english) == 332
+        # 边界护栏：估算 token 远小于字符数（不再按 1:1 高估 5 倍）
+        assert len(english) // 3 > 332
 
     def test_mixed_cjk_and_ascii(self):
         """混合文本：CJK 字符与 ASCII 字符分段精确累计。"""

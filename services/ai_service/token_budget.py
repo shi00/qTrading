@@ -23,8 +23,7 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 CONTEXT_RESERVE_TOKENS = 8000
 # 输出预留 token：为模型生成分析报告 JSON 结论预留基础空间（D5-4）。
 OUTPUT_RESERVE_TOKENS = 4000
-# 回退估算分母：无 tiktoken/离线时分段估算（CJK 1:1，非 CJK 4:1，Issue D5-8）。
-CHAR_FALLBACK_TOKENS_DIV = 1
+# 回退估算分母：tiktoken 不可用/离线时分段估算（CJK 1:1，非 CJK 4:1，Issue D5-8）。
 CHAR_FALLBACK_NON_CJK_DIV = 4
 
 # CJK 字符集区间定义（含基本汉字、扩展区、CJK标点与全角字符）
