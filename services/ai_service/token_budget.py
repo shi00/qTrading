@@ -23,8 +23,39 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 CONTEXT_RESERVE_TOKENS = 8000
 # 输出预留 token：为模型生成分析报告 JSON 结论预留基础空间（D5-4）。
 OUTPUT_RESERVE_TOKENS = 4000
-# 回退估算分母：无 tiktoken/离线时用 len(text)//1（保守，不低估 CJK）。
-CHAR_FALLBACK_TOKENS_DIV = 1
+# 回退估算分母：tiktoken 不可用/离线时分段估算（CJK 1:1，非 CJK 4:1，Issue D5-8）。
+CHAR_FALLBACK_NON_CJK_DIV = 4
+
+# CJK 字符集区间定义（含基本汉字、扩展区、CJK标点与全角字符）
+_CJK_RANGES = (
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0x20000, 0x2A6DF),  # CJK Extension B
+    (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+    (0x3000, 0x303F),  # CJK Symbols and Punctuation (全角标点)
+    (0xFF00, 0xFFEF),  # Halfwidth and Fullwidth Forms (全角ASCII与标点)
+)
+
+
+def _estimate_tokens_fallback(text: str) -> int:
+    """tiktoken 不可用时的分段保守估算（Issue D5-8）。
+
+    cl100k_base 实测：
+    - CJK 字符（含汉字与全角标点）：约 1 字符/token（高估约 1.08 倍，保守安全）。
+    - 非 CJK（拉丁英文、数字、ASCII 符号）：约 4 字符/token。
+    历史实现采用单一分母(=1)对纯英文高估 5.56 倍，导致 token 预算被过度裁剪。
+    """
+    if not text:
+        return 0
+    cjk_count = 0
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in _CJK_RANGES):
+            cjk_count += 1
+    non_cjk_count = len(text) - cjk_count
+    non_cjk_tokens = (non_cjk_count + 3) // CHAR_FALLBACK_NON_CJK_DIV if non_cjk_count > 0 else 0
+    return cjk_count + non_cjk_tokens
+
 
 _tiktoken_enc = None
 _tiktoken_enc_error = False
@@ -38,11 +69,11 @@ def _reset_token_estimator() -> None:
 
 
 def _estimate_tokens(text) -> int:
-    """估算文本 token 数（Issue #70）。
+    """估算文本 token 数（Issue #70, D5-8）。
 
     - None/空文本 → 0
     - 非 str（多模态 list content parts）递归求和其中 str 的 text 部分
-    - 惰性初始化 tiktoken cl100k_base；异常/离线回退 len(text)//CHAR_FALLBACK_TOKENS_DIV
+    - 惰性初始化 tiktoken cl100k_base；异常/离线回退 _estimate_tokens_fallback
     """
     global _tiktoken_enc, _tiktoken_enc_error
     if text is None:
@@ -62,7 +93,7 @@ def _estimate_tokens(text) -> int:
             return len(_tiktoken_enc.encode(text))
         except Exception:
             _tiktoken_enc_error = True
-    return len(text) // CHAR_FALLBACK_TOKENS_DIV
+    return _estimate_tokens_fallback(text)
 
 
 def _get_model_context_window(llm_config: dict, model_override: str | None = None) -> int:
