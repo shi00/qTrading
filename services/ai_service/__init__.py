@@ -78,6 +78,7 @@ from services.ai_service.token_budget import (
     CHAR_FALLBACK_TOKENS_DIV as CHAR_FALLBACK_TOKENS_DIV,
     CONTEXT_RESERVE_TOKENS as CONTEXT_RESERVE_TOKENS,
     DEFAULT_CONTEXT_WINDOW as DEFAULT_CONTEXT_WINDOW,
+    OUTPUT_RESERVE_TOKENS as OUTPUT_RESERVE_TOKENS,
     TokenBudgetService,
     _apply_context_budget as _apply_context_budget,
     _estimate_tokens as _estimate_tokens,
@@ -452,10 +453,19 @@ class AIService:
     # 薄委托：TokenBudgetService（token 预算）
     # ------------------------------------------------------------------
 
-    def _compute_analysis_budget(self) -> int:
+    def _compute_analysis_budget(
+        self,
+        system_messages: list[dict] | None = None,
+        fixed_blocks: str | list[str] | None = None,
+        reserved_output_tokens: int = OUTPUT_RESERVE_TOKENS,
+    ) -> int:
         """委托 TokenBudgetService._compute_analysis_budget。"""
         self._ensure_subservices()
-        return self._budget._compute_analysis_budget()
+        return self._budget._compute_analysis_budget(
+            system_messages=system_messages,
+            fixed_blocks=fixed_blocks,
+            reserved_output_tokens=reserved_output_tokens,
+        )
 
     # ------------------------------------------------------------------
     # 薄委托：StockAnalysisService（股票分析）

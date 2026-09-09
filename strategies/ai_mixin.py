@@ -18,8 +18,10 @@ The Mixin handles:
 
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import httpx
 from cachetools import TTLCache
@@ -52,6 +54,20 @@ from utils.time_utils import get_now, to_yyyymmdd_str
 logger = logging.getLogger(__name__)
 
 
+def _dataframe_sizeof(value: Any) -> int:
+    """
+    计算放入 TTLCache 的对象的内存字节数。
+    对 DataFrame 使用 memory_usage(deep=True).sum()，非 DataFrame 使用 sys.getsizeof。
+    最小返回 1，防止 0 大小导致 cachetools 内部除零或状态异常。
+    """
+    if isinstance(value, pd.DataFrame):
+        try:
+            return max(1, int(value.memory_usage(deep=True).sum()))
+        except Exception:
+            return max(1, sys.getsizeof(value, 1024))
+    return max(1, sys.getsizeof(value, 1024))
+
+
 class AIStrategyMixin:
     """
     Mixin class providing sequential AI analysis capability to any strategy.
@@ -82,12 +98,17 @@ class AIStrategyMixin:
     enable_ai_analysis: bool = True
 
     _HISTORY_CACHE_MAX = 4
+    _HISTORY_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB
     _HISTORY_CACHE_TTL = 120
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
-        self._history_cache: TTLCache = TTLCache(maxsize=self._HISTORY_CACHE_MAX, ttl=self._HISTORY_CACHE_TTL)
+        self._history_cache: TTLCache = TTLCache(
+            maxsize=self._HISTORY_CACHE_MAX_BYTES,
+            ttl=self._HISTORY_CACHE_TTL,
+            getsizeof=_dataframe_sizeof,
+        )
         # UX-2.3: 供 retry_single 复用（_last_prefetched 避免重新预取 news）
         self._last_candidates_df: pd.DataFrame | None = None
         self._last_prefetched: PreFetchedContext | None = None
@@ -420,7 +441,15 @@ class AIStrategyMixin:
                     end_date=end_date,
                     suppress_errors=False,
                 )
-                self._history_cache[cache_key] = bulk_history_df
+                if bulk_history_df is not None:
+                    try:
+                        self._history_cache[cache_key] = bulk_history_df
+                    except ValueError:
+                        logger.warning(
+                            "[%s] Bulk history dataframe exceeds cache max size (%d bytes), skipping cache",
+                            self.__class__.__name__,
+                            self._HISTORY_CACHE_MAX_BYTES,
+                        )
             if bulk_history_df is not None and not bulk_history_df.empty:
                 for code, group in bulk_history_df.groupby("ts_code"):
                     prefetched_history[code] = group
@@ -436,7 +465,14 @@ class AIStrategyMixin:
                     except asyncio.CancelledError:
                         # R2: 传播取消信号，配合优雅停机
                         raise
-                    except (ValueError, RuntimeError, OSError, ConnectionError):
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "network",
+                            "[AIStrategyMixin] Failed to fetch news (%s: %s) for %s, degrading to empty news context",
+                            code,
+                        )
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
@@ -580,11 +616,22 @@ class AIStrategyMixin:
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
         if on_progress:
-            on_progress(0, total_tasks, Message("ai_progress_init"))
+            if stream_enabled:
+                on_progress(0, total_tasks, Message("ai_progress_init"))
+            else:
+                on_progress(0, total_tasks, Message("ai_progress_concurrent_info", {"concurrency": concurrency}))
+
+        if not stream_enabled:
+            logger.info(
+                "[AIStrategyMixin] Concurrent analysis enabled (concurrency=%d). "
+                "Streaming chunk output is disabled in multi-concurrency mode; reporting real-time card and progress updates.",
+                concurrency,
+            )
 
         on_card_error = context.get("on_card_error")  # UX-2.3: 单股失败回调
 
         async def analyze_one(row_data: dict) -> dict | None:
+            nonlocal completed
             async with screening_sem:
                 if dp and dp.is_cancelled():
                     return None  # 已取消，不触发 on_card_error
@@ -596,7 +643,19 @@ class AIStrategyMixin:
                     hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
                     news_list = []
                     if row_data.get("ts_code") in prefetched.news_tasks:
-                        news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                        try:
+                            news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            log_classified(
+                                logger,
+                                e,
+                                "network",
+                                "[AIStrategyMixin] Failed to await news task (%s: %s) for %s, degrading to empty news context",
+                                row_data.get("ts_code", "?"),
+                            )
+                            news_list = []
                     res = await self._mixin_analyze_single(
                         row_data,
                         dp,
@@ -613,7 +672,10 @@ class AIStrategyMixin:
                         if on_card_error:
                             on_card_error(stock_name, I18n.get("ai_card_analysis_failed"))
                         return None
-                    return self._build_result_row(row_data, res)
+                    row = self._build_result_row(row_data, res)
+                    if on_result:
+                        on_result(row)
+                    return row
                 except asyncio.CancelledError:
                     raise  # R2 合规
                 except Exception as e:
@@ -624,6 +686,14 @@ class AIStrategyMixin:
                 finally:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
                         on_chunk.final_flush()
+                    if not (dp and dp.is_cancelled()):
+                        completed += 1
+                        if on_progress:
+                            on_progress(
+                                completed,
+                                total_tasks,
+                                Message("ai_progress_done", {"done": completed, "total": total_tasks}),
+                            )
 
         # Batch task creation to avoid unbounded coroutine explosion
         _BATCH_SIZE = 20
@@ -648,7 +718,6 @@ class AIStrategyMixin:
                 # 若未来 gather 实现变化导致 CancelledError 漏入 results, 此处显式 raise (R2)
                 if isinstance(res, asyncio.CancelledError):
                     raise res
-                completed += 1
                 if isinstance(res, Exception):
                     # UX-2.3: on_card_error 已在 analyze_one 内调用, 此处仅日志
                     log_classified(
@@ -659,14 +728,6 @@ class AIStrategyMixin:
                     )
                 elif isinstance(res, dict):
                     final_rows.append(res)
-                    if on_result:
-                        on_result(res)
-                if on_progress:
-                    on_progress(
-                        completed,
-                        total_tasks,
-                        Message("ai_progress_done", {"done": completed, "total": total_tasks}),
-                    )
 
             logger.info(
                 "[AIStrategyMixin] Complete. %d/%d processed, %d valid results",

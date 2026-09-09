@@ -125,6 +125,252 @@ class TestAIStrategyMixinInit:
         assert "test" in s._context_builders
 
 
+class TestHistoryCacheByteLimitation:
+    """Issue D5-5: _history_cache 以字节数限容而非条目数。"""
+
+    def test_history_cache_defaults(self):
+        """AIStrategyMixin 默认初始化为 128MB 字节上限且保留 _HISTORY_CACHE_MAX 兼容（D5-5）。"""
+        from strategies.ai_mixin import AIStrategyMixin
+
+        s = ConcreteStrategy()
+        assert AIStrategyMixin._HISTORY_CACHE_MAX == 4
+        assert AIStrategyMixin._HISTORY_CACHE_MAX_BYTES == 128 * 1024 * 1024
+        assert s._history_cache.maxsize == 128 * 1024 * 1024
+
+    def test_history_cache_tracks_memory_bytes(self):
+        """_history_cache 必须按实际内存字节跟踪容量，currsize 等于 DataFrame 字节数（D5-5）。"""
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        df = pd.DataFrame({"close": [10.0, 11.0, 12.0], "vol": [100, 200, 300]})
+        df_bytes = _dataframe_sizeof(df)
+        assert df_bytes > 50  # 确保不是默认的 1
+
+        s._history_cache["test_key"] = df
+        assert len(s._history_cache) == 1
+        assert s._history_cache.currsize == df_bytes
+
+    def test_history_cache_evicts_by_bytes(self):
+        """当总字节数超过 maxsize 时发生淘汰，防止多个大 DataFrame 造成 OOM（D5-5）。"""
+        from cachetools import TTLCache
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        df1 = pd.DataFrame({"close": list(range(50))})
+        df1_bytes = _dataframe_sizeof(df1)
+
+        # 设置仅能容纳约 1.5 个 df1 的小缓存
+        s._history_cache = TTLCache(maxsize=int(df1_bytes * 1.5), ttl=120, getsizeof=_dataframe_sizeof)
+
+        s._history_cache["k1"] = df1
+        assert "k1" in s._history_cache
+
+        df2 = pd.DataFrame({"close": list(range(50))})
+        s._history_cache["k2"] = df2
+        # k1 应因总字节数超限被 LRU 淘汰
+        assert "k1" not in s._history_cache
+        assert "k2" in s._history_cache
+
+    def test_dataframe_sizeof_fallbacks(self):
+        """_dataframe_sizeof 针对非 DataFrame 及异常情况的安全回退（D5-5）。"""
+        import sys
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        # 非 DataFrame 类型（如字符串、数字、None）
+        str_size = _dataframe_sizeof("test_string")
+        assert str_size == sys.getsizeof("test_string")
+        assert _dataframe_sizeof(None) >= 1
+
+        # DataFrame 模拟 memory_usage 抛错
+        mock_df = MagicMock(spec=pd.DataFrame)
+        mock_df.memory_usage.side_effect = RuntimeError("memory_usage failed")
+        fallback_size = _dataframe_sizeof(mock_df)
+        assert fallback_size >= 1
+
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_oversized_history_skips_cache(self, caplog):
+        """run_ai_analysis 在全量历史超大超出缓存上限时安全跳过缓存并记录 warning（D5-5）。"""
+        import logging
+        from cachetools import TTLCache
+        from strategies.ai_mixin import _dataframe_sizeof
+
+        s = ConcreteStrategy()
+        # 将缓存容量强制设为极小（10 字节），使任何 DataFrame 均超限触发 ValueError
+        s._history_cache = TTLCache(maxsize=10, ttl=120, getsizeof=_dataframe_sizeof)
+
+        dp = _make_mock_dp()
+        dummy_history = pd.DataFrame({"ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"], "close": [10.0, 11.0, 12.0]})
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=dummy_history)
+
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [12.0]})
+        context = {"data_processor": dp}
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            # 运行分析：不应崩溃，顺利完成分析
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
+        # 验证触发了跳过缓存的 warning
+        assert "exceeds cache max size" in caplog.text
+        assert len(s._history_cache) == 0
+
+
+class TestAIConcurrencyStreamFeedback:
+    """Issue D5-6: 并发模式下流式输出状态反馈与实时卡片/进度更新。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_info_progress_and_log_when_concurrency_gt_1(self, caplog):
+        """当并发 > 1 时，on_progress 收到 ai_progress_concurrent_info 且记录提示日志（D5-6）。"""
+        import logging
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        progress_calls = []
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total, msg))
+
+        context = {
+            "data_processor": dp,
+            "on_progress": on_progress,
+        }
+
+        with (
+            caplog.at_level(logging.INFO),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 1
+
+        # 检查初始 progress 消息为 ai_progress_concurrent_info 并携带 concurrency=3
+        assert len(progress_calls) >= 1
+        init_call = progress_calls[0]
+        assert isinstance(init_call[2], Message)
+        assert init_call[2].key == "ai_progress_concurrent_info"
+        assert init_call[2].params.get("concurrency") == 3
+
+        # 检查记录了并发流式受限的解释日志
+        assert "Concurrent analysis enabled" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_single_concurrency_uses_standard_init(self):
+        """当并发 == 1 时，on_progress 收到标准 ai_progress_init（D5-6）。"""
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        progress_calls = []
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total, msg))
+
+        context = {
+            "data_processor": dp,
+            "on_progress": on_progress,
+        }
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 1
+
+        assert len(progress_calls) >= 1
+        init_call = progress_calls[0]
+        assert isinstance(init_call[2], Message)
+        assert init_call[2].key == "ai_progress_init"
+
+    @pytest.mark.asyncio
+    async def test_realtime_on_result_and_on_progress_per_stock(self):
+        """多并发模式下单股完成立即触发 on_result 与 on_progress，无重复调用（D5-6）。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        result_calls = []
+        progress_calls = []
+        c1_completed_event = asyncio.Event()
+
+        def on_result(row):
+            result_calls.append(row)
+            if row.get("ts_code") == "000001.SZ":
+                c1_completed_event.set()
+
+        def on_progress(cur, total, msg):
+            progress_calls.append((cur, total))
+
+        context = {
+            "data_processor": dp,
+            "on_result": on_result,
+            "on_progress": on_progress,
+        }
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            ts_code = stock_info.get("ts_code")
+            if ts_code == "000001.SZ":
+                return {"score": 75, "summary": "ok", "decision": "Hold"}
+            else:
+                # 必须等 candidate 1 触发 on_result 并 set event 后才完成；若不是实时触发将死锁超时
+                await asyncio.wait_for(c1_completed_event.wait(), timeout=2.0)
+                return {"score": 85, "summary": "good", "decision": "Buy"}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            res = await s.run_ai_analysis(candidates, context)
+            assert len(res) == 2
+
+        # 验证 on_result 被精确调用 2 次（没有多余的重复调用）
+        assert len(result_calls) == 2
+        # 验证包含初始 progress 以及每个任务完成时的 progress (1, 2), (2, 2)
+        assert (1, 2) in progress_calls
+        assert (2, 2) in progress_calls
+
+
 class TestAIStrategyMixinSortForAI:
     def test_single_row(self):
         s = ConcreteStrategy()
@@ -755,6 +1001,117 @@ class TestRunAiAnalysis:
             # run_ai_analysis 传播 CancelledError
             with pytest.raises(asyncio.CancelledError):
                 await s.run_ai_analysis(candidates, context)
+
+    @pytest.mark.asyncio
+    async def test_bg_fetch_news_converges_httpx_http_error(self, caplog):
+        """D5-7: 验证 bg_fetch_news 遇到 HTTP 错误/超时时收敛降级为空新闻，不中断个股分析。"""
+        import logging
+        import httpx
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        req = httpx.Request("GET", "https://example.com")
+        http_err = httpx.HTTPStatusError("502 Bad Gateway", request=req, response=httpx.Response(502, request=req))
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=http_err),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 88, "summary": "test", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+            # 核心业务不应被中断，仍应成功完成打分
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 88
+            # 验证 analyze_stock 接收到的 news 为降级后的空列表
+            call_kwargs = mock_ai_instance.analyze_stock.call_args.kwargs
+            call_args = mock_ai_instance.analyze_stock.call_args.args
+            news_arg = (
+                call_kwargs.get("news") if "news" in call_kwargs else (call_args[2] if len(call_args) > 2 else None)
+            )
+            assert news_arg == []
+            # 验证记录了分类降级日志
+            assert "Failed to fetch news" in caplog.text
+            assert "000001.SZ" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_bg_fetch_news_converges_arbitrary_exception(self, caplog):
+        """D5-7: 验证 bg_fetch_news 遇到任意未预期异常（如 JSON/KeyError）时收敛降级。"""
+        import logging
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=AsyncMock(side_effect=KeyError("corrupted_payload")),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 70, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 70
+            assert "Failed to fetch news" in caplog.text
+            assert "000001.SZ" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_analyze_one_guards_against_news_task_unhandled_exception(self, caplog):
+        """D5-7: 验证 analyze_one 在 await news_task 时若遭遇异常也防御性降级，不中断分析。"""
+        import logging
+
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+
+        async def bad_prefetch_hook(candidates_df, ctx, prefetched):
+            async def failing_news():
+                raise TypeError("unexpected type error in coroutine")
+
+            prefetched.news_tasks["000001.SZ"] = asyncio.create_task(failing_news())
+            return prefetched
+
+        s._prefetch_strategy_specific = bad_prefetch_hook
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 92, "summary": "test", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+            assert "ai_score" in result.columns
+            assert result["ai_score"].iloc[0] == 92
+            assert "Failed to await news task" in caplog.text
+            assert "000001.SZ" in caplog.text
 
     @pytest.mark.asyncio
     async def test_skips_and_prompts_when_not_acknowledged(self, _mock_ai_not_acknowledged):
