@@ -513,6 +513,55 @@ class TestHistoricalSyncRunExtended:
         assert result is not None
 
 
+class TestHistoricalSyncRunD1:
+    @pytest.mark.asyncio
+    async def test_run_report_uses_touched_range(self):
+        """D1-6：report 段用本次触及日期范围（候选 min/max）而非按 days 推算的全区间聚合。"""
+        ctx = make_ctx()
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "issues": [],
+                    "tables": {"daily_quotes": {"count": 5000}},
+                }
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result.status == "success"
+        # 候选日期为 ["20240614", "20240613"]（make_ctx 的 trade_dates 均为 str）
+        assert result.touched_start == "20240613"
+        assert result.touched_end == "20240614"
+        # report 段调用用触及区间；quality check 段因无缓存候选 dates_to_verify 为空不调用
+        call = ctx.cache.get_bulk_sync_quality_scores.await_args
+        assert call is not None
+        assert call.kwargs["start_date"] == "20240613"
+        assert call.kwargs["end_date"] == "20240614"
+
+    @pytest.mark.asyncio
+    async def test_run_skips_report_when_all_dates_skipped(self):
+        """D1-6：本次无候选（全部被断点续传跳过）时，report 段跳过聚合。"""
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        # quality check 段返回高分，避免已缓存日期被判低质而重新拉回候选
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 95, "expected_base": 5000, "issues": [], "tables": {}},
+                datetime.date(2024, 6, 13): {"score": 95, "expected_base": 5000, "issues": [], "tables": {}},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.run(days=5)
+        assert result.status == "success"
+        assert result.touched_start is None
+        assert result.touched_end is None
+        # report 段因无候选跳过，质量分/表统计不填充（quality check 段调用不产生 report 数据）
+        assert result.quality_scores == {}
+        assert result.table_stats == {}
+
+
 class TestHistoricalSyncDailySnapshotExtended:
     @pytest.mark.asyncio
     async def test_empty_quotes(self):

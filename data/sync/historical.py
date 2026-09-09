@@ -181,27 +181,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
             await self._run_historical_sync(days, progress_callback, result)
 
             if result.status in ["success", "partial"]:
-                end_date = await self._get_effective_trade_date()
-                calendar_days = int(days * _CALENDAR_DAY_MULTIPLIER) + _CALENDAR_DAY_BUFFER
-                start_date = end_date - datetime.timedelta(days=calendar_days)
                 try:
-                    effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
-                    quality_results = await self.context.cache.get_bulk_sync_quality_scores(
-                        start_date=start_date,
-                        end_date=end_date,
-                        tables=list(effective_report_tables),
-                    )
-                    for date, quality in quality_results.items():
-                        result.quality_scores[date] = quality.get("score", 0)
-                        result.expected_bases[date] = quality.get("expected_base", 0)
-                        if quality.get("issues"):
-                            result.warnings.extend([f"{date}: {issue}" for issue in quality["issues"][:2]])
+                    # D1-6：用本次实际触及日期范围代替按 days 推算的全区间聚合。
+                    # 断点续传已跳过多数已完成/高质日期，全区间重算成本随历史长度线性增长；
+                    # 本次无候选（全部被续传跳过）时跳过 report 聚合。
+                    if result.touched_start is not None and result.touched_end is not None:
+                        effective_report_tables = TushareClient().get_effective_synced_tables(self.CORE_RESUME_TABLES)
+                        quality_results = await self.context.cache.get_bulk_sync_quality_scores(
+                            start_date=result.touched_start,
+                            end_date=result.touched_end,
+                            tables=list(effective_report_tables),
+                        )
+                        for date, quality in quality_results.items():
+                            result.quality_scores[date] = quality.get("score", 0)
+                            result.expected_bases[date] = quality.get("expected_base", 0)
+                            if quality.get("issues"):
+                                result.warnings.extend([f"{date}: {issue}" for issue in quality["issues"][:2]])
 
-                        tables_info = quality.get("tables", {})
-                        for table, info in tables_info.items():
-                            if table not in result.table_stats:
-                                result.table_stats[table] = {"count": 0}
-                            result.table_stats[table]["count"] += info.get("count", 0)
+                            tables_info = quality.get("tables", {})
+                            for table, info in tables_info.items():
+                                if table not in result.table_stats:
+                                    result.table_stats[table] = {"count": 0}
+                                result.table_stats[table]["count"] += info.get("count", 0)
 
                 except EngineDisposedError:
                     raise
@@ -420,6 +421,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
             trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
             skipped = original_count - len(trade_dates)
             result.skipped += skipped
+
+            # D1-6：断点续传筛选后的候选日期即"本次实际触及日期"。取其 min/max 作为 report
+            # 聚合区间，替代 _run_impl 中按 days 推算的全区间重算。筛选后无需再排序（取极值即可），
+            # 但候选可能不连续，中间非触及日期由 get_bulk_sync_quality_scores 返回低分而非抛错。
+            if trade_dates:
+                result.touched_start = min(trade_dates)
+                result.touched_end = max(trade_dates)
 
             if skipped > 0:
                 logger.debug(

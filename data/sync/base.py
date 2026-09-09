@@ -152,6 +152,10 @@ class SyncResult:
     table_stats: dict[str, dict] = field(default_factory=dict)
     failed_critical_tables: list[str] = field(default_factory=list)
     failed_optional_tables: list[str] = field(default_factory=list)
+    # D1-6：本次历史同步实际触及的日期范围（断点续传筛选后的候选 min/max）。
+    # 供 report 段以触及区间代替全 days 区间聚合质量分；本次无候选时为 None。
+    touched_start: datetime.date | None = None
+    touched_end: datetime.date | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -207,6 +211,14 @@ class SyncResult:
                 self.table_stats[table]["count"] = existing + stats.get("count", 0)
             else:
                 self.table_stats[table] = stats.copy()
+
+        # D1-6：触及日期范围取并集（min/max）。
+        if other.touched_start is not None:
+            if self.touched_start is None or other.touched_start < self.touched_start:
+                self.touched_start = other.touched_start
+        if other.touched_end is not None:
+            if self.touched_end is None or other.touched_end > self.touched_end:
+                self.touched_end = other.touched_end
 
         # 优先级：cancelled > failed > partial > success。
         # failed 优先级高于 partial：任一子任务 failed 即视整体失败，
