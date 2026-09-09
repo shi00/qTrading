@@ -440,7 +440,14 @@ class AIStrategyMixin:
                     except asyncio.CancelledError:
                         # R2: 传播取消信号，配合优雅停机
                         raise
-                    except (ValueError, RuntimeError, OSError, ConnectionError):
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "network",
+                            "[AIStrategyMixin] Failed to fetch news (%s: %s) for %s, degrading to empty news context",
+                            code,
+                        )
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
@@ -603,7 +610,19 @@ class AIStrategyMixin:
                     hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
                     news_list = []
                     if row_data.get("ts_code") in prefetched.news_tasks:
-                        news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                        try:
+                            news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            log_classified(
+                                logger,
+                                e,
+                                "network",
+                                "[AIStrategyMixin] Failed to await news task (%s: %s) for %s, degrading to empty news context",
+                                row_data.get("ts_code", "?"),
+                            )
+                            news_list = []
                     res = await self._mixin_analyze_single(
                         row_data,
                         dp,
