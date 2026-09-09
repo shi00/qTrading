@@ -1093,6 +1093,72 @@ class TestResultUpdatedAccumulation:
         # result.updated 不应被污染
         assert result.updated == 0
 
+    @pytest.mark.asyncio
+    async def test_skip_dates_report_progress_sync_skip_cached(self):
+        """D1-8: 全部日期已缓存且高质量时，逐日上报 sync_skip_cached 而非静默跳过。
+
+        分母应为过滤前的交易日总数（original_count），让增量同步进度可见推进。
+        """
+        ctx = make_ctx()
+        # 两个交易日都已缓存且高质量 → 全部被跳过，无批次处理
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+
+        calls: list[tuple[int, int, Message]] = []
+
+        def progress_callback(current, total, msg):
+            calls.append((current, total, msg))
+
+        result = await strategy.run(days=5, progress_callback=progress_callback)
+        assert result.skipped == 2
+        # 跳过回调以"跳过已缓存"消息推进，日期参数取自被跳过日期
+        skip_msg_dates = {
+            msg.params.get("date") for _, _, msg in calls if isinstance(msg, Message) and msg.key == "sync_skip_cached"
+        }
+        assert skip_msg_dates == {"20240614", "20240613"}
+        # 分母恒为过滤前交易日总数 2，任意 current 不超 total
+        assert calls
+        for current, total, _ in calls:
+            assert current <= total
+            assert total == 2
+
+    @pytest.mark.asyncio
+    async def test_skip_progress_monotonic_with_batch_processing(self):
+        """D1-8: 跳过段 + 批次处理段共享同一分母，进度单调递增且最终封顶 100%。"""
+        ctx = make_ctx()
+        # 仅 20240614 已缓存且高质量（被跳过）；20240613 未缓存需实际处理
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+
+        calls: list[tuple[int, int, Message]] = []
+
+        def progress_callback(current, total, msg):
+            calls.append((current, total, msg))
+
+        result = await strategy.run(days=5, progress_callback=progress_callback)
+        assert result.skipped == 1
+        assert result.added == 1
+        assert calls
+        # 跳过段 current=1/total=2 → 批次成功段 current=2/total=2，单调不减且不超限
+        ratios = [current / total for current, total, _ in calls if total]
+        assert ratios == sorted(ratios)
+        for current, total, _ in calls:
+            assert current <= total
+        assert calls[-1][0] == calls[-1][1] == 2
+        # 批次成功段仍上报 progress_sync_market
+        assert any(isinstance(msg, Message) and msg.key == "progress_sync_market" for _, _, msg in calls)
+
 
 class TestHistoricalSyncRunDeepBranches:
     @pytest.mark.asyncio
