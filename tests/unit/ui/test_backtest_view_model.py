@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import polars as pl
 import pytest
 
+from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
 from ui.viewmodels import Message
@@ -219,7 +220,7 @@ class TestBacktestViewModel:
         assert config.slippage_bps == 5.0
         assert config.rebalance_freq == "signal"
         assert config.max_position_count == 50
-        assert config.benchmark_code == "000300.SH"
+        assert config.benchmark_code == DEFAULT_BENCHMARK_INDEX  # D2-5: 单源基准正本
         assert config.risk_free_rate == 0.02
 
     def test_create_config_custom_values(self):

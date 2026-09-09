@@ -1030,6 +1030,7 @@ class TestComputedColsFromMetadata:
             "t5_price",
             "t5_pct",
             "index_pct",
+            "benchmark_code",  # D2-5: 复盘阶段写入的基准代码
             "alpha",
             "prediction_result",
         }
@@ -1038,7 +1039,16 @@ class TestComputedColsFromMetadata:
         from data.persistence.models import ScreeningHistory, get_model_columns
 
         cols = set(get_model_columns(ScreeningHistory))
-        computed_cols = {"t1_price", "t1_pct", "t5_price", "t5_pct", "index_pct", "alpha", "prediction_result"}
+        computed_cols = {
+            "t1_price",
+            "t1_pct",
+            "t5_price",
+            "t5_pct",
+            "index_pct",
+            "benchmark_code",
+            "alpha",
+            "prediction_result",
+        }
         for c in computed_cols:
             assert c not in cols, f"computed col '{c}' should be excluded from get_model_columns"
         # review_status is NOT computed (explicitly set to PENDING at save time)
