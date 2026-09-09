@@ -296,8 +296,20 @@ class TestComputeAnalysisBudget:
             budget = svc._compute_analysis_budget()
         assert budget == max(1, 32000 - CONTEXT_RESERVE_TOKENS)
 
-    def test_failover_read_error_falls_back(self):
+    def test_failover_read_error_falls_back_to_active_model(self):
+        """failover 配置读取异常时，安全降级至当前生效模型预算（D5-3）。"""
         svc = self._make_svc()
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            side_effect=Exception("config read failed"),
+        ):
+            budget = svc._compute_analysis_budget()
+        assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)
+
+    def test_failover_read_error_no_active_model_falls_back_to_default(self):
+        """failover 配置读取异常且无生效模型配置时，安全回退到默认窗口（D5-3）。"""
+        svc = self._make_svc()
+        svc._litellm_config = {}
         with patch(
             "services.ai_service.ConfigHandler.get_failover_config",
             side_effect=Exception("config read failed"),
@@ -305,14 +317,56 @@ class TestComputeAnalysisBudget:
             budget = svc._compute_analysis_budget()
         assert budget == max(1, DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS)
 
-    def test_empty_failover_uses_default(self):
-        svc = self._make_svc({})
+    def test_empty_failover_uses_active_model_context(self):
+        """未配置 failover 时，应以当前生效模型（1M）的 context 为基准，而非硬编码默认窗口（D5-3）。"""
+        svc = self._make_svc()
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            return_value={"primary": "", "fallbacks": []},
+        ):
+            budget = svc._compute_analysis_budget()
+        assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)
+
+    def test_empty_failover_with_small_model_budget(self):
+        """未配置 failover 时，小模型（32k）应严格按其自身 context 计算预算，避免超窗导致 API 400（D5-3）。"""
+        svc = self._make_svc()
+        svc._litellm_config = {
+            "provider": "custom",
+            "model": "custom-32k",
+            "custom_model_contexts": {"custom": {"custom-32k": 32000}},
+        }
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            return_value={"primary": "", "fallbacks": []},
+        ):
+            budget = svc._compute_analysis_budget()
+        assert budget == max(1, 32000 - CONTEXT_RESERVE_TOKENS)
+
+    def test_empty_failover_unknown_model_falls_back_to_default(self):
+        """未配置 failover 且当前生效模型未知时，安全回退到默认窗口（D5-3）。"""
+        svc = self._make_svc()
+        svc._litellm_config = {"provider": "unknown", "model": "unknown-model"}
         with patch(
             "services.ai_service.ConfigHandler.get_failover_config",
             return_value={"primary": "", "fallbacks": []},
         ):
             budget = svc._compute_analysis_budget()
         assert budget == max(1, DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS)
+
+    def test_empty_failover_whitespace_primary_uses_active_model(self):
+        """failover primary 为纯空白字符串时，安全防御等同未指定，按当前生效模型计算（D5-3 对抗性检视）。"""
+        svc = self._make_svc()
+        svc._litellm_config = {
+            "provider": "custom",
+            "model": "custom-64k",
+            "custom_model_contexts": {"custom": {"custom-64k": 64000}},
+        }
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            return_value={"primary": "   ", "fallbacks": []},
+        ):
+            budget = svc._compute_analysis_budget()
+        assert budget == max(1, 64000 - CONTEXT_RESERVE_TOKENS)
 
     def test_budget_at_least_one(self):
         """预算下限为 1，避免除零/负预算。"""
