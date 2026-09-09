@@ -69,6 +69,17 @@ class ReviewManager:
             return
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
+        # D2-3: 从 bulk_quotes 提取全市场真实交易日集合（复权收益 + T+N 停牌位置防护基准）。
+        # 停牌个股在 daily_quotes 缺行，行位置 t0_idx+1/+5 在停牌时并非真实 T+N；
+        # 以跨股票并集的唯一交易日作为"真实交易日"序列，避免为每笔记录额外查 DAO
+        # （同时保持现有测试返回的 quotes mock 语义不变）。
+        market_trade_dates: list[datetime.date] = sorted(
+            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
+        )
+        market_pos = {d: i for i, d in enumerate(market_trade_dates)}
+
+        has_adj_factor = "adj_factor" in bulk_quotes.columns
+
         index_code = ConfigHandler.get_config("benchmark_index", "000001.SH")
         index_cache: dict[str, float | None] = {}
 
@@ -117,31 +128,82 @@ class ReviewManager:
                 continue
 
             try:
-                t0_row = df_quotes[df_quotes["trade_date"].astype(object) == pred_date]
-                if t0_row.empty:
+                t0_match = df_quotes[df_quotes["trade_date"].astype(object) == pred_date]
+                if t0_match.empty:
                     continue
 
-                t0_idx = int(df_quotes.index.get_loc(t0_row.index[0]))  # type: ignore[arg-type]
+                t0_label = t0_match.index[0]
+                t0_date = self._normalize_trade_date(df_quotes.loc[t0_label, "trade_date"])
+                t0_ser = df_quotes.loc[t0_label]
+                t0_close_raw = t0_ser.get("close")
+                t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
+                if t0_close is None or t0_close == 0:
+                    continue
+                t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
+                t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+
+                # D2-3 停牌防护：个股交易日→原始行序查表。停牌个股在真实 T+N 日缺行，
+                # 以跨股票并集日历（market_trade_dates）锚定真实 T+N 再查个股价格，避免行位置漂移。
+                stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
+
+                t0_mpos = market_pos.get(t0_date)
+                t1_date = (
+                    market_trade_dates[t0_mpos + 1]
+                    if t0_mpos is not None and t0_mpos + 1 < len(market_trade_dates)
+                    else None
+                )
+                t5_date = (
+                    market_trade_dates[t0_mpos + 5]
+                    if t0_mpos is not None and t0_mpos + 5 < len(market_trade_dates)
+                    else None
+                )
+
+                t1_row = None
                 t1_pct: float | None = None
                 t1_price: float | None = None
                 t5_pct: float | None = None
                 t5_price: float | None = None
-                t1_row = None
-                if len(df_quotes) > t0_idx + 1:
-                    t1_row = df_quotes.iloc[t0_idx + 1]
-                    raw_pct = t1_row["pct_chg"]
-                    if bool(pd.notna(raw_pct)):
-                        t1_pct = float(raw_pct)
+
+                def _qfq_return(tn_ser: pd.Series, basis_close: float, basis_adj: float | None) -> float | None:
+                    """基于复权价的持有期收益率：ret = (close_tN/adj_tN) ÷ (close_t0/adj_t0) − 1。
+
+                    复权基准 adj_ref 在比率中抵消，结果与基准选择无关（基准免疫）；
+                    除权日因 adj 变化自动校正，避免 T+5 裸 close 累计被除权严重失真（D2-3）。
+                    无 adj_factor（存量数据/测试替身）时回退原始 close 比率，保持向后兼容。
+                    """
+                    tn_close_raw = tn_ser.get("close")
+                    tn_close = float(tn_close_raw) if bool(pd.notna(tn_close_raw)) else None
+                    if tn_close is None:
+                        return None
+                    if has_adj_factor:
+                        tn_adj_raw = tn_ser.get("adj_factor")
+                        tn_adj = float(tn_adj_raw) if bool(pd.notna(tn_adj_raw)) else None
+                        if tn_adj is None or tn_adj == 0:
+                            return None
+                        if basis_adj is None or basis_adj == 0:
+                            return None
+                        return (tn_close / tn_adj) / (basis_close / basis_adj) - 1.0
+                    return (tn_close / basis_close) - 1.0
+
+                # T+1（真实交易日 +1）
+                if t1_date is not None and (t1_idx := stock_pos.get(t1_date)) is not None:
+                    t1_row = df_quotes.iloc[t1_idx]
+                    # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标，
+                    # 与"停牌缺行不标"同语义，避免把数据不完整的 T+1 误标为 0% 收益。
+                    if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
+                        continue
+                    t1_ret = _qfq_return(t1_row, t0_close, t0_adj)
+                    t1_pct = round(t1_ret * 100.0, 4) if t1_ret is not None else None
                     if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
                         t1_price = float(t1_row["close"])
 
-                if len(df_quotes) > t0_idx + 5:
-                    t5_row = df_quotes.iloc[t0_idx + 5]
+                # T+5（真实交易日 +5）
+                if t5_date is not None and (t5_idx := stock_pos.get(t5_date)) is not None:
+                    t5_row = df_quotes.iloc[t5_idx]
+                    t5_ret = _qfq_return(t5_row, t0_close, t0_adj)
+                    t5_pct = round(t5_ret * 100.0, 4) if t5_ret is not None else None
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
-                        t0_close = t0_row.iloc[0].get("close")
-                        if bool(pd.notna(t0_close)) and float(t0_close) != 0:
-                            t5_pct = (t5_price / float(t0_close) - 1.0) * 100.0
 
                 if t1_pct is not None and t1_row is not None:
                     t1_date_val = t1_row["trade_date"]
@@ -202,7 +264,7 @@ class ReviewManager:
                         )
                         continue
 
-                    alpha = t1_pct - index_pct
+                    alpha = round(t1_pct - index_pct, 4)
 
                     label = "DRAW"
                     if alpha > self.alpha_win_threshold:

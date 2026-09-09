@@ -522,7 +522,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
             call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
             self.assertEqual(call_args[0][2], "WIN")
-            self.assertEqual(call_args.kwargs["alpha"], 4.0)
+            self.assertAlmostEqual(call_args.kwargs["alpha"], 4.0)
 
         asyncio.run(run_test())
 
@@ -553,7 +553,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
             call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
             self.assertEqual(call_args[0][2], "LOSS")
-            self.assertEqual(call_args.kwargs["alpha"], -7.0)
+            self.assertAlmostEqual(call_args.kwargs["alpha"], -7.0)
 
         asyncio.run(run_test())
 
@@ -623,7 +623,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             self.assertAlmostEqual(kwargs["t5_pct"], 10.0)
             self.assertEqual(kwargs["t5_price"], 11.0)
             self.assertEqual(kwargs["index_pct"], 1.0)
-            self.assertEqual(kwargs["alpha"], 4.0)
+            self.assertAlmostEqual(kwargs["alpha"], 4.0)
 
         asyncio.run(run_test())
 
