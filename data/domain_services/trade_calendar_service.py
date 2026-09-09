@@ -491,14 +491,19 @@ class TradeCalendarService:
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_start_date_by_trade_days(self, end_date, trade_days: int) -> datetime.date | None:
         """
-        根据交易日数量计算起始日期。
+        根据交易日数量计算起始日期（确定性，绝不返回自然日估算）。
+
+        当日历数据不足以确定 ``trade_days`` 个真实交易日（DB 覆盖不足 / API 失败 / 离线不足）
+        时**返回 None**，由调用方以其为数据充分性判据决定降级，规范上禁止在此伪造自然日起点，
+        否则调用方的 ``None`` 检查会被静默绕过（D2-1）。需要"宁可用估算也要继续"的业务
+        请显式调用 :meth:`estimate_start_date_by_calendar_days`。
 
         Args:
             end_date: 结束日期
             trade_days: 交易日数量
 
         Returns:
-            date: 起始日期 (N 个交易日前的日期)
+            date: 起始日期 (N 个交易日前的日期)；数据不足时返回 None
 
         示例:
             >>> await service.get_start_date_by_trade_days("2024-03-21", 120)
@@ -513,13 +518,13 @@ class TradeCalendarService:
             if result is not None:
                 return result
 
-            rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
-            dates = await self.get_trade_dates(rough_start, end_obj)
-
-            if len(dates) >= trade_days:
-                return dates[-trade_days]
-
-            return rough_start
+            logger.warning(
+                "[TradeCalendarService] get_start_date_by_trade_days: DB has insufficient calendar "
+                "data for %s trade days before %s, returning None (D2-1)",
+                trade_days,
+                end_obj,
+            )
+            return None
 
         except asyncio.CancelledError:
             raise
@@ -531,8 +536,72 @@ class TradeCalendarService:
                 "[TradeCalendarService] get_start_date_by_trade_days failed (%s): %s",
                 exc_info=True,
             )
-            rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
-            return rough_start
+            return None
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def estimate_start_date_by_calendar_days(self, end_date, trade_days: int) -> datetime.date | None:
+        """
+        按自然日外推估算起始日期（显式降级 API，D2-1）。
+
+        语义与 :meth:`get_start_date_by_trade_days` 不同：后者要求确定性返回真实交易日（不足则
+        None），本方法在日历数据不足时**显式**用自然日密度外推约 ``end_date`` 前 ``trade_days``。
+        仅供"宁可用估算也要继续"的业务场景显式调用，调用方须清楚估算不是严格交易日语义、
+        并在依赖严格窗口的计算链路中避免使用。
+
+        估算规则：真实 ``get_start_date_by_trade_days`` 优先；失败/不足时按 ``trade_days * 1.5 + 30``
+        自然日外推（保守覆盖周末/节假日），并在忽略 ``None`` 后尝试用已可得交易日列表取近似位置；
+        仍不足则返回外推起点。以 ``end_obj`` 为基准，end_obj/trade_days 非法时返回 None。
+
+        Args:
+            end_date: 结束日期
+            trade_days: 交易日数量
+
+        Returns:
+            date: 估算起始日期；end_date/trade_days 非法时返回 None
+        """
+        end_obj = self._to_date(end_date)
+        if end_obj is None or trade_days <= 0:
+            return None
+
+        try:
+            result = await self._cache.stock_dao.get_start_date_by_trade_days(end_obj, trade_days)
+            if result is not None:
+                return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[TradeCalendarService] estimate_start_date_by_calendar_days DAO query failed (%s): %s",
+                exc_info=True,
+            )
+
+        rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
+        try:
+            dates = await self.get_trade_dates(rough_start, end_obj)
+            if dates:
+                return dates[max(0, len(dates) - trade_days)]
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[TradeCalendarService] estimate_start_date_by_calendar_days list query failed (%s): %s",
+                exc_info=True,
+            )
+
+        logger.warning(
+            "[TradeCalendarService] estimate_start_date_by_calendar_days: calendar insufficient, "
+            "falling back to calendar-day estimate %s for %s trade days before %s (explicit API)",
+            rough_start,
+            trade_days,
+            end_obj,
+        )
+        return rough_start
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_prev_trade_date(self, date) -> datetime.date | None:
