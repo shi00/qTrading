@@ -10,6 +10,7 @@ import datetime
 import inspect
 import logging
 import threading
+from collections import deque
 
 import pandas as pd
 
@@ -37,6 +38,39 @@ logger = logging.getLogger(__name__)
 
 _CALENDAR_DAY_MULTIPLIER = 365 / 250
 _CALENDAR_DAY_BUFFER = 30
+
+
+class _FailureWindow:
+    """并发友好的滑动窗口失败率熔断判据（D1-3）。
+
+    替代 ``consecutive_failures`` 整型计数：并发任务交错时"连续失败"概念失真
+    （成功会清零计数掩盖真实失败密度，极端场景 9 败 1 成导致熔断永不触发）。
+    改为统计最近 ``size`` 次同步结果的失败率，样本未满窗口时不熔断以避免
+    启动期误判。同步循环运行在单一事件循环线程上，``deque.append`` 无需加锁；
+    若未来改为跨线程须经 ``ThreadPoolManager`` 提交并配 ``threading.Lock``。
+    """
+
+    def __init__(self, size: int, threshold: float = 0.8) -> None:
+        self._size = size
+        self._recent: deque[bool] = deque(maxlen=size)
+        self._threshold = threshold
+
+    def record(self, ok: bool) -> None:
+        self._recent.append(ok)
+
+    @property
+    def should_trip(self) -> bool:
+        if len(self._recent) < self._size:
+            return False
+        fails = sum(1 for r in self._recent if not r)
+        return fails / len(self._recent) >= self._threshold
+
+    @property
+    def failure_rate_pct(self) -> float:
+        if not self._recent:
+            return 0.0
+        fails = sum(1 for r in self._recent if not r)
+        return round(fails / len(self._recent) * 100, 1)
 
 
 class HistoricalSyncStrategy(ISyncStrategy):
@@ -377,8 +411,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
         failed_dates = []
-        consecutive_failures = 0
-        CB_THRESHOLD = min(50, max(3, int(total_days * 0.2) if total_days > 0 else 3))
+        failure_window_size = min(50, max(3, int(total_days * 0.2) if total_days > 0 else 3))
+        failure_window = _FailureWindow(size=failure_window_size)
         retry_round = 0
         abort_sync = False
         processed_count = 0
@@ -386,7 +420,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         counter_lock = get_loop_local("hist_counter_lock", asyncio.Lock)
 
         async def sync_one_day(date: datetime.date | str):
-            nonlocal abort_sync, processed_count, consecutive_failures
+            nonlocal abort_sync, processed_count
             if self._shutdown_event.is_set() or abort_sync:
                 return
 
@@ -396,17 +430,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 async with counter_lock:
                     if self._shutdown_event.is_set() or abort_sync:
                         return
-
-                    if consecutive_failures > CB_THRESHOLD:
+                    # D1-3: 滑动窗口失败率熔断，取代并发语义失真的连续失败计数。
+                    if failure_window.should_trip:
                         abort_sync = True
                         result.status = "failed"
                         result.errors.append(
-                            f"Circuit breaker triggered: {consecutive_failures} consecutive failures",
+                            f"Circuit breaker triggered: failure_rate {failure_window.failure_rate_pct}% "
+                            f"in last {failure_window_size} attempts",
                         )
                         logger.error(
-                            "[HistoricalSync] CircuitBreaker | ❌ Abort: %s consecutive failures exceeded threshold %s",
-                            consecutive_failures,
-                            CB_THRESHOLD,
+                            "[HistoricalSync] CircuitBreaker | ❌ Abort: failure_rate=%s%% in last %s attempts",
+                            failure_window.failure_rate_pct,
+                            failure_window_size,
                         )
                         return
 
@@ -415,13 +450,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     success = await self.sync_daily_market_snapshot(date_obj, force=True, sync_result=result)
                     if not success:
                         async with counter_lock:
-                            consecutive_failures += 1
+                            failure_window.record(ok=False)
                             failed_dates.append(date_obj)
                         return
                     async with counter_lock:
                         processed_count += 1
                         result.added += 1
-                        consecutive_failures = 0
+                        failure_window.record(ok=True)
                     if progress_callback:
                         progress_callback(
                             processed_count,
@@ -443,7 +478,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if severity == "system":
                         raise
                     async with counter_lock:
-                        consecutive_failures += 1
+                        failure_window.record(ok=False)
                         failed_dates.append(date_obj)
 
         # Batch Processing
