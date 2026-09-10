@@ -502,17 +502,16 @@ class VectorBacktestEngine:
         self,
         exec_date: date,
         trade_dates: list[date],
-        signals: pl.DataFrame,
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame],
         rebalance_freq: str,
     ) -> bool:
         if rebalance_freq == "daily":
             return True
 
         if rebalance_freq == "signal":
-            if signals.is_empty():
-                return False
-            day_signals = signals.filter(pl.col("execution_date") == exec_date)
-            return not day_signals.is_empty()
+            # D4-3: 复用 _simulate_trades 预构建的按日分区结构，O(1) 判定。
+            # 有信号即再平衡，键「执行日」语义与再平衡日严格等价。
+            return (exec_date,) in signals_by_date
 
         try:
             idx = trade_dates.index(exec_date)
@@ -561,7 +560,7 @@ class VectorBacktestEngine:
             is_rebalance = self._is_rebalance_day(
                 exec_date,
                 trade_dates,
-                signals,
+                signals_by_date,
                 self.config.rebalance_freq,
             )
             simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
