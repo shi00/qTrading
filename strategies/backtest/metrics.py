@@ -146,19 +146,24 @@ class BacktestMetrics:
         return len(profitable) / len(sell_trades)
 
     @staticmethod
-    def calc_profit_factor(trades: pl.DataFrame) -> float:
-        """计算盈亏比，仅统计卖出/平仓交易。"""
+    def calc_profit_factor(trades: pl.DataFrame) -> float | None:
+        """计算盈亏比，仅统计卖出/平仓交易。
+
+        无亏损交易（gross_loss <= 0）或无平仓交易时返回 None（指标无定义），
+        不返回 inf —— inf 无法 JSON 序列化，且写入 numeric 列会被 PostgreSQL 拒绝
+        （D4-5）。
+        """
         if len(trades) == 0:
-            return 0.0
+            return None
         sell_trades = trades.filter(pl.col("action") == "sell")
         if len(sell_trades) == 0:
-            return 0.0
+            return None
         gross_profit_raw = sell_trades.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
         gross_loss_raw = sell_trades.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
         gross_profit = float(gross_profit_raw) if gross_profit_raw is not None else 0.0
         gross_loss = abs(float(gross_loss_raw)) if gross_loss_raw is not None else 0.0
-        if gross_loss == 0:
-            return float("inf") if gross_profit > 0 else 0.0
+        if gross_loss <= 0:
+            return None
         return gross_profit / gross_loss
 
     @staticmethod
@@ -239,7 +244,7 @@ class BacktestMetrics:
         trades: pl.DataFrame,
         ic_series: pl.Series,
         risk_free_rate: float = 0.02,
-    ) -> dict[str, float]:
+    ) -> dict[str, float | None]:
         total_return = BacktestMetrics.calc_total_return(nav_curve)
         ann_return = BacktestMetrics.calc_annualized_return(total_return, len(nav_curve))
         volatility = BacktestMetrics.calc_volatility(daily_returns)

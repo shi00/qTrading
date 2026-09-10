@@ -122,13 +122,14 @@ class TestBacktestMetrics:
         assert pf == pytest.approx(350.0 / 80.0, rel=0.01)
 
     def test_calc_profit_factor_no_loss(self) -> None:
+        """无亏损交易时返回 None（指标无定义），不返回 inf（D4-5）。"""
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell"],
                 "realized_pnl": [100.0, 200.0, 50.0],
             }
         )
-        assert BacktestMetrics.calc_profit_factor(trades) == float("inf")
+        assert BacktestMetrics.calc_profit_factor(trades) is None
 
     def test_calc_profit_factor_no_profit(self) -> None:
         trades = pl.DataFrame(
@@ -150,6 +151,23 @@ class TestBacktestMetrics:
         # 仅统计 sell: gross_profit=100, gross_loss=50 → pf=2.0
         pf = BacktestMetrics.calc_profit_factor(trades)
         assert pf == pytest.approx(2.0, rel=0.01)
+
+    def test_calc_profit_factor_empty(self) -> None:
+        """空交易（无任何数据）时返回 None（指标无定义）。
+        覆盖空交易分支（无交易 → None），与 D4-5 语义一致。"""
+        trades = pl.DataFrame()
+        assert BacktestMetrics.calc_profit_factor(trades) is None
+
+    def test_calc_profit_factor_only_buy_trades(self) -> None:
+        """全部为买入交易（无卖出/平仓）时返回 None（指标无定义）。
+        覆盖无平仓交易分支（无 sell → None），与 D4-5 语义一致。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["buy", "buy"],
+                "realized_pnl": [0.0, 0.0],
+            }
+        )
+        assert BacktestMetrics.calc_profit_factor(trades) is None
 
     def test_calc_ic(self) -> None:
         signal_rank = pl.Series([1, 2, 3, 4, 5])
@@ -246,9 +264,9 @@ class TestBacktestMetrics:
         assert "information_ratio" in metrics
         assert "tracking_error" in metrics
 
-        assert metrics["total_return"] > 0
-        assert metrics["sharpe_ratio"] > 0
-        assert metrics["max_drawdown"] >= 0
+        assert metrics["total_return"] is not None and metrics["total_return"] > 0
+        assert metrics["sharpe_ratio"] is not None and metrics["sharpe_ratio"] > 0
+        assert metrics["max_drawdown"] is not None and metrics["max_drawdown"] >= 0
 
     def test_calc_nav_curve_from_positions(self) -> None:
         positions = pl.DataFrame(

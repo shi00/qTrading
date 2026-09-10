@@ -209,7 +209,9 @@ class TestBacktestE2E:
         for metric in expected_metrics:
             assert metric in result.metrics
 
+        assert result.metrics["max_drawdown"] is not None
         assert result.metrics["max_drawdown"] >= 0
+        assert result.metrics["total_trades"] is not None
         assert result.metrics["total_trades"] >= 0
 
     @pytest.mark.asyncio
@@ -705,6 +707,7 @@ class TestBacktestHandCalculated:
         engine = VectorBacktestEngine(cache, config)
         result = await engine.run(strategy)
 
+        assert result.metrics["max_drawdown"] is not None
         assert result.metrics["max_drawdown"] >= 0
         assert result.metrics["max_drawdown"] <= 1.0
 
@@ -729,5 +732,6 @@ class TestBacktestHandCalculated:
 
         buy_trades = result.trades.filter(pl.col("action") == "buy")
         assert len(buy_trades) >= 1
+        assert result.metrics["total_trades"] is not None
         assert result.metrics["total_trades"] >= 1
         assert result.metrics["total_trades"] == len(result.trades)
