@@ -331,6 +331,87 @@ class TestRequireQualityDecorator:
 
         assert my_special_function.__name__ == "my_special_function"
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    async def test_from_attr_reads_class_attribute_tier(self):
+        """from_attr 从 self.<attr> 读取等级，满足时放行（D2-8）。"""
+
+        class MyStrategy:
+            required_quality_tier = QualityTier.SILVER
+            data_processor = MagicMock()
+            data_processor._quality_tier = QualityTier.GOLD
+
+            @require_quality(from_attr="required_quality_tier")
+            async def run(self, context):
+                return context["inner"]()
+
+        s = MyStrategy()
+        result = await s.run({"inner": lambda: "success"})
+        assert result == "success"
+
+    @pytest.mark.asyncio
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    async def test_from_attr_insufficient_raises(self, mock_i18n):
+        mock_i18n.get.return_value = "quality_err_too_low"
+
+        class MyStrategy:
+            required_quality_tier = QualityTier.SILVER
+            data_processor = MagicMock()
+            data_processor._quality_tier = QualityTier.BRONZE
+
+            @require_quality(from_attr="required_quality_tier")
+            async def run(self, context):
+                return "should_not_reach"
+
+        s = MyStrategy()
+        with pytest.raises(QualityGateError):
+            await s.run({})
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    async def test_from_attr_missing_attribute_raises(self):
+        """from_attr 指定属性缺失/为 None 时显式 QualityGateError（D2-8 配置错误）。"""
+
+        class MyStrategy:
+            required_quality_tier = None
+            data_processor = MagicMock()
+            data_processor._quality_tier = QualityTier.GOLD
+
+            @require_quality(from_attr="required_quality_tier")
+            async def run(self, context):
+                return "should_not_reach"
+
+        s = MyStrategy()
+        with pytest.raises(QualityGateError, match="required_quality_tier"):
+            await s.run({})
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    async def test_from_attr_finds_processor_via_context_dict(self):
+        """镜像 PolarsBaseStrategy.filter：processor 经 context dict args[0] 解析（D2-8）。"""
+
+        class MyStrategy:
+            required_quality_tier = QualityTier.SILVER
+
+            @require_quality(from_attr="required_quality_tier")
+            async def run(self, context):
+                return "success"
+
+        s = MyStrategy()
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        assert await s.run({"data_processor": processor}) == "success"
+
+    def test_require_quality_requires_exactly_one_source(self):
+        """min_tier 与 from_attr 必须恰好提供一个（D2-8 配置互斥校验）。"""
+        from data.persistence.quality_gate import require_quality
+
+        with pytest.raises(TypeError, match="exactly one of min_tier or from_attr"):
+            require_quality()
+        with pytest.raises(TypeError, match="exactly one of min_tier or from_attr"):
+            require_quality(QualityTier.SILVER, from_attr="required_quality_tier")
+
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
     def test_with_kwargs_processor(self):
         class MyStrategy:
