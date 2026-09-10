@@ -1439,6 +1439,66 @@ class TestAIStrategyMixinAnalyzeSingle:
         assert result is not None
 
 
+class TestAIStrategyMixinBuildResultRowD36:
+    """D3-6: _build_result_row 不再以 score==0 丢弃行，并携带 ai_status 状态。
+
+    覆盖 analyzed / rejected / failed 三态，验证"AI 明确否决"与"分析失败"可区分。
+    """
+
+    def test_analyzed_score_positive(self):
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            {"score": 88, "summary": "看好", "confidence": 90, "thinking": "t", "uncertainty_factors": []},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["ai_score"] == 88
+        assert "看好" in row["ai_reason"]
+        assert I18n.get("ai_confidence_label") in row["ai_reason"]
+        assert row["confidence"] == 90
+
+    def test_rejected_zero_score_kept(self):
+        """score==0（模型明确否决）时行保留，ai_status=rejected，ai_reason 承载否决理由。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            {"score": 0, "summary": "财务造假嫌疑", "thinking": "", "uncertainty_factors": []},
+        )
+        assert row["ai_status"] == "rejected"
+        assert row["ai_score"] == 0
+        assert row["ai_reason"] == "财务造假嫌疑"
+        # 保留原始候选列
+        assert row["ts_code"] == "000001.SZ"
+        assert row["name"] == "平安银行"
+
+    def test_failed_none_res_kept(self):
+        """res=None（分析失败）时行保留，ai_status=failed，ai_score=None。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            None,
+            error_reason="timeout",
+        )
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+        assert row["ai_reason"] == "timeout"
+        assert row["ts_code"] == "000001.SZ"
+
+    def test_failed_exception_res_kept(self):
+        """res 为 Exception（网络失败）时行保留，ai_status=failed。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            ValueError("boom"),
+        )
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+
+    def test_analyzed_score_clamped_to_range(self):
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            {"score": 150, "summary": "", "thinking": "", "uncertainty_factors": []},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["ai_score"] == 100
+
+
 class TestBuildCapitalFlowText:
     def test_no_data(self):
         result = _build_capital_flow_text("000001.SZ", {})
@@ -2933,7 +2993,46 @@ class TestRunAiAnalysisConcurrency:
 
             with patch.object(s, "_mixin_analyze_single", flaky):
                 result = await s.run_ai_analysis(candidates, context)
-            assert len(result) == 4
+            # D3-6/D3-7: 部分失败不中断整体，但失败行保留并显式打标 ai_status="failed"，
+            # 使"分析失败"与"被否决/未入选"可区分，不再静默消失。
+            assert len(result) == 5
+            assert result["ai_status"].tolist().count("failed") == 1
+
+    @pytest.mark.asyncio
+    async def test_result_sorted_analyzed_rejected_failed(self):
+        """D3-6: 混合状态结果排序为 analyzed(score 降序) → rejected → failed，
+        而非 ai_status 字符串字典序（f<r），防止 failed 错误排在 rejected 前。"""
+        s = self._make_strategy()
+        candidates = await self._make_candidates(4)
+        context = self._make_context()
+
+        async def mixed(*args, **kwargs):
+            row = args[0]
+            name = row["name"]
+            if name == "S0":
+                return {"score": 10, "summary": "low"}
+            if name == "S1":
+                return {"score": 80, "summary": "high"}
+            if name == "S2":
+                return {"score": 0, "summary": "veto"}
+            raise RuntimeError("boom")  # S3 → failed
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis",
+                return_value=2,
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai.return_value = mock_ai_instance
+
+            with patch.object(s, "_mixin_analyze_single", mixed):
+                result = await s.run_ai_analysis(candidates, context)
+
+        assert result["name"].tolist() == ["S1", "S0", "S2", "S3"]
+        assert result["ai_status"].tolist() == ["analyzed", "analyzed", "rejected", "failed"]
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self):
