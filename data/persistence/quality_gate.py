@@ -7,6 +7,10 @@ from enum import IntEnum
 
 from utils.app_env import is_e2e_mode
 
+# D2-9: 复用数据质量服务常量（MAX_MISSING_REPORT），与 DataProcessor 扫描口径一致。
+# data/persistence 同层导入合法，无循环依赖。
+from data.persistence.data_quality import DataQualityService
+
 logger = logging.getLogger(__name__)
 
 _STRICT_QUALITY_GATE = os.environ.get("STRICT_QUALITY_GATE", "true").lower() in ("true", "1", "yes")
@@ -99,6 +103,15 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
                     attribution = I18n.get("quality_err_attribution", lag_days=int(lag_days))
                     if attribution != "quality_err_attribution":
                         msg = f"{msg} {attribution}"
+        # D2-9: 附采样缺失交易日归因。质量门控除等级外，报告具体缺失的交易日
+        # （采样代理证据，非全市场全量）。截断至 MAX_MISSING_REPORT 防消息过长。
+        # 类型守卫：真实字段为 frozenset；MagicMock 替身返回非集合对象时静默跳过，
+        # 不破坏既有门控测试。
+        scan_missing = getattr(processor, "_scan_missing_dates", frozenset())
+        if isinstance(scan_missing, frozenset) and scan_missing:
+            top = sorted(scan_missing)[: DataQualityService.MAX_MISSING_REPORT]
+            msg = f"{msg} | 采样缺失交易日: {', '.join(top)}"
+            logger.debug("[QualityGate] missing_dates=%s", ",".join(sorted(scan_missing)))
         logger.warning("[QualityGate] %s", msg)
         raise QualityGateError(msg)
 

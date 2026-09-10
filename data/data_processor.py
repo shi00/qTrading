@@ -147,6 +147,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._first_news_sync = True
             self._cancel_event = None  # ST-01: Lazy initialization to avoid loop binding issues
             self._quality_tier = None  # None=Uninitialized, 0=Critical, 1=Bronze, 2=Silver, 3=Gold
+            # D2-9: 采样质量扫描聚合出的缺失交易日集合（代理证据，供门控归因）。
+            # frozenset 不可变、幂等，避免跨调用状态污染；每次 run_quality_scan 重建。
+            self._scan_missing_dates: frozenset[str] = frozenset()
 
             # Initialize Context & Strategies
             logger.info("[DataProcessor] init: creating SyncContext")
