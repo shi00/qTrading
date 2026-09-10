@@ -458,10 +458,18 @@ class AIStrategyMixin:
             _news_concurrency = ConfigHandler.get_ai_max_concurrent_analysis()
             news_sem = asyncio.Semaphore(_news_concurrency)
 
-            async def bg_fetch_news(code):
+            async def bg_fetch_news(code) -> tuple[list, bool]:
+                """抓取新闻上下文。
+
+                D5-7: 返回 (news_list, ok)。新闻是可选增强上下文 — 任何抓取失败都
+                降级为空列表并返回 ok=False，绝不向上传播导致整只股票分析失败。
+                ok 标记透传到结果行，使 UI 能提示"本次分析未包含新闻"，AI 结论的
+                信息完备度对用户透明。
+                """
                 async with news_sem:
                     try:
-                        return await NewsFetcher.get_stock_news(code, limit=5, as_of=news_as_of)
+                        news = await NewsFetcher.get_stock_news(code, limit=5, as_of=news_as_of)
+                        return news, True
                     except asyncio.CancelledError:
                         # R2: 传播取消信号，配合优雅停机
                         raise
@@ -473,7 +481,7 @@ class AIStrategyMixin:
                             "[AIStrategyMixin] Failed to fetch news (%s: %s) for %s, degrading to empty news context",
                             code,
                         )
-                        return []
+                        return [], False
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
         except Exception as e:
@@ -642,9 +650,10 @@ class AIStrategyMixin:
                 try:
                     hist_df = prefetched.history.get(row_data.get("ts_code"), pd.DataFrame())
                     news_list = []
+                    news_ok = True
                     if row_data.get("ts_code") in prefetched.news_tasks:
                         try:
-                            news_list = await prefetched.news_tasks[row_data.get("ts_code")]
+                            news_list, news_ok = await prefetched.news_tasks[row_data.get("ts_code")]
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
@@ -656,6 +665,8 @@ class AIStrategyMixin:
                                 row_data.get("ts_code", "?"),
                             )
                             news_list = []
+                            news_ok = False
+                    row_data["_ai_news_ok"] = news_ok
                     res = await self._mixin_analyze_single(
                         row_data,
                         dp,
@@ -821,19 +832,61 @@ class AIStrategyMixin:
             ts_code = row_data.get("ts_code")
             hist_df = prefetched.history.get(ts_code, pd.DataFrame())
             news_list: list = []
+            news_ok = True
             if ts_code in prefetched.news_tasks:
                 news_task = prefetched.news_tasks[ts_code]
                 if news_task.done() and news_task.cancelled():
                     # UX-2.3 v4 P1-1: 原 news task 已被 cancel（批次取消场景），降级重新拉取
                     if prefetched.news_as_of:
-                        news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+                        try:
+                            news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            log_classified(
+                                logger,
+                                e,
+                                "network",
+                                "[AIStrategyMixin] retry_single re-fetch news failed (%s: %s) for %s, degrading to empty news context",
+                                ts_code,
+                            )
+                            news_list = []
+                            news_ok = False
                     else:
                         news_list = []
+                        news_ok = False
                 else:
                     # task 未完成或正常完成，await 复用（CancelledError 由外层传播）
-                    news_list = await news_task
+                    try:
+                        news_list, news_ok = await news_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "network",
+                            "[AIStrategyMixin] retry_single await news task failed (%s: %s) for %s, degrading to empty news context",
+                            ts_code,
+                        )
+                        news_list = []
+                        news_ok = False
             elif prefetched.news_as_of:
-                news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+                try:
+                    news_list = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log_classified(
+                        logger,
+                        e,
+                        "network",
+                        "[AIStrategyMixin] retry_single re-fetch news failed (%s: %s) for %s, degrading to empty news context",
+                        ts_code,
+                    )
+                    news_list = []
+                    news_ok = False
+            row_data["_ai_news_ok"] = news_ok
             res = await self._mixin_analyze_single(
                 row_data,
                 dp,

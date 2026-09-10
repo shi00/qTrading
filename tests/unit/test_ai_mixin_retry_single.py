@@ -301,7 +301,8 @@ class TestRetrySingleNewsTaskReuse:
         s._last_candidates_df = _make_candidates_df()
 
         async def _return_news():
-            return [{"title": "cached news"}]
+            # D5-7: news task 返回 (news_list, ok)
+            return [{"title": "cached news"}], True
 
         loop = asyncio.get_event_loop()
         normal_task = loop.create_task(_return_news())
