@@ -2217,3 +2217,67 @@ class TestCheckDataHealthCoerceGate:
             assert proc._quality_tier != 0
         finally:
             WriteQuality._reset_singleton()
+
+
+class TestRunQualityScanMissingDates:
+    """D2-9: run_quality_scan 聚合采样缺失交易日到 _scan_missing_dates，供门控归因。"""
+
+    @staticmethod
+    def _mock_scan_env(proc):
+        """构造 run_quality_scan 所需依赖：1 只采样股，日历 5 个交易日，该股缺 2 天。"""
+        proc._scan_missing_dates = frozenset({"20990101"})  # 前值残留，验证重置
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "list_status": ["L"],
+                }
+            )
+        )
+        proc.cache.check_comprehensive_health = AsyncMock(return_value={"tables": {}})
+        proc.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.datetime(2024, 6, 7))
+
+        cal = pd.DataFrame(
+            {
+                "cal_date": pd.to_datetime(["2024-06-03", "2024-06-04", "2024-06-05", "2024-06-06", "2024-06-07"]),
+                "is_open": [1, 1, 1, 1, 1],
+            }
+        )
+        proc.trade_calendar.get_trade_cal_df = AsyncMock(return_value=cal)
+
+        # 该股仅含 3 个交易日（缺 2024-06-04、2024-06-06）
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["2024-06-03", "2024-06-05", "2024-06-07"],
+                "close": [10.0, 10.5, 11.0],
+                "vol": [100, 200, 300],
+            }
+        )
+        proc.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="2024-06-07")
+        proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+        proc.cache.get_field_completeness = AsyncMock(return_value={})
+
+    @pytest.mark.asyncio
+    async def test_aggregates_missing_dates(self):
+        proc = FakeProcessor()
+        self._mock_scan_env(proc)
+        await proc.run_quality_scan(sample_size=1)
+        expected = {"20240604", "20240606"}
+        assert proc._scan_missing_dates == frozenset(expected)
+
+    @pytest.mark.asyncio
+    async def test_resets_stale_cache_at_scan_start(self):
+        proc = FakeProcessor()
+        self._mock_scan_env(proc)
+        await proc.run_quality_scan(sample_size=1)
+        # 前值 20990101 应被重置，不残留
+        assert "20990101" not in proc._scan_missing_dates
+
+    @pytest.mark.asyncio
+    async def test_frozenset_immutable(self):
+        proc = FakeProcessor()
+        self._mock_scan_env(proc)
+        await proc.run_quality_scan(sample_size=1)
+        assert isinstance(proc._scan_missing_dates, frozenset)

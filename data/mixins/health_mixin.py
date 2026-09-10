@@ -143,6 +143,8 @@ class HealthCheckMixin:
     cache: CacheManager
     _quality_tier: int | None
     _health_cache: dict
+    # D2-9: 由 DataProcessor.__init__ 初始化的缺失交易日集合（采样代理证据）
+    _scan_missing_dates: frozenset[str]
 
     async def _assign_basic_tier(self):
         """
@@ -818,6 +820,9 @@ class HealthCheckMixin:
         # Reset cancel event (prevents immediate skipped scan if previous op was cancelled)
         self.clear_cancel()  # type: ignore[attr-defined]
 
+        # D2-9: 重置采样缺失日集合。每次扫描重建，避免上一轮残留陈旧值误导门控归因。
+        self._scan_missing_dates = frozenset()
+
         if progress_callback:
             progress_callback(0, 100, Message("scan_step_init"))
 
@@ -893,6 +898,9 @@ class HealthCheckMixin:
             # We use a simplified loop. In production, could be parallelized.
             total_steps = len(sample)
 
+            # D2-9: 聚合采样股票的缺失交易日（跨股票并集，代理证据）。
+            sample_missing_dates: set[str] = set()
+
             for idx, ts_code in enumerate(sample):
                 if self.is_cancelled():  # type: ignore[attr-defined]
                     break
@@ -920,6 +928,9 @@ class HealthCheckMixin:
                             trade_cal_df,
                         )
                         scan_results["continuity"].append(cont_res["coverage_ratio"])
+                        # D2-9: 收集该股票缺失的交易日（date 对象 → "%Y%m%d" 字符串）。
+                        for d in cont_res.get("missing_dates", []):
+                            sample_missing_dates.add(d.strftime("%Y%m%d"))
 
                     # Check Recency against the latest closed trade date, not wall-clock today.
                     rec_res = DataQualityService.check_recency(
@@ -951,6 +962,9 @@ class HealthCheckMixin:
                         )
 
             # 4. Aggregate Quote Metrics
+            # D2-9: 写入采样缺失日集合供门控归因（frozenset 不可变、幂等）。
+            self._scan_missing_dates = frozenset(sample_missing_dates)
+
             avg_continuity = (
                 sum(scan_results["continuity"]) / len(scan_results["continuity"]) if scan_results["continuity"] else 0
             )

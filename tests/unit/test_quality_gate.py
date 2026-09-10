@@ -13,6 +13,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from data.mixins.health_mixin import _compute_tier
+from data.persistence.data_quality import DataQualityService
 from data.persistence.quality_gate import (
     QualityGate,
     QualityGateError,
@@ -265,6 +266,43 @@ class TestCheckTier:
         processor._health_cache = {"data": {"market": {"lag_days": 3.5}}}
         with pytest.raises(QualityGateError, match="落后 3 天"):
             _check_tier(processor, QualityTier.SILVER, "test_func")
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_scan_missing_dates_appended_to_msg(self, mock_i18n):
+        """D2-9: _scan_missing_dates 非空时，错误消息附采样缺失交易日（截断上报）。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._scan_missing_dates = frozenset({"20260105", "20260106", "20260107"})
+        with pytest.raises(QualityGateError, match="采样缺失交易日: 20260105, 20260106"):
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_scan_missing_dates_truncated_to_max_report(self, mock_i18n):
+        """D2-9: 缺失日超过 MAX_MISSING_REPORT 时按上限截断，不超长。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        big = {f"2026{i:04d}" for i in range(20)}  # 20 个缺失日 > MAX_MISSING_REPORT(10)
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._scan_missing_dates = frozenset(big)
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func")
+        # 仅统计"采样缺失交易日:"区块内的缺失日数量 = MAX_MISSING_REPORT
+        missing_section = str(exc_info.value).split("采样缺失交易日: ")[1]
+        listed = [d for d in missing_section.split(", ") if d]
+        assert len(listed) == DataQualityService.MAX_MISSING_REPORT
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_scan_missing_dates_empty_no_attribution(self, mock_i18n):
+        """D2-9: _scan_missing_dates 为空时，错误消息不含缺失日归因（回归既有行为）。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock(spec=[])  # spec=[] : 无 auto-属性，getattr 触发默认 frozenset()
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.BRONZE, "test_func")
+        assert "采样缺失交易日" not in str(exc_info.value)
 
 
 class TestRequireQualityDecorator:
