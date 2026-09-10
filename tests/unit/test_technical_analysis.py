@@ -429,6 +429,33 @@ class TestRSIPandas:
         assert TechnicalAnalysis.calculate_rsi_pandas(up, 14).iloc[-1] == pytest.approx(100.0)
         assert TechnicalAnalysis.calculate_rsi_pandas(down, 14).iloc[-1] == pytest.approx(0.0)
 
+    def test_rsi_pandas_matches_polars(self):
+        """跨实现一致性（D3-2 防漂移门禁）。
+
+        get_rsi / get_rsi_expr / calculate_rsi_pandas 三套实现对同一输入
+        必须给出相同的末值。D3-1 的漂移正是由于三份独立分解实现无法同步演进，
+        本测试确保未来任何一份再被改动时立即被捕获。
+        """
+        import polars as pl
+
+        np.random.seed(42)
+        close = pd.Series(100.0 + np.cumsum(np.random.randn(60)))
+        period = 14
+        df = pd.DataFrame({"close": close})
+
+        polars_last = (
+            pl.from_pandas(df)
+            .lazy()
+            .with_columns(TechnicalAnalysis.get_rsi_expr("close", period=period, alias="rsi"))
+            .collect()["rsi"]
+            .to_list()[-1]
+        )
+        pandas_point = TechnicalAnalysis.get_rsi(df, period=period)
+        pandas_series = TechnicalAnalysis.calculate_rsi_pandas(close, period=period).iloc[-1]
+
+        assert polars_last == pytest.approx(pandas_point, rel=1e-6)
+        assert polars_last == pytest.approx(pandas_series, rel=1e-6)
+
     def test_rsi_series_insufficient_data(self):
         close = pd.Series([10.0, 11.0])
         rsi = TechnicalAnalysis.calculate_rsi_pandas(close, period=14)

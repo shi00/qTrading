@@ -147,8 +147,7 @@ class TechnicalAnalysis:
         # Calculate price changes
         delta = df_calc["close"].diff()  # type: ignore[optional-subscript]
 
-        up = delta.clip(lower=0)
-        down = -1 * delta.clip(upper=0)
+        up, down = TechnicalAnalysis._split_delta(delta)
 
         # Use Wilder's Smoothing (alpha = 1/period)
         ma_up = up.ewm(com=period - 1, adjust=False).mean()
@@ -162,6 +161,16 @@ class TechnicalAnalysis:
         rsi = pd.Series(rsi).fillna(50)
 
         return float(rsi.iloc[-1])
+
+    @staticmethod
+    def _split_delta(delta):
+        """
+        涨跌分解的唯一实现（D3-2 收敛）：gain / loss 均为非负。
+
+        get_rsi 与 calculate_rsi_pandas 这两个 Pandas 路径共用本方法，
+        避免同一指标多份分解实现漂移（D3-1 正是漂移的实证）。
+        """
+        return delta.clip(lower=0), (-delta).clip(lower=0)
 
     @staticmethod
     def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
@@ -184,8 +193,7 @@ class TechnicalAnalysis:
             return pd.Series(dtype=float)
 
         delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = (-delta).clip(lower=0)
+        gain, loss = TechnicalAnalysis._split_delta(delta)
 
         avg_gain = gain.ewm(com=period - 1, min_periods=period, adjust=False).mean()
         avg_loss = loss.ewm(com=period - 1, min_periods=period, adjust=False).mean()
