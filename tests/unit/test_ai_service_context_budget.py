@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import services.ai_service as ai_mod
 import services.ai_service.token_budget as token_budget
+from core.i18n import Message
 from services.ai_service import (
     AIService,
     CONTEXT_RESERVE_TOKENS,
@@ -468,27 +469,25 @@ class TestComputeAnalysisBudgetDeductFixed:
         expected_deduct = sum(_estimate_tokens(b) for b in fixed_list) + 2000
         assert budget == 32000 - expected_deduct
 
-    def test_overflow_fixed_blocks_capped_at_one(self, caplog):
-        """当固定提示词 + 预留输出超过模型上下文上限时，保底返回 1 并输出 warning（D5-4 对抗性防护）。"""
+    def test_overflow_fixed_blocks_raises(self):
+        """当固定提示词 + 预留输出超过模型上下文上限时，显式抛 AIBudgetError（D5-4）。"""
+        from core.errors import AIBudgetError
+
         svc = self._make_svc(model="model-8k", context=8000)
         failover = {"primary": "custom/model-8k", "fallbacks": []}
 
         # 超大 system prompt（>8000 tokens，必然溢出 8k 窗口）
         sys_msgs = [{"role": "system", "content": "SuperLongPrompt " * 4000}]
 
-        import logging
-
-        with (
-            patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover),
-            caplog.at_level(logging.WARNING),
-        ):
-            budget = svc._compute_analysis_budget(
-                system_messages=sys_msgs,
-                reserved_output_tokens=4000,
-            )
-
-        assert budget == 1
-        assert "exceeds model context window" in caplog.text
+        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+            with pytest.raises(AIBudgetError) as excinfo:
+                svc._compute_analysis_budget(
+                    system_messages=sys_msgs,
+                    reserved_output_tokens=4000,
+                )
+        # 强断言：异常携带可操作"提示词过长"信息（tokens / window）
+        assert excinfo.value.info.message_key == "ai_prompt_too_long"
+        assert excinfo.value.info.format_args["tokens"] > 8000
 
     def test_backward_compatible_no_args(self):
         """不传参数时 100% 保持向后兼容性（D5-4）。"""
@@ -605,3 +604,42 @@ class TestAnalyzeStockBudgetIntegration:
         assert any("SYSTEM_STRATEGY_RULES" in m["content"] for m in sys_msgs)
         # fixed_blocks 包含 user_custom_instructions
         assert any("safe_custom" in str(b) for b in call_kwargs["fixed_blocks"])
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_budget_overflow_returns_readable_error(self):
+        """预算超窗时 analyze_stock 转可读 error 返回，而非冒泡为通用失败（D5-4）。"""
+        from core.errors import AIBudgetError
+
+        svc = AIService.__new__(AIService)
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+
+        with (
+            patch.object(
+                AIService,
+                "_compute_analysis_budget",
+                side_effect=AIBudgetError(
+                    Message(
+                        "ai_prompt_too_long",
+                        {"tokens": 99999, "window": 8000},
+                    )
+                ),
+            ),
+            patch.object(AIService, "is_cloud_available", return_value=True),
+            patch("services.ai_service.ConfigHandler") as mock_ch,
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe_custom"),
+        ):
+            mock_ch.get_ai_system_prompt.return_value = "SYSTEM_STRATEGY_RULES"
+            mock_ch.get_setting.return_value = False
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                ui_prompt_override="override_prompt",
+            )
+
+        # 返回可读错误 dict，score=0，不向上抛（否则被 ai_mixin 吞为通用 failed 行）
+        assert result is not None
+        assert result.get("score") == 0
+        assert "error" in result
