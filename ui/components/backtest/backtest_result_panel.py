@@ -67,6 +67,21 @@ def _get_color_for_ic(ic: float) -> str:
     return AppColors.TEXT_PRIMARY
 
 
+def _profit_factor_card(metrics: dict) -> ft.Container:
+    """盈亏比卡片：无亏损交易时指标无定义（None），显示 N/A（D4-5）。"""
+    pf = metrics.get("profit_factor")
+    if pf is None:
+        value = "N/A"
+        color = AppColors.TEXT_SECONDARY
+    else:
+        value = f"{pf:.2f}"
+        color = AppColors.SUCCESS if pf > 1 else AppColors.ERROR
+    return ft.Container(
+        content=_metric_card(I18n.get("backtest_metric_profit_factor"), value, color),
+        col=_COL_QUARTER,
+    )
+
+
 # --- Pure builders (接收必要参数，无 self 依赖) ---
 
 
@@ -130,14 +145,7 @@ def _build_metrics_section(metrics: dict) -> ft.Column:
     row2 = ft.ResponsiveRow(
         controls=safe_controls(
             [
-                ft.Container(
-                    content=_metric_card(
-                        I18n.get("backtest_metric_profit_factor"),
-                        f"{metrics.get('profit_factor', 0):.2f}",
-                        AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
-                    ),
-                    col=_COL_QUARTER,
-                ),
+                _profit_factor_card(metrics),
                 ft.Container(
                     content=_metric_card(
                         I18n.get("backtest_metric_ic_mean"),

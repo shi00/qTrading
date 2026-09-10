@@ -114,7 +114,7 @@ class BacktestResult:
     positions: pl.DataFrame
     skipped_orders: pl.DataFrame
 
-    metrics: dict[str, float]
+    metrics: dict[str, float | None]
     ic_series: pl.Series
     period_stats: pl.DataFrame
     data_warnings: tuple[str, ...]

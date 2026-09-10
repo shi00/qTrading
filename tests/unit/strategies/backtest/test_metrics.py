@@ -122,13 +122,14 @@ class TestBacktestMetrics:
         assert pf == pytest.approx(350.0 / 80.0, rel=0.01)
 
     def test_calc_profit_factor_no_loss(self) -> None:
+        """无亏损交易时返回 None（指标无定义），不返回 inf（D4-5）。"""
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell"],
                 "realized_pnl": [100.0, 200.0, 50.0],
             }
         )
-        assert BacktestMetrics.calc_profit_factor(trades) == float("inf")
+        assert BacktestMetrics.calc_profit_factor(trades) is None
 
     def test_calc_profit_factor_no_profit(self) -> None:
         trades = pl.DataFrame(
@@ -246,9 +247,9 @@ class TestBacktestMetrics:
         assert "information_ratio" in metrics
         assert "tracking_error" in metrics
 
-        assert metrics["total_return"] > 0
-        assert metrics["sharpe_ratio"] > 0
-        assert metrics["max_drawdown"] >= 0
+        assert metrics["total_return"] is not None and metrics["total_return"] > 0
+        assert metrics["sharpe_ratio"] is not None and metrics["sharpe_ratio"] > 0
+        assert metrics["max_drawdown"] is not None and metrics["max_drawdown"] >= 0
 
     def test_calc_nav_curve_from_positions(self) -> None:
         positions = pl.DataFrame(

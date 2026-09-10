@@ -33,7 +33,9 @@ class BacktestReport:
             if m.get("ic_ir") is not None
             else f"{I18n.get('report_ic_ir')}: N/A",
             f"{I18n.get('report_win_rate')}: {m.get('win_rate', 0):.2%}",
-            f"{I18n.get('report_profit_factor')}: {m.get('profit_factor', 0):.4f}",
+            f"{I18n.get('report_profit_factor')}: {m.get('profit_factor', 0):.4f}"
+            if m.get("profit_factor") is not None
+            else f"{I18n.get('report_profit_factor')}: N/A",
             f"{I18n.get('report_total_trades')}: {m.get('total_trades', 0)}",
             "",
             f"{I18n.get('report_duration')}: {result.duration_ms}ms",
