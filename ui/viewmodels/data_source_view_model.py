@@ -428,9 +428,17 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     raise
                 except Exception as perm_err:
                     logger.debug("[DataSourceVM] skipped_permission summary failed: %s", perm_err)
-                # D1-2: 非关键数据源失败时给出降级提示，而非无条件当作完整成功。
+                # D1-2 补缺：完整性以 SyncResult.is_complete 为准。UI 完整日更新不再把
+                # "关键表失败"（quotes/basic 任一失败）误报为完整成功——单关键表失败策略
+                # 因 S8 错误隔离仍返回 True，故必须显式检查 failed_critical_tables 并给降级提示。
+                failed_critical = getattr(result, "failed_critical_tables", []) or []
                 failed_optional = getattr(result, "failed_optional_tables", []) or []
-                if failed_optional:
+                if failed_critical:
+                    self._emit_snack(
+                        Message("snack_sync_critical_failed", {"tables": len(failed_critical)}),
+                        "warning",
+                    )
+                elif failed_optional:
                     self._emit_snack(
                         Message("snack_sync_partial_sources", {"tables": len(failed_optional)}),
                         "warning",
