@@ -672,6 +672,74 @@ class TestLoadQuotes:
         with pytest.raises(ValueError, match="No quotes data found"):
             await engine._load_quotes(trade_dates)
 
+    @pytest.mark.asyncio
+    async def test_passes_ts_code_list_for_pruning(self):
+        """D4-9：传 ts_codes 时 get_daily_quotes 收到 ts_code_list，按信号标的裁剪行情。"""
+        import pandas as pd
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            benchmark_code="000300.SH",
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cache = MagicMock()
+        quotes_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": ["20240103", "20240103"],
+                "open": [10.0, 20.0],
+            }
+        )
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        mock_dao = engine.cache.quote_dao
+
+        # 裁剪断言只关心 get_daily_quotes 的 ts_code_list 参数；
+        # 后续 enrich/qfq 不是本测试对象，直接短路以聚焦参数透传。
+        engine._enrich_suspend_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        engine._enrich_limit_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        engine._compute_avg_daily_volume = lambda df: df
+        engine._apply_qfq = lambda df: df
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        result, _ = await engine._load_quotes(trade_dates, ts_codes=["000001.SZ"])
+
+        mock_dao.get_daily_quotes.assert_awaited_once_with(
+            start_date="20240102",
+            end_date="20240103",
+            ts_code_list=["000001.SZ"],
+        )
+        assert not result.is_empty()
+
+    @pytest.mark.asyncio
+    async def test_ts_codes_none_passes_none_for_full_market(self):
+        """D4-9：ts_codes=None（空信号兜底）时 ts_code_list=None，等价全市场旧行为。"""
+        import pandas as pd
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            benchmark_code="000300.SH",
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cache = MagicMock()
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": [], "trade_date": []})
+        )
+        mock_dao = engine.cache.quote_dao
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        with pytest.raises(ValueError, match="No quotes data found"):
+            await engine._load_quotes(trade_dates, ts_codes=None)
+
+        mock_dao.get_daily_quotes.assert_awaited_once_with(
+            start_date="20240102",
+            end_date="20240103",
+            ts_code_list=None,
+        )
+
 
 class TestLoadBenchmark:
     @pytest.mark.asyncio
