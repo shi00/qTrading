@@ -4,6 +4,7 @@ import typing
 import pandas as pd
 import polars as pl
 
+from core.i18n import Message
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
@@ -76,6 +77,12 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
             logger.warning(warning_msg)
             self._data_warnings.append(warning_msg)
             chg_max = chg_min + 0.5
+            # D3-4: 参数自动调整必须显式告知用户，否则结果会被归因于用户所设的矛盾参数。
+            # 写入 StrategyContext.warnings 通道 (base filter 已初始化为空 list)，由 VM 透传、
+            # View 在结果区上方渲染。双写 self._data_warnings 仅为兼容既有依赖该实例字段的测试。
+            warnings = context.get("warnings")
+            if warnings is not None:
+                warnings.append(Message("strategy_param_auto_adjusted", {"min": chg_min, "adjusted_max": chg_max}))
         return (
             lf.drop_nulls(subset=["pct_chg", "turnover_rate"])
             .filter(pl.col("pct_chg").is_between(chg_min, chg_max))

@@ -147,6 +147,41 @@ def _render_status_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **params)
 
 
+def _build_screener_warning_banner(warnings: tuple[Message, ...]) -> ft.Control | None:
+    """D3-4: 结果区上方的策略业务警告横幅。
+
+    渲染 ``ScreenerState.warnings``（策略执行期业务警告，如 VolumeBreakout 参数自动调整）。
+    与状态栏并存，逐条按当前 locale 翻译 (View 感知 locale)；空时返回 None 不渲染空块。
+    与 ``_render_status_message`` 相同的翻译契约 (VM 只产 i18n key)。
+    """
+    if not warnings:
+        return None
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.WARNING, size=AppStyles.FONT_SIZE_TITLE),
+                        ft.Text(
+                            I18n.get(msg.key, **dict(msg.params)),
+                            color=AppColors.WARNING,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            no_wrap=False,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                )
+                for msg in warnings
+            ],
+            spacing=6,
+        ),
+        padding=AppStyles.SPACING_MD,
+        border_radius=8,
+        bgcolor=AppColors.SURFACE_VARIANT,
+    )
+
+
 def _format_cell_value(col: str, val) -> str:
     if pd.isna(val):
         return "-"
@@ -1732,7 +1767,12 @@ def ScreenerView(
 
     return ft.Container(
         content=ft.Column(
-            [control_card, main_body, *([dialog_control] if dialog_control is not None else [])],
+            [
+                control_card,
+                *([banner] if (banner := _build_screener_warning_banner(state.warnings)) is not None else []),
+                main_body,
+                *([dialog_control] if dialog_control is not None else []),
+            ],
             expand=True,
             spacing=15,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,

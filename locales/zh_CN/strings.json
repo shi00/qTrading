@@ -182,6 +182,7 @@
     "strategy_dividend_desc": "标准：股息率(TTM) > 4% (防御性现金牛资产)",
     "strategy_volume_breakout_name": "放量突破",
     "strategy_volume_breakout_desc": "标准：当日涨幅 2-7% | 换手率 > 3% (放量活跃)",
+    "strategy_param_auto_adjusted": "涨幅区间参数冲突：下限 {min} ≥ 上限，已自动将上限调整为 {adjusted_max}",
     "strategy_northbound_holding_name": "北向持股",
     "strategy_northbound_holding_desc": "标准：北向资金持股比例 > 设定值 (外资重仓股，关注长期持仓)",
     "strategy_northbound_flow_name": "北向净流入",

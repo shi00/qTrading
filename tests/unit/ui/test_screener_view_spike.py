@@ -66,6 +66,8 @@ class FakeScreenerState:
     stock_filter: str = ""
     # C2b: 当前页 locale-neutral 原始行 (View 只读 state 快照)
     current_page_rows: tuple = ()
+    # D3-4: 策略执行期业务警告 (镜像 ScreenerState.warnings)
+    warnings: tuple = ()
 
 
 class FakeScreenerViewModel:
