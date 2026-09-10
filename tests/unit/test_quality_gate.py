@@ -304,6 +304,77 @@ class TestCheckTier:
             _check_tier(processor, QualityTier.BRONZE, "test_func")
         assert "采样缺失交易日" not in str(exc_info.value)
 
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_meets_declared_window_missing_dates_raises(self):
+        """D2-9: 等级达标 + require_continuous_window + 有采样缺失日 ⇒ 区间完整性拦截报缺失日。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._scan_missing_dates = frozenset({"20260108", "20260109"})
+        with pytest.raises(QualityGateError, match="continuous window integrity check failed") as exc_info:
+            _check_tier(
+                processor,
+                QualityTier.SILVER,
+                "test_func",
+                require_continuous_window=True,
+            )
+        assert "20260108, 20260109" in str(exc_info.value)
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_meets_no_missing_dates_passes(self):
+        """D2-9: 等级达标 + 声明窗口 + 无采样缺失日（空集合）⇒ 放行。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._scan_missing_dates = frozenset()
+        _check_tier(processor, QualityTier.SILVER, "test_func", require_continuous_window=True)
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_meets_missing_not_required_passes(self):
+        """D2-9: 等级达标 + 未声明窗口（默认 False）+ 有采样缺失日 ⇒ 放行（回归既有行为）。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._scan_missing_dates = frozenset({"20260108"})
+        _check_tier(processor, QualityTier.SILVER, "test_func")
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_meets_magicmock_missing_skips(self):
+        """D2-9: _scan_missing_dates 为 MagicMock（非 frozenset）时静默跳过，不拦截（类型守卫）。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        # 裸 MagicMock：processor._scan_missing_dates 是 auto 属性（非 frozenset）⇒ 守卫跳过
+        _check_tier(processor, QualityTier.SILVER, "test_func", require_continuous_window=True)
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_truncated_to_max_report(self):
+        """D2-9: 缺失日超过 MAX_MISSING_REPORT 时，窗口拦截消息按上限截断。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        big = frozenset({f"2026{i:04d}" for i in range(20)})
+        processor._scan_missing_dates = big
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(processor, QualityTier.SILVER, "test_func", require_continuous_window=True)
+        actual = str(exc_info.value).split("missing trading dates: ")[1]
+        listed = [d for d in actual.split(", ") if d]
+        assert len(listed) == DataQualityService.MAX_MISSING_REPORT
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_window_check_tier_tier_insufficient_still_uses_original_branch(self, mock_i18n):
+        """D2-9: 等级不达标 + 声明窗口 ⇒ 仍走原等级报错分支，不复用窗口拦截消息。"""
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._scan_missing_dates = frozenset({"20260108"})
+        with pytest.raises(QualityGateError) as exc_info:
+            _check_tier(
+                processor,
+                QualityTier.SILVER,
+                "test_func",
+                require_continuous_window=True,
+            )
+        # 等级不足走原报错分支（"Data Quality too low..." fallback 文案），而非窗口拦截文案。
+        assert "Data Quality too low" in str(exc_info.value)
+        assert "continuous window integrity" not in str(exc_info.value)
+
 
 class TestRequireQualityDecorator:
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
@@ -332,6 +403,61 @@ class TestRequireQualityDecorator:
 
         s = MyStrategy()
         assert await s.run() == "success"
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_sync_decorator_window_integrity_raises(self):
+        """D2-9（同步）：等级达标 + require_continuous_window + 有缺失日 ⇒ 抛 QualityGateError。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._scan_missing_dates = frozenset({"20260108"})
+
+        class MyStrategy:
+            data_processor = processor
+
+            @require_quality(QualityTier.SILVER, require_continuous_window=True)
+            def run(self):
+                return "should_not_reach"
+
+        s = MyStrategy()
+        with pytest.raises(QualityGateError, match="continuous window integrity"):
+            s.run()
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_sync_decorator_window_integrity_no_missing_passes(self):
+        """D2-9（同步）：等级达标 + 声明窗口 + 无缺失日 ⇒ 放行。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._scan_missing_dates = frozenset()
+
+        class MyStrategy:
+            data_processor = processor
+
+            @require_quality(QualityTier.SILVER, require_continuous_window=True)
+            def run(self):
+                return "success"
+
+        s = MyStrategy()
+        assert s.run() == "success"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    async def test_async_decorator_window_integrity_raises(self):
+        """D2-9（异步）：require_continuous_window 在异步形态下同样拦截。"""
+
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._scan_missing_dates = frozenset({"20260108"})
+
+        class MyStrategy:
+            data_processor = processor
+
+            @require_quality(QualityTier.SILVER, require_continuous_window=True)
+            async def run(self):
+                return "should_not_reach"
+
+        s = MyStrategy()
+        with pytest.raises(QualityGateError, match="continuous window integrity"):
+            await s.run()
 
     @patch("core.i18n.I18n")
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)

@@ -239,7 +239,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     # Main Filter Logic
     # ============================================================
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    @require_quality(QualityTier.SILVER)
+    @require_quality(QualityTier.SILVER, require_continuous_window=True)
     async def filter(self, context: StrategyContext):
         """
         Two-phase filtering:
