@@ -13,7 +13,7 @@ import pandas as pd
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import stock_alive_condition
-from data.constants import REVIEW_STATUS_COMPLETED
+from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_T1_DONE
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
@@ -947,3 +947,97 @@ class TestScreenerDaoGetHistoryTreeNoneLimit:
         call_args = dao._read_db.call_args
         params = call_args[0][1]
         assert params[0] == 30  # effective_limit defaults to 30 when limit is None
+
+
+class TestScreenerDaoGetUnfilledHorizonPredictions:
+    """D2-4: 回填候选查询 —— 只含 T1_DONE 且 t5_pct 为 NULL，升序 + LIMIT 封顶。"""
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1, 2],
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240601", "20240610"],
+                }
+            )
+        )
+        result = await dao.get_unfilled_horizon_predictions()
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["ts_code"] == "000001.SZ"
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_unfilled_horizon_predictions()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_sql_encoding(self):
+        """SQL 必须限定 review_status='T1_DONE' + t5_pct IS NULL，且升序、LIMIT 封顶。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_unfilled_horizon_predictions(limit=2000)
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt)
+        assert "review_status" in sql
+        assert "t5_pct IS NULL" in sql
+        assert "ORDER BY" in sql
+        assert "trade_date" in sql
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_T1_DONE in compiled.params.values()
+        assert compiled.params.get("param_1") == 2000 or compiled.params.get("limit_1") == 2000
+
+
+class TestScreenerDaoBackfillT5Prediction:
+    """D2-4: 幂等回填 —— WHERE 带 t5_pct IS NULL，且推进 review_status 为 COMPLETED。"""
+
+    @staticmethod
+    def _make_dao_with_conn():
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        return dao, mock_conn
+
+    @pytest.mark.asyncio
+    async def test_basic_update(self):
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.backfill_t5_prediction(1, 3.0, 10.3)
+        stmt = mock_conn.execute.call_args.args[0]
+        sql = str(stmt)
+        assert "t5_pct" in sql
+        assert "t5_price" in sql
+        assert "t5_pct IS NULL" in sql
+        compiled = stmt.compile()
+        assert compiled.params.get("review_status") == REVIEW_STATUS_COMPLETED
+        assert compiled.params.get("t5_pct") == 3.0
+
+    @pytest.mark.asyncio
+    async def test_in_conn_batch(self):
+        """支持在外部 conn（engine.begin() 事务）中批量执行，不自行开新事务。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.backfill_t5_prediction(1, 3.0, 10.3, conn=mock_conn)
+        mock_conn.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_table_not_in_metadata(self):
+        dao, _ = self._make_dao_with_conn()
+        with patch("data.persistence.daos.screener_dao.Base") as mock_base:
+            mock_base.metadata.tables.get.return_value = None
+            await dao.backfill_t5_prediction(1, 3.0, 10.3)
+        mock_base.metadata.tables.get.assert_called_once_with("screening_history")
+        dao._check_engine.assert_called_once()  # noqa: weak-assertion 无参调用，仅确认引擎前置检查已执行

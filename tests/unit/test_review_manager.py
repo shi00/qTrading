@@ -1845,3 +1845,171 @@ class TestReviewManagerSuspendProtection:
         await rm.run_review()
         # T+1（20240611）停牌缺行 → t1_pct=None → 无标签 → 不更新
         rm._update_result.assert_not_called()
+
+
+class TestReviewManagerBackfill:
+    """D2-4: backfill_horizon_returns —— T+5 延迟回填，只处理 t5_pct 仍为 NULL 的成熟记录。"""
+
+    @staticmethod
+    def _make_rm(mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._batch_backfill_t5 = AsyncMock()
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_invalid_horizon_raises(self, mock_cm, mock_tc):
+        rm, _ = self._make_rm(mock_cm)
+        with pytest.raises(ValueError, match="horizon"):
+            await rm.backfill_horizon_returns(horizon=0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_no_candidates_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=[])
+        count = await rm.backfill_horizon_returns()
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_empty_quotes_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        count = await rm.backfill_horizon_returns()
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_fills_mature_record(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+                "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
+        updates = rm._batch_backfill_t5.call_args.args[0]
+        assert len(updates) == 1
+        assert updates[0]["record_id"] == 1
+        assert updates[0]["t5_pct"] == round(((9.8 / 1.0) / (10.0 / 1.0) - 1.0) * 100.0, 4)
+        assert updates[0]["t5_price"] == 9.8
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_immature(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm)
+        # t0 为最后一行 → T+5 越界 → 跳过，留 NULL 次日重试
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240617"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+                "adj_factor": [1.0] * 6,
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        count = await rm.backfill_horizon_returns()
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_suspended_stock(self, mock_cm, mock_tc):
+        """T+5 日在市场日历中存在、但个股停牌缺行 → 跳过（数据不可得不伪造）。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        # 市场并集需含真实 T+5 日（t0=610 + 5 → 617，需 ≥6 个交易日）。
+        # 000001.SZ 只到 T+4（614）于 617 缺行 → 停牌；000002.SZ 到 617 → 可回填。
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[
+                {"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"},
+                {"id": 2, "ts_code": "000002.SZ", "trade_date": "20240610"},
+            ]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": [
+                    "000001.SZ",
+                    "000001.SZ",
+                    "000001.SZ",
+                    "000001.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                ],
+                "trade_date": [
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240617",
+                ],
+                "close": [10.0, 10.5, 11.0, 10.8, 10.2, 20.0, 21.0, 22.0, 21.5, 20.8, 19.4],
+                "adj_factor": [1.0] * 11,
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
+        updates = rm._batch_backfill_t5.call_args.args[0]
+        assert len(updates) == 1
+        assert updates[0]["record_id"] == 2
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_no_adj_factor_fallback(self, mock_cm, mock_tc):
+        """无 adj_factor（存量数据/测试替身）时回退原始 close 比率。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        updates = rm._batch_backfill_t5.call_args.args[0]
+        assert updates[0]["t5_pct"] == round((9.8 / 10.0 - 1.0) * 100.0, 4)

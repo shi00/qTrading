@@ -364,7 +364,7 @@ class SchedulerService:
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
-        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh"]:
+        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh", "review_backfill"]:
             existing = self.scheduler.get_job(job_id)
             if existing:
                 existing.remove()
@@ -419,6 +419,16 @@ class SchedulerService:
             dh,
             dm,
         )
+
+        # 4. T+5 Review Backfill Job (D2-4)
+        # 晚于默认日跟新 16:30，确保当日行情已同步后再回填远期收益。
+        self.scheduler.add_job(
+            self._run_review_backfill,
+            CronTrigger(hour=17, minute=0),
+            id="review_backfill",
+            replace_existing=True,
+        )
+        logger.info("[Scheduler] Scheduled Review Backfill at 17:00")
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
@@ -583,6 +593,20 @@ class SchedulerService:
         if job_fn is None:
             logger.warning(
                 "[Scheduler] nightly_prediction job not registered (call SchedulerService.register_job)",
+            )
+            return
+        await job_fn(self)
+
+    async def _run_review_backfill(self):
+        """D2-4: 调度 T+5 延迟回填 job（review_backfill 注册于 services/scheduled_jobs/review_backfill.py）。"""
+        from utils.correlation import ensure_correlation_id
+
+        ensure_correlation_id()
+
+        job_fn = self._registered_jobs.get("review_backfill")
+        if job_fn is None:
+            logger.warning(
+                "[Scheduler] review_backfill job not registered (call SchedulerService.register_job)",
             )
             return
         await job_fn(self)

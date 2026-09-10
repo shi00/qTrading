@@ -578,6 +578,26 @@ class TestSchedulerDispatchNightlyPrediction:
         assert "nightly_prediction" not in svc2._registered_jobs
 
 
+class TestSchedulerDispatchReviewBackfill:
+    """D2-4: svc._run_review_backfill 仅调度注册的 T+5 回填 job（业务逻辑在 services 层）。"""
+
+    @pytest.mark.asyncio
+    async def test_unregistered_job_warns_and_returns(self):
+        svc = _make_svc()
+        with patch("utils.scheduler_service.logger") as mock_logger:
+            await svc._run_review_backfill()
+        warning_calls = [c for c in mock_logger.warning.call_args_list]
+        assert any("not registered" in str(c.args[0]) for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_registered_job_is_invoked_with_svc(self):
+        svc = _make_svc()
+        mock_job = AsyncMock()
+        svc.register_job("review_backfill", mock_job)
+        await svc._run_review_backfill()
+        mock_job.assert_awaited_once_with(svc)
+
+
 class TestScheduleJobsInvalidTime:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_invalid_auto_update_time(self, mock_ch):
@@ -598,6 +618,16 @@ class TestScheduleJobsInvalidTime:
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("ai_concept_daily_refresh") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
+
+    @patch("utils.scheduler_service.ConfigHandler")
+    def test_review_backfill_job_registered(self, mock_ch):
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "16:30"
+        mock_ch.get_ai_concept_schedule_time.return_value = None
+        mock_ch.get_nightly_prediction_time.return_value = "20:30"
+        svc = SchedulerService()
+        svc._schedule_jobs()
+        assert svc.scheduler.get_job("review_backfill") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
 
 
 class TestSchedulerServiceStatus:
@@ -668,7 +698,7 @@ class TestSchedulerStart:
         svc.scheduler.running = False
         svc.start()
         svc.scheduler.start.assert_called_once()
-        assert svc.scheduler.add_job.call_count == 5  # 多次调用预期 (3 schedule_jobs + config_watchdog + load_db_state)
+        assert svc.scheduler.add_job.call_count == 6  # 多次调用预期 (4 schedule_jobs + config_watchdog + load_db_state)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_start_exception(self, mock_ch):
