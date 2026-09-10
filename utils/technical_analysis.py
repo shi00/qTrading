@@ -153,8 +153,15 @@ class TechnicalAnalysis:
         ma_up = up.ewm(com=period - 1, adjust=False).mean()
         ma_down = down.ewm(com=period - 1, adjust=False).mean()
 
-        # Avoid division by zero: when ma_down=0, RSI=100
-        rs = np.where(ma_down == 0, np.inf, ma_up / ma_down)
+        # Avoid division by zero: when ma_down=0, RSI=100。
+        # 与 calculate_rsi_pandas 语义一致（D3-2 祛漂）：无涨有跌→RSI=0，
+        # 无跌有涨→RSI=100，无涨无跌(横盘)→RSI=50（中性），
+        # 后者由 np.nan → rsi 为 NaN → 末尾 fillna(50) 归中。
+        rs = np.where(
+            (ma_down == 0),
+            np.where(ma_up == 0, np.nan, np.inf),
+            ma_up / ma_down,
+        )
         rsi = 100 - (100 / (1 + rs))
 
         # Handle nan (e.g. initial window)
