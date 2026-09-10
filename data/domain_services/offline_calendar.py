@@ -76,9 +76,8 @@ class OfflineCalendar:
                 check_date = ts.date() if isinstance(ts, pd.Timestamp) else ts
                 if isinstance(check_date, datetime.date) and check_date > _OFFLINE_TRUSTED_UNTIL:
                     logger.info(
-                        "[OfflineCalendar] Date %s beyond trusted interval (%s), returning None (unknown)",
+                        "[OfflineCalendar] Date %s beyond trusted interval, returning None (unknown)",
                         date_obj,
-                        _OFFLINE_TRUSTED_UNTIL,
                     )
                     return None
             except (AttributeError, TypeError):
