@@ -9,6 +9,11 @@ from utils.error_classifier import log_classified
 
 logger = logging.getLogger(__name__)
 
+# 中国 A 股法定节假日与调休由国务院每年公告，pandas_market_calendars 无法对未来完全预测。
+# 离线日历仅对 <= 此日期的历史/近期交易日负责；超出返回 None（未知），由调用方显式决策，绝不猜测。
+# 维护：每年国务院新年放假通知发布后，前移为次年 12-31（相关守卫生效时间同为该常量，勿只更新不核对）。
+_OFFLINE_TRUSTED_UNTIL = datetime.date(2027, 12, 31)
+
 
 class OfflineCalendar:
     """
@@ -45,9 +50,11 @@ class OfflineCalendar:
         return cls._calendar
 
     @staticmethod
-    def is_trading_day(date_obj: typing.Any):
-        """
-        Check if a date is a trading day.
+    def is_trading_day(date_obj: typing.Any) -> bool | None:
+        """离线判定交易日。返回三态（D2-7）：
+        True  确定是交易日
+        False 确定非交易日（历史节假日/周末/日历不可用时的保守判定）
+        None  日期超出可信区间（> _OFFLINE_TRUSTED_UNTIL），无法确定——绝不猜测
         """
         try:
             cal = OfflineCalendar.get_instance()
@@ -62,6 +69,21 @@ class OfflineCalendar:
                 ts = pd.Timestamp(date_obj)
             else:
                 ts = date_obj
+
+            # 可信区间守卫：超出 _OFFLINE_TRUSTED_UNTIL 的日期，离线库对未来调休/节假日不预测，
+            # 返回 None（未知）交由调用方显式决策，避免把规则外推当权威判定。
+            try:
+                check_date = ts.date() if isinstance(ts, pd.Timestamp) else ts
+                if isinstance(check_date, datetime.date) and check_date > _OFFLINE_TRUSTED_UNTIL:
+                    logger.info(
+                        "[OfflineCalendar] Date %s beyond trusted interval (%s), returning None (unknown)",
+                        date_obj,
+                        _OFFLINE_TRUSTED_UNTIL,
+                    )
+                    return None
+            except (AttributeError, TypeError):
+                # 非日期输入不进入可信区间比较，交由下方 schedule 判定（异常由 except 兜底为 False）
+                pass
 
             schedule = cal.schedule(start_date=ts, end_date=ts)
             return not schedule.empty

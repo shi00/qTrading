@@ -802,7 +802,7 @@ class TushareClient:
         return []
 
     @track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
-    def is_trading_day(self, date_str: typing.Any = None):
+    def is_trading_day(self, date_str: typing.Any = None) -> bool | None:
         """
         Check if a given date is a trading day with optimized caching.
         Strategy: Year-based lazy loading with Double-Checked Locking.
@@ -811,7 +811,8 @@ class TushareClient:
             date_str: Date in YYYYMMDD format, or a native datetime.date object. If None, uses today.
 
         Returns:
-            bool: True if trading day, False if holiday/weekend
+            bool | None: True if trading day, False if holiday/weekend, None if
+                offline fallback cannot determine the date (beyond trusted interval, D2-7).
         """
         if date_str is None:
             date_str = get_now().strftime("%Y%m%d")

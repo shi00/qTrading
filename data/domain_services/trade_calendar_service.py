@@ -321,7 +321,7 @@ class TradeCalendarService:
             return False
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def is_trading_day(self, date) -> bool:
+    async def is_trading_day(self, date) -> bool | None:
         """
         判断是否为交易日。
 
@@ -329,7 +329,7 @@ class TradeCalendarService:
             date: 日期 (date/datetime/str)
 
         Returns:
-            bool: 是否为交易日
+            bool | None: True 交易日 / False 非交易日 / None 无法确定（离线降级且日期超出可信区间，D2-7）
 
         示例:
             >>> await service.is_trading_day("2024-03-21")
@@ -357,7 +357,13 @@ class TradeCalendarService:
                 if not row.empty:
                     return row["is_open"].iloc[0] == 1  # type: ignore[index]
 
-            return self._offline.is_trading_day(date_obj)
+            result = self._offline.is_trading_day(date_obj)
+            if result is None:
+                logger.warning(
+                    "[TradeCalendarService] Offline calendar cannot determine %s (beyond trusted interval), propagating None (D2-7)",
+                    date_obj,
+                )
+            return result
 
         except Exception as e:
             log_classified(
@@ -367,7 +373,13 @@ class TradeCalendarService:
                 "[TradeCalendarService] is_trading_day check failed, using offline (%s): %s",
                 exc_info=True,
             )
-            return self._offline.is_trading_day(date_obj)
+            result = self._offline.is_trading_day(date_obj)
+            if result is None:
+                logger.warning(
+                    "[TradeCalendarService] Offline calendar cannot determine %s after DB/API failure (beyond trusted interval), propagating None (D2-7)",
+                    date_obj,
+                )
+            return result
 
     @log_async_operation(
         operation_name="get_trade_dates",
@@ -767,6 +779,7 @@ class TradeCalendarService:
 
             dt = end_dt
             for _ in range(20):
+                # None 视为未知（超出可信区间，D2-7）：不把未知自然日当候选交易日，继续向历史回溯
                 if self._offline.is_trading_day(dt):
                     return dt
                 dt -= datetime.timedelta(days=1)
