@@ -163,3 +163,12 @@ exceptions:
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008：关机编排重构为显式依赖注入后移除。"
     verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0015）。"
+  # EX-0016: utils/scheduler_service.py -> data.domain_services.offline_calendar（D6-1/D6-2 日历降级）
+  - id: EX-0016
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "D6-1 启动补偿与 D6-2 日历检查降级均需访问离线日历：① _catch_up_missed_updates 检查遗漏交易日（交易日历三级降级链的最后一级兜底，由 get_trade_dates 内部承担，无需直接 import，本条目对应 _run_daily_update except 分支的直接调用）；② _run_daily_update 的 except 分支降级调用 OfflineCalendar.is_trading_day 三态判定（替代退化的 weekday 判断）。两处均为函数内 lazy import 带 # lazy-import: 注释，启动性能优化。"
+    owner: 架构维护者
+    approved_by: 架构维护者（D6-1/D6-2 修复）
+    removal_trigger: "日历判定统一收口到 TradeCalendarService（DB→API→Offline 三级降级链）且 SchedulerService 不再直接访问 OfflineCalendar 时移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0016）。"
