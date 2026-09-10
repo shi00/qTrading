@@ -129,9 +129,15 @@ async def _run_nightly_prediction(svc: SchedulerService, runner: AISelectionRunn
     try:
         processor = DataProcessor()
         is_trading = await processor.trade_calendar.is_trading_day(today)
-        if not is_trading:
+        if is_trading is False:
             logger.info(
                 "[Scheduler] Prediction skipped (%s is not a trading day)",
+                today_str,
+            )
+            return
+        if is_trading is None:
+            logger.warning(
+                "[Scheduler] Prediction skipped (%s status unknown: offline calendar beyond trusted interval, D2-7)",
                 today_str,
             )
             return

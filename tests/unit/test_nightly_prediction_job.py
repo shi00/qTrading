@@ -84,6 +84,29 @@ class TestRunNightlyPrediction:
             await job(svc)
 
     @pytest.mark.asyncio
+    async def test_unknown_trading_day_skips(self):
+        """is_trading_day 返回 None（离线日历超可信区间）时告警并跳过、不提交（D2-7）。"""
+        svc = _FakeSvc()
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=None)
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await job(svc)
+            mock_warn.assert_called_once_with(
+                "[Scheduler] Prediction skipped (%s status unknown: offline calendar beyond trusted interval, D2-7)",
+                date(2024, 6, 15).strftime("%Y%m%d"),
+            )
+
+    @pytest.mark.asyncio
     async def test_calendar_check_fails_weekend(self):
         svc = _FakeSvc()
         job, _ = _make_job(svc)

@@ -122,6 +122,38 @@ class TestOfflineCalendarIsTradingDay:
             result = OfflineCalendar.is_trading_day("2024-01-01")
             assert result is False
 
+    def test_is_trading_day_beyond_trusted_interval_returns_none(self):
+        """超出可信区间返回 None（未知），绝不猜测（D2-7）。"""
+        from data.domain_services.offline_calendar import OfflineCalendar, _OFFLINE_TRUSTED_UNTIL
+
+        OfflineCalendar._calendar = None
+
+        mock_cal = MagicMock()
+        mock_cal.schedule.return_value = MagicMock(empty=False)
+
+        with patch("data.domain_services.offline_calendar.get_calendar", return_value=mock_cal):
+            result = OfflineCalendar.is_trading_day(_OFFLINE_TRUSTED_UNTIL + datetime.timedelta(days=1))
+            assert result is None
+            mock_cal.schedule.assert_not_called()
+
+    def test_is_trading_day_at_trusted_boundary_still_evaluates(self):
+        """恰好等于可信区间上界的日期仍是可信区间内，进入规则判定（D2-7 边界语义）。"""
+        from data.domain_services.offline_calendar import OfflineCalendar, _OFFLINE_TRUSTED_UNTIL
+
+        OfflineCalendar._calendar = None
+
+        mock_cal = MagicMock()
+        mock_cal.schedule.return_value = MagicMock(empty=False)
+
+        with patch("data.domain_services.offline_calendar.get_calendar", return_value=mock_cal):
+            assert OfflineCalendar.is_trading_day(_OFFLINE_TRUSTED_UNTIL) is True
+
+    def test_trusted_until_is_in_future(self):
+        """可信区间守卫：若常量过期（today > 边界），说明维护遗漏，调度器将持续跳过交易日（D2-7 失效）。"""
+        from data.domain_services.offline_calendar import _OFFLINE_TRUSTED_UNTIL
+
+        assert datetime.date.today() < _OFFLINE_TRUSTED_UNTIL
+
 
 class TestOfflineCalendarGetTradeDates:
     def test_get_trade_dates_success(self):
