@@ -88,6 +88,16 @@ TERMINAL_STATUSES = (
 )
 
 
+# Statuses eligible for retry_task (D6-3): FAILED plus INTERRUPTED.
+# INTERRUPTED（应用异常退出遗留的未完成任务）在业务上与 FAILED 等价——任务未完成，
+# 用户需要能重新发起；同步层已有基于已缓存日期的跳过逻辑，重新提交即自然续传。
+# CANCELLED 不纳入：用户主动取消代表放弃意图，重试应由用户重新操作。
+_RETRYABLE_STATUSES = (
+    TaskStatus.FAILED,
+    TaskStatus.INTERRUPTED,
+)
+
+
 @dataclass
 class AppTask:
     """Represents a long-running asynchronous operation in the application.
@@ -517,19 +527,25 @@ class TaskManager:
             self._loop.call_soon_threadsafe(self._clear_finished_impl)
 
     def retry_task(self, task_id: str) -> str | None:
-        """Retry a failed task by re-submitting with stored factory + kwargs (Phase 6.2, FR-UX-006).
+        """Retry a failed or interrupted task by re-submitting with stored factory + kwargs (Phase 6.2, FR-UX-006).
 
-        Only FAILED tasks can be retried. The new task gets a fresh task_id and
-        does NOT inherit the original ``unique_key`` (avoids dedup conflicts
-        with the failed task's still-held key during the brief overlap window).
+        D6-3: ``INTERRUPTED`` 纳入可重试范围——应用异常退出遗留的未完成任务在业务上
+        与 ``FAILED`` 等价，都需要用户能重新发起。同步层已有基于已缓存日期的跳过
+        逻辑，重新提交即可自然续传。``CANCELLED`` 不纳入：用户主动取消代表放弃
+        意图，重试应由用户重新操作。
+
+        Only retryable statuses (``_RETRYABLE_STATUSES``) can be retried. The new
+        task gets a fresh task_id and does NOT inherit the original ``unique_key``
+        (avoids dedup conflicts with the failed task's still-held key during the
+        brief overlap window).
 
         Returns:
-            New task_id if retry was submitted, None if task not found, not FAILED,
+            New task_id if retry was submitted, None if task not found, not retryable,
             or missing stored factory.
         """
         task = self._tasks.get(task_id)
-        if not task or task.status != TaskStatus.FAILED:
-            logger.warning("[TaskManager] Retry skipped: task %s not found or not FAILED", task_id)
+        if not task or task.status not in _RETRYABLE_STATUSES:
+            logger.warning("[TaskManager] Retry skipped: task %s not found or not retryable", task_id)
             return None
         if task._coroutine_factory is None:
             logger.warning("[TaskManager] Retry skipped: task %s has no stored factory", task_id)

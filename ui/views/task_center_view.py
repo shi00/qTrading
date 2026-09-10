@@ -251,8 +251,9 @@ def _build_task_card(
                 on_click=lambda e, tid=row.id: on_cancel(tid),
             )
         )
-    elif row.status == TaskStatus.FAILED:
-        # Phase 6.2 (FR-UX-006): Retry + View Details buttons for failed tasks
+    elif row.status in (TaskStatus.FAILED, TaskStatus.INTERRUPTED):
+        # Phase 6.2 (FR-UX-006) + D6-3: Retry + View Details buttons for
+        # failed/interrupted tasks (INTERRUPTED 与 FAILED 业务等价，均可重新发起续传)
         if on_retry is not None:
             action_buttons.append(
                 ft.TextButton(
@@ -347,7 +348,7 @@ def TaskCenterView(active: bool = True) -> ft.Container:
 
     def _on_retry(task_id: str) -> None:
         UILogger.log_action("TaskCenterView", "Click", f"btn_retry | task_id={task_id}")
-        vm.retry_task(task_id)  # pragma: no cover - retry 仅在 FAILED 任务触发，单测不覆盖完整 retry 流程
+        vm.retry_task(task_id)  # pragma: no cover - retry 仅在 FAILED/INTERRUPTED 任务触发，单测不覆盖完整 retry 流程
 
     def _on_view_details(task_id: str) -> None:
         UILogger.log_action("TaskCenterView", "Click", f"btn_details | task_id={task_id}")
