@@ -65,6 +65,7 @@ class BacktestConfig:
     allow_limit_up_buy: bool = False
     allow_limit_down_sell: bool = False
     cash_reserve_pct: float = 0.1
+    min_rebalance_delta_pct: float = 0.01  # 权重变化小于该百分比不交易，避免噪声换手
     preload_max_days: int = 366
 
     def validate(self) -> list[str]:
@@ -79,6 +80,8 @@ class BacktestConfig:
             errors.append("max_single_weight must be in (0, 1]")
         if self.cash_reserve_pct < 0 or self.cash_reserve_pct >= 1:
             errors.append("cash_reserve_pct must be in [0, 1)")
+        if self.min_rebalance_delta_pct < 0 or self.min_rebalance_delta_pct >= 1:
+            errors.append("min_rebalance_delta_pct must be in [0, 1)")
         if self.max_position_count <= 0:
             errors.append("max_position_count must be positive")
         if self.preload_max_days < 30:
