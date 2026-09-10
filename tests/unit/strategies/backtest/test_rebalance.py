@@ -1174,3 +1174,186 @@ class TestDiffRebalance:
             TransactionCostModel(TransactionCostConfig(slippage_bps=0.0)),
         )
         return simulator, config
+
+    @staticmethod
+    def _add_pos(sim: PortfolioSimulator, ts_code: str, volume: int, price: float) -> None:
+        sim.positions[ts_code] = {
+            "volume": volume,
+            "cost_basis": float(volume * price),
+            "entry_date": date(2024, 1, 1),
+            "entry_price": price,
+            "qfq_entry_price": price,
+        }
+
+    def test_reset_restores_default_state(self) -> None:
+        """reset() 清空交易/持仓/现金回初始资本（覆盖 51-57）。
+
+        用于引擎可能复用一个模拟器实例的路径，保证状态可重建。
+        """
+        sim, config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.cash = 50.0
+        sim.trades_list.append({"action": "sell"})
+        sim.skipped_list.append({"reason": "no_quote"})
+        sim.positions_list.append({"trade_date": date(2024, 1, 1)})
+        sim.warnings.append("warn")
+        sim._last_known_prices["000001.SZ"] = 10.0
+
+        sim.reset()
+
+        assert sim.cash == config.initial_capital
+        assert sim.positions == {}
+        assert sim.trades_list == []
+        assert sim.skipped_list == []
+        assert sim.positions_list == []
+        assert sim.warnings == []
+        assert sim._last_known_prices == {}
+
+    def test_rebalance_with_invalid_weights_sells_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """权重计算无效（空权重）时按全清仓处理，不买入任何新仓（覆盖 100-101）。
+
+        语义：无法确定目标权重属于数据异常，保守全清仓（与空信号分支行为一致）。
+        """
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.cash = 0.0
+
+        from strategies.backtest import position_sizer as _ps
+
+        class _EmptySizer:
+            def compute_weights(self, signals, quotes, config):
+                return pl.DataFrame(schema={"ts_code": pl.Utf8, "weight": pl.Float64})
+
+        monkeypatch.setattr(_ps, "get_sizer", lambda sizing: _EmptySizer())
+
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8)],
+                "ts_code": ["000002.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 8), signals, self._quote(date(2024, 1, 8)))
+
+        assert "000001.SZ" in [t["ts_code"] for t in sim.trades_list if t["action"] == "sell"]
+        assert "000002.SZ" not in sim.positions
+
+    def test_rebalance_uses_entry_price_when_no_quote_for_held_position(self) -> None:
+        """已持仓标的当日无报价时用 entry_price 兜底估算市值（覆盖 115）。
+
+        场景：B 在目标内但当日行情缺失，不影响再平衡计算（用成本兜底）。
+        """
+        sim, config = self._make_simulator(rebalance_freq="weekly", min_rebalance_delta_pct=0.001)
+        sim.cash = 50000.0
+        self._add_pos(sim, "000002.SZ", 1000, 10.0)
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8), date(2024, 1, 8)],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [1, 2],
+            }
+        )
+        # 仅 000001.SZ 有报价（000002.SZ 缺失）
+        quotes = self._quote(date(2024, 1, 8))
+        sim.stock_meta = {"000002.SZ": {"delist_date": None}}
+        sim.process_day(date(2024, 1, 8), signals, quotes, is_rebalance=True)
+        # 不应抛异常；000002.SZ 以 entry_price 兜底参与市值，不被误清仓
+        assert "000002.SZ" in sim.positions
+
+    def test_sell_position_no_quote_and_not_delisted_skips(self) -> None:
+        """卖出时无报价且未退市 → 记 no_quote 跳过（覆盖 202-212）。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.stock_meta = {"000001.SZ": {"delist_date": None}}
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], quote=None)
+        assert any(r["reason"] == "no_quote" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert any("sell skipped (no_quote)" in w for w in sim.warnings)
+
+    def test_sell_position_to_value_no_quote_and_not_delisted_skips(self) -> None:
+        """减持时无报价且未退市 → 记 no_quote 跳过（覆盖 285-298）。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.stock_meta = {"000001.SZ": {"delist_date": None}}
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", None, target_value=5000.0)
+        assert any(r["reason"] == "no_quote" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+
+    def test_sell_position_suspended_skips(self) -> None:
+        """卖出遇停牌 → 记 suspended 跳过（覆盖 202-212 的 suspended 分支）。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), 10.0).with_columns(pl.lit(False).alias("is_tradable"))
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+        assert any(r["reason"] == "suspended" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+
+    def test_sell_position_to_value_suspended_skips(self) -> None:
+        """减持遇停牌 → 记 suspended 跳过（覆盖 302-312）。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), 10.0).with_columns(pl.lit(False).alias("is_tradable"))
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=5000.0)
+        assert any(r["reason"] == "suspended" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+
+    def test_sell_position_to_value_next_close(self) -> None:
+        """减持用 next_close 成交价（覆盖 329）并正确摊销成本。"""
+        sim, _config = self._make_simulator(execution_price="next_close")
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0)
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=5000.0)
+        sells = [t for t in sim.trades_list if t["action"] == "sell"]
+        assert len(sells) == 1
+        assert sim.positions["000001.SZ"]["volume"] < 1000
+        assert sim.positions["000001.SZ"]["cost_basis"] == pytest.approx(5000.0, abs=1e-6)
+
+    def test_sell_position_to_value_full_sell_fallback(self) -> None:
+        """减持量无效（>= 现持仓）→ 复用全额清仓（覆盖 337-339）。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0)
+        # target_value 为 0 → sell_value = current_value → volume >= pos.volume → 全额清仓
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=0.0)
+        assert "000001.SZ" not in sim.positions
+        sells = [t for t in sim.trades_list if t["action"] == "sell"]
+        assert len(sells) == 1
+        assert sells[0]["volume"] == 1000
+
+    def test_buy_to_target_scales_when_exceeds_budget(self) -> None:
+        """买入总额超预算时按比例缩减（覆盖 386-390）。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 5000.0
+        targets = {"000001.SZ": 3000.0, "000002.SZ": 3000.0}
+        base = self._quote(date(2024, 1, 8), 10.0)
+        q1 = base
+        q2 = base.with_columns(pl.lit("000002.SZ").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q1, "000002.SZ": q2}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=4000.0)
+        buys = [t for t in sim.trades_list if t["action"] == "buy"]
+        assert len(buys) == 2
+        # 缩减后总买入额不超过 budget
+        total_amount = sum(t["gross_amount"] for t in buys)
+        assert total_amount <= 4000.0 + 1e-6
+
+    def test_buy_to_target_insufficient_cash_skips(self) -> None:
+        """买入所需现金不足 → 记 insufficient_cash 跳过（覆盖 478-489）。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 100.0
+        targets = {"000001.SZ": 100000.0}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10000.0)}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=100000.0)
+        # 10000 元/1000股 → target 100000 → net_amount 远超现金 → skipped
+        assert any(r["reason"] == "insufficient_cash" for r in sim.skipped_list)
+        assert "000001.SZ" not in sim.positions
+
+    def test_buy_to_target_adds_to_existing_position(self) -> None:
+        """加仓已存在持仓 → 累加 volume/cost_basis（覆盖 506-519 existing 分支）。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 50000.0
+        self._add_pos(sim, "000001.SZ", 100, 10.0)
+        targets = {"000001.SZ": 10000.0}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10.0)}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=10000.0)
+        assert sim.positions["000001.SZ"]["volume"] > 100
+        assert sim.positions["000001.SZ"]["cost_basis"] > 1000.0
