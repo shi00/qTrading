@@ -1176,7 +1176,6 @@ class TestEngineEndToEndPipeline:
                 "ts_code": ["000001.SZ"],
                 "score": [1.0],
                 "signal_rank": [1],
-                "target_weight": [1.0],
                 "reason": [None],
             }
         )
@@ -1260,7 +1259,6 @@ class TestEngineEndToEndPipeline:
                 "ts_code": ["000001.SZ"],
                 "score": [1.0],
                 "signal_rank": [1],
-                "target_weight": [1.0],
                 "reason": [None],
             }
         )

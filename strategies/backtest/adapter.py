@@ -62,7 +62,6 @@ class BacktestStrategyAdapter:
             - ts_code: str
             - score: float | None
             - rank: int
-            - target_weight: float | None
             - reason: str | None
         """
         dep_result = strategy.check_dependencies(context)
@@ -108,7 +107,6 @@ class BacktestStrategyAdapter:
         - ts_code: str
         - score: float | None
         - rank: int
-        - target_weight: float | None
         - reason: str | None
         """
         if result_df is None or (hasattr(result_df, "empty") and result_df.empty):
@@ -157,16 +155,12 @@ class BacktestStrategyAdapter:
         # rank 语义：rank 大 = 信号强（第一行 rank=N 最大，按 score 降序后即最强信号）
         ranks = list(range(num_rows, 0, -1))
 
-        equal_weight = 1.0 / num_rows if num_rows > 0 else 0.0
-        target_weights = [equal_weight] * num_rows
-
         signal_data = {
             "signal_date": [signal_date] * num_rows,
             "execution_date": [execution_date] * num_rows,
             "ts_code": ts_codes,
             "score": score_col if score_col else [None] * num_rows,
             "signal_rank": ranks,
-            "target_weight": target_weights,
             "reason": reason_col if reason_col else [None] * num_rows,
         }
 
