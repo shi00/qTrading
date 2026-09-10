@@ -528,9 +528,13 @@ class AIStreamMixin:
                     Message("task_aggregating_results"),
                 )
 
+                # D3-4: 捕获策略执行期业务警告，随结果单帧透传给 state（frozen dataclass 用 tuple）。
+                # dep unready 等提前返回路径未初始化通道时 .get() 为 None，判空后 () 空载。
+                strategy_warnings = tuple(context.get("warnings") or ())
+
                 if result_df is not None and not result_df.empty:
                     self._full_results = result_df
-                    self._update_pagination(page_no=1)
+                    self._update_pagination(page_no=1, warnings=strategy_warnings)
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
                     # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
@@ -597,6 +601,7 @@ class AIStreamMixin:
                     status_message=Message("screener_no_results"),
                     status_color="warning",
                     status_action_key=None,
+                    warnings=strategy_warnings,
                 )
                 return Message("screener_no_results")
 

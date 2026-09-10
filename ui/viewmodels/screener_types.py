@@ -198,6 +198,9 @@ class ScreenerState:
     status_color: str = ""
     # Task 5.2: 质量门阻断时的跳转 action key (如 screener_action_go_sync), None 无 action
     status_action_key: str | None = None
+    # D3-4: 策略执行期业务警告 (不可变空载 tuple)。与 status_message 并存——放成功/失败
+    # 后 status_message 会被 "完成" 状态覆盖，故警告需独立字段，View 在结果区上方单独渲染横幅。
+    warnings: tuple[Message, ...] = ()
     # AI streaming logs (append-only tuple)
     logs: tuple[LogEntry, ...] = ()
     # AI streaming/placeholder cards (state-driven, §3.2 MVVM)

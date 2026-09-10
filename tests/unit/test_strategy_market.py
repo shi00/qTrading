@@ -17,6 +17,7 @@ import unittest
 import pandas as pd
 import polars as pl
 
+from core.i18n import Message
 from strategies.market import (
     BlockTradeStrategy,
     InstitutionalStrategy,
@@ -211,6 +212,32 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         # Second call without conflict
         self.strategy._filter_logic(lf, {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 0}})
         self.assertEqual(self.strategy._data_warnings, [])
+
+    def test_conflict_writes_warning_to_context_channel(self):
+        """D3-4: 参数冲突自动调整时必须写入 StrategyContext.warnings 通道 (Message + i18n key),
+        供 VM/UI 公知；无冲突调用不产生警告。"""
+        sample_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "涨幅8.2", "pct_chg": 8.2, "turnover_rate": 8.0},
+                {"ts_code": "000002.SZ", "name": "涨幅6.0", "pct_chg": 6.0, "turnover_rate": 5.0},
+            ]
+        )
+        lf = pl.from_pandas(sample_df).lazy()
+        # 真实执行时 base filter 会先初始化 warnings 为空通道
+        context = {"params": {"pct_chg_min": 8, "pct_chg_max": 5, "turnover_min": 0}, "warnings": []}
+        result = self.strategy._filter_logic(lf, context).collect()
+        self.assertGreater(result.height, 0)
+        self.assertTrue(context["warnings"], "参数冲突应写入策略警告通道")
+        msg = context["warnings"][0]
+        self.assertIsInstance(msg, Message)
+        self.assertEqual(msg.key, "strategy_param_auto_adjusted")
+        self.assertEqual(msg.params["min"], 8)
+        self.assertEqual(msg.params["adjusted_max"], 8.5)
+
+        # 无冲突调用不产生警告
+        clean_context = {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 0}, "warnings": []}
+        self.strategy._filter_logic(lf, clean_context).collect()
+        self.assertEqual(clean_context["warnings"], [])
 
 
 class TestNorthboundHoldingStrategy(unittest.TestCase):

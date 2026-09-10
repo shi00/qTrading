@@ -88,6 +88,11 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         try:
+            # D3-4: 每次策略执行从空通道开始，避免同一 context 跨运行/跨策略残留旧警告。
+            # _filter_logic 在线程池线程内仅对 list append（GIL 原子），run_async 等待
+            # 完成后主协程再读取，无并发写读竞态。
+            context["warnings"] = []
+
             # Offload CPU-intensive from_pandas, _filter_logic graph building, collect, and conversion to thread pool
             # to avoid blocking the Flet event loop during full-market screening.
             # Thread-safety: df and context are not mutated concurrently during filter() execution.

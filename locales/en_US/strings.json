@@ -299,6 +299,7 @@
     "strategy_dividend_desc": "Criteria: Div Yield (TTM) > 4% (Defensive Income Assets)",
     "strategy_volume_breakout_name": "Volume Breakout",
     "strategy_volume_breakout_desc": "Criteria: Daily Chg 2-7% | Turnover > 3% (Active Volume)",
+    "strategy_param_auto_adjusted": "Conflicting range params: lower bound {min} >= upper bound, upper bound auto-adjusted to {adjusted_max}",
     "strategy_northbound_holding_name": "Northbound Holdings",
     "strategy_northbound_holding_desc": "Criteria: Northbound Holding Ratio > threshold (Long-term foreign positions)",
     "strategy_northbound_flow_name": "Northbound Net Inflow",

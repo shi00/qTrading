@@ -54,3 +54,7 @@ class StrategyContext(TypedDict, total=False):
     _dependency_status: dict[str, Any]
     _diagnostics: dict[str, Any]
     _metadata: dict[str, Any]
+    # D3-4: 策略执行期业务警告通道。策略检测到非致命参数/数据问题时 append
+    # Message(i18n key + params)，交由 base filter 初始化本次运行通道、VM 透传、
+    # View 在结果区上方渲染。符合 §3.2 策略只产出 i18n key 约束。
+    warnings: list[Message]
