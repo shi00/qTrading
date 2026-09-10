@@ -565,6 +565,46 @@ class TestDataSourceViewModelFullDailySync:
         assert any(s.message == Message("snack_sync_partial_sources", {"tables": 2}) for s in snack_msgs)
         assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
 
+    async def test_daily_sync_critical_failed_emits_warning_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """D1-2 补缺: failed_critical_tables 非空（单关键表失败，is_complete=False）→
+        发射关键数据源失败 warning snack，而非误报"完整日更新完成"。"""
+        mock_processor.run_daily_update = AsyncMock(
+            return_value=SyncResult(added=0, failed_critical_tables=["daily_quotes"])
+        )
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(s.message == Message("snack_sync_critical_failed", {"tables": 1}) for s in snack_msgs)
+        assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
+
+    async def test_daily_sync_critical_and_optional_prioritizes_critical(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """D1-2 补缺: 同时有关键+非关键失败时，优先报关键数据源失败。"""
+        mock_processor.run_daily_update = AsyncMock(
+            return_value=SyncResult(
+                added=0,
+                failed_critical_tables=["daily_quotes"],
+                failed_optional_tables=["limit_list"],
+            )
+        )
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(s.message == Message("snack_sync_critical_failed", {"tables": 1}) for s in snack_msgs)
+        assert all(s.message != Message("snack_sync_partial_sources", {"tables": 1}) for s in snack_msgs)
+        assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
+
 
 class TestDataSourceViewModelAiConceptRebuild:
     def test_execute_sets_sync_busy(self, bound_vm):
