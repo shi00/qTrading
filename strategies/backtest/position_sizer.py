@@ -132,6 +132,15 @@ class RankWeightedSizer(PositionSizer):
 
     注意：本 sizer 不含任何风险度量。若需按波动率控制风险暴露，
     见 InverseVolatilitySizer（如已实现）。
+
+    D3-9 说明 —— 仅 ordinal rank 的权衡：
+    signal_rank 是 1..N 的整数**序数**，不携带信号强度的量级信息：
+      - 打分 95/94/93（几乎等价）与 95/50/20（差异巨大）会得到**相同**的 rank(1,2,3)
+        与相同权重——本 sizer 不感知打分间距；
+      - 权重依赖候选总数 N：同一排名第 2 的标的，在 3 个候选时权重远高于 30 个候选时。
+    这是"排名加权"这一分配方式的固有语义（按定义只用排名，不用打分量级）。
+    若需按信号**强度**（而非仅排名）分配，应使用支持原始打分归一化的 sizer
+    （如 adapter 同时输出 signal_score 时改用打分加权）。
     """
 
     def compute_weights(
