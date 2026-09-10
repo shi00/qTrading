@@ -60,8 +60,13 @@ def _find_processor(instance: typing.Any, args: typing.Any, kwargs: typing.Any):
     return processor
 
 
-def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.Any):
-    """Shared logic to verify quality tier."""
+def _check_tier(
+    processor: typing.Any,
+    min_tier: typing.Any,
+    func_name: typing.Any,
+    require_continuous_window: bool = False,
+):
+    """Shared logic to verify quality tier, optionally enforcing window integrity."""
     if is_e2e_mode():
         logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
@@ -115,11 +120,32 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
         logger.warning("[QualityGate] %s", msg)
         raise QualityGateError(msg)
 
+    # D2-9: 可选区间完整性检查（保守拦截）。仅当策略显式声明 require_continuous_window=True 时启用。
+    # 等级达标（未走上方报错分支）后，若本轮质量扫描在采样中检测到缺失交易日（代理证据，
+    # 非全市场全量），即使等级满足也拦截——防止"等级达标但策略所需窗口恰好缺某天"仍放行的核心风险。
+    # 边界：fast-path（静默启动、未跑 run_quality_scan 深扫描）时 _scan_missing_dates 为空 frozenset
+    # ⇒ 不拦截（不新增 DB 查询）；MagicMock 替身返回非 frozenset 集合对象时静默跳过，不破坏既有门控测试。
+    if require_continuous_window:
+        scan_missing = getattr(processor, "_scan_missing_dates", frozenset())
+        if isinstance(scan_missing, frozenset) and scan_missing:
+            top = sorted(scan_missing)[: DataQualityService.MAX_MISSING_REPORT]
+            msg = (
+                f"QualityGate: continuous window integrity check failed for {func_name}. "
+                f"Scan detected missing trading dates: {', '.join(top)}"
+            )
+            logger.warning("[QualityGate] %s", msg)
+            raise QualityGateError(msg)
+
 
 _CallableT = typing.TypeVar("_CallableT", bound=typing.Callable)
 
 
-def require_quality(min_tier: QualityTier | None = None, *, from_attr: str | None = None):
+def require_quality(
+    min_tier: QualityTier | None = None,
+    *,
+    from_attr: str | None = None,
+    require_continuous_window: bool = False,
+):
     """
     Decorator to enforce data quality requirements.
     Supports both sync and async methods.
@@ -127,6 +153,12 @@ def require_quality(min_tier: QualityTier | None = None, *, from_attr: str | Non
     两种形式（互斥，恰好提供其一）：
       @require_quality(QualityTier.SILVER)                          # 固定等级
       @require_quality(from_attr="required_quality_tier")           # 运行时读 self.<attr>
+
+    Optional（D2-9）：
+      require_continuous_window=True  // 等级达标后再做区间完整性检查（保守拦截）。
+      // 依据 processor._scan_missing_dates（run_quality_scan 采样的缺失交易日代理证据）
+      // 判定：声明后若采样检测到任何缺失日即便等级达标也抛 QualityGateError，防止
+      // "策略所需窗口恰好缺某天"仍放行。默认 False，不改变既有策略行为。
 
     Usage:
         @require_quality(QualityTier.SILVER)
@@ -159,7 +191,12 @@ def require_quality(min_tier: QualityTier | None = None, *, from_attr: str | Non
             @functools.wraps(func)
             async def async_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
                 processor = _find_processor(self, args, kwargs)
-                _check_tier(processor, _resolve_tier(self), func.__name__)
+                _check_tier(
+                    processor,
+                    _resolve_tier(self),
+                    func.__name__,
+                    require_continuous_window=require_continuous_window,
+                )
                 return await func(self, *args, **kwargs)
 
             return typing.cast(_CallableT, async_wrapper)
@@ -167,7 +204,12 @@ def require_quality(min_tier: QualityTier | None = None, *, from_attr: str | Non
         @functools.wraps(func)
         def sync_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
             processor = _find_processor(self, args, kwargs)
-            _check_tier(processor, _resolve_tier(self), func.__name__)
+            _check_tier(
+                processor,
+                _resolve_tier(self),
+                func.__name__,
+                require_continuous_window=require_continuous_window,
+            )
             return func(self, *args, **kwargs)
 
         return typing.cast(_CallableT, sync_wrapper)
