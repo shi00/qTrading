@@ -1443,6 +1443,82 @@ class TestReviewManagerSaveResultsEdgeCases:
         assert records[0]["ai_score"] == 0
 
 
+class TestReviewManagerSaveResultsAiStatusFilter:
+    """D3-7: 复盘/预测写入侧守卫——仅 ai_status == analyzed 的记录可写入，rejected/failed 不落库。
+
+    避免 AI 失败/否决记录污染预测表进入学习闭环（降级不得伪装成成功，D2-1 原则）。
+    """
+
+    def _make_rm(self, mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_only_analyzed_rows_written(self, mock_cm, mock_tc):
+        """含 ai_status 列时，rejected/failed 一律跳过，仅 analyzed 写库。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S0", "S1", "S2"],
+                "name": ["A", "B", "C"],
+                "close": [10.0, 11.0, 12.0],
+                "trade_date": ["20240615", "20240615", "20240615"],
+                "ai_status": ["analyzed", "rejected", "failed"],
+                "ai_score": [60, 0, None],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        mock_cache.screener_dao.save_screening_results.assert_called_once()
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        ts_codes = [r["ts_code"] for r in records]
+        assert ts_codes == ["S0"]
+        assert records[0]["ai_score"] == 60
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_no_ai_status_column_keeps_legacy_behavior(self, mock_cm, mock_tc):
+        """无 ai_status 列（老调用方）时行为不变：全部写入，保持向后兼容。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S0", "S1"],
+                "name": ["A", "B"],
+                "close": [10.0, 11.0],
+                "trade_date": ["20240615", "20240615"],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        assert [r["ts_code"] for r in records] == ["S0", "S1"]
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_all_rejected_failed_skip_dao(self, mock_cm, mock_tc):
+        """全部为 rejected/failed 时 nothing to write，跳过 DAO 落库。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S1", "S2"],
+                "name": ["B", "C"],
+                "close": [11.0, 12.0],
+                "trade_date": ["20240615", "20240615"],
+                "ai_status": ["rejected", "failed"],
+                "ai_score": [0, None],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
+
+
 class TestReviewManagerEngineDisposedErrorR5:
     """R5 一致性：disposed 引擎抛出的 EngineDisposedError 必须上抛，不可被 except Exception 吞没。
 
