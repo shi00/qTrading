@@ -9,6 +9,7 @@ import unittest
 import pandas as pd
 import polars as pl
 
+from core.errors import StrategyParamError
 from strategies.fundamental import (
     CashFlowStrategy,
     DividendStrategy,
@@ -125,6 +126,17 @@ class TestValueStrategy(unittest.TestCase):
         lf = pl.from_pandas(df).lazy()
         context = {"params": {"pe_min": 5, "pe_max": 20, "pb_max": 3, "dv_min": 2}}
         with self.assertRaises(pl.exceptions.ColumnNotFoundError):
+            self.strategy._filter_logic(lf, context).collect()
+
+    def test_value_strategy_contradictory_pe_range(self):
+        """矛盾区间参数 (pe_min > pe_max) 应抛 StrategyParamError，绝不静默返回空集。
+
+        D3-3: 参数下限大于上限时，若静默返回空集，UI 会误读为
+        "市场上没有这种股票"（虚假市场信息），而真相是参数矛盾。
+        """
+        lf = pl.from_pandas(self.sample_df).lazy()
+        context = {"params": {"pe_min": 30, "pe_max": 20, "pb_max": 3, "dv_min": 2}}
+        with self.assertRaises(StrategyParamError):
             self.strategy._filter_logic(lf, context).collect()
 
     def test_value_strategy_sort_by_dividend(self):

@@ -285,6 +285,7 @@
     "screener_blocked": "Blocked: {reason}",
     "screener_action_go_sync": "Go to Sync",
     "screener_internal_error": "Internal system error, check logs for details.",
+    "strategy_param_range_invalid": "Invalid strategy parameter range: lower bound {min} exceeds upper bound {max}",
     "screener_score": "Score",
     "screener_view_details": "View Details",
     "strategy_ai_active_name": "AI Deep Dive (Beta)",

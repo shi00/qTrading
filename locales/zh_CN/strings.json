@@ -169,6 +169,7 @@
     "screener_blocked": "中止: {reason}",
     "screener_action_go_sync": "前往同步",
     "screener_internal_error": "内部系统错误，请查看日志获取详细信息。",
+    "strategy_param_range_invalid": "策略参数区间无效：下限 {min} 大于上限 {max}，请调整",
     "screener_score": "评分",
     "screener_view_details": "查看详情",
     "strategy_ai_active_name": "AI 深度精选 (Beta)",

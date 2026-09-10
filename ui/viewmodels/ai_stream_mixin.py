@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from core.errors import StrategyParamError
 from data.persistence.quality_gate import QualityGateError
 from services.task_manager import TaskManager
 from ui.viewmodels import Message
@@ -621,6 +622,19 @@ class AIStreamMixin:
                     status_action_key="screener_action_go_sync",
                 )
                 return Message("screener_blocked", {"reason": DataSanitizer.sanitize_error(e)})
+            except StrategyParamError as e:
+                logger.warning(
+                    "[ScreenerVM] Invalid strategy parameter: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                self._set_state(
+                    loading=False,
+                    status_message=e.message,
+                    status_color="warning",
+                    status_action_key=None,
+                )
+                return e.message
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
