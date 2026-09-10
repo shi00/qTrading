@@ -51,7 +51,7 @@ class BacktestConfig:
     slippage_bps: float = 5.0
 
     rebalance_freq: Literal["daily", "weekly", "monthly", "signal"] = "signal"
-    position_sizing: Literal["equal_weight", "market_cap_weight", "risk_parity"] = "equal_weight"
+    position_sizing: Literal["equal_weight", "market_cap_weight", "rank_weighted"] = "equal_weight"
     max_position_count: int = 50
     max_single_weight: float = 0.1
 

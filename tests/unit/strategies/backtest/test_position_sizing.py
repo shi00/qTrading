@@ -31,12 +31,12 @@ class TestPositionSizerFactory:
         sizer = get_sizer("market_cap_weight")
         assert isinstance(sizer, MarketCapWeightSizer)
 
-    def test_get_risk_parity_sizer(self):
-        """测试获取风险平价分配器"""
-        from strategies.backtest.position_sizer import get_sizer, RiskParitySizer
+    def test_get_rank_weighted_sizer(self):
+        """测试获取按信号排名加权分配器"""
+        from strategies.backtest.position_sizer import get_sizer, RankWeightedSizer
 
-        sizer = get_sizer("risk_parity")
-        assert isinstance(sizer, RiskParitySizer)
+        sizer = get_sizer("rank_weighted")
+        assert isinstance(sizer, RankWeightedSizer)
 
     def test_get_unknown_sizer_fallback(self):
         """测试未知类型回退到等权重"""
@@ -392,12 +392,12 @@ class TestMarketCapWeightSizer:
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
 
 
-class TestRiskParitySizer:
-    """测试风险平价分配器（简化版）"""
+class TestRankWeightedSizer:
+    """测试按信号排名加权分配器"""
 
-    def test_risk_parity_distribution(self):
-        """测试风险平价分配：权重与 signal_rank 成正比（rank 大=信号强=权重大）"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+    def test_rank_weighted_distribution(self):
+        """测试按信号排名加权分配：权重与 signal_rank 成正比（rank 大=信号强=权重大）"""
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -415,7 +415,7 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         rank_sum = 3 + 2 + 1
@@ -426,9 +426,9 @@ class TestRiskParitySizer:
         assert abs(w2 - 2 / rank_sum) < 1e-6
         assert abs(w3 - 1 / rank_sum) < 1e-6
 
-    def test_risk_parity_higher_rank_higher_weight(self):
+    def test_rank_weighted_higher_rank_higher_weight(self):
         """M10-001 修复：signal_rank 数值越大（信号越强），权重越高"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -446,7 +446,7 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         weights = result["weight"].to_list()
@@ -454,9 +454,9 @@ class TestRiskParitySizer:
         # M10-001 统一语义：rank 大=信号强=权重大
         assert weights[0] > weights[1] > weights[2]
 
-    def test_risk_parity_missing_signal_rank_fallback(self):
+    def test_rank_weighted_missing_signal_rank_fallback(self):
         """测试缺失 signal_rank 列时回退到等权重"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -473,15 +473,15 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         weights = result["weight"].to_list()
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
 
-    def test_risk_parity_zero_signal_rank_filtered(self):
+    def test_rank_weighted_zero_signal_rank_filtered(self):
         """测试 signal_rank=0 的记录被过滤，只使用有效记录计算权重"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -499,7 +499,7 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         # signal_rank=0 被过滤，只剩 1 条记录，权重为 1.0
@@ -507,9 +507,9 @@ class TestRiskParitySizer:
         assert result["ts_code"][0] == "000002.SZ"
         assert abs(float(result["weight"][0]) - 1.0) < 1e-6
 
-    def test_risk_parity_all_invalid_ranks_fallback(self):
+    def test_rank_weighted_all_invalid_ranks_fallback(self):
         """测试全部 signal_rank <= 0 时回退到等权重"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -527,16 +527,16 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         # 全部过滤后为空，fallback 到等权重
         weights = result["weight"].to_list()
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
 
-    def test_risk_parity_null_signal_rank_filtered(self):
+    def test_rank_weighted_null_signal_rank_filtered(self):
         """测试 signal_rank=null 的记录被过滤"""
-        from strategies.backtest.position_sizer import RiskParitySizer
+        from strategies.backtest.position_sizer import RankWeightedSizer
 
         signals = pl.DataFrame(
             {
@@ -554,7 +554,7 @@ class TestRiskParitySizer:
             end_date=date(2024, 1, 31),
         )
 
-        sizer = RiskParitySizer()
+        sizer = RankWeightedSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
         # null 被过滤，只剩 2 条记录
