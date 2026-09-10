@@ -4,7 +4,7 @@
 支持三种分配方式：
 1. equal_weight: 等权重分配
 2. market_cap_weight: 市值加权
-3. risk_parity: 风险平价（简化版，使用信号排名倒数）
+3. rank_weighted: 按信号排名线性递减加权
 """
 
 from __future__ import annotations
@@ -119,8 +119,8 @@ class MarketCapWeightSizer(PositionSizer):
         return result
 
 
-class RiskParitySizer(PositionSizer):
-    """风险平价分配器（简化版）
+class RankWeightedSizer(PositionSizer):
+    """按信号排名线性递减分配权重的仓位分配器
 
     M10-001 修复：统一 signal_rank 语义为 "rank 大 = 信号强"。
     使用 signal_rank 本身作为权重代理：rank 大 = 信号强 = 权重大。
@@ -129,6 +129,9 @@ class RiskParitySizer(PositionSizer):
     （rank N 最强，权重最高）。
 
     计算公式：weight_i = rank_i / sum(rank)
+
+    注意：本 sizer 不含任何风险度量。若需按波动率控制风险暴露，
+    见 InverseVolatilitySizer（如已实现）。
     """
 
     def compute_weights(
@@ -138,13 +141,13 @@ class RiskParitySizer(PositionSizer):
         config: BacktestConfig,
     ) -> pl.DataFrame:
         if "signal_rank" not in signals.columns:
-            logger.warning("[RiskParitySizer] signal_rank column not found, falling back to equal weight")
+            logger.warning("[RankWeightedSizer] signal_rank column not found, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
         # 过滤非正 signal_rank（避免除零）和 null 值
         valid_signals = signals.filter((pl.col("signal_rank") > 0) & pl.col("signal_rank").is_not_null())
         if valid_signals.is_empty():
-            logger.warning("[RiskParitySizer] No valid signal_rank data, falling back to equal weight")
+            logger.warning("[RankWeightedSizer] No valid signal_rank data, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
         signals_sorted = valid_signals.sort("signal_rank", descending=True)
@@ -152,7 +155,7 @@ class RiskParitySizer(PositionSizer):
         rank_sum = signals_sorted.select(pl.col("signal_rank").sum()).item()
 
         if rank_sum is None or rank_sum <= 0:
-            logger.warning("[RiskParitySizer] Invalid rank sum, falling back to equal weight")
+            logger.warning("[RankWeightedSizer] Invalid rank sum, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
         result = signals_sorted.with_columns((pl.col("signal_rank") / rank_sum).alias("weight"))
@@ -231,7 +234,7 @@ def get_sizer(position_sizing: str) -> PositionSizer:
     sizers: dict[str, type[PositionSizer]] = {
         "equal_weight": EqualWeightSizer,
         "market_cap_weight": MarketCapWeightSizer,
-        "risk_parity": RiskParitySizer,
+        "rank_weighted": RankWeightedSizer,
     }
     sizer_cls = sizers.get(position_sizing, EqualWeightSizer)
     return sizer_cls()
