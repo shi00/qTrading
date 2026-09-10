@@ -722,3 +722,140 @@ class TestLastKnownPriceValuation:
         simulator.process_day(date(2024, 1, 3), pl.DataFrame(), quotes_day2, is_rebalance=True)
 
         assert "000001.SZ" not in simulator._last_known_prices
+
+
+class TestNavNoJumpOnEntry:
+    """D4-1: 全链路复权计价后，除权标的买入当日净值只下降交易成本，无虚假收益。"""
+
+    @pytest.fixture
+    def cost_model(self) -> TransactionCostModel:
+        # slippage_bps=0.0 使交易成本精确等于法定费用，便于精确断言
+        return TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
+
+    def test_no_fake_gain_on_entry_for_dividend_stock(
+        self,
+        cost_model: TransactionCostModel,
+    ) -> None:
+        """
+        回归防护：报告 D4-1 要求「除权标的买入当日的净值变化必须只等于交易成本」。
+
+        场景：raw_close=20.0, qfq_close=22.0（累计除权 10%，qfq > raw）。
+        修复前：现金按原始价扣、市值按复权价计，买入日净值虚增约 10%（= 累计除权比例）。
+        修复后：买卖现金流统一复权价，买入日 NAV 只下降交易成本。
+        """
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=1,
+            max_single_weight=1.0,
+            cash_reserve_pct=0.0,
+            execution_price="next_close",
+        )
+        simulator = PortfolioSimulator(config, cost_model)
+
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "raw_close": [20.0],
+                "qfq_close": [22.0],
+                "is_tradable": [True],
+            }
+        )
+
+        simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        volume = int(1_000_000.0 / 22.0 / 100) * 100
+        cost = cost_model.calculate(
+            price=22.0,
+            volume=volume,
+            is_buy=True,
+            trade_date=date(2024, 1, 2),
+        )
+        expected_transaction_cost = cost.net_amount - cost.gross_amount
+
+        assert volume > 0
+
+        positions = simulator.get_results()[1]
+        last = positions.row(-1, named=True)
+        nav_after_entry = last["total_value"]
+
+        # 关键断言 1：NAV 只下降交易成本（除法权比例、无虚假收益）
+        assert (1_000_000.0 - nav_after_entry) == pytest.approx(expected_transaction_cost, rel=1e-9)
+        # 关键断言 2：修复前该值为 1,000,000 + vol*(22-20) - costs，恒大于本金；修复后必小于本金
+        assert nav_after_entry < 1_000_000.0
+
+    def test_sell_settles_in_qfq_keeping_cash_consistent(
+        self,
+        cost_model: TransactionCostModel,
+    ) -> None:
+        """
+        D4-1 卖出侧：平仓现金流与建仓同样按复权价结算，现金保持 qfq 口径一致。
+
+        买 qfq_close=12 再 卖 qfq_close=12（同价），round-trip 后现金 = 本金 - 双边交易成本。
+        修复前卖出按原始价结算会与 qfq 现金混用，round-trip 现金不符。
+        """
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=1,
+            max_single_weight=1.0,
+            cash_reserve_pct=0.0,
+            execution_price="next_close",
+            rebalance_freq="signal",
+        )
+        simulator = PortfolioSimulator(config, cost_model)
+
+        buy_signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+        buy_quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "raw_close": [10.0],
+                "qfq_close": [12.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator.process_day(date(2024, 1, 2), buy_signals, buy_quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        assert not buy_trades.is_empty()
+        buy_net = float(buy_trades["net_amount"][0])
+        volume = int(buy_trades["volume"][0])
+
+        sell_quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "raw_close": [10.0],
+                "qfq_close": [12.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator.process_day(
+            date(2024, 1, 3),
+            pl.DataFrame(),
+            sell_quotes,
+            is_rebalance=True,
+        )
+
+        sell_trades = simulator.get_results()[0].filter(pl.col("action") == "sell")
+        assert not sell_trades.is_empty()
+        sell_net = float(sell_trades["net_amount"][0])
+
+        # 买、卖均按 qfq 价结算：买支出 = 12*vol + buy_fee，卖收入 = 12*vol - sell_fee
+        expected_buy_net = cost_model.calculate(
+            price=12.0, volume=volume, is_buy=True, trade_date=date(2024, 1, 2)
+        ).net_amount
+        expected_sell_net = cost_model.calculate(
+            price=12.0, volume=volume, is_buy=False, trade_date=date(2024, 1, 3)
+        ).net_amount
+
+        assert buy_net == pytest.approx(expected_buy_net, rel=1e-9)
+        assert sell_net == pytest.approx(expected_sell_net, rel=1e-9)
+        # 同价 round-trip 后现金回到本金 - 双边成本
+        assert simulator.cash == pytest.approx(
+            1_000_000.0 - (expected_buy_net - 12.0 * volume) - (12.0 * volume - expected_sell_net),
+            rel=1e-9,
+        )
