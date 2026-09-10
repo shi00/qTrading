@@ -10,6 +10,7 @@ from data.domain_services.transaction_cost import (
 )
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
+from strategies.backtest.portfolio import PortfolioSimulator
 
 pytestmark = pytest.mark.unit
 
@@ -26,9 +27,14 @@ class TestRebalanceLogic:
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
         return engine
 
-    def test_daily_rebalance_sells_every_day(self):
-        engine = self._make_engine(rebalance_freq="daily")
-        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+    def test_daily_rebalance_no_unnecessary_turnover(self):
+        """D4-4：等权重持仓在后续调仓日仍处于目标区间时，不得被卖出再买回。
+
+        旧实现每次调仓全清全买；差集调仓后，单一持仓保持目标权重时应
+        只进行一次建仓，后续调仓日无多余买卖（消除虚假换手）。
+        """
+        engine = self._make_engine(rebalance_freq="daily", min_rebalance_delta_pct=0.05)
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
             {
                 "execution_date": [date(2024, 1, 2), date(2024, 1, 3)],
@@ -38,20 +44,20 @@ class TestRebalanceLogic:
         )
         quotes_df = pl.DataFrame(
             {
-                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": trade_dates,
-                "raw_open": [10.0, 10.5, 11.0],
-                "raw_close": [10.2, 10.7, 11.2],
-                "qfq_open": [10.0, 10.5, 11.0],
-                "qfq_close": [10.2, 10.7, 11.2],
-                "is_tradable": [True, True, True],
+                "raw_open": [10.0, 10.5],
+                "raw_close": [10.2, 10.7],
+                "qfq_open": [10.0, 10.5],
+                "qfq_close": [10.2, 10.7],
+                "is_tradable": [True, True],
             }
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
-        assert len(buy_trades) >= 2
-        assert len(sell_trades) >= 1
+        assert len(buy_trades) == 1
+        assert len(sell_trades) == 0
 
     def test_signal_rebalance_holds_between_signals(self):
         engine = self._make_engine(rebalance_freq="signal")
@@ -80,8 +86,13 @@ class TestRebalanceLogic:
         assert len(buy_trades) == 1
         assert len(sell_trades) == 0
 
-    def test_weekly_rebalance_only_on_week_boundary(self):
-        engine = self._make_engine(rebalance_freq="weekly")
+    def test_weekly_rebalance_no_unnecessary_turnover(self):
+        """D4-4：周度调仓边界触发时，若持仓仍处于目标区间则不产生多余交易。
+
+        旧实现每次周度调仓对重叠持仓全清全买；差集调仓后应只在权重漂移
+        超过阈值时才调整，目标保持的持仓不产生买卖 → 仅首次建仓 1 笔买入。
+        """
+        engine = self._make_engine(rebalance_freq="weekly", min_rebalance_delta_pct=0.05)
         trade_dates = [
             date(2024, 1, 8),
             date(2024, 1, 9),
@@ -113,10 +124,17 @@ class TestRebalanceLogic:
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
-        assert len(buy_trades) == 2
+        sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
+        assert len(buy_trades) == 1
+        assert len(sell_trades) == 0
 
-    def test_monthly_rebalance_only_on_month_boundary(self):
-        engine = self._make_engine(rebalance_freq="monthly")
+    def test_monthly_rebalance_no_unnecessary_turnover(self):
+        """D4-4：月度调仓边界触发时，若持仓仍处于目标区间则不产生多余交易。
+
+        与 weekly 同理：单一只在目标权重的持仓，跨月度边界时保持不动，
+        仅首次建仓 1 笔买入，无虚假换手。
+        """
+        engine = self._make_engine(rebalance_freq="monthly", min_rebalance_delta_pct=0.05)
         trade_dates = [
             date(2024, 1, 2),
             date(2024, 1, 15),
@@ -142,7 +160,9 @@ class TestRebalanceLogic:
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
-        assert len(buy_trades) == 2
+        sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
+        assert len(buy_trades) == 1
+        assert len(sell_trades) == 0
 
     def test_no_signals_no_trades(self):
         engine = self._make_engine(rebalance_freq="signal")
@@ -1014,3 +1034,143 @@ class TestICCalculationWithRebalanceFreq:
         )
         ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert len(ic_series) == 0
+
+
+class TestDiffRebalance:
+    """D4-4：差集调仓——只交易集合差与权重差，不做全清全买。"""
+
+    def _make_engine(self, **kwargs) -> VectorBacktestEngine:
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            **kwargs,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
+        return engine
+
+    @staticmethod
+    def _quote(exec_date: date, price: float = 10.0) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [exec_date],
+                "raw_open": [price],
+                "raw_close": [price],
+                "qfq_open": [price],
+                "qfq_close": [price],
+                "is_tradable": [True],
+                "limit_status": [None],
+                "avg_daily_volume": [5_000_000.0],
+            }
+        )
+
+    def test_dropped_position_sold_and_overlap_kept(self) -> None:
+        """目标移除的持仓被清仓，重叠持仓不产生反向买卖。
+
+        场景（weekly，平盘价无漂移）：
+        - 1/8 再平衡：目标 {A, B} → 建仓 A、B
+        - 1/15 再平衡：目标 {B} → A 被移除 → 卖出 A；B 保持
+        """
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [date(2024, 1, 8), date(2024, 1, 15)]
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8), date(2024, 1, 15)],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [1, 1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 8), date(2024, 1, 8), date(2024, 1, 15), date(2024, 1, 15)],
+                "raw_open": [10.0, 10.0, 10.0, 10.0],
+                "raw_close": [10.0, 10.0, 10.0, 10.0],
+                "qfq_open": [10.0, 10.0, 10.0, 10.0],
+                "qfq_close": [10.0, 10.0, 10.0, 10.0],
+                "is_tradable": [True, True, True, True],
+            }
+        )
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        sells = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
+        assert len(sells) == 1
+        assert sells["ts_code"][0] == "000001.SZ"
+        final_pos = positions.tail(1)["positions"][0]
+        # 已清仓标的在持仓记录中被标记为 None（closed）
+        assert final_pos["000001.SZ"] is None
+        assert final_pos["000002.SZ"] is not None
+
+    def test_new_position_bought_and_overlap_kept(self) -> None:
+        """新增目标被买入，重叠持仓被减持但不清仓（不重建）。
+
+        场景（weekly，平盘价无漂移）：
+        - 1/8 再平衡：目标 {A} → 建仓 A
+        - 1/15 再平衡：目标 {A, B} → B 新增 → 买入 B；A 减持但保留
+        """
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [date(2024, 1, 8), date(2024, 1, 15)]
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8), date(2024, 1, 15), date(2024, 1, 15)],
+                "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ"],
+                "signal_rank": [1, 1, 2],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 8), date(2024, 1, 8), date(2024, 1, 15), date(2024, 1, 15)],
+                "raw_open": [10.0, 10.0, 10.0, 10.0],
+                "raw_close": [10.0, 10.0, 10.0, 10.0],
+                "qfq_open": [10.0, 10.0, 10.0, 10.0],
+                "qfq_close": [10.0, 10.0, 10.0, 10.0],
+                "is_tradable": [True, True, True, True],
+            }
+        )
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        buys = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
+        assert len(buys) >= 1
+        assert "000002.SZ" in set(buys["ts_code"].to_list())
+        final_pos = positions.tail(1)["positions"][0]
+        assert "000001.SZ" in final_pos
+        assert "000002.SZ" in final_pos
+
+    def test_partial_sell_amortizes_cost_basis_and_records_trade(self) -> None:
+        """部分减持记录 sell 交易并按平均成本摊销剩余 cost_basis（A7/A9）。
+
+        场景：持仓 1000 股@10（成本 10000），减持至目标市值 5000 → 卖出约一半。
+        """
+        sim, config = self._make_simulator(cash_reserve_pct=0.1)
+        sim.cash = 0.0
+        sim.positions["000001.SZ"] = {
+            "volume": 1000,
+            "cost_basis": 10000.0,
+            "entry_date": date(2024, 1, 1),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        quote = self._quote(date(2024, 1, 2), price=10.0)
+        sim._sell_position_to_value(date(2024, 1, 2), "000001.SZ", quote, target_value=5000.0)
+
+        sells = pl.DataFrame(sim.trades_list).filter(pl.col("action") == "sell") if sim.trades_list else pl.DataFrame()
+        assert len(sells) == 1
+        assert sells["volume"][0] == 500
+        pos = sim.positions["000001.SZ"]
+        assert pos["volume"] == 500
+        # 平均成本摊销：成本按卖出比例减半
+        assert pos["cost_basis"] == pytest.approx(5000.0, abs=1e-6)
+        assert sim.cash == pytest.approx(float(sells["net_amount"][0]), abs=1e-6)
+
+    def _make_simulator(self, **kwargs) -> tuple[PortfolioSimulator, BacktestConfig]:
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            **kwargs,
+        )
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig(slippage_bps=0.0)),
+        )
+        return simulator, config
