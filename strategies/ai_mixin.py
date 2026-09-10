@@ -671,7 +671,14 @@ class AIStrategyMixin:
                         # UX-2.3: 软失败（_mixin_analyze_single 内部已日志）
                         if on_card_error:
                             on_card_error(stock_name, I18n.get("ai_card_analysis_failed"))
-                        return None
+                        # D3-6/D3-7: 失败也保留候选行（ai_status="failed"），
+                        # 使下游能区分"AI 跑过但失败" 与 "AI 未跑"。UI 错误呈现仍由
+                        # on_card_error 承载（失败行 UI 化属 D7-3 范围，本层不重复 on_result）。
+                        return self._build_result_row(
+                            row_data,
+                            None,
+                            error_reason=I18n.get("ai_card_analysis_failed"),
+                        )
                     row = self._build_result_row(row_data, res)
                     if on_result:
                         on_result(row)
@@ -682,7 +689,13 @@ class AIStrategyMixin:
                     # UX-2.3: 网络错误等（_mixin_analyze_single raise 的异常）
                     if on_card_error:
                         on_card_error(stock_name, DataSanitizer.sanitize_error(e))
-                    raise  # 继续传播给 gather 收集（保持现有行为）
+                    # D3-6/D3-7: 异常不吞没（R2），但构造 failed 行保留候选，
+                    # 避免下游将"分析失败"静默当作"被否决/未入选"。异常信息经脱敏。
+                    return self._build_result_row(
+                        row_data,
+                        None,
+                        error_reason=DataSanitizer.sanitize_error(e),
+                    )
                 finally:
                     if on_chunk and hasattr(on_chunk, "final_flush"):
                         on_chunk.final_flush()
@@ -727,6 +740,8 @@ class AIStrategyMixin:
                         "[AIStrategyMixin] Task error (%s: %s)",
                     )
                 elif isinstance(res, dict):
+                    # D3-6/D3-7: analyze_one 已对 analyzed/rejected/failed 均返回 dict 行,
+                    # 因此此处收集的即完整候选集（含否决与失败），不再仅筛出成功结果。
                     final_rows.append(res)
 
             logger.info(
@@ -741,8 +756,11 @@ class AIStrategyMixin:
             # 吞内部 CancelledError、不抛普通异常），finally 中安全
             await self._cancel_orphan_news_tasks(prefetched)
 
+        # D3-7: 仅当所有任务被用户取消时（final_rows 为空）才退回原始候选集,
+        # 以保留取消/退出的既有语义。AI 全部失败已由 analyze_one 构造 failed 行,
+        # 不再出现"AI 跑了但静默退回未打标候选"的情况。
         if not final_rows:
-            return candidates_df  # Fallback: return math-only results
+            return candidates_df  # 用户取消全部任务时退回数学筛选结果
 
         result_df = pd.DataFrame(final_rows)
 
@@ -756,7 +774,16 @@ class AIStrategyMixin:
                 total_tasks,
             )
 
-        return result_df.sort_values("ai_score", ascending=False)
+        # 排序规则：analyzed → rejected → failed，同 ai_status 内按 ai_score 降序。
+        # ai_status 为字符串，"analyzed/failed/rejected" 的字典序与目标顺序不一致（f<r），
+        # 故用显式次序映射；ai_score=None (failed) 在 pandas 中始终排最后。
+        _AI_STATUS_ORDER = {"analyzed": 0, "rejected": 1, "failed": 2}
+        order_series = result_df["ai_status"].map(_AI_STATUS_ORDER)
+        return (
+            result_df.assign(_ai_order=order_series)
+            .sort_values(["_ai_order", "ai_score"], ascending=[True, False])
+            .drop(columns=["_ai_order"])
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def retry_single(self, stock_name: str, context: dict) -> None:
@@ -821,13 +848,11 @@ class AIStrategyMixin:
                     on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
                 return
             result_row = self._build_result_row(row_data, res)
-            if result_row and on_result:
-                on_result(result_row)
-            elif on_card_error:
-                # I-1: score==0（模型判定无信号）时 _build_result_row 返回 None。
+            if on_result:
+                # D3-6: _build_result_row 不再返回 None（score==0 亦视为 rejected 行）。
                 # 调用方 retry_single_stock 已把失败卡转为 is_analyzing=True 占位卡，
-                # 此处必须终结之，否则卡片永久停留在"分析中"且无重试按钮。
-                on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
+                # 此处 on_result 更新该卡状态，不再依赖 score==0 判定失败。
+                on_result(result_row)
         except asyncio.CancelledError:
             raise  # R2 合规
         except Exception as e:
@@ -856,15 +881,36 @@ class AIStrategyMixin:
         # 等待被取消的 task 完成；CancelledError 和其他异常都被吞没（已记录日志或预期）
         await gather_for_shutdown_cleanup(*pending)
 
-    def _build_result_row(self, row_data: dict, res: object) -> dict | None:
-        """把单股 AI 结果组装为结果行；无效（None/异常/score==0）返回 None。"""
-        if isinstance(res, Exception) or res is None:
-            return None
-        score_val = res.get("score", 0)  # type: ignore[union-attr]
-        if score_val == 0:
-            return None
+    @staticmethod
+    def _build_result_row(
+        row_data: dict,
+        res: object,
+        *,
+        error_reason: str | None = None,
+    ) -> dict:
+        """把单股 AI 结果组装为结果行。
 
+        D3-6: 不再以 score==0 作为丢弃判据。结果行始终保留原始候选列，
+        并通过 ai_status 表达单股 AI 结论：
+
+        - ai_status="analyzed": res 为正常 dict 且 score>0，携带 ai_score/ai_reason/confidence/thinking
+        - ai_status="rejected": res 为正常 dict 且 score==0（模型明确否决），ai_score=0，ai_reason 保留否决理由
+        - ai_status="failed":   res 为 None/异常或分析未完成，ai_score=None，ai_reason 承载错误分类
+
+        返回始终为 dict（保留原始行全部字段），不再返回 None。
+        """
         row_dict = dict(row_data)
+
+        # 失败/未完成路径：保留原始候选行，填充 failed 状态
+        if isinstance(res, Exception) or res is None:
+            row_dict["ai_status"] = "failed"
+            row_dict["ai_score"] = None
+            row_dict["ai_reason"] = error_reason or ""
+            row_dict["thinking"] = ""
+            row_dict["confidence"] = None
+            return row_dict
+
+        score_val = res.get("score", 0)  # type: ignore[union-attr]
         summary_raw = res.get("summary", "")  # type: ignore[union-attr]
         summary = str(summary_raw) if summary_raw else ""
         confidence = res.get("confidence")  # type: ignore[union-attr]
@@ -886,9 +932,10 @@ class AIStrategyMixin:
             ]:
                 summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
 
-        row_dict["ai_score"] = (
-            round(min(100, max(0, float(score_val))), 1) if isinstance(score_val, (int, float)) else 0
-        )
+        # D3-6: score==0 表示模型明确否决，不再丢弃；得分>0 为 analyzed
+        score_int = round(min(100, max(0, float(score_val))), 1) if isinstance(score_val, (int, float)) else 0
+        row_dict["ai_status"] = "rejected" if score_val == 0 else "analyzed"
+        row_dict["ai_score"] = score_int
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""

@@ -757,6 +757,12 @@ class ReviewManager:
             if not ts_code:
                 continue
 
+            # D3-7: 仅写入 ai_status == analyzed 的记录，不写入 rejected / failed
+            # 避免非分析结果污染 AI 学习闭环数据（failed 写盘会让 AI"学习从未输出过的预测"）
+            ai_status = row.get("ai_status")
+            if ai_status is not None and ai_status != "analyzed":
+                continue  # rejected/failed 不入数据库，由上层/UI 呈现不参与学习
+
             ai_score = row.get("ai_score", 0)
             try:
                 ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore[union-attr]

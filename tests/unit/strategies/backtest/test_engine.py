@@ -28,10 +28,10 @@ class TestIsRebalanceDay:
     def test_daily_always_returns_true(self):
         engine = self._make_engine(rebalance_freq="daily")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
         for d in trade_dates:
-            assert engine._is_rebalance_day(d, trade_dates, signals, "daily") is True
+            assert engine._is_rebalance_day(d, trade_dates, signals_by_date, "daily") is True
 
     def test_signal_with_signals_returns_true(self):
         engine = self._make_engine(rebalance_freq="signal")
@@ -43,23 +43,17 @@ class TestIsRebalanceDay:
                 "signal_rank": [1],
             }
         )
+        signals_by_date = dict(signals.partition_by("execution_date", as_dict=True))
 
-        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals, "signal") is False
-        assert engine._is_rebalance_day(date(2024, 1, 3), trade_dates, signals, "signal") is True
-        assert engine._is_rebalance_day(date(2024, 1, 4), trade_dates, signals, "signal") is False
+        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals_by_date, "signal") is False
+        assert engine._is_rebalance_day(date(2024, 1, 3), trade_dates, signals_by_date, "signal") is True
+        assert engine._is_rebalance_day(date(2024, 1, 4), trade_dates, signals_by_date, "signal") is False
 
     def test_signal_empty_signals_returns_false(self):
         engine = self._make_engine(rebalance_freq="signal")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
-        signals = pl.DataFrame(
-            {
-                "execution_date": [],
-                "ts_code": [],
-                "signal_rank": [],
-            }
-        )
 
-        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals, "signal") is False
+        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, {}, "signal") is False
 
     def test_weekly_boundary_detection(self):
         engine = self._make_engine(rebalance_freq="weekly")
@@ -71,11 +65,11 @@ class TestIsRebalanceDay:
             date(2024, 1, 12),
             date(2024, 1, 15),
         ]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
-        assert engine._is_rebalance_day(date(2024, 1, 8), trade_dates, signals, "weekly") is True
-        assert engine._is_rebalance_day(date(2024, 1, 9), trade_dates, signals, "weekly") is False
-        assert engine._is_rebalance_day(date(2024, 1, 15), trade_dates, signals, "weekly") is True
+        assert engine._is_rebalance_day(date(2024, 1, 8), trade_dates, signals_by_date, "weekly") is True
+        assert engine._is_rebalance_day(date(2024, 1, 9), trade_dates, signals_by_date, "weekly") is False
+        assert engine._is_rebalance_day(date(2024, 1, 15), trade_dates, signals_by_date, "weekly") is True
 
     def test_monthly_boundary_detection(self):
         engine = self._make_engine(rebalance_freq="monthly")
@@ -86,32 +80,32 @@ class TestIsRebalanceDay:
             date(2024, 2, 1),
             date(2024, 2, 2),
         ]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
-        assert engine._is_rebalance_day(date(2024, 1, 29), trade_dates, signals, "monthly") is True
-        assert engine._is_rebalance_day(date(2024, 1, 30), trade_dates, signals, "monthly") is False
-        assert engine._is_rebalance_day(date(2024, 2, 1), trade_dates, signals, "monthly") is True
+        assert engine._is_rebalance_day(date(2024, 1, 29), trade_dates, signals_by_date, "monthly") is True
+        assert engine._is_rebalance_day(date(2024, 1, 30), trade_dates, signals_by_date, "monthly") is False
+        assert engine._is_rebalance_day(date(2024, 2, 1), trade_dates, signals_by_date, "monthly") is True
 
     def test_first_day_always_rebalance(self):
         engine = self._make_engine(rebalance_freq="weekly")
         trade_dates = [date(2024, 1, 8), date(2024, 1, 9)]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
-        assert engine._is_rebalance_day(date(2024, 1, 8), trade_dates, signals, "weekly") is True
+        assert engine._is_rebalance_day(date(2024, 1, 8), trade_dates, signals_by_date, "weekly") is True
 
     def test_date_not_in_trade_dates_returns_false(self):
         engine = self._make_engine(rebalance_freq="weekly")
         trade_dates = [date(2024, 1, 8), date(2024, 1, 9)]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
-        assert engine._is_rebalance_day(date(2024, 1, 10), trade_dates, signals, "weekly") is False
+        assert engine._is_rebalance_day(date(2024, 1, 10), trade_dates, signals_by_date, "weekly") is False
 
     def test_unknown_freq_returns_true(self):
         engine = self._make_engine(rebalance_freq="unknown")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
-        signals = pl.DataFrame()
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
-        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals, "unknown") is True
+        assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals_by_date, "unknown") is True
 
 
 class TestCalcICSeries:

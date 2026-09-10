@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from core.i18n import I18n
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 
 pytestmark = pytest.mark.unit
@@ -204,11 +203,11 @@ class TestRetrySingleSuccessPath:
         assert row["ai_score"] == 75.0
 
     @pytest.mark.asyncio
-    async def test_score_zero_terminates_placeholder_card(self):
-        """I-1: score==0（无信号）时 _build_result_row 返回 None → 调 on_card_error 终结占位卡。
+    async def test_score_zero_produces_rejected_row(self):
+        """D3-6: score==0（模型明确否决）不再丢弃，经 on_result 交付 rejected 行而非 on_card_error。
 
-        调用方 retry_single_stock 已把失败卡转为 is_analyzing=True 占位卡；若此处不终结，
-        卡片会永久停留在"分析中"且无重试按钮。on_card_error 将占位卡复位为错误状态。
+        UI 侧 on_result 处理会将该行 is_analyzing 置 False，同样终结占位卡，
+        同时保留"AI 明确否决"信息。
         """
         s = ConcreteStrategy()
         s._last_candidates_df = _make_candidates_df()
@@ -223,8 +222,10 @@ class TestRetrySingleSuccessPath:
         ):
             await s.retry_single("贵州茅台", context)
 
-        on_result.assert_not_called()
-        on_card_error.assert_called_once_with("贵州茅台", I18n.get("ai_card_analysis_failed"))
+        on_card_error.assert_not_called()
+        row = on_result.call_args.args[0]
+        assert row["ai_status"] == "rejected"
+        assert row["ai_score"] == 0
 
     @pytest.mark.asyncio
     async def test_no_on_result_callback_skips_call(self):
