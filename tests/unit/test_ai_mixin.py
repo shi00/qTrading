@@ -1035,6 +1035,8 @@ class TestRunAiAnalysis:
             assert len(result) == 1
             assert "ai_score" in result.columns
             assert result["ai_score"].iloc[0] == 88
+            # D5-7: ok=False 透传到结果行，供 UI 提示"本次分析未包含新闻"
+            assert bool(result["_ai_news_ok"].iloc[0]) is False
             # 验证 analyze_stock 接收到的 news 为降级后的空列表
             call_kwargs = mock_ai_instance.analyze_stock.call_args.kwargs
             call_args = mock_ai_instance.analyze_stock.call_args.args
@@ -1075,6 +1077,7 @@ class TestRunAiAnalysis:
             assert len(result) == 1
             assert "ai_score" in result.columns
             assert result["ai_score"].iloc[0] == 70
+            assert bool(result["_ai_news_ok"].iloc[0]) is False  # D5-7: 新闻抓取失败透传 ok=False
             assert "Failed to fetch news" in caplog.text
             assert "000001.SZ" in caplog.text
 
