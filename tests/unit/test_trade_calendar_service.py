@@ -220,6 +220,25 @@ class TestIsTradingDay:
         result = await svc.is_trading_day("20240614")
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_offline_unknown_propagates_none(self):
+        """DB/API 均无数据且离线日历返回 None 时，透传 None（不猜测，D2-7）。"""
+        svc = _make_service(cache_return=None, api_return=None)
+        svc._offline = MagicMock()
+        svc._offline.is_trading_day = MagicMock(return_value=None)
+        result = await svc.is_trading_day("20240614")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_db_exception_offline_unknown_propagates_none(self):
+        """DB 异常后离线日历返回 None 时，透传 None（不猜测，D2-7）。"""
+        svc = _make_service()
+        svc._cache.stock_dao.get_trade_cal = AsyncMock(side_effect=Exception("DB error"))
+        svc._offline = MagicMock()
+        svc._offline.is_trading_day = MagicMock(return_value=None)
+        result = await svc.is_trading_day("20240614")
+        assert result is None
+
 
 class TestGetTradeDates:
     @pytest.mark.asyncio

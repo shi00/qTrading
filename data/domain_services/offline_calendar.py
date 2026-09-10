@@ -72,17 +72,13 @@ class OfflineCalendar:
 
             # 可信区间守卫：超出 _OFFLINE_TRUSTED_UNTIL 的日期，离线库对未来调休/节假日不预测，
             # 返回 None（未知）交由调用方显式决策，避免把规则外推当权威判定。
-            try:
-                check_date = ts.date() if isinstance(ts, pd.Timestamp) else ts
-                if isinstance(check_date, datetime.date) and check_date > _OFFLINE_TRUSTED_UNTIL:
-                    logger.info(
-                        "[OfflineCalendar] Date %s beyond trusted interval, returning None (unknown)",
-                        date_obj,
-                    )
-                    return None
-            except (AttributeError, TypeError):
-                # 非日期输入不进入可信区间比较，交由下方 schedule 判定（异常由 except 兜底为 False）
-                pass
+            check_date = ts.date() if isinstance(ts, pd.Timestamp) else ts
+            if isinstance(check_date, datetime.date) and check_date > _OFFLINE_TRUSTED_UNTIL:
+                logger.info(
+                    "[OfflineCalendar] Date %s beyond trusted interval, returning None (unknown)",
+                    date_obj,
+                )
+                return None
 
             schedule = cal.schedule(start_date=ts, end_date=ts)
             return not schedule.empty
