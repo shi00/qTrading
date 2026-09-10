@@ -395,10 +395,15 @@ class TestRenderStatusMessage:
 
     @patch("ui.views.screener_view.I18n")
     def test_multiple_key_params_translated(self, mock_i18n):
-        """多个 *_key 后缀 params 同时翻译 (name_key + provider_key)."""
+        """多个 *_key 后缀 params 同时翻译 (name_key + provider_key), 并注入非 *_key 普通参数.
+
+        R.3 D5-6: *_key 指向的模板可能自身含占位符 (如 ai_progress_concurrent_info 的
+        {concurrency}), 因此子翻译时须注入同级非 *_key 参数 (count) 供模板填充;
+        其他 *_key 原始 key 被排除, 不当作占位符值混入.
+        """
         from ui.viewmodels import Message
 
-        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}"
         msg = Message(
             "test_multi_key",
             {"name_key": "strategy_value_name", "provider_key": "provider_qwen", "count": 5},
@@ -406,9 +411,9 @@ class TestRenderStatusMessage:
 
         _render_status_message(msg)
 
-        # 应分别翻译 name_key 和 provider_key, 保留 count
-        mock_i18n.get.assert_any_call("strategy_value_name")
-        mock_i18n.get.assert_any_call("provider_qwen")
+        # 每个 *_key 均翻译; 子翻译时注入非 *_key 参数 count (供模板占位符填充)
+        mock_i18n.get.assert_any_call("strategy_value_name", count=5)
+        mock_i18n.get.assert_any_call("provider_qwen", count=5, name="[T]strategy_value_name")
         final_call = mock_i18n.get.call_args_list[-1]
         assert final_call.args == ("test_multi_key",)
         assert final_call.kwargs == {
@@ -416,6 +421,27 @@ class TestRenderStatusMessage:
             "provider": "[T]provider_qwen",
             "count": 5,
         }
+
+    @patch("ui.views.screener_view.I18n")
+    def test_key_translation_injects_sibling_params_for_placeholder(self, mock_i18n):
+        """R.3 D5-6: 翻译 *_key 指向的模板时注入同级非 *_key 参数, 使占位符可填充.
+
+        覆盖 ai_progress_concurrent_info 场景: VM 透传 msg_key + concurrency,
+        View 翻译 msg_key (ai_progress_concurrent_info) 时必须收到 concurrency,
+        否则模板内 {concurrency} 会以字面量残留.
+        """
+        from ui.viewmodels import Message
+
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        msg = Message(
+            "screener_ai_analyzing",
+            {"msg_key": "ai_progress_concurrent_info", "concurrency": 3, "done": 0, "total": 5},
+        )
+
+        _render_status_message(msg)
+
+        # msg_key 翻译应注入 concurrency (供 {concurrency} 填充), 但不注入其它 *_key
+        mock_i18n.get.assert_any_call("ai_progress_concurrent_info", concurrency=3, done=0, total=5)
 
     @patch("ui.views.screener_view.I18n")
     def test_non_str_key_param_skipped(self, mock_i18n):

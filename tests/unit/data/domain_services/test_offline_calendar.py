@@ -8,6 +8,21 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _reset_offline_calendar_cache():
+    """每个测试结束后重置 OfflineCalendar 的类级日历缓存（R7 状态隔离）。
+
+    get_instance() 会把 patched 的 mock 写入类属性 _calendar；with patch() 退出仅还原
+    get_calendar，不还原 _calendar。若 mock 泄漏到同进程后续测试，其未配置的 valid_days
+    会在 get_trade_dates 中被 except 吞掉并返回空，导致依赖离线兜底的测试（如回测
+    test_empty_db_falls_back_to_offline）间歇性失败。故在 teardown 阶段统一清空。
+    """
+    yield
+    from data.domain_services.offline_calendar import OfflineCalendar
+
+    OfflineCalendar._calendar = None
+
+
 class TestOfflineCalendarGetInstance:
     def test_get_instance_success(self):
         from data.domain_services.offline_calendar import OfflineCalendar
