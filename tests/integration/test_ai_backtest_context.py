@@ -294,7 +294,12 @@ class TestBacktestAIContextIntegration:
 
             result = await strategy.run_ai_analysis(sample_candidates_df, context)
 
-            assert result is sample_candidates_df
+            # D5-1: 未确认时返回带状态标记的结果行（与其他 AI 路径同构），
+            # 原始候选列保留，外部请求均未触发。
+            assert len(result) == len(sample_candidates_df)
+            assert result.iloc[0]["ts_code"] == "000001.SZ"
+            assert result.iloc[0]["ai_score"] is None
+            assert result.iloc[0]["ai_status"] == "policy_not_acknowledged"
             mock_news.assert_not_called()
             mock_global.assert_not_called()
             mock_lc.assert_not_called()
