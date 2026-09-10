@@ -1041,3 +1041,44 @@ class TestScreenerDaoBackfillT5Prediction:
             await dao.backfill_t5_prediction(1, 3.0, 10.3)
         mock_base.metadata.tables.get.assert_called_once_with("screening_history")
         dao._check_engine.assert_called_once()  # noqa: weak-assertion 无参调用，仅确认引擎前置检查已执行
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_raised(self):
+        """_guarded_begin 抛 EngineDisposedError → 必须上抛（R5），不可被 except Exception 吞没。"""
+        from data.persistence.daos.base_dao import EngineDisposedError as EDE
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+
+        @asynccontextmanager
+        async def raise_on_begin(conn=None):
+            raise EDE("engine disposed")
+            yield None  # pragma: no cover 确保除非被异常跳过否则不产生额外分支
+
+        dao._guarded_begin = raise_on_begin
+        with pytest.raises(EDE, match="engine disposed"):
+            await dao.backfill_t5_prediction(1, 3.0, 10.3)
+
+    @pytest.mark.asyncio
+    async def test_other_exception_warned_not_raised(self, caplog):
+        """_guarded_begin 抛普通异常 → 记 WARNING 降级，不向上抛。"""
+        from contextlib import asynccontextmanager
+        import logging
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+
+        @asynccontextmanager
+        async def raise_on_begin(conn=None):
+            raise RuntimeError("db down")
+            yield None  # pragma: no cover 确保除非被异常跳过否则不产生额外分支
+
+        dao._guarded_begin = raise_on_begin
+        with caplog.at_level(logging.WARNING, logger="data.persistence.daos.screener_dao"):
+            await dao.backfill_t5_prediction(1, 3.0, 10.3)
+        assert any("Failed to backfill T+5" in r.message for r in caplog.records)

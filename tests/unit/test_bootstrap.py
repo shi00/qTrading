@@ -1172,3 +1172,25 @@ class TestStopStartedServicesCancellation:
         assert "scheduler" in call_order
         mock_news.stop_async.assert_awaited_once()
         mock_scheduler.stop.assert_called_once_with()
+
+
+class TestRegisterSchedulerJobs:
+    """review01-A2-1: `_register_scheduler_jobs` 注册 nightly_prediction 与 review_backfill 两个业务 job。"""
+
+    def test_registers_nightly_and_review_backfill(self):
+        from app.bootstrap import _register_scheduler_jobs
+
+        mock_scheduler = MagicMock()
+        with (
+            patch("app.bootstrap.SchedulerService", return_value=mock_scheduler),
+            patch("services.scheduled_jobs.nightly_prediction.build_nightly_prediction_job") as mock_night_build,
+            patch("services.scheduled_jobs.review_backfill.build_review_backfill_job") as mock_rb_build,
+        ):
+            _register_scheduler_jobs()
+
+        calls = mock_scheduler.register_job.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0] == "nightly_prediction"
+        assert calls[0].args[1] == mock_night_build.return_value
+        assert calls[1].args[0] == "review_backfill"
+        assert calls[1].args[1] == mock_rb_build.return_value
