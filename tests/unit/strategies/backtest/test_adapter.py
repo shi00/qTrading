@@ -131,7 +131,6 @@ class TestBacktestStrategyAdapter:
             "ts_code",
             "score",
             "signal_rank",
-            "target_weight",
             "reason",
         ]
         for col in expected_columns:
@@ -581,10 +580,12 @@ class TestBacktestStrategyAdapter:
         assert result.is_empty()
 
     @pytest.mark.asyncio
-    async def test_adapter_equal_weight_calculation(
+    async def test_adapter_no_target_weight_column(
         self,
         adapter: BacktestStrategyAdapter,
     ) -> None:
+        """D4-7：信号 schema 不包含 target_weight（权重由 sizer 唯一计算，避免"看似权威实则被忽略"的死字段）。"""
+
         class MultiStockStrategy(BaseStrategy):
             required_context_keys = ()
 
@@ -610,10 +611,7 @@ class TestBacktestStrategyAdapter:
 
         assert result is not None
         assert len(result) == 3
-        weights = result["target_weight"].to_list()
-        expected_weight = 1.0 / 3
-        for w in weights:
-            assert w == expected_weight
+        assert "target_weight" not in result.columns
 
     @pytest.mark.asyncio
     async def test_adapter_rank_assignment(
