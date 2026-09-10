@@ -466,6 +466,67 @@ class TestRSIPandas:
         assert rsi.empty
 
 
+class TestStrongNumericAssertionsD38:
+    """D3-8: 指标函数"已知输入 → 精确期望值"强数值断言。
+
+    仅值域断言是零测试（错误输出被 clip/填充压进合法域也无法捕获），
+    本类对核心指标建立单调方向边界 + 固定序列参考值断言，用于捕获
+    D3-1 这类"算错但不出域"的计算缺陷。
+    """
+
+    @staticmethod
+    def _real_ohlc(n: int = 40) -> pd.DataFrame:
+        # 确定性序列（不含 adj_factor，走非 QFQ 分支），便于复算。
+        close = 100.0 + np.arange(n) * 2.0 + np.sin(np.arange(n)) * 5.0
+        return pd.DataFrame({"close": close, "high": close + 3.0, "low": close - 3.0})
+
+    # ---------- RSI ----------
+    def test_rsi_boundaries_known_input(self):
+        """单调上涨→100、单调下跌→0、横盘→50（固定精确期望）。"""
+        up = pd.Series(np.arange(100.0, 130.0))
+        down = pd.Series(np.arange(130.0, 100.0, -1.0))
+        flat = pd.Series(np.full(30, 100.0))
+        assert TechnicalAnalysis.calculate_rsi_pandas(flat, 14).iloc[-1] == pytest.approx(50.0)
+        # get_rsi 点值三边界（flat→100 为 D3-8 修复前惰性错误，修复后应归中性）
+        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": up}), period=6) == pytest.approx(100.0)
+        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": down}), period=6) == pytest.approx(0.0)
+        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": flat}), period=6) == pytest.approx(50.0)
+
+    def test_rsi_real_series_exact_value(self):
+        """固定序列 → 精确 RSI 末值（D3-1 回归 + D3-8 强断言）。"""
+        close = self._real_ohlc()["close"]
+        assert TechnicalAnalysis.calculate_rsi_pandas(close, 14).iloc[-1] == pytest.approx(85.108693, abs=1e-4)
+
+    # ---------- MACD ----------
+    def test_macd_real_series_exact_value(self):
+        """固定序列 → 精确 macd/hist 与状态。"""
+        df = self._real_ohlc()
+        status, macd, hist = TechnicalAnalysis.get_macd(df)
+        assert status == "BULLISH"
+        assert macd == pytest.approx(12.959179, abs=1e-4)
+        assert hist == pytest.approx(0.793880, abs=1e-4)
+
+    def test_macd_direction_exact_hist(self):
+        """单调上涨/下跌 → hist 精确为 ±0.272172，状态 BULLISH/BEARISH。"""
+        # get_macd 仅使用 close，high/low 仅供 get_kdj 使用，此处保持一致以避免混淆。
+        up = pd.DataFrame({"close": np.arange(100.0, 140.0)})
+        status, _, hist = TechnicalAnalysis.get_macd(up)
+        assert status == "BULLISH" and hist == pytest.approx(0.272172, abs=1e-4)
+        down = pd.DataFrame({"close": np.arange(140.0, 100.0, -1.0)})
+        status2, _, hist2 = TechnicalAnalysis.get_macd(down)
+        assert status2 == "BEARISH" and hist2 == pytest.approx(-0.272172, abs=1e-4)
+
+    # ---------- KDJ ----------
+    def test_kdj_real_series_exact_value(self):
+        """固定序列 → 精确 k/d/j 与状态。"""
+        df = self._real_ohlc()
+        status, k, d, j = TechnicalAnalysis.get_kdj(df)
+        assert status == "OVERBOUGHT"
+        assert k == pytest.approx(85.203612, abs=1e-3)
+        assert d == pytest.approx(82.564299, abs=1e-3)
+        assert j == pytest.approx(90.482238, abs=1e-3)
+
+
 class TestRSIOversoldFeatures:
     def test_consecutive_oversold_days(self):
         close = pd.Series([20.0 - i * 0.5 for i in range(30)])
