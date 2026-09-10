@@ -80,6 +80,7 @@ class TestBacktestMetrics:
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE"] * 5,
                 "realized_pnl": [100.0, -50.0, 200.0, -30.0, 50.0],
             }
         )
@@ -87,13 +88,15 @@ class TestBacktestMetrics:
         assert win_rate == pytest.approx(0.6, rel=0.01)
 
     def test_calc_win_rate_empty(self) -> None:
-        assert BacktestMetrics.calc_win_rate(pl.DataFrame()) == 0.0
+        """空交易（无任何数据）时胜率无定义，返回 None（D4-6）。"""
+        assert BacktestMetrics.calc_win_rate(pl.DataFrame()) is None
 
     def test_calc_win_rate_excludes_buy_trades(self) -> None:
         """胜率仅统计卖出/平仓交易，买入交易不计入分母。"""
         trades = pl.DataFrame(
             {
                 "action": ["buy", "buy", "sell", "sell", "sell"],
+                "exit_reason": [None, None, "REBALANCE", "REBALANCE", "REBALANCE"],
                 "realized_pnl": [0.0, 0.0, 100.0, -50.0, 200.0],
             }
         )
@@ -102,14 +105,41 @@ class TestBacktestMetrics:
         assert win_rate == pytest.approx(2 / 3, rel=0.01)
 
     def test_calc_win_rate_all_buy_trades(self) -> None:
-        """全部为买入交易时胜率为 0（无卖出交易）。"""
+        """全部为买入交易时无平仓样本，胜率无定义，返回 None（D4-6）。"""
         trades = pl.DataFrame(
             {
                 "action": ["buy", "buy"],
                 "realized_pnl": [0.0, 0.0],
             }
         )
-        assert BacktestMetrics.calc_win_rate(trades) == 0.0
+        assert BacktestMetrics.calc_win_rate(trades) is None
+
+    def test_calc_win_rate_excludes_delisted_liquidation(self) -> None:
+        """胜率排除退市强平（DELISTED）样本，仅为策略主动决策平仓（D4-6）。
+
+        3 笔 REBALANCE（2 盈 1 亏）+ 1 笔 DELISTED（必亏）：
+        分母只统计 3 笔 REBALANCE → 胜率 2/3，而非 4 笔全卖 → 2/4。
+        """
+        trades = pl.DataFrame(
+            {
+                "action": ["sell", "sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE", "REBALANCE", "REBALANCE", "DELISTED"],
+                "realized_pnl": [100.0, 200.0, -50.0, -500.0],
+            }
+        )
+        win_rate = BacktestMetrics.calc_win_rate(trades)
+        assert win_rate == pytest.approx(2 / 3, rel=0.01)
+
+    def test_calc_win_rate_only_delisted_returns_none(self) -> None:
+        """全部为退市强平时无主动决策平仓样本，胜率无定义，返回 None（D4-6）。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["sell", "sell", "sell"],
+                "exit_reason": ["DELISTED", "DELISTED", "DELISTED"],
+                "realized_pnl": [-100.0, -200.0, -300.0],
+            }
+        )
+        assert BacktestMetrics.calc_win_rate(trades) is None
 
     def test_calc_profit_factor(self) -> None:
         trades = pl.DataFrame(
@@ -236,6 +266,7 @@ class TestBacktestMetrics:
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE", "REBALANCE", "REBALANCE"],
                 "realized_pnl": [100.0, -50.0, 200.0],
             }
         )

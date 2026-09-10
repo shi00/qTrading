@@ -143,6 +143,15 @@ class TestBacktestReport:
         assert "empty_strategy" in summary
         assert "0.00%" in summary
 
+    def test_format_summary_win_rate_none_renders_na(self, backtest_result: BacktestResult) -> None:
+        """win_rate 为 None（无主动决策平仓）时渲染 N/A，与 profit_factor 一致（D4-6）。"""
+        result = dataclasses.replace(
+            backtest_result,
+            metrics={**backtest_result.metrics, "win_rate": None},
+        )
+        summary = BacktestReport().format_summary(result)
+        assert f"{I18n.get('report_win_rate')}: N/A" in summary
+
     def test_format_summary_with_data_warnings(self, backtest_result: BacktestResult) -> None:
         result_with_warning = backtest_result.with_warnings(list(backtest_result.data_warnings) + ["test warning"])
         report = BacktestReport()
