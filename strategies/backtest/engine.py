@@ -77,13 +77,15 @@ class VectorBacktestEngine:
             progress_callback(0.0, Message("backtest_progress_loading"))
 
         trade_dates = await self._get_trade_dates()
-        quotes_df, quote_warnings = await self._load_quotes(trade_dates)
-        benchmark_df = await self._load_benchmark(trade_dates)
 
         if progress_callback:
             progress_callback(0.1, Message("backtest_progress_running_strategy"))
 
         failed_signal_dates: list[dict] = []
+
+        # D4-9: 先生成信号以收集标的集合，再用 ts_code_list 裁剪行情加载，
+        # 避免把区间内全市场标的的行情一次载入内存（按信号标的裁剪）。
+        benchmark_df = await self._load_benchmark(trade_dates)
 
         signals = await self._generate_signals(
             strategy,
@@ -93,6 +95,10 @@ class VectorBacktestEngine:
             failed_signal_dates,
             cancel_check,
         )
+
+        # D4-9: 信号非空时仅加载信号涉及标的；空信号回退全市场（等价旧行为，兼容无信号路径）。
+        target_codes = signals["ts_code"].unique().to_list() if not signals.is_empty() else None
+        quotes_df, quote_warnings = await self._load_quotes(trade_dates, target_codes)
 
         if progress_callback:
             progress_callback(0.5, Message("backtest_progress_simulating"))
@@ -191,13 +197,20 @@ class VectorBacktestEngine:
         return trade_dates
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def _load_quotes(self, trade_dates: list[date]) -> tuple[pl.DataFrame, list[DataWarning]]:
+    async def _load_quotes(
+        self,
+        trade_dates: list[date],
+        ts_codes: list[str] | None = None,
+    ) -> tuple[pl.DataFrame, list[DataWarning]]:
         start_str = trade_dates[0].strftime("%Y%m%d")
         end_str = trade_dates[-1].strftime("%Y%m%d")
 
+        # D4-9: 传 ts_code_list 裁剪为信号涉及标的，避免全市场行情一次入内存；
+        # None/空时由 DAO 判定为不带 ts_code_list 条件（等价全市场旧行为）。
         quotes_pd = await self.cache.quote_dao.get_daily_quotes(
             start_date=start_str,
             end_date=end_str,
+            ts_code_list=ts_codes,
         )
 
         if quotes_pd is None or quotes_pd.empty:
