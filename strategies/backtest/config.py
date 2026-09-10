@@ -65,6 +65,9 @@ class BacktestConfig:
     allow_limit_up_buy: bool = False
     allow_limit_down_sell: bool = False
     cash_reserve_pct: float = 0.1
+    """现金预留比例。语义：先从总资产扣除该比例，剩余部分才按目标权重分配。
+    整手取整产生的余数计入现金，因此实际现金比例 >= cash_reserve_pct。
+    """
     min_rebalance_delta_pct: float = 0.01  # 权重变化小于该百分比不交易，避免噪声换手
     preload_max_days: int = 366
 
