@@ -152,6 +152,23 @@ class TestBacktestMetrics:
         pf = BacktestMetrics.calc_profit_factor(trades)
         assert pf == pytest.approx(2.0, rel=0.01)
 
+    def test_calc_profit_factor_empty(self) -> None:
+        """空交易（无任何数据）时返回 None（指标无定义）。
+        覆盖空交易分支（无交易 → None），与 D4-5 语义一致。"""
+        trades = pl.DataFrame()
+        assert BacktestMetrics.calc_profit_factor(trades) is None
+
+    def test_calc_profit_factor_only_buy_trades(self) -> None:
+        """全部为买入交易（无卖出/平仓）时返回 None（指标无定义）。
+        覆盖无平仓交易分支（无 sell → None），与 D4-5 语义一致。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["buy", "buy"],
+                "realized_pnl": [0.0, 0.0],
+            }
+        )
+        assert BacktestMetrics.calc_profit_factor(trades) is None
+
     def test_calc_ic(self) -> None:
         signal_rank = pl.Series([1, 2, 3, 4, 5])
         forward_return = pl.Series([5.0, 3.0, 0.0, -2.0, -4.0])

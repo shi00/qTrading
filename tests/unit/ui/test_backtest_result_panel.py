@@ -33,6 +33,7 @@ from ui.components.backtest.backtest_result_panel import (
     _get_color_for_sharpe,
     _get_color_for_value,
     _metric_card,
+    _profit_factor_card,
 )
 from ui.i18n import I18n
 from ui.theme import AppColors
@@ -179,6 +180,43 @@ class TestMetricCard:
         assert card.width is None  # 移除固定宽度，改用 ResponsiveRow col
         assert isinstance(card.content, ft.Column)
         assert len(card.content.controls) == 2
+
+
+class TestProfitFactorCard:
+    """_profit_factor_card 纯函数单测（D4-5：无亏损交易时显示 N/A）。"""
+
+    def test_profit_factor_card_null_shows_na(self) -> None:
+        """profit_factor 为 None（指标无定义）→ 显示 N/A，secondary 色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            card = _profit_factor_card({"profit_factor": None})
+
+        assert isinstance(card, ft.Container)
+        label_text, value_text = card.content.content.controls
+        assert value_text.value == "N/A"
+        assert value_text.color == AppColors.TEXT_SECONDARY
+
+    def test_profit_factor_card_high_shows_success(self) -> None:
+        """profit_factor > 1 → 显示两位小数，SUCCESS 色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            card = _profit_factor_card({"profit_factor": 2.0})
+
+        assert isinstance(card, ft.Container)
+        label_text, value_text = card.content.content.controls
+        assert value_text.value == "2.00"
+        assert value_text.color == AppColors.SUCCESS
+
+    def test_profit_factor_card_low_shows_error(self) -> None:
+        """profit_factor <= 1 → 显示两位小数，ERROR 色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            card = _profit_factor_card({"profit_factor": 0.5})
+
+        assert isinstance(card, ft.Container)
+        label_text, value_text = card.content.content.controls
+        assert value_text.value == "0.50"
+        assert value_text.color == AppColors.ERROR
 
 
 class TestBuildMetricsSection:
