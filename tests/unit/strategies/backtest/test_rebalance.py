@@ -1357,3 +1357,43 @@ class TestDiffRebalance:
         sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=10000.0)
         assert sim.positions["000001.SZ"]["volume"] > 100
         assert sim.positions["000001.SZ"]["cost_basis"] > 1000.0
+
+    def test_rebalance_cash_ratio_respects_reserve_floor(self) -> None:
+        """现金预留语义：先扣预留，再在可投资金内分配；实际现金比例 >= 预留比例（D4-10）。
+
+        零成本模型下，investable = total_assets * (1 - cash_reserve_pct)；
+        整手取整产生的余数计入现金，故回测后现金占比不低于 cash_reserve_pct。
+        非整手价格（10.5）确保取整余数落入现金，精确验证下界。
+        """
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            cash_reserve_pct=0.3,
+        )
+        sim = PortfolioSimulator(
+            config,
+            TransactionCostModel(
+                TransactionCostConfig(
+                    commission_rate=0.0,
+                    commission_min=0.0,
+                    stamp_duty_rate=0.0,
+                    transfer_fee_rate=0.0,
+                    slippage_bps=0.0,
+                )
+            ),
+        )
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 8), signals, self._quote(date(2024, 1, 8), price=10.5))
+
+        total_assets = sim.cash + sum(p["volume"] * p["qfq_entry_price"] for p in sim.positions.values())
+        assert total_assets == pytest.approx(config.initial_capital, abs=1e-6)
+        # 整手取整余数累积，实际现金占比不低于预留比例
+        assert sim.cash / total_assets >= config.cash_reserve_pct - 1e-9
+        # 且预留比例被真正扣除（investable 已按 1 - reserve 缩小，现金不可能是满仓结算）
+        assert sim.cash / total_assets < 1.0 - 0.01
