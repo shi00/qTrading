@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pandas as pd
 
+from core.errors import AIBudgetError
 from services.ai_service.labels import filter_available_labels
 from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAULT_ANALYSIS_TIMEOUT
 from services.ai_service.output import validate_ai_analysis_response
@@ -421,10 +422,23 @@ class StockAnalysisService:
             fixed_blocks.append(f"<available_data>\n{' '.join(labels)}\n</available_data>")
 
         # Issue #70 / D5-4：全局 token 预算分配（从主模型窗口逐层扣减：窗口 - 输出预留 - system 消息 - 不可裁剪固定块）
-        budget_tokens = self._service._compute_analysis_budget(
-            system_messages=messages,
-            fixed_blocks=fixed_blocks,
-        )
+        try:
+            budget_tokens = self._service._compute_analysis_budget(
+                system_messages=messages,
+                fixed_blocks=fixed_blocks,
+            )
+        except AIBudgetError as e:
+            # D5-4：固定提示词+输出预留超出模型窗口 → 显式抛可操作异常。
+            # 此处转可读错误返回（而非静默 capping），指向"提示词过长"；若继续
+            # 冒泡会被 ai_mixin 吞为通用 failed 行，丢失归因信息。R2 合规：吞入
+            # 外显为可读 error，不吞没（调用方可见）。
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIService] Token budget unavailable (%s: %s)",
+            )
+            return {"error": str(e), "score": 0}
         budget_res = _apply_context_budget(sections, budget_tokens)
         user_prompt, surviving_names = budget_res
         section_map = budget_res.section_map

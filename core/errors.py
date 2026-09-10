@@ -84,3 +84,27 @@ class StrategyParamError(AppError):
             ),
             detail,
         )
+
+
+class AIBudgetError(AppError):
+    """AI token 预算不可用（固定提示词+输出预留已超出模型上下文窗口）。
+
+    D5-4: system 消息与不可裁剪固定块超窗时，若静默 capping 到 1，用户编辑过长的
+    自定义提示词会绕过余量导致 API 400，却无法归因到"提示词过长"。本异常显式
+    抛出，携带可操作信息（占用 token / 模型窗口），向用户呈现"自定义提示词过长"。
+
+    携带 ``Message``（i18n key + params）而非预翻译字符串，符合 CLAUDE.md §3.2
+    "策略/VM 只产出 i18n key"。``info`` 与 ``self.message`` 同一来源，使
+    ``classify_error`` 首分支可直接透传。
+    """
+
+    def __init__(self, message: Message, detail: str = "") -> None:
+        self.message = message
+        super().__init__(
+            ErrorInfo(
+                code="ai_budget_unavailable",
+                message_key=message.key,
+                format_args=dict(message.params),
+            ),
+            detail,
+        )

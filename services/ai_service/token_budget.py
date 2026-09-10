@@ -9,6 +9,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from core.errors import AIBudgetError
+from core.i18n import Message
+
 if TYPE_CHECKING:
     from services.ai_service import AIService
 
@@ -260,10 +263,21 @@ class TokenBudgetService:
         deduct_tokens = system_tokens + fixed_tokens + max(0, reserved_output_tokens)
         budget = primary_context - deduct_tokens
         if budget < 1:
-            logger.warning(
-                "[AIService] Fixed prompt + output reserve (%d tokens) exceeds model context window (%d tokens), capping budget to 1",
-                deduct_tokens,
-                primary_context,
+            # D5-4：固定提示词 + 输出预留超出模型上下文窗口时，显式抛可操作异常
+            # （而非静默 capping 到 1）。用户自定义长提示词突破余量的情形下，静默
+            # 降级会让 API 400 却无法归因；显式抛出携带"占用 token / 模型窗口"，
+            # 向用户呈现"自定义提示词过长"的可操作信息。
+            raise AIBudgetError(
+                Message(
+                    "ai_prompt_too_long",
+                    {
+                        "tokens": deduct_tokens,
+                        "window": primary_context,
+                    },
+                ),
+                detail=(
+                    f"Fixed prompt + output reserve ({deduct_tokens} tokens) exceeds model "
+                    f"context window ({primary_context} tokens)"
+                ),
             )
-            return 1
         return budget
