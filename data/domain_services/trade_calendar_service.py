@@ -130,13 +130,15 @@ class TradeCalendarService:
         >>> start = await calendar.get_start_date_by_trade_days(latest, 120)
     """
 
-    def __init__(self, cache_manager: CacheManager, tushare_client: TushareClient):
+    def __init__(self, cache_manager: CacheManager, tushare_client: TushareClient | None = None):
         """
         初始化交易日历服务。
 
         Args:
             cache_manager: 缓存管理器 (提供数据库访问)
-            tushare_client: Tushare 客户端 (提供 API 访问)
+            tushare_client: Tushare 客户端 (提供 API 访问)；缺省为 None，
+                此时仅使用 Database 与 Offline Calendar 两级（离线/仅 DB 模式），
+                API 补齐被跳过（D4-8：回测等确定性场景无需 live API 降级）。
 
         Note:
             初始化仅进行依赖注入，不执行任何 I/O 操作。
@@ -231,6 +233,15 @@ class TradeCalendarService:
             )
             return None
 
+        if self._api is None:
+            # D4-8：离线/仅 DB 模式，跳过 API 补齐，交由调用方走离线兜底。
+            logger.debug(
+                "[TradeCalendarService] No Tushare client (offline/DB-only mode), skipping API fetch for %s - %s",
+                start_date,
+                end_date,
+            )
+            return None
+
         try:
             df = await self._api.get_trade_cal(start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
@@ -290,6 +301,15 @@ class TradeCalendarService:
                             db_max,
                         )
                         return True
+
+            if self._api is None:
+                # D4-8：离线/仅 DB 模式，无法通过 API 补齐，认定未覆盖。
+                logger.debug(
+                    "[TradeCalendarService] ensure_calendar_range: no Tushare client (offline/DB-only mode), cannot backfill %s to %s via API",
+                    start_obj,
+                    end_obj,
+                )
+                return False
 
             # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）
             df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)  # type: ignore[arg-type]

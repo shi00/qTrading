@@ -3,11 +3,12 @@
 
 import math
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
 import pytest
 
+from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
@@ -599,8 +600,9 @@ class TestGetNextRebalanceDate:
 
 
 class TestGetTradeDates:
-    @pytest.mark.asyncio
-    async def test_empty_trade_calendar_raises(self):
+    @staticmethod
+    def _make_engine() -> "VectorBacktestEngine":
+        """构造未初始化的 engine（绕过 __init__），仅装配 _get_trade_dates 所需最小状态。"""
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
@@ -609,25 +611,30 @@ class TestGetTradeDates:
         engine.config = config
         engine.cache = MagicMock()
         engine.cache.stock_dao.get_trade_cal = AsyncMock(return_value=None)
-
-        with pytest.raises(ValueError, match="No trade dates found"):
-            await engine._get_trade_dates()
+        engine.trade_calendar = None
+        return engine
 
     @pytest.mark.asyncio
-    async def test_empty_dataframe_raises(self):
-        import pandas as pd
+    async def test_empty_db_falls_back_to_offline(self):
+        """D4-8：DB 无日历数据时，回测层经 TradeCalendarService 离线兜底获取交易日，而非抛错。"""
+        engine = self._make_engine()
 
-        config = BacktestConfig(
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 1, 31),
-        )
-        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
-        engine.config = config
-        engine.cache = MagicMock()
-        engine.cache.stock_dao.get_trade_cal = AsyncMock(return_value=pd.DataFrame())
+        trade_dates = await engine._get_trade_dates()
 
-        with pytest.raises(ValueError, match="No trade dates found"):
-            await engine._get_trade_dates()
+        # 2024-01 在 _OFFLINE_TRUSTED_UNTIL 可信区间内，离线日历应能返回真实交易日
+        assert isinstance(trade_dates, list)
+        assert trade_dates
+        assert trade_dates[0] >= date(2024, 1, 1)
+        assert trade_dates[-1] <= date(2024, 1, 31)
+
+    @pytest.mark.asyncio
+    async def test_all_calendar_sources_empty_raises(self):
+        """D4-8：DB 与离线日历均无数据（全源耗尽）时仍显式抛错，与改前语义一致。"""
+        engine = self._make_engine()
+        # 由 _get_trade_dates 懒构造 TradeCalendarService，patch 其离线日历为空
+        with patch.object(OfflineCalendar, "get_trade_dates", return_value=[]):
+            with pytest.raises(ValueError, match="No trade dates found"):
+                await engine._get_trade_dates()
 
 
 class TestLoadQuotes:

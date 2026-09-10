@@ -17,6 +17,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr
 from utils.sanitizers import DataSanitizer
 from core.i18n import Message
+from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
@@ -53,6 +54,9 @@ class VectorBacktestEngine:
         self.cost_model = TransactionCostModel(config.get_cost_config())
         self.data_provider = BacktestDataProvider(cache, data_processor, preload_max_days=config.preload_max_days)
         self.strategy_adapter = BacktestStrategyAdapter()
+        # D4-8：优先复用策略层同一 TradeCalendarService（DB → API → 离线三级降级），
+        # 消除回测层直接查 DB 的第二套日历通路；无 data_processor 时留空，_get_trade_dates 懒构造。
+        self.trade_calendar = getattr(data_processor, "trade_calendar", None)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(
@@ -168,24 +172,23 @@ class VectorBacktestEngine:
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_trade_dates(self) -> list[date]:
-        cal_df = await self.cache.stock_dao.get_trade_cal(
-            start_date=self.config.start_date.strftime("%Y%m%d"),
-            end_date=self.config.end_date.strftime("%Y%m%d"),
-            is_open="1",
-        )
-        if cal_df is None or cal_df.empty:
-            raise ValueError("No trade dates found in the specified range")
+        # D4-8：统一走 TradeCalendarService 的三级降级链（DB → API → 离线），
+        # 消除回测层直接查 stock_dao 的第二套日历通路。DB 缺失/不完整时由
+        # service 负责 API 补齐/离线兜底与降级告警，而非回测层得到残缺序列。
+        trade_calendar = self.trade_calendar
+        if trade_calendar is None:
+            # 无 data_processor（测试/独立回测）时以缓存构造：仅 DB + 离线兜底，
+            # 不引入 live API（回测确定性诉求）；生产恒走 data_processor.trade_calendar 全链。
+            trade_calendar = TradeCalendarService(self.cache, None)
+            self.trade_calendar = trade_calendar
 
-        trade_dates = []
-        for d in cal_df["cal_date"].tolist():
-            if isinstance(d, date):
-                trade_dates.append(d)
-            elif isinstance(d, datetime.datetime):
-                trade_dates.append(d.date())
-            else:
-                d_str = str(d).replace("-", "").strip()[:8]
-                trade_dates.append(datetime.datetime.strptime(d_str, "%Y%m%d").date())
-        return sorted(trade_dates)
+        trade_dates = await trade_calendar.get_trade_dates(
+            self.config.start_date,
+            self.config.end_date,
+        )
+        if not trade_dates:
+            raise ValueError("No trade dates found in the specified range")
+        return trade_dates
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _load_quotes(self, trade_dates: list[date]) -> tuple[pl.DataFrame, list[DataWarning]]:
