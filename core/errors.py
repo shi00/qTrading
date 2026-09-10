@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.i18n import Message
+
 
 @dataclass(frozen=True)
 class ErrorInfo:
@@ -58,3 +60,27 @@ class AppError(Exception):
     def to_error_info(self) -> dict[str, Any]:
         """与 classify_error 返回结构兼容，供调用方映射用户提示。"""
         return self.info.to_dict()
+
+
+class StrategyParamError(AppError):
+    """策略业务参数不合法（如数值区间下限大于上限）。
+
+    D3-3: 数值区间参数（如 ``pe_min``/``pe_max``）缺交叉校验时，矛盾参数
+    会静默产生空集，UI 误读为"市场上没有这种股票"。本异常在 ``_filter_logic``
+    入口抛出并显式透传至表现层，向用户呈现"参数区间无效"，而非伪造空结果。
+
+    携带 ``Message``（i18n key + params）而非预翻译字符串，符合 CLAUDE.md §3.2
+    "策略/VM 只产出 i18n key"。``info`` 与 ``self.message`` 同一来源，使
+    ``classify_error`` 首分支可直接透传。
+    """
+
+    def __init__(self, message: Message, detail: str = "") -> None:
+        self.message = message
+        super().__init__(
+            ErrorInfo(
+                code="strategy_param_invalid",
+                message_key=message.key,
+                format_args=dict(message.params),
+            ),
+            detail,
+        )

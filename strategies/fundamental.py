@@ -1,6 +1,8 @@
 import pandas as pd
 import polars as pl
 
+from core.errors import StrategyParamError
+from core.i18n import Message
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
@@ -80,6 +82,10 @@ class ValueStrategy(PolarsBaseStrategy):
         pe_max = p.get("pe_max", 20)
         pb_max = p.get("pb_max", 3)
         dv_min = p.get("dv_min", 2)
+        if pe_min > pe_max:
+            # D3-3: 区间参数交叉校验。矛盾参数绝不静默返回空集，
+            # 否则用户会把参数错误误读为"市场上没有这种股票"。
+            raise StrategyParamError(Message("strategy_param_range_invalid", {"min": pe_min, "max": pe_max}))
         return (
             lf.drop_nulls(subset=["pe_ttm", "pb", "dv_ttm"])
             .filter(pl.col("pe_ttm").is_between(pe_min, pe_max))

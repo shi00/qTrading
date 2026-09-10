@@ -4,6 +4,7 @@ from abc import abstractmethod
 import pandas as pd
 import polars as pl
 
+from core.errors import StrategyParamError
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
@@ -100,6 +101,8 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
                 lambda: _convert_and_filter(df, context),
             )
         except QualityGateError:
+            raise
+        except StrategyParamError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略过滤异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
