@@ -4,7 +4,7 @@ from abc import abstractmethod
 import pandas as pd
 import polars as pl
 
-from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
 from strategies.utils import StrategyContext
@@ -46,6 +46,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     required_context_keys: tuple[str, ...] = ("screening_data",)
     required_tables: tuple[str, ...] = ("daily_quotes",)
 
+    @require_quality(from_attr="required_quality_tier")
     async def filter(self, context: StrategyContext):
         if self.required_quality_tier == QualityTier.BRONZE:
             logger.warning(
@@ -54,12 +55,6 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
                 "Consider upgrading to SILVER if you need MA/RSI or other technical indicators.",
                 self.name,
             )
-
-        _check_tier(
-            context.get("data_processor"),
-            self.required_quality_tier,
-            f"{self.__class__.__name__}.filter",
-        )
 
         dep_result = self.check_dependencies(context)
         if dep_result["status"] == "unready":

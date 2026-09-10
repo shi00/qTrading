@@ -106,10 +106,14 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
 _CallableT = typing.TypeVar("_CallableT", bound=typing.Callable)
 
 
-def require_quality(min_tier: QualityTier):
+def require_quality(min_tier: QualityTier | None = None, *, from_attr: str | None = None):
     """
     Decorator to enforce data quality requirements.
     Supports both sync and async methods.
+
+    两种形式（互斥，恰好提供其一）：
+      @require_quality(QualityTier.SILVER)                          # 固定等级
+      @require_quality(from_attr="required_quality_tier")           # 运行时读 self.<attr>
 
     Usage:
         @require_quality(QualityTier.SILVER)
@@ -120,6 +124,21 @@ def require_quality(min_tier: QualityTier):
         async def filter(self, context: typing.Any):
             ...
     """
+    if (min_tier is None) == (from_attr is None):
+        raise TypeError("require_quality: exactly one of min_tier or from_attr must be provided")
+
+    def _resolve_tier(instance: typing.Any) -> QualityTier:
+        """解析本次调用的目标质量等级（D2-8 唯一门控入口的等级来源）。"""
+        if min_tier is not None:
+            return min_tier
+        assert from_attr is not None  # 内部不变量：require_quality 顶部互斥校验已保证 min_tier 与 from_attr 恰好其一
+        tier = getattr(instance, from_attr, None)
+        if tier is None:
+            raise QualityGateError(
+                f"require_quality(from_attr={from_attr!r}): attribute missing or None on "
+                f"{type(instance).__name__}. Set {from_attr!r} on the strategy class."
+            )
+        return tier
 
     def decorator(func: _CallableT) -> _CallableT:
         if inspect.iscoroutinefunction(func):
@@ -127,7 +146,7 @@ def require_quality(min_tier: QualityTier):
             @functools.wraps(func)
             async def async_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
                 processor = _find_processor(self, args, kwargs)
-                _check_tier(processor, min_tier, func.__name__)
+                _check_tier(processor, _resolve_tier(self), func.__name__)
                 return await func(self, *args, **kwargs)
 
             return typing.cast(_CallableT, async_wrapper)
@@ -135,7 +154,7 @@ def require_quality(min_tier: QualityTier):
         @functools.wraps(func)
         def sync_wrapper(self, *args: typing.Any, **kwargs: typing.Any):
             processor = _find_processor(self, args, kwargs)
-            _check_tier(processor, min_tier, func.__name__)
+            _check_tier(processor, _resolve_tier(self), func.__name__)
             return func(self, *args, **kwargs)
 
         return typing.cast(_CallableT, sync_wrapper)
