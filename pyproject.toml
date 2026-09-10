@@ -269,6 +269,9 @@ ignore_imports = [
     "utils.shutdown -> services.news_subscription_service",
     # EX-0015
     "utils.shutdown -> services.task_manager",
+    # EX-0016 (D6-1/D6-2): scheduler_service 交易日历降级到离线日历（契约 5 例外，
+    # 启动补偿 + except 降级两处函数内 lazy import，见 docs/governance/exceptions.yml）
+    "utils.scheduler_service -> data.domain_services.offline_calendar",
 ]
 
 # 契约 6: R1 — ui 不得导入 app（编排层单向，app 仅被 main.py 调用）(§3.1 R1 / §4.1)

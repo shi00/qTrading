@@ -8,6 +8,7 @@ is used only as a startup cache for fast access before the DB is available.
 """
 
 import asyncio
+import datetime
 import logging
 import threading
 from collections.abc import Awaitable, Callable
@@ -20,7 +21,7 @@ from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
+from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +113,13 @@ class SchedulerService:
                 return
             # Initialize AsyncIOScheduler with explicit timezone
             # 'apscheduler.job_defaults.max_instances': 1 ensures we don't overlap runs
-            # 'misfire_grace_time': 60 allows jobs to run up to 60s late during heavy load
+            # 'misfire_grace_time': 1800 (D6-1) 允许任务在重负载下最多晚 30 分钟执行；
+            # 超过宽限期触发 _on_job_missed，由补偿机制（_catch_up_missed_updates）回补遗漏交易日。
             # timezone='Asia/Shanghai' ensures consistent scheduling regardless of server location
             self.scheduler = AsyncIOScheduler(
                 job_defaults={
                     "max_instances": 1,
-                    "misfire_grace_time": 60,
+                    "misfire_grace_time": 1800,
                 },
                 timezone="Asia/Shanghai",
             )
@@ -247,6 +249,8 @@ class SchedulerService:
                 self._last_pred_date,
                 self._last_ai_concept_date,
             )
+            # D6-1: DB 幂等状态就绪后立即检查遗漏交易日并启动补偿。
+            await self._catch_up_missed_updates()
         except Exception as e:
             log_classified(
                 logger,
@@ -257,14 +261,29 @@ class SchedulerService:
             )
 
     def _on_job_missed(self, event):
-        """Handle missed job events with clear logging"""
+        """Handle missed job events with clear logging + catch-up trigger (D6-1).
+
+        misfire（超过 misfire_grace_time 仍未执行）意味着当天任务永久丢失。
+        业务 job 被跳过时安排 _catch_up_missed_updates 检查遗漏交易日并补偿。
+        """
         job_id = event.job_id
         run_time = event.scheduled_run_time
         logger.warning(
-            "[Scheduler] ⚠️ JOB MISSED: '%s' was skipped because the system was busy (Scheduled: %s)",
+            "[Scheduler] ⚠️ JOB MISSED: '%s' was skipped because the system was busy (Scheduled: %s). "
+            "Triggering catch-up check.",
             job_id,
             run_time,
         )
+        if job_id in ("daily_update", "nightly_prediction", "ai_concept_daily_refresh", "review_backfill"):
+            # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
+            # 在事件循环线程执行，可直接获取 running loop 调度异步补偿协程。
+            # include_today=True（D6-1 Q21）：misfire 已过计划时刻+宽限（已收盘），
+            # 若仅补到昨天则"当天永久跳过"依旧存在。
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._catch_up_missed_updates(include_today=True))
+            except RuntimeError:
+                logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
 
     def _on_job_error(self, event):
         """Handle job error events, suppressing CancelledError during shutdown"""
@@ -361,6 +380,10 @@ class SchedulerService:
             self._schedule_jobs()
             self._last_known_config = current_config
 
+        # D6-1: 复用 30 秒周期任务检查遗漏交易日并补偿（无新增定时器）。
+        # 幂等由 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
+        await self._catch_up_missed_updates()
+
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
@@ -430,6 +453,96 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Review Backfill at 17:00")
 
+    async def _catch_up_missed_updates(self, include_today: bool = False) -> None:
+        """D6-1 启动/周期/misfire 补偿：检查自 _last_update_date 以来是否有遗漏交易日并回补。
+
+        桌面应用无法保证在 cron 时刻处于运行状态，且 misfire_grace_time 在启动期/繁忙期
+        极易超时。纯时间触发会导致当天永久丢失且用户无感。本方法以"上次成功日期"为权威
+        状态驱动补偿。三处触发：_load_db_state 后 / _watch_config_changes 内 / _on_job_missed 内。
+        include_today=True 仅由 _on_job_missed 传入：misfire 意味着计划时间已过（16:30 + 1800s
+        宽限 ≥ 17:00，已收盘），此时今天也应回补，否则"当天永久跳过"依旧存在。
+        幂等由补偿任务独立 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
+        """
+        if not self._last_update_date:
+            return  # 无基准（None 或空串，_persist_run_date 以空串表示无值），首次运行由全量初始化路径负责
+        from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅补偿检查时加载
+        from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交补偿任务时加载
+
+        last_dt = parse_date(self._last_update_date).date()
+        today = get_now().date()
+        # 常规路径只补 [last_update_date+1, 昨天]：今天由 16:30 cron 负责，避免在盘中提前
+        # 同步今日数据（数据不完整）。misfire 路径（include_today=True）已过计划时刻+宽限，
+        # 今天数据已收盘，end=today 一并回补。
+        end = today if include_today else today - datetime.timedelta(days=1)
+        if end <= last_dt:
+            return
+
+        processor = DataProcessor()
+        missed = await processor.trade_calendar.get_trade_dates(start_date=last_dt, end_date=end)
+        # 过滤：get_trade_dates 是闭区间，需排除基准日本身
+        missed = [d for d in missed if d > last_dt]
+        if not missed:
+            return
+
+        logger.warning(
+            "[Scheduler] 检测到 %d 个遗漏交易日，提交补偿同步: %s",
+            len(missed),
+            [d.strftime("%Y%m%d") for d in missed[:5]],
+        )
+        TaskManager().submit_task(
+            name=Message("sched_task_catchup", {"days": len(missed)}),
+            task_type=Message("sched_task_type_daily"),
+            coroutine_factory=self._catchup_logic,
+            cancellable=True,
+            unique_key="daily_sync_catchup",  # 独立 key，与常规同步解耦（D6-1 Q2 修订）
+            missed_dates=missed,
+        )
+
+    async def _catchup_logic(self, task_id: str, missed_dates: list, **kwargs):
+        """D6-1 补偿执行：对每个遗漏交易日执行单日市场快照同步。
+
+        同步层 `HistoricalSyncStrategy.sync_daily_market_snapshot(trade_date=d)` 已有
+        check_data_exists 缓存跳过，重复同步安全（天然续传）。逐日捕获异常（CancelledError
+        重抛、其他异常记日志后继续），单日失败不中断整批；全部结束后按 is_complete 判定
+        是否推进幂等键，已成功日期下次被 check_data_exists 跳过。
+        """
+        from services.task_manager import TaskManager  # lazy-import: 启动性能
+        from data.data_processor import DataProcessor  # lazy-import: 启动性能
+        from data.sync.base import SyncResult  # lazy-import: 启动性能
+
+        tm = TaskManager()
+        processor = DataProcessor()
+        sync_result = SyncResult()
+        total = len(missed_dates)
+        for i, d in enumerate(missed_dates):
+            if not tm.update_progress(
+                task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
+            ):
+                raise asyncio.CancelledError("catchup cancelled (update_progress returned False)")
+            try:
+                await processor.sync_daily_market_snapshot(trade_date=d, sync_result=sync_result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[Scheduler] Catch-up failed for %s, continuing (%s): %s",
+                    d.strftime("%Y%m%d"),
+                    exc_info=True,
+                )
+        # D1-2: 幂等键以 is_complete 为准（关键表全部成功）
+        if sync_result.is_complete:
+            latest = missed_dates[-1]
+            await self._mark_daily_update_done_db(latest.strftime("%Y%m%d"))
+            return I18n.get("sched_catchup_done", days=total)
+        logger.warning(
+            "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
+            sync_result.failed_critical_tables,
+        )
+        return I18n.get("sched_catchup_partial", days=total)
+
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
         from utils.correlation import ensure_correlation_id
@@ -473,8 +586,27 @@ class SchedulerService:
                 "[Scheduler] Trade calendar check failed (%s): %s",
                 exc_info=True,
             )
-            if get_now().weekday() >= 5:
+            # D6-2: 降级到离线日历（三级降级链的最后一级），而非退化为 weekday 判断。
+            # weekday 无法识别法定节假日（全年约 15-20 天），会导致节假日发起无效同步、
+            # 消耗 API 配额并可能污染质量分。
+            from data.domain_services.offline_calendar import (
+                OfflineCalendar,
+            )  # lazy-import: 日历降级（契约 5 例外 EX-0016）
+
+            offline_result = OfflineCalendar.is_trading_day(today)
+            if offline_result is False:
+                logger.info(
+                    "[Scheduler] 离线日历判定 %s 非交易日，跳过",
+                    today,
+                )
                 return
+            if offline_result is None:
+                # 离线日历也无法判定（超出可信区间，D2-7）：保守跳过，交由 D6-1 补偿机制回补。
+                logger.warning(
+                    "[Scheduler] 交易日无法判定（离线日历超可信区间），跳过本次并交由补偿机制处理",
+                )
+                return
+            # offline_result is True → 继续执行
 
         # Submit via TaskManager for visibility and persistence
         from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
