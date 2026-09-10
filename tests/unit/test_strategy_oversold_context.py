@@ -552,7 +552,11 @@ class TestRSIPercentile(unittest.TestCase):
     """测试 RSI 百分位计算"""
 
     def test_rsi_percentile_all_nan(self):
-        """RSI 全部为 NaN 时返回填充 50 的 Series（实现中用 50 填充 NaN）"""
+        """RSI 全为 NaN 时返回全 NaN（无行情数据，RSI 如实未知而非虚构"中性 50"）。
+
+        D3-1 移除 fillna(50) 掩盖后，无数据的 RSI 应为 NaN；下游 analyze_rsi_oversold_features
+        的 current_rsi 为 NaN 时由业务侧按缺失数据处理。
+        """
         from utils.technical_analysis import TechnicalAnalysis
 
         close_prices = pd.Series([float("nan")] * 30)
@@ -560,7 +564,7 @@ class TestRSIPercentile(unittest.TestCase):
         result = TechnicalAnalysis.calculate_rsi_pandas(close_prices)
 
         self.assertIsInstance(result, pd.Series)
-        self.assertTrue((result == 50.0).all())
+        self.assertTrue(result.isna().all())
 
 
 class TestPromptFormatting(unittest.TestCase):

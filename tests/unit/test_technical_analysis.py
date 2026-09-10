@@ -412,8 +412,22 @@ class TestRSIPandas:
         close = pd.Series([10.0 + i * 0.3 for i in range(30)])
         rsi = TechnicalAnalysis.calculate_rsi_pandas(close, period=14)
         assert len(rsi) == len(close)
-        assert (rsi >= 0).all()
-        assert (rsi <= 100).all()
+        # 移除 fillna(50) 掩盖后，EMA 预热期（不足 period 个观测）产生 NaN 属正确语义，
+        # 值域断言仅针对有效值段。
+        valid = rsi.dropna()
+        assert (valid >= 0).all()
+        assert (valid <= 100).all()
+
+    def test_rsi_direction_is_correct(self):
+        """RSI 方向性断言：单调上涨必须接近 100，单调下跌必须接近 0。
+
+        回归防护：修复前（loss = (-delta).clip(upper=0) 的语义反转 + fillna(50)/clip 掩盖）
+        该测试对单调上涨返回 0.0、对单调下跌返回 50.0，均会失败。
+        """
+        up = pd.Series(np.arange(100.0, 130.0))
+        down = pd.Series(np.arange(130.0, 100.0, -1.0))
+        assert TechnicalAnalysis.calculate_rsi_pandas(up, 14).iloc[-1] == pytest.approx(100.0)
+        assert TechnicalAnalysis.calculate_rsi_pandas(down, 14).iloc[-1] == pytest.approx(0.0)
 
     def test_rsi_series_insufficient_data(self):
         close = pd.Series([10.0, 11.0])
