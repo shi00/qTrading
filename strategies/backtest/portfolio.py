@@ -134,9 +134,9 @@ class PortfolioSimulator:
                 continue
 
             if self.config.execution_price == "next_close":
-                exit_price = float(quote.select("raw_close").item())
+                exit_price = float(quote.select("qfq_close").item())
             else:
-                exit_price = float(quote.select("raw_open").item())
+                exit_price = float(quote.select("qfq_open").item())
             volume = pos["volume"]
 
             cost = self.cost_model.calculate(
@@ -332,7 +332,9 @@ class PortfolioSimulator:
                 continue
 
             target_value = available_cash * weight
-            volume = int(target_value / entry_price / 100) * 100
+            # D4-1: 股数按复权价计算，保证 qfq 成交额不超可用现金且买入日净值只降交易成本。
+            # 持仓日收益 = qfq_close / qfq_entry_price - 1，与股数无关，股数口径不影响净值收益率。
+            volume = int(target_value / qfq_entry_price / 100) * 100
 
             if volume <= 0:
                 self.skipped_list.append(
@@ -350,7 +352,6 @@ class PortfolioSimulator:
             buy_plans.append(
                 {
                     "ts_code": ts_code,
-                    "entry_price": entry_price,
                     "qfq_entry_price": qfq_entry_price,
                     "volume": volume,
                     "target_value": target_value,
@@ -367,12 +368,11 @@ class PortfolioSimulator:
             scale = available_cash / total_target
             for plan in buy_plans:
                 plan["target_value"] *= scale
-                plan["volume"] = int(plan["target_value"] / plan["entry_price"] / 100) * 100
+                plan["volume"] = int(plan["target_value"] / plan["qfq_entry_price"] / 100) * 100
 
         # 第二遍：按缩减后的目标金额顺序下单
         for plan in buy_plans:
             ts_code = plan["ts_code"]
-            entry_price = plan["entry_price"]
             qfq_entry_price = plan["qfq_entry_price"]
             volume = plan["volume"]
             quote = plan["quote"]
@@ -391,7 +391,7 @@ class PortfolioSimulator:
                 continue
 
             cost = self.cost_model.calculate(
-                price=entry_price,
+                price=qfq_entry_price,
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
@@ -399,19 +399,19 @@ class PortfolioSimulator:
             )
 
             # 使用滑点调整后的成交价重新计算股数（仅一次）
-            if cost.slippage_adjusted_price > 0 and cost.slippage_adjusted_price != entry_price:
+            if cost.slippage_adjusted_price > 0 and cost.slippage_adjusted_price != qfq_entry_price:
                 adjusted_volume = int(plan["target_value"] / cost.slippage_adjusted_price / 100) * 100
                 if 0 < adjusted_volume < volume:
                     volume = adjusted_volume
                     cost = self.cost_model.calculate(
-                        price=entry_price,
+                        price=qfq_entry_price,
                         volume=volume,
                         is_buy=True,
                         avg_daily_volume=self._get_avg_daily_volume(quote),
                         trade_date=exec_date,
                     )
 
-            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else entry_price
+            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else qfq_entry_price
 
             if cost.net_amount > self.cash:
                 self.skipped_list.append(
@@ -459,12 +459,12 @@ class PortfolioSimulator:
         """
         记录每日持仓状态。
 
-        NAV 口径使用 qfq（复权总收益）：
-        - cash 为名义金额（raw 口径）
+        NAV 口径统一使用 qfq（复权总收益）：
+        - cash 为 qfq 口径余额（D4-1：买入/卖出均按复权价结算，与市值计价单位一致）
         - 持仓市值使用 qfq_close 计算
         - 除权日 NAV 不跳变（qfq 价格连续）
 
-        交易成本和 realized_pnl 保持 raw 口径，NAV 代表复权总收益。
+        交易成本和 realized_pnl 也保持 qfq 口径，NAV 代表复权总收益。
         """
         total_value = self.cash
         positions_detail: dict[str, dict] = {}
