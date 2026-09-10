@@ -142,7 +142,12 @@ def _render_status_message(msg: Message | None) -> str:
     params = dict(msg.params)
     for k in list(params):
         if k.endswith("_key") and isinstance(params[k], str):
-            params[k[:-4]] = I18n.get(params[k])
+            # R.3 D5-6: 翻译 *_key 指向的模板时, 注入当前已平铺的非 *_key 参数
+            # (如 ai_progress_concurrent_info 的 concurrency), 使模板内占位符
+            # ({concurrency}) 可填充, 避免字面量残留. 排除其它 *_key 原始 key,
+            # 避免把未翻译的 key 字符串当成占位符值混入模板; 多余 kwargs 会被忽略.
+            inject = {kk: vv for kk, vv in params.items() if not kk.endswith("_key")}
+            params[k[:-4]] = I18n.get(params[k], **inject)
             del params[k]
     return I18n.get(msg.key, **params)
 
