@@ -1138,9 +1138,12 @@ class TestRunAiAnalysis:
 
             result = await s.run_ai_analysis(candidates, context)
 
-            # 返回原始 candidates（不进行 AI 分析, fallback 到 math-only results）
+            # D5-1 补充：政策未确认时返回带状态标记的结果行（不进行 AI 分析），
+            # ai_status="policy_not_acknowledged" 让下游能区分状态、避免污染学习闭环。
             assert len(result) == 1
             assert result.iloc[0]["ts_code"] == "000001.SZ"
+            assert result.iloc[0]["ai_score"] is None
+            assert result.iloc[0]["ai_status"] == "policy_not_acknowledged"
 
             # 验证外部网络调用与大盘资讯完全未被触发 (D5-1 核心合规契约)
             mock_news.get_stock_news.assert_not_called()

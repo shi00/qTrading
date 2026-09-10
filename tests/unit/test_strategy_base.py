@@ -517,7 +517,10 @@ async def test_phase2_bypassed_when_dp_missing():
         },
     )
     context = {"params": {}}
-    with patch("strategies.ai_mixin.AIService") as mock_ai:
+    with (
+        patch("strategies.ai_mixin.AIService") as mock_ai,
+        patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+    ):
         mock_instance = MagicMock()
         mock_instance.is_cloud_available.return_value = True
         mock_ai.return_value = mock_instance

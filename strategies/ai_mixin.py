@@ -323,7 +323,14 @@ class AIStrategyMixin:
                     0,
                     Message("ai_external_acknowledgment_prompt"),
                 )
-            return candidates_df
+            # 政策未确认时返回带状态标记的结果行（与其他 AI 路径同构）：
+            # ai_status="policy_not_acknowledged" 让下游能区分"政策未确认"与
+            # "AI 分析失败"；review_manager 对非 "analyzed" 状态不写库，
+            # 避免未经确认的候选结果污染 AI 学习闭环数据。
+            return candidates_df.assign(
+                ai_score=None,
+                ai_status="policy_not_acknowledged",
+            )
 
         # --- Guard: DataProcessor Available? ---
         if dp is None:
