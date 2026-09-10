@@ -185,18 +185,21 @@ class TechnicalAnalysis:
 
         delta = close.diff()
         gain = delta.clip(lower=0)
-        loss = (-delta).clip(upper=0)
+        loss = (-delta).clip(lower=0)
 
         avg_gain = gain.ewm(com=period - 1, min_periods=period, adjust=False).mean()
         avg_loss = loss.ewm(com=period - 1, min_periods=period, adjust=False).mean()
 
-        rs = avg_gain / avg_loss
-        rs = rs.replace([np.inf, -np.inf], np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        rsi = rsi.fillna(50)
-        rsi = rsi.clip(lower=0, upper=100)
+        # avg_loss == 0 是有业务含义的边界（区间内无下跌），不是计算失败：
+        #   有上涨 → RSI = 100（极度超买）；无涨无跌 → RSI = 50（中性）
+        # 原实现用 fillna(50) 把这两种情况都填成中性，掩盖了超买信号。
+        rsi = np.where(
+            avg_loss == 0,
+            np.where(avg_gain > 0, 100.0, 50.0),
+            100.0 - 100.0 / (1.0 + avg_gain / avg_loss),
+        )
 
-        return rsi
+        return pd.Series(rsi, index=close.index)
 
     @staticmethod
     def analyze_rsi_oversold_features(close: pd.Series, period: int = 14) -> dict:
