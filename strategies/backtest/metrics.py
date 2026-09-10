@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import math
 from typing import cast
 
@@ -12,6 +13,23 @@ import polars as pl
 # < PROFIT_THRESHOLD 为亏损（LOSS），== PROFIT_THRESHOLD 为平局（DRAW）。
 # report.py 与 calc_win_rate 共享此常量，确保 0 归类一致。
 PROFIT_THRESHOLD: float = 0.0
+
+
+class ExitReason(enum.StrEnum):
+    """平仓原因（D4-6）。
+
+    区分主动决策交易（计入胜率等交易指标）与非策略决策交易（排除）：
+
+    - SIGNAL：策略信号触发的主动平仓（当前 engine 由再平衡剥离后未直接产生）。
+    - REBALANCE：再平衡调仓触发的主动平仓（正常卖出/部分减持）。
+    - DELISTED：退市强制清算（非策略决策，亏损属强制簿记），不计入胜率分母。
+
+    存于 trades 的 exit_reason 列为字符串值（enum 成员原值）。
+    """
+
+    SIGNAL = "SIGNAL"
+    REBALANCE = "REBALANCE"
+    DELISTED = "DELISTED"
 
 
 class BacktestMetrics:
@@ -131,19 +149,30 @@ class BacktestMetrics:
         return annualized_return / max_drawdown
 
     @staticmethod
-    def calc_win_rate(trades: pl.DataFrame) -> float:
-        """计算胜率，仅统计卖出/平仓交易。
+    def calc_win_rate(trades: pl.DataFrame) -> float | None:
+        """计算胜率，仅统计卖出/平仓交易中由策略主动决策的平仓。
 
-        买入交易 realized_pnl=0.0 不计入分母，避免系统性压低胜率。
-        盈亏阈值由 PROFIT_THRESHOLD 共享常量定义，与 report.py 保持一致。
+        买入交易 realized_pnl=0.0 不计入分母；退市强平等非策略决策平仓
+        （exit_reason == DELISTED）也不计入分母——退市标的通常必然亏损，
+        计入会系统性拉低胜率、使策略间不可比、掩盖退市风险（D4-6）。
+
+        无主动决策平仓或空 trades 时返回 None（指标无定义），与 calc_profit_factor
+        语义一致，report 层渲染 N/A。盈亏阈值由 PROFIT_THRESHOLD 共享常量定义，
+        与 report.py 保持一致。
         """
         if len(trades) == 0:
-            return 0.0
-        sell_trades = trades.filter(pl.col("action") == "sell")
-        if len(sell_trades) == 0:
-            return 0.0
-        profitable = sell_trades.filter(pl.col("realized_pnl") > PROFIT_THRESHOLD)
-        return len(profitable) / len(sell_trades)
+            return None
+        if "exit_reason" not in trades.columns:
+            # 历史/无退出原因标注的 trades 无法区分主动与非策略决策平仓 → 无定义
+            return None
+        decision_sells = trades.filter(
+            (pl.col("action") == "sell")
+            & pl.col("exit_reason").is_in([ExitReason.SIGNAL.value, ExitReason.REBALANCE.value])
+        )
+        if len(decision_sells) == 0:
+            return None
+        profitable = decision_sells.filter(pl.col("realized_pnl") > PROFIT_THRESHOLD)
+        return len(profitable) / len(decision_sells)
 
     @staticmethod
     def calc_profit_factor(trades: pl.DataFrame) -> float | None:
