@@ -1132,7 +1132,7 @@ class TestMultiProviderCredentials:
         )
         assert result.all_ok is True
         # D8-5：按字段独立保存，base_url 与 models 各触发一次 save_config
-        saved_configs = [c.args[0][0] for c in mock_save.call_args_list]
+        saved_configs = [c.args[0] for c in mock_save.call_args_list]
         assert any("qwen" in sc.get("llm_provider_credentials", {}) for sc in saved_configs)
         assert any(sc.get("llm_custom_models", {}).get("qwen") == ["qwen-plus"] for sc in saved_configs)
 
