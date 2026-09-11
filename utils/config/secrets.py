@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 
 from utils import config_handler as cfg
 from utils.llm_providers import LLM_PROVIDERS
@@ -33,36 +34,45 @@ def _try_decrypt(value):
 
 
 _KEYRING_PROBE_ITEM = "__keyring_available_probe__"
+# D8-6：keyring 可用性探测的 TTL 缓存时限。超时后重新探测，使 keyring 服务后续
+# 恢复（或失效）能被感知，而非永久保持模块级缓存。
+_KEYRING_PROBE_TTL_SECONDS = 60.0
 _keyring_available: bool | None = None
+_keyring_probe_at: float | None = None
 
 
 def is_keyring_available() -> bool:
-    """F4（检视 06）：探测 keyring 后端是否可用（只读，结果缓存）。
+    """F4（检视 06）：探测 keyring 后端是否可用（只读，结果 TTL 限时缓存）。
 
     通过一次只读操作（``get_password``）检测 keyring 后端可用性：后端不可用
     （无 D-Bus / 未登录 / 权限拒绝）时该调用抛异常 → 返回 False；可正常返回
-    （含未存储该项返回 None）则视为可用。结果缓存于模块级，避免重复探测
-    带来的 OS / IPC 开销（应用启动期探测一次，后续 UI 状态直接读取缓存）。
+    （含未存储该项返回 None）则视为可用。结果按 ``_KEYRING_PROBE_TTL_SECONDS``
+    限时缓存：TTL 内直接返回缓存避免重复 OS / IPC 探测；TTL 过期后重新探测，
+    使 keyring 服务后续的恢复 / 失效能被感知（D8-6）。
 
     Returns:
         bool: True 表示 keyring 后端可用；否则 False。
     """
-    global _keyring_available
-    if _keyring_available is not None:
-        return _keyring_available
+    global _keyring_available, _keyring_probe_at
+    now = time.monotonic()
+    if _keyring_available is not None and _keyring_probe_at is not None:
+        if now - _keyring_probe_at < _KEYRING_PROBE_TTL_SECONDS:
+            return _keyring_available
     try:
         cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, _KEYRING_PROBE_ITEM)
         _keyring_available = True
     except Exception as e:
         cfg.logger.debug("Keyring availability probe failed: %s", cfg.DataSanitizer.sanitize_error(e))
         _keyring_available = False
+    _keyring_probe_at = now
     return _keyring_available
 
 
 def _reset_keyring_available_cache() -> None:
     """测试隔离：重置 keyring 可用性探测缓存，使下次调用重新探测。"""
-    global _keyring_available
+    global _keyring_available, _keyring_probe_at
     _keyring_available = None
+    _keyring_probe_at = None
 
 
 def get_token():
