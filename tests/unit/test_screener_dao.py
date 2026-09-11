@@ -512,7 +512,7 @@ class TestScreenerDaoSwIndustryJoin:
         assert "sw_industry_member" in sql
         assert "AS industry_sw_l2" in sql
         assert "AS industry_tushare" in sql
-        assert "COALESCE(m.sw_l2_name, b.industry)" not in sql
+        assert "COALESCE(m.l2_name, b.industry)" not in sql
         assert "LEFT JOIN LATERAL" in sql
 
     def test_screener_sql_range_uses_sw_industry(self):
@@ -522,12 +522,12 @@ class TestScreenerDaoSwIndustryJoin:
         assert "sw_industry_member" in sql
         assert "AS industry_sw_l2" in sql
         assert "AS industry_tushare" in sql
-        assert "COALESCE(m.sw_l2_name, b.industry)" not in sql
+        assert "COALESCE(m.l2_name, b.industry)" not in sql
         assert "LEFT JOIN LATERAL" in sql
 
     def test_industry_split_no_coalesce(self):
         """双列拆分契约：单日/区间模板均输出 industry_sw_l2 与 industry_tushare 两列，
-        且不再存在 COALESCE(m.sw_l2_name, b.industry) 单列混合（评审 m1：含
+        且不再存在 COALESCE(m.l2_name, b.industry) 单列混合（评审 m1：含
         fundamental 模板，经 require_close 参数复用的同一静态模板）。"""
         dao = ScreenerDao(MagicMock())
         for sql in (
@@ -536,19 +536,19 @@ class TestScreenerDaoSwIndustryJoin:
             dao._build_screening_sql(require_close=False),
             dao._build_screening_sql_range(require_close=False),
         ):
-            assert "m.sw_l2_name AS industry_sw_l2" in sql, f"缺少 industry_sw_l2:\n{sql}"
+            assert "m.l2_name AS industry_sw_l2" in sql, f"缺少 industry_sw_l2:\n{sql}"
             assert "b.industry AS industry_tushare" in sql, f"缺少 industry_tushare:\n{sql}"
-            assert "COALESCE(m.sw_l2_name, b.industry) AS industry" not in sql, f"残留 COALESCE 混列:\n{sql}"
+            assert "COALESCE(m.l2_name, b.industry) AS industry" not in sql, f"残留 COALESCE 混列:\n{sql}"
 
     @staticmethod
     def _extract_sw_industry_lateral(sql: str) -> str:
         """提取 sw_industry_member 的 LATERAL 子查询片段（含 LIMIT 1）。
 
-        以 LEFT JOIN LATERAL (SELECT sw_l2_name FROM sw_industry_member 起头、
+        以 LEFT JOIN LATERAL (SELECT l2_name FROM sw_industry_member 起头、
         ") m ON TRUE" 收尾，因此只捕获行业子查询，不会误捕财务子查询。
         """
         m = re.search(
-            r"LEFT JOIN LATERAL \(\s*SELECT sw_l2_name\s*FROM sw_industry_member.*?LIMIT 1\s*\) m ON TRUE",
+            r"LEFT JOIN LATERAL \(\s*SELECT l2_name\s*FROM sw_industry_member.*?LIMIT 1\s*\) m ON TRUE",
             sql,
             re.S,
         )
@@ -556,18 +556,18 @@ class TestScreenerDaoSwIndustryJoin:
         return m.group(0)
 
     def test_industry_lateral_deterministic_order(self):
-        """DAT-08①: 行业 LATERAL 子查询 LIMIT 1 前必须有 ORDER BY index_code。
+        """DAT-08① + DATA-04 L2: 行业 LATERAL 子查询 LIMIT 1 前必须有 ORDER BY l2_code。
 
-        sw_industry_member 主键为 (ts_code, index_code)，同 ts_code 可有多行；
-        无 ORDER BY 的 LIMIT 1 返回行随执行计划（VACUUM/ANALYZE/并行度）漂移，
-        导致同一股票行业归属在两次运行间变化。单日/区间两模板都必须满足。
+        sw_industry_member 主键为 (ts_code, l3_code, in_date)，同 ts_code 当前有效行
+        (out_date IS NULL) 由 LATERAL 的 WHERE 限定为唯一归属；ORDER BY l2_code
+        保证无 ORDER BY 时不随执行计划漂移。单日/区间两模板都必须满足。
         """
         dao = ScreenerDao(MagicMock())
         for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
             lateral = self._extract_sw_industry_lateral(sql)
-            assert "ORDER BY index_code" in lateral, f"行业 LATERAL 缺少 ORDER BY:\n{lateral}"
+            assert "ORDER BY l2_code" in lateral, f"行业 LATERAL 缺少 ORDER BY:\n{lateral}"
             assert "LIMIT 1" in lateral
-            assert lateral.index("ORDER BY index_code") < lateral.index("LIMIT 1")
+            assert lateral.index("ORDER BY l2_code") < lateral.index("LIMIT 1")
 
 
 class TestScreenerDaoGetLatestClosedTradeDate:

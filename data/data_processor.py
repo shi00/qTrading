@@ -19,6 +19,7 @@ from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
+from data.sync.name_change import NameChangeSyncStrategy
 from data.sync.sw_industry import SwIndustrySyncStrategy
 from core.i18n import I18n, Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -166,6 +167,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 "macro": MacroSyncStrategy(self.context),
                 "holder": HolderSyncStrategy(self.context),
                 "sw_industry": SwIndustrySyncStrategy(self.context),
+                "name_change": NameChangeSyncStrategy(self.context),
             }
             logger.info("[DataProcessor] init: sync strategies created")
 

@@ -53,19 +53,21 @@ def _make_classify_df(n_levels: int = 3, codes_per_level: int = 1) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def _make_member_df(index_code: str) -> pd.DataFrame:
-    """Build a single-row member DataFrame for the given index_code."""
+def _make_member_df(l3_code: str) -> pd.DataFrame:
+    """Build a single-row member DataFrame for the given l3_code (DATA-04 L2 new schema)."""
     return pd.DataFrame(
         {
             "ts_code": ["000001.SZ"],
-            "index_code": [index_code],
-            "index_name": [f"行业_{index_code}"],
-            "sw_l1_code": ["110000"],
-            "sw_l1_name": ["农林牧渔"],
-            "sw_l2_code": ["110100"],
-            "sw_l2_name": ["种植业"],
-            "sw_l3_code": ["110101"],
-            "sw_l3_name": ["玉米"],
+            "l1_code": ["110000"],
+            "l1_name": ["农林牧渔"],
+            "l2_code": ["110100"],
+            "l2_name": ["种植业"],
+            "l3_code": [l3_code],
+            "l3_name": [f"行业_{l3_code}"],
+            "name": ["平安银行"],
+            "in_date": ["20200101"],
+            "out_date": [""],
+            "is_new": ["1"],
         }
     )
 
@@ -159,7 +161,7 @@ class TestSyncMembersCancellation:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI"],
-                "sw_level": ["L1", "L1"],
+                "sw_level": ["L3", "L3"],
             }
         )
 
@@ -218,7 +220,7 @@ class TestSyncMembersCancellation:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI"],
-                "sw_level": ["L1", "L1"],
+                "sw_level": ["L3", "L3"],
             }
         )
 
@@ -266,7 +268,7 @@ class TestSyncMembersCancellation:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI"],
-                "sw_level": ["L1", "L1"],
+                "sw_level": ["L3", "L3"],
             }
         )
 
@@ -313,28 +315,30 @@ class TestSyncMembersCancellation:
         strategy.member_dao.save_sw_industry_member.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_members_dedup_on_ts_code_index_code(self):
-        """combined DataFrame 在 ts_code+index_code 上去重（同一股票多次出现保留首条）。"""
+    async def test_members_dedup_on_ts_code_l3_code_in_date(self):
+        """combined DataFrame 在 ts_code+l3_code+in_date 上去重（同一股票同一三级行业同历史区间保留首条）。"""
         ctx = _make_ctx()
         strategy = SwIndustrySyncStrategy(ctx)
         strategy.member_dao = MagicMock()
         strategy.member_dao.save_sw_industry_member = AsyncMock(return_value=1)
 
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L3", "L3"]})
 
-        # 两次调用都返回相同 ts_code+index_code，应去重为 1 行
+        # 两次调用都返回相同 ts_code+l3_code+in_date，应去重为 1 行
         ctx.api.get_index_member_all = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
-                    "index_code": ["801010.SI"],
-                    "index_name": ["农林牧渔"],
-                    "sw_l1_code": ["110000"],
-                    "sw_l1_name": ["农林牧渔"],
-                    "sw_l2_code": ["110100"],
-                    "sw_l2_name": ["种植业"],
-                    "sw_l3_code": ["110101"],
-                    "sw_l3_name": ["玉米"],
+                    "l1_code": ["110000"],
+                    "l1_name": ["农林牧渔"],
+                    "l2_code": ["110100"],
+                    "l2_name": ["种植业"],
+                    "l3_code": ["801010.SI"],
+                    "l3_name": ["农林牧渔"],
+                    "name": ["平安银行"],
+                    "in_date": ["20200101"],
+                    "out_date": [""],
+                    "is_new": ["1"],
                 }
             )
         )

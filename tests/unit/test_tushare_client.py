@@ -891,23 +891,25 @@ class TestTushareClientApiMethods:
 
     @pytest.mark.asyncio
     async def test_get_index_member_all_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
-        """Phase 3F-1 §4.3.2：get_index_member_all 委托 _handle_api_call，传递 index_code 和显式 fields。"""
+        """Phase 3F-1 §4.3.2 + DATA-04 L2：get_index_member_all 委托 _handle_api_call，传递 l3_code 和显式 fields。"""
         client, _, _ = tushare_client_mocks
         expected_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "index_code": ["801010.SI"],
-                "index_name": ["农林牧渔"],
-                "sw_l1_code": ["110000"],
-                "sw_l1_name": ["农林牧渔"],
-                "sw_l2_code": ["110100"],
-                "sw_l2_name": ["种植业"],
-                "sw_l3_code": ["110101"],
-                "sw_l3_name": ["玉米"],
+                "l1_code": ["110000"],
+                "l1_name": ["农林牧渔"],
+                "l2_code": ["110100"],
+                "l2_name": ["种植业"],
+                "l3_code": ["110101.SI"],
+                "l3_name": ["玉米"],
+                "name": ["平安银行"],
+                "in_date": ["20200101"],
+                "out_date": [""],
+                "is_new": ["1"],
             }
         )
         client._handle_api_call = AsyncMock(return_value=expected_df)
-        result = await client.get_index_member_all(index_code="801010.SI")
+        result = await client.get_index_member_all(l3_code="110101.SI")
 
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
@@ -915,28 +917,65 @@ class TestTushareClientApiMethods:
         call_args = client._handle_api_call.call_args
         # 第一个位置参数是 pro.index_member_all callable
         assert callable(call_args.args[0])
-        # kwargs 含 index_code 和 fields（含 L1/L2/L3 全字段）
-        assert call_args.kwargs["index_code"] == "801010.SI"
+        # kwargs 含 l3_code 和 fields（index_member_all 真实输出字段）
+        assert call_args.kwargs["l3_code"] == "110101.SI"
         fields_str = call_args.kwargs["fields"]
         assert "ts_code" in fields_str
-        assert "sw_l1_code" in fields_str
-        assert "sw_l2_code" in fields_str
-        assert "sw_l3_code" in fields_str
+        assert "l1_code" in fields_str
+        assert "l2_code" in fields_str
+        assert "l3_code" in fields_str
+        assert "in_date" in fields_str
+        assert "out_date" in fields_str
+        assert "is_new" in fields_str
 
     @pytest.mark.asyncio
     async def test_get_index_member_all_wrapper_allows_none_index_code(self, tushare_client_mocks):
-        """Phase 3F-1 §4.3.2：get_index_member_all 接受 index_code=None（拉取全市场）。"""
+        """Phase 3F-1 §4.3.2 + DATA-04 L2：get_index_member_all 接受 l3_code=None（拉取全市场）。"""
         client, _, _ = tushare_client_mocks
-        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "index_code": ["801010.SI"]})
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "l3_code": ["110101.SI"]})
         client._handle_api_call = AsyncMock(return_value=expected_df)
 
-        result = await client.get_index_member_all(index_code=None)
+        result = await client.get_index_member_all(l3_code=None)
 
         assert isinstance(result, pd.DataFrame)
         assert not result.empty
         client._handle_api_call.assert_called_once()
         call_args = client._handle_api_call.call_args
-        assert call_args.kwargs["index_code"] is None
+        assert call_args.kwargs["l3_code"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_namechange_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """DATA-04 L3：get_namechange 委托 _handle_api_call，显式 fields（namechange 真实输出列）。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["*ST平安"],
+                "start_date": ["2020-06-30"],
+                "end_date": [None],
+                "ann_date": ["2020-06-29"],
+                "change_reason": ["连续亏损实行退市风险警示"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_namechange()
+
+        assert isinstance(result, pd.DataFrame)
+        assert not result.empty
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.namechange callable
+        assert callable(call_args.args[0])
+        # kwargs 含 fields，且不含日期区间（tushare #1858 全量拉取避免隐式过滤）
+        fields_str = call_args.kwargs["fields"]
+        assert "ts_code" in fields_str
+        assert "name" in fields_str
+        assert "start_date" in fields_str
+        assert "end_date" in fields_str
+        assert "ann_date" in fields_str
+        assert "change_reason" in fields_str
+        assert "start_date" not in call_args.kwargs  # 不传日期区间作为入参过滤
+        assert "end_date" not in call_args.kwargs
 
 
 class TestTushareClientBuildRateLimiters:
