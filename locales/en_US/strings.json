@@ -479,6 +479,8 @@
     "sys_snack_pool_saved": "Thread pool settings saved and reloaded!",
     "sys_snack_num_fmt": "Invalid number format",
     "sys_snack_save_err": "Error saving settings",
+    "secrets_save_overridden": "Environment variable {env_var} is set and takes precedence over this config, so your input will not take effect. To manage this here, remove the environment variable first.",
+    "secrets_save_failed_no_store": "Cannot securely store credential: no keyring/encryption environment available. Use environment variables instead, or fix the keyring service (Linux: install libsecret and ensure a keyring daemon is running).",
     "settings_check_health": "Check Now",
     "settings_verify_success": "Verified",
     "settings_save_failed": "Save failed",

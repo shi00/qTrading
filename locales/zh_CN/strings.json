@@ -977,6 +977,8 @@
     "sys_snack_pool_saved": "线程池配置已保存并重载！",
     "sys_snack_num_fmt": "数字格式无效",
     "sys_snack_save_err": "保存配置出错",
+    "secrets_save_overridden": "检测到环境变量 {env_var} 已设置，其优先级高于此处的配置，当前输入不会生效。如需在此处管理，请先移除该环境变量。",
+    "secrets_save_failed_no_store": "无法安全存储凭证：本机无可用密钥环/加密环境。请改用环境变量，或修复密钥环服务（Linux 需安装 libsecret 并确保密钥环守护进程运行）。",
     "health_report_title": "全量数据体检报告",
     "health_checking": "正在执行全量数据体检...",
     "health_status_label": "健康状态: {status}",

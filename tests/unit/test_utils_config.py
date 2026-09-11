@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from utils.config.secrets import SaveOutcome
 from utils.config_handler import ConfigHandler
 from utils.config_models import get_default_config
 
@@ -105,6 +106,6 @@ class TestConfigHandler:
         ):
             result = ConfigHandler.save_db_password("secret")
 
-        assert result is True
+        assert result is SaveOutcome.SAVED
         mock_encrypt.assert_called_once_with("secret")
         assert ConfigHandler.load_config().get("db_password_encrypted") == "encrypted-secret"

@@ -123,7 +123,7 @@ class ConfigHandler:
         return secrets.get_token()
 
     @staticmethod
-    def save_token(token):
+    def save_token(token) -> "secrets.SaveOutcome":
         return secrets.save_token(token)
 
     @staticmethod
@@ -131,7 +131,7 @@ class ConfigHandler:
         return secrets.get_db_password()
 
     @staticmethod
-    def save_db_password(password: str) -> bool:
+    def save_db_password(password: str) -> "secrets.SaveOutcome":
         return secrets.save_db_password(password)
 
     @staticmethod
@@ -140,7 +140,7 @@ class ConfigHandler:
         api_key: str | None = None,
         base_url: str | None = None,
         models: list[str] | None = None,
-    ) -> bool:
+    ) -> "secrets.CredentialSaveResult":
         return secrets.save_provider_credential(provider, api_key, base_url, models)
 
     @staticmethod

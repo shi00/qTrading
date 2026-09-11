@@ -14,6 +14,7 @@ from ui.viewmodels.tushare_config_panel_view_model import (
     TushareConfigPanelViewModel,
     TushareConfigState,
 )
+from utils.config.secrets import SaveOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -26,7 +27,7 @@ def mock_config_handler():
     """Mock ConfigHandler 模块级 patch（VM 构造时加载配置）。"""
     with patch("ui.viewmodels.tushare_config_panel_view_model.ConfigHandler") as m:
         m.get_token.return_value = ""
-        m.save_token.return_value = True
+        m.save_token.return_value = SaveOutcome.SAVED
         m.get_tushare_point_tier.return_value = "points_5000"
         m.get_tushare_timeout.return_value = 30
         m.set_tushare_point_tier.return_value = True

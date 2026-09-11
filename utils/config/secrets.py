@@ -10,9 +10,46 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
 from utils import config_handler as cfg
 from utils.llm_providers import LLM_PROVIDERS
+
+
+class SaveOutcome(StrEnum):
+    """凭证保存结果语义（替代裸 bool，修复 D8-2 假报成功）。
+
+    - ``SAVED``: 已成功持久化。
+    - ``OVERRIDDEN_BY_ENV``: 对应环境变量已设置，优先级高于此处配置，本次输入不生效
+      （get_* 优先读环境变量，写入的值永不生效）。返回成功会让 UI 假报"已保存"。
+    - ``FAILED_NO_SECURE_STORE``: 本机无可用的 keyring / 加密环境（SecurityManager
+      在无既有密钥文件时故意抛 ``SecurityError``）。应提示用户改用环境变量或修复密钥服务。
+    - ``FAILED``: 其他持久化失败。
+    """
+
+    SAVED = "saved"
+    OVERRIDDEN_BY_ENV = "overridden_by_env"
+    FAILED_NO_SECURE_STORE = "failed_no_secure_store"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class CredentialSaveResult:
+    """按字段报告的凭证保存结果（修复 D8-5 部分成功不可区分）。
+
+    ``None`` 表示本次调用未修改该字段。
+    """
+
+    api_key: SaveOutcome | None = None
+    base_url: SaveOutcome | None = None
+    models: SaveOutcome | None = None
+
+    @property
+    def all_ok(self) -> bool:
+        outcomes = [o for o in (self.api_key, self.base_url, self.models) if o is not None]
+        return all(o is SaveOutcome.SAVED for o in outcomes) if outcomes else True
 
 
 def _try_decrypt(value):
@@ -99,12 +136,86 @@ def get_token():
     return decrypted
 
 
-def save_token(token):
-    # 环境变量优先：若 TS_TOKEN 已存在，跳过 keyring 读写（get_token 会优先读环境变量）
-    if os.environ.get(cfg.ENV_FALLBACK_MAP["ts_token"]):
-        return True
+def _store_secret(
+    item: str,
+    value: str,
+    env_var: str,
+    *,
+    clear_config: Callable[[], bool],
+    encrypt_to_config: Callable[[str], bool],
+) -> SaveOutcome:
+    """统一的凭证存储降级链：环境变量检查 → keyring → AES → 明确失败。
 
+    三个 save_* 函数原各自实现同一降级结构并已漂移
+    （save_provider_credential 缺 SecurityError 分支，见 D8-3）。
+
+    Args:
+        item: keyring 中的存储项名（如 ``"ts_token"``）。
+        value: 要保存的明文凭证。
+        env_var: 对应环境变量名（如 ``"TS_TOKEN"``）。该环境变量存在时返回
+            ``OVERRIDDEN_BY_ENV``，因为 get_* 会优先读环境变量，写入的值永不生效。
+        clear_config: keyring 写入成功后清除配置中对应加密残留字段的可调用（返回 bool）。
+        encrypt_to_config: AES 降级时把加密值写入配置的可调用（返回 bool）。
+
+    Returns:
+        保存结果（SaveOutcome），关键分支：
+        - 环境变量已设置 → ``OVERRIDDEN_BY_ENV``
+        - keyring + SecurityManager 均不可用 → ``FAILED_NO_SECURE_STORE``
+    """
+    if os.environ.get(env_var):
+        return SaveOutcome.OVERRIDDEN_BY_ENV
+
+    try:
+        cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, item, value)
+        return SaveOutcome.SAVED if clear_config() else SaveOutcome.FAILED
+    # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
+    except Exception as e:
+        cfg.logger.error(
+            "Failed to use keyring for %s: %s. Falling back to SecurityManager (lower security).",
+            item,
+            cfg.DataSanitizer.sanitize_error(e),
+        )
+        # H-3：keyring 降级到 AES 前清除陈旧的 keyring 条目，防止旧的明文/错误值在
+        # keyring 恢复后"赢过"新写入的加密值。
+        try:
+            cfg.keyring.delete_password(cfg.KEYRING_SERVICE_NAME, item)
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
+        except Exception as del_err:
+            cfg.logger.debug(
+                "Keyring %s deletion skipped: %s",
+                item,
+                cfg.DataSanitizer.sanitize_error(del_err),
+                exc_info=True,
+            )
+        try:
+            encrypted = cfg.SecurityManager.encrypt_data(value)
+            return SaveOutcome.SAVED if encrypt_to_config(encrypted) else SaveOutcome.FAILED
+        except cfg.SecurityError as se:
+            cfg.logger.error(
+                "Cannot securely store %s: %s. Please use environment variable %s instead.",
+                item,
+                cfg.DataSanitizer.sanitize_error(se),
+                env_var,
+            )
+            return SaveOutcome.FAILED_NO_SECURE_STORE
+        # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
+        except Exception as enc_err:
+            cfg.logger.error("Failed to encrypt %s: %s", item, cfg.DataSanitizer.sanitize_error(enc_err))
+            return SaveOutcome.FAILED
+
+
+def save_token(token: str) -> SaveOutcome:
+    """保存 Tushare token。
+
+    环境变量存在时返回 ``OVERRIDDEN_BY_ENV`` 而非成功 —— get_token 优先读
+    环境变量，写入的值永远不会生效。返回成功会让 UI 显示"保存成功"而功能
+    不工作，用户无从归因（D8-2）。
+    """
     if not token:
+        # 与 D8-2 语义一致：环境变量存在时不做任何 keyring 操作（环境变量优先，
+        # 清除 keyring 无意义，并避免误删用户长期保存的 token / 临时设环境变量时被清空）。
+        if os.environ.get(cfg.ENV_FALLBACK_MAP["ts_token"]):
+            return SaveOutcome.OVERRIDDEN_BY_ENV
         try:
             cfg.keyring.delete_password(cfg.KEYRING_SERVICE_NAME, "ts_token")
         # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
@@ -114,30 +225,15 @@ def save_token(token):
                 cfg.DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-        return cfg.ConfigHandler.save_config({"ts_token": ""})
+        return SaveOutcome.SAVED if cfg.ConfigHandler.save_config({"ts_token": ""}) else SaveOutcome.FAILED
 
-    try:
-        cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, "ts_token", token)
-        return cfg.ConfigHandler.save_config({"ts_token": ""})
-    # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
-    except Exception as e:
-        cfg.logger.error(
-            "Failed to use keyring for ts_token: %s. Falling back to SecurityManager (lower security).",
-            cfg.DataSanitizer.sanitize_error(e),
-        )
-        try:
-            encrypted = cfg.SecurityManager.encrypt_data(token)
-            return cfg.ConfigHandler.save_config({"ts_token": encrypted})
-        except cfg.SecurityError as se:
-            cfg.logger.error(
-                "Cannot securely store ts_token: %s. Please use environment variable TS_TOKEN instead.",
-                cfg.DataSanitizer.sanitize_error(se),
-            )
-            return False
-        # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
-        except Exception as enc_err:
-            cfg.logger.error("Failed to encrypt ts_token: %s", cfg.DataSanitizer.sanitize_error(enc_err))
-            return False
+    return _store_secret(
+        "ts_token",
+        token,
+        cfg.ENV_FALLBACK_MAP["ts_token"],
+        clear_config=lambda: cfg.ConfigHandler.save_config({"ts_token": ""}),
+        encrypt_to_config=lambda enc: cfg.ConfigHandler.save_config({"ts_token": enc}),
+    )
 
 
 def get_db_password():
@@ -170,45 +266,21 @@ def get_db_password():
     return ""
 
 
-def save_db_password(password: str) -> bool:
-    """Save database password to keyring."""
+def save_db_password(password: str) -> SaveOutcome:
+    """保存数据库密码。
+
+    环境变量存在时返回 ``OVERRIDDEN_BY_ENV``（D8-2）；其余走统一的
+    keyring → AES → 明确失败降级链。
+    """
     if not password:
-        return False
-    # 环境变量优先：若 DB_PASSWORD 已存在，跳过 keyring 写入（get_db_password 会优先读环境变量）
-    if os.environ.get(cfg.ENV_FALLBACK_MAP["db_password"]):
-        return True
-    try:
-        cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, "db_password", password)
-        return cfg.ConfigHandler.save_config({"db_password_encrypted": ""})
-    # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
-    except Exception as e:
-        cfg.logger.error(
-            "Failed to save db_password to keyring: %s. Falling back to SecurityManager (lower security).",
-            cfg.DataSanitizer.sanitize_error(e),
-            exc_info=True,
-        )
-        try:
-            cfg.keyring.delete_password(cfg.KEYRING_SERVICE_NAME, "db_password")
-        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
-        except Exception as e:
-            cfg.logger.debug(
-                "Keyring db_password deletion skipped: %s",
-                cfg.DataSanitizer.sanitize_error(e),
-                exc_info=True,
-            )
-        try:
-            encrypted = cfg.SecurityManager.encrypt_data(password)
-            return cfg.ConfigHandler.save_config({"db_password_encrypted": encrypted})
-        except cfg.SecurityError as se:
-            cfg.logger.error(
-                "Cannot securely store db_password: %s. Please use environment variable DB_PASSWORD instead.",
-                cfg.DataSanitizer.sanitize_error(se),
-            )
-            return False
-        # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
-        except Exception as e2:
-            cfg.logger.error("Failed to encrypt db_password: %s", cfg.DataSanitizer.sanitize_error(e2))
-            return False
+        return SaveOutcome.FAILED
+    return _store_secret(
+        "db_password",
+        password,
+        cfg.ENV_FALLBACK_MAP["db_password"],
+        clear_config=lambda: cfg.ConfigHandler.save_config({"db_password_encrypted": ""}),
+        encrypt_to_config=lambda enc: cfg.ConfigHandler.save_config({"db_password_encrypted": enc}),
+    )
 
 
 def save_provider_credential(
@@ -216,8 +288,17 @@ def save_provider_credential(
     api_key: str | None = None,
     base_url: str | None = None,
     models: list[str] | None = None,
-) -> bool:
+) -> CredentialSaveResult:
     """保存指定 LLM 供应商的凭证（用于跨供应商 failover）。
+
+    按字段（base_url / models / api_key）独立保存并各自报告结果，使 UI 能
+    区分"全部失败 / 部分失败 / 未修改"，避免 api_key 无法安全存储时连带
+    回滚 base_url / models 的修改且无任何可操作指引（D8-3 / D8-5）。
+
+    Provider key 的环境变量语义与全局凭证不同：``get_provider_credential``
+    仅在供应商专属 key 缺失时回退到全局，全局 ``AI_API_KEY`` 环境变量存在
+    不应阻止供应商专属 key 的保存，故此处不复用 ``_store_secret`` 的环境
+    变量覆盖检查，只对齐其 keyring → AES → 明确失败的降级结构。
 
     Args:
         provider: 供应商 ID (如 "qwen", "deepseek", "openai")
@@ -226,7 +307,7 @@ def save_provider_credential(
         models: 该供应商的自定义模型列表。None 表示不修改。
 
     Returns:
-        bool: 保存是否成功。
+        CredentialSaveResult: 各字段独立结果（None 表示本次未修改该字段）。
     """
     config = cfg.ConfigHandler.load_config()
 
@@ -236,16 +317,16 @@ def save_provider_credential(
 
     cred = provider_credentials.get(provider, {})
 
-    config_update = {}
+    result = CredentialSaveResult()
 
     if base_url is not None:
         if base_url:
             cred["base_url"] = base_url
         elif "base_url" in cred:
             del cred["base_url"]
-
-    provider_credentials[provider] = cred
-    config_update["llm_provider_credentials"] = provider_credentials
+        provider_credentials[provider] = cred
+        ok = cfg.ConfigHandler.save_config({"llm_provider_credentials": provider_credentials})
+        result = replace(result, base_url=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
 
     if models is not None:
         custom_models = copy.deepcopy(config.get("llm_custom_models", {}))
@@ -253,12 +334,14 @@ def save_provider_credential(
         if len(updated_models) > 50:
             updated_models = updated_models[-50:]
         custom_models[provider] = updated_models
-        config_update["llm_custom_models"] = custom_models
+        ok = cfg.ConfigHandler.save_config({"llm_custom_models": custom_models})
+        result = replace(result, models=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
 
     if api_key is not None:
         if api_key:
             try:
                 cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
+                result = replace(result, api_key=SaveOutcome.SAVED)
             # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 cfg.logger.error(
@@ -270,7 +353,17 @@ def save_provider_credential(
                     encrypted_key = cfg.SecurityManager.encrypt_data(api_key)
                     cred["api_key_encrypted"] = encrypted_key
                     provider_credentials[provider] = cred
-                    config_update["llm_provider_credentials"] = provider_credentials
+                    ok = cfg.ConfigHandler.save_config({"llm_provider_credentials": provider_credentials})
+                    result = replace(result, api_key=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
+                except cfg.SecurityError as se:
+                    # 与 save_token/save_db_password 保持一致：SecurityError 携带完整
+                    # 解决指引（keyring 安装 / 环境变量），必须传递到 UI 而非降级为通用错误。
+                    cfg.logger.error(
+                        "[ConfigHandler] Cannot securely store api_key for %s: %s. Use environment variable AI_API_KEY instead.",
+                        provider,
+                        cfg.DataSanitizer.sanitize_error(se),
+                    )
+                    result = replace(result, api_key=SaveOutcome.FAILED_NO_SECURE_STORE)
                 # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
                 except Exception as enc_err:
                     cfg.logger.error(
@@ -278,7 +371,7 @@ def save_provider_credential(
                         provider,
                         cfg.DataSanitizer.sanitize_error(enc_err),
                     )
-                    return False
+                    result = replace(result, api_key=SaveOutcome.FAILED)
         else:
             try:
                 cfg.keyring.delete_password(cfg.KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
@@ -294,9 +387,12 @@ def save_provider_credential(
             if "api_key_encrypted" in cred:
                 del cred["api_key_encrypted"]
                 provider_credentials[provider] = cred
-                config_update["llm_provider_credentials"] = provider_credentials
+                ok = cfg.ConfigHandler.save_config({"llm_provider_credentials": provider_credentials})
+                result = replace(result, api_key=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
+            else:
+                result = replace(result, api_key=SaveOutcome.SAVED)
 
-    return cfg.ConfigHandler.save_config(config_update)
+    return result
 
 
 def get_provider_credential(provider: str, fallback_to_global: bool = True) -> dict:

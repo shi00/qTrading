@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from data.constants import TUSHARE_POINT_TIERS
 from ui.viewmodels import Message
 from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
+from utils.config.secrets import SaveOutcome
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -226,10 +227,21 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
             from strategies.all_strategies import StrategyManager
 
             # keyring.set_password + save_config 均为同步 IO，15s 兜底防 keyring 后端卡死
-            await asyncio.wait_for(
+            # D8-2：环境变量存在时 save_token 返回 OVERRIDDEN_BY_ENV（而非静默成功），
+            # D8-3：无安全存储时返回 FAILED_NO_SECURE_STORE，均需向用户作出可操作提示。
+            save_outcome = await asyncio.wait_for(
                 ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
                 timeout=15,
             )
+            if save_outcome is SaveOutcome.OVERRIDDEN_BY_ENV:
+                self._show_warning(Message("secrets_save_overridden", {"env_var": "TS_TOKEN"}))
+                logger.warning("[TushareConfigVM] TS_TOKEN env var overrides saved token; save not persisted")
+            elif save_outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
+                self._show_error(Message("secrets_save_failed_no_store"))
+                self._set_loading_state(False)
+                self._set_state(is_verifying=False)
+                # 未生成安全持久化的 token，继续探活/能力探测无意义，直接返回
+                return False
 
             # TushareClient 必须在 async 上下文（事件循环线程）实例化，经 _capture_loop 捕获
             # 事件循环引用；set_token 使用异步 API set_token_async。同步包装器 set_token 依赖
