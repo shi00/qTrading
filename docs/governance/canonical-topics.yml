@@ -120,3 +120,8 @@ topics:
     title: 打包分发 / PyInstaller 构建
     canonical: docs/guides/dependency-management.md
     note: 见 dependency-management.md「PyInstaller 打包」
+
+  - id: fallback
+    title: 未列出的任务类型
+    canonical: CLAUDE.md
+    note: "纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等未列类型：先读 §3 红线 + §4 架构边界；再按改动实际触及的层选最接近的 canonical 入口，并在回复中说明所选入口与理由。DOC-04 方向 2 对该元条目豁免（见 check_docs_consistency.py）。"

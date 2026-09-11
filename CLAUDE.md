@@ -127,6 +127,7 @@
 | 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（操作前确认应用已完全退出） |
 | 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md)；存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR（P2-17） |
 | 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md)（分层职责与登记约定） |
+| 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 |
 
 > 红线（§3）与架构边界（§4）为所有任务的通用约束，任何任务均须遵守；高风险任务（红线、架构边界、数据丢失风险）经确认后再编码。
 
