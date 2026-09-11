@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from core.i18n import I18n, Message
+from core.i18n import Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
@@ -536,12 +536,12 @@ class SchedulerService:
         if sync_result.is_complete:
             latest = missed_dates[-1]
             await self._mark_daily_update_done_db(latest.strftime("%Y%m%d"))
-            return I18n.get("sched_catchup_done", days=total)
+            return Message("sched_catchup_done", {"days": total})
         logger.warning(
             "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
             sync_result.failed_critical_tables,
         )
-        return I18n.get("sched_catchup_partial", days=total)
+        return Message("sched_catchup_partial", {"days": total})
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
@@ -635,7 +635,7 @@ class SchedulerService:
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
             if result is None:
-                return I18n.get("sched_daily_done", days=0, rows=0)
+                return Message("sched_daily_done", {"days": 0, "rows": 0})
             days = getattr(result, "days_processed", None)
             if days is not None:
                 # D1-4: SyncResult 路径——天数与条数分开展示，避免"天数被当条数"的语义错位。
@@ -648,7 +648,7 @@ class SchedulerService:
                         "— possibly empty market or insufficient permission",
                         days,
                     )
-                return I18n.get("sched_daily_done", days=days, rows=rows)
+                return Message("sched_daily_done", {"days": days, "rows": rows})
             # fallback（D1-2 后 run_daily_update 恒返回 SyncResult，以下为防御旧路径）
             if hasattr(result, "added"):
                 added = getattr(result, "added", 0)  # type: ignore[union-attr]
@@ -660,11 +660,11 @@ class SchedulerService:
                     added = 0
             else:
                 added = result
-            return I18n.get("sched_daily_done", days=0, rows=added)
+            return Message("sched_daily_done", {"days": 0, "rows": added})
 
         TaskManager().submit_task(
-            name=I18n.get("sched_task_daily_update", date=today_str),
-            task_type=I18n.get("sched_task_type_daily"),
+            name=Message("sched_task_daily_update", {"date": today_str}),
+            task_type=Message("sched_task_type_daily"),
             coroutine_factory=_daily_update_logic,
             cancellable=False,
             unique_key="daily_sync",
@@ -703,11 +703,11 @@ class SchedulerService:
             )
             self._last_ai_concept_date = today_str
             await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
-            return I18n.get("sched_ai_concept_done")
+            return Message("sched_ai_concept_done")
 
         TaskManager().submit_task(
-            name=I18n.get("sched_ai_concept_task_name"),
-            task_type=I18n.get("sched_ai_concept_task_type"),
+            name=Message("sched_ai_concept_task_name"),
+            task_type=Message("sched_ai_concept_task_type"),
             coroutine_factory=_ai_concept_logic,
             cancellable=True,
             unique_key="ai_concept_sync",

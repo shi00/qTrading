@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import date, datetime
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
+from core.i18n import Message
 from data.sync.base import SyncResult
 from utils.scheduler_service import SchedulerService
 
@@ -893,7 +894,7 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_with_sync_result_days_rows(self):
@@ -914,9 +915,9 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
             # D1-4: 消息应包含条数 42（用户据此判断是否真的拉到数据）
-            assert "42" in result_msg
+            assert result_msg.params == {"days": 1, "rows": 42}
             assert svc._last_update_date == "20240614"
 
     @pytest.mark.asyncio
@@ -1003,7 +1004,7 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_empty_dataframe(self):
@@ -1022,7 +1023,7 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_int_result(self):
@@ -1041,7 +1042,7 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
 
 
 class TestAiConceptLogicClosure:
@@ -1065,7 +1066,7 @@ class TestAiConceptLogicClosure:
             await svc._run_ai_concept_tagger()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
-            assert isinstance(result_msg, str)
+            assert isinstance(result_msg, Message)
             # 验证通过 get_cancel_event 访问器获取取消事件（而非穿透 _cancel_event）
             mock_tm.get_cancel_event.assert_called_once_with("test_task")
             # 验证 manual_trigger=False（调度场景不调用 LLM）
