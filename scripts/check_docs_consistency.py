@@ -2101,11 +2101,19 @@ def check_governance_id_glossary() -> list[str]:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors
     refs: set[str] = set()
-    for path in (CLAUDE_PATH, AGENTS_PATH):
+    # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
+    # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
+    # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
+    # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
+    governance_yml = [
+        p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
+    ]
+    scan_paths = [p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md")] + governance_yml
+    for path in scan_paths:
         if path.exists():
             refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
     for gov_id in sorted(refs - registered):
-        errors.append(f"治理 ID 对照表: {gov_id} 出现在自动加载文档中，但未在 governance-ids.md 登记")
+        errors.append(f"治理 ID 对照表: {gov_id} 出现在受检文档中，但未在 governance-ids.md 登记")
     return errors
 
 
