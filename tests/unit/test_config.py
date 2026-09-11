@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 import pytest
 
@@ -85,3 +86,46 @@ class TestConfigDotenvImport:
         import config
 
         importlib.reload(config)
+
+
+class TestUserDataDir:
+    def test_user_data_dir_env_override(self, monkeypatch):
+        import config
+
+        monkeypatch.setenv("ASTOCK_USER_DATA_DIR", "/custom/user/data")
+        assert config._user_data_dir() == "/custom/user/data"
+
+    @pytest.mark.parametrize(
+        ("platform", "env", "must_contain"),
+        [
+            ("win32", {"APPDATA": "C:/Users/demo/AppData/Roaming"}, "appdata"),
+            ("darwin", {}, "app_support"),
+            ("linux", {"XDG_CONFIG_HOME": "/x/stub"}, "xdg"),
+        ],
+        ids=["win32", "darwin", "else"],
+    )
+    def test_user_data_dir_fallback_without_platformdirs(self, monkeypatch, platform, env, must_contain):
+        original_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "platformdirs":
+                raise ImportError("No module named platformdirs")
+            return original_import(name, *args, **kwargs)
+
+        import config
+
+        monkeypatch.delenv("ASTOCK_USER_DATA_DIR", raising=False)
+        monkeypatch.setattr("builtins.__import__", mock_import)
+        monkeypatch.setattr(sys, "platform", platform)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        result = config._user_data_dir()
+
+        assert result.endswith("AStockScreener")
+        if must_contain == "appdata":
+            assert Path(result).as_posix().startswith("C:/Users/demo/AppData/Roaming")
+        elif must_contain == "xdg":
+            assert Path(result).as_posix().startswith("/x/stub")
+        else:
+            assert "Application Support" in result
