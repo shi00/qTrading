@@ -49,7 +49,7 @@ redlines:
 
   - id: R3
     title: 模糊压制
-    description: "使用 # type: ignore 时不带 [reason] 注释 (pre-commit 强制拦截)"
+    description: "使用 # type: ignore 时不带 [error-code]（人类理由写在方括号外，格式 # type: ignore[错误码]  # 原因；pre-commit 强制拦截）"
     enforcement: "pre-commit"
     automation_coverage: full
     human_review_required: false
