@@ -36,8 +36,9 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Drop and recreate sw_industry_member with index_member_all real fields."""
     # 1. Drop legacy table (data has wrong column grain).
+    # DAT-15 (0018) 已删除 ix_sw_industry_member_ts_code，drop 带 if_exists 保持幂等。
     op.drop_index("ix_sw_industry_member_sw_l2_code", table_name="sw_industry_member")
-    op.drop_index("ix_sw_industry_member_ts_code", table_name="sw_industry_member")
+    op.drop_index("ix_sw_industry_member_ts_code", table_name="sw_industry_member", if_exists=True)
     op.drop_table("sw_industry_member")
 
     # 2. Recreate with corrected schema (match data/persistence/models.py).
@@ -58,14 +59,16 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("ts_code", "l3_code", "in_date", name=op.f("pk_sw_industry_member")),
     )
-    op.create_index("ix_sw_industry_member_ts_code", "sw_industry_member", ["ts_code"])
+    # 仅创建模型声明的 l2_code 索引；ts_code 为主键左前缀列，单列索引冗余（DAT-15），
+    # 不创建可保持 alembic check 通过。
     op.create_index("ix_sw_industry_member_l2_code", "sw_industry_member", ["l2_code"])
 
 
 def downgrade() -> None:
     """Restore the legacy sw_industry_member schema."""
+    # upgrade 不再创建 ts_code 索引，drop 带 if_exists 保持降级幂等。
     op.drop_index("ix_sw_industry_member_l2_code", table_name="sw_industry_member")
-    op.drop_index("ix_sw_industry_member_ts_code", table_name="sw_industry_member")
+    op.drop_index("ix_sw_industry_member_ts_code", table_name="sw_industry_member", if_exists=True)
     op.drop_table("sw_industry_member")
 
     op.create_table(
@@ -83,5 +86,5 @@ def downgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("ts_code", "index_code", name=op.f("pk_sw_industry_member")),
     )
+    # 忠实还原 pre-0020 状态：DAT-15 (0018) 已删除 ts_code 索引，仅恢复 sw_l2_code 索引。
     op.create_index("ix_sw_industry_member_sw_l2_code", "sw_industry_member", ["sw_l2_code"])
-    op.create_index("ix_sw_industry_member_ts_code", "sw_industry_member", ["ts_code"])

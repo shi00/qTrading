@@ -40,10 +40,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("ts_code", "start_date", name=op.f("pk_stock_name_history")),
     )
-    op.create_index("ix_stock_name_history_ts_code", "stock_name_history", ["ts_code"])
+    # ts_code 为主键左前缀列，单列索引冗余（与模型声明一致），不创建以保持 alembic check 通过。
 
 
 def downgrade() -> None:
     """Drop stock_name_history table."""
-    op.drop_index("ix_stock_name_history_ts_code", table_name="stock_name_history")
     op.drop_table("stock_name_history")
