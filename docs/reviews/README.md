@@ -4,6 +4,8 @@
 >
 > **状态取值**：`进行中` / `已归档` / `已消化`（已消化 = 该轮发现已全部落入修复队列并关闭）。
 >
+> **目录职责边界**：`docs/reviews/` 仅承载检视**方法论**（ai-review.md / appendix.md / quality-dimensions.md / review-profiles/ / evals/）；检视**报告产物**一律落根目录 `reviews/`（gitignored，不入 git）。报告正文 **SHALL NOT** 落 `docs/reviews/<slug>/`。正本见 ADR-0002 Errata。
+>
 > **路径说明**：报告正文落 `reviews/` 根的为**本地检视工作产物，已被 `.gitignore` 排除、不入 git**（见 [.gitignore](../../.gitignore) `/reviews/`），仅在新会话本地工作区可读；已丢失报告的轮次仅保留 ID 供追溯，不复原正文。
 
 ## 方法论文档
