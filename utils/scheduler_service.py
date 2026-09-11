@@ -33,6 +33,11 @@ _DB_KEY_DAILY_UPDATE = "sched_last_daily_update"
 _DB_KEY_NIGHTLY_PREDICTION = "sched_last_nightly_prediction"
 _DB_KEY_AI_CONCEPT_REFRESH = "sched_last_ai_concept_refresh"
 
+# D6-6: 依赖注入的必需 job（启动期契约）。这些 job 由 app 层装配注册，缺失即装配
+# 遗漏，应在启动期立即暴露而非等触发时仅留一条 warning 静默跳过。app 层 `_register_scheduler_jobs`
+# 无条件注册下列全部 job（nightly_prediction 与 AI 功能开关无关）。
+_REQUIRED_JOBS: frozenset[str] = frozenset({"nightly_prediction"})
+
 
 from utils.singleton_registry import register_singleton
 
@@ -177,6 +182,15 @@ class SchedulerService:
         """Start the scheduler"""
         if self.scheduler.running:
             return
+
+        missing = _REQUIRED_JOBS - self._registered_jobs.keys()
+        if missing:
+            # D6-6: 必需 job 未注册即装配遗漏（app 层依赖注入漏调/重构漏改）。启动期失败
+            # 比每晚触发时留一条 warning 静默跳过好：装配问题在开发/测试阶段立即暴露。
+            raise RuntimeError(
+                f"[Scheduler] 必需的定时 job 未注册: {sorted(missing)} "
+                "(call SchedulerService.register_job during app bootstrap)"
+            )
 
         self._schedule_jobs()
 

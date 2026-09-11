@@ -34,6 +34,11 @@ def _get_patches(mock_dp, mock_tm, now_val):
     )
 
 
+async def _dummy_job(svc):
+    """D6-6: 满足 _REQUIRED_JOBS 装配校验的占位 job（仅用于不验证业务逻辑的 start 路径测试）。"""
+    return None
+
+
 class TestSchedulerServiceInit:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_init_creates_scheduler(self, mock_ch):
@@ -736,6 +741,7 @@ class TestSchedulerStart:
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
+        svc.register_job("nightly_prediction", _dummy_job)
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
         svc.start()
@@ -748,6 +754,7 @@ class TestSchedulerStart:
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
+        svc.register_job("nightly_prediction", _dummy_job)
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
         svc.scheduler.start.side_effect = Exception("start error")
@@ -841,11 +848,39 @@ class TestStartDeep:
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
+        svc.register_job("nightly_prediction", _dummy_job)
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
         svc._schedule_jobs = MagicMock()
         svc.start()
         assert svc.scheduler.add_listener.call_count >= 2
+
+    @patch("utils.scheduler_service.ConfigHandler")
+    def test_start_missing_required_job_raises(self, mock_ch):
+        """D6-6: 必需 job 未注册时 start() 启动期即抛 RuntimeError，而非静默跳过。"""
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "16:30"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        svc = SchedulerService()
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = False
+        with pytest.raises(RuntimeError, match="必需的定时 job 未注册"):
+            svc.start()
+        svc.scheduler.start.assert_not_called()
+
+    @patch("utils.scheduler_service.ConfigHandler")
+    def test_start_required_job_registered_proceeds(self, mock_ch):
+        """D6-6: 装配完整（必需 job 已注册）时 start() 正常继续调度。"""
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "16:30"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        svc = SchedulerService()
+        svc.register_job("nightly_prediction", _dummy_job)
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = False
+        svc._schedule_jobs = MagicMock()
+        svc.start()
+        svc.scheduler.start.assert_called_once()
 
 
 class TestWatchConfigChangesDeep:
