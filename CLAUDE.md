@@ -20,7 +20,7 @@
 
 > 仅列不可逾越的底线；完整红线表见 §3.1，机器可读正本见 [redlines.yml](./docs/governance/redlines.yml)。**本摘要为提示，非冗余正本**，语义以 §3.1 与 `redlines.yml` 为准。
 >
-> - **不可豁免安全不变量（INVARIANT，先读后写）**：R2 异常吞没（`CancelledError` 必须 `raise`）· R3 模糊压制（`# type: ignore` 必带 `[reason]`）· R4 SQL 注入（asyncpg 必须用 `$1, $2, ...`）· R5 僵尸引擎操作 · R7 测试状态污染（单例隔离）· R9 敏感信息泄露（脱敏）· R10 硬编码密钥（keyring/环境变量）
+> - **不可豁免安全不变量（INVARIANT，先读后写）**：R2 异常吞没（`CancelledError` 必须 `raise`）· R3 模糊压制（`# type: ignore` 必带 `[error-code]`，人类理由写在方括号外）· R4 SQL 注入（asyncpg 必须用 `$1, $2, ...`）· R5 僵尸引擎操作 · R7 测试状态污染（单例隔离）· R9 敏感信息泄露（脱敏）· R10 硬编码密钥（keyring/环境变量）
 > - **工作区整洁**：R18 未隔离开发（跨多文件任务须 git worktree 隔离）
 > - **任务路由**：按 §1.8 决策树定位必读正本；改动后按 §1.9 验证命令自检。
 
@@ -176,7 +176,7 @@
 |---|------|------|---------|
 | R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 6 条契约） |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests） |
-| R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) | pre-commit |
+| R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[error-code]`（人类理由写在方括号外，格式 `# type: ignore[错误码]`  `# 原因`；pre-commit 强制拦截） | pre-commit |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) | 仅人工评审 |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
