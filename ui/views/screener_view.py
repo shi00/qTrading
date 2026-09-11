@@ -1176,6 +1176,10 @@ def _build_screener_section_card(
         alignment=ft.MainAxisAlignment.START,
     )
 
+    # 仅数据分区参与 flex 均分 (expand); 空分区紧凑呈现, 不挤压数据分区高度.
+    # 否则三分区均分导致底部结果行 (尤其 1280×720 最小视口) 布局高度≈0,
+    # 行语义节点不参与布局/不可 hit-test, 详情对话框点击与结果文本可见性失效 (C5-5 回归).
+    expands = bool(section_rows)
     if section_rows:
         body = ft.Column(
             [
@@ -1208,13 +1212,12 @@ def _build_screener_section_card(
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             padding=8,
-            expand=True,
         )
 
     return ft.Container(
         content=ft.Column([title, ft.Divider(height=1, color=AppColors.DIVIDER), body], spacing=4),
         **AppStyles.dashboard_card(padding=AppStyles.SPACING_MD),
-        expand=True,
+        expand=expands,
     )
 
 
