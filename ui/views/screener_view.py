@@ -1176,10 +1176,6 @@ def _build_screener_section_card(
         alignment=ft.MainAxisAlignment.START,
     )
 
-    # 仅数据分区参与 flex 均分 (expand); 空分区紧凑呈现, 不挤压数据分区高度.
-    # 否则三分区均分导致底部结果行 (尤其 1280×720 最小视口) 布局高度≈0,
-    # 行语义节点不参与布局/不可 hit-test, 详情对话框点击与结果文本可见性失效 (C5-5 回归).
-    expands = bool(section_rows)
     if section_rows:
         body = ft.Column(
             [
@@ -1212,12 +1208,13 @@ def _build_screener_section_card(
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             padding=8,
+            expand=True,
         )
 
     return ft.Container(
         content=ft.Column([title, ft.Divider(height=1, color=AppColors.DIVIDER), body], spacing=4),
         **AppStyles.dashboard_card(padding=AppStyles.SPACING_MD),
-        expand=expands,
+        expand=True,
     )
 
 
@@ -1505,14 +1502,17 @@ def _build_screener_table_card(
         if is_realtime:
             # D7-3: 当前页内按 ai_status 拆分为三分区 (recommended/excluded/failed) 独立呈现;
             # VM 已保证三分区和 data.current_page_rows 行零丢失 (非三分区值归入 failed)。
-            # 空分区仍渲染标题+空态行, 保证决策可解释 (不因无行而整体消失)。
+            # 仅渲染有数据的分区: 空分区不留占位卡。否则小视口 (1280×720) 下有数据分区
+            # 被空分区挤到页面底部未布局区, CanvasKit 不物化其语义节点, 结果行不可见
+            # (C5-5 视口塌陷回归)。三态均有结果时并列呈现; 某态无行时该分区整体不显示,
+            # 决策可解释性由剩余有行分区承载。
             body_rows = [
                 _build_screener_section_card(
                     title_key=meta[0],
-                    count=len(section_formatted.get(meta[3], [])),
+                    count=len(rows),
                     icon=meta[1],
                     icon_color=meta[2],
-                    section_rows=section_formatted.get(meta[3], []),
+                    section_rows=rows,
                     vt_columns=vt_columns,
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
@@ -1520,6 +1520,7 @@ def _build_screener_table_card(
                     on_row_click=on_row_click,
                 )
                 for meta in _SECTION_META
+                if (rows := section_formatted.get(meta[3], []))
             ]
         else:
             # HISTORY: 历史记录来自 ScreeningHistory 表 (无 ai_status 列), 无法按 AI 三态分区;
