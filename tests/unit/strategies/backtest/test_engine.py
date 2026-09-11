@@ -938,7 +938,8 @@ class TestEnrichSuspendStatus:
         return engine
 
     @pytest.mark.asyncio
-    async def test_no_suspend_data_returns_all_tradable(self):
+    async def test_no_suspend_data_returns_all_tradable_and_warns(self):
+        """DATA-03：查询成功但区间内无 suspend_d 数据 → 全可交易 + suspend_data_absent 告警。"""
         engine = self._make_engine()
         engine.cache = MagicMock()
         engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=None)
@@ -955,10 +956,16 @@ class TestEnrichSuspendStatus:
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "suspend_data_absent"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "suspend_d" in warning.error_message
 
     @pytest.mark.asyncio
-    async def test_empty_suspend_data_returns_all_tradable(self):
+    async def test_empty_suspend_data_returns_all_tradable_and_warns(self):
+        """DATA-03：suspend_d 返回空 DataFrame → 全可交易 + suspend_data_absent 告警。"""
         import pandas as pd
 
         engine = self._make_engine()
@@ -977,7 +984,9 @@ class TestEnrichSuspendStatus:
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "suspend_data_absent"
+        assert "suspend_d" in warning.error_message
 
     @pytest.mark.asyncio
     async def test_suspend_data_marks_suspended_stocks(self):
@@ -1050,7 +1059,8 @@ class TestEnrichLimitStatus:
         return engine
 
     @pytest.mark.asyncio
-    async def test_no_limit_data_returns_none_limit_status(self):
+    async def test_no_limit_data_returns_none_limit_status_and_warns(self):
+        """DATA-03：区间内无 limit_list 数据 → limit_status=None + limit_data_absent 告警。"""
         engine = self._make_engine()
         engine.cache = MagicMock()
         engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=None)
@@ -1067,7 +1077,12 @@ class TestEnrichLimitStatus:
 
         assert "limit_status" in result.columns
         assert all(v is None for v in result["limit_status"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "limit_data_absent"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "limit_list" in warning.error_message
 
     @pytest.mark.asyncio
     async def test_limit_data_marks_limit_stocks(self):
