@@ -637,6 +637,32 @@ class TestBuildTaskCard:
         buttons = _find_all_controls_by_type(card, ft.TextButton)
         assert len(buttons) == 0
 
+    # --- D6-3: INTERRUPTED task retry button（与 FAILED 业务等价，均可重新发起续传）---
+
+    def test_build_task_card_interrupted_has_retry_button(self):
+        """INTERRUPTED task card should show Retry button when on_retry is provided."""
+        row = self._make_row(status=TaskStatus.INTERRUPTED)
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock())
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) >= 1
+
+    def test_build_task_card_interrupted_retry_triggers_callback(self):
+        """Clicking Retry button on INTERRUPTED card should call on_retry with task_id."""
+        row = self._make_row(id="interrupted-task-1", status=TaskStatus.INTERRUPTED)
+        on_retry = MagicMock()
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=on_retry)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) >= 1
+        _trigger_callback(buttons[0].on_click, MagicMock())
+        on_retry.assert_called_once_with("interrupted-task-1")
+
+    def test_build_task_card_interrupted_no_retry_button_when_callback_none(self):
+        """INTERRUPTED task card should not show Retry button when on_retry is None."""
+        row = self._make_row(status=TaskStatus.INTERRUPTED)
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=None)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) == 0
+
 
 # ---------------------------------------------------------------------------
 # TaskCenterView 组件体测试 (覆盖 263-408 行 @ft.component 函数体)

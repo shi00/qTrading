@@ -2005,7 +2005,8 @@ class TestTaskManagerUpdateProgressThrottle:
 
 
 class TestRetryTask:
-    """覆盖 retry_task 的 4 个分支：task 不存在 / 非 FAILED / 无 factory / 重试成功。"""
+    """覆盖 retry_task 分支：task 不存在 / 非可重试状态（QUEUED/CANCELLED）/ 无 factory /
+    FAILED 重试成功 / INTERRUPTED 重试成功（D6-3）。"""
 
     def test_task_not_found_returns_none(self):
         with singleton_state(TaskManager):
@@ -2027,6 +2028,16 @@ class TestRetryTask:
             task._coroutine_factory = None
             mgr._tasks["tid2"] = task
             result = mgr.retry_task("tid2")
+            assert result is None
+
+    def test_cancelled_task_not_retryable_returns_none(self):
+        """D6-3: CANCELLED 不纳入可重试——用户主动取消代表放弃意图。"""
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            task = AppTask(status=TaskStatus.CANCELLED)
+            task._coroutine_factory = MagicMock()
+            mgr._tasks["tid4"] = task
+            result = mgr.retry_task("tid4")
             assert result is None
 
     def test_retry_success_calls_submit_task(self):
@@ -2055,6 +2066,34 @@ class TestRetryTask:
             a=1,
         )
         # 显式确认 unique_key 未被传入（retry 不使用唯一键去重）
+        assert "unique_key" not in mock_submit.call_args.kwargs
+
+    def test_interrupted_task_retry_success_calls_submit_task(self):
+        """D6-3: INTERRUPTED 与 FAILED 业务等价，可重试续传。"""
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            factory = MagicMock()
+            task = AppTask(
+                name="Interrupted",
+                task_type="Data",
+                status=TaskStatus.INTERRUPTED,
+                cancellable=True,
+            )
+            task._coroutine_factory = factory
+            task._coroutine_kwargs = {"a": 1}
+            mgr._tasks["tid5"] = task
+
+            with patch.object(mgr, "submit_task", return_value="new_tid_456") as mock_submit:
+                result = mgr.retry_task("tid5")
+
+        assert result == "new_tid_456"
+        mock_submit.assert_called_once_with(
+            name="Interrupted",
+            task_type="Data",
+            coroutine_factory=factory,
+            cancellable=True,
+            a=1,
+        )
         assert "unique_key" not in mock_submit.call_args.kwargs
 
 

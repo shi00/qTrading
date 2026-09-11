@@ -151,9 +151,9 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
         self._task_manager.clear_finished()
 
     def retry_task(self, task_id: str) -> None:
-        """Retry a failed task via TaskManager (Phase 6.2, FR-UX-006).
+        """Retry a failed/interrupted task via TaskManager (Phase 6.2, FR-UX-006).
 
-        Re-submits the failed task with stored factory + kwargs. TaskManager
-        handles validation (task must be FAILED + have stored factory).
+        Re-submits the task with stored factory + kwargs. TaskManager handles
+        validation (task must be FAILED/INTERRUPTED + have stored factory).
         """
         self._task_manager.retry_task(task_id)
