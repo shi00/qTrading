@@ -61,8 +61,9 @@ class TestThreadPoolInjection:
 class TestAppTask:
     def test_default_values(self):
         task = AppTask()
-        assert task.name == "Unknown Task"
-        assert task.task_type == "System"
+        # D7-5: 默认值改为 Message（i18n），非裸硬编码字符串
+        assert task.name == Message("task_name_unknown")
+        assert task.task_type == Message("task_type_system")
         assert task.status == TaskStatus.QUEUED
         assert task.progress == 0.0
         assert task.cancellable is False

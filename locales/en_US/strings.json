@@ -43,6 +43,8 @@
     "task_name_daily_sync": "Full Daily Update",
     "task_name_clear_cache": "Clear All Cache",
     "task_name_backtest": "Backtest: {name}",
+    "task_name_unknown": "Unknown Task",
+    "task_type_system": "System",
     "task_progress_checking": "Checking local cache health...",
     "task_progress_analyzing": "Analyzing data quality, updating metrics...",
     "task_result_health_done": "Health check completed",
