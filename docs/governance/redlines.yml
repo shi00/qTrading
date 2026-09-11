@@ -6,7 +6,7 @@
 # 契约测试: tests/unit/test_docs_consistency.py::TestRedlinesYamlConsistency
 #
 # 字段说明:
-#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R19)
+#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R22)
 #   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
 #   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
 #   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
@@ -25,7 +25,7 @@
 #     EXCEPTIONABLE: 只能通过例外注册表豁免 (docs/governance/exceptions.yml)
 #
 # 修改规则:
-#   - 新增 R19+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
+#   - 新增 R20+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
 #   - 禁止删除或复用已废弃编号 (append-only)
 #   - 字段变更 (如新增字段) 需同步更新契约测试
 #   - EXCEPTIONABLE 规则被例外注册表引用时, 例外 rule_id 必须指向 EXCEPTIONABLE 规则
@@ -180,5 +180,29 @@ redlines:
     description: "新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 scripts/check_diff_coverage.py / scripts/check_per_file_coverage.py 强制）"
     enforcement: "CI-test（scripts/check_diff_coverage.py --strict --threshold 80 + scripts/check_per_file_coverage.py）"
     automation_coverage: partial
+    human_review_required: true
+    rule_type: NEW_CODE
+
+  - id: R20
+    title: 单位未核对的量纲比较
+    description: "策略/回测中对已知金额、数量列（north_money / net_amount / amount / total_mv / circ_mv / vol）的裸数值比较，调用链上无显式单位换算即违规（必须经 threshold_in_data_unit() 统一入口换算后再比较）"
+    enforcement: "仅人工评审（统一入口 threshold_in_data_unit() 架构惯例 + AST 可行性原型 scripts/prototype_business_redlines.py 供复核；误报率高不设自动拦截，R20 语义以人工评审为准）"
+    automation_coverage: none
+    human_review_required: true
+    rule_type: NEW_CODE
+
+  - id: R21
+    title: 缺失值伪装
+    description: "业务语义字段（score / ai_score / confidence 等）缺失必须用 None/哨兵表示，禁止填充业务上合法的具体值（0 分、50% 置信度、空表视为「无限制」）"
+    enforcement: "仅人工评审（AST 可行性原型 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor 检测 fillna/fill/赋值 0·50 形态供复核；存量缺陷修复前不设自动拦截）"
+    automation_coverage: none
+    human_review_required: true
+    rule_type: NEW_CODE
+
+  - id: R22
+    title: 水位线单调性
+    description: "checkpoint / 高水位语义的持久化状态（如 set_app_state 写入的断点续传水位），写入必须单调（优先 *_max 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值"
+    enforcement: "仅人工评审（AST 可行性原型 scripts/prototype_business_redlines.py 的 WatermarkVisitor 检测 set_app_state 非 *_max 写水位形态供复核；存量缺陷修复前不设自动拦截）"
+    automation_coverage: none
     human_review_required: true
     rule_type: NEW_CODE
