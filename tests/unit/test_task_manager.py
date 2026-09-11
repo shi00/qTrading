@@ -2101,6 +2101,46 @@ class TestTaskManagerUpdateProgressThrottle:
         assert mgr._dirty is False
 
 
+class TestAppTaskIsRetryable:
+    """覆盖 AppTask.is_retryable 派生属性（D6-7）四象限逻辑。
+
+    is_retryable = (status ∈ _RETRYABLE_STATUSES) AND (_coroutine_factory is not None)。
+    历史任务从 DB 加载无 factory 时，即使状态为 FAILED/INTERRUPTED 也不可重试。
+    """
+
+    def test_failed_with_factory_is_retryable(self):
+        task = AppTask(status=TaskStatus.FAILED)
+        task._coroutine_factory = MagicMock()
+        assert task.is_retryable is True
+
+    def test_interrupted_with_factory_is_retryable(self):
+        task = AppTask(status=TaskStatus.INTERRUPTED)
+        task._coroutine_factory = MagicMock()
+        assert task.is_retryable is True
+
+    def test_failed_without_factory_is_not_retryable(self):
+        """D6-7: 历史任务无 factory，即使 FAILED 也不可重试。"""
+        task = AppTask(status=TaskStatus.FAILED)
+        assert task._coroutine_factory is None
+        assert task.is_retryable is False
+
+    def test_interrupted_without_factory_is_not_retryable(self):
+        task = AppTask(status=TaskStatus.INTERRUPTED)
+        assert task.is_retryable is False
+
+    def test_non_retryable_status_not_retryable_even_with_factory(self):
+        """CANCELLED/QUEUED/RUNNING/COMPLETED 即使有 factory 也不可重试。"""
+        for status in (
+            TaskStatus.CANCELLED,
+            TaskStatus.QUEUED,
+            TaskStatus.RUNNING,
+            TaskStatus.COMPLETED,
+        ):
+            task = AppTask(status=status)
+            task._coroutine_factory = MagicMock()
+            assert task.is_retryable is False
+
+
 class TestRetryTask:
     """覆盖 retry_task 分支：task 不存在 / 非可重试状态（QUEUED/CANCELLED）/ 无 factory /
     FAILED 重试成功 / INTERRUPTED 重试成功（D6-3）。"""

@@ -42,6 +42,7 @@ class TaskRow:
     cancellable: bool
     created_at: datetime.datetime
     error: str
+    is_retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
                 cancellable=t.cancellable,
                 created_at=t.created_at,
                 error=t.error,
+                is_retryable=t.is_retryable,
             )
             for t in tasks
         )

@@ -512,6 +512,9 @@ class TestBuildTaskCard:
             created_at=datetime.datetime(2025, 1, 1, 12, 0, 0),
             error="",
         )
+        # D6-7: 默认按 status 推断 is_retryable——FAILED/INTERRUPTED 视为带 factory 的
+        # 可重试任务（真实世界对应活动任务或仍持 factory 的任务），无需调用方显式传值。
+        defaults.setdefault("is_retryable", status in (TaskStatus.FAILED, TaskStatus.INTERRUPTED))
         defaults.update(kwargs)
         return TaskRow(**defaults)
 
@@ -660,6 +663,27 @@ class TestBuildTaskCard:
         """INTERRUPTED task card should not show Retry button when on_retry is None."""
         row = self._make_row(status=TaskStatus.INTERRUPTED)
         card = _build_task_card(row, on_cancel=MagicMock(), on_retry=None)
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        assert len(buttons) == 0
+
+    # --- D6-7: 重试按钮可见性基于 is_retryable（历史任务无 factory 时重试入口无效）---
+
+    def test_build_task_card_failed_no_retry_button_when_not_retryable(self):
+        """FAILED task without factory (is_retryable=False) must NOT show Retry button even with on_retry.
+
+        D6-7: 从 DB 加载的历史任务即使状态为 FAILED 也没有 _coroutine_factory，无法重建
+        协程重试；UI 以 is_retryable 隐藏重试按钮，避免"按钮存在但无效"。
+        """
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock(), on_view_details=MagicMock())
+        buttons = _find_all_controls_by_type(card, ft.TextButton)
+        # 仅详情按钮，无重试按钮
+        assert len(buttons) == 1
+
+    def test_build_task_card_interrupted_no_retry_button_when_not_retryable(self):
+        """INTERRUPTED task without factory (is_retryable=False) must NOT show Retry button."""
+        row = self._make_row(status=TaskStatus.INTERRUPTED, is_retryable=False)
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock())
         buttons = _find_all_controls_by_type(card, ft.TextButton)
         assert len(buttons) == 0
 

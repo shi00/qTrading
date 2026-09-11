@@ -254,7 +254,10 @@ def _build_task_card(
     elif row.status in (TaskStatus.FAILED, TaskStatus.INTERRUPTED):
         # Phase 6.2 (FR-UX-006) + D6-3: Retry + View Details buttons for
         # failed/interrupted tasks (INTERRUPTED 与 FAILED 业务等价，均可重新发起续传)
-        if on_retry is not None:
+        # D6-7: 重试按钮可见性基于 is_retryable（状态可重试 AND 保有 factory）——历史任务
+        # 从 DB 加载无 factory 即使状态为 FAILED/INTERRUPTED 也无法重试，不显示按钮，
+        # 避免"按钮存在但无效"的体验问题。
+        if on_retry is not None and row.is_retryable:
             action_buttons.append(
                 ft.TextButton(
                     I18n.get("task_retry"),
