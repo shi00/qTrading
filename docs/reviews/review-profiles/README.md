@@ -16,7 +16,7 @@
 | [library-sdk-plugin.md](./library-sdk-plugin.md) | 库、SDK、插件公共 API | API 稳定性/线程安全/默认配置/弃用 |
 | [third-party-rpa.md](./third-party-rpa.md) | 第三方集成、浏览器自动化 | 稳定契约/定位稳健/会话过期/幂等 |
 | [ai-ml-llm.md](./ai-ml-llm.md) | AI/ML/LLM、非确定性输出 | 不可信输出/注入/泄露/工具校验/评测 |
-| [project-profile.md](./project-profile.md) | AStockScreener 项目特定规则 | 红线 R1-R19/架构边界/reviewProfile |
+| [project-profile.md](./project-profile.md) | AStockScreener 项目特定规则 | 红线 R1-R22/架构边界/reviewProfile |
 
 ## 加载规则
 

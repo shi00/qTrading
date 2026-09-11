@@ -6,7 +6,7 @@
 
 项目特定规则优先于 [ai-review.md](../ai-review.md) 通用建议。冲突时以 [CLAUDE.md](../../../CLAUDE.md) §3 红线 / §4 架构边界为准。
 
-## 红线映射（R1-R19）
+## 红线映射（R1-R22）
 
 检视时必须检查以下红线违反（完整定义见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 与 [docs/governance/redlines.yml](../../governance/redlines.yml)）：
 
@@ -31,6 +31,9 @@
 | R17 保留字作字段 | SQL 保留字作表名或列名 |
 | R18 未隔离开发 | 新特性/重构未启用 git worktree 隔离 |
 | R19 未配套测试的业务逻辑变更 | 新增/修改业务逻辑未同步新增或更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」） |
+| R20 单位未核对的量纲比较 | 策略/回测对已知金额、数量列（`north_money`/`net_amount`/`amount`/`total_mv`/`circ_mv`/`vol`）的裸数值比较无显式单位换算（须经 `threshold_in_data_unit()`） |
+| R21 缺失值伪装 | 业务语义字段缺失被填充合法具体值（`score`/`ai_score` 填 `0` 分、`confidence` 填 `50%`、空表视为「无限制」）。已修复缺陷（DATA-03→`suspend_data_absent`）不得再判为伪装 |
+| R22 水位线单调性 | checkpoint/高水位持久化写入非单调（`set_app_state` 非 `*_max` 写水位；须优先 `*_max`/GREATEST 保护 + 乱序写入单测） |
 
 ## reviewProfile 结构
 

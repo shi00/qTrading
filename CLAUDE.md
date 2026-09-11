@@ -6,7 +6,7 @@
 > **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-08
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.5.0（规则集版本，规则变更时递增）
+> - ruleset_version: 1.6.0（规则集版本，规则变更时递增）
 > - last_reviewed: 2026-09-11
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
@@ -156,7 +156,7 @@
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `python -c "from flet_mcp import mcp; mcp.run()"`；IDE 本地 MCP 配置不入版本控制需用户手动创建），"not found" 结果在 api.json 完整收录前提下具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级；若 flet-mcp 滞后发布见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §5；版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
-- **禁止臆造红线编号**：引用 R1~R19 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
+- **禁止臆造红线编号**：引用 R1~R22 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
 
 ---
@@ -194,8 +194,11 @@
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 | R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 强制） | CI-test（`scripts/check_diff_coverage.py --strict --threshold 80` + `scripts/check_per_file_coverage.py`） |
+| R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的裸数值比较，调用链上无显式单位换算即违规（必须经 `threshold_in_data_unit()` 统一入口换算后再比较） | 仅人工评审（统一入口 `threshold_in_data_unit()` 架构惯例 + AST 可行性原型 `scripts/prototype_business_redlines.py` 供复核；误报率高不设自动拦截，R20 语义以人工评审为准） |
+| R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」） | 仅人工评审（AST 可行性原型 `scripts/prototype_business_redlines.py` 的 MissingMaskingVisitor 检测 fillna/fill/赋值 0·50 形态供复核；存量缺陷修复前不设自动拦截） |
+| R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | 仅人工评审（AST 可行性原型 `scripts/prototype_business_redlines.py` 的 WatermarkVisitor 检测 set_app_state 非 *_max 写水位形态供复核；存量缺陷修复前不设自动拦截） |
 
-> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R2 由 `tests/unit/test_no_cancelled_error_swallow.py` AST 扫描守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15/R16（VM 构造单例切面）及 UI 裸色拦截已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R11 由 `tests/unit/test_no_class_attr_asyncio_primitives.py` AST 扫描守护类与实例属性构造点。R16 其余维度（事件处理器内同步 IO 等）及 R11 缓存点/跨循环使用仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。R19（未配套测试）由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 在 CI 强制（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」）。
+> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R2 由 `tests/unit/test_no_cancelled_error_swallow.py` AST 扫描守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15/R16（VM 构造单例切面）及 UI 裸色拦截已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R11 由 `tests/unit/test_no_class_attr_asyncio_primitives.py` AST 扫描守护类与实例属性构造点。R16 其余维度（事件处理器内同步 IO 等）及 R11 缓存点/跨循环使用仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。R19（未配套测试）由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 在 CI 强制（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」）。R20/R21/R22（单位未核对 / 缺失值伪装 / 水位线单调性）为 `NEW_CODE` 业务红线且暂为 `仅人工评审`：AST 可行性原型 `scripts/prototype_business_redlines.py` 已验证三者的静态识别，但 R20 因误报率高（无法追踪数据流区分已换算/裸比较）不设自动拦截，R21/R22 因存量缺陷未修复不设自动拦截；三者均依赖 AI 自查与统一入口架构惯例（`threshold_in_data_unit` / `None` 哨兵 / `*_max` 单调写入）兜底，存量缺陷修复后另行评估自动 gate。
 
 > **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
 > - `INVARIANT`：不可豁免的无条件安全不变量；
