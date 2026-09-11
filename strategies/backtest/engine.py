@@ -277,7 +277,20 @@ class VectorBacktestEngine:
             )
 
             if suspend_pd is None or suspend_pd.empty:
-                return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), None
+                # DATA-03：区分「查询失败（enrich 异常已告警）」与「查询成功但区间内无停牌数据」。
+                # 后者多为用户未同步 suspend_d 表，静默乐观降级会让回测在停牌股上成交，结果被美化，
+                # 故必须显式告警（逐区间一次）。
+                warning = DataWarning(
+                    warning_type="suspend_data_absent",
+                    start_date=start_date,
+                    end_date=end_date,
+                    affected_stock_count=quotes_df.height,
+                    error_message=(
+                        "suspend_d 表在该区间无数据，停牌保护未生效，回测默认全市场可交易。"
+                        "若从未同步停牌数据，回测可能在停牌股票上成交，实盘不可执行。"
+                    ),
+                )
+                return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), warning
 
             suspend_df = pl.from_pandas(suspend_pd)
             suspend_df = suspend_df.select(["ts_code", "trade_date"]).with_columns(pl.lit(False).alias("is_tradable"))
@@ -329,7 +342,20 @@ class VectorBacktestEngine:
             )
 
             if limit_list_pd is None or limit_list_pd.empty:
-                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), None
+                # DATA-03：与 suspend 同理，查询成功但区间内无涨跌停数据必须显式告警
+                # （limit_list 需较高 Tushare 积分，普通用户大概率未同步），
+                # 否则默认无涨跌停限制会让回测在涨停板上买入/跌停板上卖出，收益被高估。
+                warning = DataWarning(
+                    warning_type="limit_data_absent",
+                    start_date=start_date,
+                    end_date=end_date,
+                    affected_stock_count=quotes_df.height,
+                    error_message=(
+                        "limit_list 表在该区间无数据，涨跌停撮合保护未生效。"
+                        "回测允许了涨停买入/跌停卖出，实盘不可执行，收益被高估。"
+                    ),
+                )
+                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
 
             limit_df = pl.from_pandas(limit_list_pd)
             limit_df = limit_df.select(["ts_code", "trade_date", "limit_type"]).rename({"limit_type": "limit_status"})

@@ -20,7 +20,12 @@ class DataWarning:
     用于记录 enrichment 失败时的详细信息，便于用户理解数据质量问题。
     """
 
-    warning_type: Literal["suspend_enrich_failed", "limit_enrich_failed"]
+    warning_type: Literal[
+        "suspend_enrich_failed",
+        "limit_enrich_failed",
+        "suspend_data_absent",
+        "limit_data_absent",
+    ]
     start_date: str
     end_date: str
     affected_stock_count: int
