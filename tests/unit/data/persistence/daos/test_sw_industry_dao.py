@@ -11,7 +11,11 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
+from data.persistence.daos.sw_industry_dao import (
+    StockNameHistoryDao,
+    SwIndustryClassifyDao,
+    SwIndustryMemberDao,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -32,6 +36,13 @@ def _make_member_dao() -> SwIndustryMemberDao:
         yield "mock_conn"
 
     dao._guarded_begin = mock_begin
+    return dao
+
+
+def _make_name_history_dao() -> StockNameHistoryDao:
+    dao = StockNameHistoryDao(MagicMock(spec=AsyncEngine))
+    dao._save_upsert = AsyncMock(return_value=7)
+    dao._read_db = AsyncMock(return_value=pd.DataFrame())
     return dao
 
 
@@ -97,19 +108,21 @@ class TestSaveSwIndustryMember:
 
     @pytest.mark.asyncio
     async def test_valid_calls_save_upsert(self):
-        """非空 DataFrame 调用 _save_upsert，传入表名 + PK 列。"""
+        """非空 DataFrame 调用 _save_upsert，传入表名 + PK 列（DATA-04 L2 新主键）。"""
         dao = _make_member_dao()
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "index_code": ["801010.SI"],
-                "index_name": ["农林牧渔"],
-                "sw_l1_code": ["110000"],
-                "sw_l1_name": ["农林牧渔"],
-                "sw_l2_code": ["110100"],
-                "sw_l2_name": ["种植业"],
-                "sw_l3_code": ["110101"],
-                "sw_l3_name": ["玉米"],
+                "l3_code": ["110101.SI"],
+                "in_date": ["20200101"],
+                "l1_code": ["110000.SI"],
+                "l1_name": ["农林牧渔"],
+                "l2_code": ["110100.SI"],
+                "l2_name": ["种植业"],
+                "l3_name": ["玉米"],
+                "name": ["平安银行"],
+                "out_date": [None],
+                "is_new": ["Y"],
             }
         )
         result = await dao.save_sw_industry_member(df)
@@ -119,7 +132,8 @@ class TestSaveSwIndustryMember:
         assert call_args.args[1] == "sw_industry_member"
         pk_columns = call_args.kwargs["pk_columns"]
         assert "ts_code" in pk_columns
-        assert "index_code" in pk_columns
+        assert "l3_code" in pk_columns
+        assert "in_date" in pk_columns
 
 
 class TestGetSwIndustryByTsCode:
@@ -138,14 +152,16 @@ class TestGetSwIndustryByTsCode:
         expected = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
-                "index_code": ["801010.SI"],
-                "index_name": ["农林牧渔"],
-                "sw_l1_code": ["110000"],
-                "sw_l1_name": ["农林牧渔"],
-                "sw_l2_code": ["110100"],
-                "sw_l2_name": ["种植业"],
-                "sw_l3_code": ["110101"],
-                "sw_l3_name": ["玉米"],
+                "l1_code": ["110000.SI"],
+                "l1_name": ["农林牧渔"],
+                "l2_code": ["110100.SI"],
+                "l2_name": ["种植业"],
+                "l3_code": ["110101.SI"],
+                "l3_name": ["玉米"],
+                "name": ["平安银行"],
+                "in_date": ["20200101"],
+                "out_date": [None],
+                "is_new": ["Y"],
             }
         )
         dao._read_db = AsyncMock(return_value=expected)
@@ -206,7 +222,7 @@ class TestGetSwL2Mapping:
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
-                    "sw_l2_name": ["种植业", "房地产开发"],
+                    "l2_name": ["种植业", "房地产开发"],
                 }
             )
         )
@@ -236,7 +252,7 @@ class TestGetSwL2Mapping:
     async def test_specific_ts_codes_uses_chunked_in_query(self):
         """ts_codes 非空时走 chunked_in_query 分支（IN 子句 + 分块）。"""
         dao = _make_member_dao()
-        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "sw_l2_name": ["种植业"]})
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "l2_name": ["种植业"]})
         # chunked_in_query 是 staticmethod，通过实例属性覆盖以拦截调用
         dao.chunked_in_query = AsyncMock(return_value=expected_df)
 
@@ -307,13 +323,13 @@ class TestGetSwL2Mapping:
 
     @pytest.mark.asyncio
     async def test_dict_zip_preserves_ts_code_to_l2_mapping(self):
-        """返回的 dict 通过 zip(ts_code, sw_l2_name) 构造，保留多行映射。"""
+        """返回的 dict 通过 zip(ts_code, l2_name) 构造，保留多行映射。"""
         dao = _make_member_dao()
         dao._read_db = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "600000.SH"],
-                    "sw_l2_name": ["种植业", "房地产开发", "股份制银行"],
+                    "l2_name": ["种植业", "房地产开发", "股份制银行"],
                 }
             )
         )
@@ -325,3 +341,105 @@ class TestGetSwL2Mapping:
             "000002.SZ": "房地产开发",
             "600000.SH": "股份制银行",
         }
+
+
+class TestSaveStockNameHistory:
+    """save_stock_name_history：空/None 短路 + 非空 UPSERT 调用（主键 ts_code+start_date）。"""
+
+    @pytest.mark.asyncio
+    async def test_none_returns_zero(self):
+        dao = _make_name_history_dao()
+        assert await dao.save_stock_name_history(None) == 0
+        dao._save_upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_returns_zero(self):
+        dao = _make_name_history_dao()
+        assert await dao.save_stock_name_history(pd.DataFrame()) == 0
+        dao._save_upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_calls_save_upsert_with_pk(self):
+        dao = _make_name_history_dao()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "start_date": ["2020-06-30"],
+                "name": ["*ST平安"],
+                "end_date": [None],
+                "ann_date": ["2020-06-29"],
+                "change_reason": ["连续亏损实行退市风险警示"],
+            }
+        )
+        result = await dao.save_stock_name_history(df)
+        assert result == 7
+        dao._save_upsert.assert_awaited_once()
+        call_args = dao._save_upsert.call_args
+        assert call_args.args[1] == "stock_name_history"
+        pk_columns = call_args.kwargs["pk_columns"]
+        assert "ts_code" in pk_columns
+        assert "start_date" in pk_columns
+
+
+class TestGetNameAsOf:
+    """get_name_as_of：as-of 区间定位 + None 短路 + 异常分层（R2/R5/脱敏）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_ts_code_returns_none_without_query(self):
+        dao = _make_name_history_dao()
+        assert await dao.get_name_as_of("", "2021-01-01") is None
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_query_binds_dollar_placeholders(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"name": ["平安银行"]}))
+        result = await dao.get_name_as_of("000001.SZ", "2021-01-01")
+        assert result == "平安银行"
+        dao._read_db.assert_awaited_once()
+        sql_arg = dao._read_db.call_args.args[0]
+        # R4：asyncpg 占位符必须是 $1/$2 而非 %s；as-of 区间过滤需存在
+        assert "$1" in sql_arg
+        assert "$2" in sql_arg
+        assert "%s" not in sql_arg
+        assert "start_date <= $2" in sql_arg
+        assert "end_date" in sql_arg
+        params_arg = dao._read_db.call_args.args[1]
+        assert params_arg == ("000001.SZ", "2021-01-01")
+
+    @pytest.mark.asyncio
+    async def test_none_df_result_returns_none(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_name_as_of("000001.SZ", "2021-01-01") is None
+
+    @pytest.mark.asyncio
+    async def test_empty_df_result_returns_none(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_name_as_of("000001.SZ", "2021-01-01") is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_name_as_of("000001.SZ", "2021-01-01")
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_name_as_of("000001.SZ", "2021-01-01")
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_none_with_sanitization(self):
+        dao = _make_name_history_dao()
+        original_error = RuntimeError("db error with sensitive: token=secret")
+        dao._read_db = AsyncMock(side_effect=original_error)
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
+            result = await dao.get_name_as_of("000001.SZ", "2021-01-01")
+        assert result is None
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)

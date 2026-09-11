@@ -825,8 +825,9 @@ class TestScreenerDao:
             await conn.execute(
                 text(
                     "INSERT INTO sw_industry_member "
-                    "(ts_code, index_code, index_name, sw_l1_code, sw_l1_name, sw_l2_code, sw_l2_name) "
-                    "VALUES ('000001.SZ', '801711.SI', '申万二级：银行II', '801710', '银行', '801711', '银行II')"
+                    "(ts_code, l3_code, in_date, l1_code, l1_name, l2_code, l2_name, l3_name, name, out_date, is_new) "
+                    "VALUES ('000001.SZ', '801711.SI', '2015-01-01', "
+                    "'801710.SI', '银行', '801711.SI', '银行II', '银行II', '平安银行', NULL, 'Y')"
                 )
             )
 

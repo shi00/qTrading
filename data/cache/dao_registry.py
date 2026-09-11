@@ -21,7 +21,11 @@ from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.stk_limit_dao import StkLimitDao
-from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
+from data.persistence.daos.sw_industry_dao import (
+    StockNameHistoryDao,
+    SwIndustryClassifyDao,
+    SwIndustryMemberDao,
+)
 from data.persistence.daos.top_inst_dao import TopInstDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
 from data.persistence.daos.sync_dao import SyncDao
@@ -52,6 +56,7 @@ class DaoRegistry:
         ("stk_holdertrade_dao", StkHoldertradeDao),
         ("sw_industry_classify_dao", SwIndustryClassifyDao),
         ("sw_industry_member_dao", SwIndustryMemberDao),
+        ("stock_name_history_dao", StockNameHistoryDao),
         ("express_dao", ExpressDao),
         ("watchlist_dao", WatchlistDao),
     )

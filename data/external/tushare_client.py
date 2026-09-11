@@ -949,6 +949,25 @@ class TushareClient:
         """Alias for get_stock_basic"""
         return await self.get_stock_basic()
 
+    async def get_namechange(self):
+        """Get 股票名称变更历史（namechange）。
+
+        DATA-04 L3：历史名称变更记录（含 ST/*ST 状态），供 stock_name_history 表
+        as-of 还原。显式 fields 请求真实输出列 ts_code/name/start_date/end_date/
+        ann_date/change_reason。
+
+        注意（tushare issue #1858）：namechange 的入参 start_date/end_date 被映射到
+        输出 ann_date 并触发隐式 NOT NULL 过滤，早期记录（ann_date 为 NULL）会被
+        静默丢弃，故此处必须全量拉取（不传日期区间），避免 ST 历史缺失导致生存偏差。
+
+        Returns:
+            DataFrame，包含 ts_code/name/start_date/end_date/ann_date/change_reason。
+        """
+        return await self._handle_api_call(
+            self.pro.namechange,
+            fields="ts_code,name,start_date,end_date,ann_date,change_reason",
+        )
+
     async def get_daily_quotes(
         self,
         trade_date: str | None = None,
@@ -1436,22 +1455,26 @@ class TushareClient:
             fields="index_code,index_name,level,industry_code,industry_name,parent_code,is_sw",
         )
 
-    async def get_index_member_all(self, index_code: str | None = None):
+    async def get_index_member_all(self, l3_code: str | None = None):
         """Get 申万行业成分股（index_member_all）。
 
-        Phase 3F-1 §4.3.2：申万行业成分股映射（全局快照），挂 @log_async_operation（由 _handle_api_call 提供）
+        Phase 3F-1 §4.3.2 + DATA-04 L2：申万行业成分股映射，挂 @log_async_operation（由 _handle_api_call 提供）
         + 显式 fields。申万行业不加入 TABLE_TO_API_MAP（不参与交易日快照权限裁剪）。
 
+        DATA-04 L2：按真实输出字段（doc_id=335）请求 —— l1/l2/l3_code + l1/l2/l3_name +
+        ts_code + name + in_date/out_date/is_new。旧实现请求了该接口不存在的
+        index_code/sw_l1_code 等列（index_classify 口径），导致未正确落库且丢失时间维度。
+
         Args:
-            index_code: 指数代码（如 "801010.SI"）。None 时返回全市场成分股。
+            l3_code: 三级行业代码（如 "850531.SI"）。None 时返回全市场成分股。
 
         Returns:
-            DataFrame，包含 ts_code/index_code/index_name/sw_l1_code..sw_l3_name。
+            DataFrame，包含 l1_code/l1_name/l2_code/l2_name/l3_code/l3_name/ts_code/name/in_date/out_date/is_new。
         """
         return await self._handle_api_call(
             self.pro.index_member_all,
-            index_code=index_code,
-            fields="ts_code,index_code,index_name,sw_l1_code,sw_l1_name,sw_l2_code,sw_l2_name,sw_l3_code,sw_l3_name",
+            l3_code=l3_code,
+            fields="l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new",
         )
 
     async def get_repurchase(

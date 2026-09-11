@@ -174,10 +174,23 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             return
 
         try:
-            index_codes = classify_df["index_code"].astype(str).unique().tolist()
-            total = len(index_codes)
+            # DATA-04 L2：index_member_all 入参为 l3_code（接口无 index_code 入参，请求
+            # index_code 属旧 schema 错误口径，见 tushare_client.get_index_member_all）。
+            # 仅以三级行业代码（classify 的 L3 index_code，即 l3_code）遍历拉取成分，
+            # 申万分类下每股归属唯一 L3。
+            if "sw_level" in classify_df.columns:
+                l3_codes = (
+                    classify_df.loc[classify_df["sw_level"] == "L3", "index_code"]
+                    .astype(str)
+                    .dropna()
+                    .unique()
+                    .tolist()
+                )
+            else:
+                l3_codes = classify_df["index_code"].astype(str).unique().tolist()
+            total = len(l3_codes)
             logger.info(
-                "[SwIndustrySync] Members | Starting per-index sync: %s indices",
+                "[SwIndustrySync] Members | Starting per-L3 sync: %s L3 industries",
                 total,
             )
 
@@ -192,7 +205,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             # 信号，违反 2s 红线。
             last_cancel_check = time.monotonic()
 
-            for i, index_code in enumerate(index_codes):
+            for i, l3_code in enumerate(l3_codes):
                 now = time.monotonic()
                 if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
                     last_cancel_check = now
@@ -205,7 +218,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                         return
 
                 try:
-                    df = await self.context.api.get_index_member_all(index_code=index_code)
+                    df = await self.context.api.get_index_member_all(l3_code=l3_code)
                     if df is not None and not df.empty:
                         all_dfs.append(df)
                         total_rows += len(df)
@@ -225,8 +238,8 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                         logger,
                         e,
                         "general",
-                        "[SwIndustrySync] Members | Skip (%s): %s (index_code=%s)",
-                        index_code,
+                        "[SwIndustrySync] Members | Skip (%s): %s (l3_code=%s)",
+                        l3_code,
                         exc_info=True,
                     )
                     if severity == "system":
@@ -236,7 +249,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     # fetch 失败时 status 仍为 success。system 级别已 raise，此处
                     # 仅覆盖 recoverable/operational 路径。
                     result.status = SyncStatus.PARTIAL.value
-                    result.errors.append(f"member index_code={index_code}: {safe_error(e)}")
+                    result.errors.append(f"member l3_code={l3_code}: {safe_error(e)}")
 
                 # data-P1-5a: 达到 checkpoint 阈值时持久化已累积的数据，
                 # 避免循环中断导致全量数据丢失。仅在保存成功后清空 all_dfs。
@@ -268,9 +281,11 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 return
 
             combined = pd.concat(all_dfs, ignore_index=True)
-            # 去重：同一 ts_code+index_code 可能被多个级别重复返回
-            if {"ts_code", "index_code"}.issubset(combined.columns):
-                combined = combined.drop_duplicates(subset=["ts_code", "index_code"])
+            # DATA-04 L2：去重键对齐新主键 (ts_code, l3_code, in_date)，保留同一股票
+            # 同一三级行业多次纳入/剔除的历史区间（不同 in_date）。旧键 ts_code+index_code
+            # 会把同股同行的多次进出压成一条，丢失时间维度。
+            if {"ts_code", "l3_code", "in_date"}.issubset(combined.columns):
+                combined = combined.drop_duplicates(subset=["ts_code", "l3_code", "in_date"])
             count = await self.member_dao.save_sw_industry_member(combined)
             result.added += count if count else 0
             await self.context.cache.sync_dao.update_sync_status(
@@ -338,9 +353,11 @@ class SwIndustrySyncStrategy(ISyncStrategy):
         """
         try:
             combined = pd.concat(all_dfs, ignore_index=True)
-            # 去重：同一 ts_code+index_code 可能被多个级别重复返回
-            if {"ts_code", "index_code"}.issubset(combined.columns):
-                combined = combined.drop_duplicates(subset=["ts_code", "index_code"])
+            # DATA-04 L2：去重键对齐新主键 (ts_code, l3_code, in_date)，保留同一股票
+            # 同一三级行业多次纳入/剔除的历史区间（不同 in_date）。旧键 ts_code+index_code
+            # 会把同股同行的多次进出压成一条，丢失时间维度。
+            if {"ts_code", "l3_code", "in_date"}.issubset(combined.columns):
+                combined = combined.drop_duplicates(subset=["ts_code", "l3_code", "in_date"])
             await self.member_dao.save_sw_industry_member(combined)
             logger.info(
                 "[SwIndustrySync] Members | Checkpoint saved: %s records",

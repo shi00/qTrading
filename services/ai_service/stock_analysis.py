@@ -154,6 +154,11 @@ class StockAnalysisService:
             return True
 
         clean_stock_info = {k: v for k, v in stock_info.items() if not str(k).startswith("_") and is_valid_value(v)}
+        if is_backtest:
+            # DATA-04 L1：stock_basic.name 为当前快照，含 ST/*ST 标记等未来时点信息。
+            # 历史回放时若喂给 LLM，等于告知"这只股票后来被 ST 了"，引入前视偏差 →
+            # 剔除 name，保证回测分析基于历史时点可观测信息。
+            clean_stock_info.pop("name", None)
 
         stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
 
