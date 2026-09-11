@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from core.i18n import I18n
 from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
 
 pytestmark = pytest.mark.integration
@@ -113,13 +114,6 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
     fake_now = datetime.datetime(2026, 4, 23, 16, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
     monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
-    monkeypatch.setattr(
-        sched_mod.I18n,
-        "get",
-        staticmethod(
-            lambda key, **kwargs: f"{key}:{kwargs.get('days', kwargs.get('date', ''))}:{kwargs.get('rows', '')}"
-        ),
-    )
 
     class _FakeTradeCalendar:
         async def is_trading_day(self, _today):
@@ -153,8 +147,10 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
 
     factory = holder["factory"]
     msg = await factory("task-id")
-    # D1-4: DataFrame fallback 路径 — days 未知为 0，rows=DataFrame 行数 2
-    assert msg == "sched_daily_done:0:2"
+    # D1-4: DataFrame fallback 路径 — days 未知为 0，rows=DataFrame 行数 2。
+    # D7-2: 任务结果为 Message（key+params），渲染时由 View 按当前 locale 翻译。
+    assert msg.key == "sched_daily_done"
+    assert msg.params == {"days": 0, "rows": 2}
 
 
 @pytest.mark.asyncio
@@ -170,7 +166,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
     monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
     monkeypatch.setattr(
-        sched_mod.I18n,
+        I18n,
         "get",
         staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
     )
@@ -257,7 +253,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
     monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
     monkeypatch.setattr(
-        sched_mod.I18n,
+        I18n,
         "get",
         staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
     )
