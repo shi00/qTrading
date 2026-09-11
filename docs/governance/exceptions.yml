@@ -4,7 +4,7 @@
 # 校验脚本: scripts/check_docs_consistency.py::check_exceptions_yaml_consistency()
 # 契约测试: tests/unit/test_docs_consistency.py::TestExceptionsYamlConsistency
 #
-# 目的: 集中管理所有对硬规则 (红线 R1~R18 / §4 架构边界) 的已批准例外,
+# 目的: 集中管理所有对硬规则 (红线 R1~R19 / §4 架构边界) 的已批准例外,
 #       消除 KNOWN_EXCEPTIONS、技术债表、宪法各自维护独立例外的漂移风险。
 #       (P1-01: KNOWN_EXCEPTIONS、技术债与宪法不得各自维护独立例外)
 #

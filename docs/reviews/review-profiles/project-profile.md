@@ -6,7 +6,7 @@
 
 项目特定规则优先于 [ai-review.md](../ai-review.md) 通用建议。冲突时以 [CLAUDE.md](../../../CLAUDE.md) §3 红线 / §4 架构边界为准。
 
-## 红线映射（R1-R18）
+## 红线映射（R1-R19）
 
 检视时必须检查以下红线违反（完整定义见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 与 [docs/governance/redlines.yml](../../governance/redlines.yml)）：
 
@@ -30,6 +30,7 @@
 | R16 UI 阻塞主循环 | Flet 事件处理器中同步执行 IO/CPU 密集任务（CPU 密集仅限 Polars 等释放 GIL 库调用，纯 Python 计算须向量化） |
 | R17 保留字作字段 | SQL 保留字作表名或列名 |
 | R18 未隔离开发 | 新特性/重构未启用 git worktree 隔离 |
+| R19 未配套测试的业务逻辑变更 | 新增/修改业务逻辑未同步新增或更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」） |
 
 ## reviewProfile 结构
 

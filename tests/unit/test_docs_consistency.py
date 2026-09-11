@@ -718,7 +718,7 @@ class TestRedlinesYamlConsistency:
     校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
     - YAML 解析成功 + 含 redlines key
     - 每条红线含 6 字段 (id/title/description/enforcement/automation_coverage/human_review_required)
-    - R 编号连续 append-only (R1~R18, 无缺号/重号/跳号)
+    - R 编号连续 append-only (R1~R19, 无缺号/重号/跳号)
     - CLAUDE.md §3.1 表格行数 = yml 条目数
     - automation_coverage 值合法 (full/partial/none) 且与 human_review_required 一致
     - CLAUDE.md §3.1 表格与 YAML 字段语义一致 (id/title/description/enforcement)

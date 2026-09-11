@@ -6,8 +6,8 @@
 > **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-08
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.3.1（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-08
+> - ruleset_version: 1.4.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-09-11
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
@@ -145,7 +145,7 @@
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `python -c "from flet_mcp import mcp; mcp.run()"`；IDE 本地 MCP 配置不入版本控制需用户手动创建），"not found" 结果在 api.json 完整收录前提下具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级；若 flet-mcp 滞后发布见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §5；版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
-- **禁止臆造红线编号**：引用 R1~R18 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
+- **禁止臆造红线编号**：引用 R1~R19 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
 
 ---
@@ -182,8 +182,9 @@
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | pre-commit（check_redlines.py，部分守护：VM `__init__` 构造已注册单例检测；事件处理器内同步 IO 仍仅人工评审） |
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
+| R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 强制） | CI-test（`scripts/check_diff_coverage.py --strict --threshold 80` + `scripts/check_per_file_coverage.py`） |
 
-> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R2 由 `tests/unit/test_no_cancelled_error_swallow.py` AST 扫描守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15/R16（VM 构造单例切面）及 UI 裸色拦截已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R11 由 `tests/unit/test_no_class_attr_asyncio_primitives.py` AST 扫描守护类与实例属性构造点。R16 其余维度（事件处理器内同步 IO 等）及 R11 缓存点/跨循环使用仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 6 条契约守护（pre-commit `import-linter` hook）——覆盖 core/data/services/strategies 四个禁止方向，以及 utils 叶子层反向依赖（契约 5）、ui→app 单向（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）；R2 由 `tests/unit/test_no_cancelled_error_swallow.py` AST 扫描守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15/R16（VM 构造单例切面）及 UI 裸色拦截已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，守护规则数见 `scripts/check_redlines.py`，对应单元测试见 `tests/unit/`）；R11 由 `tests/unit/test_no_class_attr_asyncio_primitives.py` AST 扫描守护类与实例属性构造点。R16 其余维度（事件处理器内同步 IO 等）及 R11 缓存点/跨循环使用仍为人工评审重点（见 `docs/reviews/ai-review.md`）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。R19（未配套测试）由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 在 CI 强制（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」）。
 
 > **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
 > - `INVARIANT`：不可豁免的无条件安全不变量；
@@ -211,6 +212,7 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。预期异常、控制流异常和直接传播边界不强制分类；外部 IO 失败在转译、降级、记录或跨层传播时才要求分类。涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装，除非能证明该封装带来实质性价值。
+- **变更必须配套验证（R19）**：新增或修改业务逻辑必须同步新增/更新单测；覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」，由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 在 CI 强制。
 - **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, vm)` hook 消费 ViewModel，`vm` 即 commands（MVVM 架构与 ViewModel 生命周期 SSOT 见 [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)，Flet 声明式渲染与 API 正本见 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。界面设计遵守 [docs/flet/ui-ux-best-practices.md](./docs/flet/ui-ux-best-practices.md)；无障碍遵守 [docs/flet/accessibility-baseline.md](./docs/flet/accessibility-baseline.md)；Flet API 与声明式实现遵守 [docs/flet/v1-api-constraints.md](./docs/flet/v1-api-constraints.md)。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)

@@ -6,7 +6,7 @@
 # 契约测试: tests/unit/test_docs_consistency.py::TestRedlinesYamlConsistency
 #
 # 字段说明:
-#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R18)
+#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R19)
 #   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
 #   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
 #   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
@@ -174,3 +174,11 @@ redlines:
     automation_coverage: none
     human_review_required: true
     rule_type: WORKFLOW
+
+  - id: R19
+    title: 未配套测试的业务逻辑变更
+    description: "新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 scripts/check_diff_coverage.py / scripts/check_per_file_coverage.py 强制）"
+    enforcement: "CI-test（scripts/check_diff_coverage.py --strict --threshold 80 + scripts/check_per_file_coverage.py）"
+    automation_coverage: partial
+    human_review_required: true
+    rule_type: NEW_CODE
