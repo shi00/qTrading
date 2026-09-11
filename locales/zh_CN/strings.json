@@ -240,6 +240,7 @@
     "ai_external_acknowledgment_prompt": "未确认数据外发政策，已跳过 AI 分析。请先在「设置 → AI」或下方引导中确认。",
     "ai_external_acknowledgment_checkbox": "我已知悉：使用云端 AI 会将候选股行情/财务指标/新闻与提示词发送至所选云端供应商",
     "ai_progress_init": "初始化 AI 分析引擎...",
+    "ai_prompt_too_long": "自定义提示词过长：占用 {tokens} tokens，超出模型上下文窗口 {window} tokens。请缩短提示词或更换更大窗口的模型。",
     "ai_progress_concurrent_info": "AI 并发分析中 (并发度: {concurrency})，逐字流式已暂停，实时更新卡片进度...",
     "ai_progress_skipped": "{name} — 跳过 (无有效结果)",
     "ai_progress_analyzed": "{name} — 得分: {score}",

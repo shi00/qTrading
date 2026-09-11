@@ -264,6 +264,7 @@
     "ai_external_acknowledgment_prompt": "AI external data policy not acknowledged — AI analysis skipped. Please acknowledge in \"Settings → AI\" or via the guide below.",
     "ai_external_acknowledgment_checkbox": "I acknowledge: using cloud AI sends candidate quotes / financial metrics / news and prompts to the selected cloud provider",
     "ai_progress_init": "Initializing AI analysis engine...",
+    "ai_prompt_too_long": "Custom prompt too long: takes {tokens} tokens, exceeds model context window of {window} tokens. Shorten the prompt or switch to a larger model.",
     "ai_progress_concurrent_info": "AI concurrent analysis active (concurrency: {concurrency}). Streaming paused, updating cards in real time...",
     "ai_progress_skipped": "{name} — Skipped (no valid result)",
     "ai_progress_analyzed": "{name} — Score: {score}",
