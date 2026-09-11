@@ -38,6 +38,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.viewmodels import Message
 from ui.viewmodels.history_mode_mixin import HistoryModeMixin
+from ui.viewmodels.pagination_sorting_mixin import PaginationSortingMixin
 from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
@@ -410,20 +411,36 @@ class _FakeScreenerViewModel:
         return f"列别名[{col}]"
 
     def _set_current_page_rows(self, df: pd.DataFrame | None, page_no: int = 1, page_size: int = 50) -> None:
-        """C2b: 注入 state.current_page_rows (locale-neutral 原始行), 替代旧 _current_page_data."""
+        """C2b: 注入 state.current_page_rows (locale-neutral 原始行), 替代旧 _current_page_data.
+
+        D7-3: 与生产 VM._update_pagination 一致, 同帧原子产出按 ai_status 拆分的
+        ai_recommended_rows/ai_excluded_rows/ai_failed_rows 三分区, 否则 REALTIME
+        View 只渲染三分区空态, PaginatedTable 不挂载, 排序/行点击回调节点无法捕获。
+        """
         if df is not None and not df.empty:
             rows = tuple(ScreenerRow(values=MappingProxyType(dict(record))) for record in df.to_dict("records"))
+            recommended, excluded, failed = PaginationSortingMixin._split_page_rows_by_ai_status(rows)
             total_items = len(df)
             total_pages = (total_items + page_size - 1) // page_size
             self._set_state(
                 current_page_rows=rows,
+                ai_recommended_rows=recommended,
+                ai_excluded_rows=excluded,
+                ai_failed_rows=failed,
                 total_items=total_items,
                 total_pages=total_pages,
                 page_no=page_no,
                 page_size=page_size,
             )
         else:
-            self._set_state(current_page_rows=(), total_items=0, total_pages=0)
+            self._set_state(
+                current_page_rows=(),
+                ai_recommended_rows=(),
+                ai_excluded_rows=(),
+                ai_failed_rows=(),
+                total_items=0,
+                total_pages=0,
+            )
 
     def get_export_data(self) -> Any:
         return self._export_data
