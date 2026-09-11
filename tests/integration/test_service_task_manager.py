@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from core.i18n import Message
 from services.task_manager import (
     TERMINAL_STATUSES,
     AppTask,
@@ -65,7 +66,7 @@ class TestAppTask:
         task = AppTask()
         assert task.name == "Unknown Task"
         assert task.task_type == "System"
-        assert task.description == "Waiting..."
+        assert task.description == Message("task_status_queued")
         assert task.cancellable is False
         assert task.started_at is None
         assert task.completed_at is None
