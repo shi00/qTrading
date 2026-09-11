@@ -186,7 +186,7 @@
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
 | R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审） |
 | R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
-| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` 驱动循环同步，结构上不可漏改） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度） |
+| R13 | **未注册 DAO** | 新增 DAO 需同时登记进 `_DAO_REGISTRY` 并在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` + `sync_engines()` 驱动循环同步；**已登记的 DAO** 其 engine 同步不可漏改，登记本身仍需人工确保） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度）+ CI-test（`test_cache_manager_dao_registry.py` 反查 `_DAO_REGISTRY` 覆盖） |
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | pre-commit（check_redlines.py，部分守护：VM `__init__` 构造已注册单例检测；事件处理器内同步 IO 仍仅人工评审） |
