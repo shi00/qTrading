@@ -274,9 +274,10 @@ class TestDat06AnnDateNull:
         import asyncpg
         import sqlalchemy.exc as sa_exc
 
-        # SQLAlchemy 引擎会把 asyncpg 驱动异常包装为 sqlalchemy.exc.IntegrityError，
-        # 原始 asyncpg 异常可通过 .orig 取回——捕获包装后的异常并断言原始类型，
-        # 否则异常逃逸导致测试失败（CI PR-880 已复现）。
+        # SQLAlchemy asyncpg dialect 会用 DBAPI shim（AsyncAdapt_asyncpg_dbapi.IntegrityError）
+        # 把 asyncpg 异常再包装成 sqlalchemy.exc.IntegrityError；原始 asyncpg 异常挂在
+        # shim 的 __cause__ 链上。故捕获外层 IntegrityError 后，沿 .orig → __cause__ 链
+        # 追回原始 asyncpg.NotNullViolationError，否则异常逃逸/断言类型错位导致测试失败。
         with pytest.raises(sa_exc.IntegrityError) as excinfo:
             async with function_engine.begin() as conn:
                 await conn.execute(
@@ -286,7 +287,10 @@ class TestDat06AnnDateNull:
                     )
                 )
 
-        assert isinstance(excinfo.value.orig, asyncpg.NotNullViolationError)
+        cause = excinfo.value.orig
+        while cause is not None and not isinstance(cause, asyncpg.NotNullViolationError):
+            cause = cause.__cause__
+        assert isinstance(cause, asyncpg.NotNullViolationError)
 
     @pytest.mark.asyncio
     async def test_has_ann_date_nulls_false_on_clean_mvd(self, financial_dao):
