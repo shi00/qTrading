@@ -3142,6 +3142,40 @@ class TestDecisionTreeMapping:
         errors = check_decision_tree_mapping()
         assert any("缺字段" in e and "id" in e for e in errors), f"应优雅报缺 id 字段, got: {errors}"
 
+    def test_meta_fallback_exempt_from_reverse_canonical_mapping(self, tmp_path, monkeypatch):
+        """决策树元条目（fallback 兜底行）不作任务路由，canonical 不必在 §1.8 决策树出现（DOC-04 方向 2 豁免）."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        # fallback 元条目 canonical 指向 CLAUDE.md（红线/架构边界），该 canonical 不参与任务路由
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "a", "title": "A", "canonical": "docs/patterns/a.md"},
+                        {"id": "fallback", "title": "未列出任务类型", "canonical": "CLAUDE.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency._DECISION_TREE_META_IDS", frozenset({"fallback"}))
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert errors == [], f"fallback 元条目不应触发反向映射误报, got: {errors}"
+
 
 class TestCanonicalRouting:
     """canonical 入口承担条件路由责任（DOC-05）：声明 workflow 的入口必须含指向 workflow 的链接."""
