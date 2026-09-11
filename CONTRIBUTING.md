@@ -7,7 +7,7 @@
 > **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-08（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 > **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
 > - owner: 架构维护者
-> - ruleset_version: 1.4.0（与 CLAUDE.md 同步，规则集版本变更时递增）
+> - ruleset_version: 1.5.0（与 CLAUDE.md 同步，规则集版本变更时递增）
 > - last_reviewed: 2026-09-11
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
