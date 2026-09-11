@@ -201,8 +201,10 @@ async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
 
 async def test_institutional(strategies_ctx):
     lhb_data = pd.DataFrame(
-        {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},
+        # DATA-02: net_amount 单位为元；35000000元=3500万 > 默认 3000万, 1000000元=100万 < 3000万
+        {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [35000000.0, 1000000.0]},
     )
+    lhb_data.attrs["column_units"] = {"net_amount": "yuan"}
     ctx = {
         "top_list": lhb_data,
         "screening_data": strategies_ctx.base_data,
