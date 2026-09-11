@@ -159,7 +159,13 @@ class TestSecurityManagerSalt:
         from unittest.mock import mock_open
 
         salt_content = b"existing_salt_16bytes"
-        with patch("builtins.open", mock_open(read_data=salt_content)):
+        with (
+            patch("builtins.open", mock_open(read_data=salt_content)),
+            # 隔离文件系统 IO：os.makedirs 内部 mkdir 是真实调用，mock 的
+            # path.exists(head) 会跳过父目录递归创建，USER_DATA_ROOT 父目录
+            # 不存在时（如 CI）抛 FileNotFoundError，导致环境相关 flaky。
+            patch("utils.security_utils.os.makedirs"),
+        ):
             result = SecurityManager._get_or_create_salt()
             assert result == salt_content
 
@@ -169,6 +175,7 @@ class TestSecurityManagerSalt:
 
         with (
             patch("builtins.open", MagicMock()),
+            patch("utils.security_utils.os.makedirs"),
             patch("utils.security_utils.os.replace"),
             patch("utils.security_utils.os.fsync"),
             patch("utils.security_utils._hide_file_windows"),
@@ -236,6 +243,7 @@ class TestSecurityManagerSaveKey:
         tmp_file = SecurityManager.KEY_FILE + ".tmp"
         with (
             patch("builtins.open", side_effect=OSError("write error")),
+            patch("utils.security_utils.os.makedirs"),
             patch("utils.security_utils.os.path.exists", return_value=True),
             patch("utils.security_utils.os.remove") as mock_remove,
         ):
@@ -843,6 +851,7 @@ class TestGetOrCreateSaltCorrupted:
         m = mock_open(read_data=b"short")
         with (
             patch("builtins.open", m),
+            patch("utils.security_utils.os.makedirs"),
             patch("utils.security_utils.secrets.token_bytes", return_value=b"n" * 32),
             patch("utils.security_utils.os.replace"),
             patch("utils.security_utils.os.fsync"),
@@ -865,6 +874,7 @@ class TestGetOrCreateSaltCorrupted:
 
         with (
             patch("builtins.open", side_effect=open_side_effect),
+            patch("utils.security_utils.os.makedirs"),
             patch("utils.security_utils.secrets.token_bytes", return_value=b"m" * 32),
             patch("utils.security_utils.os.replace"),
             patch("utils.security_utils.os.fsync"),
