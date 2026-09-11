@@ -164,6 +164,10 @@ class TaskManager:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
+            inst = cls._instance
+            if inst is not None and inst._flush_handle is not None:
+                inst._flush_handle.cancel()  # D6-4: drop loop-bound timer before teardown
+                inst._flush_handle = None
             cls._instance = None
             cls._initialized = False
 
@@ -200,8 +204,11 @@ class TaskManager:
             self._MAX_SUBSCRIBER_ERRORS: int = 3
             self._background_tasks = set()  # Strong references to prevent GC
 
-            # Throttle for update_progress notifications (seconds)
-            self._last_notify_time: float = 0.0
+            # Update-progress notification: dirty flag + single deferred flush (D6-4).
+            # Replaces the old global-throttle timestamp that let high-frequency
+            # tasks starve low-frequency progress updates.
+            self._dirty: bool = False
+            self._flush_handle: asyncio.TimerHandle | None = None
             self._NOTIFY_THROTTLE_S: float = _NOTIFY_THROTTLE_S
 
             # History loaded from DB (read-only, separate from active _tasks)
@@ -459,11 +466,43 @@ class TaskManager:
         if description is not None:
             task.description = description
 
-        now = _time.monotonic()
-        if (now - self._last_notify_time) >= self._NOTIFY_THROTTLE_S or progress >= 1.0:
-            self._last_notify_time = now
-            self._notify_subscribers()
+        # D6-4: dirty flag + single deferred flush. Every accepted update is
+        # guaranteed to be pushed eventually (at most _NOTIFY_THROTTLE_S later),
+        # regardless of how many other tasks update concurrently — a low-frequency
+        # task can no longer be starved by a high-frequency one hogging a shared
+        # throttle window. progress >= 1.0 still flushes immediately (completion
+        # must not be delayed).
+        self._dirty = True
+        self._ensure_flush_scheduled()
+        if progress >= 1.0:
+            self._flush_now()
         return True
+
+    def _ensure_flush_scheduled(self):
+        """Ensure one pending flush is scheduled; never stack duplicates.
+
+        Runs on the event-loop thread (update_progress is called from task
+        coroutines), so ``call_later`` is loop-bound safe. No-op when a flush is
+        already pending or when no running loop exists (e.g. tests / shutdown).
+        """
+        if self._flush_handle is not None or not (self._loop and self._loop.is_running()):
+            return
+        self._flush_handle = self._loop.call_later(self._NOTIFY_THROTTLE_S, self._flush_pending)
+
+    def _flush_pending(self):
+        """Deferred flush: push the latest state snapshot if anything changed."""
+        self._flush_handle = None
+        if self._dirty:
+            self._dirty = False
+            self._notify_subscribers()
+
+    def _flush_now(self):
+        """Immediate flush: cancel the pending timer (if any) and push now."""
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        self._dirty = False
+        self._notify_subscribers()
 
     def is_cancelled(self, task_id: str) -> bool:
         """B-P1-5: Check if a task has been cancelled. Workers should call this
@@ -642,6 +681,15 @@ class TaskManager:
                 len(active_ids),
             )
             self._notify_subscribers()
+
+        # D6-4: drop the pending deferred-flush timer before teardown so it
+        # cannot fire after the loop is closed. The final notify above (if any)
+        # already pushed the last snapshot; clearing the dirty flag keeps a
+        # stale flush from being rescheduled later.
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        self._dirty = False
 
         # Clear any keys from tasks submitted via call_soon_threadsafe but not
         # yet enqueued (shutdown race window). Safe since no new submissions

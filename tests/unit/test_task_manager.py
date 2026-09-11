@@ -408,7 +408,6 @@ class TestTaskManagerUpdateProgress:
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        mgr._last_notify_time = 0.0
         mgr.update_progress(t.id, 0.5, "Half done")
         assert t.progress == 0.5
         assert t.description == "Half done"
@@ -417,7 +416,6 @@ class TestTaskManagerUpdateProgress:
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        mgr._last_notify_time = 0.0
         mgr.update_progress(t.id, 1.5)
         assert t.progress == 1.0
 
@@ -1977,31 +1975,130 @@ class TestTaskManagerSafeDtEdgeCases:
 
 
 class TestTaskManagerUpdateProgressThrottle:
-    """覆盖 update_progress 节流逻辑。"""
+    """D6-4: 脏标记 + 单一定时刷新替代全局时间戳节流。
 
-    def test_throttle_skips_notify(self):
-        """节流窗口内不通知（progress < 1.0）。"""
-        import time
+    原全局时间戳节流会让高频任务占满共享窗口，低频任务的更新被吞掉且不重试
+    （进度条饥饿）。新机制保证任一任务的更新最终都会被推送。
+    """
 
+    def test_update_without_loop_defers_notify(self):
+        """无运行 loop（测试/未 init_db）时 progress < 1.0 不立即推送。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        mgr._last_notify_time = time.monotonic()  # 刚通知过
-        with patch.object(mgr, "_notify_subscribers") as mock_notify:
+        notified = []
+        with patch.object(mgr, "_notify_subscribers", side_effect=lambda: notified.append(1)):
             mgr.update_progress(t.id, 0.5)
-        mock_notify.assert_not_called()
+        assert len(notified) == 0
+        assert t.progress == 0.5  # 进度已更新但未推送
 
-    def test_progress_1_bypasses_throttle(self):
-        """progress >= 1.0 时绕过节流。"""
-        import time
+    def test_running_loop_schedules_single_deferred_flush(self):
+        """loop 运行时安排单个定时刷新；同窗口多次更新不重复堆叠。"""
+        mgr = TaskManager()
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        notified = []
+        with patch.object(mgr, "_notify_subscribers", side_effect=lambda: notified.append(1)):
+            for p in (0.1, 0.2, 0.3):
+                mgr.update_progress(t.id, p)
+        mgr._loop.call_later.assert_called_once_with(mgr._NOTIFY_THROTTLE_S, mgr._flush_pending)
+        assert len(notified) == 0  # 定时刷新触发前不推送
 
+    def test_deferred_flush_notifies_once_and_clears_state(self):
+        """定时刷新触发时推送一次（含最新进度）并清除脏标记与句柄。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        mgr._last_notify_time = time.monotonic()
-        with patch.object(mgr, "_notify_subscribers") as mock_notify:
-            mgr.update_progress(t.id, 1.0)
-        mock_notify.assert_called_once()
+        notified = []
+
+        def _cb():
+            notified.append(mgr.get_all_tasks())
+
+        with patch.object(mgr, "_notify_subscribers", side_effect=_cb):
+            mgr.update_progress(t.id, 0.5)
+            mgr._flush_pending()
+        assert len(notified) == 1
+        assert notified[0][0].progress == 0.5  # 快照含最新进度
+        assert mgr._dirty is False
+        assert mgr._flush_handle is None
+
+    @pytest.mark.asyncio
+    async def test_progress_1_flushes_immediately_and_cancels_pending(self):
+        """progress >= 1.0 立即推送（完成保底）并取消待执行刷新。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        notified = []
+
+        def _cb():
+            notified.append(mgr.get_all_tasks())
+
+        with patch.object(mgr, "_notify_subscribers", side_effect=_cb):
+            mgr.update_progress(t.id, 0.5)  # 安排定时刷新
+            pending = mgr._flush_handle
+            assert pending is not None  # 中间断言：确认确实安排了刷新
+            mgr.update_progress(t.id, 1.0)  # 立即推送
+        assert len(notified) == 1
+        assert next(x for x in notified[0] if x.id == t.id).progress == 1.0
+        assert pending.cancelled() is True  # 待执行刷新已被取消
+        assert mgr._flush_handle is None
+
+    @pytest.mark.asyncio
+    async def test_reset_singleton_cancels_pending_flush(self):
+        """单例重置取消待执行刷新句柄（测试隔离，避免跨 loop 悬挂）。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        mgr.update_progress(t.id, 0.5)
+        pending = mgr._flush_handle
+        assert pending is not None  # 中间断言：确认已安排刷新
+        TaskManager._reset_singleton()
+        assert pending.cancelled() is True  # 重置时句柄已被取消
+
+    @pytest.mark.asyncio
+    async def test_low_frequency_update_eventually_pushed(self):
+        """D6-4 核心场景：高频任务刷屏期间，低频任务的更新最终也会推送。"""
+        import services.task_manager as tm_mod
+
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        notify_count = 0
+
+        def _cb(_tasks):
+            nonlocal notify_count
+            notify_count += 1
+
+        mgr.subscribe(_cb)  # 注册即初始推送一次
+        ta = AppTask(name="high_freq", status=TaskStatus.RUNNING)
+        tb = AppTask(name="low_freq", status=TaskStatus.RUNNING)
+        mgr._tasks[ta.id] = ta
+        mgr._tasks[tb.id] = tb
+        for _ in range(20):
+            mgr.update_progress(ta.id, 0.4)  # 高频刷屏
+        mgr.update_progress(tb.id, 0.5)  # 低频任务一次更新落在同一窗口
+        baseline = notify_count
+        await asyncio.sleep(tm_mod._NOTIFY_THROTTLE_S * 2)
+        assert notify_count > baseline  # 窗口到点后最终推送
+        tb_snapshot = next(x for x in mgr.get_all_tasks() if x.id == tb.id)
+        assert tb_snapshot.progress == 0.5
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_running_async_cancels_pending_flush(self):
+        """停机路径取消待执行刷新句柄（报告要求：避免 loop 关闭后回调触发）。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        mgr.update_progress(t.id, 0.5)
+        assert mgr._flush_handle is not None  # 中间断言：确认已安排刷新
+        with patch.object(mgr, "_persist_task_async", new_callable=AsyncMock):
+            await mgr.cancel_all_running_async()
+        assert mgr._flush_handle is None
+        assert mgr._dirty is False
 
 
 class TestRetryTask:
