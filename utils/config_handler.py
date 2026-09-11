@@ -21,7 +21,9 @@ from utils.security_utils import DecryptionError, SecurityError, SecurityManager
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = os.environ.get("ASTOCK_CONFIG_FILE") or os.path.join(config.APP_ROOT, "user_settings.json")
+CONFIG_FILE = os.environ.get("ASTOCK_CONFIG_FILE") or os.path.join(config.USER_DATA_ROOT, "user_settings.json")
+# D8-4：旧配置位置（APP_ROOT 即安装/源码目录）——升级迁移的一次性复制源。
+_CONFIG_FILE_LEGACY = os.path.join(config.APP_ROOT, "user_settings.json")
 KEYRING_SERVICE_NAME = "AStockScreener"
 
 ENV_FALLBACK_MAP = {

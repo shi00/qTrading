@@ -37,7 +37,7 @@ async def test_analyze_stock_does_not_dump_prompt_when_feature_disabled(monkeypa
         AsyncMock(return_value={"score": 88, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
-    monkeypatch.setattr(ai_mod.config, "APP_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)
 
     result = await service.analyze_stock(
         stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
@@ -79,7 +79,7 @@ async def test_prompt_dump_cleanup_outside_hot_path(monkeypatch, tmp_path):
         AsyncMock(return_value={"score": 90, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
-    monkeypatch.setattr(ai_mod.config, "APP_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)
     monkeypatch.setattr(time, "time", lambda: fake_now_ts)
     monkeypatch.setattr(
         os.path,
@@ -121,7 +121,7 @@ def _setup_dump_enabled(monkeypatch, tmp_path, service):
         AsyncMock(return_value={"score": 90, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
-    monkeypatch.setattr(ai_mod.config, "APP_ROOT", str(tmp_path), raising=False)
+    monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)
     monkeypatch.setattr(time_utils, "get_now", lambda: datetime.datetime(2026, 4, 28, 12, 0, 0))
 
 

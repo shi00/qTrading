@@ -176,7 +176,8 @@ class AIService:
 
     @staticmethod
     def _get_prompt_dump_dir() -> str:
-        return os.path.join(config.APP_ROOT, "logs", "ai_prompts")
+        # D8-4：prompt dump 属用户数据，随 LOG_DIR 落于 USER_DATA_ROOT/logs。
+        return os.path.join(config.USER_DATA_ROOT, "logs", "ai_prompts")
 
     def _cleanup_prompt_dumps(self) -> None:
         """Cleanup old prompt dump files; run outside analyze hot path."""
