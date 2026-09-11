@@ -113,7 +113,7 @@ class AppTask:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
     name: Message | str = "Unknown Task"
     task_type: Message | str = "System"
-    description: Message | str = "Waiting..."
+    description: Message | str = Message("task_status_queued")
     status: TaskStatus = TaskStatus.QUEUED
     progress: float = 0.0  # 0.0 to 1.0
     cancellable: bool = False
@@ -705,7 +705,7 @@ class TaskManager:
                 # CON-04: 真正获取信号量许可后才转换为 RUNNING 状态，修正排队期状态语义
                 task.status = TaskStatus.RUNNING
                 task.started_at = get_now()
-                task.description = "Starting..."
+                task.description = Message("task_starting_desc")
                 self._persist_task(task)
                 self._notify_subscribers()
                 logger.info("[TaskManager] Running: [%s] %s", task.id, task.name)
