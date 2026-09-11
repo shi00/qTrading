@@ -66,6 +66,10 @@ class FakeScreenerState:
     stock_filter: str = ""
     # C2b: 当前页 locale-neutral 原始行 (View 只读 state 快照)
     current_page_rows: tuple = ()
+    # D7-3: 当前页切片按 ai_status 拆分的三分区 (镜像 ScreenerState, View 渲染期只读)
+    ai_recommended_rows: tuple = ()
+    ai_excluded_rows: tuple = ()
+    ai_failed_rows: tuple = ()
     # D3-4: 策略执行期业务警告 (镜像 ScreenerState.warnings)
     warnings: tuple = ()
 

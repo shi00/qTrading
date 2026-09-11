@@ -3005,6 +3005,69 @@ class TestSecretsKeyringAvailability:
         with patch.object(cfg_mod.keyring, "get_password", return_value=None):
             assert secrets_mod.is_keyring_available() is True
 
+    def test_within_ttl_returns_cached_without_reprobe(self):
+        """D8-6：TTL 内命中缓存，不重复探测（get_password 不再被调用）。"""
+        from utils.config import secrets as secrets_mod
+
+        t0 = 1000.0
+        with (
+            patch.object(
+                secrets_mod.time,
+                "monotonic",
+                side_effect=[t0, t0, t0 + 30.0],
+            ),
+            patch.object(
+                cfg_mod.keyring,
+                "get_password",
+                side_effect=[None, RuntimeError("should not be re-probed")],
+            ),
+        ):
+            assert secrets_mod.is_keyring_available() is True
+            # 距首次探测 30s（< 60s TTL）：直接返回缓存，不再触发 get_password
+            assert secrets_mod.is_keyring_available() is True
+
+    def test_ttl_expiry_redetects_recovery(self):
+        """D8-6：TTL 过期后重新探测，能感知 keyring 服务后续恢复。"""
+        from utils.config import secrets as secrets_mod
+
+        t0 = 1000.0
+        with (
+            patch.object(
+                secrets_mod.time,
+                "monotonic",
+                side_effect=[t0, t0 + 61.0],
+            ),
+            patch.object(
+                cfg_mod.keyring,
+                "get_password",
+                side_effect=[RuntimeError("no dbus"), None],
+            ),
+        ):
+            # 首次探测：keyring 不可用 → False
+            assert secrets_mod.is_keyring_available() is False
+            # 61s 后（≥ 60s TTL）：重新探测，keyring 已恢复 → True
+            assert secrets_mod.is_keyring_available() is True
+
+    def test_ttl_expiry_redetects_failure(self):
+        """D8-6：TTL 过期后重新探测，也能感知 keyring 服务后续失效。"""
+        from utils.config import secrets as secrets_mod
+
+        t0 = 1000.0
+        with (
+            patch.object(
+                secrets_mod.time,
+                "monotonic",
+                side_effect=[t0, t0 + 61.0],
+            ),
+            patch.object(
+                cfg_mod.keyring,
+                "get_password",
+                side_effect=[None, RuntimeError("no dbus")],
+            ),
+        ):
+            assert secrets_mod.is_keyring_available() is True
+            assert secrets_mod.is_keyring_available() is False
+
 
 class TestMigrateConfigLocation:
     """D8-4：user_settings.json 从 APP_ROOT 一次性迁移到 USER_DATA_ROOT 的行为"""
