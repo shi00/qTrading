@@ -1097,15 +1097,71 @@ class TestNoHardcodedSecrets:
 
 
 class TestKeyFilePathFromConfig:
-    """R9/R10 守卫：KEY_FILE 等路径应从 APP_ROOT 派生，不硬编码绝对路径"""
+    """R9/R10 守卫：KEY_FILE 等路径应从 USER_DATA_ROOT 派生，不硬编码绝对路径"""
 
-    def test_key_file_paths_derived_from_app_root(self):
-        """KEY_FILE / KEY_FILE_BAK / _MACHINE_SALT_FILE / _LEGACY_MARKER 基于 APP_ROOT"""
-        from config import APP_ROOT
+    def test_key_file_paths_derived_from_user_data_root(self):
+        """KEY_FILE / KEY_FILE_BAK / _MACHINE_SALT_FILE / _LEGACY_MARKER 基于 USER_DATA_ROOT"""
+        from config import USER_DATA_ROOT
 
         from utils.security_utils import _LEGACY_MARKER, _MACHINE_SALT_FILE
 
-        assert SecurityManager.KEY_FILE.startswith(APP_ROOT)
-        assert SecurityManager.KEY_FILE_BAK.startswith(APP_ROOT)
-        assert _MACHINE_SALT_FILE.startswith(APP_ROOT)
-        assert _LEGACY_MARKER.startswith(APP_ROOT)
+        assert SecurityManager.KEY_FILE.startswith(USER_DATA_ROOT)
+        assert SecurityManager.KEY_FILE_BAK.startswith(USER_DATA_ROOT)
+        assert _MACHINE_SALT_FILE.startswith(USER_DATA_ROOT)
+        assert _LEGACY_MARKER.startswith(USER_DATA_ROOT)
+
+
+class TestMigrateLegacyKeyLocation:
+    """D8-4：密钥文件从 APP_ROOT 一次性迁移到 USER_DATA_ROOT 的行为"""
+
+    def _patch_paths(self, monkeypatch, tmp_path, *, legacy=False):
+        """把 security_utils 的密钥相关路径常量重导向 tmp_path。"""
+        import utils.security_utils as sec
+
+        legacy_root = tmp_path / "legacy" if legacy else tmp_path
+        new_root = tmp_path / "new"
+        if legacy:
+            legacy_root.mkdir(exist_ok=True)
+        new_root.mkdir(exist_ok=True)
+
+        monkeypatch.setattr(sec, "USER_DATA_ROOT", str(new_root))
+        monkeypatch.setattr(sec, "_MACHINE_SALT_FILE", str(new_root / ".secret.salt"))
+        monkeypatch.setattr(sec, "_LEGACY_MARKER", str(new_root / ".secret.legacy"))
+        monkeypatch.setattr(sec, "_KEY_FILE", str(new_root / ".secret.key"))
+        monkeypatch.setattr(sec, "_KEY_FILE_BAK", str(new_root / ".secret.key.bak"))
+        monkeypatch.setattr(sec, "_MACHINE_SALT_FILE_LEGACY", str(legacy_root / ".secret.salt"))
+        monkeypatch.setattr(sec, "_LEGACY_MARKER_LEGACY", str(legacy_root / ".secret.legacy"))
+        monkeypatch.setattr(sec, "_KEY_FILE_LEGACY", str(legacy_root / ".secret.key"))
+        monkeypatch.setattr(sec, "_KEY_FILE_BAK_LEGACY", str(legacy_root / ".secret.key.bak"))
+        return sec
+
+    def test_noop_when_new_salt_exists(self, monkeypatch, tmp_path):
+        sec = self._patch_paths(monkeypatch, tmp_path)
+        (tmp_path / "new" / ".secret.salt").write_bytes(b"s" * 32)
+        assert sec._migrate_legacy_key_location() is False
+
+    def test_noop_when_no_legacy_sources(self, monkeypatch, tmp_path):
+        sec = self._patch_paths(monkeypatch, tmp_path, legacy=True)
+        assert sec._migrate_legacy_key_location() is False
+
+    def test_copies_legacy_files_once_and_keeps_source(self, monkeypatch, tmp_path):
+        sec = self._patch_paths(monkeypatch, tmp_path, legacy=True)
+        old_key = tmp_path / "legacy" / ".secret.key"
+        old_key.write_bytes(b"legacy-key-bytes")
+        (tmp_path / "legacy" / ".secret.salt").write_bytes(b"s" * 32)
+
+        assert sec._migrate_legacy_key_location() is True
+        # 复制到新位置
+        assert (tmp_path / "new" / ".secret.key").read_bytes() == b"legacy-key-bytes"
+        assert (tmp_path / "new" / ".secret.salt").read_bytes() == b"s" * 32
+        # 保留源文件（防降级安装）
+        assert old_key.exists()
+
+    def test_skips_copy_when_destination_exists(self, monkeypatch, tmp_path):
+        sec = self._patch_paths(monkeypatch, tmp_path, legacy=True)
+        new_key = tmp_path / "new" / ".secret.key"
+        new_key.write_bytes(b"new-key")
+        (tmp_path / "legacy" / ".secret.key").write_bytes(b"legacy-key")
+
+        assert sec._migrate_legacy_key_location() is False
+        assert new_key.read_bytes() == b"new-key"  # 未被旧文件覆盖

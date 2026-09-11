@@ -165,6 +165,7 @@ def _migrate_custom_models_credentials(current_config: dict) -> bool:
 
 def _save_json_atomically(data, path):
     """Helper: Atomic write for JSON config."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_file = path + ".tmp"
     try:
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -185,6 +186,35 @@ def _save_json_atomically(data, path):
         return False
 
 
+def _migrate_config_location() -> None:
+    """把 APP_ROOT 下的旧 user_settings.json 一次性迁移到 USER_DATA_ROOT。
+
+    仅在未用 ``ASTOCK_CONFIG_FILE`` 覆盖（即 CONFIG_FILE 为默认用户数据目录路径）、
+    新文件缺失、旧文件存在时复制一次；迁移后**保留源文件**，防降级安装失效。
+    惰性在读写入口触发，避免 import 副作用；幂等，重复调用为 no-op。
+    """
+    if os.environ.get("ASTOCK_CONFIG_FILE"):
+        return
+    target = cfg.CONFIG_FILE
+    if os.path.exists(target):
+        return
+    source = cfg._CONFIG_FILE_LEGACY
+    if not os.path.exists(source):
+        return
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        # 字节级复制，保留原始内容与注释格式（一次性迁移，非热路径）。
+        import shutil
+
+        shutil.copy2(source, target)
+        cfg.logger.info("[ConfigHandler] Migrated user settings to %s", target)
+    except OSError as e:
+        cfg.logger.warning(
+            "[ConfigHandler] Config migration from legacy path skipped: %s",
+            DataSanitizer.sanitize_error(e),
+        )
+
+
 def ensure_defaults():
     """Ensure default settings exist AND remove unused keys from user_settings.json.
 
@@ -192,6 +222,7 @@ def ensure_defaults():
     Reads config directly inside the lock (not via load_config) to avoid
     wlock->rlock deadlock with RWLockFair.
     """
+    _migrate_config_location()
     try:
         with cfg.ConfigHandler._lock.gen_wlock():
             if cfg.ConfigHandler._config_cache is not None:
@@ -255,6 +286,7 @@ def ensure_defaults():
 
 def load_config():
     """Load config with Read Lock and Validation."""
+    _migrate_config_location()
     with cfg.ConfigHandler._lock.gen_rlock():
         if cfg.ConfigHandler._config_cache is not None:
             return cfg.ConfigHandler._config_cache.copy()
@@ -283,6 +315,7 @@ def load_config():
 
 def load_config_with_validation() -> ConfigValidationResult:
     """加载配置并返回验证详情 (供 UI 层使用)."""
+    _migrate_config_location()
     with cfg.ConfigHandler._lock.gen_rlock():
         if os.path.exists(cfg.CONFIG_FILE):
             try:
@@ -330,6 +363,7 @@ def save_config(config_data, replace=False):
     :param config_data: Dict to save
     :param replace: If True, replaces entire config with config_data. If False, merges.
     """
+    _migrate_config_location()
     try:
         with cfg.ConfigHandler._lock.gen_wlock():
             if replace:

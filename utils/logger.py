@@ -8,7 +8,32 @@ import config
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now
 
-LOG_DIR = os.path.join(config.APP_ROOT, "logs")
+LOG_DIR = os.path.join(config.USER_DATA_ROOT, "logs")
+# D8-4：旧日志目录（APP_ROOT 即安装/源码目录）——升级迁移的一次性复制源。
+_LOG_DIR_LEGACY = os.path.join(config.APP_ROOT, "logs")
+
+logger = logging.getLogger(__name__)
+
+
+def _migrate_legacy_log_dir() -> None:
+    """把 APP_ROOT 下的旧 logs 目录一次性迁移到 USER_DATA_ROOT/logs。
+
+    仅在新日志目录不存在而旧目录存在时复制；保留源目录（不删除），防降级安装
+    丢失日志。惰性在 setup_logging 前触发；幂等。
+    """
+    if os.path.isdir(LOG_DIR) or not os.path.isdir(_LOG_DIR_LEGACY):
+        return
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        import shutil
+
+        for name in os.listdir(_LOG_DIR_LEGACY):
+            src = os.path.join(_LOG_DIR_LEGACY, name)
+            dst = os.path.join(LOG_DIR, name)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    except OSError as e:
+        logger.error("Failed to migrate legacy log dir: %s", e, exc_info=True)
 
 
 class _SanitizingFormatter(logging.Formatter):
@@ -74,6 +99,7 @@ def setup_logging(name="astock_screener"):
     - File: user configured level (default: INFO)
     - Supports JSON format via ConfigHandler.get_log_format()
     """
+    _migrate_legacy_log_dir()
     if not os.path.exists(LOG_DIR):
         try:
             os.makedirs(LOG_DIR)

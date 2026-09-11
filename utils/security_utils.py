@@ -11,14 +11,63 @@ import typing
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from config import APP_ROOT
+from config import APP_ROOT, USER_DATA_ROOT
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
-_MACHINE_SALT_FILE = os.path.join(APP_ROOT, ".secret.salt")
-_LEGACY_MARKER = os.path.join(APP_ROOT, ".secret.legacy")
+_MACHINE_SALT_FILE = os.path.join(USER_DATA_ROOT, ".secret.salt")
+_LEGACY_MARKER = os.path.join(USER_DATA_ROOT, ".secret.legacy")
+_KEY_FILE = os.path.join(USER_DATA_ROOT, ".secret.key")
+_KEY_FILE_BAK = os.path.join(USER_DATA_ROOT, ".secret.key.bak")
+# 旧位置（APP_ROOT 即安装/源码目录）：升级迁移的一次性复制源（D8-4）。
+_MACHINE_SALT_FILE_LEGACY = os.path.join(APP_ROOT, ".secret.salt")
+_LEGACY_MARKER_LEGACY = os.path.join(APP_ROOT, ".secret.legacy")
+_KEY_FILE_LEGACY = os.path.join(APP_ROOT, ".secret.key")
+_KEY_FILE_BAK_LEGACY = os.path.join(APP_ROOT, ".secret.key.bak")
+
+
+def _migrate_legacy_key_location() -> bool:
+    """把 APP_ROOT 下的旧密钥/盐/标记文件迁移到 USER_DATA_ROOT。
+
+    仅当目标缺失且源存在时复制一次，迁移后**保留源文件**（不删除），避免降级
+    安装（回退到旧版本）时用户凭证不可解密。返回 True 表示实际发生了复制。
+
+    惰性在 ``get_key`` 首次进入前触发，确保不晚于任何密钥读写。
+    """
+    if os.path.exists(_MACHINE_SALT_FILE) and os.path.exists(USER_DATA_ROOT):
+        return False
+    pairs = (
+        (_KEY_FILE_LEGACY, _KEY_FILE),
+        (_KEY_FILE_BAK_LEGACY, _KEY_FILE_BAK),
+        (_MACHINE_SALT_FILE_LEGACY, _MACHINE_SALT_FILE),
+        (_LEGACY_MARKER_LEGACY, _LEGACY_MARKER),
+    )
+    sources = [s for s, _ in pairs if os.path.exists(s)]
+    if not sources:
+        return False
+    os.makedirs(USER_DATA_ROOT, exist_ok=True)
+    copied = False
+    for src, dst in pairs:
+        if os.path.exists(src) and not os.path.exists(dst):
+            try:
+                shutil.copy2(src, dst)
+                copied = True
+            except OSError as e:
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "Failed to migrate legacy secret file (%s -> %s): %s",
+                    exc_info=True,
+                )
+    return copied
+
+
+# D8-4：升级已有用户时将旧安装目录/源码目录下的密钥文件一次性复制到用户数据目录。
+# 在模块导入期即触发（早于任何 get_key / 密钥读写），幂等且无资源时自动跳过。
+_migrate_legacy_key_location()
 
 
 def _get_machine_fingerprint():
@@ -145,8 +194,12 @@ class SecurityManager:
     # Legacy path: base64-encoded AES key stored as plaintext on disk.
     # Security equivalent to plaintext — see class docstring (SEC-005).
     # Prefer keyring or environment variables for new deployments.
-    KEY_FILE = os.path.join(APP_ROOT, ".secret.key")
-    KEY_FILE_BAK = os.path.join(APP_ROOT, ".secret.key.bak")
+    KEY_FILE = _KEY_FILE
+    KEY_FILE_BAK = _KEY_FILE_BAK
+    # D8-4：升级已有用户时从旧安装/源码目录迁移密钥文件（含主文件与备份）。
+    # 迁移逻辑见模块级 _migrate_legacy_key_location()。
+    KEY_FILE_LEGACY = _KEY_FILE_LEGACY
+    KEY_FILE_BAK_LEGACY = _KEY_FILE_BAK_LEGACY
     _key = None
     _key_lock = threading.Lock()
 
@@ -355,6 +408,7 @@ class SecurityManager:
     @classmethod
     def _get_or_create_salt(cls):
         """Load or generate a random salt for PBKDF2 key derivation."""
+        os.makedirs(USER_DATA_ROOT, exist_ok=True)
         if os.path.exists(_MACHINE_SALT_FILE):
             try:
                 with open(_MACHINE_SALT_FILE, "rb") as f:
@@ -399,6 +453,7 @@ class SecurityManager:
     @classmethod
     def _save_key(cls, key_bytes):
         """Atomic write of key file"""
+        os.makedirs(USER_DATA_ROOT, exist_ok=True)
         encoded = base64.b64encode(key_bytes)
 
         # Atomic write: Write to tmp -> Flush -> Sync -> Rename

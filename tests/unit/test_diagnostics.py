@@ -69,7 +69,7 @@ def _patch_diagnostics_env(
     mock_tp.run_async = _run_async
 
     with (
-        patch("config.APP_ROOT", str(tmp_path)),
+        patch("config.USER_DATA_ROOT", str(tmp_path)),
         patch("data.data_processor.DataProcessor", return_value=mock_dp),
         patch("services.task_manager.TaskManager", return_value=mock_tm),
         patch("utils.thread_pool.ThreadPoolManager", return_value=mock_tp),
@@ -97,8 +97,8 @@ async def test_diagnostics_export(tmp_path):
         encoding="utf-8",
     )
 
-    # Mock config.APP_ROOT 让它指向 tmp_path
-    with patch("config.APP_ROOT", str(tmp_path)):
+    # Mock config.USER_DATA_ROOT 让它指向 tmp_path
+    with patch("config.USER_DATA_ROOT", str(tmp_path)):
         import datetime
 
         # Mock DataProcessor
@@ -224,7 +224,7 @@ async def test_diagnostics_export_with_numpy_types(tmp_path):
     (log_dir / "app.log").write_text("ok", encoding="utf-8")
     (log_dir / "error.log").write_text("ok", encoding="utf-8")
 
-    with patch("config.APP_ROOT", str(tmp_path)):
+    with patch("config.USER_DATA_ROOT", str(tmp_path)):
         mock_dp = MagicMock()
         # 模拟 stock_dao.count_trade_days() 等返回 numpy 标量的场景
         mock_dp.check_data_health = AsyncMock(

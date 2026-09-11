@@ -3075,3 +3075,63 @@ class TestSecretsKeyringAvailability:
         ):
             assert secrets_mod.is_keyring_available() is True
             assert secrets_mod.is_keyring_available() is False
+
+
+class TestMigrateConfigLocation:
+    """D8-4：user_settings.json 从 APP_ROOT 一次性迁移到 USER_DATA_ROOT 的行为"""
+
+    def test_noop_when_env_override_set(self, monkeypatch, tmp_path):
+        """ASTOCK_CONFIG_FILE 覆盖时跳过迁移，不触碰旧路径。"""
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        with patch.dict(os.environ, {"ASTOCK_CONFIG_FILE": str(tmp_path / "custom.json")}):
+            with patch.object(cfg_mod, "CONFIG_FILE", str(tmp_path / "custom.json")):
+                with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(tmp_path / "legacy.json")):
+                    (tmp_path / "legacy.json").write_text("{}", encoding="utf-8")
+                    storage_mod._migrate_config_location()
+        assert not (tmp_path / "custom.json").exists()
+
+    def test_migrates_legacy_config_once_and_keeps_source(self, monkeypatch, tmp_path):
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "old" / "user_settings.json"
+        target = tmp_path / "new" / "user_settings.json"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                storage_mod._migrate_config_location()
+
+        assert target.read_text(encoding="utf-8") == '{"log_level": "INFO"}'
+        # 保留源文件（防降级安装）
+        assert legacy.exists()
+
+    def test_noop_when_target_exists(self, monkeypatch, tmp_path):
+        """目标已存在时不复制源（不覆盖用户现有配置）。"""
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        target = tmp_path / "user_settings.json"
+        legacy = tmp_path / "legacy.json"
+        target.write_text('{"log_level": "DEBUG"}', encoding="utf-8")
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                storage_mod._migrate_config_location()
+
+        # 目标未被旧文件覆盖
+        assert target.read_text(encoding="utf-8") == '{"log_level": "DEBUG"}'
+
+    def test_noop_when_legacy_missing(self, monkeypatch, tmp_path):
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        target = tmp_path / "user_settings.json"
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(tmp_path / "missing.json")):
+                storage_mod._migrate_config_location()
+        assert not target.exists()
