@@ -5,10 +5,11 @@ import pandas as pd
 import polars as pl
 
 from core.i18n import Message
+from data.constants import HSGT_NORTH_MONEY_UNIT, TOP_LIST_NET_AMOUNT_UNIT
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
-from strategies.utils import StrategyContext
+from strategies.utils import StrategyContext, threshold_in_data_unit
 from utils.error_classifier import classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -218,12 +219,17 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             collected = await ThreadPoolManager().run_async(TaskType.CPU, gated_lf.collect)
             north_money_val = typing.cast(pl.DataFrame, collected).item()
 
-            if north_money_val is None or north_money_val <= target_flow:
+            # DATA-01: 按声明单位把 UI 阈值（亿）换算到数据单位（百万元）再比较，
+            # 修复 100 倍单位错位；未知单位抛 StrategyParamError → 拒绝 gating（catch→空）。
+            threshold = threshold_in_data_unit(flow_df, "north_money", HSGT_NORTH_MONEY_UNIT, target_flow, "yi_cny")
+
+            if north_money_val is None or north_money_val <= threshold:
                 logger.debug(
-                    "[%s] Gating: north_money=%s, threshold=%s. Returning empty (market sentiment insufficient).",
+                    "[%s] Gating: north_money=%s, threshold=%s (%s). Returning empty (market sentiment insufficient).",
                     self.name,
                     north_money_val,
-                    target_flow,
+                    threshold,
+                    HSGT_NORTH_MONEY_UNIT,
                 )
                 return pd.DataFrame()
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出北向资金过滤异常. upgrade: 策略层重构时统一走 classify_error.
@@ -236,10 +242,14 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         p = context.get("params", {})
         mv_min = p.get("total_mv_min", 100)
+        # DATA-01 附带：total_mv 列为万元（同 daily_indicators / LargePEStrategy），参数 total_mv_min 单位为亿。
+        # 换算到数据单位（万元）再比较，修复 10000 倍单位错位；lf 通常为 polars LazyFrame 不带单位元数据，
+        # threshold_in_data_unit 回退到声明单位 "wan_cny"。
+        mv_threshold = threshold_in_data_unit(lf, "total_mv", "wan_cny", mv_min, "yi_cny")
 
         return (
             lf.drop_nulls(subset=["total_mv", "pe_ttm"])
-            .filter((pl.col("total_mv") >= mv_min) & (pl.col("pe_ttm") > 0))
+            .filter((pl.col("total_mv") >= mv_threshold) & (pl.col("pe_ttm") > 0))
             .sort("total_mv", descending=True)
         )
 
@@ -283,9 +293,13 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             top_lf = pl.from_pandas(lhb).lazy()
             base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
 
+            # DATA-02: net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），参数 inst_net_min 单位为万，
+            # 换算到数据单位（元）再比较，修复 10000 倍单位错位；未知单位抛 StrategyParamError（catch→空）。
+            net_threshold = threshold_in_data_unit(lhb, "net_amount", TOP_LIST_NET_AMOUNT_UNIT, target_net, "wan_cny")
+
             return (
                 top_lf.filter(pl.col("net_amount").is_not_null())
-                .filter(pl.col("net_amount") > target_net)
+                .filter(pl.col("net_amount") > net_threshold)
                 .join(base_lf, on="ts_code", how="inner")
                 .sort("net_amount", descending=True)
             )

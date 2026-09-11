@@ -379,10 +379,13 @@ class TestInstitutionalStrategy(unittest.TestCase):
         )
         self.lhb_df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "net_amount": 5000.0},
-                {"ts_code": "000002.SZ", "net_amount": 1000.0},
+                # DATA-02: net_amount 单位为元；50000000元=5000万, 10000000元=1000万。
+                # inst_net_min=3000(万) 换算到元=3e7, 故 5000万入选 / 1000万被剔除。
+                {"ts_code": "000001.SZ", "net_amount": 50000000.0},
+                {"ts_code": "000002.SZ", "net_amount": 10000000.0},
             ]
         )
+        self.lhb_df.attrs["column_units"] = {"net_amount": "yuan"}
 
     def test_institutional_normal(self):
         """正常机构筛选"""
@@ -544,9 +547,10 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
     def test_gating_returns_stocks_when_flow_exceeds_threshold(self):
         flow_df = pd.DataFrame(
             [
-                {"trade_date": "20240101", "north_money": 120.0},
+                {"trade_date": "20240101", "north_money": 600000.0},  # 600000百万 = 6000亿 (仅 _filter_logic 断言)
             ]
         )
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         base_lf = pl.DataFrame(
             [
                 {
@@ -554,21 +558,21 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                     "name": "平安银行",
                     "industry_sw_l2": "银行",
                     "pe_ttm": 5.5,
-                    "total_mv": 4000.0,
+                    "total_mv": 2000000.0,  # 200亿 (万元)
                 },
                 {
                     "ts_code": "600000.SH",
                     "name": "浦发银行",
                     "industry_sw_l2": "银行",
                     "pe_ttm": 4.5,
-                    "total_mv": 3000.0,
+                    "total_mv": 1500000.0,  # 150亿
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "小盘股",
                     "industry_sw_l2": "科技",
                     "pe_ttm": 20.0,
-                    "total_mv": 50.0,
+                    "total_mv": 50000.0,  # 5亿
                 },
             ]
         ).lazy()
@@ -588,9 +592,10 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
     def test_gating_returns_empty_when_flow_below_threshold(self):
         flow_df = pd.DataFrame(
             [
-                {"trade_date": "20240101", "north_money": 30.0},
+                {"trade_date": "20240101", "north_money": 3000.0},  # 3000百万=30亿 < 50亿
             ]
         )
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         screening_data = pd.DataFrame(
             [
                 {
@@ -658,11 +663,12 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
     def test_sorts_by_trade_date_desc_before_taking_first(self):
         flow_df = pd.DataFrame(
             [
-                {"trade_date": "20240101", "north_money": 10.0},
-                {"trade_date": "20240103", "north_money": 120.0},
-                {"trade_date": "20240102", "north_money": 30.0},
+                {"trade_date": "20240101", "north_money": 1000.0},
+                {"trade_date": "20240103", "north_money": 12000.0},  # 12000百万=120亿 (最新)
+                {"trade_date": "20240102", "north_money": 3000.0},
             ]
         )
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         base_lf = pl.DataFrame(
             [
                 {
@@ -670,7 +676,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                     "name": "p",
                     "industry_sw_l2": "x",
                     "pe_ttm": 5.0,
-                    "total_mv": 500.0,
+                    "total_mv": 2000000.0,  # 200亿
                 }
             ]
         ).lazy()
@@ -683,7 +689,8 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         assert len(out) == 1
 
     def test_negative_pe_ttm_excluded(self):
-        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 120.0}])
+        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 6000.0}])
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         base_lf = pl.DataFrame(
             [
                 {
@@ -691,14 +698,14 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
                     "name": "亏损股",
                     "industry_sw_l2": "科技",
                     "pe_ttm": -5.0,
-                    "total_mv": 4000.0,
+                    "total_mv": 2000000.0,
                 },
                 {
                     "ts_code": "000002.SZ",
                     "name": "盈利股",
                     "industry_sw_l2": "科技",
                     "pe_ttm": 10.0,
-                    "total_mv": 3000.0,
+                    "total_mv": 1500000.0,
                 },
             ]
         ).lazy()
@@ -713,7 +720,8 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         assert "000002.SZ" in ts_codes
 
     def test_flow_equal_to_threshold_returns_empty(self):
-        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 50.0}])
+        flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 5000.0}])  # 5000百万=50亿
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         screening_data = pd.DataFrame(
             [
                 {
