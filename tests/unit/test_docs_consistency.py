@@ -3809,12 +3809,10 @@ class TestGovernanceIdGlossary:
         )
         claude = tmp_path / "CLAUDE.md"
         claude.write_text("新增规则引用 P9-99（未登记）\n", encoding="utf-8")
-        agents = tmp_path / "AGENTS.md"
-        agents.write_text("# no ids\n", encoding="utf-8")
 
-        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
-        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
         errors = check_governance_id_glossary()
         assert any("P9-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
@@ -3831,14 +3829,12 @@ class TestGovernanceIdGlossary:
             "| ID | 一句话含义 |\n|---|-----------|\n| DOC-04 | 决策树镜像 |\n",
             encoding="utf-8",
         )
-        claude = tmp_path / "CLAUDE.md"
-        claude.write_text("# no ids\n", encoding="utf-8")
         agents = tmp_path / "AGENTS.md"
         agents.write_text("引用 DOC-99（未登记）\n", encoding="utf-8")
 
-        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
-        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [agents])
 
         errors = check_governance_id_glossary()
         assert any("DOC-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
@@ -3881,9 +3877,9 @@ class TestGovernanceIdGlossary:
         agents = tmp_path / "AGENTS.md"
         agents.write_text("引用 GDR-06\n", encoding="utf-8")
 
-        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
-        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude, agents])
 
         errors = check_governance_id_glossary()
         assert errors == [], f"全部已登记应通过, got: {errors}"
