@@ -1850,6 +1850,7 @@
     "failover_move_down": "Move Down",
     "failover_edit": "Edit",
     "failover_delete": "Delete",
+    "ai_failover_missing_credential": "Backup provider {provider} has no dedicated API key; request refused. Please configure dedicated credentials for this provider.",
     "report_strategy": "Strategy",
     "report_run_id": "Run ID",
     "report_backtest_range": "Backtest Range",

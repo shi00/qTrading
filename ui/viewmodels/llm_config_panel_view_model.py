@@ -657,7 +657,8 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
                 if model.startswith(f"{provider}/"):
                     effective_key = api_key
                     if effective_key is None:
-                        existing_cred = ConfigHandler.get_provider_credential(provider)
+                        # 主供应商同步：provider 即当前主供应商，允许回退到全局 key
+                        existing_cred = ConfigHandler.get_provider_credential(provider, fallback_to_global=True)
                         effective_key = existing_cred.get("api_key", "")
 
                     ConfigHandler.save_provider_credential(

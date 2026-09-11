@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 import httpx
 
+from core.errors import AIConfigError
 from services.ai_service import AIService, AIServiceUnavailableError
 
 pytestmark = pytest.mark.unit
@@ -260,7 +261,12 @@ class TestFailoverModelPropagation:
         params_default = AIService._build_litellm_params(llm_config, messages)
         assert params_default["model"] == "deepseek/deepseek-v4-flash"
 
-        params_override = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
+        # 跨供应商 override：提供 qwen 专属 key（D8-1 禁止全局回退，无专属 key 将抛错）
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value={"api_key": "sk-qwen-key", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+        ):
+            params_override = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
         assert params_override["model"] == "qwen/qwen-max"
 
     @pytest.mark.asyncio
@@ -361,6 +367,11 @@ class TestReasoningCheckWithModelOverride:
             ),
             patch("services.ai_service.acompletion", return_value=mock_stream()),
             patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+            # D8-1 跨供应商 override：提供 anthropic 专属 key（禁止全局回退，无专属 key 将抛错）
+            patch(
+                "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+                return_value={"api_key": "sk-anthropic-key", "base_url": "https://api.anthropic.com/v1"},
+            ),
         ):
             await service._chat_completion_litellm(
                 messages=[{"role": "user", "content": "test"}],
@@ -457,8 +468,8 @@ class TestCrossProviderFailoverCredentials:
         assert params["api_key"] == "sk-qwen-from-credentials"
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-    def test_cross_provider_without_credentials_omits_api_key(self):
-        """跨供应商 failover 且无凭证配置时不设置 api_key，但使用默认 base_url"""
+    def test_cross_provider_without_credentials_raises(self):
+        """跨供应商 failover 且无专属 key 时抛显式异常（D8-1：拒绝凭证跨域泄露）"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -472,11 +483,10 @@ class TestCrossProviderFailoverCredentials:
             "services.ai_service.ConfigHandler.get_llm_config_for_provider",
             return_value=mock_credential,
         ):
-            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
-        assert params["model"] == "openai/gpt-4o"
-        assert "api_key" not in params
-        # 修复后：无凭证 base_url 时回退到 LLM_PROVIDERS 默认值
-        assert params["api_base"] == "https://api.openai.com"
+            with pytest.raises(AIConfigError) as exc_info:
+                AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+            assert exc_info.value.to_error_info()["code"] == "ai_config_missing_credential"
+            assert exc_info.value.to_error_info()["message_key"] == "ai_failover_missing_credential"
 
     def test_cross_provider_uses_credential_base_url(self):
         """跨供应商 failover 时使用凭证中的 base_url"""
@@ -542,7 +552,7 @@ class TestCrossProviderCredentialFallback:
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     def test_no_credential_logs_debug(self):
-        """ConfigHandler 也无凭证时，不设置 api_key 并输出 debug 日志，但使用默认 base_url"""
+        """跨供应商无专属 key 时显式抛 AIConfigError（D8-1：禁止静默继续，避免凭证跨域泄露）"""
         llm_config = {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
@@ -556,10 +566,10 @@ class TestCrossProviderCredentialFallback:
             "services.ai_service.ConfigHandler.get_llm_config_for_provider",
             return_value=mock_credential,
         ):
-            params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
-        assert "api_key" not in params
-        # 修复后：无凭证 base_url 时回退到 LLM_PROVIDERS 默认值
-        assert params["api_base"] == "https://api.openai.com"
+            with pytest.raises(AIConfigError) as exc_info:
+                AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
+        assert exc_info.value.to_error_info()["code"] == "ai_config_missing_credential"
+        assert exc_info.value.to_error_info()["message_key"] == "ai_failover_missing_credential"
 
 
 class TestCrossProviderBaseUrlFallback:
@@ -742,22 +752,21 @@ class TestCrossProviderFailoverLogWording:
         failover_credentials = {"openai": {"api_key": "", "base_url": ""}}
 
         with caplog.at_level(logging.WARNING):
-            params = client._build_litellm_params(
-                llm_config,
-                messages,
-                model_override="openai/gpt-4o",
-                failover_credentials=failover_credentials,
-            )
+            # D8-1：目标供应商无专属 key 时显式抛 AIConfigError（拒绝凭证跨域泄露），
+            # 而非静默省略 api_key 继续发送请求。
+            with pytest.raises(AIConfigError) as exc_info:
+                client._build_litellm_params(
+                    llm_config,
+                    messages,
+                    model_override="openai/gpt-4o",
+                    failover_credentials=failover_credentials,
+                )
 
-        # 验证真实行为：request_params 中不带 api_key
-        assert "api_key" not in params
-        assert params["model"] == "openai/gpt-4o"
-
-        # 验证日志：提升为 WARNING，准确描述实际行为
-        assert "Cross-provider failover to 'openai' has no dedicated API key" in caplog.text
-        assert "request will not include api_key" in caplog.text
-        # 验证删除了具误导性的 "using primary key"
-        assert "using primary key" not in caplog.text
+        # 验证显式失败：异常携带可操作的 i18n 提示
+        assert exc_info.value.to_error_info()["code"] == "ai_config_missing_credential"
+        assert exc_info.value.to_error_info()["message_key"] == "ai_failover_missing_credential"
+        # 验证日志不再输出误导性的 "will not include api_key"
+        assert "request will not include api_key" not in caplog.text
 
     def test_cross_provider_failover_with_dedicated_key_sets_key_and_no_warning(self, caplog):
         """目标供应商配置了专属 API key 时，正确使用该专属 key 且不触发警告。"""

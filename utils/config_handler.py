@@ -144,8 +144,8 @@ class ConfigHandler:
         return secrets.save_provider_credential(provider, api_key, base_url, models)
 
     @staticmethod
-    def get_provider_credential(provider: str, fallback_to_global: bool = True) -> dict:
-        return secrets.get_provider_credential(provider, fallback_to_global)
+    def get_provider_credential(provider: str, *, fallback_to_global: bool) -> dict:
+        return secrets.get_provider_credential(provider, fallback_to_global=fallback_to_global)
 
     @staticmethod
     def validate_failover_credentials() -> list[str]:
@@ -244,8 +244,8 @@ class ConfigHandler:
         return llm.get_failover_config()
 
     @staticmethod
-    def get_llm_config_for_provider(provider: str) -> dict:
-        return llm.get_llm_config_for_provider(provider)
+    def get_llm_config_for_provider(provider: str, *, allow_global_fallback: bool = False) -> dict:
+        return llm.get_llm_config_for_provider(provider, allow_global_fallback=allow_global_fallback)
 
     @staticmethod
     def get_local_ai_timeout() -> int | None:

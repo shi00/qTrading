@@ -299,8 +299,16 @@ def save_provider_credential(
     return cfg.ConfigHandler.save_config(config_update)
 
 
-def get_provider_credential(provider: str, fallback_to_global: bool = True) -> dict:
+def get_provider_credential(provider: str, *, fallback_to_global: bool) -> dict:
     """获取指定 LLM 供应商的完整凭证。
+
+    Args:
+        provider: 供应商 ID（如 "qwen", "deepseek", "openai"）。
+        fallback_to_global: 是否在无供应商专属 key 时回退到全局 ``ai_api_key``。
+            关键字限定且**无默认值**，调用方必须显式表态（D8-1）——全局 key 语义上
+            属于当前主供应商，跨供应商 failover 复用会使 A 的凭证被发往 B 的 endpoint
+            （凭证跨域泄露）。failover / 完整性校验场景传 ``False``；仅当确知 provider
+            就是主供应商时才传 ``True``。
 
     Returns:
         {"api_key": str | None, "base_url": str, "models": list[str]}
@@ -432,7 +440,10 @@ def validate_failover_credentials() -> list[str]:
             if provider in seen:
                 continue
             model_id = model.split("/", 1)[1]
-            cred = cfg.ConfigHandler.get_provider_credential(provider)
+            # D8-1: 必须禁全局回退。failover 目标供应商需要**自己的**专属凭证；
+            # 用默认的 fallback_to_global=True 会把无凭证的供应商在全局 key 存在时
+            # 误判为已配置，使本校验在最需要它的场景下失效。
+            cred = cfg.ConfigHandler.get_provider_credential(provider, fallback_to_global=False)
             if not cred.get("api_key"):  # noqa: SIM114
                 missing.append(provider)
                 seen.add(provider)

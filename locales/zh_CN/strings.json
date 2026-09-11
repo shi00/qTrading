@@ -1850,6 +1850,7 @@
     "failover_move_down": "下移",
     "failover_edit": "编辑",
     "failover_delete": "删除",
+    "ai_failover_missing_credential": "备用供应商 {provider} 未配置专属 API Key，已拒绝发送请求。请为该供应商单独配置凭证。",
     "report_strategy": "策略",
     "report_run_id": "运行ID",
     "report_backtest_range": "回测区间",
