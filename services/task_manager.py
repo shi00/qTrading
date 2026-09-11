@@ -111,8 +111,8 @@ class AppTask:
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
-    name: Message | str = "Unknown Task"
-    task_type: Message | str = "System"
+    name: Message | str = Message("task_name_unknown")
+    task_type: Message | str = Message("task_type_system")
     description: Message | str = Message("task_status_queued")
     status: TaskStatus = TaskStatus.QUEUED
     progress: float = 0.0  # 0.0 to 1.0
