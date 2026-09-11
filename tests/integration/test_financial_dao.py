@@ -272,8 +272,12 @@ class TestDat06AnnDateNull:
         也会被约束拦截，PIT 双分支口径不会因 NULL 行分叉。
         """
         import asyncpg
+        import sqlalchemy.exc as sa_exc
 
-        with pytest.raises(asyncpg.NotNullViolationError):  # noqa: weak-assertion 契约只需验证 schema 层拒绝 NULL 主键行，无后继参数可断言
+        # SQLAlchemy 引擎会把 asyncpg 驱动异常包装为 sqlalchemy.exc.IntegrityError，
+        # 原始 asyncpg 异常可通过 .orig 取回——捕获包装后的异常并断言原始类型，
+        # 否则异常逃逸导致测试失败（CI PR-880 已复现）。
+        with pytest.raises(sa_exc.IntegrityError) as excinfo:
             async with function_engine.begin() as conn:
                 await conn.execute(
                     text(
@@ -281,6 +285,8 @@ class TestDat06AnnDateNull:
                         "VALUES ('999999.SZ', '2024-12-31', NULL, 20.0)"
                     )
                 )
+
+        assert isinstance(excinfo.value.orig, asyncpg.NotNullViolationError)
 
     @pytest.mark.asyncio
     async def test_has_ann_date_nulls_false_on_clean_mvd(self, financial_dao):
