@@ -8,6 +8,7 @@
 #   id: 主题标识 (稳定, 供文档与脚本引用)
 #   title: 任务类型标题 (对应 CLAUDE.md §1.8 决策树「任务类型」列)
 #   canonical: 该主题的唯一正本入口 (条件路由由该文档负责)
+#   section: 可选, 正本内章节名 (canonical 为整文件时精确到章节, 机器可读精度不低于 §1.8)
 #   workflow: 可选, 工作流入口 (how-to 等)
 #   note: 可选, 补充说明 (如高风险任务、不可逆决策等)
 #
@@ -56,6 +57,7 @@ topics:
   - id: exception-handling
     title: 修改异常处理
     canonical: CONTRIBUTING.md
+    section: 错误处理标准模式
 
   - id: bug-fix
     title: 修复 bug / 排查问题
@@ -80,7 +82,8 @@ topics:
   - id: backtest
     title: 新增/修改回测
     canonical: docs/guides/how-to.md
-    note: 见 how-to.md「7. 新增回测配置」（无独立回测正本，配置流程承载于 how-to）
+    section: 7. 新增回测配置
+    note: 无独立回测正本，配置流程承载于 how-to
 
   - id: config
     title: 修改配置项
@@ -101,6 +104,7 @@ topics:
   - id: embedded-pg
     title: 内置 PostgreSQL 离线维护 / 数据恢复
     canonical: docs/guides/how-to.md
+    section: 9. 内置 PostgreSQL 离线维护
 
   - id: architecture-design
     title: 架构设计 / 公共契约 / 跨层范式
@@ -114,9 +118,9 @@ topics:
   - id: release
     title: 版本发布 / Release 管理
     canonical: docs/guides/ci-cd.md
-    note: 见 ci-cd.md「版本发布流程与 Release 管理」
+    section: 版本发布流程与 Release 管理
 
   - id: packaging
     title: 打包分发 / PyInstaller 构建
     canonical: docs/guides/dependency-management.md
-    note: 见 dependency-management.md「PyInstaller 打包」
+    section: PyInstaller 打包
