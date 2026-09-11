@@ -352,7 +352,9 @@ class FinancialReports(Base):
     __tablename__ = "financial_reports"
     ts_code = Column(String, primary_key=True)
     end_date = Column(Date, primary_key=True, index=True)
-    ann_date = Column(Date)
+    # DATA-05: 主键加入 ann_date，保留同一报告期的多版本（财报更正/追溯调整），
+    # PIT（ann_date <= as_of）才能还原历史公告日的可见值。
+    ann_date = Column(Date, primary_key=True, index=True)
     report_type = Column(String)
     total_revenue = Column(Numeric(20, 4), info={"null_protected": True})
     revenue = Column(Numeric(20, 4), info={"null_protected": True})
@@ -375,7 +377,7 @@ class FinancialReports(Base):
     accounts_receiv = Column(Numeric(20, 4), info={"null_protected": True})
     __table_args__ = (
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
-        Index("ix_financial_reports_ann_date", "ann_date"),
+        # ann_date 单列索引由列级 index=True 生成（ix_financial_reports_ann_date），不再在 __table_args__ 重复声明。
     )
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))

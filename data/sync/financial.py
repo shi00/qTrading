@@ -34,15 +34,18 @@ _CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
 def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Deduplicate financial DataFrame by end_date, preferring the latest disclosure.
+    Deduplicate financial DataFrame by full version key (end_date + ann_date).
 
-    For DataFrames with 'ann_date' column, sorts by [end_date, ann_date, update_flag]
-    ascending and keeps the last row per end_date. This ensures we select the most
-    recently disclosed report for each financial period (handles revised reports).
+    DATA-05: 保留同一报告期（end_date）的全部公告版本（ann_date），不再按 end_date
+    去重，使财报更正/追溯调整能被持久化而非 UPSERT 覆盖。主键已扩展为
+    (ts_code, end_date, ann_date)，同一 (end_date, ann_date) 只保留一行即可。
 
-    update_flag: "1" means revised data, should be preferred over original ("0" or None).
+    For DataFrames with 'ann_date' column, sorts by [end_date, ann_date] ascending
+    and keeps the last row per (end_date, ann_date). This preserves every disclosed
+    version; identical duplicated rows (same end_date + ann_date) collapse to one.
 
-    For DataFrames without 'ann_date', falls back to simple end_date dedup.
+    For DataFrames without 'ann_date', falls back to simple end_date dedup (no
+    version dimension available on the payload).
     """
     if df is None or df.empty:
         return df
@@ -50,13 +53,8 @@ def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
     if "ann_date" in df.columns:
         sort_cols = ["end_date", "ann_date"]
         ascending = [True, True]
-        if "update_flag" in df.columns:
-            sort_cols.append("update_flag")
-            ascending.append(True)
-        # na_position="first": NaN update_flag 排在 "0"/"1" 之前，keep="last" 保留
-        # update_flag="1"（修订版）而非 None 版本（当 end_date + ann_date 相同时）。
         return df.sort_values(by=sort_cols, ascending=ascending, na_position="first").drop_duplicates(
-            subset=["end_date"], keep="last"
+            subset=["end_date", "ann_date"], keep="last"
         )
     return df.sort_values("end_date").drop_duplicates(subset=["end_date"], keep="last")
 
@@ -976,17 +974,28 @@ class FinancialSyncStrategy(ISyncStrategy):
             if not dfs:
                 return None, aux_counts
 
+            # DATA-05: 仅当全部 core 表都携带 ann_date 版本维度时按 (ts_code, end_date,
+            # ann_date) 对齐，避免同一报告期多版本合并产生笛卡尔积；否则回退到
+            # (ts_code, end_date) 合并，兼容无版本维度的 payload（测试 mock / 特殊 API）。
+            has_ann_dimension = all("ann_date" in df.columns for df in dfs)
+            merge_on = ["ts_code", "end_date", "ann_date"] if has_ann_dimension else ["ts_code", "end_date"]
+
             df_merged = dfs[0]
             for i in range(1, len(dfs)):
                 df_merged = pd.merge(
                     df_merged,
                     dfs[i],
-                    on=["ts_code", "end_date"],
+                    on=merge_on,
                     how="outer",
                     suffixes=("", "_drop"),
                 )
                 # Immediately remove _drop columns to prevent duplicate suffixes in subsequent merges
                 df_merged = df_merged[[c for c in df_merged.columns if not c.endswith("_drop")]]
+
+            # DATA-05: 主键含 ann_date 且 NOT NULL。缺失公告日的行无法落库
+            # （与 0022 迁移/DAT-06 语义一致），在返回前过滤，避免约束冲突。
+            if "ann_date" in df_merged.columns:
+                df_merged = df_merged[df_merged["ann_date"].notna()]
 
             return df_merged, aux_counts
 
