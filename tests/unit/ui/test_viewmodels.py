@@ -579,6 +579,33 @@ class TestScreenerViewModelGetCurrentPageData:
         assert screener_vm.state.current_page_rows == ()
 
 
+class TestScreenerViewModelSplitPageByAiStatus:
+    """D7-3: 当前页切片按 ai_status 拆分三分区 (零丢失兜底)."""
+
+    def _rows(self, statuses):
+        from ui.viewmodels.screener_types import ScreenerRow
+
+        return tuple(ScreenerRow(values={"ts_code": f"x{i}", "ai_status": st}) for i, st in enumerate(statuses))
+
+    def test_analyzed_rejected_and_fallback(self, screener_vm):
+        rows = self._rows(["analyzed", "rejected", "failed", "skipped", "analyzed", None])
+        rec, exc, fail = ScreenerViewModel._split_page_rows_by_ai_status(rows)
+        assert [r.values["ts_code"] for r in rec] == ["x0", "x4"]
+        assert [r.values["ts_code"] for r in exc] == ["x1"]
+        # failed/skipped/缺失 一律归入 failed → 行零丢失
+        assert [r.values["ts_code"] for r in fail] == ["x2", "x3", "x5"]
+        assert len(rec) + len(exc) + len(fail) == len(rows)
+
+    def test_empty_input(self, screener_vm):
+        rec, exc, fail = ScreenerViewModel._split_page_rows_by_ai_status(())
+        assert rec == () and exc == () and fail == ()
+
+    def test_all_rejected(self, screener_vm):
+        rows = self._rows(["rejected", "rejected"])
+        rec, exc, fail = ScreenerViewModel._split_page_rows_by_ai_status(rows)
+        assert rec == () and exc == rows and fail == ()
+
+
 class TestScreenerViewModelSwitchToHistory:
     def test_snapshots_state(self, screener_vm):
         df = pd.DataFrame({"a": [1]})
