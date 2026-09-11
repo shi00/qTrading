@@ -3,6 +3,7 @@ import os
 
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
+from utils.config.secrets import SaveOutcome
 import pytest
 
 
@@ -270,7 +271,7 @@ class TestSaveDbPasswordEncryptFallback:
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
-            assert result is False
+            assert result is SaveOutcome.FAILED
 
     def test_security_error_returns_false(self):
         """SecurityManager.encrypt_data 抛 SecurityError → 返回 False"""
@@ -291,7 +292,7 @@ class TestSaveDbPasswordEncryptFallback:
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
-            assert result is False
+            assert result is SaveOutcome.FAILED_NO_SECURE_STORE
 
     def test_generic_exception_returns_false(self):
         """SecurityManager.encrypt_data 抛普通 Exception → 返回 False"""
@@ -310,7 +311,7 @@ class TestSaveDbPasswordEncryptFallback:
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
-            assert result is False
+            assert result is SaveOutcome.FAILED
 
     def test_fallback_logs_error_not_warning(self):
         """F4（检视 06）：keyring 降级到加密配置属于安全级别降级，须记 error 而非 warning。"""
@@ -331,7 +332,7 @@ class TestSaveDbPasswordEncryptFallback:
             patch.object(cfg_mod.logger, "warning") as mock_warning,
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
-            assert result is True
+            assert result is SaveOutcome.SAVED
             assert any("Falling back to SecurityManager" in str(c[0][0]) for c in mock_error.call_args_list)
             assert not any("Falling back to SecurityManager" in str(c[0][0]) for c in mock_warning.call_args_list)
 
@@ -353,7 +354,7 @@ class TestSaveTokenEncryptFallback:
             ),
         ):
             result = cfg_mod.ConfigHandler.save_token("my_token")
-            assert result is False
+            assert result is SaveOutcome.FAILED
 
 
 class TestConfigHandlerSaveConfigReplace:
@@ -406,12 +407,12 @@ class TestConfigHandlerSaveDbPassword:
     @patch.object(cfg_mod.keyring, "set_password")
     def test_save_to_keyring(self, mock_set, mock_save):
         result = cfg_mod.ConfigHandler.save_db_password("mypassword")
-        assert result is True
+        assert result is SaveOutcome.SAVED
         mock_set.assert_called_once()
 
     def test_empty_password(self):
         result = cfg_mod.ConfigHandler.save_db_password("")
-        assert result is False
+        assert result is SaveOutcome.FAILED
 
 
 class TestConfigHandlerGetDbConfig:
@@ -834,7 +835,7 @@ class TestSaveDbPasswordKeyringDeleteLogsDebug:
     def test_fallback_logs_debug_on_keyring_delete_failure(self, mock_set, mock_del, mock_enc, mock_save):
         with patch.object(cfg_mod, "logger") as mock_logger:
             cfg_mod.ConfigHandler.save_db_password("my_password")
-            debug_calls = [c for c in mock_logger.debug.call_args_list if "db_password" in c[0][0]]
+            debug_calls = [c for c in mock_logger.debug.call_args_list if any("db_password" in str(a) for a in c.args)]
             assert len(debug_calls) >= 1
 
 
@@ -869,7 +870,7 @@ class TestSaveTokenEnvShortCircuit:
     def test_empty_token_skips_keyring_delete_when_env_exists(self, mock_set, mock_del):
         """TS_TOKEN 存在时，save_token("") 不删除 keyring"""
         result = cfg_mod.ConfigHandler.save_token("")
-        assert result is True
+        assert result is SaveOutcome.OVERRIDDEN_BY_ENV
         mock_del.assert_not_called()
         mock_set.assert_not_called()
 
@@ -878,7 +879,7 @@ class TestSaveTokenEnvShortCircuit:
     def test_nonempty_token_skips_keyring_write_when_env_exists(self, mock_set):
         """TS_TOKEN 存在时，save_token("valid") 不写入 keyring"""
         result = cfg_mod.ConfigHandler.save_token("valid_token")
-        assert result is True
+        assert result is SaveOutcome.OVERRIDDEN_BY_ENV
         mock_set.assert_not_called()
 
 
@@ -1068,7 +1069,8 @@ class TestMultiProviderCredentials:
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
             models=["qwen-plus", "qwen-turbo"],
         )
-        assert result is True
+        assert result.all_ok is True
+        assert result.api_key is SaveOutcome.SAVED
         mock_set.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen", "qwen_key_123")
 
     @patch.object(cfg_mod.keyring, "get_password", return_value="qwen_key_123")
@@ -1128,10 +1130,11 @@ class TestMultiProviderCredentials:
             base_url="",
             models=["qwen-plus"],
         )
-        assert result is True
-        saved_config = mock_save.call_args[0][0]
-        assert "qwen" in saved_config["llm_provider_credentials"]
-        assert saved_config["llm_custom_models"]["qwen"] == ["qwen-plus"]
+        assert result.all_ok is True
+        # D8-5：按字段独立保存，base_url 与 models 各触发一次 save_config
+        saved_configs = [c.args[0] for c in mock_save.call_args_list]
+        assert any("qwen" in sc.get("llm_provider_credentials", {}) for sc in saved_configs)
+        assert any(sc.get("llm_custom_models", {}).get("qwen") == ["qwen-plus"] for sc in saved_configs)
 
     @patch.object(
         cfg_mod.ConfigHandler,
@@ -1150,7 +1153,7 @@ class TestMultiProviderCredentials:
             base_url="https://api.qwen.com/v1",
             models=[f"model-{i}" for i in range(53)],
         )
-        assert result is True
+        assert result.all_ok is True
         saved_config = mock_save.call_args[0][0]
         models_list = saved_config["llm_custom_models"]["qwen"]
         assert len(models_list) == 50
@@ -1513,7 +1516,7 @@ class TestSaveProviderCredentialEncrypt:
             provider="qwen",
             api_key="qwen_secret_key",
         )
-        assert result is True
+        assert result.api_key is SaveOutcome.SAVED
         mock_encrypt.assert_called_once_with("qwen_secret_key")
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
@@ -1528,7 +1531,7 @@ class TestSaveProviderCredentialEncrypt:
             provider="qwen",
             api_key="qwen_secret_key",
         )
-        assert result is False
+        assert result.api_key is SaveOutcome.FAILED
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     @patch.object(cfg_mod.keyring, "set_password")
@@ -1538,7 +1541,7 @@ class TestSaveProviderCredentialEncrypt:
             provider="qwen",
             models=models,
         )
-        assert result is True
+        assert result.all_ok is True
         saved_config = mock_save.call_args[0][0]
         assert len(saved_config["llm_custom_models"]["qwen"]) == 50
 
@@ -1865,7 +1868,7 @@ class TestSetTypedValidation:
 class TestSaveDbConfig:
     """测试 save_db_config 保存数据库配置"""
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_save_full_config(self, mock_save, mock_pw):
         from data.persistence.db_config_service import DatabaseConfigService
@@ -2027,7 +2030,7 @@ class TestConfigReviewFixes:
         )
         assert result is False
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=False)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.FAILED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_save_db_config_returns_false_when_save_db_password_fails(self, mock_save, mock_pwd):
         """F1: save_db_password 失败时 save_db_config 返回 False"""
@@ -2036,7 +2039,7 @@ class TestConfigReviewFixes:
         )
         assert result is False
 
-    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=True)
+    @patch.object(cfg_mod.ConfigHandler, "save_db_password", return_value=SaveOutcome.SAVED)
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     def test_save_db_config_returns_true_when_all_succeed(self, mock_save, mock_pwd):
         """F1: 全部成功时 save_db_config 返回 True"""
@@ -2060,7 +2063,7 @@ class TestConfigReviewFixes:
     def test_save_db_password_returns_save_config_result_on_success_path(self, mock_save, mock_kr):
         """F2: keyring 成功后，save_db_password 返回 save_config 的实际返回值（False）"""
         result = cfg_mod.ConfigHandler.save_db_password("my_password")
-        assert result is False
+        assert result is SaveOutcome.FAILED
 
     @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="encrypted")
     @patch.object(cfg_mod.keyring, "delete_password")
@@ -2071,7 +2074,7 @@ class TestConfigReviewFixes:
     ):
         """F2: 加密 fallback 路径，save_db_password 返回 save_config 的实际返回值（False）"""
         result = cfg_mod.ConfigHandler.save_db_password("my_password")
-        assert result is False
+        assert result is SaveOutcome.FAILED
 
     # === F3: save_provider_credential 不污染 _config_cache ===
 
@@ -2119,12 +2122,16 @@ class TestConfigReviewFixes:
                     base_url="https://new.example.com",
                     models=["model-b"],
                 )
-                assert result is False
+                # api_key 走 keyring（成功）；base_url/models 各自 save_config（失败）
+                assert result.api_key is SaveOutcome.SAVED
+                assert result.base_url is SaveOutcome.FAILED
+                assert result.models is SaveOutcome.FAILED
+                assert result.all_ok is False
         finally:
             cfg_mod.ConfigHandler._clear_cache()
 
     def test_save_provider_credential_returns_true_when_save_config_succeeds(self):
-        """N1: save_provider_credential 在 save_config 成功时返回 True"""
+        """N1: save_provider_credential 在 save_config 成功时返回全字段 SAVED"""
         cfg_mod.ConfigHandler._config_cache = {
             "llm_provider_credentials": {},
             "llm_custom_models": {},
@@ -2140,7 +2147,7 @@ class TestConfigReviewFixes:
                     base_url="https://new.example.com",
                     models=["model-b"],
                 )
-                assert result is True
+                assert result.all_ok is True
         finally:
             cfg_mod.ConfigHandler._clear_cache()
 
@@ -2368,7 +2375,7 @@ class TestSaveProviderCredentialClearSemantics:
             api_key="",
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
-        assert result is True
+        assert result.all_ok is True
         mock_del.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen")
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
@@ -2384,7 +2391,7 @@ class TestSaveProviderCredentialClearSemantics:
             api_key="test_key",
             base_url="",
         )
-        assert result is True
+        assert result.all_ok is True
         saved_config = mock_save.call_args[0][0]
         qwen_cred = saved_config["llm_provider_credentials"]["qwen"]
         assert "base_url" not in qwen_cred
@@ -2398,7 +2405,7 @@ class TestSaveProviderCredentialClearSemantics:
             api_key=None,
             base_url="https://api.qwen.com/v1",
         )
-        assert result is True
+        assert result.all_ok is True
         mock_set.assert_not_called()
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
@@ -2414,10 +2421,11 @@ class TestSaveProviderCredentialClearSemantics:
             api_key="test_key",
             base_url=None,
         )
-        assert result is True
-        saved_config = mock_save.call_args[0][0]
-        qwen_cred = saved_config["llm_provider_credentials"]["qwen"]
-        assert qwen_cred.get("base_url") == "https://old.url"
+        # base_url=None 表示不修改：不应触发 provider_credentials 的 config 保存，
+        # 从侧面证明已有 base_url 未被覆盖。
+        assert result.base_url is None
+        assert result.api_key is SaveOutcome.SAVED
+        mock_save.assert_not_called()
 
 
 class TestConfigHandlerAIConceptSchedule:

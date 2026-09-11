@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
 from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
+from utils.config.secrets import CredentialSaveResult, SaveOutcome
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -381,7 +382,7 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
             is_edit = self._state.dialog_is_edit
             edit_item = self._state.dialog_edit_item
 
-            def _save_sync() -> tuple[dict | None, str]:
+            def _save_sync() -> tuple[dict | None, str, CredentialSaveResult]:
                 """合并多次 IO 到单个闭包，减少 run_async 调用次数。"""
                 # 编辑模式下清空 API Key 时查询原有凭证（用于警告提示）
                 existing_cred = None
@@ -391,15 +392,20 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
                 # 主供应商检查
                 primary_provider = ConfigHandler.load_config().get("llm_provider", "")
                 if provider == primary_provider:
-                    return existing_cred, primary_provider
+                    return existing_cred, primary_provider, CredentialSaveResult()
 
-                # 保存凭证
-                ConfigHandler.save_provider_credential(
+                # 保存凭证（按字段报告：base_url / models / api_key）
+                save_result = ConfigHandler.save_provider_credential(
                     provider=provider,
                     api_key=api_key,
                     base_url=base_url,
                     models=[model],
                 )
+
+                # api_key 保存失败时不把该条目加入 failover 列表 ——
+                # 否则该供应商会被用于 failover 却无可用的 API Key（D8-3）。
+                if save_result.api_key in (SaveOutcome.FAILED, SaveOutcome.FAILED_NO_SECURE_STORE):
+                    return existing_cred, primary_provider, save_result
 
                 # 加载并更新 failover 列表
                 failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
@@ -412,9 +418,9 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
                         failover_models.append(new_entry)
 
                 ConfigHandler.save_config({"llm_failover_models": failover_models})
-                return existing_cred, primary_provider
+                return existing_cred, primary_provider, save_result
 
-            existing_cred, primary_provider = await ThreadPoolManager().run_async(TaskType.IO, _save_sync)
+            existing_cred, primary_provider, save_result = await ThreadPoolManager().run_async(TaskType.IO, _save_sync)
 
             # 编辑模式下清空 API Key 时提示警告（允许用户有意清除）
             if is_edit and not api_key and existing_cred and existing_cred.get("api_key"):
@@ -422,6 +428,15 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
 
             if provider == primary_provider:
                 self._show_dialog_status(Message("failover_primary_in_list"), "warning")
+                return
+
+            # api_key 保存失败：给出可操作提示（保留对话框供重试，不关闭不刷新）
+            if save_result.api_key in (SaveOutcome.FAILED, SaveOutcome.FAILED_NO_SECURE_STORE):
+                if save_result.api_key is SaveOutcome.FAILED_NO_SECURE_STORE:
+                    self._show_dialog_status(Message("secrets_save_failed_no_store"), "error")
+                else:
+                    self._show_dialog_status(Message("sys_snack_save_err"), "error")
+                self._set_state(dialog_is_saving=False)
                 return
 
             # 关闭对话框 + 重新加载列表

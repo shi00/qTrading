@@ -4,6 +4,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+from utils.config.secrets import SaveOutcome
+
 
 @pytest.mark.unit
 class TestConfigHandlerKeyringFallback:
@@ -28,7 +30,7 @@ class TestConfigHandlerKeyringFallback:
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
 
-        assert result is True
+        assert result is SaveOutcome.SAVED
         mock_encrypt.assert_called_once_with("my_secret_password")
         assert len(saved_configs) == 1
         assert saved_configs[0] == {"db_password_encrypted": encrypted_value}
@@ -49,7 +51,7 @@ class TestConfigHandlerKeyringFallback:
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
 
-        assert result is False
+        assert result is SaveOutcome.FAILED
 
     def test_save_db_password_prefers_keyring(self, monkeypatch):
         import utils.config_handler as cfg_mod
@@ -69,7 +71,7 @@ class TestConfigHandlerKeyringFallback:
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
 
-        assert result is True
+        assert result is SaveOutcome.SAVED
         assert len(keyring_called) == 1
         assert keyring_called[0] == (
             cfg_mod.KEYRING_SERVICE_NAME,
@@ -82,7 +84,7 @@ class TestConfigHandlerKeyringFallback:
         import utils.config_handler as cfg_mod
 
         result = cfg_mod.ConfigHandler.save_db_password("")
-        assert result is False
+        assert result is SaveOutcome.FAILED
 
     def test_get_db_password_reads_encrypted_fallback(self, monkeypatch):
         import utils.config_handler as cfg_mod
@@ -229,7 +231,7 @@ class TestKeyringFallbackClearsStale:
         monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda _: True)
 
         result = cfg_mod.ConfigHandler.save_db_password("new_password_v2")
-        assert result is True
+        assert result is SaveOutcome.SAVED
         assert delete_calls == [(cfg_mod.KEYRING_SERVICE_NAME, "db_password")], (
             "H-3: fallback path must wipe stale keyring entry to prevent old password winning"
         )
@@ -243,5 +245,5 @@ class TestKeyringFallbackClearsStale:
         monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda _: True)
 
         result = cfg_mod.ConfigHandler.save_db_password("pw")
-        assert result is True
+        assert result is SaveOutcome.SAVED
         assert len(delete_calls) == 0, "H-3: success path must NOT call delete_password"

@@ -147,7 +147,15 @@ def save_db_config(host: str, port: int, user: str, password: str, database: str
         return False
 
     if password:
-        return cfg.ConfigHandler.save_db_password(password)
+        from utils.config.secrets import (
+            SaveOutcome,
+        )  # lazy-import: 避免 config_handler↔db 循环内再引入 secrets 顶部依赖
+
+        outcome = cfg.ConfigHandler.save_db_password(password)
+        # save_db_password 现返回 SaveOutcome（StrEnum，任何值均 truthy），不能直接作 bool 返回
+        # （否则 FAILED / FAILED_NO_SECURE_STORE 会被误判为成功，重新引入 D8-2 假报成功）。
+        # OVERRIDDEN_BY_ENV 视为成功：DB_PASSWORD 环境变量优先，get_db_password 运行时仍可读到密码。
+        return outcome in (SaveOutcome.SAVED, SaveOutcome.OVERRIDDEN_BY_ENV)
     return True
 
 

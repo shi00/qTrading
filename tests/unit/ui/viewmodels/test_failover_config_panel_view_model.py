@@ -19,6 +19,7 @@ from ui.viewmodels.failover_config_panel_view_model import (
     _load_failover_items_sync,
     _normalize_base_url,
 )
+from utils.config.secrets import CredentialSaveResult, SaveOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +42,9 @@ def mock_config_handler(monkeypatch):
         "llm_provider": "deepseek",
     }
     m.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
-    m.save_provider_credential.return_value = True
+    m.save_provider_credential.return_value = CredentialSaveResult(
+        api_key=SaveOutcome.SAVED, base_url=SaveOutcome.SAVED, models=SaveOutcome.SAVED
+    )
     m.save_config.return_value = True
     m.validate_failover_credentials.return_value = []
     monkeypatch.setattr("ui.viewmodels.failover_config_panel_view_model.ConfigHandler", m)
