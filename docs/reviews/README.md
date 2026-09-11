@@ -30,5 +30,7 @@
 | UX-07 | 2026-08-06 | 全系统 UI/UX 专项审视 | `reviews/UX-reviews.md`（本地） | 已归档 |
 | 文档体系 | 2026-08-13 | CLAUDE.md 文档体系对抗性深度检视（GOV 系列） | `reviews/文档体系检视.md`（本地） | 已归档 |
 | 文档体系·AI 可执行性 | 2026-09-03 | 文档体系「AI 可执行性」专项（DOC-01~14，修复分批跟踪） | 本仓库 `docs/**` 改修分支（见各 PR） | 进行中 |
+| 文档体系·AI 可执行性 II | 2026-09-11 | CLAUDE/AGENTS/CONTRIBUTING 体系复检（P1×4 / P2×10 / P3×8） | `reviews/09-11/AI文档检视报告.md`（本地） | 进行中 |
+| business-review | 2026-09-11 | 业务语义 / 数据正确性 / 回测可信度 / AI 可信度等分册检视 | `reviews/09-11/`（本地，`00-INDEX.md` 索引） | 进行中 |
 
 > 报告正文若同步产出机器可读结论，遵循 [review-result.schema.json](./review-result.schema.json)；发现清单的「状态」列（未修复 / 已修复 / 已接受）随 DOC-14 第 1 步在本索引轮次表维护，不回溯改写已归档报告。
