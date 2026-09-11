@@ -6,7 +6,7 @@
 > **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致），最后校对：2026-09-08
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.4.0（规则集版本，规则变更时递增）
+> - ruleset_version: 1.5.0（规则集版本，规则变更时递增）
 > - last_reviewed: 2026-09-11
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
@@ -20,7 +20,7 @@
 
 > 仅列不可逾越的底线；完整红线表见 §3.1，机器可读正本见 [redlines.yml](./docs/governance/redlines.yml)。**本摘要为提示，非冗余正本**，语义以 §3.1 与 `redlines.yml` 为准。
 >
-> - **不可豁免安全不变量（INVARIANT，先读后写）**：R2 异常吞没（`CancelledError` 必须 `raise`）· R3 模糊压制（`# type: ignore` 必带 `[error-code]`，人类理由写在方括号外）· R4 SQL 注入（asyncpg 必须用 `$1, $2, ...`）· R5 僵尸引擎操作 · R7 测试状态污染（单例隔离）· R9 敏感信息泄露（脱敏）· R10 硬编码密钥（keyring/环境变量）
+> - **不可豁免安全不变量（INVARIANT，先读后写）**：R2 异常吞没（`CancelledError` 必须 `raise`）· R3 模糊压制（`# type: ignore` 必带 `[error-code]`，人类理由写在方括号外）· R4 SQL 注入（asyncpg 必须用 `$1, $2, ...`）· R7 测试状态污染（单例隔离）· R9 敏感信息泄露（脱敏）· R10 硬编码密钥（keyring/环境变量）· **可豁免（EXCEPTIONABLE）**：R5 僵尸引擎操作（经 exceptions.yml 例外注册豁免）
 > - **工作区整洁**：R18 未隔离开发（跨多文件任务须 git worktree 隔离）
 > - **任务路由**：按 §1.8 决策树定位必读正本；改动后按 §1.9 验证命令自检。
 
@@ -179,7 +179,7 @@
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests） |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[error-code]`（人类理由写在方括号外，格式 `# type: ignore[错误码]`  `# 原因`；pre-commit 强制拦截） | pre-commit |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
-| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) | 仅人工评审 |
+| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作（DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`；应用服务层轮询循环的优雅停止不在其内，此类既有偏离经 exceptions.yml 登记） | 仅人工评审 |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
 | R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `tests/conftest.py` 的 `singleton_state` 上下文管理器) | CI-test（全量，conftest.py autouse fixture） |
 | R8 | **废弃 API** | 批量写入必须使用 `_save_upsert`；`_write_db` 不提供批量参数 | CI-test（结构性签名强制 + filterwarnings error::DeprecationWarning 通用辅助门禁） |

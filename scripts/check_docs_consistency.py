@@ -1259,6 +1259,92 @@ def check_exceptions_yaml_consistency() -> list[str]:
     return errors
 
 
+# 反向一致性检查 (P1-04)：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已在 exceptions.yml 登记。
+# 检视报告建议：「扫描 known-technical-debt.md 中出现的 R\d+ 引用，若上下文含豁免性措辞而该条目未在
+# exceptions.yml 登记则报错」，消除 P1-01 立项要治理的红线豁免漂移（前期只消除了 R1 那一半）。
+# 为避免误报（债表大量条目含「保持现状 / 合理降级」但多数仅描述现状或推迟优化，并未豁免红线），
+# 本检查做三重收敛：① 只针对 rule_type == EXCEPTIONABLE 的红线（当前 R1 / R5）；
+# ② 仅当行内出现「豁免意图词」才视为豁免声明；③ 仅校验有稳定行 ID（第一列 `P3-...`）的条目。
+# 「推迟优化 / 已落地现状」等非豁免词不触发，故不误报（如 P3-CON04 / P3-M9-EmbeddedPg-TimeoutExpired）。
+_DEBT_EXEMPTION_INTENT_WORDS = ("保持现状", "合理设计", "不适用 R", "严格按 R", "豁免")
+_DEBT_ROW_ID_PATTERN = re.compile(r"^\|\s*\*\*\s*(P3-[A-Za-z0-9-]+)\s*\*\*")
+_DEBT_REDLINE_REF_PATTERN = re.compile(r"\bR(\d+)\b")
+
+
+def check_exceptions_reverse_coverage() -> list[str]:
+    """反向一致性检查 (P1-04)：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已登记例外。
+
+    通过检查：确保任何「在技术债表中声明豁免某条 EXCEPTIONABLE 红线（如 R5）」的条目，
+    都已在 docs/governance/exceptions.yml 中以 rule_id 对应登记（reason 回指该条目标识），
+    否则报错——从机制上消除红线豁免绕过例外唯一注册入口的漂移。
+    误报防护见函数上方注释，具体豁免清单登记见 EX-0017/EX-0018（R5）。
+    """
+    errors: list[str] = []
+
+    if not REDLINES_YAML_PATH.exists() or not EXCEPTIONS_YAML_PATH.exists() or not KNOWN_TECHNICAL_DEBT_PATH.exists():
+        # 依赖文件缺失由对应一致性检查（check_redlines_yaml_consistency /
+        # check_exceptions_yaml_consistency / check_note_lazy_format）fail-closed 守护，
+        # 本检查仅在其存在时执行，避免重复报错。
+        return errors
+
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+    try:
+        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return errors  # YAML 解析错误由对应检查函数守护，此处静默由它报
+
+    # 1. EXCEPTIONABLE 红线 id 集合
+    exceptable_ids: set[str] = set()
+    if isinstance(redlines_data, dict) and isinstance(redlines_data.get("redlines"), list):
+        for entry in redlines_data["redlines"]:
+            if isinstance(entry, dict) and entry.get("rule_type") == "EXCEPTIONABLE" and entry.get("id"):
+                exceptable_ids.add(str(entry["id"]))
+
+    # 2. exceptions.yml 已登记：rule_id -> reason 聚合文本集合（用于「reason 回指条目」判定）
+    registered: dict[str, list[str]] = {}
+    if isinstance(exc_data, dict) and isinstance(exc_data.get("exceptions"), list):
+        for entry in exc_data["exceptions"]:
+            if not isinstance(entry, dict):
+                continue
+            rule_id = entry.get("rule_id")
+            reason = entry.get("reason")
+            if isinstance(rule_id, str) and isinstance(reason, str):
+                registered.setdefault(rule_id, []).append(reason)
+
+    # 仅当存在待守护的 EXCEPTIONABLE 红线且已有登记时才需要校验
+    if not exceptable_ids:
+        return errors
+
+    # 3. 扫描技术债表表格行，校验豁免登记
+    for line in KNOWN_TECHNICAL_DEBT_PATH.read_text(encoding="utf-8").splitlines():
+        row_id_match = _DEBT_ROW_ID_PATTERN.match(line)
+        if not row_id_match:
+            continue  # 非表格行或无可稳定映射的行 ID，跳过
+        row_id = row_id_match.group(1)
+        if not any(word in line for word in _DEBT_EXEMPTION_INTENT_WORDS):
+            continue  # 无豁免意图（描述现状/推迟优化），不视为红线豁免
+        # 行内引用的 EXCEPTIONABLE 红线
+        exempted_ids = {f"R{rid}" for rid in _DEBT_REDLINE_REF_PATTERN.findall(line) if f"R{rid}" in exceptable_ids}
+        for rid in sorted(exempted_ids):
+            if rid not in registered:
+                errors.append(
+                    f"known-technical-debt.md 条目 {row_id} 声明豁免 EXCEPTIONABLE 红线 {rid}（含豁免意图措辞），"
+                    f"但 exceptions.yml 未登记任何 rule_id={rid} 的例外。请在 exceptions.yml 补录该豁免，"
+                    f"或用不含豁免意图的措辞（推迟优化）描述。"
+                )
+                continue
+            if not any(row_id in reason for reason in registered[rid]):
+                errors.append(
+                    f"known-technical-debt.md 条目 {row_id} 声明的 {rid} 豁免，exceptions.yml 中 rule_id={rid} "
+                    f"的例外（{', '.join(registered[rid])[:80]}…）均未在 reason 中回指条目 {row_id}。"
+                    f"请将条目 {row_id} 补记入对应例外的 reason，或在 exceptions.yml 新增该豁免。"
+                )
+
+    return errors
+
+
 def check_canonical_topics_consistency() -> list[str]:
     """主题 → canonical 正本映射一致性检查 (P2-12)。
 
@@ -2187,6 +2273,8 @@ def main() -> int:
     all_errors.extend(check_enforcement_mapping())
     # 例外注册表一致性：紧随红线一致性之后，守护集中例外治理 (P1-01)
     all_errors.extend(check_exceptions_yaml_consistency())
+    # 例外反向覆盖：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已登记例外 (P1-04)
+    all_errors.extend(check_exceptions_reverse_coverage())
     # 主题 → canonical 正本映射一致性：守护决策树机器可读镜像的路径有效性 (P2-12)
     all_errors.extend(check_canonical_topics_consistency())
     # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
@@ -2218,7 +2306,7 @@ def main() -> int:
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "enforcement 字段映射一致性 / exceptions.yml 一致性 / canonical-topics.yml 一致性 / "
+        "enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "

@@ -2493,6 +2493,106 @@ class TestExceptionsYamlConsistency:
         errors = check_exceptions_yaml_consistency()
         assert any("expires_at 或 removal_trigger" in e for e in errors), f"应报缺少二选一字段, got: {errors}"
 
+    # --- 反向一致性检查 (P1-04)：技术债表豁免 EXCEPTIONABLE 红线必须已登记 ---
+
+    def _write_rev_redlines_with_r5(self, tmp_path, rule_type: str = "EXCEPTIONABLE"):
+        red = tmp_path / "redlines.yml"
+        red.write_text(
+            f"redlines:\n  - id: R5\n    title: 僵尸引擎操作\n    rule_type: {rule_type}\n",
+            encoding="utf-8",
+        )
+        return red
+
+    def _write_rev_debt_with_exemption(self, tmp_path, row_id: str = "P3-M9-NewsSub") -> object:
+        debt = tmp_path / "known-technical-debt.md"
+        debt.write_text(
+            f"| **{row_id}** | **#M9 R5: 吞没 EngineDisposedError** | "
+            f"设计合理但严格按 R5 应传播，保持现状 | 保持现状 |\n",
+            encoding="utf-8",
+        )
+        return debt
+
+    def _write_rev_exceptions(self, tmp_path, yaml_body: str) -> object:
+        exc = tmp_path / "exceptions.yml"
+        exc.write_text(yaml_body, encoding="utf-8")
+        return exc
+
+    def test_reverse_coverage_detects_unregistered_exemption(self, tmp_path, monkeypatch):
+        """债表声明豁免 EXCEPTIONABLE 红线但未登记 exceptions.yml 时应报错."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", self._write_rev_debt_with_exemption(tmp_path)
+        )
+        errors = check_exceptions_reverse_coverage()
+        assert any("P3-M9-NewsSub" in e and "R5" in e for e in errors), f"应报未登记豁免, got: {errors}"
+
+    def test_reverse_coverage_passes_when_registered(self, tmp_path, monkeypatch):
+        """债表豁免已在 exceptions.yml 登记（reason 回指条目）时应通过."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH",
+            self._write_rev_exceptions(
+                tmp_path,
+                "exceptions:\n"
+                "  - id: EX-0017\n"
+                "    rule_id: R5\n"
+                "    paths: [services/x.py]\n"
+                "    reason: 技术债条目 P3-M9-NewsSub 登记于此\n",
+            ),
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", self._write_rev_debt_with_exemption(tmp_path)
+        )
+        errors = check_exceptions_reverse_coverage()
+        assert errors == [], f"应通过检查, got: {errors}"
+
+    def test_reverse_coverage_requires_reason_backref(self, tmp_path, monkeypatch):
+        """exceptions.yml 有 rule_id 但 reason 未回指条目时应报错."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH",
+            self._write_rev_exceptions(
+                tmp_path,
+                "exceptions:\n"
+                "  - id: EX-0017\n"
+                "    rule_id: R5\n"
+                "    paths: [services/x.py]\n"
+                "    reason: 未回指任意技术债条目\n",
+            ),
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", self._write_rev_debt_with_exemption(tmp_path)
+        )
+        errors = check_exceptions_reverse_coverage()
+        assert any("未在 reason 中回指" in e and "P3-M9-NewsSub" in e for e in errors), (
+            f"应报 reason 未回指, got: {errors}"
+        )
+
+    def test_reverse_coverage_ignores_non_exceptionable(self, tmp_path, monkeypatch):
+        """非 EXCEPTIONABLE 红线（INVARIANT）在债表中豁免不应被反向检查拦截."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr(
+            "check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path, "INVARIANT")
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", self._write_rev_debt_with_exemption(tmp_path)
+        )
+        errors = check_exceptions_reverse_coverage()
+        assert errors == [], f"INVARIANT 红线豁免不应触发反向检查, got: {errors}"
+
     def test_detects_duplicate_id(self, tmp_path, monkeypatch):
         """例外 id 重复时应报错."""
         from check_docs_consistency import check_exceptions_yaml_consistency
@@ -2766,12 +2866,12 @@ class TestAgentsMdSync:
         assert "<!-- /generated -->" in content, "缺少生成区块结束标记"
 
     def test_render_invariant_lines_expected_ids(self):
-        """渲染结果应为 INVARIANT(R2/R3/R4/R5/R7/R9/R10) + R18, 共 8 行."""
+        """渲染结果应为 INVARIANT(R2/R3/R4/R7/R9/R10) + R18, 共 7 行 (R5 降为 EXCEPTIONABLE 后移出)."""
         from check_docs_consistency import _render_agents_invariant_lines
 
         lines = _render_agents_invariant_lines()
         ids = [line.removeprefix("- R").split("：")[0] for line in lines]
-        assert ids == ["2", "3", "4", "5", "7", "9", "10", "18"], f"红线集合漂移, got: {ids}"
+        assert ids == ["2", "3", "4", "7", "9", "10", "18"], f"红线集合漂移, got: {ids}"
 
     def test_check_agents_md_sync_passes(self):
         """真实 AGENTS.md 生成区块应与 redlines.yml 渲染一致 (无错误)."""

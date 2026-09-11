@@ -65,11 +65,11 @@ redlines:
 
   - id: R5
     title: 僵尸引擎操作
-    description: "在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError)"
+    description: "在 disposed 的引擎上执行数据库操作（DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError；应用服务层轮询循环的优雅停止不在其内，此类既有偏离经 exceptions.yml 登记）"
     enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
-    rule_type: INVARIANT
+    rule_type: EXCEPTIONABLE
 
   - id: R6
     title: 过时类型注解
