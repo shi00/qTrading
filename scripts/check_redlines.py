@@ -508,7 +508,8 @@ def check_R13() -> list[str]:
             errors.append(
                 f"R13 未注册 DAO: {rel} 定义 DAO 类 '{cls_name}' "
                 f"但 CacheManager.__init__ 未实例化（应在 data/cache/cache_manager.py 中 "
-                f"self.<name>_dao = {cls_name}(self.engine) 并在 _create_engine 中更新 .engine 引用）"
+                f"self.<name>_dao = {cls_name}(self.engine) 并在 data/cache/dao_registry.py 的 "
+                f'_DAO_REGISTRY 中登记（"attr_name", {cls_name}）；engine 同步由 sync_engines() 驱动，不要手工赋值 .engine）'
             )
     return errors
 

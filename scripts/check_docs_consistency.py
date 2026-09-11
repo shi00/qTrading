@@ -1596,6 +1596,11 @@ _DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
     "docs/guides/ci-cd.md": {"ci-deps", "release"},
 }
 
+# 决策树元条目（非具体任务路由，承载「未列类型 → 按层选最接近入口」的兜底规则）。
+# 其 canonical 指向 CLAUDE.md §3/§4（红线 + 架构边界），不参与任务到正本的路由映射，
+# DOC-04 方向 2（canonical 必须在 §1.8 决策树出现）据此豁免（F-11）。
+_DECISION_TREE_META_IDS: frozenset[str] = frozenset({"fallback"})
+
 
 def _load_canonical_topics() -> list[dict] | None:
     """加载 canonical-topics.yml 的 topics 列表；无法解析或结构非法时返回 None。"""
@@ -1676,6 +1681,9 @@ def check_decision_tree_mapping() -> list[str]:
 
     # 方向 2: 逐主题绑定 canonical 归属（补齐集合级丢失「分布/归属」的交叉错配与归属丢失）
     for canonical, topic_ids in sorted(yml_canonical_map.items()):
+        # 元条目（fallback 兜底行）的 canonical 不是任务路由目标，豁免跨引用校验（DOC-04 方向 2）
+        if topic_ids == _DECISION_TREE_META_IDS:
+            continue
         if canonical in _DECISION_TREE_MERGED_IDS:
             # 共享 canonical：须在宪法出现，且 yml 归属与白名单（宪法合并行承载主题集）一致
             if canonical not in claude_targets:

@@ -137,6 +137,7 @@
 | 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（操作前确认应用已完全退出） |
 | 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md)；存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR（P2-17） |
 | 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md)（分层职责与登记约定） |
+| 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 |
 
 > 红线（§3）与架构边界（§4）为所有任务的通用约束，任何任务均须遵守；高风险任务（红线、架构边界、数据丢失风险）经确认后再编码。
 
@@ -176,7 +177,7 @@
 |---|------|------|---------|
 | R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 6 条契约） |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests） |
-| R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) | pre-commit |
+| R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[error-code]`（人类理由写在方括号外，格式 `# type: ignore[错误码]`  `# 原因`；pre-commit 强制拦截） | pre-commit |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作（DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`；应用服务层轮询循环的优雅停止不在其内，此类既有偏离经 exceptions.yml 登记） | 仅人工评审 |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
@@ -186,7 +187,7 @@
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
 | R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审） |
 | R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
-| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` 驱动循环同步，结构上不可漏改） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度） |
+| R13 | **未注册 DAO** | 新增 DAO 需同时登记进 `_DAO_REGISTRY` 并在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` + `sync_engines()` 驱动循环同步；**已登记的 DAO** 其 engine 同步不可漏改，登记本身仍需人工确保） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度）+ CI-test（`test_cache_manager_dao_registry.py` 反查 `_DAO_REGISTRY` 覆盖） |
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | pre-commit（check_redlines.py，部分守护：VM `__init__` 构造已注册单例检测；事件处理器内同步 IO 仍仅人工评审） |
