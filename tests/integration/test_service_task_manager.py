@@ -64,8 +64,8 @@ class TestAppTask:
 
     def test_task_default_values(self):
         task = AppTask()
-        assert task.name == "Unknown Task"
-        assert task.task_type == "System"
+        assert task.name == Message("task_name_unknown")
+        assert task.task_type == Message("task_type_system")
         assert task.description == Message("task_status_queued")
         assert task.cancellable is False
         assert task.started_at is None

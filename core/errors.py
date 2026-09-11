@@ -108,3 +108,29 @@ class AIBudgetError(AppError):
             ),
             detail,
         )
+
+
+class AIConfigError(AppError):
+    """AI 供应商配置不合法（如跨供应商 failover 目标无专属 API Key）。
+
+    D8-1: 跨供应商 failover 时，若备用供应商未配置**自己的**专属凭证而全局
+    ``ai_api_key`` 存在，旧逻辑会把主供应商的 key 作为 Authorization 发送到备用
+    供应商的 endpoint（凭证跨域泄露）。本异常在 ``_build_litellm_params`` 显式抛出，
+    使 failover 明确失败并给出可操作提示（"备用供应商未配置 API Key"），而非
+    发出一个注定失败且泄露凭证的请求。
+
+    携带 ``Message``（i18n key + params）而非预翻译字符串，符合 CLAUDE.md §3.2
+    "策略/VM 只产出 i18n key"。``info`` 与 ``self.message`` 同一来源，使
+    ``classify_error`` 首分支可直接透传。
+    """
+
+    def __init__(self, message: Message, detail: str = "") -> None:
+        self.message = message
+        super().__init__(
+            ErrorInfo(
+                code="ai_config_missing_credential",
+                message_key=message.key,
+                format_args=dict(message.params),
+            ),
+            detail,
+        )

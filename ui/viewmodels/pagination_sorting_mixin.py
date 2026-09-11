@@ -66,14 +66,43 @@ class PaginationSortingMixin:
         # 内容未变时复用引用 (NaN 会导致 value 比较误判重建, 属安全侧: 额外重格式化而非陈旧命中)
         if rows == self._state.current_page_rows:
             rows = self._state.current_page_rows
+        # D7-3: 当前页切片按 ai_status 拆三区 (与 current_page_rows 同帧原子, 保证分区与页/排序/过滤一致)
+        recommended, excluded, failed = self._split_page_rows_by_ai_status(rows)
         self._set_state(
             page_size=ps,
             page_no=pn,
             total_items=total_items,
             total_pages=total_pages,
             current_page_rows=rows,
+            ai_recommended_rows=recommended,
+            ai_excluded_rows=excluded,
+            ai_failed_rows=failed,
             **changes,
         )
+
+    @staticmethod
+    def _split_page_rows_by_ai_status(
+        rows: tuple[ScreenerRow, ...],
+    ) -> tuple[tuple[ScreenerRow, ...], tuple[ScreenerRow, ...], tuple[ScreenerRow, ...]]:
+        """将当前页行按 ai_status 拆为 (recommended, excluded, failed) 三区 (D7-3).
+
+        - ai_status == "analyzed"   → recommended (AI 推荐)
+        - ai_status == "rejected"   → excluded (AI 已排除)
+        - 其余所有值 (failed/skipped/ai_unavailable/policy_not_acknowledged/缺失)
+          一律归入 failed, 保证 current_page_rows 行零丢失 (D7-3 对抗检视 ROE-1).
+        """
+        recommended: list[ScreenerRow] = []
+        excluded: list[ScreenerRow] = []
+        failed: list[ScreenerRow] = []
+        for row in rows:
+            status = row.values.get("ai_status")
+            if status == "analyzed":
+                recommended.append(row)
+            elif status == "rejected":
+                excluded.append(row)
+            else:
+                failed.append(row)
+        return tuple(recommended), tuple(excluded), tuple(failed)
 
     @staticmethod
     def _build_current_page_rows(

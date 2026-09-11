@@ -220,7 +220,7 @@ class TestConfigHandlerLLM:
             api_key="primary-key",
         )
 
-        cred = ConfigHandler.get_provider_credential("qwen")
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
 
         # When no provider-specific key exists, it falls back to the global primary key
         assert cred["api_key"] == "primary-key"
@@ -595,7 +595,7 @@ class TestProviderCredentialRoundtrip:
             models=["qwen-max"],
         )
 
-        cred = ConfigHandler.get_provider_credential("qwen")
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
 
         assert cred["api_key"] == "sk-test-key"
         assert cred["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -607,7 +607,7 @@ class TestProviderCredentialRoundtrip:
 
         ConfigHandler.save_provider_credential(provider="qwen", api_key="sk-test")
 
-        cred = ConfigHandler.get_provider_credential("qwen")
+        cred = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
 
         assert cred["base_url"] is not None
         assert "dashscope" in cred["base_url"] or cred["base_url"] == ""

@@ -189,6 +189,14 @@ class ScreenerState:
     total_items: int = 0
     # C2b: 当前页 locale-neutral 原始行 (唯一切片 owner 在 _update_pagination 内生成)
     current_page_rows: tuple[ScreenerRow, ...] = ()
+    # D7-3: 当前页切片按 ai_status 拆分的三分区 (recommended/excluded/failed)。
+    # locale-neutral 原始行, 数据源 _update_pagination 单帧原子产出;
+    # View 渲染期按分区标题(i18n key)+计数呈现。ai_status 非三分区值(如
+    # skipped/ai_unavailable/policy_not_acknowledged/缺失)一律归入 failed,
+    # 保证 current_page_rows 行零丢失 (§3.2 VM 不感知 locale, 不引入状态机)。
+    ai_recommended_rows: tuple[ScreenerRow, ...] = ()
+    ai_excluded_rows: tuple[ScreenerRow, ...] = ()
+    ai_failed_rows: tuple[ScreenerRow, ...] = ()
     # Sorting
     sort_column: str | None = None
     sort_ascending: bool = True

@@ -235,13 +235,22 @@ def _build_table_data(current_page_rows: tuple[ScreenerRow, ...], vm: ScreenerVi
         label = vm.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
-    formatted_rows: list[dict[str, typing.Any]] = []
-    for row in current_page_rows:
+    formatted_rows = _format_rows(current_page_rows, visible_cols)
+    return vt_columns, formatted_rows
+
+
+def _format_rows(
+    rows: tuple[ScreenerRow, ...] | list[ScreenerRow],
+    visible_cols: list[str],
+) -> list[dict[str, typing.Any]]:
+    """按可见列格式化行 (D7-3 抽出复用: 主表与三分区共用同一格式规则)."""
+    formatted: list[dict[str, typing.Any]] = []
+    for row in rows:
         raw = row.values
         fmt: dict[str, typing.Any] = {col: _format_cell_value(col, raw[col]) for col in visible_cols}
         fmt["_raw"] = raw  # #423: 携带原始行引用, 供 _on_row_click 反查 (替代 ts_code 字典反查, 避免同名多行覆盖)
-        formatted_rows.append(fmt)
-    return vt_columns, formatted_rows
+        formatted.append(fmt)
+    return formatted
 
 
 def _get_page() -> ft.Page | None:
@@ -1123,6 +1132,92 @@ def _resolve_table_data(
     return vt_columns, formatted_rows
 
 
+# D7-3: AI 三分区标题 → (i18n key, 图标, 标题颜色)。仅 View 渲染期使用; 数据按 ai_status
+# 已由 VM 拆分为 ai_recommended_rows/ai_excluded_rows/ai_failed_rows (§3.2 VM 只产出 key)。
+_SECTION_META: tuple[tuple[str, typing.Any, str, str], ...] = (
+    # (i18n key, 图标名, 图标色, 分区标签)
+    ("screener_section_recommended", ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS, "recommended"),
+    ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, AppColors.WARNING, "excluded"),
+    ("screener_section_failed", ft.Icons.ERROR_OUTLINE, AppColors.ERROR, "failed"),
+)
+
+
+def _build_screener_section_card(
+    *,
+    title_key: str,
+    count: int,
+    icon: typing.Any,
+    icon_color: str,
+    section_rows: list[dict],
+    vt_columns: list,
+    sort_col: str | None,
+    sort_asc: bool,
+    on_virtual_sort: typing.Callable[[str, bool], None],
+    on_row_click: typing.Callable[[dict], None],
+) -> ft.Container:
+    """构建单个 AI 分区卡片 (D7-3): 标题栏(图标+文案+计数) + 该分区表格/空态.
+
+    分区渲染仅消费 ``section_rows`` (当前页内按 ai_status 拆分的格式化行),
+    不持有业务状态 (§3.2 VM 只产出 key, View 渲染期翻译).
+    """
+    title = ft.Row(
+        safe_controls(
+            [
+                ft.Icon(icon, color=icon_color, size=AppStyles.FONT_SIZE_LG),
+                ft.Text(
+                    I18n.get(title_key).format(count=count),
+                    size=AppStyles.FONT_SIZE_BODY,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+            ]
+        ),
+        spacing=6,
+        alignment=ft.MainAxisAlignment.START,
+    )
+
+    if section_rows:
+        body = ft.Column(
+            [
+                PaginatedTable(
+                    rows=section_rows,
+                    columns=vt_columns,
+                    sort_col=sort_col,
+                    sort_asc=sort_asc,
+                    on_sort=on_virtual_sort,
+                    on_row_click=on_row_click,
+                    col_anchor=EIDS.SCREENER.column_header,
+                    row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+    else:
+        body = ft.Container(
+            content=ft.Row(
+                safe_controls(
+                    [
+                        ft.Text(
+                            I18n.get("screener_no_results"),
+                            color=AppColors.TEXT_SECONDARY,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                        )
+                    ]
+                ),
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=8,
+            expand=True,
+        )
+
+    return ft.Container(
+        content=ft.Column([title, ft.Divider(height=1, color=AppColors.DIVIDER), body], spacing=4),
+        **AppStyles.dashboard_card(padding=AppStyles.SPACING_MD),
+        expand=True,
+    )
+
+
 def _build_screener_control_card(
     state: ScreenerState,
     vm: ScreenerViewModel,
@@ -1334,13 +1429,20 @@ def _build_screener_table_card(
     state: ScreenerState,
     formatted_rows: list[dict],
     vt_columns: list,
+    section_formatted: dict[str, list[dict]],
     on_prev_page: typing.Callable[[ft.ControlEvent], None],
     on_next_page: typing.Callable[[ft.ControlEvent], None],
     on_page_size_change: typing.Callable[[ft.ControlEvent], None],
     on_virtual_sort: typing.Callable[[str, bool], None],
     on_row_click: typing.Callable[[dict], None],
+    is_realtime: bool,
 ) -> ft.Container:
-    """构建表格卡片区 (包含虚拟化表格/分页栏/空态)."""
+    """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
+
+    REALTIME 模式按 ai_status 渲染 recommended/excluded/failed 三分区;
+    HISTORY 模式的历史记录无 ai_status 列 (ScreeningHistory 表无该字段),
+    无法按 AI 三态分区, 渲染单一结果表, 避免全部行误入「分析失败」分区误导用户。
+    """
     page_no = state.page_no
     total_pages = state.total_pages
 
@@ -1397,22 +1499,52 @@ def _build_screener_table_card(
             expand=True,
         )
     else:
-        table_content = ft.Column(
-            [
-                PaginatedTable(
-                    rows=formatted_rows,
-                    columns=vt_columns,
+        if is_realtime:
+            # D7-3: 当前页内按 ai_status 拆分为三分区 (recommended/excluded/failed) 独立呈现;
+            # VM 已保证三分区和 data.current_page_rows 行零丢失 (非三分区值归入 failed)。
+            # 仅渲染有数据的分区: 空分区不留占位卡。否则小视口 (1280×720) 下有数据分区
+            # 被空分区挤到页面底部未布局区, CanvasKit 不物化其语义节点, 结果行不可见
+            # (C5-5 视口塌陷回归)。三态均有结果时并列呈现; 某态无行时该分区整体不显示,
+            # 决策可解释性由剩余有行分区承载。
+            body_rows = [
+                _build_screener_section_card(
+                    title_key=meta[0],
+                    count=len(rows),
+                    icon=meta[1],
+                    icon_color=meta[2],
+                    section_rows=rows,
+                    vt_columns=vt_columns,
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
-                    on_sort=on_virtual_sort,
+                    on_virtual_sort=on_virtual_sort,
                     on_row_click=on_row_click,
-                    col_anchor=EIDS.SCREENER.column_header,
-                    row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
-                ),
-                ft.Divider(height=1, color=AppColors.DIVIDER),
-                pagination_row,
-            ],
-            spacing=0,
+                )
+                for meta in _SECTION_META
+                if (rows := section_formatted.get(meta[3], []))
+            ]
+        else:
+            # HISTORY: 历史记录来自 ScreeningHistory 表 (无 ai_status 列), 无法按 AI 三态分区;
+            # 渲染单一结果表, 与既有历史查看行为一致 (D7-3 对抗检视 HISTORY 决策可解释回归)。
+            body_rows = [
+                ft.Container(
+                    content=PaginatedTable(
+                        rows=formatted_rows,
+                        columns=vt_columns,
+                        sort_col=state.sort_column,
+                        sort_asc=state.sort_ascending,
+                        on_sort=on_virtual_sort,
+                        on_row_click=on_row_click,
+                        col_anchor=EIDS.SCREENER.column_header,
+                        row_anchor=(
+                            lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None
+                        ),
+                    ),
+                    expand=True,
+                )
+            ]
+        table_content = ft.Column(
+            [*body_rows, ft.Divider(height=1, color=AppColors.DIVIDER), pagination_row],
+            spacing=8,
             expand=True,
         )
 
@@ -1701,6 +1833,14 @@ def ScreenerView(
     status_text_value = _render_status_message(state.status_message)
     status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
     vt_columns, formatted_rows = _resolve_table_data(state.current_page_rows, table_memo_ref, vm)
+    # D7-3: 当前页三分区行 (recommended/excluded/failed) 复用同一可见列集格式化。
+    # VM 已按 ai_status 拆分 (零丢失兜底), View 仅据此渲染, 不引入额外状态机 (§3.2)。
+    _visible_cols = [c["id"] for c in vt_columns]
+    section_formatted = {
+        "recommended": _format_rows(state.ai_recommended_rows, _visible_cols),
+        "excluded": _format_rows(state.ai_excluded_rows, _visible_cols),
+        "failed": _format_rows(state.ai_failed_rows, _visible_cols),
+    }
 
     progress_visible = state.loading
     run_disabled = state.loading or state.is_retrying or not state.selected_strategy
@@ -1737,11 +1877,13 @@ def ScreenerView(
         state=state,
         formatted_rows=formatted_rows,
         vt_columns=vt_columns,
+        section_formatted=section_formatted,
         on_prev_page=lambda _: vm.change_page(-1),
         on_next_page=lambda _: vm.change_page(1),
         on_page_size_change=_on_page_size_change,
         on_virtual_sort=_on_virtual_sort,
         on_row_click=_on_row_click,
+        is_realtime=is_realtime,
     )
 
     log_card = _build_screener_log_card(

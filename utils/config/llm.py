@@ -226,13 +226,19 @@ def get_failover_config() -> dict:
     }
 
 
-def get_llm_config_for_provider(provider: str) -> dict:
+def get_llm_config_for_provider(provider: str, *, allow_global_fallback: bool = False) -> dict:
     """获取指定供应商的 LLM 配置（用于跨供应商 failover）。
+
+    Args:
+        provider: 供应商 ID（如 "qwen", "deepseek", "openai"）。
+        allow_global_fallback: 默认 False。全局 ``ai_api_key`` 语义上属于当前主供应商，
+            跨供应商 failover 复用会把 A 的凭证发送到 B 的 endpoint（凭证跨域泄露，
+            D8-1）。仅当调用方确知 provider 就是主供应商时才可传 True。
 
     Returns:
         {provider, model, api_key, base_url, models}
     """
-    cred = cfg.ConfigHandler.get_provider_credential(provider)
+    cred = cfg.ConfigHandler.get_provider_credential(provider, fallback_to_global=allow_global_fallback)
 
     if not cred["models"]:
         cfg.logger.warning("[ConfigHandler] No models found for provider '%s', returning empty model", provider)

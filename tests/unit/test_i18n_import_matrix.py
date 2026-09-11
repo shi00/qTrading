@@ -309,6 +309,12 @@ def test_apptask_persist_roundtrip_with_message():
     assert _deserialize_msg_field(legacy) == legacy
     assert _serialize_msg_field(legacy) == legacy
 
-    # AppTask 默认值仍为 str (向后兼容)
+    # AppTask 默认值为 Message (D7-5: 非 UI 层不产出硬编码用户文案；
+    # 旧 str 数据的向后兼容由持久化反序列化 _deserialize_msg_field 保证, 见上方)
     task = AppTask()
-    assert isinstance(task.name, str)
+    assert isinstance(task.name, Message)
+    assert task.name.key == "task_name_unknown"
+    assert isinstance(task.task_type, Message)
+    assert task.task_type.key == "task_type_system"
+    assert isinstance(task.description, Message)
+    assert task.description.key == "task_status_queued"
