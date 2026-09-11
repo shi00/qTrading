@@ -108,7 +108,7 @@ def _load_failover_items_sync() -> list[FailoverItem]:
             continue
         provider, model = entry.split("/", 1)
         pinfo = LLM_PROVIDERS.get(provider, {})
-        cred = ConfigHandler.get_provider_credential(provider)
+        cred = ConfigHandler.get_provider_credential(provider, fallback_to_global=False)
         has_key = bool(cred.get("api_key"))
         key_masked = ""
         if has_key and cred["api_key"]:
@@ -228,8 +228,10 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
             if index < 0 or index >= len(items):
                 return
             item = items[index]
+            # D8-1: failover 目标是备用供应商，无专属 key 时禁止回退全局 key
             cred = await ThreadPoolManager().run_async(
-                TaskType.IO, ConfigHandler.get_provider_credential, item.provider
+                TaskType.IO,
+                lambda: ConfigHandler.get_provider_credential(item.provider, fallback_to_global=False),
             )
 
             existing = [it.provider for it in items]
@@ -384,7 +386,7 @@ class FailoverConfigPanelViewModel(ConfigPanelViewModelBase[FailoverConfigState]
                 # 编辑模式下清空 API Key 时查询原有凭证（用于警告提示）
                 existing_cred = None
                 if is_edit and not api_key:
-                    existing_cred = ConfigHandler.get_provider_credential(provider)
+                    existing_cred = ConfigHandler.get_provider_credential(provider, fallback_to_global=False)
 
                 # 主供应商检查
                 primary_provider = ConfigHandler.load_config().get("llm_provider", "")

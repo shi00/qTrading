@@ -152,7 +152,7 @@ class TestGetProviderCredentialRegistersSecret:
 
         monkeypatch.setattr(cfg_mod.keyring, "get_password", mock_get_pw)
 
-        result = ConfigHandler.get_provider_credential("qwen")
+        result = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
 
         assert result["api_key"] == _SECRET_PROVIDER_KEY
         assert _SECRET_PROVIDER_KEY in DataSanitizer._known_secrets
@@ -173,7 +173,7 @@ class TestGetProviderCredentialRegistersSecret:
             lambda v: _SECRET_PROVIDER_KEY if v else None,
         )
 
-        result = ConfigHandler.get_provider_credential("qwen")
+        result = ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
 
         assert result["api_key"] == _SECRET_PROVIDER_KEY
         assert _SECRET_PROVIDER_KEY in DataSanitizer._known_secrets

@@ -1024,7 +1024,7 @@ class TestLLMConfigPanelViewModelStaticMethods:
             "base_url": "old",
         }
         LLMConfigPanelViewModel._sync_provider_credential_to_failover("deepseek", None, "https://api.x.com", None)
-        mock_config_handler.get_provider_credential.assert_called_once_with("deepseek")
+        mock_config_handler.get_provider_credential.assert_called_once_with("deepseek", fallback_to_global=True)
         call_kwargs = mock_config_handler.save_provider_credential.call_args.kwargs
         assert call_kwargs["api_key"] == "sk-existing"
 

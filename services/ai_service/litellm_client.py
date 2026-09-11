@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from core.errors import AIConfigError
+from core.i18n import Message
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
 from services.local_model_manager import LocalInferenceTimeoutError, LocalModelManager
 from utils.error_classifier import classify_error, classify_severity, log_classified
@@ -227,11 +229,19 @@ class LiteLLMClient:
                 if override_llm_config.get("api_key"):
                     request_params["api_key"] = override_llm_config["api_key"]
                 else:
-                    logger.warning(
-                        "[AIService] Cross-provider failover to '%s' has no dedicated API key; "
-                        "request will not include api_key (LiteLLM may fallback to environment variables). "
-                        "Consider configuring dedicated credentials for this provider.",
-                        override_provider,
+                    # D8-1: 跨供应商 failover 无专属 key 时显式失败，而非静默继续。
+                    # 禁止以全局 key 回退：全局 ai_api_key 语义上属于当前主供应商，
+                    # 复用会把 A 的凭证发往 B 的 endpoint（凭证跨域泄露）。此处
+                    # 显式抛错使 failover 明确失败并可给出可操作提示。
+                    raise AIConfigError(
+                        Message(
+                            "ai_failover_missing_credential",
+                            {"provider": override_provider},
+                        ),
+                        detail=(
+                            f"Cross-provider failover target '{override_provider}' has no "
+                            "dedicated API key; refusing to reuse the global api_key"
+                        ),
                     )
                 # Prefer credential's base_url, fallback to LLM_PROVIDERS default
                 override_base_url = override_llm_config.get("base_url")

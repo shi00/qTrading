@@ -1085,7 +1085,7 @@ class TestMultiProviderCredentials:
         },
     )
     def test_get_provider_credential(self, mock_load, mock_kr):
-        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
         assert result["api_key"] == "qwen_key_123"
         assert result["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         assert "qwen-plus" in result["models"]
@@ -1099,7 +1099,7 @@ class TestMultiProviderCredentials:
             "get_password",
             side_effect=lambda svc, key: "global_key" if key == "ai_api_key" else None,
         ):
-            result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+            result = cfg_mod.ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
             assert result["api_key"] == "global_key"
 
     @patch.object(cfg_mod.keyring, "get_password", return_value="qwen_key")
@@ -1338,7 +1338,7 @@ class TestValidateFailoverCredentials:
         with patch.object(
             cfg_mod.ConfigHandler,
             "get_provider_credential",
-            side_effect=lambda p: cred_calls[p],
+            side_effect=lambda p, **kw: cred_calls[p],
         ):
             result = cfg_mod.ConfigHandler.validate_failover_credentials()
             assert "deepseek" not in result
@@ -1553,7 +1553,7 @@ class TestGetProviderCredentialFallback:
     )
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_from_provider_keyring(self, mock_load, mock_kr):
-        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
         assert result["api_key"] == "provider_key"
 
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
@@ -1564,7 +1564,7 @@ class TestGetProviderCredentialFallback:
     )
     @patch.object(cfg_mod.SecurityManager, "decrypt_data", return_value="decrypted_key")
     def test_from_encrypted_config(self, mock_decrypt, mock_load, mock_kr):
-        result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
+        result = cfg_mod.ConfigHandler.get_provider_credential("qwen", fallback_to_global=True)
         assert result["api_key"] == "decrypted_key"
 
     @patch.object(
@@ -1574,7 +1574,7 @@ class TestGetProviderCredentialFallback:
     )
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_fallback_to_global_keyring(self, mock_load, mock_kr):
-        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
+        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider", fallback_to_global=True)
         assert result["api_key"] == "global_key"
 
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
@@ -1585,7 +1585,7 @@ class TestGetProviderCredentialFallback:
         return_value={"ai_api_key": "ENCRYPTED_GLOBAL"},
     )
     def test_fallback_to_global_encrypted(self, mock_load, mock_decrypt, mock_kr):
-        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
+        result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider", fallback_to_global=True)
         assert result["api_key"] == "decrypted_from_config"
 
 
