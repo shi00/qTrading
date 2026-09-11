@@ -503,7 +503,7 @@ class SchedulerService:
             len(missed),
             [d.strftime("%Y%m%d") for d in missed[:5]],
         )
-        TaskManager().submit_task(
+        task_id = TaskManager().submit_task(
             name=Message("sched_task_catchup", {"days": len(missed)}),
             task_type=Message("sched_task_type_daily"),
             coroutine_factory=self._catchup_logic,
@@ -511,6 +511,12 @@ class SchedulerService:
             unique_key="daily_sync_catchup",  # 独立 key，与常规同步解耦（D6-1 Q2 修订）
             missed_dates=missed,
         )
+        # D6-5: 返回值 None（去重命中/无事件循环）时，本次补偿未真正提交；不写幂等键，
+        # 下个补偿周期（30s 看门狗 / misfire）会重新检查遗漏并尝试。
+        if task_id is None:
+            logger.warning(
+                "[Scheduler] Catch-up task not submitted (dedup hit or no event loop); will re-check on next cycle"
+            )
 
     async def _catchup_logic(self, task_id: str, missed_dates: list, **kwargs):
         """D6-1 补偿执行：对每个遗漏交易日执行单日市场快照同步。
@@ -676,13 +682,21 @@ class SchedulerService:
                 added = result
             return Message("sched_daily_done", {"days": 0, "rows": added})
 
-        TaskManager().submit_task(
+        # D6-5: submit_task 返回 None 有两种原因——unique_key 去重命中（正常，跳过合理）
+        # 或无可用事件循环（故障，任务未提交）。TaskManager 内部已分别记 warning/error；
+        # 此处仅记录调度器视角告警，本次不标记完成，交由 D6-1 补偿机制在下次检查时重试。
+        task_id = TaskManager().submit_task(
             name=Message("sched_task_daily_update", {"date": today_str}),
             task_type=Message("sched_task_type_daily"),
             coroutine_factory=_daily_update_logic,
             cancellable=False,
             unique_key="daily_sync",
         )
+        if task_id is None:
+            logger.warning(
+                "[Scheduler] Daily update task not submitted (dedup hit or no event loop); "
+                "not marking done, catch-up will retry"
+            )
 
     async def _run_ai_concept_tagger(self):
         from utils.correlation import ensure_correlation_id
@@ -719,13 +733,17 @@ class SchedulerService:
             await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
             return Message("sched_ai_concept_done")
 
-        TaskManager().submit_task(
+        # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
+        # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。
+        task_id = TaskManager().submit_task(
             name=Message("sched_ai_concept_task_name"),
             task_type=Message("sched_ai_concept_task_type"),
             coroutine_factory=_ai_concept_logic,
             cancellable=True,
             unique_key="ai_concept_sync",
         )
+        if task_id is None:
+            logger.warning("[Scheduler] AI concept task not submitted (dedup hit or no event loop)")
 
     async def _run_nightly_prediction(self):
         """Execute registered nightly prediction job (review01-A2-1 下沉).

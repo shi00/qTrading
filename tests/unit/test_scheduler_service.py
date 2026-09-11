@@ -546,9 +546,36 @@ class TestRunDailyUpdate:
             mock_dp.return_value = mock_dp_instance
             mock_now.return_value.date.return_value = date(2024, 6, 15)
             mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task.return_value = "task-abc"
             mock_tm.return_value = mock_tm_instance
             await svc._run_daily_update()
             mock_tm_instance.submit_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trading_day_submit_returns_none_warns(self):
+        """D6-5: submit_task 返回 None（无事件循环/去重命中）时记 warning 且不抛错。"""
+        svc = _make_svc()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("utils.scheduler_service.get_now") as mock_now,
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task.return_value = None
+            mock_tm.return_value = mock_tm_instance
+            await svc._run_daily_update()
+            mock_tm_instance.submit_task.assert_called_once()
+            # 强断言：warning 出现且携带"not submitted"语义
+            warning_calls = [c for c in mock_warn.call_args_list]
+            assert any("Daily update task not submitted" in str(c.args[0]) for c in warning_calls)
 
 
 class TestRunAiConceptTagger:
@@ -587,6 +614,27 @@ class TestRunAiConceptTagger:
             mock_tm.return_value = mock_tm_instance
             await svc._run_ai_concept_tagger()
             mock_tm_instance.submit_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_none_warns(self):
+        """D6-5: AI 概念任务未提交（去重命中/无事件循环）时记 warning 且不抛错。"""
+        svc = _make_svc()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now") as mock_now,
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            mock_now.return_value.strftime.return_value = "20240615"
+            svc._last_ai_concept_date = None
+            mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task.return_value = None
+            mock_tm.return_value = mock_tm_instance
+            await svc._run_ai_concept_tagger()
+            mock_tm_instance.submit_task.assert_called_once()
+            warning_calls = [c for c in mock_warn.call_args_list]
+            assert any("AI concept task not submitted" in str(c.args[0]) for c in warning_calls)
 
 
 class TestSchedulerDispatchNightlyPrediction:
@@ -1264,6 +1312,28 @@ class TestCatchUpMissedUpdates:
                 "start_date": date(2024, 6, 13),
                 "end_date": date(2024, 6, 14),
             }
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_none_warns(self):
+        """D6-5: 补偿任务未提交（去重命中/无事件循环）时记 warning 且不抛错。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240610"
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 11)])
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.submit_task.return_value = None
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("utils.scheduler_service.get_now") as mock_now,
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._catch_up_missed_updates()
+            mock_tm_instance.submit_task.assert_called_once()
+            warning_calls = [c for c in mock_warn.call_args_list]
+            assert any("Catch-up task not submitted" in str(c.args[0]) for c in warning_calls)
 
     @pytest.mark.asyncio
     async def test_load_db_state_triggers_catchup(self):
