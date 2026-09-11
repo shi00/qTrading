@@ -135,6 +135,16 @@ class AppTask:
     _coroutine_factory: Callable = None  # type: ignore[assignment]
     _coroutine_kwargs: dict = field(default_factory=dict)
 
+    @property
+    def is_retryable(self) -> bool:
+        """能否重试：状态可重试且保有重建协程所需的 factory。
+
+        D6-7: 从 DB 加载的历史任务（AppTask 构造未设置 _coroutine_factory）即使状态为
+        FAILED/INTERRUPTED 也无法重试（factory 无法序列化）。UI 以本属性控制重试按钮
+        可见性，避免"按钮存在但无效"的体验问题。
+        """
+        return self.status in _RETRYABLE_STATUSES and self._coroutine_factory is not None
+
 
 @register_singleton
 class TaskManager:
