@@ -45,7 +45,7 @@
 
 第二阶段扩展：
 - 3a NOTE(lazy) 三要素检查（已实现：check_note_lazy_format()）。
-- 3b 红线 R1~R18 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
+- 3b 红线 R1~R19 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
 - Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
 - exceptions.yml 例外注册表一致性检查（已实现：check_exceptions_yaml_consistency()，P1-01）。
@@ -2109,11 +2109,19 @@ def check_governance_id_glossary() -> list[str]:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors
     refs: set[str] = set()
-    for path in (CLAUDE_PATH, AGENTS_PATH):
+    # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
+    # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
+    # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
+    # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
+    governance_yml = [
+        p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
+    ]
+    scan_paths = [p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md")] + governance_yml
+    for path in scan_paths:
         if path.exists():
             refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
     for gov_id in sorted(refs - registered):
-        errors.append(f"治理 ID 对照表: {gov_id} 出现在自动加载文档中，但未在 governance-ids.md 登记")
+        errors.append(f"治理 ID 对照表: {gov_id} 出现在受检文档中，但未在 governance-ids.md 登记")
     return errors
 
 

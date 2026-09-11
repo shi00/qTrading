@@ -237,7 +237,7 @@ def ScreenerView():
 
 **文档权威（按主题正本，P1-05）**：文档权威不按目录层级全局覆盖，而按主题确定正本（见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）：
 
-1. 红线 R1~R18、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
+1. 红线 R1~R19、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
 2. 项目实现规范入口索引 → [CONTRIBUTING.md](../../CONTRIBUTING.md)
 3. Flet 项目约束与 API → 本文件（`v1-api-constraints.md` 为 Flet 声明式渲染与 V1 API 约束正本）
 

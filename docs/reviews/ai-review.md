@@ -85,7 +85,7 @@
 | 第三方集成、浏览器自动化、RPA | [third-party-rpa.md](./review-profiles/third-party-rpa.md) |
 | AI/ML/LLM、非确定性输出、工具调用 | [ai-ml-llm.md](./review-profiles/ai-ml-llm.md) |
 
-项目特定规则（AStockScreener 红线 R1-R18、架构边界、reviewProfile 结构）见 [project-profile.md](./review-profiles/project-profile.md)。
+项目特定规则（AStockScreener 红线 R1-R19、架构边界、reviewProfile 结构）见 [project-profile.md](./review-profiles/project-profile.md)。
 
 ## 7. 发现分类、证据与定级
 

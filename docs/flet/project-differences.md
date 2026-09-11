@@ -21,7 +21,7 @@ API 约束表、声明式组件契约、V1 声明式 UI 开发规范见 [v1-api-
 
 **文档权威（按主题正本，P1-05）**：文档权威不按目录层级全局覆盖，而按主题确定正本（见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）：
 
-1. 红线 R1~R18、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
+1. 红线 R1~R19、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
 2. 项目实现规范入口索引 → [CONTRIBUTING.md](../../CONTRIBUTING.md)
 3. Flet V1 API 关键约束 → [v1-api-constraints.md](./v1-api-constraints.md)
 4. 项目差异与高风险 API → **本文件**
