@@ -76,7 +76,7 @@
 
 - **仅修改必须触及的代码，只清理自己的逻辑，绝不随意改变周边代码。**
 - **禁止过度修饰/无益重构**：不要顺手"优化"周边的格式、命名、注释或无关逻辑，绝不重构没坏的代码。
-- **删除优于添加**：优先通过删除死代码、未使用的灵活性、推测性功能来解决问题，而非添加新代码。重构时先问"能否删除"，再问"如何修改"。但"不可简化清单"中的内容（输入校验、错误处理、安全、专项规范要求）不可因"删除"而省略。
+- **删除优于添加**：优先通过删除死代码、未使用的灵活性、推测性功能来解决问题，而非添加新代码（**限本次变更触及的代码**；范围外的无关死代码按 §1.4「残留代码处理」只报告、不删除）。重构时先问"能否删除"，再问"如何修改"。但"不可简化清单"中的内容（输入校验、错误处理、安全、专项规范要求）不可因"删除"而省略。
 - **严格融入风格**：必须与现有代码的编码风格（哪怕是你认为不够优雅的风格）保持绝对一致。
 - **残留代码处理**：若发现无关的死代码（Dead Code），在回复中指出，绝不顺手删除。
 
@@ -215,7 +215,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-当前 CLAUDE.md/CONTRIBUTING.md 规范条目中无未解决的规范缺口；代码层面的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
+规范层缺口的当前状态见 [docs/reviews/README.md](./docs/reviews/README.md) 轮次表中状态为「进行中」的行；代码层面的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用代码搜索工具（IDE 搜索或跨平台脚本）汇集 `NOTE(lazy):` 标记。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
@@ -230,12 +230,14 @@
 **依赖规则 (严格单向):**
 
 ```text
-core ← data / services / strategies / utils / ui / app
-data ← services / strategies / ui / app
-services ← strategies / ui / app
-strategies ← ui / app
-utils ← 任意层可引用 (横切关注点)
-app → 编排所有层，仅被 main.py 调用
+禁止导入方向（X 不得导入 Y）：
+  core       ✗→ data / services / strategies / ui / utils / app
+  data       ✗→ services / strategies / ui / app
+  services   ✗→ strategies / ui / app
+  strategies ✗→ ui / app
+  utils      ✗→ data / services / strategies / ui / app   （横切叶子：可被任意层引用，但不引用任何业务层）
+  ui         ✗→ app
+  app        →  可编排所有层，仅被 main.py 调用
 ```
 
 **绝对禁止反向依赖：** `core` 导入 `data`/`services`/`strategies`/`ui`/`utils`/`app` 中的任何模块；`data` 导入 `ui`/`services`/`strategies`；`services` 导入 `ui`；`strategies` 导入 `ui`。
