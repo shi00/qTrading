@@ -781,6 +781,64 @@ class TestTaskManagerAutoEvictOld:
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
 
+    def test_evicted_tasks_move_to_history(self):
+        """LIFE-05: 淘汰任务移入 _history，避免本会话消失、重启再现。"""
+        mgr = TaskManager()
+        for i in range(210):
+            t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
+            t.completed_at = datetime.datetime(2024, 1, 1, 0, 0, 0)
+            mgr._tasks[t.id] = t
+            mgr._finished_order[t.id] = t.completed_at
+        # 淘汰前最旧 10 条（插入序，completed_at 相同）会被移入 _history
+        expected_old_ids = list(mgr._finished_order.keys())[:10]
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
+        # 被淘汰的最旧 10 条已移入 _history
+        assert len(mgr._history) == 10
+        history_ids = {h.id for h in mgr._history}
+        assert set(expected_old_ids) <= history_ids
+        # 被淘汰任务已从 _tasks 移除，但保留在 _history
+        assert all(tid not in mgr._tasks for tid in expected_old_ids)
+        # 均保留在 get_all_tasks 合并视图中（不因淘汰而从界面消失）
+        combined_ids = {t.id for t in mgr.get_all_tasks()}
+        assert set(expected_old_ids) <= combined_ids
+
+    def test_history_bounded_after_eviction(self):
+        """LIFE-05: _history 超限时移除最旧条目，保持有界。"""
+        mgr = TaskManager()
+        cst = datetime.timezone(datetime.timedelta(hours=8))
+        base = datetime.datetime(2023, 1, 1, tzinfo=cst)
+        # 预置已近上限的 _history（含 running 与 completed，模拟混合来源）
+        for i in range(mgr._MAX_FINISHED_HISTORY):
+            h = AppTask(name=f"hist_{i}", status=TaskStatus.COMPLETED)
+            h.created_at = base + datetime.timedelta(minutes=i)
+            mgr._history.append(h)
+        # 触发淘汰：单条完成使 _finished_order 超限一条
+        for i in range(mgr._MAX_FINISHED_HISTORY + 1):
+            t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
+            t.completed_at = datetime.datetime(2024, 6, 1, tzinfo=cst)
+            mgr._tasks[t.id] = t
+            mgr._finished_order[t.id] = t.completed_at
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
+        # _history 保持 ≤ 上限
+        assert len(mgr._history) <= mgr._MAX_FINISHED_HISTORY
+
+    def test_multiple_evictions_no_duplicate_ids_in_view(self):
+        """LIFE-05: 多轮累积淘汰后 get_all_tasks 视图无重复 id 且总数有界。"""
+        mgr = TaskManager()
+        for _round in range(4):
+            for i in range(30):
+                t = AppTask(name=f"r{_round}_{i}", status=TaskStatus.COMPLETED)
+                t.completed_at = datetime.datetime(2024, _round + 1, 1, 0, 0, 0)
+                mgr._tasks[t.id] = t
+                mgr._finished_order[t.id] = t.completed_at
+            last_tid = list(mgr._finished_order.keys())[-1]
+            mgr._evict_on_complete(last_tid)
+        view_ids = [t.id for t in mgr.get_all_tasks()]
+        assert len(view_ids) == len(set(view_ids))
+        assert len(view_ids) <= mgr._MAX_FINISHED_HISTORY * 2
+
 
 class TestTaskManagerSafeDt:
     def test_none(self):
