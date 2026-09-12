@@ -60,6 +60,11 @@ class BacktestConfig:
     max_position_count: int = 50
     max_single_weight: float = 0.1
 
+    renormalize_after_cap: bool = False
+    """截顶后是否重新归一化到满仓（BT-03）。False=保留现金（默认，风控优先）；
+    True=全部触顶时放宽单票上限、等比放大到满仓，权总=1（资金效率优先，但会超出
+    max_single_weight 硬上限）。配合回测指标 avg_invested_pct / cash_drag_days 观察现金流。"""
+
     delist_recovery_rate: float = 0.3
     """退市清算回收率（0, 1]。
 

@@ -1,0 +1,10 @@
+fix(backtest): 新增仓位运用效率可见性与 renormalize 满仓开关（BT-03）
+
+暴露「信号稀疏 → 资金闲置」问题：
+- metrics: 新增 avg_invested_pct / min_invested_pct / cash_drag_days 三项仓位可见性指标
+- position_sizer: apply_max_weight_constraint 支持 renormalize，n*max_weight<1 时可按配置
+  放宽单票上限等比放大到满仓（权总=1）或保留现金（默认，风控优先）
+- config: 新增 renormalize_after_cap 开关（默认 False）
+- portfolio: 应用权重约束时透传 renormalize_after_cap
+- engine: 将仓位指标并入回测 metrics
+- UI+i18n: 结果面板展示投资比例指标，avg_invested_pct<0.7 显示现金稀释告警

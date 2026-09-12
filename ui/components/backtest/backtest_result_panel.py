@@ -120,6 +120,38 @@ def _ic_ir_label(has_real_score: bool) -> str:
     return I18n.get("backtest_metric_ic_ir" if has_real_score else "backtest_metric_ic_ir_sort")
 
 
+def _invested_color(pct: float) -> str:
+    """BT-03: 投资比例颜色。>=80% 正常，>=70% 警告，<70%（资金闲置严重）红色。"""
+    if pct > 0.5:
+        return AppColors.SUCCESS
+    if pct > 0.3:
+        return AppColors.WARNING
+    return AppColors.ERROR
+
+
+def _invested_warning(avg_invested_pct: float | None) -> ft.Container | None:
+    """BT-03: avg_invested_pct < 0.7 时返回现金稀释告警条，否则 None。"""
+    if avg_invested_pct is None or avg_invested_pct >= 0.7:
+        return None
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=AppColors.WARNING),
+                ft.Text(
+                    I18n.get("backtest_investment_warning", percent=f"{avg_invested_pct * 100:.0f}"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.CARD_BG,
+        border_radius=8,
+    )
+
+
 def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Column:
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
@@ -198,6 +230,49 @@ def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Col
         run_spacing=AppStyles.SPACING_MD,
     )
 
+    # BT-03: 第三行展示仓位运用效率指标（资金闲置可见性）
+    avg_invested = metrics.get("avg_invested_pct")
+    min_invested = metrics.get("min_invested_pct")
+    cash_drag_days = metrics.get("cash_drag_days", 0)
+    row3 = ft.ResponsiveRow(
+        controls=safe_controls(
+            [
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_avg_invested_pct"),
+                        f"{float(avg_invested) * 100:.1f}%" if avg_invested is not None else "N/A",
+                        _invested_color(float(avg_invested)) if avg_invested is not None else AppColors.TEXT_SECONDARY,
+                        tooltip=I18n.get("backtest_metric_invested_tooltip"),
+                    ),
+                    col=_COL_QUARTER,
+                ),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_min_invested_pct"),
+                        f"{float(min_invested) * 100:.1f}%" if min_invested is not None else "N/A",
+                        _invested_color(float(min_invested)) if min_invested is not None else AppColors.TEXT_SECONDARY,
+                    ),
+                    col=_COL_QUARTER,
+                ),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_cash_drag_days"),
+                        f"{int(cash_drag_days)}",
+                        AppColors.ERROR
+                        if (isinstance(cash_drag_days, (int, float)) and cash_drag_days > 0)
+                        else AppColors.TEXT_PRIMARY,
+                        tooltip=I18n.get("backtest_metric_cash_drag_tooltip"),
+                    ),
+                    col=_COL_QUARTER,
+                ),
+            ]
+        ),
+        spacing=AppStyles.SPACING_MD,
+        run_spacing=AppStyles.SPACING_MD,
+    )
+
+    invested_warning = _invested_warning(float(avg_invested) if avg_invested is not None else None)
+
     return ft.Column(
         [
             ft.Text(
@@ -206,8 +281,10 @@ def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Col
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
             ),
+            *([invested_warning] if invested_warning is not None else []),
             row1,
             row2,
+            row3,
         ],
         spacing=12,
     )
