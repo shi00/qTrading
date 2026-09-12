@@ -32,6 +32,9 @@ from ui.components.backtest.backtest_result_panel import (
     _get_color_for_ic,
     _get_color_for_sharpe,
     _get_color_for_value,
+    _ic_ir_label,
+    _ic_mean_label,
+    _ic_sort_tooltip,
     _metric_card,
     _profit_factor_card,
 )
@@ -262,6 +265,32 @@ class TestBuildMetricsSection:
             content = _build_metrics_section({"max_drawdown": 0.10})
 
         assert isinstance(content, ft.Column)
+
+
+class TestIcSortLabel:
+    """BT-01: has_real_score=False 时 IC 卡片标签切换为「排序 IC」并附 tooltip。"""
+
+    def test_ic_mean_label_switches_to_sort(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            _ic_mean_label(True)
+            mock_i18n.assert_called_with("backtest_metric_ic_mean")
+            _ic_mean_label(False)
+            mock_i18n.assert_called_with("backtest_metric_ic_mean_sort")
+
+    def test_ic_ir_label_switches_to_sort(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            _ic_ir_label(True)
+            mock_i18n.assert_called_with("backtest_metric_ic_ir")
+            _ic_ir_label(False)
+            mock_i18n.assert_called_with("backtest_metric_ic_ir_sort")
+
+    def test_ic_sort_tooltip_only_when_no_real_score(self) -> None:
+        # has_real_score=True → 无 tooltip
+        assert _ic_sort_tooltip(True) == ""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            tip = _ic_sort_tooltip(False)
+            assert tip != ""
+            mock_i18n.assert_called_with("backtest_metric_ic_sort_tooltip")
 
 
 class TestBuildEmptyContent:

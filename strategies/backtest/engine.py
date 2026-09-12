@@ -155,6 +155,14 @@ class VectorBacktestEngine:
 
         all_warnings = [str(w) for w in quote_warnings] + list(sim_warnings)
 
+        # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
+        # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。
+        has_real_score = (
+            bool(signals["has_real_score"].any())
+            if not signals.is_empty() and "has_real_score" in signals.columns
+            else False
+        )
+
         return BacktestResult(
             config=self.config,
             strategy_name=strategy.name,
@@ -181,6 +189,7 @@ class VectorBacktestEngine:
             failed_signal_dates=tuple(failed_signal_dates),
             delist_liquidation_count=delist_stats["delist_liquidation_count"],
             delist_loss_amount=delist_stats["delist_loss_amount"],
+            has_real_score=has_real_score,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

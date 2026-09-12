@@ -146,6 +146,11 @@ class BacktestStrategyAdapter:
         ts_codes = df["ts_code"].to_list()
         score_col = df[score_col_name].to_list() if score_col_name else None
 
+        # BT-01: has_real_score 指示信号是否来自独立打分。存在打分列时为 True；
+        # 否则 score 为 None，signal_rank 仅表达策略自身的排序偏好（如按股息率/ROE/市值排序），
+        # 不代表信号强度 —— 此时 IC 应被解读为「排序 IC」而非独立打分的信息系数。
+        has_real_score = score_col_name is not None
+
         reason_col = None
         for reason_name in ["reason", "signal_reason", "note"]:
             if reason_name in df.columns:
@@ -161,6 +166,7 @@ class BacktestStrategyAdapter:
             "ts_code": ts_codes,
             "score": score_col if score_col else [None] * num_rows,
             "signal_rank": ranks,
+            "has_real_score": [has_real_score] * num_rows,
             "reason": reason_col if reason_col else [None] * num_rows,
         }
 

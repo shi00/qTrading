@@ -131,6 +131,7 @@ class TestBacktestStrategyAdapter:
             "ts_code",
             "score",
             "signal_rank",
+            "has_real_score",
             "reason",
         ]
         for col in expected_columns:
@@ -694,3 +695,51 @@ class TestBacktestStrategyAdapter:
 
         assert isinstance(result, pl.DataFrame)
         assert result.is_empty()
+
+    def test_has_real_score_true_with_score_column(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """BT-01：存在打分列时 has_real_score=True（IC 为独立打分的信息系数）。"""
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "score": [0.8, 0.6],
+            }
+        )
+
+        result = adapter._normalize_signal_output(
+            result_df,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert result["has_real_score"].to_list() == [True, True]
+        assert result["score"].to_list() == [0.8, 0.6]
+
+    def test_has_real_score_false_without_score_column(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """BT-01：无打分列（纯排序策略）时 has_real_score=False，IC 退化为「排序 IC」。
+
+        signal_rank 仅表达策略自身排序偏好，不代表信号强度；score 强制为 None。
+        """
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                # 仅按业务字段排序，无 score/signal_score/rank_score/ai_score
+                "dv_ttm": [20.0, 10.0, 5.0],
+            }
+        )
+
+        result = adapter._normalize_signal_output(
+            result_df,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert result["has_real_score"].to_list() == [False, False, False]
+        assert result["score"].to_list() == [None, None, None]
+        # rank 语义不变：仍表达策略排序偏好（rank 大 = 信号强）
+        assert result["signal_rank"].to_list() == [3, 2, 1]
