@@ -34,6 +34,12 @@ class _BacktestQualityProxy:
     回测使用历史快照数据，质量等级默认 GOLD（最高等级），
     确保任何质量要求的策略都能通过门控。
     回测数据质量由数据同步流程保证，不应被质量门控阻断。
+
+    # NOTE(lazy): 硬编码 GOLD 绕过数据质量门控，回测结果不反映数据质量问题。
+    # ceiling: 回测需历史任意时点数据，DataProcessor 质量评估面向最新数据设计，
+    #           直接复用会拒绝所有历史回测；含缺失日/异常值的区间不会被拦截。
+    # upgrade: 实现 evaluate_historical_window() 区间质量评估（复用
+    #           DataProcessor._scan_missing_dates，结果并入 DataWarning）后移除本代理。
     """
 
     def __init__(self, tier: QualityTier = QualityTier.GOLD):
