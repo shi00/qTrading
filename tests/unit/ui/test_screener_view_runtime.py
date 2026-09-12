@@ -1789,15 +1789,17 @@ class TestLoadHistoryTree:
 
 
 class TestLoadHistoryForDate:
-    """_load_history_for_date: run_id 优先 / strategy_name fallback / all_strategies."""
+    """_load_history_for_date: 策略子项按 (date, strategy_name) 载入覆盖快照, all_strategies 全量."""
 
-    def test_with_run_id(self, screener_view_env) -> None:
-        """run_id 非空 → label = '#run_id[:8]' → vm.set_history_viewing_status 被调用."""
+    def test_strategy_tile_loads_by_strategy_name(self, screener_view_env) -> None:
+        """LIFE-03: 点击策略子项按 (trade_date, strategy_name) 载入覆盖后快照.
+
+        run_id 已降级为聚合展示, 点击传 strategy_name + run_id=None,
+        载入 (trade_date, strategy_name) 保留快照, 避免按单一 run_id 过滤漏掉同组跨 run 记录.
+        """
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
-
-        # 设置历史树数据
         fake_vm._history_tree_data = {
             "20240615": [{"strategy_name": "value", "run_id": "abc12345def", "cnt": 5}],
         }
@@ -1813,53 +1815,23 @@ class TestLoadHistoryForDate:
 
         # 历史树已加载, 查找 ListTile.on_click (子策略条目, 不含 "all_strategies")
         list_tiles = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ListTile)]
-        # 第一个 ListTile 是 "all_strategies" (run_id=None), 后续是各策略 (run_id=...)
+        # 第一个 ListTile 是 "all_strategies" (run_id=None), 后续是各策略 (strategy_name=..., run_id=None)
         strategy_tiles = [t for t in list_tiles[1:] if t.on_click is not None]
         assert len(strategy_tiles) >= 1, "应至少有一个策略 ListTile"
 
         page.run_task.reset_mock()
         _invoke(strategy_tiles[0].on_click, _make_event())
 
-        # 提取 _load_history_for_date handler
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        # 验证 set_history_viewing_status 被调用 (run_id 传入 VM, 由 VM 格式化 #run_id[:8])
-        assert any("set_history_viewing_status" in c and "run_id=abc12345def" in c for c in fake_vm.method_calls), (
-            f"应调用 set_history_viewing_status with run_id=abc12345def, 实际: {fake_vm.method_calls}"
-        )
-
-    def test_run_id_label_format(self, screener_view_env) -> None:
-        """_load_history_for_date: run_id 非空 → 传 raw run_id 给 VM (VM 格式化 #run_id[:8])."""
-        env = screener_view_env
-        fake_vm = env["fake_vm"]
-        page = env["page"]
-
-        fake_vm._history_tree_data = {
-            "20240615": [{"strategy_name": "value", "run_id": "abcdefgh1234", "cnt": 5}],
-        }
-
-        segs = _get_segmented_buttons(env)
-        page.run_task.reset_mock()
-        _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
-
-        tree_handler, tree_args, _ = _await_run_task_handler(page)
-        asyncio.run(tree_handler(*tree_args))
-        _rerender(env)
-
-        list_tiles = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ListTile)]
-        strategy_tiles = [t for t in list_tiles[1:] if t.on_click is not None]
-        assert len(strategy_tiles) >= 1
-
-        page.run_task.reset_mock()
-        _invoke(strategy_tiles[0].on_click, _make_event())
-
-        handler, args, _ = _await_run_task_handler(page)
-        asyncio.run(handler(*args))
-
-        # 验证 raw run_id 传入 VM (VM 负责格式化 #run_id[:8])
-        assert any("set_history_viewing_status" in c and "run_id=abcdefgh1234" in c for c in fake_vm.method_calls), (
-            f"应传 raw run_id=abcdefgh1234 给 VM, 实际: {fake_vm.method_calls}"
+        # LIFE-03: 传 strategy_name + run_id=None 给 VM, 载入 (date, strategy) 覆盖快照
+        assert any(
+            "set_history_viewing_status" in c and "strategy_name=value" in c and "run_id=None" in c
+            for c in fake_vm.method_calls
+        ), f"应调用 set_history_viewing_status with strategy_name=value, 实际: {fake_vm.method_calls}"
+        assert any(c.startswith("load_history_data:20240615:value:None") for c in fake_vm.method_calls), (
+            f"应按 (trade_date, strategy_name) 载入快照, 实际: {fake_vm.method_calls}"
         )
 
     def test_all_strategies_label_when_no_run_id(self, screener_view_env) -> None:
