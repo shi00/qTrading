@@ -29,7 +29,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.backtest_view_model import BacktestViewModel, consume_pending_prefill
+from ui.viewmodels.backtest_view_model import BacktestState, BacktestViewModel, consume_pending_prefill
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,62 @@ _STATUS_COLOR_MAP = {
     "success": AppColors.SUCCESS,
     "info": AppColors.INFO,
 }
+
+# UX-01: 可信度等级 → 标题 i18n 全字面量 key (静态引用, 满足 i18n 键完整性静态扫描).
+_CREDIBILITY_TITLE_KEYS = {
+    "degraded": "backtest_credibility_degraded",
+    "unreliable": "backtest_credibility_unreliable",
+}
+
+
+def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
+    """UX-01: 结果区顶部的回测可信度告警横幅。
+
+    渲染 ``BacktestState.credibility_level`` / ``warnings``，复用选股路径
+    ``_build_screener_warning_banner`` 的「结果区上方 Message 通道」模式
+    (D3-4 原则: 参数/数据异常必须显式告知用户, 否则结果被误归因)。
+    纯声明式: View 感知 locale, 逐条按当前 locale 翻译 i18n key；ok 时返回 None。
+    """
+    if state.credibility_level == "ok":
+        return None
+    is_unreliable = state.credibility_level == "unreliable"
+    accent = AppColors.ERROR if is_unreliable else AppColors.WARNING
+    title = I18n.get(_CREDIBILITY_TITLE_KEYS[state.credibility_level])
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.ERROR_OUTLINE if is_unreliable else ft.Icons.WARNING_AMBER,
+                            color=accent,
+                            size=AppStyles.FONT_SIZE_TITLE,
+                        ),
+                        ft.Text(
+                            title,
+                            color=accent,
+                            weight=ft.FontWeight.BOLD,
+                            size=AppStyles.FONT_SIZE_BODY,
+                        ),
+                    ],
+                    spacing=8,
+                ),
+                # 告警明细: 逐条按当前 locale 翻译 (VM 只产 i18n key, 不感知 locale)
+                *[
+                    ft.Text(
+                        "• " + I18n.get(msg.key, **dict(msg.params)),
+                        color=accent,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                    )
+                    for msg in state.warnings
+                ],
+            ],
+            spacing=6,
+        ),
+        padding=AppStyles.SPACING_MD,
+        border_radius=8,
+        bgcolor=AppColors.SURFACE_VARIANT,
+    )
 
 
 @ft.component
@@ -225,7 +281,9 @@ def BacktestView(active: bool = True) -> ft.Container:
             cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )
     else:
-        right_content = BacktestResultPanel(
+        # UX-01: 结果区顶部接入回测可信度告警横幅 (不可忽略, 放在净值曲线/指标卡之上)
+        warning_banner = _build_backtest_warning_banner(state)
+        result_panel = BacktestResultPanel(
             metrics=state.metrics,
             trades=state.trades,
             nav_curve=state.nav_curve,
@@ -238,6 +296,10 @@ def BacktestView(active: bool = True) -> ft.Container:
             benchmark_name=state.benchmark_name,
             has_real_score=state.has_real_score,
         )
+        if warning_banner is not None:
+            right_content = ft.Column([warning_banner, result_panel], spacing=12, expand=True)
+        else:
+            right_content = result_panel
 
     return ft.Container(
         content=ft.Column(

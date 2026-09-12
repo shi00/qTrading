@@ -159,8 +159,8 @@ class HistoryModeMixin:
         策略名 strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2).
         """
         # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
-        # PRF-09: 避免 iterrows (每行构造 Series, 慢 ~17x); get_history_tree 列固定为
-        # run_id/trade_date/strategy_name/cnt, to_numpy 列索引等价取列
+        # PRF-09: 避免 iterrows (每行构造 Series, 慢 ~17x); get_history_tree 列顺序为
+        # trade_date/strategy_name/cnt/run_id, 下方按列名 col_map 取列索引, 与顺序无关
         if df is None or df.empty:
             return ()
 

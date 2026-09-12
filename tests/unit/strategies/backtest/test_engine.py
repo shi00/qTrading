@@ -781,6 +781,43 @@ class TestLoadBenchmark:
         assert result.is_empty()
 
 
+class TestComputeAvgDailyVolume:
+    def _make_engine(self):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        return engine
+
+    def test_missing_vol_column_returns_unchanged(self):
+        engine = self._make_engine()
+        quotes_df = pl.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        result = engine._compute_avg_daily_volume(quotes_df)
+        assert "avg_daily_volume" not in result.columns
+
+    def test_converts_vol_from_lot_to_share(self):
+        """BT-06：vol 单位「手」（1 手=100 股），avg_daily_volume 须换算为「股」。
+        25 天恒定 vol=100（手），rolling window=20/min_samples=5，日均成交量应≈10000（股）。
+        若未 ×100 则会得到 100（手），据此区分换算是否生效。
+        """
+        engine = self._make_engine()
+        n = 25
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * n,
+                "trade_date": [date(2024, 1, 1 + i) for i in range(n)],
+                "vol": [100.0] * n,
+            }
+        )
+        result = engine._compute_avg_daily_volume(quotes_df)
+        avg = result["avg_daily_volume"]
+        # 末值应为换算后股数（前 20 日均=10000 股），而非原始「手」数 100；
+        # 若换算缺失或窗口未生效（None），此强数值断言会失败，无需单独 is not None
+        assert avg.to_list()[-1] == pytest.approx(10000.0, rel=1e-9)
+
+
 class TestGenerateSignals:
     def _make_engine(self):
         config = BacktestConfig(

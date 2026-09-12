@@ -274,10 +274,14 @@ class ScreeningHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
+        # LIFE-03: 唯一键由 (run_id, ts_code) 改为 (trade_date, strategy_name, ts_code)，
+        # 让同一天同一策略对同一股票的多次运行以覆盖语义落库（保留最新快照），
+        # 修复复盘统计（UN-04）将重复运行样本重复计入的问题。run_id 降级为普通列。
         UniqueConstraint(
-            "run_id",
+            "trade_date",
+            "strategy_name",
             "ts_code",
-            name="uq_screening_history_run_code",
+            name="uq_screening_history_dat_strategy_code",
         ),
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
         Index("idx_sh_date_code", "trade_date", "ts_code"),
@@ -825,11 +829,16 @@ class TaskHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
+
     # LIFE-01: 崩溃后重试信息。unique_key 供重推去重复用；factory_key + retry_kwargs
     # 供重启后回填可重建工厂。
     unique_key = Column(String, nullable=True)
     factory_key = Column(String, nullable=True)
     retry_kwargs = Column(String, nullable=True)
+
+    # LIFE-02: 持久化单调序号，配合 INSERT ... ON CONFLICT ... WHERE persist_seq < EXCLUDED
+    # 守卫，使乱序到达的旧快照不会覆盖更新的终态写入。default 0 兼容存量行。
+    persist_seq = Column(Integer, server_default="0", nullable=False, default=0)
 
     __table_args__ = (
         Index("idx_task_history_status_created", "status", "created_at"),

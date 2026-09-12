@@ -27,6 +27,7 @@ from data.constants import (
     TOP_LIST_NET_AMOUNT_UNIT,
     attach_column_units,
     attach_column_unit_sources,
+    attach_daily_quotes_column_units,
     attach_top_list_column_units,
     get_column_unit,
     get_column_unit_source,
@@ -97,6 +98,23 @@ class TestAttachHsgtColumnUnits:
         df = attach_hsgt_column_units(df)
         assert df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["north_money"] == "million_cny"
         assert df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["north_money"]["provider"] == "tushare.moneyflow_hsgt"
+
+
+class TestAttachDailyQuotesColumnUnits:
+    def test_attaches_units_and_sources(self):
+        from data.constants import (
+            attach_daily_quotes_column_units,
+            DATAFRAME_ATTR_COLUMN_UNITS,
+            DATAFRAME_ATTR_COLUMN_UNIT_SOURCES,
+        )
+
+        df = pd.DataFrame({"vol": [100, 200]})
+        df = attach_daily_quotes_column_units(df)
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["vol"] == "lot"
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["vol"]["provider"] == "tushare.daily"
+
+    def test_none_df(self):
+        assert attach_daily_quotes_column_units(None) is None
 
 
 class TestGetColumnUnit:

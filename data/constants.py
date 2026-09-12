@@ -162,6 +162,30 @@ def attach_hsgt_column_units(df):
     return attach_column_unit_sources(df, HSGT_COLUMN_UNIT_SOURCES)
 
 
+# Tushare daily_quotes.vol 单位为「手」（1 手 = 100 股）。
+# 回测滑点模型（strategies/backtest/engine.py）需将 vol 换算为「股」后，
+# 与订单股数（shares，单位「股」）计算参与率，否则 participation 被放大 100 倍（BT-06）。
+DAILY_QUOTES_VOL_UNIT = "lot"
+DAILY_QUOTES_VOL_UNIT_SOURCE = {
+    "provider": "tushare.daily",
+    "doc_url": "https://tushare.pro/document/2?doc_id=27",
+    "doc_field": "vol",
+    "doc_description": "成交量（手），1 手 = 100 股",
+}
+DAILY_QUOTES_COLUMN_UNITS = {
+    "vol": DAILY_QUOTES_VOL_UNIT,
+}
+DAILY_QUOTES_COLUMN_UNIT_SOURCES = {
+    "vol": DAILY_QUOTES_VOL_UNIT_SOURCE,
+}
+
+
+def attach_daily_quotes_column_units(df):
+    """Declare known daily_quotes units and their upstream documentation without changing schema."""
+    df = attach_column_units(df, DAILY_QUOTES_COLUMN_UNITS)
+    return attach_column_unit_sources(df, DAILY_QUOTES_COLUMN_UNIT_SOURCES)
+
+
 def get_column_unit(df, column_name: str, default: str | None = None) -> str | None:
     """Read unit metadata from a DataFrame."""
     if df is None:

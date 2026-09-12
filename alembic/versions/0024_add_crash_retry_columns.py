@@ -1,7 +1,7 @@
 """add crash-retry columns to task_history (LIFE-01)
 
-Revision ID: 0023
-Revises: 0022
+Revision ID: 0024
+Revises: 0023 (add_persist_seq_to_task_history, LIFE-02)
 Create Date: 2026-09-12 00:00:00.000000
 
 LIFE-01（崩溃后重试中断任务）：factory 是闭包无法直接序列化，改为序列化其注册键与
@@ -12,6 +12,9 @@ LIFE-01（崩溃后重试中断任务）：factory 是闭包无法直接序列�
 
 三列均可空（NULL）表示该任务未登记可重建能力——历史存量行自动降级为不可重试，
 行为与现状一致（不显示重试按钮），向后兼容。
+
+注：本迁移编号由 0023 调整为 0024，串接于 life-02 persist_seq(0023) 之后，以消除
+任务表多特性并行撞号。
 """
 
 from collections.abc import Sequence
@@ -21,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0023"
-down_revision: str | Sequence[str] | None = "0022"
+revision: str = "0024"
+down_revision: str | Sequence[str] | None = "0023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

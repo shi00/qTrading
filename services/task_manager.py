@@ -245,6 +245,9 @@ class TaskManager:
             self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
             self._persist_pending_count = 0
             self._persist_counter_lock = threading.Lock()
+            # LIFE-02: 持久化单调序号。每次生成快照时经 _persist_counter_lock 分配并自增，
+            # 保证同任务多次写入的 persist_seq 严格递增，乱序到达时可由 SQL WHERE 守卫丢弃旧值。
+            self._persist_seq_counter = 0
             self._semaphore_needs_reset: bool = False
 
             self.__class__._initialized = True
@@ -752,7 +755,13 @@ class TaskManager:
         while len(self._finished_order) > self._MAX_FINISHED_HISTORY:
             oldest_tid, _ = self._finished_order.popitem(last=False)
             if oldest_tid in self._tasks:
-                del self._tasks[oldest_tid]
+                task = self._tasks.pop(oldest_tid)
+                # LIFE-05: 移入 _history 而非直接丢弃，避免"本会话消失、重启再现"
+                self._history.append(task)
+                # 有界：超限时移除 _history 中最旧的一条（按 id 过滤，避免 dataclass 同值误删）
+                if len(self._history) > self._MAX_FINISHED_HISTORY:
+                    oldest_h = min(self._history, key=lambda h: h.created_at)
+                    self._history = [h for h in self._history if h.id != oldest_h.id]
 
     # --- Internal Runner ---
 
@@ -1004,9 +1013,22 @@ class TaskManager:
                         logger,
                         ValueError("malformed retry_kwargs"),
                         "general",
-                        "[TaskManager] Malformed retry_kwargs for task %s, retry disabled",
+                        "[TaskManager] Malformed retry_kwargs for task %s, retry disabled (%s): %s",
                         t.id,
+                        exc_info=True,
                     )
+
+    def _next_persist_seq(self) -> int:
+        """Allocate the next monotonically-increasing persist sequence (LIFE-02).
+
+        Called while capturing a snapshot inside ``_persist_task``/``_persist_task_async``.
+        Thread-safe via ``_persist_counter_lock``.  Guarantees strictly increasing
+        ``persist_seq`` per task so a stale out-of-order snapshot can never overwrite a
+        newer terminal write (guarded by SQL ``WHERE persist_seq < EXCLUDED.persist_seq``).
+        """
+        with self._persist_counter_lock:
+            self._persist_seq_counter += 1
+            return self._persist_seq_counter
 
     def _persist_task(self, task: AppTask):
         """Fire-and-forget async write to DB. Snapshots values at call time
@@ -1028,6 +1050,7 @@ class TaskManager:
             task.unique_key,
             task.factory_key,
             self._serialize_retry_kwargs(task),
+            self._next_persist_seq(),
         )
         self._queue_persist_snapshot(snapshot)
 
@@ -1162,13 +1185,16 @@ class TaskManager:
             sql = (
                 "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
-                "created_at, started_at, completed_at, unique_key, factory_key, retry_kwargs) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) "
+                "created_at, started_at, completed_at, unique_key, factory_key, retry_kwargs, "
+                "persist_seq) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) "
                 "ON CONFLICT (id) DO UPDATE SET "
                 "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
                 "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
                 "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, "
-                "unique_key=EXCLUDED.unique_key, factory_key=EXCLUDED.factory_key, retry_kwargs=EXCLUDED.retry_kwargs"
+                "unique_key=EXCLUDED.unique_key, factory_key=EXCLUDED.factory_key, "
+                "retry_kwargs=EXCLUDED.retry_kwargs, persist_seq=EXCLUDED.persist_seq "
+                "WHERE task_history.persist_seq < EXCLUDED.persist_seq"
             )
             await cache.write_db(sql, params)
         except asyncio.CancelledError:
@@ -1200,6 +1226,7 @@ class TaskManager:
             task.unique_key,
             task.factory_key,
             self._serialize_retry_kwargs(task),
+            self._next_persist_seq(),
         )
         await self._persist_snapshot(params)
 

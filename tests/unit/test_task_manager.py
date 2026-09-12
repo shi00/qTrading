@@ -781,6 +781,64 @@ class TestTaskManagerAutoEvictOld:
         finished = [t for t in mgr._tasks.values() if t.status in TERMINAL_STATUSES]
         assert len(finished) <= mgr._MAX_FINISHED_HISTORY
 
+    def test_evicted_tasks_move_to_history(self):
+        """LIFE-05: 淘汰任务移入 _history，避免本会话消失、重启再现。"""
+        mgr = TaskManager()
+        for i in range(210):
+            t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
+            t.completed_at = datetime.datetime(2024, 1, 1, 0, 0, 0)
+            mgr._tasks[t.id] = t
+            mgr._finished_order[t.id] = t.completed_at
+        # 淘汰前最旧 10 条（插入序，completed_at 相同）会被移入 _history
+        expected_old_ids = list(mgr._finished_order.keys())[:10]
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
+        # 被淘汰的最旧 10 条已移入 _history
+        assert len(mgr._history) == 10
+        history_ids = {h.id for h in mgr._history}
+        assert set(expected_old_ids) <= history_ids
+        # 被淘汰任务已从 _tasks 移除，但保留在 _history
+        assert all(tid not in mgr._tasks for tid in expected_old_ids)
+        # 均保留在 get_all_tasks 合并视图中（不因淘汰而从界面消失）
+        combined_ids = {t.id for t in mgr.get_all_tasks()}
+        assert set(expected_old_ids) <= combined_ids
+
+    def test_history_bounded_after_eviction(self):
+        """LIFE-05: _history 超限时移除最旧条目，保持有界。"""
+        mgr = TaskManager()
+        cst = datetime.timezone(datetime.timedelta(hours=8))
+        base = datetime.datetime(2023, 1, 1, tzinfo=cst)
+        # 预置已近上限的 _history（含 running 与 completed，模拟混合来源）
+        for i in range(mgr._MAX_FINISHED_HISTORY):
+            h = AppTask(name=f"hist_{i}", status=TaskStatus.COMPLETED)
+            h.created_at = base + datetime.timedelta(minutes=i)
+            mgr._history.append(h)
+        # 触发淘汰：单条完成使 _finished_order 超限一条
+        for i in range(mgr._MAX_FINISHED_HISTORY + 1):
+            t = AppTask(name=f"task_{i}", status=TaskStatus.COMPLETED)
+            t.completed_at = datetime.datetime(2024, 6, 1, tzinfo=cst)
+            mgr._tasks[t.id] = t
+            mgr._finished_order[t.id] = t.completed_at
+        last_tid = list(mgr._finished_order.keys())[-1]
+        mgr._evict_on_complete(last_tid)
+        # _history 保持 ≤ 上限
+        assert len(mgr._history) <= mgr._MAX_FINISHED_HISTORY
+
+    def test_multiple_evictions_no_duplicate_ids_in_view(self):
+        """LIFE-05: 多轮累积淘汰后 get_all_tasks 视图无重复 id 且总数有界。"""
+        mgr = TaskManager()
+        for _round in range(4):
+            for i in range(30):
+                t = AppTask(name=f"r{_round}_{i}", status=TaskStatus.COMPLETED)
+                t.completed_at = datetime.datetime(2024, _round + 1, 1, 0, 0, 0)
+                mgr._tasks[t.id] = t
+                mgr._finished_order[t.id] = t.completed_at
+            last_tid = list(mgr._finished_order.keys())[-1]
+            mgr._evict_on_complete(last_tid)
+        view_ids = [t.id for t in mgr.get_all_tasks()]
+        assert len(view_ids) == len(set(view_ids))
+        assert len(view_ids) <= mgr._MAX_FINISHED_HISTORY * 2
+
 
 class TestTaskManagerSafeDt:
     def test_none(self):
@@ -1040,6 +1098,81 @@ class TestTaskManagerPersistTask:
             mgr._persist_task(t)
         assert mgr._persist_pending_count >= 0
         mock_sched.assert_called_once()
+
+
+class TestTaskManagerPersistSeq:
+    """LIFE-02: 持久化单调序号 persist_seq 及 SQL 乱序守卫。"""
+
+    @staticmethod
+    def _runner() -> TaskManager:
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        return mgr
+
+    def test_persist_task_allocates_increasing_seq(self):
+        """连续 _persist_task 生成的快照 persist_seq 严格递增。"""
+        mgr = self._runner()
+        captured: list[tuple] = []
+        with patch.object(mgr, "_queue_persist_snapshot", side_effect=captured.append):
+            mgr._persist_task(AppTask(name="a"))
+            mgr._persist_task(AppTask(name="b"))
+            mgr._persist_task(AppTask(name="c"))
+        seqs = [snap[-1] for snap in captured]
+        assert seqs == [1, 2, 3]
+        assert seqs == sorted(seqs)
+        assert len(set(seqs)) == len(seqs)
+
+    @pytest.mark.asyncio
+    async def test_persist_task_async_includes_persist_seq(self):
+        """_persist_task_async 透传含 persist_seq 的 15 元组快照。"""
+        mgr = self._runner()
+        with patch.object(mgr, "_persist_snapshot", AsyncMock()) as mock_snap:
+            await mgr._persist_task_async(AppTask(name="t"))
+        assert mock_snap.await_args is not None
+        params = mock_snap.await_args.args[0]
+        assert len(params) == 15
+        assert isinstance(params[-1], int)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_sql_sets_monotonic_guard(self):
+        """_persist_snapshot 的 SQL 含乱序守卫，且持久化序号随参数透传。"""
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            await mgr._persist_snapshot(
+                ("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None, None, None, None, 7)
+            )
+        sql = mock_cache.write_db.call_args[0][0]
+        params = mock_cache.write_db.call_args[0][1]
+        assert "persist_seq < EXCLUDED.persist_seq" in sql
+        assert params[-1] == 7
+
+    @pytest.mark.asyncio
+    async def test_stale_older_seq_guarded_at_db_level(self):
+        """旧序号(persist_seq 较小)不会覆盖新终态写入——由 SQL 守卫而非代码拒绝保证。
+
+        停机场上更早调度、更晚完成的 RUNNING 快照若落在 CANCELLED 之后，其较低
+        persist_seq 会被 ``WHERE task_history.persist_seq < EXCLUDED.persist_seq`` 丢弃。
+        此处验证 SQL 含该守卫（实际拒绝在 DB 层完成，无法在单测内模拟 DB 语义）。
+        """
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            # 模拟乱序：先写终态(高序号)，后到的旧 RUNNING 快照(低序号)
+            await mgr._persist_snapshot(
+                ("id", "n", "t", "CANCELLED", 1.0, "", "", None, None, None, None, None, None, None, 10)
+            )
+            await mgr._persist_snapshot(
+                ("id", "n", "t", "RUNNING", 0.5, "", "", None, None, None, None, None, None, None, 3)
+            )
+        sql = mock_cache.write_db.call_args_list[0][0][0]
+        assert "persist_seq < EXCLUDED.persist_seq" in sql
 
 
 class TestTaskManagerInitDb:
@@ -2224,6 +2357,7 @@ class TestRetryTask:
             coroutine_factory=factory,
             cancellable=True,
             unique_key="uniq_retried",
+            factory_key=None,
             a=1,
         )
         # LIFE-01: retry 复用原 unique_key（防止并发重推），不再省略
@@ -2255,6 +2389,7 @@ class TestRetryTask:
             coroutine_factory=factory,
             cancellable=True,
             unique_key="uniq_interrupted",
+            factory_key=None,
             a=1,
         )
         assert mock_submit.call_args.kwargs.get("unique_key") == "uniq_interrupted"
@@ -2268,8 +2403,10 @@ class TestTaskManagerLife01RetryableFactory:
         with singleton_state(TaskManager):
             TaskManager.register_retryable_factory("k", MagicMock())
             assert "k" in TaskManager._RETRYABLE_FACTORIES
-        # 离开 context 后已 reset，注册表应被清空
-        assert TaskManager._RETRYABLE_FACTORIES == {}
+            # singleton_state 只保存/恢复 _instance，不触达类属性注册表；
+            # 显式调用 _reset_singleton 验证其清空语义（R7）
+            TaskManager._reset_singleton()
+            assert TaskManager._RETRYABLE_FACTORIES == {}
 
     def test_interrupted_task_from_db_is_retryable_when_registered(self):
         """注册工厂的 INTERRUPTED 历史任务可回填 factory 并重试。"""
@@ -2286,6 +2423,8 @@ class TestTaskManagerLife01RetryableFactory:
                 "retry_kwargs": '{"a": 1}',
             }
             mgr._rehydrate_retry_info(t, row)
+            # 模拟 init_db 已将历史任务载入 _history
+            mgr._history.append(t)
 
             assert t.factory_key == "hist_sync"
             assert t.unique_key == "sys_sync"

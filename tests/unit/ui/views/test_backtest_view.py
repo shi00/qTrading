@@ -104,6 +104,11 @@ class _FakeBacktestViewModel:
             ic_dates: Any = ()
             strategy_name: Any = None
             benchmark_name: Any = None
+            # UX-01: 与 BacktestState 新增字段同步 (回测可信度告警横幅)
+            credibility_level: Any = "ok"
+            warnings: Any = ()
+            skipped_order_count: Any = 0
+            failed_date_count: Any = 0
             # BT-01: 与 BacktestState 新增字段同步 (IC 是否来自独立打分)
             has_real_score: Any = True
 
@@ -1139,3 +1144,72 @@ class TestConsumePrefill:
             assert call_args.args[3] == test_params
         finally:
             _pending_prefill.clear()
+
+
+# ============================================================================
+# UX-01: 回测可信度告警横幅 (_build_backtest_warning_banner)
+# ============================================================================
+
+
+class TestBacktestWarningBanner:
+    """UX-01: 结果区顶部可信度告警横幅.
+
+    覆盖 ``_build_backtest_warning_banner`` (ok → None / degraded/unreliable → ft.Container)
+    与 view 集成 (非 ok 状态 → right_content 置顶 banner): L60-65, L298-299.
+    """
+
+    @staticmethod
+    def _collect_texts(root: Any) -> list[str]:
+        """收集子树内所有 Text.value (用于断言横幅标题/警告明细翻译)."""
+        return [ctrl.value for ctrl in _walk_all_controls(root) if isinstance(ctrl, ft.Text) and ctrl.value]
+
+    def test_ok_returns_none(self, backtest_view_env) -> None:
+        """L60-61: credibility_level == "ok" → 返回 None (默认状态不渲染横幅)."""
+        mod = backtest_view_env["mod"]
+        state = backtest_view_env["fake_vm"].state
+        assert mod._build_backtest_warning_banner(state) is None
+
+    def test_degraded_banner_renders_translated_title_and_details(self, backtest_view_env) -> None:
+        """L62-65: credibility_level="degraded" → ft.Container, 标题与单条警告均按 i18n 翻译."""
+        from ui.viewmodels import Message
+
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="degraded",
+            warnings=(Message("w_backtest_data_degraded", {"reason": "sample"}),),
+        )
+        banner = mod._build_backtest_warning_banner(fake_vm.state)
+        assert isinstance(banner, ft.Container)
+        texts = self._collect_texts(banner)
+        assert "i18n[backtest_credibility_degraded]" in texts
+        assert "• i18n[w_backtest_data_degraded]" in texts
+
+    def test_unreliable_banner_renders(self, backtest_view_env) -> None:
+        """L62-65: credibility_level="unreliable" → ft.Container (ERROR 标题 i18n key)."""
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(credibility_level="unreliable", warnings=())
+        banner = mod._build_backtest_warning_banner(fake_vm.state)
+        assert isinstance(banner, ft.Container)
+        assert "i18n[backtest_credibility_unreliable]" in self._collect_texts(banner)
+
+    def test_view_places_banner_above_result_panel(self, backtest_view_env) -> None:
+        """L298-299: view 渲染非 ok 状态 → right_content 为 Column 且首个控件为 banner."""
+        from ui.viewmodels import Message
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="degraded",
+            warnings=(Message("w_backtest_param_degraded", {}),),
+            metrics=(("total_return", 0.1),),
+            trades=(),
+        )
+        _rerender(env)
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        assert isinstance(right_content, ft.Column), "非 ok 状态应渲染 Column([banner, result_panel])"
+        first = right_content.controls[0]
+        assert isinstance(first, ft.Container), "banner 应为 ft.Container"
+        assert "i18n[backtest_credibility_degraded]" in self._collect_texts(first)
