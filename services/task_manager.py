@@ -724,7 +724,13 @@ class TaskManager:
         while len(self._finished_order) > self._MAX_FINISHED_HISTORY:
             oldest_tid, _ = self._finished_order.popitem(last=False)
             if oldest_tid in self._tasks:
-                del self._tasks[oldest_tid]
+                task = self._tasks.pop(oldest_tid)
+                # LIFE-05: 移入 _history 而非直接丢弃，避免"本会话消失、重启再现"
+                self._history.append(task)
+                # 有界：超限时移除 _history 中最旧的一条（按 id 过滤，避免 dataclass 同值误删）
+                if len(self._history) > self._MAX_FINISHED_HISTORY:
+                    oldest_h = min(self._history, key=lambda h: h.created_at)
+                    self._history = [h for h in self._history if h.id != oldest_h.id]
 
     # --- Internal Runner ---
 
