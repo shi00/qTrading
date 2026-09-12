@@ -191,12 +191,16 @@ class ScreenerDao(BaseDao):
 
     async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         effective_limit = limit or 30
+        # LIFE-03: 覆盖语义下同 (trade_date, strategy_name, ts_code) 仅保留最新快照，
+        # 历史树按 (trade_date, strategy_name) 聚合该日该策略当前股票集（COUNT(*) = 股票数）。
+        # run_id 取组内字典序最大值的 uuid 作为展示代表值（非严格"最新"，仅作就地展示；
+        # 点击按 trade_date+strategy_name 载入，不依赖 run_id 过滤）。
         sql = """
-            SELECT run_id, trade_date, strategy_name, COUNT(*) as cnt
+            SELECT trade_date, strategy_name, COUNT(*) as cnt, MAX(run_id) as run_id
             FROM screening_history
             WHERE trade_date >= CURRENT_DATE - INTERVAL '180 days'
-            GROUP BY run_id, trade_date, strategy_name
-            ORDER BY trade_date DESC, MIN(created_at) DESC
+            GROUP BY trade_date, strategy_name
+            ORDER BY trade_date DESC, COUNT(*) ASC, MIN(created_at) DESC
             LIMIT $1 OFFSET $2
         """
         return await self._read_db(
@@ -533,6 +537,10 @@ class ScreenerDao(BaseDao):
             else:
                 row = dict(zip(all_cols, r, strict=False))
             thinking_text = row.pop("thinking", "")
+            # LIFE-03: 覆盖语义——同 (trade_date, strategy_name, ts_code) 会覆盖历史行。
+            # 显式置 PENDING：若被覆盖行此前已复盘（COMPLETED），其 prediction_result/alpha 等
+            # computed 列因不在本次写入列而保留，但 review_status 重置为 PENDING 重新进入待复盘，
+            # 保证复盘统计基于当日最新快照（覆盖即需重复盘）。此为覆盖语义的既定权衡。
             row["review_status"] = REVIEW_STATUS_PENDING
             enriched_records.append(tuple(row.get(c) for c in all_cols))
             if thinking_text:
@@ -542,11 +550,17 @@ class ScreenerDao(BaseDao):
 
         df = pd.DataFrame(enriched_records, columns=all_cols)
 
+        # LIFE-03: 覆盖语义唯一键 (trade_date, strategy_name, ts_code)。
+        # 批内按新主键预去重（keep="last" 保留最新），避免批内同 key 触发重复告警；
+        # 跨批/并发冲突交由 ON CONFLICT DO UPDATE 串行化处理。
+        _pk = ["trade_date", "strategy_name", "ts_code"]
+        df = df.drop_duplicates(subset=_pk, keep="last")
+
         await self._save_upsert(
             df=df,
             table_name="screening_history",
             columns=all_cols,
-            pk_columns=["run_id", "ts_code"],
+            pk_columns=_pk,
         )
 
         if thinking_records:

@@ -55,6 +55,23 @@ class TestScreenerDaoGetHistoryTree:
         assert "run_id" in result.columns
         assert len(result) == 1
 
+    @pytest.mark.asyncio
+    async def test_groups_by_trade_date_and_strategy(self):
+        """LIFE-03: 历史树按 (trade_date, strategy_name) 聚合，run_id 取最新代表值。"""
+        dao = ScreenerDao(MagicMock())
+        df = pd.DataFrame(
+            {
+                "trade_date": ["20240615", "20240615"],
+                "strategy_name": ["strat_a", "strat_b"],
+                "cnt": [3, 7],
+                "run_id": ["r1", "r2"],
+            }
+        )
+        dao._read_db = AsyncMock(return_value=df)
+        result = await dao.get_history_tree(offset=0, limit=30)
+        assert len(result) == 2
+        assert set(result["strategy_name"]) == {"strat_a", "strat_b"}
+
 
 class TestScreenerDaoGetHistoryRecords:
     @pytest.mark.asyncio
@@ -436,6 +453,53 @@ class TestScreenerDaoSaveScreeningResults:
         await dao.save_screening_results(records)
         dao._save_thinking.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_uses_three_field_pk_columns(self):
+        """LIFE-03: save_screening_results 应以 (trade_date, strategy_name, ts_code) 为主键传参。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Test",
+            }
+        ]
+        await dao.save_screening_results(records)
+        dao._save_upsert.assert_called_once()
+        call_kwargs = dao._save_upsert.call_args.kwargs
+        assert call_kwargs["pk_columns"] == ["trade_date", "strategy_name", "ts_code"]
+
+    @pytest.mark.asyncio
+    async def test_batch_internal_duplicate_overwrite_keeps_last(self):
+        """LIFE-03: 批内同 (trade_date, strategy_name, ts_code) 预去重，保留最新（keep=last）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            },
+            {
+                "run_id": "r2",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Latest",
+            },
+        ]
+        await dao.save_screening_results(records)
+        df = dao._save_upsert.call_args.kwargs["df"]
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["run_id"] == "r2"
+        assert row["name"] == "Latest"
+
 
 class TestScreenerDaoBuildScreeningSql:
     def test_build_sql_with_close_requirement(self):
@@ -724,9 +788,10 @@ class TestScreenerDaoSaveScreeningResultsTuple:
         dao._save_upsert = AsyncMock(return_value=1)
         with patch(
             "data.persistence.daos.screener_dao.get_model_columns",
-            return_value=["run_id", "ts_code", "name", "trade_date"],
+            return_value=["run_id", "ts_code", "name", "trade_date", "strategy_name"],
         ):
-            records = [("r1", "000001.SZ", "Test", "20240615")]
+            # LIFE-03: tuple 形式记录须包含新主键列 strategy_name（drop_duplicates 依赖三列）。
+            records = [("r1", "000001.SZ", "Test", "20240615", "test_strategy")]
             await dao.save_screening_results(records)
             dao._save_upsert.assert_called_once()
 
