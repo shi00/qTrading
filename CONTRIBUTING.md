@@ -660,6 +660,7 @@ except Exception as e:
 - [0004-redlines-yaml-format.md](./docs/adr/0004-redlines-yaml-format.md) — redlines.yml 格式决策
 - [0005-enforcement-mapping-check.md](./docs/adr/0005-enforcement-mapping-check.md) — enforcement 字段映射不变量
 - [0006-override-agents-pure-pointer.md](./docs/adr/0006-override-agents-pure-pointer.md) — AGENTS.md 从纯指针改为最小安全集 + 指针
+- [0007-screening-history-override-pk.md](./docs/adr/0007-screening-history-override-pk.md) — screening_history 唯一键改覆盖语义
 
 ### docs/governance/ — 治理类机器可读文件
 
