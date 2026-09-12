@@ -14,13 +14,13 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
-from strategies.backtest.config import BacktestConfig
+from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -144,6 +144,43 @@ def _build_benchmark_curve(nav0: float, returns: Sequence[float]) -> tuple[float
     return tuple(curve)
 
 
+def _assess_credibility(
+    result: BacktestResult,
+) -> tuple[Literal["ok", "degraded", "unreliable"], tuple[Message, ...], int, int]:
+    """评估回测结果可信度，产出 (level, warnings, skipped_count, failed_count)。
+
+    UX-01: 将回测引擎的三类可信度信号汇总为可渲染的告警状态，供 View 在结果区
+    顶部展示。VM 只产出 i18n key (Message)，不感知 locale (CLAUDE.md §3.2 MVVM)。
+
+    严重性分级（对应真实数据结构）：
+    - data_warnings 非空 → unreliable：现存的两种 DataWarning
+      (suspend_enrich_failed / limit_enrich_failed) 均为停牌/涨跌停数据 enrichment 失败，
+      直接破坏撮合的可执行性，收益可能被高估。
+    - failed_signal_dates 非空 → unreliable：策略在某交易日执行失败，曲线存在平坦段。
+    - skipped_orders 非空 → degraded：有订单因涨跌停/停牌/资金不足被跳过。
+
+    Returns:
+        (credibility_level, warnings, skipped_order_count, failed_date_count)。
+    """
+    msgs: list[Message] = []
+    level: Literal["ok", "degraded", "unreliable"] = "ok"
+
+    if result.data_warnings:
+        msgs.append(Message("backtest_warn_data_issues", {"count": len(result.data_warnings)}))
+        level = "unreliable"
+
+    if result.failed_signal_dates:
+        msgs.append(Message("backtest_warn_failed_dates", {"count": len(result.failed_signal_dates)}))
+        level = "unreliable"
+
+    if not result.skipped_orders.is_empty():
+        msgs.append(Message("backtest_warn_skipped_orders", {"count": len(result.skipped_orders)}))
+        if level == "ok":
+            level = "degraded"
+
+    return level, tuple(msgs), len(result.skipped_orders), len(result.failed_signal_dates)
+
+
 @dataclass(frozen=True)
 class BacktestState:
     """BacktestViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
@@ -185,6 +222,11 @@ class BacktestState:
     # UX-12 (P2-05): 回测文本摘要的数据来源 (策略名 / 基准代码), 供可复制摘要行
     strategy_name: str | None = None
     benchmark_name: str | None = None
+    # UX-01: 回测结果可信度告警 (仅引擎产生告警时非默认值)
+    credibility_level: Literal["ok", "degraded", "unreliable"] = "ok"
+    warnings: tuple[Message, ...] = ()
+    skipped_order_count: int = 0
+    failed_date_count: int = 0
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -393,6 +435,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             ic_dates=(),
             strategy_name=None,
             benchmark_name=None,
+            credibility_level="ok",
+            warnings=(),
+            skipped_order_count=0,
+            failed_date_count=0,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -428,6 +474,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     benchmark_curve = _build_benchmark_curve(float(nav_values[0]), bench_returns)
                 ic_dates = _to_date_strings(result.ic_dates.to_list() if result.ic_dates is not None else None)
 
+                # UX-01: 汇总回测可信度告警 (data_warnings / skipped_orders / failed_signal_dates)
+                credibility_level, warnings, skipped_order_count, failed_date_count = _assess_credibility(result)
+
                 # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(
                     metrics=tuple(result.metrics.items()),
@@ -449,6 +498,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     ),
                     status_color="success",
                     error_detail=None,
+                    credibility_level=credibility_level,
+                    warnings=warnings,
+                    skipped_order_count=skipped_order_count,
+                    failed_date_count=failed_date_count,
                 )
 
                 return Message("backtest_success", {"sharpe": f"{result.metrics.get('sharpe_ratio', 0):.2f}"})
@@ -466,6 +519,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     ic_dates=(),
                     strategy_name=None,
                     benchmark_name=None,
+                    credibility_level="ok",
+                    warnings=(),
+                    skipped_order_count=0,
+                    failed_date_count=0,
                 )
                 raise
             except Exception as e:
@@ -490,6 +547,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     ic_dates=(),
                     strategy_name=None,
                     benchmark_name=None,
+                    credibility_level="ok",
+                    warnings=(),
+                    skipped_order_count=0,
+                    failed_date_count=0,
                 )
                 raise
 

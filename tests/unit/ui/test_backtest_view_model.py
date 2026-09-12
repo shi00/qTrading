@@ -413,8 +413,59 @@ class TestBacktestViewModelRunBacktest:
         mock_result.ic_series = pl.Series([0.1, 0.2])
         mock_result.ic_dates = pl.Series([date(2024, 1, 2), date(2024, 1, 3)], dtype=pl.Date)
         mock_result.benchmark_returns = pl.Series([0.0, 0.1])
+        # UX-01: 无告警的结果 (clean result stays ok)
+        mock_result.data_warnings = ()
+        mock_result.skipped_orders = pl.DataFrame()
+        mock_result.failed_signal_dates = ()
         vm.service.run_backtest = AsyncMock(return_value=mock_result)
         return vm, mock_result
+
+    @staticmethod
+    def _result_with(**overrides) -> MagicMock:
+        """构造带告警字段默认值的回测结果 Mock (UX-01).
+
+        默认无告警 (clean), 调用方通过 overrides 指定 data_warnings / skipped_orders /
+        failed_signal_dates 以制造具体可信度场景。
+        """
+        base = {
+            "duration_ms": 100,
+            "metrics": {"sharpe_ratio": 1.0},
+            "nav_curve": pl.DataFrame({"trade_date": [], "nav": []}),
+            "ic_series": pl.Series([]),
+            "ic_dates": pl.Series([], dtype=pl.Date),
+            "benchmark_returns": pl.Series([]),
+            "data_warnings": (),
+            "skipped_orders": pl.DataFrame(),
+            "failed_signal_dates": (),
+        }
+        base.update(overrides)
+        return MagicMock(**base)
+
+    async def _exec_backtest(self, result) -> BacktestViewModel:
+        """运行一次成功的回测并对每个 scene 应用相同 setup/拆解."""
+        vm = BacktestViewModel()
+        vm.service.run_backtest = AsyncMock(return_value=result)
+
+        captured: dict[str, Any] = {}
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured["factory"] = coroutine_factory
+            return "task_credibility"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            await vm.run_backtest("test_strategy", config)
+
+        assert captured["factory"] is not None
+        await captured["factory"](task_id="task_credibility")
+        return vm
 
     @pytest.mark.asyncio
     async def test_run_backtest_success_path(self):
@@ -463,6 +514,42 @@ class TestBacktestViewModelRunBacktest:
         assert execution_result is not None
 
     @pytest.mark.asyncio
+    async def test_clean_result_stays_ok(self):
+        """UX-01: 无任何告警的结果保持 credibility_level=ok，无告警消息。"""
+        vm = await self._exec_backtest(self._result_with())
+
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == ()
+        assert vm.state.skipped_order_count == 0
+        assert vm.state.failed_date_count == 0
+
+    @pytest.mark.asyncio
+    async def test_data_warning_marks_unreliable(self):
+        """UX-01: 数据质量告警(如缺停牌/涨跌停数据)标记 unreliable 并产出后果文案。"""
+        vm = await self._exec_backtest(self._result_with(data_warnings=("...", "...")))
+
+        assert vm.state.credibility_level == "unreliable"
+        assert vm.state.warnings == (Message("backtest_warn_data_issues", {"count": 2}),)
+
+    @pytest.mark.asyncio
+    async def test_failed_signal_dates_marks_unreliable(self):
+        """UX-01: 策略执行失败交易日标记 unreliable，failed_date_count 正确。"""
+        vm = await self._exec_backtest(self._result_with(failed_signal_dates=({"date": "20240102", "error": "x"},)))
+
+        assert vm.state.credibility_level == "unreliable"
+        assert vm.state.failed_date_count == 1
+        assert vm.state.warnings == (Message("backtest_warn_failed_dates", {"count": 1}),)
+
+    @pytest.mark.asyncio
+    async def test_skipped_orders_marks_degraded(self):
+        """UX-01: 仅被跳过订单时标记 degraded（无数据/执行失败告警不升 unreliable）。"""
+        vm = await self._exec_backtest(self._result_with(skipped_orders=pl.DataFrame({"a": [1]})))
+
+        assert vm.state.credibility_level == "degraded"
+        assert vm.state.skipped_order_count == 1
+        assert vm.state.warnings == (Message("backtest_warn_skipped_orders", {"count": 1}),)
+
+    @pytest.mark.asyncio
     async def test_run_backtest_progress_callback(self):
         """测试回测进度回调。"""
         vm = BacktestViewModel()
@@ -478,6 +565,9 @@ class TestBacktestViewModelRunBacktest:
                 ic_series=pl.Series([]),
                 ic_dates=pl.Series([], dtype=pl.Date),
                 benchmark_returns=pl.Series([]),
+                data_warnings=(),
+                skipped_orders=pl.DataFrame(),
+                failed_signal_dates=(),
             )
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
@@ -919,6 +1009,9 @@ class TestBacktestViewModelCoverageGaps:
                 ic_series=pl.Series([]),
                 ic_dates=pl.Series([], dtype=pl.Date),
                 benchmark_returns=pl.Series([]),
+                data_warnings=(),
+                skipped_orders=pl.DataFrame(),
+                failed_signal_dates=(),
             )
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
