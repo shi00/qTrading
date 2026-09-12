@@ -619,6 +619,9 @@ class TaskManager:
                 with self._active_keys_lock:
                     self._active_keys.discard(task.unique_key)
             del self._tasks[tid]
+            # Release finished-order slot if still tracked (stale keys would
+            # otherwise falsely occupy the _MAX_FINISHED_HISTORY cap)
+            self._finished_order.pop(tid, None)
         # Also clear matching items from history
         delete_set = set(to_delete)
         history_to_clear = [h.id for h in self._history if h.status in TERMINAL_STATUSES]
