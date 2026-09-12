@@ -260,10 +260,6 @@ class FinancialDao(BaseDao):
         def post_process(df):
             if "rn" in df.columns:
                 df = df.drop(columns=["rn"])
-            if "rn_version" in df.columns:
-                df = df.drop(columns=["rn_version"])
-            if "rn_period" in df.columns:
-                df = df.drop(columns=["rn_period"])
             return df
 
         return await self._batch_get_with_as_of_date(
