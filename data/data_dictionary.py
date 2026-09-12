@@ -821,6 +821,7 @@ TABLE_DEFINITIONS = {
             "created_at": "col_created_at",
             "started_at": "col_started_at",
             "completed_at": "col_completed_at",
+            "persist_seq": "col_persist_seq",
         },
     },
     "app_state": {

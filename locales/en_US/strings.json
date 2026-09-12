@@ -1451,6 +1451,7 @@
     "col_nav_curve_json": "NAV Curve",
     "col_trades_json": "Trades",
     "col_period_stats_json": "Period Stats",
+    "col_persist_seq": "Persistence Sequence",
     "col_execution_price": "Execution Price",
     "col_allow_limit_up_buy": "Allow Limit-Up Buy",
     "col_allow_limit_down_sell": "Allow Limit-Down Sell",

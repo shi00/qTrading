@@ -227,6 +227,9 @@ class TaskManager:
             self._loop: asyncio.AbstractEventLoop | None = None  # Captured in init_db
             self._persist_pending_count = 0
             self._persist_counter_lock = threading.Lock()
+            # LIFE-02: 持久化单调序号。每次生成快照时经 _persist_counter_lock 分配并自增，
+            # 保证同任务多次写入的 persist_seq 严格递增，乱序到达时可由 SQL WHERE 守卫丢弃旧值。
+            self._persist_seq_counter = 0
             self._semaphore_needs_reset: bool = False
 
             self.__class__._initialized = True
@@ -944,6 +947,18 @@ class TaskManager:
         self._db_ready = True
         logger.info("[TaskManager] Persistence layer initialized.")
 
+    def _next_persist_seq(self) -> int:
+        """Allocate the next monotonically-increasing persist sequence (LIFE-02).
+
+        Called while capturing a snapshot inside ``_persist_task``/``_persist_task_async``.
+        Thread-safe via ``_persist_counter_lock``.  Guarantees strictly increasing
+        ``persist_seq`` per task so a stale out-of-order snapshot can never overwrite a
+        newer terminal write (guarded by SQL ``WHERE persist_seq < EXCLUDED.persist_seq``).
+        """
+        with self._persist_counter_lock:
+            self._persist_seq_counter += 1
+            return self._persist_seq_counter
+
     def _persist_task(self, task: AppTask):
         """Fire-and-forget async write to DB. Snapshots values at call time
         to prevent race conditions with later state mutations."""
@@ -961,6 +976,7 @@ class TaskManager:
             to_utc_for_db(task.created_at),
             to_utc_for_db(task.started_at),
             to_utc_for_db(task.completed_at),
+            self._next_persist_seq(),
         )
         self._queue_persist_snapshot(snapshot)
 
@@ -1075,12 +1091,14 @@ class TaskManager:
             sql = (
                 "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
-                "created_at, started_at, completed_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                "created_at, started_at, completed_at, persist_seq) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "
                 "ON CONFLICT (id) DO UPDATE SET "
                 "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
                 "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
-                "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at"
+                "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, "
+                "persist_seq=EXCLUDED.persist_seq "
+                "WHERE task_history.persist_seq < EXCLUDED.persist_seq"
             )
             await cache.write_db(sql, params)
         except asyncio.CancelledError:
@@ -1109,6 +1127,7 @@ class TaskManager:
             to_utc_for_db(task.created_at),
             to_utc_for_db(task.started_at),
             to_utc_for_db(task.completed_at),
+            self._next_persist_seq(),
         )
         await self._persist_snapshot(params)
 
