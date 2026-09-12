@@ -464,15 +464,24 @@ class VectorBacktestEngine:
 
         使用 rolling_mean 窗口计算，min_samples=5 允许部分窗口。
         vol 列的 null/NaN（数据缺失）填 0 后再计算，避免污染窗口均值。
+
+        BT-06：Tushare daily_quotes.vol 单位为「手」（1 手 = 100 股）。此处统一换算为
+        「股」，使 avg_daily_volume 与订单股数（shares，单位「股」）口径一致，
+        否则 participation 被放大 100 倍，滑点被系统性高估一两个数量级。
+        换算因子与 data.constants.DAILY_QUOTES_VOL_UNIT（"lot"）对应：1 lot = 100 股。
         """
         if "vol" not in quotes_df.columns:
             return quotes_df
+
+        # 1 手 = 100 股（BT-06，与 data.constants.DAILY_QUOTES_VOL_UNIT 一致）
+        _LOT_TO_SHARE = 100
 
         avg_vol_expr = (
             pl.col("vol")
             .cast(pl.Float64)
             .fill_null(0.0)
             .fill_nan(0.0)
+            .mul(_LOT_TO_SHARE)
             .shift(1)
             .rolling_mean(window_size=20, min_samples=5)
             .over("ts_code")
