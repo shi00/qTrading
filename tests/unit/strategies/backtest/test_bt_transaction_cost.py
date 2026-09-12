@@ -138,8 +138,8 @@ class TestStampDutyScheduleIntegration:
             is_buy=False,
             trade_date=date(2022, 1, 1),
         )
-        expected_rate = STAMP_DUTY_SCHEDULE[0].rate
-        assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
+        # 2022 年为 2008-09-19 单边档位，税率 0.1%
+        assert cost.stamp_duty == pytest.approx(10000.0 * 1e-3)
 
     def test_stamp_duty_rate_after_2023_change(self):
         config = TransactionCostConfig(stamp_duty_rate=None, slippage_bps=0.0)
@@ -183,7 +183,7 @@ class TestStampDutyScheduleIntegration:
         expected_rate = get_stamp_duty_rate(None)
         assert cost.stamp_duty == pytest.approx(10000.0 * expected_rate)
 
-    def test_buy_stamp_duty_zero_regardless_of_date(self):
+    def test_buy_stamp_duty_zero_in_single_side_periods(self):
         config = TransactionCostConfig(stamp_duty_rate=None)
         model = TransactionCostModel(config)
         cost_before = model.calculate(
