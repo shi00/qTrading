@@ -1494,6 +1494,7 @@
     "col_nav_curve_json": "净值曲线",
     "col_trades_json": "交易记录",
     "col_period_stats_json": "区间统计",
+    "col_persist_seq": "持久化序号",
     "col_execution_price": "执行价格",
     "col_allow_limit_up_buy": "允许涨停买入",
     "col_allow_limit_down_sell": "允许跌停卖出",
