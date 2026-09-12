@@ -106,11 +106,16 @@ class VectorBacktestEngine:
         # BT-002: 加载 stock_meta（含 delist_date）用于区分退市与临时停牌
         stock_meta = await self.data_provider.get_stock_meta()
 
+        delist_stats: dict[str, float | int] = {
+            "delist_liquidation_count": 0,
+            "delist_loss_amount": 0.0,
+        }
         trades, positions, skipped_orders, sim_warnings = self._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
             stock_meta=stock_meta,
+            delist_stats=delist_stats,
         )
 
         if progress_callback:
@@ -174,6 +179,8 @@ class VectorBacktestEngine:
             duration_ms=duration_ms,
             data_warnings=tuple(all_warnings),
             failed_signal_dates=tuple(failed_signal_dates),
+            delist_liquidation_count=delist_stats["delist_liquidation_count"],
+            delist_loss_amount=delist_stats["delist_loss_amount"],
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -579,6 +586,7 @@ class VectorBacktestEngine:
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
         stock_meta: dict[str, dict] | None = None,
+        delist_stats: dict[str, float | int] | None = None,
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
         if signals.is_empty():
             return (
@@ -606,6 +614,10 @@ class VectorBacktestEngine:
                 self.config.rebalance_freq,
             )
             simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
+
+        if delist_stats is not None:
+            delist_stats["delist_liquidation_count"] = simulator.delist_liquidation_count
+            delist_stats["delist_loss_amount"] = simulator.delist_loss_amount
 
         return simulator.get_results()
 
