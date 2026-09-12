@@ -668,7 +668,7 @@ class TestDelistedLiquidation:
         )
 
     def test_delisted_position_liquidated_at_last_known_price(self, config: BacktestConfig) -> None:
-        """退市标的在退市日被强制清算，清算价格使用最后已知价"""
+        """退市标的按「最后已知价 × 回收率」强制清算，并计交易成本（BT-02）。"""
         delist_date = date(2024, 1, 15)
         stock_meta = {"000001.SZ": {"delist_date": delist_date}}
         simulator = self._make_simulator(config, stock_meta=stock_meta)
@@ -706,21 +706,71 @@ class TestDelistedLiquidation:
         # 断言：持仓被移除
         assert "000001.SZ" not in simulator.positions
 
-        # 断言：现金增加（清算价格 × 持仓量）
-        expected_proceeds = volume * last_known_price
-        assert simulator.cash == initial_cash + expected_proceeds
+        # 断言：清算价 = 最后已知价 × 回收率（0.3），且按扣费后的净收入入账
+        recover_price = last_known_price * config.delist_recovery_rate
+        assert recover_price == pytest.approx(3.15)
+        # 手工计算期望净额：fixed_bps 5bps、佣金下限 5、印花税 0.05%、过户费 0.001%
+        gross_amount = 3.15 * 1000 * (1 - 5e-4)
+        expected_net = gross_amount - 5 - gross_amount * 5e-4 - gross_amount * 1e-5
+        assert simulator.cash == pytest.approx(initial_cash + expected_net)
 
-        # 断言：记录了 sell 交易
+        # 断言：记录了 sell 交易（price=回收价，成本非零）
         trades = simulator.get_results()[0]
         sell_trades = trades.filter(pl.col("action") == "sell")
         assert len(sell_trades) == 1
         assert sell_trades["ts_code"][0] == "000001.SZ"
-        assert float(sell_trades["price"][0]) == last_known_price
+        assert float(sell_trades["price"][0]) == pytest.approx(recover_price)
         assert int(sell_trades["volume"][0]) == volume
-        assert float(sell_trades["net_amount"][0]) == expected_proceeds
+        assert float(sell_trades["net_amount"][0]) == pytest.approx(expected_net)
+        assert float(sell_trades["total_cost"][0]) > 0
+
+        # 断言：退市清算分项统计（BT-02）
+        assert simulator.delist_liquidation_count == 1
+        assert simulator.delist_loss_amount == pytest.approx(10.5 * volume - expected_net)
 
         # 断言：记录了 warning 日志
         assert any("liquidated (delisted)" in w for w in simulator.warnings)
+
+    def test_liquidation_applies_recovery_and_cost(self) -> None:
+        """BT-02: 退市清算应用可配置回收率、计交易成本，并累计分项统计。"""
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            delist_recovery_rate=0.5,
+        )
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        last_known_price = 20.0
+        volume = 100
+        simulator.positions["000001.SZ"] = {
+            "volume": volume,
+            "cost_basis": 1_500.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 20.0,
+            "qfq_entry_price": 20.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = last_known_price
+
+        initial_cash = simulator.cash
+        simulator._liquidate_delisted_position("000001.SZ", simulator.positions["000001.SZ"], date(2024, 1, 16))
+
+        # 清算价 = 最后已知价 × 配置回收率(0.5)
+        recover_price = last_known_price * config.delist_recovery_rate
+        assert recover_price == pytest.approx(10.0)
+        # 成本非零（滑点+佣金+印花+过户），净额严格低于回收前的名义金额
+        gross_amount = recover_price * volume * (1 - 5e-4)
+        expected_net = gross_amount - 5 - gross_amount * 5e-4 - gross_amount * 1e-5
+        assert simulator.cash == pytest.approx(initial_cash + expected_net)
+
+        trades = simulator.get_results()[0]
+        sell_trades = trades.filter(pl.col("action") == "sell")
+        assert len(sell_trades) == 1
+        assert float(sell_trades["total_cost"][0]) > 0
+        assert float(sell_trades["price"][0]) == pytest.approx(recover_price)
+
+        # 分项统计
+        assert simulator.delist_liquidation_count == 1
+        assert simulator.delist_loss_amount == pytest.approx(last_known_price * volume - expected_net)
 
     def test_delisted_liquidation_uses_qfq_last_known_price(self, config: BacktestConfig) -> None:
         """清算价格使用 qfq_close（复权价）作为最后已知价，与 NAV 口径一致"""
@@ -764,9 +814,11 @@ class TestDelistedLiquidation:
         )
         simulator._sell_all_positions(date(2024, 1, 10), delist_day_quotes)
 
-        # 断言：清算价格 = qfq_close = 10.5
+        # 断言：清算价格 = qfq_close × 回收率 = 10.5 × 0.3，且按扣费净额入账（BT-02）
         assert "000002.SZ" not in simulator.positions
-        assert simulator.cash == initial_cash + 500 * 10.5
+        gross_amount = 10.5 * 0.3 * 500 * (1 - 5e-4)
+        expected_net = gross_amount - 5 - gross_amount * 5e-4 - gross_amount * 1e-5
+        assert simulator.cash == pytest.approx(initial_cash + expected_net)
 
     def test_delisted_no_last_known_price_falls_back_to_skip(self, config: BacktestConfig) -> None:
         """退市但无最后已知价时，兜底按临时停牌处理（保留持仓）"""
