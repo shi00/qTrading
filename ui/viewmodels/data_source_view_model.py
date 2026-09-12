@@ -645,6 +645,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             coroutine_factory=_run_initial_sync,
             cancellable=True,
             unique_key="system_init_sync",
+            factory_key="init_historical_sync",  # LIFE-01: 崩溃后可按注册表重建续传
         )
 
         if task_id is None:

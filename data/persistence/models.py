@@ -825,6 +825,11 @@ class TaskHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False, index=True)
     started_at = Column(DateTime(timezone=False))
     completed_at = Column(DateTime(timezone=False))
+    # LIFE-01: 崩溃后重试信息。unique_key 供重推去重复用；factory_key + retry_kwargs
+    # 供重启后回填可重建工厂。
+    unique_key = Column(String, nullable=True)
+    factory_key = Column(String, nullable=True)
+    retry_kwargs = Column(String, nullable=True)
 
     __table_args__ = (
         Index("idx_task_history_status_created", "status", "created_at"),

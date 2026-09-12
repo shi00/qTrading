@@ -2211,6 +2211,7 @@ class TestRetryTask:
             )
             task._coroutine_factory = factory
             task._coroutine_kwargs = {"a": 1}
+            task.unique_key = "uniq_retried"
             mgr._tasks["tid3"] = task
 
             with patch.object(mgr, "submit_task", return_value="new_tid_123") as mock_submit:
@@ -2222,10 +2223,11 @@ class TestRetryTask:
             task_type="Data",
             coroutine_factory=factory,
             cancellable=True,
+            unique_key="uniq_retried",
             a=1,
         )
-        # 显式确认 unique_key 未被传入（retry 不使用唯一键去重）
-        assert "unique_key" not in mock_submit.call_args.kwargs
+        # LIFE-01: retry 复用原 unique_key（防止并发重推），不再省略
+        assert mock_submit.call_args.kwargs.get("unique_key") == "uniq_retried"
 
     def test_interrupted_task_retry_success_calls_submit_task(self):
         """D6-3: INTERRUPTED 与 FAILED 业务等价，可重试续传。"""
@@ -2240,6 +2242,7 @@ class TestRetryTask:
             )
             task._coroutine_factory = factory
             task._coroutine_kwargs = {"a": 1}
+            task.unique_key = "uniq_interrupted"
             mgr._tasks["tid5"] = task
 
             with patch.object(mgr, "submit_task", return_value="new_tid_456") as mock_submit:
@@ -2251,9 +2254,111 @@ class TestRetryTask:
             task_type="Data",
             coroutine_factory=factory,
             cancellable=True,
+            unique_key="uniq_interrupted",
             a=1,
         )
-        assert "unique_key" not in mock_submit.call_args.kwargs
+        assert mock_submit.call_args.kwargs.get("unique_key") == "uniq_interrupted"
+
+
+class TestTaskManagerLife01RetryableFactory:
+    """LIFE-01: 崩溃后重试（factory 注册表 + history 查找 + 防并发重推）。"""
+
+    def test_register_then_reset_isolates_registry(self):
+        """R7: _reset_singleton 清空注册表，测试间不泄漏。"""
+        with singleton_state(TaskManager):
+            TaskManager.register_retryable_factory("k", MagicMock())
+            assert "k" in TaskManager._RETRYABLE_FACTORIES
+        # 离开 context 后已 reset，注册表应被清空
+        assert TaskManager._RETRYABLE_FACTORIES == {}
+
+    def test_interrupted_task_from_db_is_retryable_when_registered(self):
+        """注册工厂的 INTERRUPTED 历史任务可回填 factory 并重试。"""
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            factory = MagicMock()
+            TaskManager.register_retryable_factory("hist_sync", factory)
+
+            t = AppTask(id="hist1", status=TaskStatus.INTERRUPTED)
+            row = {
+                "id": "hist1",
+                "factory_key": "hist_sync",
+                "unique_key": "sys_sync",
+                "retry_kwargs": '{"a": 1}',
+            }
+            mgr._rehydrate_retry_info(t, row)
+
+            assert t.factory_key == "hist_sync"
+            assert t.unique_key == "sys_sync"
+            assert t._coroutine_factory is factory
+            assert t._coroutine_kwargs == {"a": 1}
+            assert t.is_retryable is True
+
+            with patch.object(mgr, "submit_task", return_value="new_tid") as mock_submit:
+                result = mgr.retry_task("hist1")
+            assert result == "new_tid"
+            assert mock_submit.call_args.kwargs["coroutine_factory"] is factory
+            assert mock_submit.call_args.kwargs["unique_key"] == "sys_sync"
+            assert mock_submit.call_args.kwargs["factory_key"] == "hist_sync"
+            assert mock_submit.call_args.kwargs["a"] == 1
+
+    def test_unregistered_interrupted_task_stays_non_retryable(self):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            t = AppTask(id="hist2", status=TaskStatus.INTERRUPTED)
+            row = {"factory_key": "unknown_key", "retry_kwargs": "{}"}
+            mgr._rehydrate_retry_info(t, row)
+            assert t.factory_key == "unknown_key"
+            assert t._coroutine_factory is None
+            assert t.is_retryable is False
+
+    def test_missing_factory_key_history_stays_non_retryable(self):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            t = AppTask(id="hist3", status=TaskStatus.INTERRUPTED)
+            mgr._rehydrate_retry_info(t, {})
+            assert t.factory_key is None
+            assert t.is_retryable is False
+
+    def test_malformed_retry_kwargs_disables_retry(self):
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            TaskManager.register_retryable_factory("k", lambda task_id: None)
+            t = AppTask(id="h", status=TaskStatus.INTERRUPTED)
+            row = {"factory_key": "k", "retry_kwargs": "not-json{{{"}
+            mgr._rehydrate_retry_info(t, row)
+            assert t._coroutine_factory is None
+            assert t.is_retryable is False
+
+    def test_retry_searches_history(self):
+        """retry_task 能命中 _history 中的任务（崩溃恢复场景）。"""
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            factory = MagicMock()
+            hist = AppTask(id="hist9", status=TaskStatus.INTERRUPTED)
+            hist._coroutine_factory = factory
+            hist._coroutine_kwargs = {}
+            hist.unique_key = "uk9"
+            mgr._history.append(hist)
+            with patch.object(mgr, "submit_task", return_value="new_tid") as mock_submit:
+                result = mgr.retry_task("hist9")
+            assert result == "new_tid"
+            assert mock_submit.call_args.kwargs["unique_key"] == "uk9"
+
+    def test_serialize_retry_kwargs_only_when_factory_key(self):
+        """单源：仅登记 factory_key 的任务持久化 kwargs 的 JSON。"""
+        t = AppTask()
+        t.factory_key = None
+        t._coroutine_kwargs = {"a": 1}
+        assert TaskManager._serialize_retry_kwargs(t) is None
+
+        t.factory_key = "k"
+        assert TaskManager._serialize_retry_kwargs(t) == '{"a": 1}'
+
+    def test_serialize_retry_kwargs_non_json_falls_back_to_none(self):
+        t = AppTask()
+        t.factory_key = "k"
+        t._coroutine_kwargs = {"obj": object()}
+        assert TaskManager._serialize_retry_kwargs(t) is None
 
 
 class TestTaskManagerQueuedCancellation:
