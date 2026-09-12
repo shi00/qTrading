@@ -1,5 +1,6 @@
 """交易成本模型单元测试"""
 
+import logging
 import math
 from datetime import date
 
@@ -11,6 +12,7 @@ from data.domain_services.transaction_cost import (
     TransactionCost,
     TransactionCostConfig,
     TransactionCostModel,
+    get_stamp_duty_both_sides,
     get_stamp_duty_rate,
     get_stamp_duty_schedule_description,
 )
@@ -23,33 +25,65 @@ class TestStampDutySchedule:
         dates = [s.effective_date for s in STAMP_DUTY_SCHEDULE]
         assert dates == sorted(dates)
 
-    def test_get_rate_before_first_schedule(self) -> None:
-        assert get_stamp_duty_rate(date(2000, 1, 1)) == STAMP_DUTY_SCHEDULE[0].rate
-
     def test_get_rate_at_first_schedule(self) -> None:
-        assert get_stamp_duty_rate(date(2008, 9, 19)) == STAMP_DUTY_SCHEDULE[0].rate
+        # 2005-01-24 起双边 0.1%
+        assert get_stamp_duty_rate(date(2005, 1, 24)) == pytest.approx(1e-3)
 
-    def test_get_rate_between_schedules(self) -> None:
-        assert get_stamp_duty_rate(date(2015, 1, 1)) == STAMP_DUTY_SCHEDULE[0].rate
+    def test_get_rate_double_sided_2008(self) -> None:
+        assert get_stamp_duty_rate(date(2008, 4, 24)) == pytest.approx(1e-3)
 
-    def test_get_rate_at_second_schedule(self) -> None:
-        assert get_stamp_duty_rate(date(2023, 8, 28)) == STAMP_DUTY_SCHEDULE[1].rate
+    def test_get_rate_after_2008_share_side(self) -> None:
+        assert get_stamp_duty_rate(date(2008, 9, 19)) == pytest.approx(1e-3)
+
+    def test_get_rate_between_2008_2023(self) -> None:
+        assert get_stamp_duty_rate(date(2015, 1, 1)) == pytest.approx(1e-3)
+
+    def test_get_rate_at_2023_halving(self) -> None:
+        assert get_stamp_duty_rate(date(2023, 8, 28)) == pytest.approx(5e-4)
 
     def test_get_rate_after_last_schedule(self) -> None:
-        assert get_stamp_duty_rate(date(2025, 1, 1)) == STAMP_DUTY_SCHEDULE[-1].rate
+        assert get_stamp_duty_rate(date(2025, 1, 1)) == pytest.approx(5e-4)
 
     def test_get_rate_none_returns_current(self) -> None:
-        assert get_stamp_duty_rate(None) == STAMP_DUTY_SCHEDULE[-1].rate
+        assert get_stamp_duty_rate(None) == pytest.approx(5e-4)
+
+    def test_get_rate_before_2005_warns_and_falls_back(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="data.domain_services.transaction_cost"):
+            rate = get_stamp_duty_rate(date(2000, 1, 1))
+        assert rate == pytest.approx(STAMP_DUTY_SCHEDULE[0].rate)
+        assert "印花税档位缺失" in caplog.text
 
     def test_description_returns_correct_text(self) -> None:
         assert "0.1%" in get_stamp_duty_schedule_description(date(2020, 1, 1))
         assert "0.05%" in get_stamp_duty_schedule_description(date(2024, 1, 1))
+        assert "双边" in get_stamp_duty_schedule_description(date(2007, 6, 1))
+
+    def test_both_sides_per_period(self) -> None:
+        assert get_stamp_duty_both_sides(date(2006, 1, 1)) is True
+        assert get_stamp_duty_both_sides(date(2008, 4, 24)) is True
+        assert get_stamp_duty_both_sides(date(2008, 9, 19)) is False
+        assert get_stamp_duty_both_sides(date(2024, 1, 1)) is False
+        assert get_stamp_duty_both_sides(None) is False
+
+    def test_rate_boundary_left_closed(self) -> None:
+        # 2007-05-30 生效 0.3%：前一天仍属 0.1% 双边档
+        assert get_stamp_duty_rate(date(2007, 5, 29)) == pytest.approx(1e-3)
+        assert get_stamp_duty_rate(date(2007, 5, 30)) == pytest.approx(3e-3)
+        # 2008-04-24 下调回 0.1%：前一天仍为 0.3%
+        assert get_stamp_duty_rate(date(2008, 4, 23)) == pytest.approx(3e-3)
+        assert get_stamp_duty_rate(date(2008, 4, 24)) == pytest.approx(1e-3)
+        # 2008-09-19 改单边：前一天仍双边征收
+        assert get_stamp_duty_both_sides(date(2008, 9, 18)) is True
+        assert get_stamp_duty_both_sides(date(2008, 9, 19)) is False
 
     def test_schedule_item_creation(self) -> None:
         item = StampDutySchedule(date(2023, 8, 28), 5e-4, "减半征收 0.05%")
         assert item.effective_date == date(2023, 8, 28)
         assert item.rate == 5e-4
         assert item.description == "减半征收 0.05%"
+        assert item.both_sides is False
+        double = StampDutySchedule(date(2007, 5, 30), 3e-3, "双边征收 0.3%", both_sides=True)
+        assert double.both_sides is True
 
 
 class TestTransactionCost:
@@ -237,6 +271,37 @@ class TestTransactionCostWithSchedule:
         )
         assert cost.stamp_duty == 0.0
 
+    def test_buy_has_stamp_duty_when_both_sides(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2007, 6, 1),
+        )
+        assert cost.stamp_duty == cost.gross_amount * 3e-3
+
+    def test_buy_both_sides_net_amount_includes_stamp_duty(self, model: TransactionCostModel) -> None:
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2007, 6, 1),
+        )
+        expected_net = cost.gross_amount + cost.commission + cost.stamp_duty + cost.transfer_fee
+        assert cost.stamp_duty > 0.0
+        assert cost.net_amount == pytest.approx(expected_net, rel=0.01)
+
+    def test_explicit_rate_override_disables_auto_both_sides(self) -> None:
+        model = TransactionCostModel(TransactionCostConfig(stamp_duty_rate=2e-3))
+        cost = model.calculate(
+            price=10.0,
+            volume=1000,
+            is_buy=True,
+            trade_date=date(2007, 6, 1),
+        )
+        # 显式覆盖税率即手动模式：买单计税仅由 stamp_duty_buy 决定，默认不按双边档位扣税
+        assert cost.stamp_duty == 0.0
+
     def test_no_trade_date_uses_current_rate(self, model: TransactionCostModel) -> None:
         cost = model.calculate(price=10.0, volume=1000, is_buy=False)
         assert cost.stamp_duty == cost.gross_amount * 5e-4
@@ -247,7 +312,7 @@ class TestFutureScheduleExtension:
         extended_schedule = STAMP_DUTY_SCHEDULE + [
             StampDutySchedule(date(2030, 1, 1), 3e-4, "未来费率"),
         ]
-        assert len(extended_schedule) == 3
+        assert len(extended_schedule) == len(STAMP_DUTY_SCHEDULE) + 1
         assert extended_schedule[-1].rate == 3e-4
 
     def test_schedule_is_frozen(self) -> None:

@@ -20,7 +20,12 @@ class DataWarning:
     用于记录 enrichment 失败时的详细信息，便于用户理解数据质量问题。
     """
 
-    warning_type: Literal["suspend_enrich_failed", "limit_enrich_failed"]
+    warning_type: Literal[
+        "suspend_enrich_failed",
+        "limit_enrich_failed",
+        "suspend_data_absent",
+        "limit_data_absent",
+    ]
     start_date: str
     end_date: str
     affected_stock_count: int
@@ -55,6 +60,14 @@ class BacktestConfig:
     max_position_count: int = 50
     max_single_weight: float = 0.1
 
+    delist_recovery_rate: float = 0.3
+    """退市清算回收率（0, 1]。
+
+    A 股退市股票进入退市整理期后普遍连续跌停，按退市前最后已知价全额变现会系统性
+    高估收益（永远高估、从不低估，且对低估值/低市值类策略放大更严重）。0.3 为保守
+    经验值，默认按回收价进行强制清算，可配置以覆盖不同风险假设。
+    """
+
     benchmark_code: str = DEFAULT_BENCHMARK_INDEX
     risk_free_rate: float = 0.02
     fail_fast: bool = True
@@ -81,6 +94,8 @@ class BacktestConfig:
             errors.append("commission_rate should be between 0 and 1%")
         if self.max_single_weight <= 0 or self.max_single_weight > 1:
             errors.append("max_single_weight must be in (0, 1]")
+        if not 0 < self.delist_recovery_rate <= 1:
+            errors.append("delist_recovery_rate must be in (0, 1]")
         if self.cash_reserve_pct < 0 or self.cash_reserve_pct >= 1:
             errors.append("cash_reserve_pct must be in [0, 1)")
         if self.min_rebalance_delta_pct < 0 or self.min_rebalance_delta_pct >= 1:
@@ -133,6 +148,16 @@ class BacktestResult:
     # UX-12 (P2-05): IC 序列对应的信号日期（仅内存透传，不持久化）。
     # 置于 dataclass 末尾并带默认值，避免破坏既有测试/调用方的关键字构造点。
     ic_dates: pl.Series = field(default_factory=lambda: pl.Series(dtype=pl.Date))
+    # BT-01: 信号是否来自独立打分（存在 score/signal_score/rank_score/ai_score 列）。
+    # False 表示 IC 仅基于策略排序字段的「排序 IC」，UI 据此调整呈现与 tooltip。
+    has_real_score: bool = True
+
+    # BT-02: 退市清算分项统计（置于末尾带默认值，避免破坏既有关键字构造点）。
+    # delist_liquidation_count: 触发的退市强制清算笔数。
+    # delist_loss_amount: 因 delist_recovery_rate 折扣相对全额变现被扣减的账面金额，
+    # 用于让用户评估「退市假设」对收益的影响权重（recovery 本身为经验估计值）。
+    delist_liquidation_count: int = 0
+    delist_loss_amount: float = 0.0
 
     def with_warnings(self, warnings: list[str] | tuple[str, ...]) -> BacktestResult:
         warnings_tuple = tuple(warnings) if isinstance(warnings, list) else warnings
@@ -155,6 +180,9 @@ class BacktestResult:
             executed_at=self.executed_at,
             duration_ms=self.duration_ms,
             ic_dates=self.ic_dates,
+            delist_liquidation_count=self.delist_liquidation_count,
+            delist_loss_amount=self.delist_loss_amount,
+            has_real_score=self.has_real_score,
         )
 
     def to_persist_dict(self) -> dict:

@@ -59,19 +59,21 @@ def _make_classify_df(n_levels: int = 3, codes_per_level: int = 1) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def _make_member_df(index_code: str) -> pd.DataFrame:
-    """Build a single-row member DataFrame for the given index_code."""
+def _make_member_df(l3_code: str) -> pd.DataFrame:
+    """Build a single-row member DataFrame for the given l3_code (DATA-04 L2 new schema)."""
     return pd.DataFrame(
         {
             "ts_code": ["000001.SZ"],
-            "index_code": [index_code],
-            "index_name": [f"行业_{index_code}"],
-            "sw_l1_code": ["110000"],
-            "sw_l1_name": ["农林牧渔"],
-            "sw_l2_code": ["110100"],
-            "sw_l2_name": ["种植业"],
-            "sw_l3_code": ["110101"],
-            "sw_l3_name": ["玉米"],
+            "l1_code": ["110000"],
+            "l1_name": ["农林牧渔"],
+            "l2_code": ["110100"],
+            "l2_name": ["种植业"],
+            "l3_code": [l3_code],
+            "l3_name": [f"行业_{l3_code}"],
+            "name": ["平安银行"],
+            "in_date": ["20200101"],
+            "out_date": [""],
+            "is_new": ["1"],
         }
     )
 
@@ -102,7 +104,7 @@ class TestRunImplOrchestration:
         """正常完成：status=success，日志包含 ✅ Complete 与 added 计数。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx, classify_count=5, member_count=10)
-        ctx.api.get_index_classify = AsyncMock(return_value=_make_classify_df(1))
+        ctx.api.get_index_classify = AsyncMock(return_value=_make_classify_df(3))
         ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
 
         with (
@@ -150,7 +152,7 @@ class TestRunImplOrchestration:
         """_cancelled=True 且 result.status 未标记 failed/cancelled 时，置 cancelled 并日志 ⚠️。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        ctx.api.get_index_classify = AsyncMock(return_value=_make_classify_df(1))
+        ctx.api.get_index_classify = AsyncMock(return_value=_make_classify_df(3))
         ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
 
         # 在 _sync_members 完成后置 _cancelled=True，模拟外部 cancel() 调用
@@ -375,7 +377,7 @@ class TestSyncMembersExceptions:
         """内层循环抛 EngineDisposedError 必须传播（不吞为 skip）。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
         ctx.api.get_index_member_all = AsyncMock(side_effect=EngineDisposedError("disposed"))
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
@@ -387,7 +389,7 @@ class TestSyncMembersExceptions:
         """内层 TushareAPIPermissionError：记录 skipped_permission 并提前 return。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L3", "L3"]})
         ctx.api.get_index_member_all = AsyncMock(side_effect=TushareAPIPermissionError("index_member_all", "no perm"))
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
@@ -403,7 +405,7 @@ class TestSyncMembersExceptions:
         """内层通用 Exception：errors 计数 +1，循环继续，最终 save 被跳过（无数据）。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L3", "L3"]})
         # 第一次抛错，第二次返回空 → all_dfs 空，触发 no data warning
         ctx.api.get_index_member_all = AsyncMock(side_effect=[RuntimeError("blip"), pd.DataFrame()])
 
@@ -424,7 +426,7 @@ class TestSyncMembersExceptions:
         """所有 index_code 返回空：all_dfs 空，日志 warning，不调用 save。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
         ctx.api.get_index_member_all = AsyncMock(return_value=pd.DataFrame())
 
         with (
@@ -444,7 +446,7 @@ class TestSyncMembersExceptions:
         strategy = _wire_strategy(ctx)
         # save_sw_industry_member 抛错 → 触发外层 except
         strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=RuntimeError("save failed"))
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
         ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
 
         with (
@@ -476,7 +478,7 @@ class TestSyncMembersPartialFailure:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI", "801030.SI"],
-                "sw_level": ["L1", "L1", "L1"],
+                "sw_level": ["L3", "L3", "L3"],
             }
         )
         # 第一、三个失败，第二个成功
@@ -505,7 +507,7 @@ class TestSyncMembersPartialFailure:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI"],
-                "sw_level": ["L1", "L1"],
+                "sw_level": ["L3", "L3"],
             }
         )
         ctx.api.get_index_member_all = AsyncMock(side_effect=[RuntimeError("blip"), _make_member_df("801020.SI")])
@@ -577,11 +579,12 @@ class TestSyncMembersCheckpoint:
         big_df = pd.DataFrame(
             {
                 "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
-                "index_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "l3_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "in_date": ["20200101"] * (_CHECKPOINT_INTERVAL + 1),
             }
         )
         ctx.api.get_index_member_all = AsyncMock(return_value=big_df)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
             result = SyncResult()
@@ -598,7 +601,7 @@ class TestSyncMembersCheckpoint:
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx, member_count=1)
         ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
             result = SyncResult()
@@ -620,11 +623,12 @@ class TestSyncMembersCheckpoint:
         big_df = pd.DataFrame(
             {
                 "ts_code": [f"00000{i}.SZ" for i in range(_CHECKPOINT_INTERVAL + 1)],
-                "index_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "l3_code": ["801010.SI"] * (_CHECKPOINT_INTERVAL + 1),
+                "in_date": ["20200101"] * (_CHECKPOINT_INTERVAL + 1),
             }
         )
         ctx.api.get_index_member_all = AsyncMock(return_value=big_df)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
             result = SyncResult()

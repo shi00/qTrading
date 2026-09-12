@@ -3,18 +3,24 @@
 供回测引擎与 ReviewManager 共用，确保费率计算一致。
 
 印花税政策时间线：
+- 2005-01-24：双边征收，税率 0.1%
+- 2007-05-30：双边征收，税率 0.3%
+- 2008-04-24：双边征收，税率 0.1%
 - 2008-09-19：单边征收（仅卖出），税率 0.1%
-- 2023-08-28：减半征收，税率 0.05%
+- 2023-08-28：减半征收（单边），税率 0.05%
 
 未来费率变更时，只需在 STAMP_DUTY_SCHEDULE 中追加新档位。
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -24,12 +30,36 @@ class StampDutySchedule:
     effective_date: date
     rate: float
     description: str = ""
+    both_sides: bool = False
 
 
 STAMP_DUTY_SCHEDULE: list[StampDutySchedule] = [
+    StampDutySchedule(date(2005, 1, 24), 1e-3, "双边征收 0.1%", both_sides=True),
+    StampDutySchedule(date(2007, 5, 30), 3e-3, "双边征收 0.3%", both_sides=True),
+    StampDutySchedule(date(2008, 4, 24), 1e-3, "双边征收 0.1%", both_sides=True),
     StampDutySchedule(date(2008, 9, 19), 1e-3, "单边征收 0.1%"),
     StampDutySchedule(date(2023, 8, 28), 5e-4, "减半征收 0.05%"),
 ]
+
+
+def _resolve_schedule(trade_date: date | None) -> StampDutySchedule:
+    """解析交易日期生效的印花税档位。
+
+    trade_date 早于表中最早档位时显式告警而非静默回退（历史税率/征收方式可能不匹配）。
+    """
+    if trade_date is None:
+        return STAMP_DUTY_SCHEDULE[-1]
+
+    for schedule in reversed(STAMP_DUTY_SCHEDULE):
+        if trade_date >= schedule.effective_date:
+            return schedule
+
+    logger.warning(
+        "印花税档位缺失：%s 早于最早档位 %s，回退到该档位（税率/征收方式可能与历史政策不符）",
+        trade_date,
+        STAMP_DUTY_SCHEDULE[0].effective_date,
+    )
+    return STAMP_DUTY_SCHEDULE[0]
 
 
 def get_stamp_duty_rate(trade_date: date | None = None) -> float:
@@ -41,26 +71,24 @@ def get_stamp_duty_rate(trade_date: date | None = None) -> float:
     Returns:
         对应日期的印花税率。
     """
-    if trade_date is None:
-        return STAMP_DUTY_SCHEDULE[-1].rate
+    return _resolve_schedule(trade_date).rate
 
-    for schedule in reversed(STAMP_DUTY_SCHEDULE):
-        if trade_date >= schedule.effective_date:
-            return schedule.rate
 
-    return STAMP_DUTY_SCHEDULE[0].rate
+def get_stamp_duty_both_sides(trade_date: date | None = None) -> bool:
+    """返回交易日期印花税是否双边征收（买入也计税）。
+
+    Args:
+        trade_date: 交易日期。None 时返回当前最新档位的征收方式。
+
+    Returns:
+        该日期印花税是否双边征收。
+    """
+    return _resolve_schedule(trade_date).both_sides
 
 
 def get_stamp_duty_schedule_description(trade_date: date | None = None) -> str:
     """获取印花税率档位描述。"""
-    if trade_date is None:
-        return STAMP_DUTY_SCHEDULE[-1].description
-
-    for schedule in reversed(STAMP_DUTY_SCHEDULE):
-        if trade_date >= schedule.effective_date:
-            return schedule.description
-
-    return STAMP_DUTY_SCHEDULE[0].description
+    return _resolve_schedule(trade_date).description
 
 
 @dataclass(frozen=True)
@@ -143,7 +171,10 @@ class TransactionCostModel:
         commission = max(gross_amount * self.config.commission_rate, self.config.commission_min)
 
         stamp_duty = 0.0
-        if not is_buy or self.config.stamp_duty_buy:
+        # 卖出恒计税；买单自动档位路径（未显式覆盖税率）按历史双边征收计税，
+        # 显式覆盖 stamp_duty_rate 即手动模式，买单是否计税仅由 stamp_duty_buy 决定。
+        auto_both_sides = self.config.stamp_duty_rate is None and is_buy and get_stamp_duty_both_sides(trade_date)
+        if not is_buy or self.config.stamp_duty_buy or auto_both_sides:
             effective_rate = self._get_effective_stamp_duty_rate(trade_date)
             stamp_duty = gross_amount * effective_rate
 
@@ -155,7 +186,7 @@ class TransactionCostModel:
         slippage_cost = abs(gross_amount - price * volume)
 
         if is_buy:
-            net_amount = gross_amount + commission + transfer_fee
+            net_amount = gross_amount + commission + stamp_duty + transfer_fee
         else:
             net_amount = gross_amount - commission - stamp_duty - transfer_fee
 

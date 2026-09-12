@@ -352,7 +352,9 @@ class FinancialReports(Base):
     __tablename__ = "financial_reports"
     ts_code = Column(String, primary_key=True)
     end_date = Column(Date, primary_key=True, index=True)
-    ann_date = Column(Date)
+    # DATA-05: 主键加入 ann_date，保留同一报告期的多版本（财报更正/追溯调整），
+    # PIT（ann_date <= as_of）才能还原历史公告日的可见值。
+    ann_date = Column(Date, primary_key=True, index=True)
     report_type = Column(String)
     total_revenue = Column(Numeric(20, 4), info={"null_protected": True})
     revenue = Column(Numeric(20, 4), info={"null_protected": True})
@@ -375,7 +377,7 @@ class FinancialReports(Base):
     accounts_receiv = Column(Numeric(20, 4), info={"null_protected": True})
     __table_args__ = (
         Index("ix_financial_reports_ts_code_ann_date", "ts_code", "ann_date"),
-        Index("ix_financial_reports_ann_date", "ann_date"),
+        # ann_date 单列索引由列级 index=True 生成（ix_financial_reports_ann_date），不再在 __table_args__ 重复声明。
     )
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
@@ -586,21 +588,52 @@ class SwIndustryClassify(Base):
 
 
 class SwIndustryMember(Base):
-    """申万行业成分股映射（Phase 3F-1，全局快照，对应 Tushare index_member_all 接口）。
+    """申万行业成分股映射（DATA-04 L2，对应 Tushare index_member_all 接口）。
+
+    DATA-04 L2 按 ``index_member_all`` 真实输出字段重建：旧 schema 请求了该接口
+    不存在的 ``index_code`` / ``sw_l1_code..sw_l3_name`` 列（仅 ``index_classify`` 输出
+    该口径），导致旧同步未正确落库且丢失行业进出时间维度，历史回测引用当前成分
+    引入前视偏差。现按 l1/l2/l3_code + in_date/out_date 保留全历史纳入/剔除区间，
+    支持 as-of 查询（out_date IS NULL 为当前有效）。
 
     供 AI 行业景气度分析与 screener 查询时计算 industry_sw_l2（DAT-08③）。
     """
 
     __tablename__ = "sw_industry_member"
-    ts_code = Column(String, primary_key=True)
-    index_code = Column(String, primary_key=True)
-    index_name = Column(String)
-    sw_l1_code = Column(String)
-    sw_l1_name = Column(String)
-    sw_l2_code = Column(String, index=True)
-    sw_l2_name = Column(String)
-    sw_l3_code = Column(String)
-    sw_l3_name = Column(String)
+    ts_code = Column(String, primary_key=True)  # 成分股票代码
+    l3_code = Column(String, primary_key=True)  # 所属申万三级行业代码（如 850531.SI）
+    in_date = Column(Date, primary_key=True)  # 纳入该三级行业日期（同股票同行业可多次进出）
+    l1_code = Column(String)
+    l1_name = Column(String)
+    l2_code = Column(String, index=True)
+    l2_name = Column(String)
+    l3_name = Column(String)
+    name = Column(String)  # 成分股票名称（API 返回当前快照）
+    out_date = Column(Date)  # 剔除日期，NULL=当前有效
+    is_new = Column(String(1))  # 是否最新 Y/N
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class StockNameHistory(Base):
+    """股票名称变更历史（DATA-04 L3，对应 Tushare namechange 接口）。
+
+    A 股 ST/*ST 等特别处理状态体现在股票名称上，而 ``stock_basic.name`` 仅保留当前快照。
+    DATA-04 L3 引入本表记录每股历次名称生效区间（start_date/end_date），支持 as-of
+    查询（start_date <= as_of AND (end_date IS NULL OR end_date > as_of)）还原历史时点
+    ST 状态，消除回测引用当前名称引入的前视偏差。
+
+    主键 (ts_code, start_date)：每股每个名称生效起始日唯一；pending 记录 end_date 为 NULL
+    （当前生效）。change_reason 为 Tushare 变更原因文本（如 ST/*ST/撤销ST/改名）。
+    """
+
+    __tablename__ = "stock_name_history"
+    ts_code = Column(String, primary_key=True)  # TS 代码
+    start_date = Column(Date, primary_key=True)  # 名称生效开始日期
+    name = Column(String)  # 该区间证券名称（含 ST/*ST 前缀）
+    end_date = Column(Date)  # 名称生效结束日期，NULL=当前生效
+    ann_date = Column(Date)  # 公告日期
+    change_reason = Column(String)  # 变更原因
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

@@ -4,7 +4,7 @@
 # 校验脚本: scripts/check_docs_consistency.py::check_exceptions_yaml_consistency()
 # 契约测试: tests/unit/test_docs_consistency.py::TestExceptionsYamlConsistency
 #
-# 目的: 集中管理所有对硬规则 (红线 R1~R19 / §4 架构边界) 的已批准例外,
+# 目的: 集中管理所有对硬规则 (红线 R1~R22 / §4 架构边界) 的已批准例外,
 #       消除 KNOWN_EXCEPTIONS、技术债表、宪法各自维护独立例外的漂移风险。
 #       (P1-01: KNOWN_EXCEPTIONS、技术债与宪法不得各自维护独立例外)
 #
@@ -176,3 +176,23 @@ exceptions:
     approved_by: 架构维护者（D6-1/D6-2 修复）
     removal_trigger: "日历判定统一收口到 TradeCalendarService（DB→API→Offline 三级降级链）且 SchedulerService 不再直接访问 OfflineCalendar 时移除。"
     verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0016）。"
+  # EX-0017: services/news_subscription_service.py 应用服务层轮询循环优雅停止（R5，P1-04 方案1）
+  # 技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（案文：#M9-010）。
+  - id: EX-0017
+    rule_id: R5
+    paths: ["services/news_subscription_service.py"]
+    reason: "应用服务层轮询循环的优雅停止不在 R5 之内：_safe_fetch_task/_processing_loop/_fetch_and_notify 三处吞没 EngineDisposedError 以停止轮询（self._running = False / break），引擎释放后停止轮询是合理设计，非 DAO/维护流程的传播要求。技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（P1-04 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（P1-04 方案1，R5 分类修正）
+    removal_trigger: "R5 红线扩展到应用服务层轮询循环时，或 NewsSubscriptionService 重构时移除（与技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 的 upgrade 触发条件一致）。"
+    verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
+  # EX-0018: services/backtest_service.py 回测持久化失败不阻塞结果返回（R5，P1-04 方案1）
+  # 技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（案文：#M9-011）。
+  - id: EX-0018
+    rule_id: R5
+    paths: ["services/backtest_service.py"]
+    reason: "回测持久化失败不阻塞结果返回在 R5 之内属合理偏离：_persist_result 捕获 EngineDisposedError 返回带警告结果（回测已完成，持久化失败仅警告，与 task_manager 的 system 级 critical log 不 raise 模式一致）。技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（P1-04 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
+    owner: 架构维护者
+    approved_by: 架构维护者（P1-04 方案1，R5 分类修正）
+    removal_trigger: "R5 红线扩展到回测持久化路径时，或 BacktestService 重构时移除（与技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 的 upgrade 触发条件一致）。"
+    verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"

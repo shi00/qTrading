@@ -9,7 +9,7 @@
 
 文档权威按主题确定正本，而非按目录层级全局覆盖（见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）。Flet 相关主题正本如下：
 
-1. 红线 R1~R19、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
+1. 红线 R1~R22、架构边界、交互准则 → [CLAUDE.md](../../CLAUDE.md)
 2. 实现与交付规范 → [CONTRIBUTING.md](../../CONTRIBUTING.md)
 3. Flet 项目约束 → 本目录各专题（`v1-api-constraints.md` 为声明式 API 约束正本）
 4. Flet API 存在性和签名 → 锁定版本源码 / [flet-mcp](./mcp-usage.md) / Flet 官方文档

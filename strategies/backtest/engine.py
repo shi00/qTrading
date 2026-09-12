@@ -106,11 +106,16 @@ class VectorBacktestEngine:
         # BT-002: 加载 stock_meta（含 delist_date）用于区分退市与临时停牌
         stock_meta = await self.data_provider.get_stock_meta()
 
+        delist_stats: dict[str, float | int] = {
+            "delist_liquidation_count": 0,
+            "delist_loss_amount": 0.0,
+        }
         trades, positions, skipped_orders, sim_warnings = self._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
             stock_meta=stock_meta,
+            delist_stats=delist_stats,
         )
 
         if progress_callback:
@@ -150,6 +155,14 @@ class VectorBacktestEngine:
 
         all_warnings = [str(w) for w in quote_warnings] + list(sim_warnings)
 
+        # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
+        # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。
+        has_real_score = (
+            bool(signals["has_real_score"].any())
+            if not signals.is_empty() and "has_real_score" in signals.columns
+            else False
+        )
+
         return BacktestResult(
             config=self.config,
             strategy_name=strategy.name,
@@ -174,6 +187,9 @@ class VectorBacktestEngine:
             duration_ms=duration_ms,
             data_warnings=tuple(all_warnings),
             failed_signal_dates=tuple(failed_signal_dates),
+            delist_liquidation_count=delist_stats["delist_liquidation_count"],
+            delist_loss_amount=delist_stats["delist_loss_amount"],
+            has_real_score=has_real_score,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -277,7 +293,20 @@ class VectorBacktestEngine:
             )
 
             if suspend_pd is None or suspend_pd.empty:
-                return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), None
+                # DATA-03：区分「查询失败（enrich 异常已告警）」与「查询成功但区间内无停牌数据」。
+                # 后者多为用户未同步 suspend_d 表，静默乐观降级会让回测在停牌股上成交，结果被美化，
+                # 故必须显式告警（逐区间一次）。
+                warning = DataWarning(
+                    warning_type="suspend_data_absent",
+                    start_date=start_date,
+                    end_date=end_date,
+                    affected_stock_count=quotes_df.height,
+                    error_message=(
+                        "suspend_d 表在该区间无数据，停牌保护未生效，回测默认全市场可交易。"
+                        "若从未同步停牌数据，回测可能在停牌股票上成交，实盘不可执行。"
+                    ),
+                )
+                return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), warning
 
             suspend_df = pl.from_pandas(suspend_pd)
             suspend_df = suspend_df.select(["ts_code", "trade_date"]).with_columns(pl.lit(False).alias("is_tradable"))
@@ -329,7 +358,20 @@ class VectorBacktestEngine:
             )
 
             if limit_list_pd is None or limit_list_pd.empty:
-                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), None
+                # DATA-03：与 suspend 同理，查询成功但区间内无涨跌停数据必须显式告警
+                # （limit_list 需较高 Tushare 积分，普通用户大概率未同步），
+                # 否则默认无涨跌停限制会让回测在涨停板上买入/跌停板上卖出，收益被高估。
+                warning = DataWarning(
+                    warning_type="limit_data_absent",
+                    start_date=start_date,
+                    end_date=end_date,
+                    affected_stock_count=quotes_df.height,
+                    error_message=(
+                        "limit_list 表在该区间无数据，涨跌停撮合保护未生效。"
+                        "回测允许了涨停买入/跌停卖出，实盘不可执行，收益被高估。"
+                    ),
+                )
+                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
 
             limit_df = pl.from_pandas(limit_list_pd)
             limit_df = limit_df.select(["ts_code", "trade_date", "limit_type"]).rename({"limit_type": "limit_status"})
@@ -553,6 +595,7 @@ class VectorBacktestEngine:
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
         stock_meta: dict[str, dict] | None = None,
+        delist_stats: dict[str, float | int] | None = None,
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
         if signals.is_empty():
             return (
@@ -580,6 +623,10 @@ class VectorBacktestEngine:
                 self.config.rebalance_freq,
             )
             simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
+
+        if delist_stats is not None:
+            delist_stats["delist_liquidation_count"] = simulator.delist_liquidation_count
+            delist_stats["delist_loss_amount"] = simulator.delist_loss_amount
 
         return simulator.get_results()
 

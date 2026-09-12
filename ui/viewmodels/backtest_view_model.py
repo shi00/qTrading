@@ -227,6 +227,8 @@ class BacktestState:
     warnings: tuple[Message, ...] = ()
     skipped_order_count: int = 0
     failed_date_count: int = 0
+    # BT-01: 信号是否来自独立打分; False 时 IC 卡片呈现为「排序 IC」并附 tooltip
+    has_real_score: bool = True
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -489,6 +491,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     ic_dates=ic_dates,
                     strategy_name=result.strategy_name,
                     benchmark_name=result.config.benchmark_code,
+                    has_real_score=result.has_real_score,
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),

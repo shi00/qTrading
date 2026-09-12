@@ -23,7 +23,11 @@ from data.persistence.daos.stk_limit_dao import StkLimitDao
 from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
-from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
+from data.persistence.daos.sw_industry_dao import (
+    StockNameHistoryDao,
+    SwIndustryClassifyDao,
+    SwIndustryMemberDao,
+)
 from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
 
@@ -71,6 +75,8 @@ def _make_mgr():
     mgr.sw_industry_classify_dao = MagicMock(spec=SwIndustryClassifyDao)
     mgr.sw_industry_member_dao = MagicMock(spec=SwIndustryMemberDao)
     mgr.sw_industry_member_dao.get_sw_l2_mapping = AsyncMock(return_value={})
+    # DATA-04 L3：股票名称变更历史 DAO（_create_engine 通过 _DAO_REGISTRY 同步 engine 引用）
+    mgr.stock_name_history_dao = MagicMock(spec=StockNameHistoryDao)
     # Phase 3G §4.3.4：express DAO（prefetch_auxiliary_data 引用 get_express_batch）
     mgr.express_dao = MagicMock(spec=ExpressDao)
     mgr.express_dao.get_express_batch = AsyncMock(return_value=pd.DataFrame())

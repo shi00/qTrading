@@ -746,6 +746,27 @@ class TestTaskManagerClearFinishedImpl:
         assert len(mgr._history) == 1
         assert h2 in mgr._history
 
+    def test_clears_finished_order_slot(self):
+        mgr = TaskManager()
+        completed = AppTask(name="completed", status=TaskStatus.COMPLETED)
+        running = AppTask(name="running", status=TaskStatus.RUNNING)
+        mgr._tasks = {completed.id: completed, running.id: running}
+        # Simulate that the completed task was tracked for eviction ordering
+        mgr._finished_order[completed.id] = completed.completed_at or datetime.datetime.min
+        mgr._clear_finished_impl()
+        assert completed.id not in mgr._finished_order
+        # Running task was never tracked; must remain untouched
+        assert running.id in mgr._tasks
+
+    def test_clear_finished_order_noop_for_empty_order(self):
+        mgr = TaskManager()
+        completed = AppTask(name="completed", status=TaskStatus.COMPLETED)
+        mgr._tasks = {completed.id: completed}
+        # _finished_order is empty: pop(tid, None) must be a safe no-op
+        mgr._clear_finished_impl()
+        assert completed.id not in mgr._tasks
+        assert len(mgr._finished_order) == 0
+
 
 class TestTaskManagerAutoEvictOld:
     def test_evicts_when_over_limit(self):

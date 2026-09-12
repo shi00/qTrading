@@ -938,7 +938,8 @@ class TestEnrichSuspendStatus:
         return engine
 
     @pytest.mark.asyncio
-    async def test_no_suspend_data_returns_all_tradable(self):
+    async def test_no_suspend_data_returns_all_tradable_and_warns(self):
+        """DATA-03：查询成功但区间内无 suspend_d 数据 → 全可交易 + suspend_data_absent 告警。"""
         engine = self._make_engine()
         engine.cache = MagicMock()
         engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=None)
@@ -955,10 +956,16 @@ class TestEnrichSuspendStatus:
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "suspend_data_absent"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "suspend_d" in warning.error_message
 
     @pytest.mark.asyncio
-    async def test_empty_suspend_data_returns_all_tradable(self):
+    async def test_empty_suspend_data_returns_all_tradable_and_warns(self):
+        """DATA-03：suspend_d 返回空 DataFrame → 全可交易 + suspend_data_absent 告警。"""
         import pandas as pd
 
         engine = self._make_engine()
@@ -977,7 +984,9 @@ class TestEnrichSuspendStatus:
 
         assert "is_tradable" in result.columns
         assert all(result["is_tradable"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "suspend_data_absent"
+        assert "suspend_d" in warning.error_message
 
     @pytest.mark.asyncio
     async def test_suspend_data_marks_suspended_stocks(self):
@@ -1050,7 +1059,8 @@ class TestEnrichLimitStatus:
         return engine
 
     @pytest.mark.asyncio
-    async def test_no_limit_data_returns_none_limit_status(self):
+    async def test_no_limit_data_returns_none_limit_status_and_warns(self):
+        """DATA-03：区间内无 limit_list 数据 → limit_status=None + limit_data_absent 告警。"""
         engine = self._make_engine()
         engine.cache = MagicMock()
         engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=None)
@@ -1067,7 +1077,12 @@ class TestEnrichLimitStatus:
 
         assert "limit_status" in result.columns
         assert all(v is None for v in result["limit_status"].to_list())
-        assert warning is None
+        assert warning is not None
+        assert warning.warning_type == "limit_data_absent"
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240131"
+        assert warning.affected_stock_count == 2
+        assert "limit_list" in warning.error_message
 
     @pytest.mark.asyncio
     async def test_limit_data_marks_limit_stocks(self):
@@ -1376,6 +1391,46 @@ class TestVectorizationEquivalence:
         # Buy on 2024-01-03 skipped due to no_quote (schema preserved, filter works)
         no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
         assert no_quote_skips.height >= 1
+
+    def test_simulate_trades_delist_stats_on_liquidation(self):
+        """BT-02: _simulate_trades 把退市清算分项统计填入 out-param delist_stats。"""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 1)],
+                "execution_date": [date(2024, 1, 2)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        # Day1 有行情建仓；Day2 该标的退市后无行情（结算走 _last_known_prices）
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "raw_open": [10.0],
+                "raw_close": [10.5],
+                "qfq_open": [10.0],
+                "qfq_close": [10.5],
+                "is_tradable": [True],
+            }
+        )
+        stock_meta = {"000001.SZ": {"delist_date": date(2024, 1, 3)}}
+
+        delist_stats: dict[str, float | int] = {}
+        trades, positions, skipped, warnings = engine._simulate_trades(
+            signals,
+            quotes_df,
+            trade_dates,
+            stock_meta=stock_meta,
+            delist_stats=delist_stats,
+        )
+
+        assert delist_stats["delist_liquidation_count"] == 1
+        assert delist_stats["delist_loss_amount"] > 0
+        # 退市强制清算以 sell / DELISTED 落账
+        assert "DELISTED" in trades["exit_reason"].to_list()
 
     def test_simulate_trades_date_with_no_signals(self):
         """A trade_date with no signals should produce empty day_signals (not crash)."""

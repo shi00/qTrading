@@ -31,7 +31,11 @@ from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.stk_limit_dao import StkLimitDao
-from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
+from data.persistence.daos.sw_industry_dao import (
+    StockNameHistoryDao,
+    SwIndustryClassifyDao,
+    SwIndustryMemberDao,
+)
 from data.persistence.daos.top_inst_dao import TopInstDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
 from data.persistence.daos.sync_dao import SyncDao
@@ -136,6 +140,8 @@ class CacheManager:
             self.stk_holdertrade_dao = StkHoldertradeDao(self.engine)
             self.sw_industry_classify_dao = SwIndustryClassifyDao(self.engine)
             self.sw_industry_member_dao = SwIndustryMemberDao(self.engine)
+            # DATA-04 L3：股票名称变更历史 DAO
+            self.stock_name_history_dao = StockNameHistoryDao(self.engine)
             # Phase 3G §4.3.4：业绩快报 DAO
             self.express_dao = ExpressDao(self.engine)
             # FR-UX-004, Task 4.2：关注列表 DAO

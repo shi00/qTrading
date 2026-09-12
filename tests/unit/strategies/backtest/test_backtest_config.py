@@ -148,6 +148,37 @@ class TestBacktestConfigValidation:
         errors = config.validate()
         assert len(errors) == 0
 
+    def test_validate_delist_recovery_rate_zero(self) -> None:
+        """BT-02: delist_recovery_rate 必须 > 0。"""
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            delist_recovery_rate=0.0,
+        )
+        errors = config.validate()
+        assert len(errors) == 1
+        assert "delist_recovery_rate must be in (0, 1]" in errors[0]
+
+    def test_validate_delist_recovery_rate_above_one(self) -> None:
+        """BT-02: delist_recovery_rate 必须 <= 1。"""
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            delist_recovery_rate=1.5,
+        )
+        errors = config.validate()
+        assert len(errors) == 1
+        assert "delist_recovery_rate must be in (0, 1]" in errors[0]
+
+    def test_validate_delist_recovery_rate_default_ok(self) -> None:
+        """BT-02: 默认 0.3 落在 (0, 1]，应通过校验。"""
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+        )
+        errors = config.validate()
+        assert not any("delist_recovery_rate" in e for e in errors)
+
 
 def _make_result(**overrides) -> BacktestResult:
     """构造 BacktestResult 测试实例，支持覆盖部分字段。"""

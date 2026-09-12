@@ -2743,3 +2743,47 @@ class TestStockAnalysisPromptDumpFailure:
                 )
         assert result["score"] == 50
         assert any("Failed to dump prompt to file" in r.message for r in caplog.records)
+
+
+class TestAnalyzeStockBacktestNameFilter:
+    """DATA-04 L1：回测模式下从 AI prompt 剔除 stock_basic.name（当前快照，含 ST 标记）。
+
+    回测历史回放时，name 属于未来时点可观测信息，喂给 LLM 会引入前视偏差；
+    实盘模式则保留 name 以提供完整上下文。
+    """
+
+    @pytest.mark.asyncio
+    async def test_backtest_mode_removes_name_from_prompt(self):
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
+            tech_info={},
+            news_list=[],
+            is_backtest=True,
+            include_learning_context=False,
+        )
+        messages = svc._chat_completion.await_args.args[0]
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        user_content = user_msgs[0]["content"]
+        assert "name: ST Example" not in user_content
+        # 其余已观测信息字段仍须保留
+        assert "ts_code: 000001.SZ" in user_content
+
+    @pytest.mark.asyncio
+    async def test_live_mode_keeps_name_in_prompt(self):
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
+            tech_info={},
+            news_list=[],
+            is_backtest=False,
+            include_learning_context=False,
+        )
+        messages = svc._chat_completion.await_args.args[0]
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        user_content = user_msgs[0]["content"]
+        assert "name: ST Example" in user_content

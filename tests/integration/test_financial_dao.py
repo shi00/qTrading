@@ -7,12 +7,10 @@
 - L2: 批量预取避免 N+1 查询
 """
 
-import datetime
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
-import pytest_asyncio
 from sqlalchemy import text
 
 from data.persistence.daos.financial_dao import FinancialDao
@@ -247,37 +245,17 @@ class TestCashflowField:
             assert df["n_cashflow_act"].iloc[0] == 100000000
 
 
-@pytest_asyncio.fixture
-async def setup_ann_date_null_rows(function_engine):
-    """DAT-06: 插入 999999.SZ 的 ann_date 有效/NULL 两行，teardown 定向清理（与 MVD 无冲突）。
-
-    自包含 fixture：不依赖 setup_stock_data 字面数据；999999.SZ 与 MVD ts_code 无冲突。
-    """
-    async with function_engine.begin() as conn:
-        await conn.execute(
-            text(
-                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
-                "VALUES ('999999.SZ', '2024-06-30', '2024-07-01', 10.0)"
-            )
-        )
-        await conn.execute(
-            text(
-                "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
-                "VALUES ('999999.SZ', '2024-12-31', NULL, 20.0)"
-            )
-        )
-    yield
-    async with function_engine.begin() as conn:
-        await conn.execute(text("DELETE FROM financial_reports WHERE ts_code = '999999.SZ'"))
-
-
 class TestDat06AnnDateNull:
-    """DAT-06: ann_date IS NULL 行在 PIT/非 PIT 双分支的口径一致性（回测/实盘不分叉）。
+    """DAT-06: ann_date 缺失防护在 DATA-05 后由 NOT NULL 主键在 schema 层杜绝。
 
-    xdist_group("serial")：本类测试通过全表 has_ann_date_nulls() 断言"无 NULL 行"（T3b），
-    而 T1/T2/T3 的 setup_ann_date_null_rows fixture 会向同一张表插入 NULL 行（teardown 才清理）。
-    并行（-n auto --dist=loadgroup）下 T3b 会读到其他 worker 尚未清理的 NULL 行导致 flaky，
-    故将本类锁定到同一 worker 串行执行（仓库既有模式，见 test_config_panels.py migration 组）。
+    DATA-05（0022 迁移）将 ``ann_date`` 纳入主键，PG 主键列隐式 NOT NULL，
+    插入 ``ann_date IS NULL`` 的行会违反约束直接失败——DAT-06 的 NULL 行告警场景
+    在 schema 层不再可能构造。因此本类从"插入 NULL 行验证查询排除"改为验证：
+      - schema 拒绝 NULL ann_date 行（插入抛约束异常）；
+      - 干净 MVD 下 ``has_ann_date_nulls()`` 恒为 False。
+
+    xdist_group("serial")：``has_ann_date_nulls()`` 为全表 EXISTS 扫描，保留串行
+    锁定避免并行 worker 间相互污染（仓库既有模式）。
     """
 
     pytestmark = pytest.mark.xdist_group("serial")
@@ -287,34 +265,36 @@ class TestDat06AnnDateNull:
         return FinancialDao(function_engine)
 
     @pytest.mark.asyncio
-    async def test_financial_history_pit_ann_date_null_consistency(self, financial_dao, setup_ann_date_null_rows):
-        """T1: as-of 与非 as-of 两分支的 end_date 集合一致，且均仅含有效行 {2024-06-30}。
+    async def test_insert_ann_date_null_rejected(self, financial_dao, function_engine):
+        """DATA-05: 插入 ann_date NULL 的行违反 NOT NULL 主键约束，被 PostgreSQL 拒绝。
 
-        修复前非 as-of 分支会返回 NULL ann_date 行（2024-12-31）→ 集合为 {06-30, 12-31} → 断言失败。
+        验证 DAT-06 的 NULL 场景已由 schema 层兜底：未来任何绕过应用的裸 SQL 写入
+        也会被约束拦截，PIT 双分支口径不会因 NULL 行分叉。
         """
-        asof = await financial_dao.get_financial_reports_history("999999.SZ", as_of_date=datetime.date(2024, 12, 31))
-        latest = await financial_dao.get_financial_reports_history("999999.SZ", as_of_date=None)
-        assert set(asof["end_date"]) == {datetime.date(2024, 6, 30)}
-        assert set(latest["end_date"]) == {datetime.date(2024, 6, 30)}
+        import asyncpg
+        import sqlalchemy.exc as sa_exc
 
-    @pytest.mark.asyncio
-    async def test_financial_history_batch_pit_ann_date_null_consistency(self, financial_dao, setup_ann_date_null_rows):
-        """T2: batch 版本同样保证双分支一致，仅返回有效行。"""
-        asof = await financial_dao.get_financial_reports_history_batch(
-            ["999999.SZ"], as_of_date=datetime.date(2024, 12, 31)
-        )
-        latest = await financial_dao.get_financial_reports_history_batch(["999999.SZ"], as_of_date=None)
-        assert set(asof["end_date"]) == {datetime.date(2024, 6, 30)}
-        assert set(latest["end_date"]) == {datetime.date(2024, 6, 30)}
+        # SQLAlchemy asyncpg dialect 会用 DBAPI shim（AsyncAdapt_asyncpg_dbapi.IntegrityError）
+        # 把 asyncpg 异常再包装成 sqlalchemy.exc.IntegrityError；原始 asyncpg 异常挂在
+        # shim 的 __cause__ 链上。故捕获外层 IntegrityError 后，沿 .orig → __cause__ 链
+        # 追回原始 asyncpg.NotNullViolationError，否则异常逃逸/断言类型错位导致测试失败。
+        with pytest.raises(sa_exc.IntegrityError) as excinfo:
+            async with function_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO financial_reports (ts_code, end_date, ann_date, roe) "
+                        "VALUES ('999999.SZ', '2024-12-31', NULL, 20.0)"
+                    )
+                )
 
-    @pytest.mark.asyncio
-    async def test_has_ann_date_nulls_true_with_null_row(self, financial_dao, setup_ann_date_null_rows):
-        """T3: 存在 NULL ann_date 行时 has_ann_date_nulls() 返回 True（非零即告警）。"""
-        assert await financial_dao.has_ann_date_nulls() is True
+        cause = excinfo.value.orig
+        while cause is not None and not isinstance(cause, asyncpg.NotNullViolationError):
+            cause = cause.__cause__
+        assert isinstance(cause, asyncpg.NotNullViolationError)
 
     @pytest.mark.asyncio
     async def test_has_ann_date_nulls_false_on_clean_mvd(self, financial_dao):
-        """T3b: 干净 MVD（所有 ann_date 非空）下返回 False。
+        """DATA-05: 干净 MVD（所有 ann_date 非空）下返回 False。
 
         依赖隐式约定：MVD 造数（mvd_data.py MVD_FINANCIAL_REPORTS）不得含 ann_date NULL 行，
         否则本测试会假失败——新增 NULL 行造数时需同步更新本断言。

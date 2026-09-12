@@ -46,6 +46,9 @@ class PortfolioSimulator:
         # BT-002: stock_meta 提供 delist_date 字段，用于区分退市与临时停牌
         # 结构: {ts_code: {"delist_date": date | None}}
         self.stock_meta: dict[str, dict] = stock_meta or {}
+        # BT-02: 退市清算分项统计（供 engine 透传到 BacktestResult 评估影响权重）
+        self.delist_liquidation_count: int = 0
+        self.delist_loss_amount: float = 0.0
 
     def reset(self) -> None:
         self.cash = self.config.initial_capital
@@ -55,6 +58,8 @@ class PortfolioSimulator:
         self.positions_list = []
         self.warnings = []
         self._last_known_prices = {}
+        self.delist_liquidation_count = 0
+        self.delist_loss_amount = 0.0
 
     def process_day(
         self,
@@ -535,13 +540,15 @@ class PortfolioSimulator:
         return delist_date is not None and exec_date >= delist_date
 
     def _liquidate_delisted_position(self, ts_code: str, pos: dict, exec_date: date) -> None:
-        """BT-002: 退市标的按最后已知价清算。
+        """BT-02: 退市标的按「最后已知价 × 回收率」清算，并计交易成本。
 
-        - 清算价格使用 _last_known_prices 中的最后已知价（退市前最后一个交易日的 qfq_close）
-        - 不计交易成本（非真实交易，强制簿记）
-        - cash += volume * last_price
-        - 从 positions 移除
-        - 记录 warning 日志
+        - 清算价 = _last_known_prices 中的最后已知价 × config.delist_recovery_rate
+          （A 股退市整理期普遍连续跌停，全额变现会系统性高估收益，见 config 字段说明）
+        - 经 cost_model 计算卖出成本（退市无成交量，avg_daily_volume 传 None，
+          滑点退化为固定 base_bps），现金流 = cost.net_amount
+        - cash += net_amount；从 positions 移除；记录 warning
+        - 累计 delist_liquidation_count 与 delist_loss_amount（相对全额变现的折扣额），
+          供 engine 透传到 BacktestResult 供用户评估退市假设的影响权重
         """
         last_price = self._last_known_prices.get(ts_code)
         if last_price is None:
@@ -559,8 +566,22 @@ class PortfolioSimulator:
             return
 
         volume = pos["volume"]
-        proceeds = volume * last_price
-        realized_pnl = proceeds - pos["cost_basis"]
+        recovery = self.config.delist_recovery_rate
+        recover_price = last_price * recovery
+        full_proceeds = last_price * volume  # 全额变现所得（对比基准，仅用于损失统计）
+
+        cost = self.cost_model.calculate(
+            price=recover_price,
+            volume=volume,
+            is_buy=False,
+            avg_daily_volume=None,
+            trade_date=exec_date,
+        )
+        realized_pnl = cost.net_amount - pos["cost_basis"]
+
+        # 退市假设导致相对全额变现被扣减的账面金额
+        self.delist_liquidation_count += 1
+        self.delist_loss_amount += full_proceeds - cost.net_amount
 
         self.trades_list.append(
             {
@@ -568,20 +589,20 @@ class PortfolioSimulator:
                 "ts_code": ts_code,
                 "action": "sell",
                 "exit_reason": "DELISTED",
-                "price": last_price,
+                "price": recover_price,
                 "volume": volume,
-                "gross_amount": proceeds,
-                "total_cost": 0.0,
-                "net_amount": proceeds,
+                "gross_amount": cost.gross_amount,
+                "total_cost": cost.total_cost,
+                "net_amount": cost.net_amount,
                 "realized_pnl": realized_pnl,
                 "hold_days": (exec_date - pos["entry_date"]).days,
             }
         )
 
-        self.cash += proceeds
+        self.cash += cost.net_amount
         del self.positions[ts_code]
         self._last_known_prices.pop(ts_code, None)
-        self.warnings.append(f"{exec_date}: {ts_code} liquidated (delisted) at {last_price}")
+        self.warnings.append(f"{exec_date}: {ts_code} liquidated (delisted) at {recover_price}")
 
     def _buy_signals(
         self,

@@ -379,9 +379,10 @@ class TestInstitutionalStrategy:
         lhb_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
-                "net_amount": [5000.0, 1000.0],  # 1000 < target=3000 不入选
+                "net_amount": [50000000.0, 10000000.0],  # 元: 5000万 / 1000万; 1000万 < 3000万(3e7元) 不入选
             }
         )
+        lhb_df.attrs["column_units"] = {"net_amount": "yuan"}
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"top_list": lhb_df, "params": {"inst_net_min": 3000}}).collect()
         codes = result["ts_code"].to_list()
@@ -516,13 +517,13 @@ class TestNorthboundFlowStrategySmoke:
     """NorthboundFlowStrategy 最少冒烟, 详细覆盖由 Task 6.2 负责。"""
 
     def test_filter_logic_filters_by_market_cap(self) -> None:
-        """_filter_logic 直接调用: total_mv >= mv_min 且 pe_ttm > 0, 按 total_mv 降序。"""
+        """_filter_logic 直接调用: total_mv(万) >= mv_min(亿换算后) 且 pe_ttm > 0, 按 total_mv 降序。"""
         strategy = NorthboundFlowStrategy()
         df = pd.DataFrame(
             {
                 "ts_code": ["A.SZ", "B.SZ", "C.SZ"],
                 "name": ["A", "B", "C"],
-                "total_mv": [200.0, 50.0, 100.0],  # 50 < mv_min=100 不入选
+                "total_mv": [2000000.0, 500000.0, 1000000.0],  # 万: 200亿/50亿/100亿; 50亿 < 100亿 不入选
                 "pe_ttm": [10.0, 5.0, -1.0],  # -1 不入选
             }
         )
@@ -551,14 +552,15 @@ class TestNorthboundFlowStrategySmoke:
             assert result.empty
 
     async def test_filter_returns_empty_when_flow_below_threshold(self) -> None:
-        """gating: north_money <= target_flow -> 返回空, 不调用 super().filter()。"""
+        """gating: north_money(百万) 归一化后 <= target_flow(亿) -> 返回空, 不调用 super().filter()。"""
         strategy = NorthboundFlowStrategy()
         flow_df = pd.DataFrame(
             {
                 "trade_date": ["20260101", "20260102"],
-                "north_money": [30.0, 40.0],  # 最新=40, target=50, 40<=50 不达标
+                "north_money": [3000.0, 4000.0],  # 最新=4000百万=40亿, target=50亿, 40<=50 不达标
             }
         )
+        flow_df.attrs["column_units"] = {"north_money": "million_cny"}
         context = {
             "northbound_flow_data": flow_df,
             "data_processor": _make_dp(),

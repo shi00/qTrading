@@ -30,7 +30,7 @@ _MAX_SCREENING_RANGE_ROWS = 1_500_000
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
-                     m.sw_l2_name AS industry_sw_l2,
+                     m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
                      b.list_status,
@@ -76,11 +76,12 @@ _SCREENING_SQL_TEMPLATE = """
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
                         LEFT JOIN LATERAL (
-                            SELECT sw_l2_name
+                            SELECT l2_name
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
-                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
-                            ORDER BY index_code  -- DAT-08: 确定性排序，主键 (ts_code, index_code) 取最小 index_code，防 LIMIT 1 随执行计划漂移
+                              AND out_date IS NULL
+                              AND l2_name IS NOT NULL AND l2_name <> ''
+                            ORDER BY l2_code  -- DATA-04 L2: 取当前有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
@@ -92,7 +93,7 @@ _SCREENING_SQL_TEMPLATE = """
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      b.name,
-                     m.sw_l2_name AS industry_sw_l2,
+                     m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
                      b.list_status,
@@ -138,11 +139,12 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             LIMIT 1
                         ) f ON TRUE
                         LEFT JOIN LATERAL (
-                            SELECT sw_l2_name
+                            SELECT l2_name
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
-                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
-                            ORDER BY index_code  -- DAT-08: 确定性排序，主键 (ts_code, index_code) 取最小 index_code，防 LIMIT 1 随执行计划漂移
+                              AND out_date IS NULL
+                              AND l2_name IS NOT NULL AND l2_name <> ''
+                            ORDER BY l2_code  -- DATA-04 L2: 取当前有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
