@@ -702,8 +702,9 @@ class TestSlippageWithAvgDailyVolume:
         vol = result["vol"].to_list()
         # 前 5 行（index 0-4）为 null：shift(1) 后 min_samples=5 无法满足
         assert avg[:5] == [None] * 5
-        # index 5（第 6 行）的 avg = mean(vol[0:5]) = mean(1,2,3,4,5) = 3.0，不含当前 bar 的 vol=6
-        assert avg[5] == 3.0
+        # index 5（第 6 行）的 avg = mean(vol[0:5]) = mean(1,2,3,4,5) = 3.0；BT-06 换算股后 ×100 = 300.0
+        # （vol 单位「手」→「股」，avg_daily_volume 与订单股数口径一致）
+        assert avg[5] == 300.0
         # 关键断言：每个非 null 行的 avg_daily_volume 不等于当前 bar 的 vol（无前视偏差）
         for i in range(5, 10):
             assert avg[i] != vol[i]
@@ -731,8 +732,9 @@ class TestSlippageWithAvgDailyVolume:
         avg = result["avg_daily_volume"].to_list()
         # 前 5 行为 null（min_samples=5 不足）
         assert avg[:5] == [None] * 5
-        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0
-        assert avg[5] == 200.0
+        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0（null 被填 0）；
+        # BT-06 换算「手」→「股」后 ×100 = 20000.0
+        assert avg[5] == 20000.0
 
     def test_avg_daily_volume_nan_vol_filled(self):
         """测试 vol 列 NaN 值被填 0 后计算，不污染窗口均值"""
@@ -757,8 +759,9 @@ class TestSlippageWithAvgDailyVolume:
         avg = result["avg_daily_volume"].to_list()
         # 前 5 行为 null（min_samples=5 不足）
         assert avg[:5] == [None] * 5
-        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0（NaN 被填 0）
-        assert avg[5] == 200.0
+        # index 5: mean(shifted vol[0:5]) = mean(100, 0, 200, 300, 400) = 200.0（NaN 被填 0）；
+        # BT-06 换算「手」→「股」后 ×100 = 20000.0
+        assert avg[5] == 20000.0
 
     def test_slippage_uses_avg_daily_volume(self):
         """测试滑点计算使用平均成交量"""

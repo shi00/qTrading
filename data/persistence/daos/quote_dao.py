@@ -7,7 +7,11 @@ import typing
 import pandas as pd
 import sqlalchemy as sa
 
-from data.constants import MAJOR_INDICES, attach_top_list_column_units
+from data.constants import (
+    MAJOR_INDICES,
+    attach_daily_quotes_column_units,
+    attach_top_list_column_units,
+)
 from data.persistence.models import (
     BlockTrade,
     DailyQuotes,
@@ -328,9 +332,10 @@ class QuoteDao(BaseDao):
                 sort_cols = [c for c in ["ts_code", "trade_date"] if c in df.columns]
                 if sort_cols:
                     df = df.sort_values(sort_cols, ignore_index=True)
-            return df
+            return attach_daily_quotes_column_units(df)
 
-        return await self._read_db(sql, params, suppress_errors=suppress_errors)
+        df = await self._read_db(sql, params, suppress_errors=suppress_errors)
+        return attach_daily_quotes_column_units(df)
 
     async def get_latest_trade_date(self):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
