@@ -136,7 +136,7 @@ def _invested_warning(avg_invested_pct: float | None) -> ft.Container | None:
     return ft.Container(
         content=ft.Row(
             [
-                ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=AppColors.WARNING),
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.WARNING),
                 ft.Text(
                     I18n.get("backtest_investment_warning", percent=f"{avg_invested_pct * 100:.0f}"),
                     size=AppStyles.FONT_SIZE_CAPTION,
