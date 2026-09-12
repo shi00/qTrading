@@ -983,7 +983,8 @@ class TestFinancialSyncRepairPaths:
 
 class TestFinancialDedupWithAnnDate:
     @pytest.mark.asyncio
-    async def test_dedup_prefers_later_ann_date(self):
+    async def test_dedup_preserves_all_ann_date_versions(self):
+        """DATA-05: 同一报告期不同 ann_date 的多个版本应全部保留，不再按 end_date 收敛。"""
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(
             return_value=pd.DataFrame(
@@ -1002,8 +1003,9 @@ class TestFinancialDedupWithAnnDate:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
-        assert len(df) == 1
-        assert df.iloc[0]["revenue"] == 300.0
+        # DATA-05: 三个不同 ann_date 版本全部保留
+        assert len(df) == 3
+        assert set(df["ann_date"]) == {"20240425", "20240430", "20240428"}
 
     @pytest.mark.asyncio
     async def test_dedup_without_ann_date_fallback(self):
@@ -1029,6 +1031,7 @@ class TestFinancialDedupWithAnnDate:
 
     @pytest.mark.asyncio
     async def test_dedup_multiple_end_dates(self):
+        """DATA-05: 多报告期、每期多个版本全部保留；相同 (end_date, ann_date) 折叠。"""
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(
             return_value=pd.DataFrame(
@@ -1047,14 +1050,16 @@ class TestFinancialDedupWithAnnDate:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
-        assert len(df) == 2
-        q1_row = df[df["end_date"] == "20240331"].iloc[0]
-        assert q1_row["revenue"] == 250.0
-        q4_row = df[df["end_date"] == "20231231"].iloc[0]
-        assert q4_row["revenue"] == 150.0
+        # DATA-05: 2 个报告期 × 2 个版本 = 4 行全部保留
+        assert len(df) == 4
+        q4_versions = set(df[df["end_date"] == "20231231"]["ann_date"])
+        q1_versions = set(df[df["end_date"] == "20240331"]["ann_date"])
+        assert q4_versions == {"20240420", "20240425"}
+        assert q1_versions == {"20240428", "20240430"}
 
     @pytest.mark.asyncio
     async def test_dedup_with_update_flag(self):
+        """DATA-05: 相同 (end_date, ann_date) 的 update_flag 版本折叠为一行（keep=last）。"""
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(
             return_value=pd.DataFrame(
@@ -1074,11 +1079,13 @@ class TestFinancialDedupWithAnnDate:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
+        # 完全相同版本 (end_date, ann_date) 折叠为一行，keep=last 保留最后一行
         assert len(df) == 1
-        assert df.iloc[0]["revenue"] == 150.0
+        assert df.iloc[0]["revenue"] == 200.0
 
     @pytest.mark.asyncio
     async def test_dedup_ann_date_and_update_flag_combined(self):
+        """DATA-05: 不同 ann_date 版本全部保留；ann_date 相同的 update_flag 行折叠。"""
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(
             return_value=pd.DataFrame(
@@ -1098,8 +1105,13 @@ class TestFinancialDedupWithAnnDate:
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         df, _aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
-        assert len(df) == 1
-        assert df.iloc[0]["revenue"] == 250.0
+        # 04-28 三个 update_flag 行折叠为一行（revenue 200.0），加 04-30 版本共 2 行
+        assert len(df) == 2
+        versions = df.sort_values("ann_date").reset_index(drop=True)
+        assert versions.iloc[0]["ann_date"] == "20240428"
+        assert versions.iloc[0]["revenue"] == 200.0
+        assert versions.iloc[1]["ann_date"] == "20240430"
+        assert versions.iloc[1]["revenue"] == 250.0
 
 
 class TestPeakDisclosureSeason:
@@ -1684,7 +1696,7 @@ class TestFinancialDedupEdgeCases:
         assert result.empty
 
     def test_dedup_update_flag_all_none(self):
-        """update_flag 全为 None 时应正常按 ann_date 去重。"""
+        """update_flag 全为 None 时保留同一报告期的全部 ann_date 版本。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -1697,9 +1709,9 @@ class TestFinancialDedupEdgeCases:
             }
         )
         result = _dedup_financial_df(df)
-        assert len(result) == 1
-        # ann_date 更大的应被保留（keep=last）
-        assert result.iloc[0]["revenue"] == 200.0
+        # DATA-05: 两个不同 ann_date 版本都应保留（不按 end_date 去重）
+        assert len(result) == 2
+        assert set(result["ann_date"]) == {"20240425", "20240430"}
 
     def test_dedup_no_ann_date_no_update_flag(self):
         """既无 ann_date 也无 update_flag 时按 end_date 简单去重。"""
@@ -1716,8 +1728,8 @@ class TestFinancialDedupEdgeCases:
         assert len(result) == 1
         assert result.iloc[0]["revenue"] == 200.0
 
-    def test_dedup_preserves_end_date_ordering(self):
-        """去重后 end_date 应保持升序。"""
+    def test_dedup_preserves_version_rows(self):
+        """同一报告期不同 ann_date 版本应全部保留，且 end_date 保持升序。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -1729,11 +1741,27 @@ class TestFinancialDedupEdgeCases:
             }
         )
         result = _dedup_financial_df(df)
-        # 2 个唯一 end_date
-        assert len(result) == 2
-        # 20231231 应保留 ann_date 最大的（200.0）
-        q4 = result[result["end_date"] == "20231231"].iloc[0]
-        assert q4["revenue"] == 200.0
+        # DATA-05: 2 个唯一 end_date，其中 20231231 有两个版本，共 3 行全部保留
+        assert len(result) == 3
+        # 20231231 的两个版本（ann_date 20240420/20240425）与 20240331 均存在
+        q4_versions = set(result[result["end_date"] == "20231231"]["ann_date"])
+        assert q4_versions == {"20240420", "20240425"}
+
+    def test_dedup_collapses_identical_version_rows(self):
+        """完全相同的 (end_date, ann_date) 重复行应折叠为一行。"""
+        from data.sync.financial import _dedup_financial_df
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "end_date": ["20240331", "20240331"],
+                "ann_date": ["20240428", "20240428"],
+                "revenue": [100.0, 200.0],
+            }
+        )
+        result = _dedup_financial_df(df)
+        assert len(result) == 1
+        assert result.iloc[0]["revenue"] == 200.0
 
 
 class TestGatherReturnExceptionsPropagatingCancel:
@@ -2161,10 +2189,10 @@ class TestProcessOneStockCancellation:
 
 
 class TestDedupFinancialDfUpdateFlag:
-    """S10: _dedup_financial_df update_flag="1" 修订版优先保留。"""
+    """S10/DATA-05: _dedup_financial_df 在 (end_date, ann_date) 维度保留版本。"""
 
-    def test_update_flag_one_preferred_over_none(self):
-        """update_flag="1" 应优先于 None 被保留（当 end_date + ann_date 相同）。"""
+    def test_same_version_row_collapses_keep_last(self):
+        """相同 (end_date, ann_date) 时折叠为一行，keep=last 保留最后一行。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -2177,12 +2205,13 @@ class TestDedupFinancialDfUpdateFlag:
             }
         )
         result = _dedup_financial_df(df)
+        # 完全相同版本折叠为一行
         assert len(result) == 1
         assert result.iloc[0]["revenue"] == 200.0
         assert result.iloc[0]["update_flag"] == "1"
 
-    def test_update_flag_one_preferred_over_zero(self):
-        """update_flag="1" 应优先于 "0" 被保留（当 end_date + ann_date 相同）。"""
+    def test_same_version_collapse_keeps_single_row(self):
+        """相同 (end_date, ann_date) 时折叠，不按 update_flag 再细分版本。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -2200,7 +2229,7 @@ class TestDedupFinancialDfUpdateFlag:
         assert result.iloc[0]["update_flag"] == "1"
 
     def test_update_flag_none_kept_when_no_one(self):
-        """无 update_flag="1" 时保留 None 版本（按 ann_date 排序 keep=last）。"""
+        """无 update_flag="1" 时保留全部 ann_date 版本。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -2213,11 +2242,12 @@ class TestDedupFinancialDfUpdateFlag:
             }
         )
         result = _dedup_financial_df(df)
-        assert len(result) == 1
-        assert result.iloc[0]["revenue"] == 200.0
+        # DATA-05: 两个不同 ann_date 版本都应保留
+        assert len(result) == 2
+        assert set(result["ann_date"]) == {"20240425", "20240430"}
 
-    def test_update_flag_one_with_different_ann_dates(self):
-        """ann_date 不同时，update_flag="1" + 更晚 ann_date 应被保留。"""
+    def test_different_ann_dates_preserved(self):
+        """ann_date 不同时，各版本全部保留，不按 update_flag 取舍。"""
         from data.sync.financial import _dedup_financial_df
 
         df = pd.DataFrame(
@@ -2230,9 +2260,9 @@ class TestDedupFinancialDfUpdateFlag:
             }
         )
         result = _dedup_financial_df(df)
-        assert len(result) == 1
-        assert result.iloc[0]["revenue"] == 300.0
-        assert result.iloc[0]["update_flag"] == "1"
+        # DATA-05: 三个不同 ann_date 版本全部保留
+        assert len(result) == 3
+        assert set(result["ann_date"]) == {"20240425", "20240428", "20240430"}
 
 
 class TestIncrementalBatchStatus:

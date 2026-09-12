@@ -152,15 +152,19 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 df = await self._read_db(
                     """
-                    SELECT
-                        ts_code, end_date, ann_date, report_type,
-                        total_revenue, revenue, n_income, n_income_attr_p,
-                        total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                        roe, roe_dt, grossprofit_margin, netprofit_margin,
-                        debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                        audit_result, n_cashflow_act, money_cap, accounts_receiv
-                    FROM financial_reports
-                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
+                    SELECT ts_code, end_date, ann_date, report_type,
+                           total_revenue, revenue, n_income, n_income_attr_p,
+                           total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                           roe, roe_dt, grossprofit_margin, netprofit_margin,
+                           debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                           audit_result, n_cashflow_act, money_cap, accounts_receiv
+                    FROM (
+                        SELECT *,
+                               ROW_NUMBER() OVER (PARTITION BY end_date ORDER BY ann_date DESC) AS rn
+                        FROM financial_reports
+                        WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
+                    ) sub
+                    WHERE rn = 1
                     ORDER BY end_date DESC
                     LIMIT $3
                     """,
@@ -169,15 +173,19 @@ class FinancialDao(BaseDao):
             else:
                 df = await self._read_db(
                     """
-                    SELECT
-                        ts_code, end_date, ann_date, report_type,
-                        total_revenue, revenue, n_income, n_income_attr_p,
-                        total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                        roe, roe_dt, grossprofit_margin, netprofit_margin,
-                        debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                        audit_result, n_cashflow_act, money_cap, accounts_receiv
-                    FROM financial_reports
-                    WHERE ts_code = $1 AND ann_date IS NOT NULL
+                    SELECT ts_code, end_date, ann_date, report_type,
+                           total_revenue, revenue, n_income, n_income_attr_p,
+                           total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                           roe, roe_dt, grossprofit_margin, netprofit_margin,
+                           debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                           audit_result, n_cashflow_act, money_cap, accounts_receiv
+                    FROM (
+                        SELECT *,
+                               ROW_NUMBER() OVER (PARTITION BY end_date ORDER BY ann_date DESC) AS rn
+                        FROM financial_reports
+                        WHERE ts_code = $1 AND ann_date IS NOT NULL
+                    ) sub
+                    WHERE rn = 1
                     ORDER BY end_date DESC
                     LIMIT $2
                     """,
@@ -208,19 +216,20 @@ class FinancialDao(BaseDao):
                     ann_date_param = chunk_len + 1
                     limit_param = chunk_len + 2
                     return f"""
-                        SELECT * FROM (
-                            SELECT
-                                ts_code, end_date, ann_date, report_type,
-                                total_revenue, revenue, n_income, n_income_attr_p,
-                                total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                                roe, roe_dt, grossprofit_margin, netprofit_margin,
-                                debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                                audit_result, n_cashflow_act, money_cap, accounts_receiv,
-                                ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
+                        SELECT ts_code, end_date, ann_date, report_type,
+                               total_revenue, revenue, n_income, n_income_attr_p,
+                               total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                               roe, roe_dt, grossprofit_margin, netprofit_margin,
+                               debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                               audit_result, n_cashflow_act, money_cap, accounts_receiv
+                        FROM (
+                            SELECT *,
+                                   ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn_version,
+                                   DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) AS rn_period
                             FROM financial_reports
                             WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL AND ann_date <= ${ann_date_param}
                         ) sub
-                        WHERE rn <= ${limit_param}
+                        WHERE rn_version = 1 AND rn_period <= ${limit_param}
                         ORDER BY ts_code, end_date DESC
                     """
 
@@ -229,19 +238,20 @@ class FinancialDao(BaseDao):
             def sql_template_fn_no_as_of(placeholders, chunk_len):
                 limit_param = chunk_len + 1
                 return f"""
-                    SELECT * FROM (
-                        SELECT
-                            ts_code, end_date, ann_date, report_type,
-                            total_revenue, revenue, n_income, n_income_attr_p,
-                            total_assets, total_liab, total_hldr_eqy_exc_min_int,
-                            roe, roe_dt, grossprofit_margin, netprofit_margin,
-                            debt_to_assets, or_yoy, netprofit_yoy, goodwill,
-                            audit_result, n_cashflow_act, money_cap, accounts_receiv,
-                            ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as rn
-                            FROM financial_reports
-                            WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
-                        ) sub
-                    WHERE rn <= ${limit_param}
+                    SELECT ts_code, end_date, ann_date, report_type,
+                           total_revenue, revenue, n_income, n_income_attr_p,
+                           total_assets, total_liab, total_hldr_eqy_exc_min_int,
+                           roe, roe_dt, grossprofit_margin, netprofit_margin,
+                           debt_to_assets, or_yoy, netprofit_yoy, goodwill,
+                           audit_result, n_cashflow_act, money_cap, accounts_receiv
+                    FROM (
+                        SELECT *,
+                               ROW_NUMBER() OVER (PARTITION BY ts_code, end_date ORDER BY ann_date DESC) AS rn_version,
+                               DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) AS rn_period
+                        FROM financial_reports
+                        WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL
+                    ) sub
+                    WHERE rn_version = 1 AND rn_period <= ${limit_param}
                     ORDER BY ts_code, end_date DESC
                 """
 
@@ -482,6 +492,11 @@ class FinancialDao(BaseDao):
 
         EXISTS 短路为 O(首个 NULL) 定位，避免对全表 COUNT 扫描；
         语义与 review「非零即告警」完全匹配。
+
+        NOTE(lazy): DATA-05（0022 迁移）已把 ``ann_date`` 纳入 NOT NULL 主键，
+        schema 层杜绝 NULL 行，本方法恒返回 False，仅作为防御性检查保留。
+        ceiling: 正常路径下不会再有 NULL 行。upgrade: 若未来某增量表重演 NULL
+        主键（非 financial_reports），改为在对应表上复用本守卫。
         """
         df = await self._read_db(
             "SELECT EXISTS (SELECT 1 FROM financial_reports WHERE ann_date IS NULL) AS has_nulls",

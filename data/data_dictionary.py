@@ -176,7 +176,7 @@ TABLE_DEFINITIONS = {
     },
     "financial_reports": {
         "alias": "tab_financial_reports",
-        "desc": "财务报表(主表)",
+        "desc": "财务报表(主表,含版本维度,支持财报更正历史保留)",
         "sync_config": {"strategy": "specialized_financial"},
         "quality_config": {"tier": 3, "monitor": True, "critical": True},
         "columns": {
