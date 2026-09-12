@@ -185,6 +185,8 @@ class BacktestState:
     # UX-12 (P2-05): 回测文本摘要的数据来源 (策略名 / 基准代码), 供可复制摘要行
     strategy_name: str | None = None
     benchmark_name: str | None = None
+    # BT-01: 信号是否来自独立打分; False 时 IC 卡片呈现为「排序 IC」并附 tooltip
+    has_real_score: bool = True
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -440,6 +442,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     ic_dates=ic_dates,
                     strategy_name=result.strategy_name,
                     benchmark_name=result.config.benchmark_code,
+                    has_real_score=result.has_real_score,
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),

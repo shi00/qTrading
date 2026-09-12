@@ -148,6 +148,9 @@ class BacktestResult:
     # UX-12 (P2-05): IC 序列对应的信号日期（仅内存透传，不持久化）。
     # 置于 dataclass 末尾并带默认值，避免破坏既有测试/调用方的关键字构造点。
     ic_dates: pl.Series = field(default_factory=lambda: pl.Series(dtype=pl.Date))
+    # BT-01: 信号是否来自独立打分（存在 score/signal_score/rank_score/ai_score 列）。
+    # False 表示 IC 仅基于策略排序字段的「排序 IC」，UI 据此调整呈现与 tooltip。
+    has_real_score: bool = True
 
     # BT-02: 退市清算分项统计（置于末尾带默认值，避免破坏既有关键字构造点）。
     # delist_liquidation_count: 触发的退市强制清算笔数。
@@ -179,6 +182,7 @@ class BacktestResult:
             ic_dates=self.ic_dates,
             delist_liquidation_count=self.delist_liquidation_count,
             delist_loss_amount=self.delist_loss_amount,
+            has_real_score=self.has_real_score,
         )
 
     def to_persist_dict(self) -> dict:

@@ -85,11 +85,16 @@ def _profit_factor_card(metrics: dict) -> ft.Container:
 # --- Pure builders (接收必要参数，无 self 依赖) ---
 
 
-def _metric_card(label: str, value: str, value_color: str) -> ft.Container:
+def _metric_card(label: str, value: str, value_color: str, tooltip: str | None = None) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(label, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+                ft.Text(
+                    label,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_SECONDARY,
+                    tooltip=tooltip,
+                ),
                 ft.Text(value, size=AppStyles.FONT_SIZE_HEADLINE, weight=ft.FontWeight.BOLD, color=value_color),
             ],
             spacing=4,
@@ -100,7 +105,22 @@ def _metric_card(label: str, value: str, value_color: str) -> ft.Container:
     )
 
 
-def _build_metrics_section(metrics: dict) -> ft.Column:
+def _ic_sort_tooltip(has_real_score: bool) -> str:
+    """BT-01: 无独立打分时，IC 卡片附 tooltip 说明「排序 IC」语义。"""
+    if has_real_score:
+        return ""
+    return I18n.get("backtest_metric_ic_sort_tooltip")
+
+
+def _ic_mean_label(has_real_score: bool) -> str:
+    return I18n.get("backtest_metric_ic_mean" if has_real_score else "backtest_metric_ic_mean_sort")
+
+
+def _ic_ir_label(has_real_score: bool) -> str:
+    return I18n.get("backtest_metric_ic_ir" if has_real_score else "backtest_metric_ic_ir_sort")
+
+
+def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Column:
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
             [
@@ -148,17 +168,19 @@ def _build_metrics_section(metrics: dict) -> ft.Column:
                 _profit_factor_card(metrics),
                 ft.Container(
                     content=_metric_card(
-                        I18n.get("backtest_metric_ic_mean"),
+                        _ic_mean_label(has_real_score),
                         f"{metrics.get('ic_mean', 0):.4f}",
                         _get_color_for_ic(metrics.get("ic_mean", 0)),
+                        tooltip=_ic_sort_tooltip(has_real_score) or None,
                     ),
                     col=_COL_QUARTER,
                 ),
                 ft.Container(
                     content=_metric_card(
-                        I18n.get("backtest_metric_ic_ir"),
+                        _ic_ir_label(has_real_score),
                         f"{metrics.get('ic_ir', 0):.2f}",
                         _get_color_for_ic(metrics.get("ic_ir", 0)),
+                        tooltip=_ic_sort_tooltip(has_real_score) or None,
                     ),
                     col=_COL_QUARTER,
                 ),
@@ -584,6 +606,7 @@ def _build_content(
     period_stats: tuple[tuple[str, float, float, float], ...],
     strategy_name: str | None,
     benchmark_name: str | None,
+    has_real_score: bool,
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -609,7 +632,7 @@ def _build_content(
 
     return ft.Column(
         [
-            _build_metrics_section(dict(metrics)),
+            _build_metrics_section(dict(metrics), has_real_score=has_real_score),
             ft.Divider(color=AppColors.DIVIDER),
             ft.Tabs(
                 length=4,
@@ -671,6 +694,7 @@ def BacktestResultPanel(
     period_stats: tuple[tuple[str, float, float, float], ...] = (),
     strategy_name: str | None = None,
     benchmark_name: str | None = None,
+    has_real_score: bool = True,
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
@@ -707,6 +731,7 @@ def BacktestResultPanel(
             period_stats,
             strategy_name,
             benchmark_name,
+            has_real_score,
             trades_page,
             set_trades_page,
             selected_tab,

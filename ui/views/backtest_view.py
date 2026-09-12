@@ -236,6 +236,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             period_stats=state.period_stats,
             strategy_name=state.strategy_name,
             benchmark_name=state.benchmark_name,
+            has_real_score=state.has_real_score,
         )
 
     return ft.Container(
