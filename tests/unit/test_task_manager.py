@@ -1100,6 +1100,75 @@ class TestTaskManagerPersistTask:
         mock_sched.assert_called_once()
 
 
+class TestTaskManagerPersistSeq:
+    """LIFE-02: 持久化单调序号 persist_seq 及 SQL 乱序守卫。"""
+
+    @staticmethod
+    def _runner() -> TaskManager:
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        return mgr
+
+    def test_persist_task_allocates_increasing_seq(self):
+        """连续 _persist_task 生成的快照 persist_seq 严格递增。"""
+        mgr = self._runner()
+        captured: list[tuple] = []
+        with patch.object(mgr, "_queue_persist_snapshot", side_effect=captured.append):
+            mgr._persist_task(AppTask(name="a"))
+            mgr._persist_task(AppTask(name="b"))
+            mgr._persist_task(AppTask(name="c"))
+        seqs = [snap[-1] for snap in captured]
+        assert seqs == [1, 2, 3]
+        assert seqs == sorted(seqs)
+        assert len(set(seqs)) == len(seqs)
+
+    @pytest.mark.asyncio
+    async def test_persist_task_async_includes_persist_seq(self):
+        """_persist_task_async 透传含 persist_seq 的 12 元组快照。"""
+        mgr = self._runner()
+        with patch.object(mgr, "_persist_snapshot", AsyncMock()) as mock_snap:
+            await mgr._persist_task_async(AppTask(name="t"))
+        assert mock_snap.await_args is not None
+        params = mock_snap.await_args.args[0]
+        assert len(params) == 12
+        assert isinstance(params[-1], int)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_sql_sets_monotonic_guard(self):
+        """_persist_snapshot 的 SQL 含乱序守卫，且持久化序号随参数透传。"""
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            await mgr._persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None, 7))
+        sql = mock_cache.write_db.call_args[0][0]
+        params = mock_cache.write_db.call_args[0][1]
+        assert "persist_seq < EXCLUDED.persist_seq" in sql
+        assert params[-1] == 7
+
+    @pytest.mark.asyncio
+    async def test_stale_older_seq_guarded_at_db_level(self):
+        """旧序号(persist_seq 较小)不会覆盖新终态写入——由 SQL 守卫而非代码拒绝保证。
+
+        停机场上更早调度、更晚完成的 RUNNING 快照若落在 CANCELLED 之后，其较低
+        persist_seq 会被 ``WHERE task_history.persist_seq < EXCLUDED.persist_seq`` 丢弃。
+        此处验证 SQL 含该守卫（实际拒绝在 DB 层完成，无法在单测内模拟 DB 语义）。
+        """
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = mock_cache
+            # 模拟乱序：先写终态(高序号)，后到的旧 RUNNING 快照(低序号)
+            await mgr._persist_snapshot(("id", "n", "t", "CANCELLED", 1.0, "", "", None, None, None, None, 10))
+            await mgr._persist_snapshot(("id", "n", "t", "RUNNING", 0.5, "", "", None, None, None, None, 3))
+        sql = mock_cache.write_db.call_args_list[0][0][0]
+        assert "persist_seq < EXCLUDED.persist_seq" in sql
+
+
 class TestTaskManagerInitDb:
     @pytest.mark.asyncio
     async def test_init_db(self):
