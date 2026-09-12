@@ -104,6 +104,11 @@ class _FakeBacktestViewModel:
             ic_dates: Any = ()
             strategy_name: Any = None
             benchmark_name: Any = None
+            # UX-01: 与 BacktestState 新增字段同步 (回测可信度告警横幅)
+            credibility_level: Any = "ok"
+            warnings: Any = ()
+            skipped_order_count: Any = 0
+            failed_date_count: Any = 0
 
         self._state = _State()
         # D2: 模拟 VM 初始化装配策略 + 默认选中首个
