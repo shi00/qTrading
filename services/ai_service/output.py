@@ -56,6 +56,10 @@ def validate_ai_analysis_response(response: dict) -> dict:
             logger.warning("[AIService] Output validation: invalid score type: %s", score)
             response["score"] = 0
 
+    # AI-02: 模型能力信息——缺失 confidence 记 debug 日志，供排查某模型是否持续不返回置信度。
+    if response.get("confidence") is None:
+        logger.debug("[AIService] Output validation: response missing 'confidence' field (%s)", response.get("score"))
+
     recommendation = response.get("recommendation")
     if recommendation is not None:
         rec_lower = str(recommendation).lower().strip()

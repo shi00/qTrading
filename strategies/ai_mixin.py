@@ -999,7 +999,9 @@ class AIStrategyMixin:
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
-        row_dict["confidence"] = min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else 50
+        row_dict["confidence"] = (
+            min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else None
+        )  # AI-02: 缺失不伪造为 50，保留 None
         return row_dict
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)

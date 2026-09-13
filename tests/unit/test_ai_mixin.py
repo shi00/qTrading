@@ -1504,6 +1504,17 @@ class TestAIStrategyMixinBuildResultRowD36:
         assert row["ai_status"] == "analyzed"
         assert row["ai_score"] == 100
 
+    def test_missing_confidence_kept_none(self):
+        """AI-02: LLM 未返回 confidence 时不伪造为 50，保留 None（R21 缺失用 None）。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ", "name": "平安银行"},
+            {"score": 88, "summary": "看好", "thinking": "t", "uncertainty_factors": []},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["confidence"] is None
+        # 缺失 confidence 不应污染 summary 文案（第 979 行 if confidence is not None 保护）
+        assert "置信度" not in row["ai_reason"]
+
 
 class TestBuildCapitalFlowText:
     def test_no_data(self):
