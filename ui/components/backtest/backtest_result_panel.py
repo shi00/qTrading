@@ -121,10 +121,10 @@ def _ic_ir_label(has_real_score: bool) -> str:
 
 
 def _invested_color(pct: float) -> str:
-    """BT-03: 投资比例颜色。>=80% 正常，>=70% 警告，<70%（资金闲置严重）红色。"""
-    if pct > 0.5:
+    """BT-03: 投资比例颜色。>=80%（无现金拖累）正常，>=70% 警告，<70%（资金闲置严重）红色。"""
+    if pct >= 0.8:
         return AppColors.SUCCESS
-    if pct > 0.3:
+    if pct >= 0.7:
         return AppColors.WARNING
     return AppColors.ERROR
 

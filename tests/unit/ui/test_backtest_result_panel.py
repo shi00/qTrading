@@ -299,10 +299,13 @@ class TestInvestedVisibility:
     """BT-03: 仓位运用效率指标的颜色与现金稀释告警。"""
 
     def test_invested_color_thresholds(self) -> None:
-        assert _invested_color(0.8) == AppColors.SUCCESS
-        assert _invested_color(0.4) == AppColors.WARNING
-        assert _invested_color(0.3) == AppColors.ERROR
-        assert _invested_color(0.1) == AppColors.ERROR
+        """颜色阈值与报告语义一致（含边界）：>=80% 正常（无现金拖累），>=70% 警告，<70% 红色。"""
+        assert _invested_color(0.9) == AppColors.SUCCESS
+        assert _invested_color(0.8) == AppColors.SUCCESS  # >=80% 无现金拖累
+        assert _invested_color(0.75) == AppColors.WARNING
+        assert _invested_color(0.7) == AppColors.WARNING  # >=70% 警告区
+        assert _invested_color(0.65) == AppColors.ERROR  # <70% 资金闲置严重（与告警条阈值对齐）
+        assert _invested_color(0.4) == AppColors.ERROR
 
     def test_invested_warning_none_when_absent_or_high(self) -> None:
         assert _invested_warning(None) is None
