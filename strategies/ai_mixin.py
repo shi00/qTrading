@@ -627,6 +627,10 @@ class AIStrategyMixin:
         total_tasks = len(candidates_df)
         completed = 0
         final_rows: list[dict] = []
+        # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量。
+        # 仅统计成功分析(非失败)的调用, token 取自 LLM 返回的 usage.total_tokens。
+        # 循环结束后若确有消耗, 回写 context["_ai_usage_summary"] 供 UI 展示。
+        ai_usage_cluster = {"calls": 0, "tokens": 0}
         on_stream_start = context.get("on_stream_start") if stream_enabled else None
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
@@ -698,6 +702,13 @@ class AIStrategyMixin:
                             error_reason=I18n.get("ai_card_analysis_failed"),
                         )
                     row = self._build_result_row(row_data, res)
+                    # AI-03(最小版本): 累计本次消耗。仅统计成功分析（res 为 dict、
+                    # 非失败且携带 usage），避免把失败调用计入用户可见的消耗量。
+                    if isinstance(res, dict) and res.get("ai_status") != "failed":
+                        usage = res.get("usage")
+                        if usage and isinstance(usage, dict):
+                            ai_usage_cluster["calls"] += 1
+                            ai_usage_cluster["tokens"] += int(usage.get("total_tokens", 0) or 0)
                     if on_result:
                         on_result(row)
                     return row
@@ -797,6 +808,16 @@ class AIStrategyMixin:
         # 故用显式次序映射；ai_score=None (failed) 在 pandas 中始终排最后。
         _AI_STATUS_ORDER = {"analyzed": 0, "rejected": 1, "failed": 2}
         order_series = result_df["ai_status"].map(_AI_STATUS_ORDER)
+
+        # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量回写 context,
+        # 供 UI ViewModel 在策略完成后读取并展示。仅当确有成功调用才回写,
+        # 避免「一次未发起调用」被 UI 误读为「消耗 0 次」。
+        if ai_usage_cluster["calls"] > 0:
+            context["_ai_usage_summary"] = {
+                "calls": ai_usage_cluster["calls"],
+                "tokens": ai_usage_cluster["tokens"],
+            }
+
         return (
             result_df.assign(_ai_order=order_series)
             .sort_values(["_ai_order", "ai_score"], ascending=[True, False])

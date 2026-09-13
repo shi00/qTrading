@@ -1284,6 +1284,112 @@ class TestRunAiAnalysis:
             assert len(result) == 1
 
 
+class TestRunAiAnalysisUsageSummary:
+    """AI-03(最小版本): run_ai_analysis 应累计本次成功调用的 LLM 消耗并回写 context。
+
+    覆盖三态：
+    - 成功分析携带 usage -> 累计 calls/tokens 并回写 _ai_usage_summary
+    - 失败结果(无 usage / ai_status="failed") -> 不计入调用次数
+    - 全部未发起(如无候选) -> 不回写 key, 避免 UI 误读「消耗 0」
+    """
+
+    @pytest.mark.asyncio
+    async def test_accumulates_calls_and_tokens_from_success_usage(self):
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        context = {"data_processor": dp}
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            tokens = {"000001.SZ": 120, "000002.SZ": 80}[stock_info.get("ts_code")]
+            return {
+                "score": 75,
+                "summary": "ok",
+                "decision": "Hold",
+                "usage": {"total_tokens": tokens},
+            }
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 2
+
+        assert context["_ai_usage_summary"] == {"calls": 2, "tokens": 200}
+
+    @pytest.mark.asyncio
+    async def test_failed_results_not_counted(self):
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        context = {"data_processor": dp}
+
+        # 一只成功(带 usage), 一只失败(失败 dict, 无 usage)
+        async def mock_analyze(stock_info, *args, **kwargs):
+            if stock_info.get("ts_code") == "000001.SZ":
+                return {
+                    "score": 75,
+                    "summary": "ok",
+                    "decision": "Hold",
+                    "usage": {"total_tokens": 100},
+                }
+            return {"error": "provider unavailable", "score": None, "ai_status": "failed"}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 2
+
+        # 仅成功调用被累计, 失败不计入
+        assert context["_ai_usage_summary"] == {"calls": 1, "tokens": 100}
+
+    @pytest.mark.asyncio
+    async def test_no_key_when_no_success_call(self):
+        s = ConcreteStrategy()
+        context = {"data_processor": MagicMock()}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = False
+            result = await s.run_ai_analysis(candidates, context)
+            assert len(result) == 1
+
+        # AI 未配置, 未发起任何调用 -> 不回写 key (让 "本次无 AI 消耗" 与 "未跑 AI" 不可区分取 None)
+        assert "_ai_usage_summary" not in context
+
+
 class TestCancelOrphanNewsTasks:
     @pytest.mark.asyncio
     async def test_cancels_undone_tasks_and_awaits_them(self):

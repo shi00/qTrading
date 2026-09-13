@@ -1562,6 +1562,7 @@ def _build_screener_log_card(
     stream_cards: tuple[StreamCard, ...],
     stream_cards_truncated: bool,
     is_realtime: bool,
+    ai_usage_summary: tuple[int, int] | None,
     on_retry_click: typing.Callable[[str], None],
 ) -> ft.Container:
     """构建 AI 流式分析卡片区 (仅 REALTIME 模式有效)."""
@@ -1572,6 +1573,20 @@ def _build_screener_log_card(
             weight=ft.FontWeight.BOLD,
             color=AppColors.TEXT_PRIMARY,
         ),
+    ]
+    # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量。
+    # 仅当确有消耗时渲染; None 表示当次未执行 AI 分析, 不展示 "消耗 0" 的误导信息。
+    if ai_usage_summary is not None:
+        calls, tokens = ai_usage_summary
+        log_column_controls.append(
+            ft.Text(
+                I18n.get("ai_usage_summary").format(calls=calls, tokens=tokens),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            )
+        )
+    log_column_controls.append(
         ft.Container(
             content=ft.Column(
                 [build_stream_card(c, on_retry_click) for c in stream_cards],
@@ -1584,7 +1599,7 @@ def _build_screener_log_card(
             padding=5,
             expand=True,
         ),
-    ]
+    )
     if stream_cards_truncated:
         log_column_controls.append(
             ft.Text(
@@ -1892,6 +1907,7 @@ def ScreenerView(
         stream_cards=state.stream_cards,
         stream_cards_truncated=state.stream_cards_truncated,
         is_realtime=is_realtime,
+        ai_usage_summary=state.ai_usage_summary,
         on_retry_click=lambda name: vm.schedule_retry(name),
     )
 
