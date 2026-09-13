@@ -639,7 +639,9 @@ class TestAnalyzeStockBudgetIntegration:
                 ui_prompt_override="override_prompt",
             )
 
-        # 返回可读错误 dict，score=0，不向上抛（否则被 ai_mixin 吞为通用 failed 行）
+        # 返回可读错误 dict，score=None + ai_status="failed"（AI-01：失败独立建模，不伪装成否决），
+        # 不向上抛（否则被 ai_mixin 吞为通用 failed 行）。
         assert result is not None
-        assert result.get("score") == 0
+        assert result.get("score") is None
+        assert result.get("ai_status") == "failed"
         assert "error" in result

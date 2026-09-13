@@ -56,6 +56,48 @@ def _mock_ai_not_acknowledged():
         yield
 
 
+class TestBuildResultRowFailureClassification:
+    """AI-01: stock_analysis 失败分支的 dict 不得被误判为 'rejected'。
+
+    失败 dict（带 error 字段 / ai_status="failed"）必须归类为 'failed'、
+    ai_score=None，避免"AI 没跑成"被伪装成"AI 否决"。
+    """
+
+    @staticmethod
+    def _row() -> dict:
+        return {"ts_code": "000001.SZ", "name": "测试", "close": 10.0}
+
+    def test_provider_failure_yields_failed_status(self):
+        res = {"error": "All LLM providers unavailable", "score": None, "ai_status": "failed"}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+        assert row["confidence"] is None
+        assert "All LLM providers unavailable" in row["ai_reason"]
+
+    def test_timeout_yields_failed_not_rejected(self):
+        res = {"error": "Analysis timeout", "score": None}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+        assert row["confidence"] is None
+
+    def test_error_dict_without_ai_status_key_detected(self):
+        # validate_ai_analysis_response 的 "Invalid response type"（score=0 无 ai_status）
+        # 同样应通过 error 字段判定为 failed，而不是被 score==0 吸收为 rejected。
+        res = {"error": "Invalid response type", "score": 0}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+
+    def test_genuine_rejected_score_zero_still_rejected(self):
+        # 回归：模型明确否决（无 error 字段）仍应为 rejected，不被失败判定误伤。
+        res = {"score": 0, "summary": "no", "recommendation": "sell"}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "rejected"
+        assert row["ai_score"] == 0
+
+
 class ConcreteStrategy(AIStrategyMixin):
     key = "test_strategy"
 
