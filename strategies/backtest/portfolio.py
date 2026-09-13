@@ -99,7 +99,9 @@ class PortfolioSimulator:
         signals_sorted = day_signals.sort("signal_rank", descending=True).head(self.config.max_position_count)
         sizer = get_sizer(self.config.position_sizing)
         weights_df = sizer.compute_weights(signals_sorted, day_quotes, self.config)
-        weights_df = apply_max_weight_constraint(weights_df, self.config.max_single_weight)
+        weights_df = apply_max_weight_constraint(
+            weights_df, self.config.max_single_weight, renormalize=self.config.renormalize_after_cap
+        )
         target_weights = {r["ts_code"]: float(r["weight"]) for r in weights_df.iter_rows(named=True)}
         if not target_weights or sum(target_weights.values()) <= 0:
             self._sell_all_positions(exec_date, day_quotes)
@@ -623,7 +625,9 @@ class PortfolioSimulator:
         sizer = get_sizer(self.config.position_sizing)
         weights_df = sizer.compute_weights(signals_sorted, day_quotes, self.config)
 
-        weights_df = apply_max_weight_constraint(weights_df, self.config.max_single_weight)
+        weights_df = apply_max_weight_constraint(
+            weights_df, self.config.max_single_weight, renormalize=self.config.renormalize_after_cap
+        )
 
         total_weight = float(weights_df.select(pl.col("weight").sum()).item() or 0)
         if total_weight <= 0:

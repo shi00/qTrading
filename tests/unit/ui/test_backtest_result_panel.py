@@ -35,6 +35,8 @@ from ui.components.backtest.backtest_result_panel import (
     _ic_ir_label,
     _ic_mean_label,
     _ic_sort_tooltip,
+    _invested_color,
+    _invested_warning,
     _metric_card,
     _profit_factor_card,
 )
@@ -241,7 +243,7 @@ class TestBuildMetricsSection:
             content = _build_metrics_section(metrics)
 
         assert isinstance(content, ft.Column)
-        assert len(content.controls) == 3  # title + row1 + row2
+        assert len(content.controls) == 4  # title + row1 + row2 + row3(BT-03 仓位指标)
 
     def test_build_metrics_section_empty(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
@@ -291,6 +293,42 @@ class TestIcSortLabel:
             tip = _ic_sort_tooltip(False)
             assert tip != ""
             mock_i18n.assert_called_with("backtest_metric_ic_sort_tooltip")
+
+
+class TestInvestedVisibility:
+    """BT-03: 仓位运用效率指标的颜色与现金稀释告警。"""
+
+    def test_invested_color_thresholds(self) -> None:
+        """颜色阈值与报告语义一致（含边界）：>=80% 正常（无现金拖累），>=70% 警告，<70% 红色。"""
+        assert _invested_color(0.9) == AppColors.SUCCESS
+        assert _invested_color(0.8) == AppColors.SUCCESS  # >=80% 无现金拖累
+        assert _invested_color(0.75) == AppColors.WARNING
+        assert _invested_color(0.7) == AppColors.WARNING  # >=70% 警告区
+        assert _invested_color(0.65) == AppColors.ERROR  # <70% 资金闲置严重（与告警条阈值对齐）
+        assert _invested_color(0.4) == AppColors.ERROR
+
+    def test_invested_warning_none_when_absent_or_high(self) -> None:
+        assert _invested_warning(None) is None
+        assert _invested_warning(0.72) is None
+
+    def test_invested_warning_shown_when_below_threshold(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            warning = _invested_warning(0.5)
+
+        assert isinstance(warning, ft.Container)
+        mock_i18n.assert_called_with("backtest_investment_warning", percent="50")
+
+    def test_metrics_section_includes_invested_warning_when_sparse(self) -> None:
+        """avg_invested_pct < 0.7 → metrics section 含告警条（title前）。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({"avg_invested_pct": 0.2})
+
+        assert isinstance(content, ft.Column)
+        # controls: [title, 告警条, row1, row2, row3]
+        assert len(content.controls) == 5
+        assert isinstance(content.controls[1], ft.Container)
 
 
 class TestBuildEmptyContent:

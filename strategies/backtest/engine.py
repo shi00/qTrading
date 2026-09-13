@@ -144,6 +144,9 @@ class VectorBacktestEngine:
             self.config.risk_free_rate,
         )
 
+        # BT-03: 仓位可见性指标并入 metrics，让「信号稀疏 → 资金闲置」可见
+        metrics = {**metrics, **BacktestMetrics.calc_investment_metrics(positions)}
+
         period_stats = self._calc_period_stats(
             nav_curve,
             daily_returns,

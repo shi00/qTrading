@@ -266,6 +266,35 @@ class BacktestMetrics:
         return information_ratio, tracking_error_annual
 
     @staticmethod
+    def calc_investment_metrics(positions: pl.DataFrame) -> dict[str, float | int]:
+        """计算仓位可见性指标（BT-03）。
+
+        基于每日持仓快照（columns: trade_date, cash, total_value）统计资金运用效率：
+        - 每日投资比例 invested_pct = (total_value - cash) / total_value（现金及未投出部分占比）
+        - avg_invested_pct: 平均投资比例
+        - min_invested_pct: 最低投资比例
+        - cash_drag_days: 投资比例 < 80% 的天数（现金拖累）
+
+        持仓为空（无信号回测等）时视为 0% 投资。这些指标让「信号稀疏 → 资金闲置」
+        变得可见：avg_invested_pct 低说明收益被现金稀释（volatility/回撤被压低但 Sharpe
+        也被拉低），用户据此调低 max_single_weight 或增加选股数量。
+        """
+        if positions.is_empty() or "total_value" not in positions.columns or "cash" not in positions.columns:
+            return {"avg_invested_pct": 0.0, "min_invested_pct": 0.0, "cash_drag_days": 0}
+        total = positions["total_value"].cast(pl.Float64).fill_nan(0.0).fill_null(0.0)
+        cash = positions["cash"].cast(pl.Float64).fill_nan(0.0).fill_null(0.0)
+        invested = total - cash
+        invested_pct = (invested / total).fill_nan(0.0).fill_null(0.0)
+        _mean = invested_pct.mean()
+        _min = invested_pct.min()
+        _drag = (invested_pct < 0.8).sum()
+        return {
+            "avg_invested_pct": float(cast(float, _mean)) if len(invested_pct) > 0 else 0.0,
+            "min_invested_pct": float(cast(float, _min)) if len(invested_pct) > 0 else 0.0,
+            "cash_drag_days": int(cast(float, _drag) if _drag is not None else 0.0),
+        }
+
+    @staticmethod
     def calc_all_metrics(
         nav_curve: pl.Series,
         daily_returns: pl.Series,

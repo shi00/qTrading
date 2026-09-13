@@ -175,6 +175,7 @@ class RankWeightedSizer(PositionSizer):
 def apply_max_weight_constraint(
     weights_df: pl.DataFrame,
     max_weight: float,
+    renormalize: bool = False,
 ) -> pl.DataFrame:
     """
     应用单股权重上限约束（迭代收敛算法）。
@@ -183,12 +184,16 @@ def apply_max_weight_constraint(
     截断 [0.4,0.3,0.2] → 归一化 [0.444,...] → 0.444 > 0.4 失效）。
     因此采用"截断→归一化"迭代直到收敛，保证 max(weight) <= max_weight + tolerance。
 
-    边界: N * max_weight < 1 时无法归一化到 1，所有取 max_weight（剩余留现金）。
+    边界: N * max_weight < 1 时无法归一化到 1。此时所有标的取 max_weight（剩余留现金），
+    即"信号稀疏 → 资金闲置"（BT-03）。当 renormalize=True 时放宽单票硬上限，
+    等比放大到满仓（权总=1），避免资金闲置（资金效率优先）。
     兜底: 100 次迭代未收敛则强制截断（总权重可能 < 1，剩余留现金，优于违反约束）。
 
     Args:
         weights_df: 包含 ts_code 和 weight 列的 DataFrame
         max_weight: 单股权重上限
+        renormalize: 截顶后是否重新归一化到满仓（BT-03，仅影响 N*max_weight < 1 的稀疏信号分支；
+            该分支以上 N*max_weight >= 1 时迭代已收敛至权总=1，语义不受影响）
 
     Returns:
         截断并归一化后的 DataFrame
@@ -199,6 +204,10 @@ def apply_max_weight_constraint(
     n = weights_df.height
     # N * max_weight < 1: 无法归一化到 1，所有取 max_weight（剩余留现金）
     if n * max_weight < 1.0:
+        if renormalize:
+            # 资金效率优先：全部触顶即无「未触顶」标的可承接盈余，放宽单票上限等比放大到满仓，
+            # 每只权重 1/n（> max_weight，超出硬上限是 renormalize 语义的固有取舍）。
+            return weights_df.select("ts_code").with_columns(pl.lit(1.0 / n).alias("weight"))
         return weights_df.with_columns(pl.lit(max_weight).alias("weight"))
 
     result = weights_df

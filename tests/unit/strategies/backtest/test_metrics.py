@@ -344,3 +344,41 @@ class TestBacktestMetrics:
         assert not returns.is_nan().any()
         # 0→100 的 inf 应被替换为 0.0
         assert float(returns[1]) == 0.0
+
+    def test_calc_investment_metrics_avg_min_drag(self) -> None:
+        """BT-03: 基于每日持仓快照正确计算平均/最低投资比例与现金拖累天数。"""
+        positions = pl.DataFrame(
+            {
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)],
+                "cash": [400_000.0, 500_000.0, 100_000.0, 900_000.0],
+                "total_value": [1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000_000.0],
+            }
+        )
+        m = BacktestMetrics.calc_investment_metrics(positions)
+        # invested_pct = (total - cash)/total = [0.6, 0.5, 0.9, 0.1]
+        assert m["avg_invested_pct"] == pytest.approx(0.525, rel=1e-6)
+        assert m["min_invested_pct"] == pytest.approx(0.1, rel=1e-6)
+        # 投资比例 < 0.8 的天数 = 3（0.6, 0.5, 0.1）
+        assert m["cash_drag_days"] == 3
+
+    def test_calc_investment_metrics_full_invested(self) -> None:
+        positions = pl.DataFrame(
+            {
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "cash": [0.0, 20_000.0],
+                "total_value": [1_000_000.0, 1_000_000.0],
+            }
+        )
+        m = BacktestMetrics.calc_investment_metrics(positions)
+        assert m["avg_invested_pct"] == pytest.approx(0.99, rel=1e-2)
+        assert m["min_invested_pct"] == pytest.approx(0.98, rel=1e-2)
+        assert m["cash_drag_days"] == 0
+
+    def test_calc_investment_metrics_empty_or_missing_columns(self) -> None:
+        assert BacktestMetrics.calc_investment_metrics(pl.DataFrame()) == {
+            "avg_invested_pct": 0.0,
+            "min_invested_pct": 0.0,
+            "cash_drag_days": 0,
+        }
+        missing = pl.DataFrame({"trade_date": [date(2024, 1, 2)], "cash": [100.0]})
+        assert BacktestMetrics.calc_investment_metrics(missing)["avg_invested_pct"] == 0.0
