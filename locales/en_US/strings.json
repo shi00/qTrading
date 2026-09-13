@@ -271,6 +271,7 @@
     "ai_progress_skipped": "{name} — Skipped (no valid result)",
     "ai_progress_analyzed": "{name} — Score: {score}",
     "ai_progress_done": "Completed {done}/{total}",
+    "ai_usage_summary": "This run: {calls} AI call(s), ~{tokens} tokens",
     "ai_stream_init": "Deep analysis engine initializing...",
     "ai_analyzing_stock": "Analyzing: {name}...",
     "ai_thinking": "Reasoning Process",
