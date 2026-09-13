@@ -79,9 +79,10 @@ _SCREENING_SQL_TEMPLATE = """
                             SELECT l2_name
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
-                              AND out_date IS NULL
+                              AND in_date <= $5
+                              AND (out_date IS NULL OR out_date > $5)
                               AND l2_name IS NOT NULL AND l2_name <> ''
-                            ORDER BY l2_code  -- DATA-04 L2: 取当前有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
+                            ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（$5）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
@@ -142,9 +143,10 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             SELECT l2_name
                             FROM sw_industry_member
                             WHERE ts_code = b.ts_code
-                              AND out_date IS NULL
+                              AND in_date <= cal.cal_date
+                              AND (out_date IS NULL OR out_date > cal.cal_date)
                               AND l2_name IS NOT NULL AND l2_name <> ''
-                            ORDER BY l2_code  -- DATA-04 L2: 取当前有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
+                            ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（cal.cal_date）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date

@@ -633,6 +633,34 @@ class TestScreenerDaoSwIndustryJoin:
             assert "LIMIT 1" in lateral
             assert lateral.index("ORDER BY l2_code") < lateral.index("LIMIT 1")
 
+    def test_industry_lateral_asof_condition(self):
+        """DATA-04 L2: 行业 LATERAL 子查询必须按 as-of 时点过滤，消除回测行业前视偏差。
+
+        单日模板 as-of 为 $5（trade_date，与 stock_alive_condition 复用同一参数）；
+        区间模板 as-of 为 cal.cal_date（逐交易日，与财务子查询 ann_date <= cal.cal_date
+        同模式）。as-of 语义为「纳入日 <= as_of 且（未剔除或剔除日 > as_of）」，
+        回测历史时点取当时生效的行业归属，而非当前快照（裸 out_date IS NULL）。
+        """
+        dao = ScreenerDao(MagicMock())
+        sql_daily = dao._build_screening_sql()
+        lateral_daily = self._extract_sw_industry_lateral(sql_daily)
+        assert "in_date <= $5" in lateral_daily, f"单日模板缺少 in_date as-of 条件:\n{lateral_daily}"
+        assert "(out_date IS NULL OR out_date > $5)" in lateral_daily, (
+            f"单日模板缺少 out_date as-of 条件:\n{lateral_daily}"
+        )
+
+        sql_range = dao._build_screening_sql_range()
+        lateral_range = self._extract_sw_industry_lateral(sql_range)
+        assert "in_date <= cal.cal_date" in lateral_range, f"区间模板缺少 in_date as-of 条件:\n{lateral_range}"
+        assert "(out_date IS NULL OR out_date > cal.cal_date)" in lateral_range, (
+            f"区间模板缺少 out_date as-of 条件:\n{lateral_range}"
+        )
+
+        # 行业子查询必须保留 out_date 的双态判断（IS NULL 或 > as_of），不得退回裸当前快照
+        for lateral in (lateral_daily, lateral_range):
+            assert lateral.count("out_date") == 2, f"行业 LATERAL 应含 2 处 out_date 判断:\n{lateral}"
+            assert "AND out_date IS NULL" not in lateral, f"行业 LATERAL 不得退回裸当前快照:\n{lateral}"
+
 
 class TestScreenerDaoGetLatestClosedTradeDate:
     @pytest.mark.asyncio
