@@ -443,7 +443,7 @@ class StockAnalysisService:
                 "llm",
                 "[AIService] Token budget unavailable (%s: %s)",
             )
-            return {"error": str(e), "score": 0}
+            return {"error": str(e), "score": None, "ai_status": "failed"}
         budget_res = _apply_context_budget(sections, budget_tokens)
         user_prompt, surviving_names = budget_res
         section_map = budget_res.section_map
@@ -553,18 +553,18 @@ class StockAnalysisService:
         except AIServiceUnavailableError as ae:
             logger.error("[AIService] Analyze | ❌ All providers failed: %s", _ai.DataSanitizer.sanitize_error(ae))
             logger.debug("[AIService] Analyze | All providers failed traceback:", exc_info=True)
-            return {"error": "All LLM providers unavailable", "score": 0}
+            return {"error": "All LLM providers unavailable", "score": None, "ai_status": "failed"}
         except (TimeoutError, httpx.TimeoutException) as te:
             logger.error("[AIService] Analyze | ❌ Timeout (120s exceeded): %s", type(te).__name__)
             logger.debug("[AIService] Analyze | Timeout traceback:", exc_info=True)
-            return {"error": "Analysis timeout", "score": 0}
+            return {"error": "Analysis timeout", "score": None, "ai_status": "failed"}
         except LocalInferenceTimeoutError as lite:
             logger.error(
                 "[AIService] Analyze | ❌ Local model inference timeout: %s",
                 _ai.DataSanitizer.sanitize_error(lite),
                 exc_info=True,
             )
-            return {"error": "Local model timeout", "score": 0}
+            return {"error": "Local model timeout", "score": None, "ai_status": "failed"}
         except Exception as e:
             log_classified(
                 logger,
@@ -574,4 +574,4 @@ class StockAnalysisService:
                 exc_info=True,
             )
             logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
-            return {"error": _ai.DataSanitizer.sanitize_error(e), "score": 0}
+            return {"error": _ai.DataSanitizer.sanitize_error(e), "score": None, "ai_status": "failed"}

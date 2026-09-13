@@ -1279,7 +1279,8 @@ class TestAIServiceAnalyzeTimeoutHandling:
             news_list=[],
         )
         assert result["error"] == "All LLM providers unavailable"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
 
 class TestAIServiceSemaphoreSeparation:
@@ -1358,7 +1359,8 @@ class TestAIServiceBuildLiteLLMParamsZhipuBoundary:
             news_list=[],
         )
         assert result["error"] == "All LLM providers unavailable"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -1383,7 +1385,8 @@ class TestAIServiceBuildLiteLLMParamsZhipuBoundary:
             news_list=[],
         )
         assert result["error"] == "Local model timeout"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
 
 class TestUniversalRulesSeparateSystemMessage:
@@ -1691,7 +1694,8 @@ class TestAIServiceAnalyzeStockSuccess:
             news_list=[],
         )
         assert result["error"] is not None
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
 
 class TestAIServiceClassifyNewsFallback:
@@ -1973,7 +1977,8 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             news_list=[],
         )
         assert result["error"] == "All LLM providers unavailable"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -2002,7 +2007,8 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             news_list=[],
         )
         assert result["error"] == "All LLM providers unavailable"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -2031,7 +2037,8 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             news_list=[],
         )
         assert result["error"] == "All LLM providers unavailable"
-        assert result["score"] == 0
+        assert result["score"] is None
+        assert result["ai_status"] == "failed"
 
 
 # ============================================================================

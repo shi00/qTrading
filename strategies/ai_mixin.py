@@ -955,7 +955,8 @@ class AIStrategyMixin:
 
         - ai_status="analyzed": res 为正常 dict 且 score>0，携带 ai_score/ai_reason/confidence/thinking
         - ai_status="rejected": res 为正常 dict 且 score==0（模型明确否决），ai_score=0，ai_reason 保留否决理由
-        - ai_status="failed":   res 为 None/异常或分析未完成，ai_score=None，ai_reason 承载错误分类
+        - ai_status="failed":   res 为 None/异常，或 stock_analysis 失败分支的 dict
+                                （含 error 字段 / ai_status="failed"），ai_score=None，ai_reason 承载错误分类
 
         返回始终为 dict（保留原始行全部字段），不再返回 None。
         """
@@ -968,6 +969,18 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = error_reason or ""
             row_dict["thinking"] = ""
             row_dict["confidence"] = None
+            return row_dict
+
+        # 失败 dict 路径（stock_analysis 失败分支返回）：显式标记 ai_status="failed"
+        # 或携带 error 字段（如 "All LLM providers unavailable" / "Analysis timeout"）。
+        # 这些 dict 的 score 已为 None，不能按 score==0 判为"AI 否决"（AI-01）——
+        # 否则"AI 没跑成"会被伪装成"AI 结论是否决"，污染复盘与误导用户。
+        if isinstance(res, dict) and (res.get("ai_status") == "failed" or res.get("error")):
+            row_dict["ai_status"] = "failed"
+            row_dict["ai_score"] = None
+            row_dict["confidence"] = None
+            row_dict["ai_reason"] = str(res.get("error") or error_reason or "")
+            row_dict["thinking"] = ""
             return row_dict
 
         score_val = res.get("score", 0)  # type: ignore[union-attr]
