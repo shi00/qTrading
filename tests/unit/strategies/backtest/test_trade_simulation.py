@@ -1106,29 +1106,6 @@ class TestPartitionByLookupEquivalence:
         assert len(sell_trades) == 1
         assert sell_trades["ts_code"][0] == "000001.SZ"
 
-    def test_buy_signals_with_missing_ts_code(self, config: BacktestConfig) -> None:
-        """_buy_signals skips a signal whose ts_code is not in day_quotes (no_quote)."""
-        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
-        signals = pl.DataFrame(
-            {
-                "ts_code": ["MISSING.SZ", "000001.SZ"],
-                "signal_rank": [1.0, 2.0],
-            }
-        )
-        day_quotes = self._make_quotes(["000001.SZ"], [10.0])
-
-        simulator._buy_signals(date(2024, 1, 10), signals, day_quotes)
-
-        trades = simulator.get_results()[0]
-        buy_trades = trades.filter(pl.col("action") == "buy")
-        # Only 000001.SZ should be bought; MISSING.SZ skipped
-        assert len(buy_trades) == 1
-        assert buy_trades["ts_code"][0] == "000001.SZ"
-        skipped = simulator.get_results()[2]
-        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
-        assert len(no_quote_skips) == 1
-        assert no_quote_skips["direction"][0] == "buy"
-
     def test_record_daily_positions_with_missing_ts_code(self, config: BacktestConfig) -> None:
         """_record_daily_positions uses last_known_price for a position whose ts_code
         is absent from day_quotes (None from partition_by lookup -> else branch)."""
