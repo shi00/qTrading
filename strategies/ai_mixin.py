@@ -312,10 +312,16 @@ class AIStrategyMixin:
                 )
             return candidates_df
 
-        # --- Guard: AI External Data Acknowledged? (D5-1) ---
-        if not ConfigHandler.is_ai_external_acknowledged():
+        # --- Guard: AI External Data Acknowledged? (D5-1 / AI-04) ---
+        # run_ai_analysis 是云端专用路径：上方 is_cloud_available() 已保证走到此处必已
+        # 配置云端 LLM 的 api_key。本地模型（数据不出本机）无需外发确认——若用户未配云端
+        # 或仅配本地，已在 is_cloud_available 提前返回，因此本 guard 仅需按 provider 校验：
+        # 更换 provider 后新 provider 无确认记录 → 未确认 → 跳过 AI 并提示，满足 UN-07。
+        current_provider = ConfigHandler.get_llm_provider()
+        if not ConfigHandler.is_ai_external_acknowledged(provider=current_provider):
             logger.info(
-                "[AIStrategyMixin] AI external data policy not acknowledged — skipping AI analysis (no external requests initiated)",
+                "[AIStrategyMixin] AI external data policy not acknowledged for provider=%s — skipping AI analysis (no external requests initiated)",
+                current_provider,
             )
             if on_progress:
                 on_progress(

@@ -424,12 +424,12 @@ class ConfigHandler:
         return app_prefs.set_onboarding_complete(complete)
 
     @staticmethod
-    def is_ai_external_acknowledged() -> bool:
-        return app_prefs.is_ai_external_acknowledged()
+    def is_ai_external_acknowledged(provider: str | None = None) -> bool:
+        return app_prefs.is_ai_external_acknowledged(provider)
 
     @staticmethod
-    def set_ai_external_acknowledged(acknowledged: bool) -> bool:
-        return app_prefs.set_ai_external_acknowledged(acknowledged)
+    def set_ai_external_acknowledged(provider: str, acknowledged: bool) -> bool:
+        return app_prefs.set_ai_external_acknowledged(provider, acknowledged)
 
     @staticmethod
     def is_auto_update_enabled():

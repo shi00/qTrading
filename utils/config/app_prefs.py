@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from utils import config_handler as cfg
+from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
 
 DEFAULTS = cfg.ConfigHandler.DEFAULT_CONFIG
 
@@ -20,13 +21,24 @@ def set_onboarding_complete(complete=True):
     return cfg.ConfigHandler.save_config({"onboarding_complete": complete})
 
 
-def is_ai_external_acknowledged() -> bool:
-    """Task 2.2: 用户是否已确认 AI 外发数据知情政策。"""
-    return cfg.ConfigHandler.get_typed("ai_external_acknowledged", bool, DEFAULTS["ai_external_acknowledged"])
+def is_ai_external_acknowledged(provider: str | None = None) -> bool:
+    """Task 2.2 / AI-04: 用户是否已确认某 provider 的 AI 外发数据知情政策。
+
+    ``provider=None`` 用于 UI 层「是否展示外发提示文案」的宽松判断（任意已确认即 True）；
+    传入具体 provider 时精确判断「该 provider 是否确认过」。历史全局确认
+    （旧 bool ``true`` 迁移到的 ``__global__`` 键）对任意 provider 回落为已确认。
+    """
+    ack_dict = cfg.ConfigHandler.get_typed("ai_external_acknowledged", dict, {})
+    if provider is None:
+        return bool(ack_dict)
+    return bool(ack_dict.get(provider) or ack_dict.get(AI_EXTERNAL_ACK_GLOBAL_KEY))
 
 
-def set_ai_external_acknowledged(acknowledged: bool) -> bool:
-    return cfg.ConfigHandler.set_typed("ai_external_acknowledged", bool(acknowledged))
+def set_ai_external_acknowledged(provider: str, acknowledged: bool) -> bool:
+    """Task 2.2 / AI-04: 按 provider 持久化 AI 外发知情确认状态。"""
+    ack_dict = cfg.ConfigHandler.get_typed("ai_external_acknowledged", dict, {})
+    ack_dict[provider] = bool(acknowledged)
+    return cfg.ConfigHandler.set_typed("ai_external_acknowledged", ack_dict)
 
 
 def is_auto_update_enabled():

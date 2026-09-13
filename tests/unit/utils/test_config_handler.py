@@ -2795,38 +2795,121 @@ class TestConfigHandlerStrategyPresets:
 
 
 class TestConfigHandlerAIExternalAcknowledged:
-    """Task 2.2: ai_external_acknowledged 知情确认状态持久化"""
+    """Task 2.2 / AI-04: ai_external_acknowledged 按 provider 的知情确认状态持久化"""
 
     @patch("utils.config_handler.ConfigHandler.load_config")
     def test_default_false_when_missing(self, mock_load):
         mock_load.return_value = {}
         assert ConfigHandler.is_ai_external_acknowledged() is False
+        assert ConfigHandler.is_ai_external_acknowledged(provider="deepseek") is False
 
     @patch("utils.config_handler.ConfigHandler.load_config")
-    def test_returns_true_when_set(self, mock_load):
-        mock_load.return_value = {"ai_external_acknowledged": True}
+    def test_returns_true_for_acknowledged_provider_only(self, mock_load):
+        mock_load.return_value = {"ai_external_acknowledged": {"deepseek": True}}
+        # 已确认的 provider → True；其他 provider → False（AI-04：更换 provider 需重新确认）
+        assert ConfigHandler.is_ai_external_acknowledged(provider="deepseek") is True
+        assert ConfigHandler.is_ai_external_acknowledged(provider="qwen") is False
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_legacy_global_bool_counts_as_acknowledged(self, mock_load):
+        """历史迁移的 __global__ 键对任意 provider 回落为已确认。"""
+        from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
+
+        mock_load.return_value = {"ai_external_acknowledged": {AI_EXTERNAL_ACK_GLOBAL_KEY: True}}
+        assert ConfigHandler.is_ai_external_acknowledged(provider="deepseek") is True
+        assert ConfigHandler.is_ai_external_acknowledged() is True
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_no_arg_returns_true_if_any_acknowledged(self, mock_load):
+        mock_load.return_value = {"ai_external_acknowledged": {"qwen": True}}
         assert ConfigHandler.is_ai_external_acknowledged() is True
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
-    def test_set_true_persists(self, mock_set):
-        result = ConfigHandler.set_ai_external_acknowledged(True)
+    @patch("utils.config_handler.ConfigHandler.get_typed", return_value={"deepseek": True})
+    def test_set_true_persists_provider(self, mock_get, mock_set):
+        result = ConfigHandler.set_ai_external_acknowledged("deepseek", True)
         assert result is True
-        mock_set.assert_called_once_with("ai_external_acknowledged", True)
+        mock_set.assert_called_once_with("ai_external_acknowledged", {"deepseek": True})
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
-    def test_set_false_persists(self, mock_set):
-        result = ConfigHandler.set_ai_external_acknowledged(False)
+    @patch("utils.config_handler.ConfigHandler.get_typed", return_value={"qwen": True})
+    def test_set_merges_into_existing_dict_for_other_provider(self, mock_get, mock_set):
+        result = ConfigHandler.set_ai_external_acknowledged("deepseek", True)
         assert result is True
-        mock_set.assert_called_once_with("ai_external_acknowledged", False)
+        mock_set.assert_called_once_with("ai_external_acknowledged", {"qwen": True, "deepseek": True})
 
     def test_field_in_default_config(self):
-        """AppConfig 默认 dump 应包含 ai_external_acknowledged=False"""
+        """AppConfig 默认 dump 应包含 ai_external_acknowledged 为空 dict"""
         from utils.config_models import AppConfig
 
         cfg = AppConfig()
-        assert cfg.ai_external_acknowledged is False
+        assert cfg.ai_external_acknowledged == {}
         dumped = cfg.model_dump()
-        assert dumped["ai_external_acknowledged"] is False
+        assert dumped["ai_external_acknowledged"] == {}
+
+
+class TestAIExternalAcknowledgementMigration:
+    """AI-04: 旧单一 bool ``ai_external_acknowledged`` 迁移为 ``dict[str, bool]``。
+
+    迁移在两个层面：ensure_defaults（写锁，落盘）；load_config 读时在内存归一化，
+    避免 AppConfig.model_validate 因 bool 类型不匹配抛错回退默认配置。
+    """
+
+    def test_normalize_legacy_bool_to_global_dict(self):
+        """直接验证 storage._normalize_ai_external_acknowledged 将旧 bool 迁移为 dict。"""
+        from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
+        from utils.config.storage import _normalize_ai_external_acknowledged
+
+        config = {"ai_external_acknowledged": True}
+        assert _normalize_ai_external_acknowledged(config) is True
+        assert config["ai_external_acknowledged"] == {AI_EXTERNAL_ACK_GLOBAL_KEY: True}
+
+        # 非 bool 形态（dict / 缺失）原样返回，不迁移
+        config2 = {"ai_external_acknowledged": {"deepseek": True}}
+        assert _normalize_ai_external_acknowledged(config2) is False
+        config3: dict = {}
+        assert _normalize_ai_external_acknowledged(config3) is False
+
+    @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
+    def test_ensure_defaults_migrates_legacy_bool(self, mock_save):
+        """ensure_defaults 在写锁下把旧 bool 迁移为 dict 并落盘。"""
+        from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
+
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "_config_cache",
+            {"ai_external_acknowledged": True, "llm_provider": "deepseek"},
+        ):
+            cfg_mod.ConfigHandler.ensure_defaults()
+            mock_save.assert_called_once()
+            migrated, _ = mock_save.call_args.args[0]["ai_external_acknowledged"], None
+            assert isinstance(migrated, dict)
+            assert migrated == {AI_EXTERNAL_ACK_GLOBAL_KEY: True}
+
+    @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
+    @patch("os.path.exists", return_value=True)
+    def test_load_config_accepts_legacy_bool_in_memory(self, mock_exists, mock_save):
+        """load_config 读时归一化旧 bool，AppConfig.model_validate 不抛错（不落盘）。"""
+        from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
+        from utils.config import storage as storage_mod
+
+        import io
+        import json
+
+        raw = {"ai_external_acknowledged": True, "llm_provider": "deepseek"}
+
+        def _fake_open_factory():
+            # 取代 _open_builtin：返回一个接受任意参数的 open callable，产出该 JSON 的内存流
+            return lambda *a, **k: io.StringIO(json.dumps(raw))
+
+        with (
+            patch.object(cfg_mod.ConfigHandler, "_config_cache", None),
+            patch.object(storage_mod, "_open_builtin", _fake_open_factory),
+        ):
+            result = cfg_mod.ConfigHandler.load_config()
+            assert result["ai_external_acknowledged"] == {AI_EXTERNAL_ACK_GLOBAL_KEY: True}
+            # 读锁路径不落盘（避免死锁），validate 已通过
+            mock_save.assert_not_called()
 
 
 class TestPurgeLegacyKeyIfSafe:

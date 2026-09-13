@@ -342,21 +342,21 @@ class TestLLMConfigPanelViewModelUpdateAIExternalAcknowledged:
 
     @pytest.mark.asyncio
     async def test_true_persists_and_updates_state(self, mock_test_connection, mock_config_handler, mock_thread_pool):
-        """acknowledged=True → ConfigHandler.set_ai_external_acknowledged(True) + state 更新 (L226/L231)。"""
+        """acknowledged=True → 按当前 provider(dict) 持久化 + state 更新。"""
         mock_config_handler.is_ai_external_acknowledged.return_value = False
         vm = _make_vm(mock_test_connection)
         assert vm.state.ai_external_acknowledged is False
         await vm.update_ai_external_acknowledged(True)
-        mock_config_handler.set_ai_external_acknowledged.assert_called_once_with(True)
+        mock_config_handler.set_ai_external_acknowledged.assert_called_once_with("deepseek", True)
         assert vm.state.ai_external_acknowledged is True
 
     @pytest.mark.asyncio
     async def test_false_persists_and_updates_state(self, mock_test_connection, mock_config_handler, mock_thread_pool):
-        """acknowledged=False → ConfigHandler.set_ai_external_acknowledged(False) + state 更新 (L226/L231)。"""
+        """acknowledged=False → 按当前 provider(dict) 持久化 + state 更新。"""
         vm = _make_vm(mock_test_connection)
         vm._set_state(ai_external_acknowledged=True)  # type: ignore[attr-defined]
         await vm.update_ai_external_acknowledged(False)
-        mock_config_handler.set_ai_external_acknowledged.assert_called_once_with(False)
+        mock_config_handler.set_ai_external_acknowledged.assert_called_once_with("deepseek", False)
         assert vm.state.ai_external_acknowledged is False
 
     @pytest.mark.asyncio
@@ -371,7 +371,7 @@ class TestLLMConfigPanelViewModelUpdateAIExternalAcknowledged:
 
     @pytest.mark.asyncio
     async def test_offloads_via_thread_pool_io(self, mock_test_connection, mock_config_handler, mock_thread_pool):
-        """R16: ConfigHandler.set_ai_external_acknowledged 通过 ThreadPoolManager.run_async(TaskType.IO, ...) offload (L226)。"""
+        """R16: ConfigHandler.set_ai_external_acknowledged 通过 ThreadPoolManager.run_async(TaskType.IO, ...) offload。"""
         from utils.thread_pool import TaskType
 
         vm = _make_vm(mock_test_connection)
@@ -379,6 +379,7 @@ class TestLLMConfigPanelViewModelUpdateAIExternalAcknowledged:
         mock_thread_pool.run_async.assert_awaited_once_with(
             TaskType.IO,
             mock_config_handler.set_ai_external_acknowledged,
+            "deepseek",
             True,
         )
 
