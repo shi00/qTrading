@@ -1,7 +1,7 @@
 """replace screening_history unique constraint (run_id, ts_code) -> (trade_date, strategy_name, ts_code)
 
-Revision ID: 0023
-Revises: 0022
+Revision ID: 0024
+Revises: 0023
 Create Date: 2026-09-12 00:00:00.000000
 
 LIFE-03: screening_history 唯一键由 (run_id, ts_code) 改为 (trade_date, strategy_name, ts_code)，
@@ -21,8 +21,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0023"
-down_revision: str | Sequence[str] | None = "0022"
+revision: str = "0024"
+down_revision: str | Sequence[str] | None = "0023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
