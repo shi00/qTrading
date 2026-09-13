@@ -280,6 +280,7 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
         patch("data.persistence.review_manager.ReviewManager") as mock_review_manager,
         patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=5),
         patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+        patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
         patch("strategies.ai_mixin._build_multi_period_financials", AsyncMock(return_value=("", False))),
         patch("strategies.ai_mixin._build_auxiliary_data_text", AsyncMock(return_value=("无辅助数据", False))),
         patch("strategies.ai_mixin._build_macro_context", AsyncMock(return_value="")),

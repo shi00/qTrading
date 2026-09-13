@@ -35,9 +35,15 @@ def _mock_ai_external_acknowledged_default_true():
     现有测试不关心确认状态，默认 True 保持原行为。
     专门测试未确认行为的用例使用 ``_mock_ai_not_acknowledged`` fixture 覆盖。
     """
-    with patch(
-        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
-        return_value=True,
+    with (
+        patch(
+            "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+            return_value=True,
+        ),
+        patch(
+            "strategies.ai_mixin.ConfigHandler.get_llm_provider",
+            return_value="deepseek",
+        ),
     ):
         yield
 
@@ -49,9 +55,15 @@ def _mock_ai_not_acknowledged():
     供专门测试「用户未同意外部 AI」分支的用例使用；autouse 默认 True 之外的
     显式 opt-out 语义，防止未来新增用例误以为未确认路径已默认覆盖。
     """
-    with patch(
-        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
-        return_value=False,
+    with (
+        patch(
+            "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+            return_value=False,
+        ),
+        patch(
+            "strategies.ai_mixin.ConfigHandler.get_llm_provider",
+            return_value="deepseek",
+        ),
     ):
         yield
 
@@ -252,6 +264,7 @@ class TestHistoryCacheByteLimitation:
             patch("strategies.ai_mixin.AIService") as mock_ai,
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
         ):
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
@@ -295,6 +308,7 @@ class TestAIConcurrencyStreamFeedback:
             caplog.at_level(logging.INFO),
             patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3),
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):
@@ -337,6 +351,7 @@ class TestAIConcurrencyStreamFeedback:
         with (
             patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):
@@ -395,6 +410,7 @@ class TestAIConcurrencyStreamFeedback:
         with (
             patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):

@@ -15,7 +15,12 @@ from collections.abc import Callable
 from pydantic import ValidationError
 
 from utils import config_handler as cfg
-from utils.config_models import AppConfig, ConfigValidationResult, get_default_config
+from utils.config_models import (
+    AI_EXTERNAL_ACK_GLOBAL_KEY,
+    AppConfig,
+    ConfigValidationResult,
+    get_default_config,
+)
 from utils.sanitizers import DataSanitizer
 
 
@@ -92,6 +97,23 @@ def _deep_merge_defaults(current: dict, defaults: dict) -> tuple[dict, bool]:
                 dirty = True
 
     return result, dirty
+
+
+def _normalize_ai_external_acknowledged(config: dict) -> bool:
+    """AI-04 配置迁移：旧单一 bool ``ai_external_acknowledged`` 迁移为 ``dict[str, bool]``。
+
+    旧 ``true`` 表示用户曾做过全局知情确认（Task 2.2），视为对任意云端 provider 均
+    已确认（记录到 ``AI_EXTERNAL_ACK_GLOBAL_KEY`` 键），避免升级后用户被要求重复确认。
+    否则（dict / 缺失）原样返回。
+
+    Returns:
+        bool: 是否发生了迁移（dirty），仅在 bool 形态下迁移。
+    """
+    val = config.get("ai_external_acknowledged")
+    if not isinstance(val, bool):
+        return False
+    config["ai_external_acknowledged"] = {AI_EXTERNAL_ACK_GLOBAL_KEY: val}
+    return True
 
 
 def _migrate_custom_models_credentials(current_config: dict) -> bool:
@@ -242,6 +264,9 @@ def ensure_defaults():
 
             dirty = False
 
+            if _normalize_ai_external_acknowledged(current_config):
+                dirty = True
+
             for key, default_val in cfg.ConfigHandler.DEFAULT_CONFIG.items():
                 if key not in current_config:
                     current_config[key] = default_val
@@ -295,6 +320,11 @@ def load_config():
             try:
                 with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
                     raw_data = json.load(f)
+                    # AI-04: 先把旧 bool 形态迁移为 dict，否则 AppConfig.model_validate 会
+                    # 因类型不符抛 ValidationError，导致整份配置回退默认（丢失其它配置）。
+                    # 此处仅做读时内存迁移（不落盘：读锁下不可再取写锁保存，避免死锁）；
+                    # 持久化由 ensure_defaults（写锁）及后续 save_config 复用归一化后的缓存完成。
+                    _normalize_ai_external_acknowledged(raw_data)
                     validated = AppConfig.model_validate(raw_data)
                     cfg.ConfigHandler._config_cache = validated.model_dump()
                     return cfg.ConfigHandler._config_cache.copy()
@@ -321,6 +351,8 @@ def load_config_with_validation() -> ConfigValidationResult:
             try:
                 with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
                     raw_data = json.load(f)
+                    # AI-04: 读时内存迁移旧 bool 形态，与 load_config 一致（同样不落盘避免读锁取写锁死锁）。
+                    _normalize_ai_external_acknowledged(raw_data)
                     validated = AppConfig.model_validate(raw_data)
                     return ConfigValidationResult(
                         is_valid=True,

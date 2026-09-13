@@ -180,7 +180,7 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             show_refresh_button=show_refresh,
             api_key_modified=False,
             custom_model_options=custom_model_options,
-            ai_external_acknowledged=ConfigHandler.is_ai_external_acknowledged(),
+            ai_external_acknowledged=ConfigHandler.is_ai_external_acknowledged(provider=provider),
         )
 
     @staticmethod
@@ -213,13 +213,17 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
         self._set_state(azure_api_version=value)
 
     async def update_ai_external_acknowledged(self, acknowledged: bool) -> None:
-        """Task 2.2: 持久化 AI 外发知情确认状态。
+        """Task 2.2 / AI-04: 按当前 provider 持久化 AI 外发知情确认状态。
 
+        AI-04：确认粒度从全局改为按 provider；写 dict 需携带当前 provider，更换
+        provider 后新 provider 无记录 → 视为未确认，自动要求重新确认。
         R16：ConfigHandler 同步 IO 通过 ThreadPoolManager offload。
         """
+        provider = self._state.provider
         await ThreadPoolManager().run_async(
             TaskType.IO,
             ConfigHandler.set_ai_external_acknowledged,
+            provider,
             acknowledged,
         )
         self._set_state(ai_external_acknowledged=acknowledged)
@@ -231,10 +235,17 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
     async def update_provider(self, provider_id: str) -> None:
         """供应商变更：加载已存储凭证 + 更新派生标志。
 
+        AI-04：切换 provider 后同步刷新该 provider 的外发确认状态（未见记录 → 未确认），
+        确保 checkbox / gating 反映真实状态。
         R16：ConfigHandler.get_provider_credential / get_llm_config 是同步 IO，
         通过 ThreadPoolManager offload。
         """
         provider = LLM_PROVIDERS.get(provider_id, {})
+        ack_state = await ThreadPoolManager().run_async(
+            TaskType.IO,
+            ConfigHandler.is_ai_external_acknowledged,
+            provider_id,
+        )
 
         # 加载该供应商已存储的专属凭证（不回退全局 Key）
         stored_cred = await ThreadPoolManager().run_async(
@@ -289,6 +300,7 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             show_custom_model_input=show_custom,
             show_refresh_button=show_refresh,
             custom_model_options=custom_model_options,
+            ai_external_acknowledged=ack_state,
         )
         self._show_info(
             Message(

@@ -451,6 +451,7 @@ async def test_phase2_triggered_when_ai_available():
         with (
             patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30),
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
         ):
             with patch.object(s, "_mixin_analyze_single", new_callable=AsyncMock) as mock_analyze:
                 mock_analyze.return_value = {
@@ -522,6 +523,7 @@ async def test_phase2_bypassed_when_dp_missing():
     with (
         patch("strategies.ai_mixin.AIService") as mock_ai,
         patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+        patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
     ):
         mock_instance = MagicMock()
         mock_instance.is_cloud_available.return_value = True

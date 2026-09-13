@@ -192,8 +192,9 @@ class AppConfig(BaseModel):
     onboarding_complete: bool = False
     enable_news_alerts: bool = True
     ai_prompt_dump_enabled: bool = False
-    # Task 2.2: AI 外发知情一次性确认（用户首次使用云端 AI 时确认数据外发政策）
-    ai_external_acknowledged: bool = False
+    # Task 2.2 / AI-04: AI 外发知情确认（按 provider 记录确认状态）
+    # 历史版本是单一 bool；AI-04 检视后升级为 {provider: bool}，更换 provider 自动要求重新确认。
+    ai_external_acknowledged: dict[str, bool] = Field(default_factory=dict)
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
@@ -249,6 +250,12 @@ class AppConfig(BaseModel):
         default=False,
         description="Settings DatabaseTab 高级模式开关（显示外置 PostgreSQL 表单）",
     )
+
+
+# AI-04 配置迁移：旧版全局 bool ``ai_external_acknowledged=true`` 迁移时写入的
+# 特殊 provider 键，视为「曾做过全局知情确认」，对任意云端 provider 回落为已确认，
+# 避免升级后用户被迫重复确认。
+AI_EXTERNAL_ACK_GLOBAL_KEY = "__global__"
 
 
 def get_default_config() -> dict[str, Any]:

@@ -30,9 +30,15 @@ def _mock_ai_external_acknowledged_default_true():
     回测 AI 上下文与 as_of 传递测试默认在 AI 已启用的前提下执行。
     未确认外发政策的路径由 test_backtest_skips_when_ai_not_acknowledged 专项覆盖。
     """
-    with patch(
-        "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
-        return_value=True,
+    with (
+        patch(
+            "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
+            return_value=True,
+        ),
+        patch(
+            "strategies.ai_mixin.ConfigHandler.get_llm_provider",
+            return_value="deepseek",
+        ),
     ):
         yield
 
@@ -280,6 +286,7 @@ class TestBacktestAIContextIntegration:
                 "strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged",
                 return_value=False,
             ),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.AIService") as mock_ai_cls,
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
