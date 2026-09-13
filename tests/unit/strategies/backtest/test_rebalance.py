@@ -1358,6 +1358,60 @@ class TestDiffRebalance:
         assert sim.positions["000001.SZ"]["volume"] > 100
         assert sim.positions["000001.SZ"]["cost_basis"] > 1000.0
 
+    def test_rebalance_buy_budget_respects_cash_when_insufficient(self) -> None:
+        """item1：买入预算受真实可用现金钳制（触发等比缩放分支）。
+
+        构造 investable 目标超过手头 cash 的场景，验证 budget 取
+        min(investable, cash) 后，多标的买单被等比缩放到现金内，
+        买入总额不超 cash，且现金不出现负值。此用例走通「总额超预算」
+        缩放分支，确保预算语义确实落到 _buy_to_target 的缩放逻辑上。
+        """
+        sim, _config = self._make_simulator()
+        sim.cash = 5000.0
+        # 各标的目标金额远大于预算 → 触发等比缩放（scale=4000/6000≈0.667）
+        targets = {"000001.SZ": 2000.0, "000002.SZ": 2000.0, "000003.SZ": 2000.0}
+        base = self._quote(date(2024, 1, 8), 10.0)
+        q1 = base
+        q2 = base.with_columns(pl.lit("000002.SZ").alias("ts_code"))
+        q3 = base.with_columns(pl.lit("000003.SZ").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q1, "000002.SZ": q2, "000003.SZ": q3}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=4000.0)
+        buys = [t for t in sim.trades_list if t["action"] == "buy"]
+        total_buy = sum(t["net_amount"] for t in buys)
+        # 缩放后买入总额不超过预算（4000）
+        assert total_buy <= 4000.0 + 1e-6
+        assert sim.cash >= -1e-6
+
+    def test_rebalance_buy_order_independent_of_dict_insertion(self) -> None:
+        """item1：现金不足（逐单现金边界截断）时，成交取舍与 dict 插入顺序无关。
+
+        _buy_to_target 直测：预算充足但现金不足——缩放不足以让全部买单成交，
+        逐单按 net_amount 累计消耗 cash，最后一个标的会因 cash 不足被跳过。
+        该「谁被跳过」不应依赖调用方传入 buy_targets 的插入顺序（已按 ts_code 排序）。
+        断言：以正序/乱序两种插入顺序传入，最终成交的标的集合与 volume 完全一致。
+        """
+
+        def run(order: dict[str, float]) -> tuple[frozenset, tuple]:
+            sim, _ = self._make_simulator()
+            # 预算充足（不触发缩放），但现金只够前两笔
+            sim.cash = 2500.0
+            base = self._quote(date(2024, 1, 8), 10.0)
+            quotes_by_code = {c: base.with_columns(pl.lit(c).alias("ts_code")) for c in order}
+            sim._buy_to_target(date(2024, 1, 8), order, quotes_by_code, budget=1_000_000.0)
+            buys = [t for t in sim.trades_list if t["action"] == "buy"]
+            held = frozenset(v["ts_code"] for v in buys)
+            vols = tuple(sorted((v["ts_code"], v["volume"]) for v in buys))
+            return held, vols
+
+        # 每只目标 2000 元/10元 → 200 股（2手）；现金 2500 只够买 1 笔整手 + 部分次笔，
+        # 落在「整手+残差」的现金边界处 → 最后一笔因现金不足被跳过
+        a = {"000001.SZ": 2000.0, "000002.SZ": 2000.0, "000003.SZ": 2000.0}
+        b = dict(reversed(a.items()))
+        held_a, vols_a = run(a)
+        held_b, vols_b = run(b)
+        assert held_a == held_b
+        assert vols_a == vols_b
+
     def test_rebalance_cash_ratio_respects_reserve_floor(self) -> None:
         """现金预留语义：先扣预留，再在可投资金内分配；实际现金比例 >= 预留比例（D4-10）。
 

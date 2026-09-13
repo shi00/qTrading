@@ -149,7 +149,11 @@ class PortfolioSimulator:
             to_buy[ts_code] = delta
 
         if to_buy:
-            self._buy_to_target(exec_date, to_buy, quotes_by_code, investable)
+            # item1：以「真实可用现金」与「目标仓位上限」取小作为买入预算。
+            # investable 已按总资产口径扣过 cash_reserve，故这里直接用 self.cash，
+            # 避免二次扣减 reserve 造成过度缩仓；现金不足时触发等比缩放（确定性）。
+            budget = min(investable, self.cash)
+            self._buy_to_target(exec_date, to_buy, quotes_by_code, budget)
 
     def _sell_all_positions(
         self,
@@ -389,6 +393,8 @@ class PortfolioSimulator:
         """对指定标的按目标买入金额建仓/加仓。
 
         买入总额超出预算时按比例缩减各标的金额，避免超额建仓；
+        逐单按 ts_code 稳定排序遍历，确保现金不足而被跳过/部分成交的取舍
+        与调用方传入的 dict 顺序无关（消除与策略无关的随机性）；
         各标的判定逻辑：无报价/停牌/涨停跳过、价格<=0 跳过、
         100 股取整、滑点、现金余额检查。
         """
@@ -398,7 +404,7 @@ class PortfolioSimulator:
                 scale = budget / total_target
                 buy_targets = {code: v * scale for code, v in buy_targets.items()}
 
-        for ts_code, delta_value in buy_targets.items():
+        for ts_code, delta_value in sorted(buy_targets.items()):
             quote = quotes_by_code.get(ts_code)
             if quote is None or quote.is_empty():
                 self.skipped_list.append(
