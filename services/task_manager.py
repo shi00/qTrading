@@ -130,6 +130,7 @@ class AppTask:
     _asyncio_task: asyncio.Task | None = None
     _cancel_event: threading.Event | None = None
     unique_key: str | None = None  # For deduplication
+    factory_key: str | None = None  # LIFE-01: 崩溃重建工厂注册键（跨重启可重试的前提）
     correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
     # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
     _coroutine_factory: Callable = None  # type: ignore[assignment]
@@ -163,6 +164,21 @@ class TaskManager:
     _initialized = False
     _lock = threading.Lock()
 
+    # LIFE-01: 可跨应用重启重建任务工厂的注册表（key → factory(task_id=..., **kwargs)）。
+    # 类属性而非模块级 dict，便于 _reset_singleton 清理以满足 R7 测试隔离。
+    # 模块在 import 时自注册（见 services/task_rebuild.py），确保 init_db 反序列化
+    # 前 inventory 已就绪。未注册的任务维持现状（不显示重试按钮，语义不变）。
+    _RETRYABLE_FACTORIES: dict[str, Callable] = {}
+
+    @classmethod
+    def register_retryable_factory(cls, key: str, factory: Callable) -> None:
+        """注册可跨重启重建的任务工厂 (LIFE-01, FR-UX-006)。
+
+        只有注册过的任务类型支持崩溃后重试；未注册任务不显示重试按钮。
+        可覆盖已存在的 key（最后一次注册生效，幂等重注册）。
+        """
+        cls._RETRYABLE_FACTORIES[key] = factory
+
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
@@ -180,6 +196,8 @@ class TaskManager:
                 inst._flush_handle = None
             cls._instance = None
             cls._initialized = False
+            # R7: 清空工厂注册表，防止测试间注册泄漏（测试内显式重注册所需工厂）
+            cls._RETRYABLE_FACTORIES.clear()
 
         del_loop_local("task_manager_semaphore")
 
@@ -374,7 +392,8 @@ class TaskManager:
         task_type: Message | str,
         coroutine_factory: Callable,
         cancellable: bool = False,
-        unique_key: str = None,  # type: ignore[assignment]
+        unique_key: str | None = None,
+        factory_key: str | None = None,
         **kwargs,
     ) -> str | None:
         """
@@ -401,6 +420,7 @@ class TaskManager:
 
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
         task.unique_key = unique_key
+        task.factory_key = factory_key
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
         # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
         task._coroutine_factory = coroutine_factory
@@ -579,36 +599,41 @@ class TaskManager:
             self._loop.call_soon_threadsafe(self._clear_finished_impl)
 
     def retry_task(self, task_id: str) -> str | None:
-        """Retry a failed or interrupted task by re-submitting with stored factory + kwargs (Phase 6.2, FR-UX-006).
+        """Retry a failed or interrupted task by re-submitting with stored factory + kwargs.
 
         D6-3: ``INTERRUPTED`` 纳入可重试范围——应用异常退出遗留的未完成任务在业务上
         与 ``FAILED`` 等价，都需要用户能重新发起。同步层已有基于已缓存日期的跳过
         逻辑，重新提交即可自然续传。``CANCELLED`` 不纳入：用户主动取消代表放弃
         意图，重试应由用户重新操作。
 
-        Only retryable statuses (``_RETRYABLE_STATUSES``) can be retried. The new
-        task gets a fresh task_id and does NOT inherit the original ``unique_key``
-        (avoids dedup conflicts with the failed task's still-held key during the
-        brief overlap window).
+        LIFE-01: 查找范围从 `_tasks` 扩展到 `_history`（崩溃恢复任务在 `_history`），
+        并复用原 ``unique_key`` 防止并发重推——重推任务与数据源页等其它提交路径共享
+        同一唯一键，先提交者持有键、后提交者被去重，避免两个并发同步写入同一批数据。
+
+        The new task gets a fresh task_id and inherits the original ``unique_key``.
 
         Returns:
             New task_id if retry was submitted, None if task not found, not retryable,
             or missing stored factory.
         """
-        task = self._tasks.get(task_id)
-        if not task or task.status not in _RETRYABLE_STATUSES:
+        task = self._tasks.get(task_id) or next((h for h in self._history if h.id == task_id), None)
+        if task is None or task.status not in _RETRYABLE_STATUSES:
             logger.warning("[TaskManager] Retry skipped: task %s not found or not retryable", task_id)
             return None
         if task._coroutine_factory is None:
             logger.warning("[TaskManager] Retry skipped: task %s has no stored factory", task_id)
             return None
-        # unique_key omitted: default None avoids dedup conflicts with the
-        # failed task's still-held key during the brief overlap window.
+        # Reuse original unique_key (LIFE-01): blocks a concurrent re-push from another
+        # submission path that shares the same key (e.g. data-source page "开始同步").
+        # safe: the terminal task's key is no longer in _active_keys (released on finish).
         return self.submit_task(
             name=task.name,
             task_type=task.task_type,
             coroutine_factory=task._coroutine_factory,
             cancellable=task.cancellable,
+            unique_key=task.unique_key,
+            # LIFE-01: 透传 factory_key，使重试后的任务本身仍可再崩溃恢复（重试链不断裂）。
+            factory_key=task.factory_key,
             **task._coroutine_kwargs,
         )
 
@@ -890,6 +915,10 @@ class TaskManager:
         # Wait for database schema to be ready (handled safely by CacheManager)
 
         # 2. Mark stale RUNNING/QUEUED from last session as INTERRUPTED
+        # LIFE-01: 反序列化前确保内置崩溃重建工厂已注册（幂等），否则 INTERRUPTED 任务
+        # 无法回填 factory，崩溃后重试能力缺失。
+        from services import task_rebuild  # noqa: F401  # (LIFE-01) side-effect: register built-in retryable factories
+
         await cache.write_db(
             "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
             (
@@ -918,6 +947,7 @@ class TaskManager:
                         started_at=self._safe_dt(row.get("started_at")),
                         completed_at=self._safe_dt(row.get("completed_at")),
                     )
+                    self._rehydrate_retry_info(t, row)
                     self._history.append(t)
                 except asyncio.CancelledError:
                     raise
@@ -946,6 +976,47 @@ class TaskManager:
 
         self._db_ready = True
         logger.info("[TaskManager] Persistence layer initialized.")
+
+    def _rehydrate_retry_info(self, t: "AppTask", row) -> None:
+        """从 DB 行回填崩溃重试所需信息 (LIFE-01)。
+
+        ``factory_key`` 命中注册表才回填 ``_coroutine_factory``（无 factory 的任务保持
+        ``is_retryable=False``，UI 不显示重试按钮）；``retry_kwargs`` JSON 反序列化回填
+        单源 ``_coroutine_kwargs``。缺失/非法数据一律降级为非可重试，不抛异常。
+        """
+
+        def _nullable(v) -> str | None:
+            if v is None:
+                return None
+            try:
+                if v != v:  # NaN（pd 缺失列/空值）
+                    return None
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            return s or None
+
+        t.factory_key = _nullable(row.get("factory_key"))
+        t.unique_key = _nullable(row.get("unique_key"))
+        raw_kwargs = _nullable(row.get("retry_kwargs"))
+        if t.factory_key and raw_kwargs:
+            factory = self._RETRYABLE_FACTORIES.get(t.factory_key)
+            if factory is not None:
+                try:
+                    parsed = json.loads(raw_kwargs)
+                    t._coroutine_kwargs = parsed if isinstance(parsed, dict) else {}
+                    t._coroutine_factory = factory
+                except (json.JSONDecodeError, TypeError):
+                    t._coroutine_factory = None  # type: ignore[assignment]  # (LIFE-01) 非法重试参数降级为不可重试
+                    t._coroutine_kwargs = {}
+                    log_classified(
+                        logger,
+                        ValueError("malformed retry_kwargs"),
+                        "general",
+                        "[TaskManager] Malformed retry_kwargs for task %s, retry disabled (%s): %s",
+                        t.id,
+                        exc_info=True,
+                    )
 
     def _next_persist_seq(self) -> int:
         """Allocate the next monotonically-increasing persist sequence (LIFE-02).
@@ -976,9 +1047,32 @@ class TaskManager:
             to_utc_for_db(task.created_at),
             to_utc_for_db(task.started_at),
             to_utc_for_db(task.completed_at),
+            task.unique_key,
+            task.factory_key,
+            self._serialize_retry_kwargs(task),
             self._next_persist_seq(),
         )
         self._queue_persist_snapshot(snapshot)
+
+    @staticmethod
+    def _serialize_retry_kwargs(task: "AppTask") -> str | None:
+        """序列化重试参数为 JSON (LIFE-01)。
+
+        仅当任务登记了 ``factory_key`` 才持久化；**单源** = ``_coroutine_kwargs``——
+        与 DB ``retry_kwargs`` 列之间不做第二份副本，init_db 读回时反序列化回填同一字段，
+        避免双源失步。注册工厂必须使用 JSON 可序列化的 kwargs；否则返回 None（该任务
+        崩溃后不显示重试按钮，语义由 is_retryable 的 factory 存在性自然决定）。
+        """
+        if task.factory_key is None:
+            return None
+        try:
+            return json.dumps(task._coroutine_kwargs, ensure_ascii=False)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[TaskManager] Retry kwargs for task %s are not JSON-serializable; crash retry disabled for this task",
+                task.id,
+            )
+            return None
 
     @staticmethod
     def _truncate_result_for_db(result: Any, max_len: int = 500) -> str | None:
@@ -1091,13 +1185,15 @@ class TaskManager:
             sql = (
                 "INSERT INTO task_history "
                 "(id, name, task_type, status, progress, description, error, result, "
-                "created_at, started_at, completed_at, persist_seq) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "
+                "created_at, started_at, completed_at, unique_key, factory_key, retry_kwargs, "
+                "persist_seq) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) "
                 "ON CONFLICT (id) DO UPDATE SET "
                 "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
                 "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
                 "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, "
-                "persist_seq=EXCLUDED.persist_seq "
+                "unique_key=EXCLUDED.unique_key, factory_key=EXCLUDED.factory_key, "
+                "retry_kwargs=EXCLUDED.retry_kwargs, persist_seq=EXCLUDED.persist_seq "
                 "WHERE task_history.persist_seq < EXCLUDED.persist_seq"
             )
             await cache.write_db(sql, params)
@@ -1127,6 +1223,9 @@ class TaskManager:
             to_utc_for_db(task.created_at),
             to_utc_for_db(task.started_at),
             to_utc_for_db(task.completed_at),
+            task.unique_key,
+            task.factory_key,
+            self._serialize_retry_kwargs(task),
             self._next_persist_seq(),
         )
         await self._persist_snapshot(params)

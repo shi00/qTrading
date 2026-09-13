@@ -837,6 +837,9 @@ TABLE_DEFINITIONS = {
             "started_at": "col_started_at",
             "completed_at": "col_completed_at",
             "persist_seq": "col_persist_seq",
+            "unique_key": "col_unique_key",
+            "factory_key": "col_factory_key",
+            "retry_kwargs": "col_retry_kwargs",
         },
     },
     "app_state": {
