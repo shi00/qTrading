@@ -580,6 +580,10 @@ except Exception as e:
 
 **优雅降级例外**：当 `severity == "system"` 但当前处于关闭流程、降级路径或基础设施兜底场景时（如窗口 destroy 失败、keyring fallback、日志系统初始化失败），可不 `raise`，但须满足以下条件之一：① 场景明确无法重试或 raise 无意义（如已处于 shutdown 流程）；② 降级路径已提供合理兜底返回值（如策略空结果、AI 计算降级文案）；③ 基础设施层兜底（如 exception_hooks/logger 不适合走 classify）。此类场景应添加注释说明不 raise 的理由。
 
+### 业务语义字段的缺失表示
+
+业务语义字段（如 `score` / `ai_score` / `confidence`）缺失时**必须用 `None`/哨兵表示**，禁止用业务上合法的具体值填充（如 `0` 分、`50%` 置信度、空表视为「无限制」）。缺失被填充成合法值，会把「数据缺失」伪装成「有确定结论」，扭曲下游展示与统计（检视报告 04 AI-02，缺陷根因见 R21）。同类「缺失填默认数字」模式均应先判断填充值是否具有误导性语义，误导则改为 `None`。
+
 ## 测试规范
 
 > 本节已迁移到 [docs/guides/testing.md](./docs/guides/testing.md)。
