@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.2（R14 `@register_strategy` 强制）；实现模板见本节。
+> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.1（R14 红线）、§3.2（强制要求）；实现模板见本节。
 
 ```python
 from strategies.base_strategy import BaseStrategy, register_strategy
