@@ -665,6 +665,7 @@ except Exception as e:
 - [0005-enforcement-mapping-check.md](./docs/adr/0005-enforcement-mapping-check.md) — enforcement 字段映射不变量
 - [0006-override-agents-pure-pointer.md](./docs/adr/0006-override-agents-pure-pointer.md) — AGENTS.md 从纯指针改为最小安全集 + 指针
 - [0007-screening-history-override-pk.md](./docs/adr/0007-screening-history-override-pk.md) — screening_history 唯一键改覆盖语义
+- [0008-no-ai-execution.md](./docs/adr/0008-no-ai-execution.md) — 不给 AI 执行权，仅输出评分和文本
 
 ### docs/governance/ — 治理类机器可读文件
 
