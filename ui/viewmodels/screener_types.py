@@ -129,6 +129,7 @@ class StrategyDepRow:
     key: str
     name_key: str
     missing_apis: tuple[str, ...] = ()
+    supports_ai: bool = False
 
 
 _EMPTY_ROW_MAPPING: Mapping[str, Any] = MappingProxyType({})

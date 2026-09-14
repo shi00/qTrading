@@ -90,6 +90,15 @@ class BaseStrategy(ABC):
     def description(self) -> str:
         return self._desc_key
 
+    @property
+    def supports_ai(self) -> bool:
+        """策略是否可能触发 AI 分析（AI-05: 派生自 AIStrategyMixin.enable_ai_analysis）。
+
+        非 AI 策略（未继承 ``AIStrategyMixin``）无 ``enable_ai_analysis`` 属性，返回 False；
+        AI 策略可在类上将其覆盖为 False（如资金流/量价类）以关闭 AI，本属性随之反映。
+        """
+        return bool(getattr(self, "enable_ai_analysis", False))
+
     def get_dynamic_description(self, current_params: dict) -> Message:
         """
         Return a dynamic description based on current UI parameters.
