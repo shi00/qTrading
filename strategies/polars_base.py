@@ -1,11 +1,13 @@
 import logging
 from abc import abstractmethod
+from dataclasses import replace
 
 import pandas as pd
 import polars as pl
 
 from core.errors import StrategyParamError
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
+from strategies.attribution import ATTRIBUTION_COLUMN, attribution_to_json
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
 from strategies.utils import StrategyContext
@@ -117,6 +119,15 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         if candidates_df is None or candidates_df.empty:
             return pd.DataFrame()
 
+        # UX-04: 归因在 AI 分支 (排序/截断) 之前生成，rank.total = AI 截断前真实候选池
+        # (一次检视 Major#1: 排名语义不因 ai_mixin 的 head(cap) 失真)。早退路径同样生成。
+        if self.attribution_enabled:
+            total = len(candidates_df)
+            candidates_df = await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                lambda: _build_attributions(self, candidates_df, total, context),
+            )
+
         if not self.enable_ai_analysis:
             return candidates_df
 
@@ -133,3 +144,30 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         :return: Filtered/Sorted LazyFrame
         """
         pass
+
+
+def _build_attributions(strategy, df: pd.DataFrame, total: int, context: StrategyContext) -> pd.DataFrame:
+    """为每个筛选行构建归因并写入 ``ATTRIBUTION_COLUMN`` 列 (UX-04).
+
+    在线程池 (``TaskType.CPU``) 内执行, 不阻塞 Flet 事件循环 (R16)。
+    ``rank.position`` 在此按 ``rank.field`` 在候选池内统一排序计算 (base 兜底,
+    单策略内 rank.field 共享, 一次排序即可); ``rank.total`` = AI 截断前候选池总数。
+    """
+    rows = df.to_dict("records")
+    built: list = [strategy.build_attribution(r, total, context) for r in rows]
+
+    # 统一计算排名 (按 rank.field/ascending; 无值/缺值恒排末尾)。冻结构用 replace 重建。
+    # 缺值哨兵按方向选择: 升序时置 +inf 排最后, 降序时置 -inf 排最后 (二次检视 a2)。
+    ranked = [(i, a) for i, a in enumerate(built) if a is not None and a.rank is not None]
+    if ranked:
+        ascending = ranked[0][1].rank.ascending
+        missing = float("inf") if ascending else float("-inf")
+        ranked.sort(
+            key=lambda i_a: i_a[1].rank.value if i_a[1].rank.value is not None else missing,
+            reverse=not ascending,
+        )
+        for pos, (idx, attr) in enumerate(ranked, start=1):
+            built[idx] = replace(attr, rank=replace(attr.rank, position=pos, total=total))
+
+    df[ATTRIBUTION_COLUMN] = [attribution_to_json(a) for a in built]
+    return df

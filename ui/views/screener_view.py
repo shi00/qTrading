@@ -112,6 +112,7 @@ _HIDDEN_COLS = frozenset(
         "t1_price",
         "t5_price",
         "params_snapshot",
+        "_filter_attribution",  # UX-04: 结构化筛选归因列 (仅详情弹窗展示, 不上表格)
     }
 )
 
@@ -1694,6 +1695,7 @@ def _build_stock_detail_dialog(
     page: ft.Page | None,
     on_close: typing.Callable[[], None],
     on_add_to_watchlist: typing.Callable[[str, str], None],
+    column_label_fn: typing.Callable[[str], str] | None = None,
 ) -> ft.Control | None:
     """按需构建股票详情对话框."""
     if detail_dialog_data is None:
@@ -1705,6 +1707,7 @@ def _build_stock_detail_dialog(
         open_state=True,
         on_close=on_close,
         on_add_to_watchlist=on_add_to_watchlist,
+        column_label_fn=column_label_fn,
     )
 
 
@@ -1958,6 +1961,7 @@ def ScreenerView(
         page=_get_page(),
         on_close=lambda: set_detail_dialog_data(None),
         on_add_to_watchlist=_on_add_to_watchlist,
+        column_label_fn=lambda col: vm.get_column_alias("screening_history", col),
     )
 
     # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，

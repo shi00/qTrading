@@ -7,6 +7,7 @@ import polars as pl
 from core.i18n import Message
 from data.constants import HSGT_NORTH_MONEY_UNIT, TOP_LIST_NET_AMOUNT_UNIT
 from data.persistence.quality_gate import QualityTier
+from strategies.attribution import FilterAttribution, FilterCondition, RankAttribution, fnum
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
 from strategies.utils import StrategyContext, threshold_in_data_unit
@@ -84,11 +85,30 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
             warnings = context.get("warnings")
             if warnings is not None:
                 warnings.append(Message("strategy_param_auto_adjusted", {"min": chg_min, "adjusted_max": chg_max}))
+        # UX-04: 记录生效阈值 (含自动调整后的 chg_max)，供 build_attribution 呈现一致阈值 (二次检视 Ma4)。
+        context["_vol_break_thresholds"] = (chg_min, chg_max, turnover)
         return (
             lf.drop_nulls(subset=["pct_chg", "turnover_rate"])
             .filter(pl.col("pct_chg").is_between(chg_min, chg_max))
             .filter(pl.col("turnover_rate") > turnover)
             .sort("pct_chg", descending=True)
+        )
+
+    attribution_enabled = True  # UX-04
+
+    def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
+        chg_min, chg_max, turnover = context.get("_vol_break_thresholds") or (
+            context.get("params", {}).get("pct_chg_min", 2),
+            context.get("params", {}).get("pct_chg_max", 7),
+            context.get("params", {}).get("turnover_min", 3),
+        )
+        conditions = (
+            FilterCondition("pct_chg", "between", (float(chg_min), float(chg_max)), fnum(row.get("pct_chg"))),
+            FilterCondition("turnover_rate", "gt", float(turnover), fnum(row.get("turnover_rate"))),
+        )
+        return FilterAttribution(
+            conditions=conditions,
+            rank=RankAttribution(field="pct_chg", value=fnum(row.get("pct_chg")), total=total_candidates),
         )
 
 

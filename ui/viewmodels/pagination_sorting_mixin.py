@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import typing
 from collections.abc import Callable
@@ -19,12 +20,29 @@ from types import MappingProxyType
 
 import pandas as pd
 
+from strategies.attribution import ATTRIBUTION_COLUMN
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import ScreenerRow, ScreenerState
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_cell(col: str, value) -> object:
+    """UX-04: 把结果行单元格转为 row.values 中的可消费值。
+
+    仅对归因列把 JSON 字符串反序列化为 dict (二次检视 m4)；其余列原样返回。
+    非法/缺失 JSON 安全降级为 None，不 raise，避免 HISTORY 等无归因列模式击穿。
+    """
+    if col != ATTRIBUTION_COLUMN or value is None:
+        return value
+    if isinstance(value, dict):  # 防御：已反序列化 (如某些路径)
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 class PaginationSortingMixin:
@@ -120,7 +138,7 @@ class PaginationSortingMixin:
         end = start + page_size
         page_slice = filtered.iloc[start:end]
         return tuple(
-            ScreenerRow(values=MappingProxyType({str(k): v for k, v in record.items()}))
+            ScreenerRow(values=MappingProxyType({str(k): _decode_cell(str(k), v) for k, v in record.items()}))
             for record in page_slice.to_dict("records")  # type: ignore[call-overload]
         )
 

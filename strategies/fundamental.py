@@ -4,6 +4,7 @@ import polars as pl
 from core.errors import StrategyParamError
 from core.i18n import Message
 from data.persistence.quality_gate import QualityTier
+from strategies.attribution import FilterAttribution, FilterCondition, RankAttribution, fnum
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
 from strategies.utils import fmt_val
@@ -94,6 +95,26 @@ class ValueStrategy(PolarsBaseStrategy):
             .sort("dv_ttm", descending=True)
         )
 
+    attribution_enabled = True  # UX-04
+
+    def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
+        p = context.get("params", {})
+        pe_min, pe_max, pb_max, dv_min = (
+            p.get("pe_min", 5),
+            p.get("pe_max", 20),
+            p.get("pb_max", 3),
+            p.get("dv_min", 2),
+        )
+        conditions = (
+            FilterCondition("pe_ttm", "between", (float(pe_min), float(pe_max)), fnum(row.get("pe_ttm"))),
+            FilterCondition("pb", "between", (0.0, float(pb_max)), fnum(row.get("pb"))),
+            FilterCondition("dv_ttm", "gt", float(dv_min), fnum(row.get("dv_ttm"))),
+        )
+        return FilterAttribution(
+            conditions=conditions,
+            rank=RankAttribution(field="dv_ttm", value=fnum(row.get("dv_ttm")), total=total_candidates),
+        )
+
 
 @register_strategy("growth")
 class GrowthStrategy(PolarsBaseStrategy):
@@ -164,6 +185,25 @@ class GrowthStrategy(PolarsBaseStrategy):
             .sort("roe", descending=True)
         )
 
+    attribution_enabled = True  # UX-04
+
+    def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
+        p = context.get("params", {})
+        rev, profit, roe = (
+            p.get("revenue_growth_min", 20),
+            p.get("profit_growth_min", 25),
+            p.get("roe_min", 15),
+        )
+        conditions = (
+            FilterCondition("or_yoy", "gt", float(rev), fnum(row.get("or_yoy"))),
+            FilterCondition("netprofit_yoy", "gt", float(profit), fnum(row.get("netprofit_yoy"))),
+            FilterCondition("roe", "gt", float(roe), fnum(row.get("roe"))),
+        )
+        return FilterAttribution(
+            conditions=conditions,
+            rank=RankAttribution(field="roe", value=fnum(row.get("roe")), total=total_candidates),
+        )
+
 
 @register_strategy("dividend")
 class DividendStrategy(PolarsBaseStrategy):
@@ -206,6 +246,17 @@ class DividendStrategy(PolarsBaseStrategy):
         p = context.get("params", {})
         dv_min = p.get("dv_min", 4)
         return lf.drop_nulls(subset=["dv_ttm"]).filter(pl.col("dv_ttm") > dv_min).sort("dv_ttm", descending=True)
+
+    attribution_enabled = True  # UX-04
+
+    def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
+        p = context.get("params", {})
+        dv_min = p.get("dv_min", 4)
+        conditions = (FilterCondition("dv_ttm", "gt", float(dv_min), fnum(row.get("dv_ttm"))),)
+        return FilterAttribution(
+            conditions=conditions,
+            rank=RankAttribution(field="dv_ttm", value=fnum(row.get("dv_ttm")), total=total_candidates),
+        )
 
 
 @register_strategy("cashflow")
@@ -260,6 +311,21 @@ class CashFlowStrategy(PolarsBaseStrategy):
             .filter(pl.col("debt_to_assets") < debt_max)
             .filter(pl.col("roe") > roe_min)
             .sort("roe", descending=True)
+        )
+
+    attribution_enabled = True  # UX-04
+
+    def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
+        p = context.get("params", {})
+        debt_max = p.get("debt_max", 50)
+        roe_min = p.get("roe_min", 10)
+        conditions = (
+            FilterCondition("debt_to_assets", "lt", float(debt_max), fnum(row.get("debt_to_assets"))),
+            FilterCondition("roe", "gt", float(roe_min), fnum(row.get("roe"))),
+        )
+        return FilterAttribution(
+            conditions=conditions,
+            rank=RankAttribution(field="roe", value=fnum(row.get("roe")), total=total_candidates),
         )
 
 

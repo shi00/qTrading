@@ -1350,3 +1350,234 @@ class TestBuildReviewSection:
 
         result = _build_review_section({"params_snapshot": {"key": "val"}})
         assert isinstance(result, ft.Column)
+
+
+# ---------------------------------------------------------------------------
+# UX-04: 筛选归因渲染 —— 模块级纯函数
+# ---------------------------------------------------------------------------
+class TestFmtAttrNum:
+    """_fmt_attr_num 模块级纯函数测试（无效值 → '-'，有效值 → 2 位小数）。"""
+
+    def test_invalid_values_return_dash(self):
+        from ui.components.stock_detail_dialog import _fmt_attr_num
+
+        assert _fmt_attr_num(None) == "-"
+        assert _fmt_attr_num(float("nan")) == "-"
+        assert _fmt_attr_num("abc") == "-"
+        assert _fmt_attr_num([1, 2]) == "-"
+        assert _fmt_attr_num({"v": 1}) == "-"
+
+    def test_valid_number_formats_two_decimals(self):
+        from ui.components.stock_detail_dialog import _fmt_attr_num
+
+        assert _fmt_attr_num(3.2) == "3.20"
+        assert _fmt_attr_num(2.0) == "2.00"
+        assert _fmt_attr_num(0) == "0.00"
+        assert _fmt_attr_num(1.2345) == "1.23"
+
+
+class TestAttrLabel:
+    """_attr_label 模块级纯函数测试（列名 → 展示别名）。"""
+
+    def test_none_column_returns_dash(self):
+        from ui.components.stock_detail_dialog import _attr_label
+
+        assert _attr_label(None, lambda c: c) == "-"
+        assert _attr_label("", lambda c: c) == "-"
+
+    def test_no_label_fn_returns_bare_column(self):
+        from ui.components.stock_detail_dialog import _attr_label
+
+        assert _attr_label("dv_ttm", None) == "dv_ttm"
+
+    def test_parses_alias_in_parentheses(self):
+        from ui.components.stock_detail_dialog import _attr_label
+
+        fn = lambda c: "dv_ttm (股息率TTM)"  # noqa: E731
+        assert _attr_label("dv_ttm", fn) == "股息率TTM"
+
+    def test_fn_empty_or_same_returns_bare_column(self):
+        from ui.components.stock_detail_dialog import _attr_label
+
+        assert _attr_label("dv_ttm", lambda c: "") == "dv_ttm"
+        assert _attr_label("dv_ttm", lambda c: "dv_ttm") == "dv_ttm"
+
+    def test_plain_alias_returned(self):
+        from ui.components.stock_detail_dialog import _attr_label
+
+        assert _attr_label("dv_ttm", lambda c: "股息率TTM") == "股息率TTM"
+
+
+class TestBuildAttributionConditionRow:
+    """_build_attribution_condition_row 模块级纯函数测试（单值/区间比较 + 单位后缀）。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", mock_app_colors))
+            yield
+
+    def test_single_compare_with_suffix(self):
+        from strategies.attribution import FilterCondition
+        from ui.components.stock_detail_dialog import _build_attribution_condition_row
+
+        row = _build_attribution_condition_row(
+            FilterCondition(column="dv_ttm", operator="gt", threshold=2.0, actual=3.2),
+            lambda c: "dv_ttm (股息率TTM)",
+        )
+        assert isinstance(row, ft.Row)
+        text = row.controls[0].value
+        assert "股息率TTM" in text
+        assert "3.20%" in text  # dv_ttm 带 % 后缀
+        assert "filter_op_g" in text  # mock_i18n 返回 key
+        assert "2.00%" in text
+
+    def test_between_compare(self):
+        from strategies.attribution import FilterCondition
+        from ui.components.stock_detail_dialog import _build_attribution_condition_row
+
+        row = _build_attribution_condition_row(
+            FilterCondition(column="pe", operator="between", threshold=(1.0, 2.0), actual=1.5),
+            None,
+        )
+        assert isinstance(row, ft.Row)
+        text = row.controls[0].value
+        assert "(1.00, 2.00)" in text
+        assert "filter_op_between" in text
+        assert "1.50" in text  # pe 无后缀
+
+    def test_unknown_operator_falls_back_to_raw(self):
+        from strategies.attribution import FilterCondition
+        from ui.components.stock_detail_dialog import _build_attribution_condition_row
+
+        row = _build_attribution_condition_row(
+            FilterCondition(column="pe", operator="lt", threshold=5.0, actual=3.0),
+            None,
+        )
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        assert isinstance(row, ft.Row)
+        text = row.controls[0].value
+        assert "filter_op_l" in text  # lt -> filter_op_l
+
+
+class TestBuildAttributionRank:
+    """_build_attribution_rank 模块级纯函数测试（None / 升降序 / 缺省位置）。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        mock_i18n.get.side_effect = lambda key, *a, **kw: {
+            "filter_attribution_rank": "排名 {position}/{total} 按{field} · {order}",
+            "filter_order_asc": "升序",
+            "filter_order_desc": "降序",
+        }.get(key, key)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", mock_app_colors))
+            yield
+
+    def test_none_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_attribution_rank
+
+        assert isinstance(_build_attribution_rank(None, None), ft.Container)
+
+    def test_ascending_with_position(self):
+        from strategies.attribution import RankAttribution
+        from ui.components.stock_detail_dialog import _build_attribution_rank
+
+        rank = RankAttribution(field="dv_ttm", ascending=True, position=3, total=285)
+        result = _build_attribution_rank(rank, lambda c: "dv_ttm (股息率TTM)")
+        assert isinstance(result, ft.Row)
+        rank_text = result.controls[1].value
+        assert "升序" in rank_text
+        assert "股息率TTM" in rank_text
+
+    def test_descending_missing_position_total(self):
+        from strategies.attribution import RankAttribution
+        from ui.components.stock_detail_dialog import _build_attribution_rank
+
+        rank = RankAttribution(field="dv_ttm", ascending=False, position=None, total=None)
+        result = _build_attribution_rank(rank, None)
+        assert isinstance(result, ft.Row)
+        rank_text = result.controls[1].value
+        assert "降序" in rank_text
+        assert "-" in rank_text
+
+
+class TestBuildAttributionSection:
+    """_build_attribution_section 模块级纯函数测试（有/无归因数据分支）。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("ui.components.stock_detail_dialog.I18n", mock_i18n))
+            stack.enter_context(patch("ui.components.stock_detail_dialog.AppColors", mock_app_colors))
+            yield
+
+    def test_no_raw_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        assert isinstance(_build_attribution_section({}), ft.Container)
+
+    def test_invalid_json_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        assert isinstance(_build_attribution_section({"_filter_attribution": "not json"}), ft.Container)
+
+    def test_no_conditions_returns_empty_container(self):
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        result = _build_attribution_section({"_filter_attribution": '{"conditions": [], "rank": null}'})
+        assert isinstance(result, ft.Container)
+
+    def test_dict_with_conditions_renders_column(self):
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: {
+            "filter_attribution_title": "筛选归因",
+            "filter_attribution_note": "说明",
+        }.get(key, key)
+        raw = {
+            "conditions": [{"column": "dv_ttm", "operator": "gt", "threshold": 2.0, "actual": 3.2}],
+            "rank": {"field": "dv_ttm", "ascending": False, "value": 2.5, "position": 1, "total": 285},
+        }
+        result = _build_attribution_section({"_filter_attribution": raw})
+        assert isinstance(result, ft.Column)
+        texts = _collect_all_texts(result)
+        assert any("筛选归因" in t for t in texts)
+
+    def test_json_string_input_renders_column(self):
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: {
+            "filter_attribution_title": "筛选归因",
+            "filter_attribution_note": "说明",
+        }.get(key, key)
+        raw = (
+            '{"conditions": [{"column": "pe", "operator": "between", '
+            '"threshold": [1.0, 2.0], "actual": 1.5}], "rank": null}'
+        )
+        result = _build_attribution_section({"_filter_attribution": raw})
+        assert isinstance(result, ft.Column)
+
+
+def _collect_all_texts(control, found=None):
+    """递归收集控件的文本值（用于断言归因卡片内容）。"""
+    if found is None:
+        found = []
+    if isinstance(control, ft.Text):
+        found.append(control.value or "")
+        return found
+    for attr_name in ("content",):
+        child = getattr(control, attr_name, None)
+        if child is not None and hasattr(child, "__class__"):
+            _collect_all_texts(child, found)
+    for attr_name in ("controls",):
+        children = getattr(control, attr_name, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    _collect_all_texts(child, found)
+    return found
