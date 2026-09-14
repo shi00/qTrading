@@ -100,20 +100,38 @@ def _deep_merge_defaults(current: dict, defaults: dict) -> tuple[dict, bool]:
 
 
 def _normalize_ai_external_acknowledged(config: dict) -> bool:
-    """AI-04 配置迁移：旧单一 bool ``ai_external_acknowledged`` 迁移为 ``dict[str, bool]``。
+    """AI-04 / SEC-01 配置迁移：将旧形态 ``ai_external_acknowledged`` 统一为 ``dict[str, int]``。
 
-    旧 ``true`` 表示用户曾做过全局知情确认（Task 2.2），视为对任意云端 provider 均
-    已确认（记录到 ``AI_EXTERNAL_ACK_GLOBAL_KEY`` 键），避免升级后用户被要求重复确认。
-    否则（dict / 缺失）原样返回。
+    迁移历史：
+    - AI-04：旧单一 ``bool`` 迁移为 ``{AI_EXTERNAL_ACK_GLOBAL_KEY: bool}``，
+      表示用户曾做全局知情确认，避免升级后被迫重复确认。
+    - SEC-01：记录值从 ``bool`` 升级为 ``scope_version:int``（确认时的外发范围版本）。
+      ``bool True`` / dict 中的 ``True`` 均迁移为版本 1（与当前 AI_EGRESS_SCOPE_VERSION 对齐）。
+      旧 ``False`` 等价于未确认，迁移为 0。
 
     Returns:
-        bool: 是否发生了迁移（dirty），仅在 bool 形态下迁移。
+        bool: 是否发生了迁移（dirty）。
     """
     val = config.get("ai_external_acknowledged")
-    if not isinstance(val, bool):
-        return False
-    config["ai_external_acknowledged"] = {AI_EXTERNAL_ACK_GLOBAL_KEY: val}
-    return True
+    if isinstance(val, bool):
+        config["ai_external_acknowledged"] = {AI_EXTERNAL_ACK_GLOBAL_KEY: 1 if val else 0}
+        return True
+    if isinstance(val, dict):
+        dirty = False
+        new_dict: dict = {}
+        for key, record in val.items():
+            if record is True:
+                new_dict[key] = 1
+                dirty = True
+            elif record is False:
+                new_dict[key] = 0
+                dirty = True
+            else:
+                new_dict[key] = record
+        if dirty:
+            config["ai_external_acknowledged"] = new_dict
+        return dirty
+    return False
 
 
 def _migrate_custom_models_credentials(current_config: dict) -> bool:

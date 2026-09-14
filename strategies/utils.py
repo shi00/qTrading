@@ -72,6 +72,10 @@ class StrategyContext(TypedDict, total=False):
     on_result: Callable
     on_stream_result: Callable
     on_stream_start: Callable
+    # SEC-01 gap3: 运行时 AI 外发确认请求（由调用方/UI 注入）。
+    # 签名：async (prompt_preview: str, provider: str) -> bool（True=确认外发并继续）。
+    # None 表示调用方无确认能力（如无 UI），策略层回落为直接跳过（policy_not_acknowledged）。
+    on_ai_egress_ack_request: Callable[..., Any] | None
     northbound_data: pd.DataFrame | None
     northbound_flow_data: pd.DataFrame | None
     moneyflow_data: pd.DataFrame | None

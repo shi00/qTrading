@@ -68,6 +68,51 @@ def _dataframe_sizeof(value: Any) -> int:
     return max(1, sys.getsizeof(value, 1024))
 
 
+def _build_egress_prompt_preview(candidates_df: pd.DataFrame | None, context: dict) -> str:
+    """SEC-01 gap3: 构造「真实 prompt 预览」用于外发确认对话框。
+
+    gating 点早于逐股完整预取，故此处用候选集第一股的现有字段（已在筛选结果中）
+    组装一份结构化的预览文本：展示将发送给云端 LLM 的数据类别与首股样例，
+    而非逐股完整 prompt。经 DataSanitizer 脱敏后返回。
+
+    对话框侧会额外标注「示例预览，实际发送内容可能略有差异」，向用户诚实披露预览
+    与最终一致性的边界（SEC-01 gap3 方案结论）。
+    """
+    if candidates_df is None or candidates_df.empty:
+        return ""
+
+    first = candidates_df.iloc[0]
+    sample = _safe_preview_field(first)
+
+    # 数据类别摘要（V1 范围：股票基本信息、行情、财务指标、公开新闻摘要）
+    # 文案经 I18n.get 取 key，locale 已收录中/英；不经 default 提供 CJK 回退（i18n 门禁）。
+    sections = [
+        I18n.get("ai_egress_preview_header"),
+        "- " + I18n.get("ai_egress_preview_stock"),
+        "- " + I18n.get("ai_egress_preview_news"),
+        "",
+        sample,
+    ]
+    return "\n".join(sections)
+
+
+def _safe_preview_field(row: pd.Series) -> str:
+    """提取首股样例为可读文本（脱敏，字段缺失容错）。"""
+    try:
+        name = row.get("name", row.get("ts_code", ""))
+        ts = row.get("ts_code", "")
+        close = row.get("close")
+        pct = row.get("pct_chg")
+        parts = [str(name), str(ts)]
+        if close is not None:
+            parts.append(f"close={DataSanitizer.sanitize_error(str(close))}")
+        if pct is not None:
+            parts.append(f"pct_chg={DataSanitizer.sanitize_error(str(pct))}")
+        return " | ".join(DataSanitizer.sanitize_error(p) for p in parts)
+    except Exception:
+        return ""
+
+
 class AIStrategyMixin:
     """
     Mixin class providing sequential AI analysis capability to any strategy.
@@ -312,31 +357,60 @@ class AIStrategyMixin:
                 )
             return candidates_df
 
-        # --- Guard: AI External Data Acknowledged? (D5-1 / AI-04) ---
+        # --- Guard: AI External Data Acknowledged? (D5-1 / AI-04 / SEC-01) ---
         # run_ai_analysis 是云端专用路径：上方 is_cloud_available() 已保证走到此处必已
         # 配置云端 LLM 的 api_key。本地模型（数据不出本机）无需外发确认——若用户未配云端
         # 或仅配本地，已在 is_cloud_available 提前返回，因此本 guard 仅需按 provider 校验：
-        # 更换 provider 后新 provider 无确认记录 → 未确认 → 跳过 AI 并提示，满足 UN-07。
+        # 更换 provider 后新 provider 无确认记录 → 未确认；外发范围版本升级后旧确认自动失效
+        # （SEC-01，scope_version 不满足）→ 同样需重新确认，满足 UN-07。
         current_provider = ConfigHandler.get_llm_provider()
+        ack_request = context.get("on_ai_egress_ack_request")
         if not ConfigHandler.is_ai_external_acknowledged(provider=current_provider):
-            logger.info(
-                "[AIStrategyMixin] AI external data policy not acknowledged for provider=%s — skipping AI analysis (no external requests initiated)",
-                current_provider,
-            )
-            if on_progress:
-                on_progress(
-                    0,
-                    0,
-                    Message("ai_external_acknowledgment_prompt"),
+            # SEC-01 gap3: 若调用方注入了运行时确认回调（UI），则构造真实 prompt 预览并
+            # 请求用户确认；确认通过后持久化当前 provider+scope 版本并继续执行。否则（无
+            # 确认能力，如夜间/无 UI 调度）回落为直接跳过，确保未经确认绝不发起云端请求。
+            if ack_request is not None:
+                try:
+                    preview = _build_egress_prompt_preview(candidates_df, context)
+                    if await ack_request(preview, current_provider):
+                        ConfigHandler.set_ai_external_acknowledged(provider=current_provider, acknowledged=True)
+                        logger.info(
+                            "[AIStrategyMixin] AI external data policy acknowledged at runtime for provider=%s",
+                            current_provider,
+                        )
+                    else:
+                        logger.info(
+                            "[AIStrategyMixin] User declined AI external data policy for provider=%s — skipping AI analysis",
+                            current_provider,
+                        )
+                        if on_progress:
+                            on_progress(0, 0, Message("ai_external_acknowledgment_declined"))
+                        return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log_classified(
+                        logger,
+                        e,
+                        "llm",
+                        "[AIStrategyMixin] Runtime egress ack request failed (%s: %s) — falling back to skip",
+                    )
+                    return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
+            else:
+                logger.info(
+                    "[AIStrategyMixin] AI external data policy not acknowledged for provider=%s — skipping AI analysis (no external requests initiated)",
+                    current_provider,
                 )
-            # 政策未确认时返回带状态标记的结果行（与其他 AI 路径同构）：
-            # ai_status="policy_not_acknowledged" 让下游能区分"政策未确认"与
-            # "AI 分析失败"；review_manager 对非 "analyzed" 状态不写库，
-            # 避免未经确认的候选结果污染 AI 学习闭环数据。
-            return candidates_df.assign(
-                ai_score=None,
-                ai_status="policy_not_acknowledged",
-            )
+                if on_progress:
+                    on_progress(0, 0, Message("ai_external_acknowledgment_prompt"))
+                # 政策未确认时返回带状态标记的结果行（与其他 AI 路径同构）：
+                # ai_status="policy_not_acknowledged" 让下游能区分"政策未确认"与
+                # "AI 分析失败"；review_manager 对非 "analyzed" 状态不写库，
+                # 避免未经确认的候选结果污染 AI 学习闭环数据。
+                return candidates_df.assign(
+                    ai_score=None,
+                    ai_status="policy_not_acknowledged",
+                )
 
         # --- Guard: DataProcessor Available? ---
         if dp is None:
