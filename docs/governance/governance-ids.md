@@ -54,6 +54,7 @@
 | P3-02 | canonical_for 链接语义正本元数据字段 | 文档体系检视（P3 系列） | [singleton-lifecycle.md](../architecture/singleton-lifecycle.md) / [mvvm.md](../patterns/mvvm.md) | 使用中 |
 | UX-01 | 导航深链协议（TOPIC_NAVIGATE） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-04 | 导航深链协议（与 UX-01 同源） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
+| UX-05 | 复盘聚合统计视图（按策略汇总，日序列 N / 置信区间 / 胜率独立 N，样本量分级提示） | UX 专项检视（review05 可解释性） | [architecture/design-ux05-review-stats.md](../architecture/design-ux05-review-stats.md) | 使用中 |
 | UX-06 | 冷启动到导航可交互端到端 SLA 未实测，以 proxy 构成基线替代 | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | UX-11 | 回测图表 Semantics/锚点经验（摘要/图例 data-testid 独立语义边界） | UX 专项检视 | [task-plans/ux-12-backtest-chart-context-plan.md](../task-plans/ux-12-backtest-chart-context-plan.md) | 使用中 |
 | UX-12 | 回测图表语境修复方案 | UX 专项检视 | [task-plans/ux-12-backtest-chart-context-plan.md](../task-plans/ux-12-backtest-chart-context-plan.md) | 使用中 |

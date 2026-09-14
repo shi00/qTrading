@@ -533,6 +533,10 @@ class _FakeScreenerViewModel:
             )
         )
 
+    async def load_strategy_stats(self) -> None:
+        """UX-05: 模拟 VM load_strategy_stats (默认保持 strategy_stats 为空, 不触真实状态)."""
+        self.method_calls.append("load_strategy_stats")
+
     async def load_history_data(
         self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None
     ) -> Any:

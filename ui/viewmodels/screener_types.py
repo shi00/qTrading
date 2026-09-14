@@ -16,6 +16,7 @@ from typing import Any
 
 import pandas as pd
 
+from data.domain_services.review_stats_service import StrategyStatRow
 from ui.viewmodels import Message
 
 # Stream card limit (moved from View, VM owns card lifecycle)
@@ -255,3 +256,6 @@ class ScreenerState:
     # 仅「有候选数据但筛选后无匹配」时设置 —— 区分「无匹配」(可调低条件) 与「无数据」(需先同步),
     # View 在结果区空态渲染该原因, 提示用户如何恢复。
     empty_message: Message | None = None
+    # UX-05: 复盘聚合统计（按 (strategy_name, benchmark_code) 分组的日序列统计行）。
+    # raw 统计含 SampleGrade 枚举, 不含 locale; View 渲染时映射 i18n key (§3.2).
+    strategy_stats: tuple[StrategyStatRow, ...] = ()

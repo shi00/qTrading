@@ -76,6 +76,8 @@ class FakeScreenerState:
     warnings: tuple = ()
     # AI-03: 本次选股 LLM 调用消耗 (镜像 ScreenerState.ai_usage_summary)
     ai_usage_summary: tuple[int, int, float] | None = None
+    # UX-05: 复盘聚合统计 (镜像 ScreenerState.strategy_stats, 默认空)
+    strategy_stats: tuple = ()
 
 
 class FakeScreenerViewModel:

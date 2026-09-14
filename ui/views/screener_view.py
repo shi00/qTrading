@@ -24,6 +24,7 @@ import typing
 import flet as ft
 import pandas as pd
 
+from data.domain_services import SampleGrade, StrategyStatRow
 from ui.components._markdown_safe import safe_open_url
 from ui.components.flet_type_helpers import (
     get_control_attr,
@@ -753,12 +754,14 @@ def build_history_tree(
     rows: tuple[HistoryTreeRow, ...],
     offset: int,
     has_more: bool,
+    strategy_stats: tuple[StrategyStatRow, ...],
     on_item_click: typing.Callable[[str, str | None, str | None], None],
     on_load_more: typing.Callable[[ft.ControlEvent], None],
 ) -> ft.Control:
     """构建历史树侧栏 (D15: 从 ScreenerView._build_history_tree 提取, props 化).
 
-    状态从 ``state.history_tree`` 派生 (Task 3.2 消除双轨, 不持有 use_state).
+    状态从 ``state.history_tree`` 派生 (Task 3.2 消除双轨, 不持有 use_state)。
+    含 UX-05「策略汇总」展开区 (state.strategy_stats 派生, T4)。
     """
     tree_controls: list[ft.Control] = []
     if not rows:
@@ -825,6 +828,10 @@ def build_history_tree(
         visible=has_more,
     )
 
+    suffix_items: list[ft.Control] = []
+    if strategy_stats:
+        suffix_items.append(_build_review_stats_section(strategy_stats))
+
     return ft.Container(
         content=ft.Column(
             [
@@ -838,6 +845,7 @@ def build_history_tree(
                     padding=ft.Padding.only(left=12, top=10, bottom=5),
                 ),
                 ft.Divider(height=1, color=AppColors.DIVIDER),
+                *suffix_items,
                 ft.ListView(tree_controls, expand=True, spacing=0),
                 load_more_btn,
             ],
@@ -846,6 +854,124 @@ def build_history_tree(
         ),
         bgcolor=AppColors.SURFACE,
         border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
+    )
+
+
+def _format_pct(value: float | None) -> str:
+    """收益分位值 (0.0123 = 1.23%) 格式化; None 用占位符 '—'（R21 None 哨兵, 不伪装 0）。"""
+    return "—" if value is None else f"{value * 100:.2f}%"
+
+
+def _grade_badge(grade: SampleGrade) -> ft.Control | None:
+    """样本量分级角标: insufficient/limited 提示文案; adequate 不显示以减少噪音。"""
+    key = {
+        SampleGrade.INSUFFICIENT: "review_stats_insufficient",
+        SampleGrade.LIMITED: "review_stats_limited",
+        SampleGrade.ADEQUATE: None,
+    }.get(grade)
+    if key is None:
+        return None
+    color = AppColors.WARNING if grade == SampleGrade.LIMITED else AppColors.ERROR
+    return ft.Container(
+        content=ft.Text(I18n.get(key), size=AppStyles.FONT_SIZE_CAPTION, color=color),
+        padding=ft.Padding.only(top=2),
+    )
+
+
+def _ci_text(lo: float | None, hi: float | None) -> str:
+    """t 分布 95% 置信区间文本; 任一端 None 表示无法计算 (n<30 或 std 无效)。"""
+    if lo is None or hi is None:
+        return "—"
+    return f"[{lo * 100:.2f}%, {hi * 100:.2f}%]"
+
+
+def _build_review_stats_section(strategy_stats: tuple[StrategyStatRow, ...]) -> ft.Control:
+    """history 侧栏「策略汇总」展开区 (UX-05, T4)。
+
+    按 (strategy_name, benchmark_code) 分组: 行内主指标 = T+1 Alpha / CI / 日序列 N +
+    胜率独立 N 角标 + 日均纳入股票数; T+5 为折叠内容并标注「无超额基准」; 基准未知组与
+    可比组强视觉分隔 (四审 L3)。纯声明式 (props 派生自 state.strategy_stats), 不持业务状态 (§3.2)。
+    """
+    tiles: list[ft.Control] = []
+    for row in strategy_stats:
+        alpha = row.alpha
+        if row.benchmark_known:
+            hm_line = f"{I18n.get('review_stats_alpha')}: {_format_pct(alpha.mean)}"
+            ci_line = f"{I18n.get('review_stats_ci')}: {_ci_text(alpha.ci_lower, alpha.ci_upper)}"
+            main_badge = _grade_badge(row.alpha_grade)
+        else:
+            hm_line = f"{I18n.get('review_stats_benchmark_unknown')} · {I18n.get('review_stats_no_excess_benchmark')}"
+            ci_line = ""
+            main_badge = None
+
+        main_lines = [hm_line, ci_line, f"{I18n.get('review_stats_n_dates')}: {alpha.n}"]
+        subtitle_items = [ft.Text("  ·  ".join(x for x in main_lines if x), size=AppStyles.FONT_SIZE_CAPTION)]
+        if main_badge is not None:
+            subtitle_items.append(main_badge)
+
+        win_rate_text = (
+            f"{I18n.get('review_stats_win_rate')}: {f'{row.win_rate * 100:.1f}%' if row.win_rate is not None else '—'}"
+        )
+        win_n_text = f"{I18n.get('review_stats_win_n')}: {row.win_n}"
+        win_badge = _grade_badge(row.win_grade)
+        win_items: list[ft.Control] = [
+            ft.Text("  ·  ".join([win_rate_text, win_n_text]), size=AppStyles.FONT_SIZE_CAPTION)
+        ]
+        if win_badge is not None:
+            win_items.append(win_badge)
+
+        details: list[ft.Control] = []
+        details.append(ft.Column(win_items, spacing=2))
+        details.append(
+            ft.Text(
+                f"{I18n.get('review_stats_avg_daily_count')}: {row.avg_daily_count:.1f}",
+                size=AppStyles.FONT_SIZE_CAPTION,
+            )
+        )
+        details.append(
+            ft.Text(
+                f"{I18n.get('review_stats_t5')}: {_format_pct(row.t5.mean)} "
+                f"({I18n.get('review_stats_no_excess_benchmark')})",
+                size=AppStyles.FONT_SIZE_CAPTION,
+            )
+        )
+        details.append(
+            ft.Text(
+                I18n.get("review_stats_survivor_bias"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        )
+
+        benchmark_label = row.benchmark_code or I18n.get("review_stats_benchmark_unknown")
+        tiles.append(
+            ft.ExpansionTile(
+                title=ft.Text(
+                    f"{translate_strategy_name(row.strategy_name)} · {benchmark_label}",
+                    size=AppStyles.FONT_SIZE_BODY,
+                ),
+                subtitle=ft.Column(subtitle_items, spacing=2),
+                controls=[ft.Column(details, spacing=8)],
+                collapsed_icon_color=AppColors.TEXT_SECONDARY,
+                dense=True,
+            )
+        )
+
+    return ft.Column(
+        [
+            ft.Container(
+                content=ft.Text(
+                    I18n.get("review_stats_title"),
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                    size=AppStyles.FONT_SIZE_LG,
+                ),
+                padding=ft.Padding.only(left=12, top=10, bottom=5),
+            ),
+            *tiles,
+            ft.Divider(height=1, color=AppColors.DIVIDER),
+        ],
+        spacing=0,
     )
 
 
@@ -1652,6 +1778,7 @@ def _build_screener_main_body(
     table_card: ft.Container,
     log_card: ft.Container,
     history_tree: typing.Any,
+    strategy_stats: tuple[StrategyStatRow, ...],
     on_tree_item_click: typing.Callable[[str, str | None, str | None], None],
     on_load_more_history: typing.Callable[[ft.ControlEvent], None],
     on_load_width: typing.Callable[[], int | None],
@@ -1671,6 +1798,7 @@ def _build_screener_main_body(
             history_tree.rows,
             history_tree.offset,
             history_tree.has_more,
+            strategy_stats,
             on_tree_item_click,
             on_load_more_history,
         ),
@@ -1822,6 +1950,9 @@ def ScreenerView(
         if page := _get_page():
             page.run_task(_load_history_tree, True)
 
+    async def _load_strategy_stats() -> None:
+        await vm.load_strategy_stats()
+
     def _on_mode_change(e: ft.ControlEvent) -> None:
         selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
         if not selected:
@@ -1833,6 +1964,7 @@ def ScreenerView(
         if new_mode == "HISTORY":
             vm.switch_to_history()
             if page := _get_page():
+                page.run_task(_load_strategy_stats)
                 page.run_task(_load_history_tree, False)
         else:
             vm.switch_to_realtime()
@@ -1945,6 +2077,7 @@ def ScreenerView(
         table_card=table_card,
         log_card=log_card,
         history_tree=state.history_tree,
+        strategy_stats=state.strategy_stats,
         on_tree_item_click=_on_tree_item_click,
         on_load_more_history=_on_load_more_history,
         on_load_width=lambda: int(vm.get_splitter_width("ui_splitter_screener_history", 250)),

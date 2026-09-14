@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 # 超出后由 _read_db 抛 ValueError，BacktestDataProvider.preload_range 捕获并降级逐日查询。
 _MAX_SCREENING_RANGE_ROWS = 1_500_000
 
+# UX-05: 复盘聚合统计的历史窗口（天）。get_history_tree 与 get_strategy_review_stats 共用，
+# 消除魔术字符串漂移（四审 L1/m1/m2）。值拼接进 SQL 的 INTERVAL，为受控模块常量、非用户输入，
+# 无注入面（review03-C7 约束的是用户输入可变点）。
+REVIEW_STATS_WINDOW_DAYS = 180
+
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
 
@@ -200,7 +205,7 @@ class ScreenerDao(BaseDao):
         sql = """
             SELECT trade_date, strategy_name, COUNT(*) as cnt, MAX(run_id) as run_id
             FROM screening_history
-            WHERE trade_date >= CURRENT_DATE - INTERVAL '180 days'
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '{REVIEW_STATS_WINDOW_DAYS} days'
             GROUP BY trade_date, strategy_name
             ORDER BY trade_date DESC, COUNT(*) ASC, MIN(created_at) DESC
             LIMIT $1 OFFSET $2
@@ -227,6 +232,62 @@ class ScreenerDao(BaseDao):
             if strategy_name:
                 stmt = stmt.where(sh.c.strategy_name == strategy_name)
         stmt = stmt.order_by(sh.c.ai_score.desc())
+        return await self._read_db_select(stmt)
+
+    async def get_strategy_review_stats(self) -> pd.DataFrame:
+        """按 (strategy_name, benchmark_code, trade_date) 返回复盘日组合聚合统计（UX-05）。
+
+        口径（设计 v5）：
+        - 覆盖语义：同 (trade_date, strategy_name, ts_code) 仅保留最新快照
+          （DISTINCT ON ... ORDER BY run_id DESC，四审 L1），消除被淘汰股票行/多运行日加权残留。
+        - 指标独立 N：t1_pct / t5_pct / alpha 各以非 NULL 股票独立聚类求日组合均值与有效
+          样本数（AVG/COUNT 自动忽略 NULL，四审 M4）。
+        - 胜率：prediction_result 为 WIN/LOSS 的逐股计数（样例单位=股票行，跨日由消费端累计，
+          与日序列 N 独立，四审 M2）。
+        - NULL 基准：benchmark_code 为 NULL 的历史行自成一组（UI 归入「基准未知」组）。
+        - 窗口：近 REVIEW_STATS_WINDOW_DAYS 天，与 get_history_tree 共用常量。
+        全 SQLAlchemy Core（参数化 window_days），无 SQL 注入（R4）。
+        """
+        sh = ScreeningHistory.__table__
+        latest = (
+            sa.select(
+                sh.c.trade_date,
+                sh.c.strategy_name,
+                sh.c.ts_code,
+                sh.c.benchmark_code,
+                sh.c.t1_pct,
+                sh.c.t5_pct,
+                sh.c.alpha,
+                sh.c.prediction_result,
+            )
+            .where(
+                sh.c.trade_date
+                >= sa.func.current_date() - sa.bindparam("window_days", REVIEW_STATS_WINDOW_DAYS, type_=sa.INTEGER)
+            )
+            # DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... run_id DESC
+            .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
+            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.run_id.desc())
+            .subquery("latest_review_stats")
+        )
+        stmt = (
+            sa.select(
+                latest.c.trade_date,
+                latest.c.strategy_name,
+                latest.c.benchmark_code,
+                sa.func.count().label("daily_cnt"),
+                sa.func.avg(latest.c.t1_pct).label("t1_mean"),
+                sa.func.count(latest.c.t1_pct).label("t1_n"),
+                sa.func.avg(latest.c.t5_pct).label("t5_mean"),
+                sa.func.count(latest.c.t5_pct).label("t5_n"),
+                sa.func.avg(latest.c.alpha).label("alpha_mean"),
+                sa.func.count(latest.c.alpha).label("alpha_n"),
+                sa.func.count().filter(latest.c.prediction_result == "WIN").label("win_cnt"),
+                sa.func.count().filter(latest.c.prediction_result == "LOSS").label("loss_cnt"),
+            )
+            .select_from(latest)
+            .group_by(latest.c.trade_date, latest.c.strategy_name, latest.c.benchmark_code)
+            .order_by(latest.c.strategy_name, latest.c.benchmark_code, latest.c.trade_date)
+        )
         return await self._read_db_select(stmt)
 
     async def get_pending_reviews(self):
