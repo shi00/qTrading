@@ -63,6 +63,8 @@ class FakeScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     status_action_key: str | None = None
     is_retrying: bool = False
+    # UX-03: 空结果时可操作原因横幅 Message (镜像 ScreenerState.empty_message)
+    empty_message: Message | None = None
     stock_filter: str = ""
     # C2b: 当前页 locale-neutral 原始行 (View 只读 state 快照)
     current_page_rows: tuple = ()
