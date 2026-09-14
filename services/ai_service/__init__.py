@@ -85,6 +85,11 @@ from services.ai_service.token_budget import (
     _get_model_context_window as _get_model_context_window,
     _reset_token_estimator as _reset_token_estimator,
 )
+
+# AIUsageTracker 是 @register_singleton 单例（R15）。经组合根 side-effect 导入触发注册，
+# 保证无论 CI 测试分片如何，import services.ai_service 后 AIUsageTracker 都在 singleton
+# registry 中（与 singleton-lifecycle.md 登记一致），并被 _reset_all_singletons 正确隔离。
+from services.ai_service.usage_tracker import AIUsageTracker as AIUsageTracker
 from services.local_model_manager import LocalModelManager
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
