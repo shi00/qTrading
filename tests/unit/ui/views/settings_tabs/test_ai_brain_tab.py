@@ -1389,3 +1389,49 @@ class TestEnterSubmit:
             assert isinstance(field, ft.TextField)
             assert field.multiline is True
             assert field.on_submit is None, f"{key} 多行 Enter 不应触发提交 (Ctrl+Enter 不可行登记)"
+
+
+# ============================================================================
+# SEC-02: 数据外发与防护边界披露卡片 (UN-07/UN-08 AI 风险知情)
+# ============================================================================
+
+
+class TestAIBrainTabDataBoundaryDisclosure:
+    """SEC-02 第三层：向用户披露提示注入防护边界。
+
+    渲染侧：card_data_boundary 的正文 ft.Text 必须出现在挂载结果中（强断言 value 匹配
+    i18n key 占位，随 mock_i18n 返回 ``f"i18n[{key}]"``）。
+    源码契约侧：标题/正文必须经 I18n.get 消费（禁止硬编码中文），且中英 locale 的
+    key 均已收录且非空。
+    """
+
+    def test_render_includes_boundary_body_text(self, ai_brain_tab_env) -> None:
+        """挂载渲染结果中存在 value == ``i18n[settings_ai_data_boundary_body]`` 的 ft.Text。"""
+        env = ai_brain_tab_env
+        text_values = [
+            getattr(ctrl, "value", None) for ctrl in _walk_all_controls(env["result"]) if isinstance(ctrl, ft.Text)
+        ]
+        assert "i18n[settings_ai_data_boundary_body]" in text_values, (
+            "SEC-02 披露正文未渲染：card_data_boundary 未挂入 ai_brain_tab 布局"
+        )
+
+    def test_source_consumes_boundary_keys_via_i18n(self) -> None:
+        """ai_brain_tab 源码通过 I18n.get 消费标题与正文 key（无中文硬编码）。"""
+        source = _read_source()
+        assert 'I18n.get("settings_ai_data_boundary_title")' in source
+        assert 'I18n.get("settings_ai_data_boundary_body")' in source
+
+    def test_boundary_keys_present_in_both_locales(self) -> None:
+        """中英 locale 均已收录数据外发防护边界标题与正文 key，且非空。"""
+        import json
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parents[5]  # repo 根 (worktree 共享项目根)
+        for locale in ("zh_CN", "en_US"):
+            path = base / "locales" / locale / "strings.json"
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            title = data.get("settings_ai_data_boundary_title")
+            body = data.get("settings_ai_data_boundary_body")
+            assert isinstance(title, str) and title.strip(), f"{locale} settings_ai_data_boundary_title 缺失或为空"
+            assert isinstance(body, str) and body.strip(), f"{locale} settings_ai_data_boundary_body 缺失或为空"

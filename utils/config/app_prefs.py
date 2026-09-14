@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from utils import config_handler as cfg
-from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY
+from utils.config_models import AI_EGRESS_SCOPE_VERSION, AI_EXTERNAL_ACK_GLOBAL_KEY
 
 DEFAULTS = cfg.ConfigHandler.DEFAULT_CONFIG
 
@@ -21,23 +21,49 @@ def set_onboarding_complete(complete=True):
     return cfg.ConfigHandler.save_config({"onboarding_complete": complete})
 
 
-def is_ai_external_acknowledged(provider: str | None = None) -> bool:
-    """Task 2.2 / AI-04: 用户是否已确认某 provider 的 AI 外发数据知情政策。
+def is_ai_external_acknowledged(provider: str | None = None, *, scope_version: int = AI_EGRESS_SCOPE_VERSION) -> bool:
+    """Task 2.2 / AI-04 / SEC-01: 用户是否已确认某 provider 的 AI 外发数据知情政策。
 
-    ``provider=None`` 用于 UI 层「是否展示外发提示文案」的宽松判断（任意已确认即 True）；
-    传入具体 provider 时精确判断「该 provider 是否确认过」。历史全局确认
-    （旧 bool ``true`` 迁移到的 ``__global__`` 键）对任意 provider 回落为已确认。
+    存储值语义（SEC-01）：``ai_external_acknowledged`` 为 ``{provider: scope_version}``，
+    即「该 provider 在哪个外发范围版本下被确认过」。仅当记录值不小于当前
+    ``scope_version`` 时视为已确认——外发内容范围版本升级（向 prompt 新增数据类别时
+    ＂AI_EGRESS_SCOPE_VERSION 递增）后，旧确认自动失效，强制用户重新确认。
+
+    ``provider=None`` 用于 UI 层「是否展示外发提示文案」的宽松判断（任意 provider 在当前
+    版本下已确认即 True）；传入具体 provider 时精确判断「该 provider 是否确认过」。历史
+    全局确认（旧 bool ``true`` 迁移到的 ``__global__`` 键，值视为 scope_version 1）对任意
+    provider 回落——仅当当前版本仍与迁移版本一致时生效。
+
+    兼容读取：迁移前的 ``bool`` 记录（True）视作 scope_version 1。
     """
+
+    def _version(record: object) -> int:
+        # 迁移兜底：旧 bool ``True`` / 数值记录都解释为版本号。
+        if record is True:
+            return 1
+        try:
+            return int(record)
+        except (TypeError, ValueError):
+            return 0
+
     ack_dict = cfg.ConfigHandler.get_typed("ai_external_acknowledged", dict, {})
     if provider is None:
-        return bool(ack_dict)
-    return bool(ack_dict.get(provider) or ack_dict.get(AI_EXTERNAL_ACK_GLOBAL_KEY))
+        return any(_version(v) >= scope_version for v in ack_dict.values())
+    # 精确 provider 优先；无专属记录时回落全局确认（等价于以 scope_version 1 确认过）
+    provider_version = _version(ack_dict.get(provider))
+    global_version = _version(ack_dict.get(AI_EXTERNAL_ACK_GLOBAL_KEY))
+    return provider_version >= scope_version or global_version >= scope_version
 
 
-def set_ai_external_acknowledged(provider: str, acknowledged: bool) -> bool:
-    """Task 2.2 / AI-04: 按 provider 持久化 AI 外发知情确认状态。"""
+def set_ai_external_acknowledged(
+    provider: str, acknowledged: bool, *, scope_version: int = AI_EGRESS_SCOPE_VERSION
+) -> bool:
+    """Task 2.2 / AI-04 / SEC-01: 按 provider 持久化 AI 外发知情确认状态。
+
+    每次确认都以当前外发范围版本写入；scope_version 升级后旧记录自动失效。
+    """
     ack_dict = cfg.ConfigHandler.get_typed("ai_external_acknowledged", dict, {})
-    ack_dict[provider] = bool(acknowledged)
+    ack_dict[provider] = scope_version if bool(acknowledged) else 0
     return cfg.ConfigHandler.set_typed("ai_external_acknowledged", ack_dict)
 
 

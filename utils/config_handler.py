@@ -424,12 +424,23 @@ class ConfigHandler:
         return app_prefs.set_onboarding_complete(complete)
 
     @staticmethod
-    def is_ai_external_acknowledged(provider: str | None = None) -> bool:
-        return app_prefs.is_ai_external_acknowledged(provider)
+    def is_ai_external_acknowledged(provider: str | None = None, *, scope_version: int | None = None) -> bool:
+        from utils.config_models import AI_EGRESS_SCOPE_VERSION
+
+        return app_prefs.is_ai_external_acknowledged(
+            provider,
+            scope_version=scope_version if scope_version is not None else AI_EGRESS_SCOPE_VERSION,
+        )
 
     @staticmethod
-    def set_ai_external_acknowledged(provider: str, acknowledged: bool) -> bool:
-        return app_prefs.set_ai_external_acknowledged(provider, acknowledged)
+    def set_ai_external_acknowledged(provider: str, acknowledged: bool, *, scope_version: int | None = None) -> bool:
+        from utils.config_models import AI_EGRESS_SCOPE_VERSION
+
+        return app_prefs.set_ai_external_acknowledged(
+            provider,
+            acknowledged,
+            scope_version=scope_version if scope_version is not None else AI_EGRESS_SCOPE_VERSION,
+        )
 
     @staticmethod
     def is_auto_update_enabled():

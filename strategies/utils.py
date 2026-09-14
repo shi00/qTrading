@@ -72,6 +72,10 @@ class StrategyContext(TypedDict, total=False):
     on_result: Callable
     on_stream_result: Callable
     on_stream_start: Callable
+    # SEC-01 gap3: 运行时 AI 外发确认请求（由调用方/UI 注入）。
+    # 签名：async (prompt_preview: str, provider: str) -> bool（True=确认外发并继续）。
+    # None 表示调用方无确认能力（如无 UI），策略层回落为直接跳过（policy_not_acknowledged）。
+    on_ai_egress_ack_request: Callable[..., Any] | None
     northbound_data: pd.DataFrame | None
     northbound_flow_data: pd.DataFrame | None
     moneyflow_data: pd.DataFrame | None
@@ -84,6 +88,9 @@ class StrategyContext(TypedDict, total=False):
     _dependency_status: dict[str, Any]
     _diagnostics: dict[str, Any]
     _metadata: dict[str, Any]
+    # UX-04: VolumeBreakout 记录自动调整后的生效阈值 (pct_chg_min, pct_chg_max, turnover_min)，
+    # 供 build_attribution 以与展示一致的阈值生成归因 (二次检视 Ma4)。
+    _vol_break_thresholds: tuple[float, float, float]
     # D3-4: 策略执行期业务警告通道。策略检测到非致命参数/数据问题时 append
     # Message(i18n key + params)，交由 base filter 初始化本次运行通道、VM 透传、
     # View 在结果区上方渲染。符合 §3.2 策略只产出 i18n key 约束。

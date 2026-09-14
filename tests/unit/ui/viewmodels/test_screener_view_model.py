@@ -887,3 +887,36 @@ class TestBuildAiFailedBannerMessage:
 
     def test_none_input_no_message(self):
         assert _build_ai_failed_banner_message(None) is None
+
+
+class TestEgressAckBridge:
+    """SEC-01 gap3：VM 侧运行时外发确认桥接（_request_egress_ack / resolve_ai_egress_ack）。
+
+    验证：策略层经注入回调 await 的 Future 与 View 落地的 resolve 在同一 loop 内正确
+    交互——state 写入/清空、确认/拒绝的返回值、未决 Future 悬挂防护。
+    """
+
+    @pytest.mark.asyncio
+    async def test_agree_resolves_true_and_clears_state(self, vm):
+        task = asyncio.create_task(vm._request_egress_ack("preview::duzeta", "deepseek"))
+        # 让协程运行到 await future 处并写入 state
+        await asyncio.sleep(0)
+        assert vm.state.pending_egress_ack_preview == "preview::duzeta"
+        assert vm.state.pending_egress_ack_provider == "deepseek"
+        vm.resolve_ai_egress_ack(True)
+        assert await task is True
+        assert vm.state.pending_egress_ack_preview == ""
+
+    @pytest.mark.asyncio
+    async def test_decline_resolves_false_and_clears_state(self, vm):
+        task = asyncio.create_task(vm._request_egress_ack("preview", "deepseek"))
+        await asyncio.sleep(0)
+        vm.resolve_ai_egress_ack(False)
+        assert await task is False
+        assert vm.state.pending_egress_ack_provider == ""
+
+    @pytest.mark.asyncio
+    async def test_resolve_with_no_pending_is_noop(self, vm):
+        # 无待决确认时 resolve 不抛错（View 过期事件防护）
+        vm.resolve_ai_egress_ack(True)
+        assert vm.state.pending_egress_ack_preview == ""

@@ -34,6 +34,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.slider_input import SliderInput
 from ui.components.state_views import EmptyState
@@ -112,6 +113,7 @@ _HIDDEN_COLS = frozenset(
         "t1_price",
         "t5_price",
         "params_snapshot",
+        "_filter_attribution",  # UX-04: 结构化筛选归因列 (仅详情弹窗展示, 不上表格)
     }
 )
 
@@ -1821,6 +1823,7 @@ def _build_stock_detail_dialog(
     page: ft.Page | None,
     on_close: typing.Callable[[], None],
     on_add_to_watchlist: typing.Callable[[str, str], None],
+    column_label_fn: typing.Callable[[str], str] | None = None,
 ) -> ft.Control | None:
     """按需构建股票详情对话框."""
     if detail_dialog_data is None:
@@ -1832,6 +1835,7 @@ def _build_stock_detail_dialog(
         open_state=True,
         on_close=on_close,
         on_add_to_watchlist=on_add_to_watchlist,
+        column_label_fn=column_label_fn,
     )
 
 
@@ -2090,6 +2094,23 @@ def ScreenerView(
         page=_get_page(),
         on_close=lambda: set_detail_dialog_data(None),
         on_add_to_watchlist=_on_add_to_watchlist,
+        column_label_fn=lambda col: vm.get_column_alias("screening_history", col),
+    )
+
+    # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，
+    # 用户「同意」调 vm.resolve_ai_egress_ack(True) 继续 AI；「拒绝」落 False 跳过。
+    egress_ack_dialog = (
+        ConfirmDialog(
+            open_state=bool(state.pending_egress_ack_preview),
+            title=I18n.get("ai_external_acknowledgment_dialog_title"),
+            body=f"{I18n.get('ai_external_acknowledgment_checkbox')}\n\n{state.pending_egress_ack_preview}",
+            on_confirm=lambda: vm.resolve_ai_egress_ack(True),
+            on_cancel=lambda: vm.resolve_ai_egress_ack(False),
+            confirm_text=I18n.get("ai_external_acknowledgment_dialog_confirm"),
+            cancel_text=I18n.get("ai_external_acknowledgment_dialog_cancel"),
+        )
+        if state.pending_egress_ack_preview
+        else None
     )
 
     return ft.Container(
@@ -2099,6 +2120,7 @@ def ScreenerView(
                 *([banner] if (banner := _build_screener_warning_banner(state.warnings)) is not None else []),
                 main_body,
                 *([dialog_control] if dialog_control is not None else []),
+                *([egress_ack_dialog] if egress_ack_dialog is not None else []),
             ],
             expand=True,
             spacing=15,
