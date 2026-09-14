@@ -4133,3 +4133,35 @@ class TestGuillemetReferences:
             "## 数据库设置\n",
         )
         assert check() == []
+
+    def test_accepts_english_suffixed_heading(self, tmp_path, monkeypatch):
+        """目标标题含英文括注（如「已知架构技术债 (Known Technical Debt)」）时，引用中文名应通过（X1 误报源）。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 CONTRIBUTING.md「已知架构技术债」\n",
+            "## 已知架构技术债 (Known Technical Debt)\n",
+        )
+        assert check() == []
+
+    def test_detects_dead_reference_with_mismatched_english_suffix(self, tmp_path, monkeypatch):
+        """标题中文基名与引用不同（即便带英文括注）→ 仍报错，防止归一化过度松弛。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 CONTRIBUTING.md「文档一致性校验」\n",
+            "## 数据库设置 (Database Setup)\n",
+        )
+        errors = check()
+        assert len(errors) == 1
+        assert "无同名标题" in errors[0]
+
+    def test_accepts_full_heading_reference_with_english_suffix(self, tmp_path, monkeypatch):
+        """引用完整英文括注标题本身（如「Database (DB)」）→ 精确命中，不受归一化影响。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "见 CONTRIBUTING.md「Database (DB)」\n",
+            "## Database (DB)\n",
+        )
+        assert check() == []

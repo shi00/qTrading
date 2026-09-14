@@ -2228,6 +2228,14 @@ def _extract_heading_texts(content: str) -> set[str]:
     return headings
 
 
+def _strip_english_suffix(heading: str) -> str:
+    """剥离标题末尾的英文括注（如「已知架构技术债 (Known Technical Debt)」→「已知架构技术债」）。
+
+    仅剥离含 ASCII 字母的圆括号后缀，避免误删中文括注或关键语义；不匹配则原样返回。
+    """
+    return re.sub(r"\s*\([^)]*[A-Za-z][^)]*\)$", "", heading)
+
+
 def check_guillemet_references() -> list[str]:
     """检查项 20：书名号式章节引用一致性（GDR-13）。
 
@@ -2251,10 +2259,12 @@ def check_guillemet_references() -> list[str]:
                 continue
             headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
             if not any(h == section or h.endswith(f"：{section}") for h in headings):
-                errors.append(
-                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
-                    f"（现有标题示例: {sorted(headings)[:6]}）"
-                )
+                normalized = {_strip_english_suffix(h) for h in headings}
+                if not any(h == section or h.endswith(f"：{section}") for h in normalized):
+                    errors.append(
+                        f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                        f"（现有标题示例: {sorted(headings)[:6]}）"
+                    )
     return errors
 
 
