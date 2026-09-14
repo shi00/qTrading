@@ -101,6 +101,9 @@ class TestNorthboundFlowStrategy:
         params = strat.get_parameters()
         names = {p["name"] for p in params}
         assert names == {"nb_flow_min", "total_mv_min"}
+        # UX-03: unit 为参数单位单一数据源, 须与 threshold_in_data_unit 换算单位一致 (R20)。
+        unit_by_name = {p["name"]: p["unit"] for p in params}
+        assert unit_by_name == {"nb_flow_min": "yi_cny", "total_mv_min": "yi_cny"}
 
     # ----- 北向资金净流入阈值 (gating) -----
 

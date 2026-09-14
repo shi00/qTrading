@@ -185,6 +185,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             {
                 "name": "nb_flow_min",
                 "label_key": "param_nb_flow_min",
+                "unit": "yi_cny",
                 "type": "slider",
                 "min": 0,
                 "max": 200,
@@ -194,6 +195,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             {
                 "name": "total_mv_min",
                 "label_key": "param_total_mv_min",
+                "unit": "yi_cny",
                 "type": "slider",
                 "min": 0,
                 "max": 10000,
@@ -270,6 +272,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             {
                 "name": "inst_net_min",
                 "label_key": "param_inst_net_min",
+                "unit": "wan_cny",
                 "type": "slider",
                 "min": 0,
                 "max": 20000,
@@ -335,6 +338,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
             {
                 "name": "block_amount_min",
                 "label_key": "param_block_amount_min",
+                "unit": "wan_cny",
                 "type": "slider",
                 "min": 0,
                 "max": 10000,

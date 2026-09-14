@@ -373,6 +373,11 @@ class TestCashFlowStrategy(unittest.TestCase):
 class TestLargePEStrategy(unittest.TestCase):
     """测试大盘低PE策略"""
 
+    def test_get_parameters_declares_unit(self):
+        """UX-03: market_cap_min 声明 yi_cny 单位 (total_mv 万元列, *10000=亿)."""
+        unit_map = {p["name"]: p.get("unit") for p in self.strategy.get_parameters()}
+        assert unit_map.get("market_cap_min") == "yi_cny"
+
     def setUp(self):
         self.strategy = LargePEStrategy()
         self.sample_df = pd.DataFrame(
