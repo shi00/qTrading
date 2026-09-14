@@ -409,3 +409,17 @@ class TestNeutralizeExternalText:
         text = "贵州茅台 600519.SH 涨停，涨幅10%"
         result = neutralize_external_text(text)
         assert "600519" in result
+
+    def test_pii_bank_card_masked(self):
+        """外部文本中的银行卡号应被脱敏"""
+        text = "公司公告: 收款账户 6222021234567890 已变更"
+        result = neutralize_external_text(text)
+        assert "6222021234567890" not in result
+        assert "***" in result
+
+    def test_pii_credit_code_masked(self):
+        """外部文本中的统一社会信用代码应被脱敏"""
+        text = "公司公告: 统一社会信用代码 91310110MA1K4Y1234 已完成变更"
+        result = neutralize_external_text(text)
+        assert "91310110MA1K4Y1234" not in result
+        assert "***" in result
