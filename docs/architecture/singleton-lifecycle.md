@@ -107,7 +107,7 @@ def __init__(self, *, config=None, clock=None):
 `TushareClient` 是注册单例中唯一持有外部 SDK 全局状态（tushare SDK 的 `ts.set_token` + `ts.pro_api`）的实例，特殊点如下：
 
 - **Token 注入**：构造函数 `__init__(token=None, *, config=None, clock=None)` 支持依赖注入，`token` 缺省时走 `ConfigHandler.get_token()`（生产）或注入的 `config`（测试）。
-- **`pro` 字段类型注解简化**：声明为非 Optional 的 `TushareProApi` 以避免 40+ 处 `reportOptionalMemberAccess` warning，运行时可能为 None（token 未设置时）。已登记为 [known-technical-debt.md](../debt/known-technical-debt.md) P3-Tushare-Client-Lazy-Markers。
-- **`_token_invalid` 全局熔断标志**：跨同步路径（`set_token()` 重置）与异步路径（`_query_with_retry` 触发熔断）读写，未持锁（async 路径不能持 `threading.Lock`）。已登记为 [known-technical-debt.md](../debt/known-technical-debt.md) P3-Tushare-Token-Invalid-Race。
+- **`pro` 字段类型注解简化**：声明为非 Optional 的 `TushareProApi` 以避免 40+ 处 `reportOptionalMemberAccess` warning（见 `tushare_client.py` `pro` 字段旁注释），运行时可能为 None（token 未设置时）由 `_get_pro` 经 `TushareConfigError` 抛出。
+- **`_token_invalid` 全局熔断标志**：跨同步路径（`set_token()`/`set_token_async()` 重置）与异步路径（`_handle_api_call` 触发熔断）读写，经 `_get_token_invalid_lock()` 提供的 loop-local `asyncio.Lock` 串行化（async 路径不能持 `threading.Lock`，R11 合规）。
 - **Token 脱敏**：所有日志与异常消息中 token 必须经 `DataSanitizer` 脱敏（R9 红线），由 `scripts/check_redlines.py` 的 `check_R_tushare_token_log` 静态守护。
 
