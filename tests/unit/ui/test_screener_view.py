@@ -274,6 +274,37 @@ class TestBuildStrategyOptions:
         assert result[0].text is not None
         assert "(!)" in result[0].text
 
+    def test_supports_ai_adds_badge_suffix(self):
+        """supports_ai=True 时追加 [AI] 徽章 (AI-05)，且仍经 I18n.get 翻译 name_key。"""
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key: {
+                "strategy_ai_active_name": "AI 深度精选",
+                "strategy_ai_badge": "AI",
+            }.get(key, key)
+            result = _build_strategy_options(
+                (StrategyDepRow(key="ai", name_key="strategy_ai_active_name", supports_ai=True),)
+            )
+        assert result[0].text == "AI 深度精选 [AI]"
+
+    def test_ai_badge_and_missing_apis_coexist(self):
+        """AI 徽章与 (!) 警告可共存 (AI-05)。"""
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key: {
+                "strategy_ai_active_name": "AI 深度精选",
+                "strategy_ai_badge": "AI",
+            }.get(key, key)
+            result = _build_strategy_options(
+                (
+                    StrategyDepRow(
+                        key="ai",
+                        name_key="strategy_ai_active_name",
+                        supports_ai=True,
+                        missing_apis=("api1",),
+                    ),
+                )
+            )
+        assert result[0].text == "AI 深度精选 [AI] (!)"
+
     def test_empty_strategies(self):
         """空策略列表返回空 options。"""
         assert _build_strategy_options(()) == []

@@ -251,6 +251,7 @@ class StrategyMetaMixin:
                     key=key,
                     name_key=name_key,
                     missing_apis=tuple(info.get("missing_apis", [])),
+                    supports_ai=bool(strategy_obj.supports_ai),
                 )
             )
         return tuple(rows)

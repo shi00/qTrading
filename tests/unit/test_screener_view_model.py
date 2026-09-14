@@ -1691,6 +1691,7 @@ class TestScreenerViewModelLoadStrategies:
         vm = ScreenerViewModel()
         mock_strategy = MagicMock()
         mock_strategy.name_key = "strategy_value_name"
+        mock_strategy.supports_ai = False  # AI-05: value 值策略不触发 AI 分析
         vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
         mock_strategies = {"value": {"name": "价值策略", "missing_apis": []}}
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value=mock_strategies)
@@ -1699,7 +1700,9 @@ class TestScreenerViewModelLoadStrategies:
 
         assert vm.state.strategies_loaded is True
         # D10: dict 收敛为不可变 StrategyDepRow 行 (name → name_key raw i18n key)
-        assert vm.state.strategies_with_dep == (StrategyDepRow(key="value", name_key="strategy_value_name"),)
+        assert vm.state.strategies_with_dep == (
+            StrategyDepRow(key="value", name_key="strategy_value_name", supports_ai=False),
+        )
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")

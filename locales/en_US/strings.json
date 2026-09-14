@@ -302,6 +302,7 @@
     "strategy_param_range_invalid": "Invalid strategy parameter range: lower bound {min} exceeds upper bound {max}",
     "screener_score": "Score",
     "screener_view_details": "View Details",
+    "strategy_ai_badge": "AI",
     "strategy_ai_active_name": "AI Deep Dive (Beta)",
     "strategy_ai_active_desc": "AI Auto-Selection: Quant filter for active stocks + DeepSeek/AI analysis of news and reports.",
     "strategy_ai_nightly_name": "AI Auto Nightly Screening",

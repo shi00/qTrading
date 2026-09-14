@@ -285,6 +285,8 @@ def _build_strategy_options(strategies_with_dep: tuple[StrategyDepRow, ...]) -> 
     options = []
     for row in strategies_with_dep:
         name = I18n.get(row.name_key)
+        if row.supports_ai:
+            name = f"{name} [{I18n.get('strategy_ai_badge')}]"  # AI-05: 支持 AI 的策略加徽章
         if row.missing_apis:
             name = f"{name} (!)"  # P2-7: 警告 emoji 改为文本符号, 避免 UI 依赖 emoji 字体
         options.append(ft.dropdown.Option(row.key, name))
