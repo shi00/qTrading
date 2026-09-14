@@ -1323,17 +1323,21 @@ class TestRunAiAnalysisUsageSummary:
         context = {"data_processor": dp}
 
         async def mock_analyze(stock_info, *args, **kwargs):
-            tokens = {"000001.SZ": 120, "000002.SZ": 80}[stock_info.get("ts_code")]
+            ts = stock_info.get("ts_code")
+            tokens = {"000001.SZ": 120, "000002.SZ": 80}[ts]
+            costs = {"000001.SZ": 0.02, "000002.SZ": 0.03}
             return {
                 "score": 75,
                 "summary": "ok",
                 "decision": "Hold",
                 "usage": {"total_tokens": tokens},
+                "cost": costs[ts],
             }
 
         with (
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
             patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
             patch(
                 "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
                 new=AsyncMock(return_value=""),
@@ -1343,11 +1347,16 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.is_cloud_available.return_value = True
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
             assert len(result) == 2
 
-        assert context["_ai_usage_summary"] == {"calls": 2, "tokens": 200}
+        # 成功调用累计 calls/tokens/cost，并按分币落账（0.02+0.03=0.05 元 → 5 分）
+        assert context["_ai_usage_summary"] == {"calls": 2, "tokens": 200, "cost_cny": 0.05}
+        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
 
     @pytest.mark.asyncio
     async def test_failed_results_not_counted(self):
@@ -1362,7 +1371,7 @@ class TestRunAiAnalysisUsageSummary:
         )
         context = {"data_processor": dp}
 
-        # 一只成功(带 usage), 一只失败(失败 dict, 无 usage)
+        # 一只成功(带 usage/cost), 一只失败(失败 dict, 无 usage)
         async def mock_analyze(stock_info, *args, **kwargs):
             if stock_info.get("ts_code") == "000001.SZ":
                 return {
@@ -1370,12 +1379,14 @@ class TestRunAiAnalysisUsageSummary:
                     "summary": "ok",
                     "decision": "Hold",
                     "usage": {"total_tokens": 100},
+                    "cost": 0.02,
                 }
             return {"error": "provider unavailable", "score": None, "ai_status": "failed"}
 
         with (
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
             patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
             patch(
                 "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
                 new=AsyncMock(return_value=""),
@@ -1385,12 +1396,16 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.is_cloud_available.return_value = True
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
             assert len(result) == 2
 
-        # 仅成功调用被累计, 失败不计入
-        assert context["_ai_usage_summary"] == {"calls": 1, "tokens": 100}
+        # 仅成功调用被累计(含成本, 0.02 元 → 2 分), 失败不计入
+        assert context["_ai_usage_summary"] == {"calls": 1, "tokens": 100, "cost_cny": 0.02}
+        mock_tracker.add_cost_cny.assert_awaited_once_with(2)
 
     @pytest.mark.asyncio
     async def test_no_key_when_no_success_call(self):
@@ -1403,6 +1418,41 @@ class TestRunAiAnalysisUsageSummary:
             assert len(result) == 1
 
         # AI 未配置, 未发起任何调用 -> 不回写 key (让 "本次无 AI 消耗" 与 "未跑 AI" 不可区分取 None)
+        assert "_ai_usage_summary" not in context
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_soft_stops_no_llm_call(self):
+        """月度预算已达上限: 不发起任何 LLM 调用, 返回 budget_exceeded 状态的候选并打软停标记。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.0],
+            }
+        )
+        context = {"data_processor": dp}
+
+        with (
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._ai_budget_exhausted",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.analyze_stock = AsyncMock()
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 未发起任何 LLM 调用
+        mock_ai_instance.analyze_stock.assert_not_awaited()
+        assert context["_ai_budget_exceeded"] is True
+        assert len(result) == 1
+        assert result.iloc[0]["ai_status"] == "budget_exceeded"
+        # 软停路径不消耗、不落账
         assert "_ai_usage_summary" not in context
 
 

@@ -39,6 +39,7 @@ def mock_config_handler():
         m.get_ai_news_max_concurrent.return_value = 1
         m.get_ai_system_prompt.return_value = "default prompt"
         m.get_ai_news_prompt.return_value = "default news prompt"
+        m.get_setting.return_value = None
         m.save_local_ai_config.return_value = True
         m.save_config.return_value = True
         m.save_ai_system_prompt.return_value = True

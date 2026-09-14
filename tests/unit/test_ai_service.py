@@ -2158,6 +2158,8 @@ class TestAIServiceChatCompletionLitellmNonStream:
             )
             assert result["content"] == '{"score": 90}'
             assert result["usage"]["total_tokens"] == 30
+            # AI-03 完整版: usage 存在时计算 cost（deepseek-v4-flash: in 1.0 out 2.0 元/百万）
+            assert result["cost"] == pytest.approx(round((10 / 1_000_000) * 1.0 + (20 / 1_000_000) * 2.0, 4))
 
     @pytest.mark.asyncio
     async def test_warns_on_large_prompt(self):

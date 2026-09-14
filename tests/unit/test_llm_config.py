@@ -5,6 +5,7 @@ Coverage Goal: >90%
 """
 
 import os
+import types
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -396,6 +397,12 @@ class TestAIServiceLiteLLM:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = '{"result": "Test response"}'
+        # AI-03 完整版读取 response.usage 计算 cost；提供真实 token 值避免 MagicMock 算术报错
+        mock_response.usage = types.SimpleNamespace(
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+        )
 
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
             service = AIService()

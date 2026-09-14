@@ -1562,7 +1562,7 @@ def _build_screener_log_card(
     stream_cards: tuple[StreamCard, ...],
     stream_cards_truncated: bool,
     is_realtime: bool,
-    ai_usage_summary: tuple[int, int] | None,
+    ai_usage_summary: tuple[int, int, float] | None,
     on_retry_click: typing.Callable[[str], None],
 ) -> ft.Container:
     """构建 AI 流式分析卡片区 (仅 REALTIME 模式有效)."""
@@ -1574,13 +1574,17 @@ def _build_screener_log_card(
             color=AppColors.TEXT_PRIMARY,
         ),
     ]
-    # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量。
+    # AI-03(完整版): 本次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # 仅当确有消耗时渲染; None 表示当次未执行 AI 分析, 不展示 "消耗 0" 的误导信息。
     if ai_usage_summary is not None:
-        calls, tokens = ai_usage_summary
+        calls, tokens, cost_cny = ai_usage_summary
         log_column_controls.append(
             ft.Text(
-                I18n.get("ai_usage_summary").format(calls=calls, tokens=tokens),
+                I18n.get("ai_usage_summary").format(
+                    calls=calls,
+                    tokens=tokens,
+                    cost_cny=format(float(cost_cny), ".4f").rstrip("0").rstrip("."),
+                ),
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,

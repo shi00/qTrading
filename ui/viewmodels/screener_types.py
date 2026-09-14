@@ -243,6 +243,6 @@ class ScreenerState:
     is_retrying: bool = False
     # UX-04 (P2-01): 股票代码过滤 (ts_code 子串匹配, 空串=不过滤; 深链/手动输入两来源)
     stock_filter: str = ""
-    # AI-03(最小版本): 上次选股实际消耗的 LLM 调用次数与 token 总量。
+    # AI-03(完整版): 上次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # None 表示当次未执行 AI 分析（本轮没有可展示的消耗）；View 据此决定是否渲染汇总行。
-    ai_usage_summary: tuple[int, int] | None = None
+    ai_usage_summary: tuple[int, int, float] | None = None
