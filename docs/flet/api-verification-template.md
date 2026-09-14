@@ -76,7 +76,7 @@
 - **项目结论**: 继续使用
   - 理由: 0.86 系列内 patch 升级（无 breaking change，Flutter 引擎 3.44.7 未变，engineRevision 未变化），CanvasKit/字体资源无需更新；三套兼容性测试 42 项全部通过；flet-mcp 与主包同步发布，API 覆盖度验证通过；6 个 bug fix 中仅模态同帧关闭修复（#6 "setState() called during build"）与项目 AlertDialog+use_dialog 路径理论相关，E2E 冒烟待 CI 验证；ruff/pyright 0 errors
 - **需更新文件**:
-  - [x] pyproject.toml (四包版本号同步升级至 0.86 系列最新补丁: flet/flet-desktop/flet-charts/flet-mcp)
+  - [x] pyproject.toml (四包版本号同步升级至 0.86 系列最新补丁: flet/flet-desktop/flet-charts/flet-code-editor)
   - [x] requirements.txt / requirements-optional.txt / requirements-dev.txt (uv pip compile 重新生成)
   - [x] .github/workflows/ci_cd.yml (flet-web 同步升级至 0.86 系列最新补丁, 3 处)
   - [x] README.md (徽章同步更新)
