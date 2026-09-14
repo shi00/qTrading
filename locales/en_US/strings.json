@@ -436,6 +436,8 @@
     "settings_token_desc": "Enter your Tushare Pro Token for data access.",
     "settings_save_token": "Save Token",
     "settings_ai_desc": "Configure LLM API for smart analysis.",
+    "settings_ai_data_boundary_title": "Data Egress & Protection Boundary",
+    "settings_ai_data_boundary_body": "AI analysis reads external text such as public news. The system sanitizes this content, but cannot fully rule out the possibility that maliciously crafted content influences the AI output. AI results are for reference only; do not rely on them as your sole decision basis.",
     "ai_advanced_settings": "⚙️ Advanced Settings",
     "ai_advanced_settings_desc": "For professional users to adjust underlying parameters or LLM system prompts.",
     "settings_ai_model": "Model Name",
