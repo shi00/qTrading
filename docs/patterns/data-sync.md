@@ -44,7 +44,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - 所有 syncer 的 `except` 块必须遵循 CLAUDE.md §3.1 R2：`except asyncio.CancelledError: raise`，禁止吞没取消异常。
 - `TushareAPIPermissionError` 由 syncer 捕获并跳过对应 API（更新 UI capability 指示器），不阻塞其他 API 同步。
 - token 认证失败触发全局熔断：`_token_invalid` 标志置 True 后所有 API 调用 fast-fail，避免无效 token 下每个 API 独立重试刷屏。`set_token()` 重置标志恢复。
-  - 该熔断标志的跨路径同步问题见 [known-technical-debt.md](../debt/known-technical-debt.md) P3-Tushare-Token-Invalid-Race。
+  - 该熔断标志经 `tushare_client.py` 的 `_get_token_invalid_lock()`（loop-local `asyncio.Lock`）串行化读写。
 - 外部 IO 异常必须经 `classify_error(e, context="general")` 分类后按严重度选择日志级别；敏感数据（token/密码）必须经 `DataSanitizer` 脱敏。
 
 ### 取消传播（C18）
