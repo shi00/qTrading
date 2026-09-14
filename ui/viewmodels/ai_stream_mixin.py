@@ -541,7 +541,19 @@ class AIStreamMixin:
 
                 if result_df is not None and not result_df.empty:
                     self._full_results = result_df
-                    self._update_pagination(page_no=1, warnings=strategy_warnings)
+                    # UX-03 (影响反馈): 筛选前候选池 (screening_data) 是本次策略的输入;
+                    # 结果非空且明显收窄时, 向 D3-4 警告通道追加「候选从 N 收窄至 M」横幅,
+                    # 让参数实际效力立即可见, 使任何单位/阈值错位在首次使用时暴露。
+                    # 结果为空(收窄至 0)时移到下方空态原因分支, 避免与本横幅冗余。
+                    sd = context.get("screening_data")
+                    candidate_total = len(sd) if sd is not None else 0
+                    if candidate_total > len(result_df):
+                        strategy_warnings = strategy_warnings + (
+                            Message("screener_param_impact", {"before": candidate_total, "after": len(result_df)}),
+                        )
+                    # 成功路径显式清空态原因 (防上一轮「无匹配」残留污染本轮),
+                    # 本轮有结果由表格承载, 空态原因仅空结果时设置 (下方分支)。
+                    self._update_pagination(page_no=1, warnings=strategy_warnings, empty_message=None)
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
                     # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
@@ -602,6 +614,12 @@ class AIStreamMixin:
                     return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()
+                # UX-03 (空态原因): 走到此分支说明筛选前有候选数据 (452 已兜底非空),
+                # 但当前条件下无匹配 —— 在结果区空态提示「共考虑 N 只候选, 可调低条件」,
+                # 区分于「无数据」(需先同步), 避免用户误判「这个参数没用 / 软件有 bug」。
+                sd = context.get("screening_data")
+                candidate_total = len(sd) if sd is not None else 0
+                empty_message = Message("screener_nomatch", {"total": candidate_total}) if candidate_total > 0 else None
                 # C2b H1: 无结果退出路径经唯一 owner 单帧原子产出 (空切片 + loading=False + 提示),
                 # 避免分两帧触发重复通知 (第 3 轮对抗检视)
                 self._update_pagination(
@@ -611,6 +629,7 @@ class AIStreamMixin:
                     status_color="warning",
                     status_action_key=None,
                     warnings=strategy_warnings,
+                    empty_message=empty_message,
                 )
                 return Message("screener_no_results")
 

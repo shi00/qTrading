@@ -62,13 +62,17 @@ class HistoryModeMixin:
             ai_buffer=self._ai_buffer[:],
             stream_cards=self._state.stream_cards,
             stream_buffers=dict(self._stream_buffers),
+            empty_message=self._state.empty_message,
+            warnings=self._state.warnings,
         )
         # Clear for history data
         self._full_results = None
         self._ai_buffer = []
         self._stream_buffers.clear()
         # C2b H1: 经唯一 owner 单帧原子产出「HISTORY + 空表 + 分页归零」,
-        # 避免「mode 未切换 + 空表」或「HISTORY + 旧 REALTIME 切片」陈旧中间帧 (M-1/H-1)
+        # 避免「mode 未切换 + 空表」或「HISTORY + 旧 REALTIME 切片」陈旧中间帧 (M-1/H-1)。
+        # UX-03: HISTORY 无实时筛选上下文, 显式清空态原因/业务警告,
+        # 防止实时「无匹配/收窄」残留污染 HISTORY 空态与警告横幅 (快照中已有保存值)。
         self._update_pagination(
             page_no=1,
             mode="HISTORY",
@@ -76,6 +80,8 @@ class HistoryModeMixin:
             sort_ascending=True,
             stream_cards=(),
             history_tree=HistoryTreeState(),
+            empty_message=None,
+            warnings=(),
         )
         logger.info("[ScreenerVM] Switched to HISTORY mode")
 
@@ -101,13 +107,16 @@ class HistoryModeMixin:
                 self._discarded_buffer = []
             # C2b H1: 恢复快照后经唯一 owner 单帧原子产出「REALTIME + 恢复内容 + 合法页码」,
             # 避免「mode=REALTIME + HISTORY 旧切片」陈旧中间帧 (M-1/H-1);
-            # UX-04: 快照页码越界时 _update_pagination 已钳制到过滤后合法范围
+            # UX-04: 快照页码越界时 _update_pagination 已钳制到过滤后合法范围。
+            # UX-03: 恢复空态原因/业务警告, 切回实时态时还原「无匹配/收窄」上下文。
             self._update_pagination(
                 page_no=pn,
                 mode="REALTIME",
                 sort_column=sc,
                 sort_ascending=sa,
                 stream_cards=stream_cards,
+                empty_message=snap.empty_message,
+                warnings=snap.warnings,
             )
         else:
             self._set_state(mode="REALTIME")
@@ -233,12 +242,15 @@ class HistoryModeMixin:
             else:
                 sort_column = None
             # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
-            # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)
+            # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)。
+            # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因/业务警告。
             self._update_pagination(
                 page_no=1,
                 loading=False,
                 sort_column=sort_column,
                 sort_ascending=False,
+                empty_message=None,
+                warnings=(),
             )
         except asyncio.CancelledError:
             self._set_state(loading=False)

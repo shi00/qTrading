@@ -357,6 +357,11 @@ class TestNorthboundHoldingStrategy(unittest.TestCase):
 class TestInstitutionalStrategy(unittest.TestCase):
     """测试机构策略"""
 
+    def test_get_parameters_declares_unit(self):
+        """UX-03: inst_net_min 声明 wan_cny 单位 (与 threshold_in_data_unit 换算一致)."""
+        unit_map = {p["name"]: p.get("unit") for p in self.strategy.get_parameters()}
+        assert unit_map.get("inst_net_min") == "wan_cny"
+
     def setUp(self):
         self.strategy = InstitutionalStrategy()
         self.base_df = pd.DataFrame(
@@ -449,6 +454,11 @@ class TestInstitutionalStrategy(unittest.TestCase):
 
 class TestBlockTradeStrategy(unittest.TestCase):
     """测试大宗交易策略"""
+
+    def test_get_parameters_declares_unit(self):
+        """UX-03: block_amount_min 声明 wan_cny 单位 (block_trade.amount 列为万元)."""
+        unit_map = {p["name"]: p.get("unit") for p in self.strategy.get_parameters()}
+        assert unit_map.get("block_amount_min") == "wan_cny"
 
     def setUp(self):
         self.strategy = BlockTradeStrategy()

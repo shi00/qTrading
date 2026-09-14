@@ -71,6 +71,14 @@ _STATUS_COLOR_MAP = {
     "info": AppColors.INFO,
 }
 
+# UX-03 (单位单一数据源): 策略参数定义的 ``unit`` 字段 (策略层声明) → 本层 i18n key。
+# View 统一据此拼接参数阈值 label 的单位后缀，杜绝策略文案与代码换算单位漂移；
+# 值域须与 strategies/utils.py 的 threshold_in_data_unit 单位约定保持一致。
+_UNIT_SUFFIX_I18N_KEYS = {
+    "yi_cny": "unit_yi",
+    "wan_cny": "unit_wan",
+}
+
 _HIDDEN_COLS = frozenset(
     {
         "symbol",
@@ -485,6 +493,13 @@ def build_param_control(
     label = I18n.get(p.get("label_key", p["name"]))
     p_type = p.get("type", "number")
     p_name = p["name"]
+
+    # UX-03 (单位单一数据源): 参数单位由策略层 unit 字段声明, 本层统一拼接后缀,
+    # 不再在 i18n 文案里硬编码单位 (避免文案与 threshold_in_data_unit 换算单位漂移)。
+    _param_unit = p.get("unit")
+    unit_i18n_key = _UNIT_SUFFIX_I18N_KEYS.get(_param_unit) if isinstance(_param_unit, str) else None
+    if unit_i18n_key is not None:
+        label = f"{label} ({I18n.get(unit_i18n_key)})"
 
     if p_type == "slider":
         min_val = p.get("min", 0)
@@ -1486,13 +1501,21 @@ def _build_screener_table_card(
 
     table_content: ft.Control
     if not formatted_rows and not state.loading:
+        # UX-03 (空态区分): 有候选但筛选后无匹配时, VM 产出 empty_message (可操作原因),
+        # 用于提示「可调低筛选条件」; 命中无数据场景 (empty_message 为 None) 时回落到
+        # 默认「请先同步」上下文, 避免两种空态混淆。
+        empty_context = (
+            _render_status_message(state.empty_message)
+            if state.empty_message is not None
+            else I18n.get("screener_no_data_context")
+        )
         table_content = ft.Column(
             [
                 ft.Container(
                     content=EmptyState(
                         icon=ft.Icons.INBOX,
                         title=I18n.get("screener_no_results"),
-                        message=I18n.get("screener_no_data_context"),
+                        message=empty_context,
                     ),
                     expand=True,
                 ),

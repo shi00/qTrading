@@ -277,6 +277,7 @@ class LargePEStrategy(PolarsBaseStrategy):
             {
                 "name": "market_cap_min",
                 "label_key": "param_market_cap",
+                "unit": "yi_cny",
                 "type": "slider",
                 "min": 50,
                 "max": 5000,

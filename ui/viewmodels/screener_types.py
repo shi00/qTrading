@@ -116,6 +116,10 @@ class RealtimeSnapshot:
     ai_buffer: list[dict]
     stream_cards: tuple[StreamCard, ...]
     stream_buffers: dict[str, dict]
+    # UX-03: 实时筛选的「结果空态原因」与「业务警告」随快照保存/恢复, 避免 REALTIME↔HISTORY
+    # 切换后残留污染 HISTORY 空态/横幅 (switch_to_history 清 None/(), 恢复时回填)。
+    empty_message: Message | None = None
+    warnings: tuple[Message, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -246,3 +250,7 @@ class ScreenerState:
     # AI-03(最小版本): 上次选股实际消耗的 LLM 调用次数与 token 总量。
     # None 表示当次未执行 AI 分析（本轮没有可展示的消耗）；View 据此决定是否渲染汇总行。
     ai_usage_summary: tuple[int, int] | None = None
+    # UX-03: 空结果时的可操作原因横幅 Message (i18n key, VM 不感知 locale; None 表示非空结果)。
+    # 仅「有候选数据但筛选后无匹配」时设置 —— 区分「无匹配」(可调低条件) 与「无数据」(需先同步),
+    # View 在结果区空态渲染该原因, 提示用户如何恢复。
+    empty_message: Message | None = None
