@@ -33,6 +33,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.slider_input import SliderInput
 from ui.components.state_views import EmptyState
@@ -1959,6 +1960,22 @@ def ScreenerView(
         on_add_to_watchlist=_on_add_to_watchlist,
     )
 
+    # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，
+    # 用户「同意」调 vm.resolve_ai_egress_ack(True) 继续 AI；「拒绝」落 False 跳过。
+    egress_ack_dialog = (
+        ConfirmDialog(
+            open_state=bool(state.pending_egress_ack_preview),
+            title=I18n.get("ai_external_acknowledgment_dialog_title"),
+            body=f"{I18n.get('ai_external_acknowledgment_checkbox')}\n\n{state.pending_egress_ack_preview}",
+            on_confirm=lambda: vm.resolve_ai_egress_ack(True),
+            on_cancel=lambda: vm.resolve_ai_egress_ack(False),
+            confirm_text=I18n.get("ai_external_acknowledgment_dialog_confirm"),
+            cancel_text=I18n.get("ai_external_acknowledgment_dialog_cancel"),
+        )
+        if state.pending_egress_ack_preview
+        else None
+    )
+
     return ft.Container(
         content=ft.Column(
             [
@@ -1966,6 +1983,7 @@ def ScreenerView(
                 *([banner] if (banner := _build_screener_warning_banner(state.warnings)) is not None else []),
                 main_body,
                 *([dialog_control] if dialog_control is not None else []),
+                *([egress_ack_dialog] if egress_ack_dialog is not None else []),
             ],
             expand=True,
             spacing=15,

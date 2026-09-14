@@ -102,6 +102,8 @@ class AIStreamMixin:
     _ensure_processor: Callable[[], Coroutine[Any, Any, DataProcessor]]
     _get_loop_or_none: Callable[[], asyncio.AbstractEventLoop | None]
     _on_background_task_done: Callable[[asyncio.Task], None]
+    # SEC-01 gap3: 运行时 AI 外发确认的待决 Future（同一 asyncio loop，详见 _request_egress_ack）。
+    _egress_ack_future: asyncio.Future | None = None
 
     def clear_stream_cards(self) -> None:
         """Clear all stream cards and buffers (called on new run)."""
@@ -282,6 +284,39 @@ class AIStreamMixin:
         self._set_state(is_retrying=False)
 
     # --- AI Streaming Handlers ---
+
+    async def _request_egress_ack(self, preview: str, provider: str) -> bool:
+        """SEC-01 gap3: 运行时 AI 外发确认桥接（由策略层经 context 注入回调调用）。
+
+        在**同一** asyncio loop 内创建待决 Future（R11：strategy.filter 与 UI 均在
+        ScreenerView 的 loop 内 await），写入 state 由 View 渲染确认对话框；用户在
+        View 点击「同意/拒绝」调 ``resolve_ai_egress_ack`` 落地。返回值即用户决策。
+
+        CancelledError 直接传播（R2：调取方/停机路径需要感知取消，不能吞没）。
+        """
+        loop = self._get_loop_or_none() or asyncio.get_running_loop()
+        # 若上一个确认尚未结算（异常路径残留），先按拒绝关闭，避免 Future 悬挂。
+        prev = self._egress_ack_future
+        if prev is not None and not prev.done():
+            prev.set_result(False)
+        future = loop.create_future()
+        self._egress_ack_future = future
+        self._set_state(
+            pending_egress_ack_preview=preview,
+            pending_egress_ack_provider=provider,
+        )
+        try:
+            return await future
+        finally:
+            self._egress_ack_future = None
+
+    def resolve_ai_egress_ack(self, confirmed: bool) -> None:
+        """SEC-01 gap3: 用户对运行时 AI 外发确认的决策落地（View 调）。"""
+        future = self._egress_ack_future
+        self._egress_ack_future = None
+        self._set_state(pending_egress_ack_preview="", pending_egress_ack_provider="")
+        if future is not None and not future.done():
+            future.set_result(bool(confirmed))
 
     def _on_ai_progress(self, current, total, msg):
         # D7: msg 为 data 层 ai_mixin 的 Message (key+params), VM 只透传 key:
@@ -520,6 +555,10 @@ class AIStreamMixin:
                 context["on_card_start"] = self._on_card_start_adapter
                 # UX-2.3: 单股失败回调 + 策略 key 透传给 mixin
                 context["on_card_error"] = self._on_card_error
+                # SEC-01 gap3: 注入运行时 AI 外发确认回调（同 loop 桥接，R11 安全）。
+                # strategy.filter 与 UI 在同一 asyncio loop 内 await（见 run_strategy 末尾），
+                # 策略层经此协程挂起等待用户确认；确认/拒绝由 View 调用 resolve_ai_egress_ack 落地。
+                context["on_ai_egress_ack_request"] = self._request_egress_ack
                 context["strategy_key"] = strategy_key
                 self._last_ai_context = context
                 self._last_strategy_key = strategy_key

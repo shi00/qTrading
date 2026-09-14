@@ -255,3 +255,9 @@ class ScreenerState:
     # 仅「有候选数据但筛选后无匹配」时设置 —— 区分「无匹配」(可调低条件) 与「无数据」(需先同步),
     # View 在结果区空态渲染该原因, 提示用户如何恢复。
     empty_message: Message | None = None
+    # SEC-01 gap3: 运行时 AI 外发确认对话框待确认内容。非 None 且非空表示当前正在等待
+    # 用户确认是否同意将该候选池数据外发给所选云端 provider。preview 为脱敏后的真实
+    # prompt 预览文本（示例标注），provider 供对话框/回显展示。View 渲染对话框并经 VM
+    # 命令 resolve_ai_egress_ack(confirmed) 完成确认；确认后置回 None。
+    pending_egress_ack_preview: str = ""
+    pending_egress_ack_provider: str = ""

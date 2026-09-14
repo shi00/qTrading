@@ -192,9 +192,10 @@ class AppConfig(BaseModel):
     onboarding_complete: bool = False
     enable_news_alerts: bool = True
     ai_prompt_dump_enabled: bool = False
-    # Task 2.2 / AI-04: AI 外发知情确认（按 provider 记录确认状态）
-    # 历史版本是单一 bool；AI-04 检视后升级为 {provider: bool}，更换 provider 自动要求重新确认。
-    ai_external_acknowledged: dict[str, bool] = Field(default_factory=dict)
+    # Task 2.2 / AI-04 / SEC-01: AI 外发知情确认（按 provider 记录确认时的外发范围版本）
+    # 历史版本是单一 bool → AI-04 升级为 {provider: bool}（更换 provider 自动重确认）
+    # → SEC-01 升级为 {provider: int}（值为确认时 AI_EGRESS_SCOPE_VERSION，范围版本升级自动失效）。
+    ai_external_acknowledged: dict[str, int] = Field(default_factory=dict)
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
@@ -256,8 +257,14 @@ class AppConfig(BaseModel):
 
 # AI-04 配置迁移：旧版全局 bool ``ai_external_acknowledged=true`` 迁移时写入的
 # 特殊 provider 键，视为「曾做过全局知情确认」，对任意云端 provider 回落为已确认，
-# 避免升级后用户被迫重复确认。
+# 避免升级后用户被迫重复确认。（SEC-01 后值亦为 scope_version）
 AI_EXTERNAL_ACK_GLOBAL_KEY = "__global__"
+
+# SEC-01: AI 外发内容范围版本。向 AI prompt 新增任何数据类别时必须 +1，以强制所有用户
+# 重新确认。V1 = 股票基本信息、行情、财务指标、公开新闻摘要。
+# 变更历史：
+#   v1 = 初始版本（股票信息、行情、财务、公开新闻）
+AI_EGRESS_SCOPE_VERSION = 1
 
 
 def get_default_config() -> dict[str, Any]:
