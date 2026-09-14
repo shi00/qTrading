@@ -508,17 +508,29 @@ def AppLayout() -> ft.Container:
         border=ft.Border(top=ft.BorderSide(1, AppColors.BORDER)),
     )
 
+    # SEC-03: 状态栏以底部 overlay 呈现, 不占用 body/结果表布局净高,
+    # 避免在最小视口 1280x720 下压缩结果表可用高度致 Flet 布局跳过子节点
+    # (详见 virtual_table NOTE(lazy), 回归 E2E: test_screener_1280x720_viewport_no_collapse).
+    body_region = ft.Container(
+        content=ft.Row(
+            [nav_rail, ft.VerticalDivider(width=1), body],
+            expand=True,
+        ),
+        expand=True,
+    )
+    status_bar_egress.left = 0
+    status_bar_egress.right = 0
+    status_bar_egress.bottom = 0
+
+    # 保留返回 ft.Container (签名契约不变), 内部以 Stack 承载:
+    # body_region 占满净高, 状态栏为底部 overlay 不占布局高度.
     return ft.Container(
-        content=ft.Column(
+        content=ft.Stack(
             [
-                ft.Row(
-                    [nav_rail, ft.VerticalDivider(width=1), body],
-                    expand=True,
-                ),
+                body_region,
                 status_bar_egress,
             ],
             expand=True,
-            spacing=0,
         ),
         expand=True,
     )
