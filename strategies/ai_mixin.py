@@ -352,6 +352,22 @@ class AIStrategyMixin:
             )
             return candidates_df
 
+        # --- Guard: 月度成本预算未超限 (AI-03 完整版) ---
+        # 发起任何 LLM 调用前先读本月累计成本；若已达月度预算上限则软停，
+        # 不再发起新的云端调用（软停标记供 UI 提示用户调整预算）。
+        await self._ensure_cost_tracker_engine()
+        if await self._ai_budget_exhausted():
+            logger.warning(
+                "[AIStrategyMixin] Monthly AI cost budget exhausted — skipping AI analysis",
+            )
+            if on_progress:
+                on_progress(0, 0, Message("ai_budget_exceeded"))
+            context["_ai_budget_exceeded"] = True
+            return candidates_df.assign(
+                ai_score=None,
+                ai_status="budget_exceeded",
+            )
+
         # --- Guard: Empty Input ---
         if candidates_df is None or candidates_df.empty:
             return pd.DataFrame()
@@ -633,10 +649,12 @@ class AIStrategyMixin:
         total_tasks = len(candidates_df)
         completed = 0
         final_rows: list[dict] = []
-        # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量。
-        # 仅统计成功分析(非失败)的调用, token 取自 LLM 返回的 usage.total_tokens。
-        # 循环结束后若确有消耗, 回写 context["_ai_usage_summary"] 供 UI 展示。
-        ai_usage_cluster = {"calls": 0, "tokens": 0}
+        # AI-03(完整版): 累计本次选股实际消耗的 LLM 调用次数、token 总量与货币成本。
+        # 仅统计成功分析(非失败)的调用, token 取自 LLM 返回的 usage.total_tokens,
+        # 成本取自 res["cost"]（litellm_client 基于 estimate_cost 计算, 未知模型为 None）。
+        # 循环结束后若确有消耗, 回写 context["_ai_usage_summary"] 供 UI 展示,
+        # 并累计到 AIUsageTracker 按月持久化。
+        ai_usage_cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0}
         on_stream_start = context.get("on_stream_start") if stream_enabled else None
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
@@ -708,13 +726,16 @@ class AIStrategyMixin:
                             error_reason=I18n.get("ai_card_analysis_failed"),
                         )
                     row = self._build_result_row(row_data, res)
-                    # AI-03(最小版本): 累计本次消耗。仅统计成功分析（res 为 dict、
+                    # AI-03(完整版): 累计本次消耗。仅统计成功分析（res 为 dict、
                     # 非失败且携带 usage），避免把失败调用计入用户可见的消耗量。
                     if isinstance(res, dict) and res.get("ai_status") != "failed":
                         usage = res.get("usage")
                         if usage and isinstance(usage, dict):
                             ai_usage_cluster["calls"] += 1
                             ai_usage_cluster["tokens"] += int(usage.get("total_tokens", 0) or 0)
+                            cost = res.get("cost")
+                            if isinstance(cost, (int, float)) and cost > 0:
+                                ai_usage_cluster["cost_cny"] += float(cost)
                     if on_result:
                         on_result(row)
                     return row
@@ -815,14 +836,28 @@ class AIStrategyMixin:
         _AI_STATUS_ORDER = {"analyzed": 0, "rejected": 1, "failed": 2}
         order_series = result_df["ai_status"].map(_AI_STATUS_ORDER)
 
-        # AI-03(最小版本): 本次选股实际消耗的 LLM 调用次数与 token 总量回写 context,
+        # AI-03(完整版): 本次选股实际消耗的 LLM 调用次数、token 总量与货币成本回写 context,
         # 供 UI ViewModel 在策略完成后读取并展示。仅当确有成功调用才回写,
         # 避免「一次未发起调用」被 UI 误读为「消耗 0 次」。
+        # cost 为浮点元, 转分为整数后按月累计持久化（AIUsageTracker）。
         if ai_usage_cluster["calls"] > 0:
             context["_ai_usage_summary"] = {
                 "calls": ai_usage_cluster["calls"],
                 "tokens": ai_usage_cluster["tokens"],
+                "cost_cny": round(ai_usage_cluster["cost_cny"], 4),
             }
+            try:
+                await self._track_cost(ai_usage_cluster["cost_cny"])
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # 成本持久化失败不阻断结果交付（仅记录）
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[AIStrategyMixin] Failed to persist AI cost to tracker: %s",
+                )
 
         return (
             result_df.assign(_ai_order=order_series)
@@ -952,6 +987,42 @@ class AIStrategyMixin:
                 "[AIStrategyMixin] retry_single failed (%s: %s)",
                 exc_info=True,
             )
+
+    async def _ensure_cost_tracker_engine(self) -> None:
+        """经 EngineProvider 惰性注入 AIUsageTracker 的引擎。
+
+        对抗审查修正：AIUsageTracker 不反向依赖 ``CacheManager`` 单例，engine 由
+        调用方注入。此处经 ``engine_provider.get_engine`` 获取 CacheManager 登记的
+        受管引擎，仅在引擎存在且未释放（R5 判活）时注入，避免在 disposed 引擎上持久化。
+        """
+        from data.persistence.engine_provider import is_disposed, get_engine as _provider_engine
+        from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import: 运行期依赖
+
+        engine = _provider_engine()
+        if engine is not None and not is_disposed(engine):
+            AIUsageTracker().configure(engine=engine)
+
+    async def _ai_budget_exhausted(self) -> bool:
+        """本月累计成本是否已达月度预算上限。
+
+        上限取自 ``ai_cost_limit_cny`` 配置（元，>0 时启用；None/0 视为不限制）。
+        读取失败或未启用均按「未超限」处理（不软停, 不阻断 AI 分析）。
+        """
+        from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
+
+        limit_cny = ConfigHandler.get_setting("ai_cost_limit_cny")
+        if not limit_cny or limit_cny <= 0:
+            return False
+        month_cost_cny = await AIUsageTracker().get_month_cost_cny()
+        return month_cost_cny >= round(limit_cny * 100)
+
+    async def _track_cost(self, cost_cny: float) -> None:
+        """将本次耗用的成本（元）转分后计入 AIUsageTracker 本月累计。"""
+        from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
+
+        if cost_cny <= 0:
+            return
+        await AIUsageTracker().add_cost_cny(round(cost_cny * 100))
 
     @staticmethod
     async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:

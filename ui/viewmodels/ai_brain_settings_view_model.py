@@ -60,6 +60,10 @@ class AIBrainSettingsState:
     ai_prompt_value: str = ""
     news_prompt_value: str = ""
     save_state: str = SAVE_IDLE
+    # AI-03 完整版 T7: 月度 AI 成本上限输入文本 (空串=不限制)
+    ai_cost_limit_value: str = ""
+    # AI-03 完整版 T7: 本月累计 AI 成本 (元, 供 UI 展示; 未加载为 None)
+    month_cost_cny: float | None = None
     # Phase 3.2 P1-1: MD5 检查结果 i18n key (非空时 View 显示 WARNING snack)
     # 下沉自 View._check_local_model_md5, VM 在 save_ai_settings 末尾写入
     warning_message: str = ""
@@ -147,6 +151,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
     def _load_config_to_state(self) -> None:
         """从 ConfigHandler 加载配置到 state（同步, 仅在 __init__ 调用一次）。"""
         ai_concurrency = max(_CONCURRENCY_MIN, ConfigHandler.get_ai_max_concurrent_analysis())
+        # AI-03 完整版 T7: ai_cost_limit_cny (元, None/0/负 视为不限制 → 空串)
+        ai_cost_limit = ConfigHandler.get_setting("ai_cost_limit_cny")
+        ai_cost_limit_value = "" if ai_cost_limit is None or ai_cost_limit <= 0 else str(ai_cost_limit)
         self._state = AIBrainSettingsState(
             max_candidates_value=str(ConfigHandler.get_ai_max_candidates()),
             min_turnover_value=str(ConfigHandler.get_strategy_min_turnover()),
@@ -155,6 +162,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             ai_prompt_value=ConfigHandler.get_ai_system_prompt(),
             news_prompt_value=ConfigHandler.get_ai_news_prompt(),
             save_state=SAVE_IDLE,
+            ai_cost_limit_value=ai_cost_limit_value,
         )
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
@@ -176,6 +184,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def set_news_prompt_value(self, value: str) -> None:
         self._set_state(news_prompt_value=value)
+
+    def set_ai_cost_limit_value(self, value: str) -> None:
+        self._set_state(ai_cost_limit_value=value)
 
     # --- 验证 (阶段 1) ---
 
@@ -210,6 +221,16 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 return False, "ai_snack_invalid_range"
         except (ValueError, TypeError):
             return False, "ai_snack_invalid_range"
+
+        # AI-03 完整版 T7: 成本上限允许空串（不限制）或非负 float
+        ai_cost_limit_str = (self._state.ai_cost_limit_value or "").strip()
+        if ai_cost_limit_str:
+            try:
+                ai_cost_limit = float(ai_cost_limit_str)
+                if ai_cost_limit < 0:
+                    return False, "ai_snack_param_err"
+            except (ValueError, TypeError):
+                return False, "ai_snack_param_err"
 
         return True, ""
 
@@ -255,6 +276,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             news_concurrency = int(self._state.news_concurrency_value.strip())
             ai_prompt = self._state.ai_prompt_value
             news_prompt = self._state.news_prompt_value
+            # AI-03 完整版 T7: 成本上限空串 → None (不限制); 否则 float 元
+            ai_cost_limit_str = (self._state.ai_cost_limit_value or "").strip()
+            ai_cost_limit_cny = None if not ai_cost_limit_str else float(ai_cost_limit_str)
 
             # local_vm.get_current_config() 返回 dict (复用 LocalModelConfigPanelViewModel)
             local_config = typing.cast(typing.Any, self._local_vm).get_current_config()
@@ -284,6 +308,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                         "strategy_min_turnover": min_turn,
                         "ai_max_concurrent_analysis": concurrency,
                         "ai_news_max_concurrent": news_concurrency,
+                        "ai_cost_limit_cny": ai_cost_limit_cny,
                     }
                 ):
                     return False
@@ -353,3 +378,33 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 )
             self._set_state(save_state=SAVE_ERROR, warning_message="")
             return False
+
+    # --- AI-03 完整版 T7: 本月累计成本加载 ---
+
+    async def load_month_cost_cny(self) -> None:
+        """读取本月累计 AI 成本（分 → 元）到 state.month_cost_cny。
+
+        经 engine_provider 惰性注入 AIUsageTracker 的引擎（R5 判活），仅在引擎可用
+        时读取；引擎不可用或读取异常时置 None（不阻断 UI，仅记日志）。
+        async-native DB 读（SQLAlchemy async），按宪法 §3.2 无需包线程池（R16）。
+        R2: asyncio.CancelledError 必须 raise，不被 except Exception 吞没。
+        """
+        from data.persistence.engine_provider import get_engine, is_disposed
+        from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
+
+        try:
+            engine = get_engine()
+            if engine is None or is_disposed(engine):
+                self._set_state(month_cost_cny=None)
+                return
+            AIUsageTracker().configure(engine=engine)
+            month_cost_cents = await AIUsageTracker().get_month_cost_cny()
+            self._set_state(month_cost_cny=month_cost_cents / 100)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:  # noqa: BLE001 -- 读取失败降级为 None, 不阻断 UI
+            logger.debug(
+                "[AIBrainSettingsVM] Failed to load month AI cost: %s",
+                ex,
+            )
+            self._set_state(month_cost_cny=None)

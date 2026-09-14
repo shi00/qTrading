@@ -1157,13 +1157,15 @@ def check_R_lazy_import_whitelist() -> list[str]:
 # ============================================================================
 
 # 已注册单例白名单（供 VM __init__ 构造单例检测；与 docs/architecture/singleton-lifecycle.md
-# 注册清单保持一致，但该白名单无自动化比对守护，新增注册单例须人工同步补充）
+# 注册清单保持一致，由 test_redline_checks.py::test_whitelist_matches_documented_singletons
+# 自动化比对守护，新增注册单例须同步补充本白名单）
 _R16_SINGLETON_CLASSES = frozenset(
     {
         "CacheManager",
         "ThreadPoolManager",
         "TaskManager",
         "AIService",
+        "AIUsageTracker",
         "SchedulerService",
         "DataProcessor",
         "MarketDataService",

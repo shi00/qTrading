@@ -28,6 +28,7 @@ import httpx
 
 from core.errors import AIConfigError
 from core.i18n import Message
+from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
 from services.local_model_manager import LocalInferenceTimeoutError, LocalModelManager
 from utils.error_classifier import classify_error, classify_severity, log_classified
@@ -432,6 +433,11 @@ class LiteLLMClient:
                     result["reasoning_content"] = reasoning_content
                 if usage:
                     result["usage"] = usage
+                    result["cost"] = estimate_cost(
+                        effective_model,
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                    )
 
                 return result
             else:
@@ -445,6 +451,11 @@ class LiteLLMClient:
                         "completion_tokens": getattr(response.usage, "completion_tokens", 0),  # type: ignore[union-attr]
                         "total_tokens": getattr(response.usage, "total_tokens", 0),  # type: ignore[union-attr]
                     }
+                    result["cost"] = estimate_cost(
+                        effective_model,
+                        result["usage"]["prompt_tokens"],
+                        result["usage"]["completion_tokens"],
+                    )
 
                 return result
 

@@ -75,7 +75,7 @@ class FakeScreenerState:
     # D3-4: 策略执行期业务警告 (镜像 ScreenerState.warnings)
     warnings: tuple = ()
     # AI-03: 本次选股 LLM 调用消耗 (镜像 ScreenerState.ai_usage_summary)
-    ai_usage_summary: tuple[int, int] | None = None
+    ai_usage_summary: tuple[int, int, float] | None = None
 
 
 class FakeScreenerViewModel:

@@ -40,6 +40,16 @@ def set_engine(engine: Any) -> None:
         _engine = engine
 
 
+def get_engine() -> Any | None:
+    """返回当前受管引擎引用（可能为 None 或已释放引擎；配合 ``is_disposed`` 判活）。
+
+    与 ``set_engine`` 对称的只读查询，供运行期中立地获得当前受管引擎
+    （如 service 层惰性注入引擎）；是否可用由调用方再经 ``is_disposed`` 确认。
+    """
+    with _lock:
+        return _engine
+
+
 def mark_disposed(flag: bool) -> None:
     """标记引擎释放。
 

@@ -66,7 +66,7 @@ def __init__(self, *, config=None, clock=None):
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，17 个）**：
+**注册单例（`@register_singleton`，18 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -74,6 +74,7 @@ def __init__(self, *, config=None, clock=None):
 | `ThreadPoolManager` | `utils/thread_pool.py` | IO/CPU 线程池调度 |
 | `TaskManager` | `services/task_manager.py` | 后台任务编排 |
 | `AIService` | `services/ai_service.py` | LLM 调用统一入口 |
+| `AIUsageTracker` | `services/ai_service/usage_tracker.py` | 立即 AI 货币成本按月（分）原子累加与跨月轮换持久化 |
 | `SchedulerService` | `utils/scheduler_service.py` | 定时调度 |
 | `DataProcessor` | `data/data_processor.py` | 数据质量扫描与处理 |
 | `MarketDataService` | `data/domain_services/market_data_service.py` | 行情数据聚合 |
