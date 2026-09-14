@@ -15,6 +15,10 @@
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
 
+## 单点特性设计文档
+
+- [UX-04 选股结果结构化归因](./design-ux04-result-attribution.md) — 筛选条件/排序归因数据结构与各层实现（策略生成 → VM 解码 → View 渲染）
+
 ## 文档层次
 
 文档权威按主题确定正本，而非按目录层级全局覆盖。目录仅作组织用途：

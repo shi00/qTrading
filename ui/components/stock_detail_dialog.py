@@ -28,6 +28,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
+from strategies.attribution import FilterCondition, RankAttribution, attribution_from_json
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -310,6 +311,149 @@ def _build_review_section(stock_data: dict) -> ft.Control:
     )
 
 
+# --- UX-04 筛选归因渲染 ---
+
+# 归因数值的单位后缀（按列）。金额/数量类已由策略层经 threshold_in_data_unit 换算到数据单位，
+# 此处仅需要百分比类显示后缀；其余列（倍数等）无后缀。
+_ATTR_FIELD_SUFFIX = {
+    "dv_ttm": "%",
+    "turnover_rate": "%",
+    "pct_chg": "%",
+    "or_yoy": "%",
+    "netprofit_yoy": "%",
+    "roe": "%",
+    "debt_to_assets": "%",
+}
+
+# 运算符 → (i18n key)。between 为区间，其余为单值比较。
+_ATTR_OP_I18N = {
+    "gt": "filter_op_g",
+    "geq": "filter_op_ge",
+    "lt": "filter_op_l",
+    "leq": "filter_op_le",
+    "between": "filter_op_between",
+}
+
+
+def _fmt_attr_num(val) -> str:
+    """格式化归因数值（2 位小数），NaN/None → '-'。"""
+    if not is_valid_number(val):
+        return "-"
+    return f"{float(val):.2f}"
+
+
+def _attr_label(column: str | None, column_label_fn: Callable[[str], str] | None) -> str:
+    """列名 → 简洁展示别名。
+
+    复用 VM 注入的 ``column_label_fn``（内部调 ``get_column_alias``）翻译，MVVM 下 View 不直接
+    import data 业务对象。``get_column_alias`` 返回 "col (别名)" 复合格式，归因卡片取括号内别名；
+    函数缺失/翻译失败回退裸列名。
+    """
+    if not column:
+        return "-"
+    if column_label_fn is None:
+        return column
+    alias = column_label_fn(column)
+    if not alias or alias == column:
+        return column
+    if "(" in alias and alias.endswith(")"):
+        return alias[alias.find("(") + 1 : -1]
+    return alias
+
+
+def _build_attribution_condition_row(cond: FilterCondition, column_label_fn: Callable[[str], str] | None) -> ft.Row:
+    """渲染单条筛选条件：'股息率(TTM) = 3.2% > 2.0%' + 通过标记。"""
+    label = _attr_label(cond.column, column_label_fn)
+    suffix = _ATTR_FIELD_SUFFIX.get(cond.column, "")
+    actual = _fmt_attr_num(cond.actual) + suffix
+
+    if cond.operator == "between":
+        lo, hi = typing.cast(tuple[typing.Any, typing.Any], cond.threshold)
+        op_text = I18n.get("filter_op_between")
+        threshold_text = f"({_fmt_attr_num(lo)}, {_fmt_attr_num(hi)}){suffix}"
+    else:
+        op_key = _ATTR_OP_I18N.get(cond.operator, cond.operator)
+        op_text = I18n.get(op_key)
+        threshold_text = _fmt_attr_num(cond.threshold) + suffix
+
+    return ft.Row(
+        [
+            ft.Text(
+                f"{label} = {actual} {op_text} {threshold_text}",
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_PRIMARY,
+            ),
+            ft.Container(expand=True),
+            # 无障碍：通过标记为图标+文字叠加，不依赖纯颜色
+            ft.Icon(ft.Icons.CHECK_CIRCLE, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.SUCCESS),
+        ],
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_attribution_rank(rank: RankAttribution | None, column_label_fn: Callable[[str], str] | None) -> ft.Control:
+    """渲染排名归因：'排名：{position} / {total}（按{field}，{order}）'。"""
+    if rank is None:
+        return ft.Container()
+    field_label = _attr_label(rank.field, column_label_fn)
+    order = I18n.get("filter_order_asc" if rank.ascending else "filter_order_desc")
+    position = rank.position if rank.position is not None else "-"
+    total = rank.total if rank.total is not None else "-"
+    rank_text = I18n.get("filter_attribution_rank").format(
+        position=position,
+        total=total,
+        field=field_label,
+        order=order,
+    )
+    return ft.Row(
+        [
+            ft.Icon(ft.Icons.LOCATION_ON_OUTLINED, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY),
+            ft.Text(
+                rank_text,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_SECONDARY,
+            ),
+        ],
+        spacing=4,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _build_attribution_section(stock_data: dict, column_label_fn: Callable[[str], str] | None = None) -> ft.Control:
+    """构建筛选归因卡片（UX-04）。
+
+    仅当行数据含结构化筛选归因时渲染；否则返回空 Container。
+    归因 JSON 反序列化失败 / 无条件时安全跳过（不 raise）。
+    """
+    raw = stock_data.get("_filter_attribution")
+    if not raw:
+        return ft.Container()
+    attr = attribution_from_json(raw)  # 已解析 dict / JSON 串均安全
+    if attr is None or not attr.conditions:
+        return ft.Container()
+
+    rows = [_build_attribution_condition_row(c, column_label_fn) for c in attr.conditions]
+    return ft.Column(
+        [
+            ft.Container(height=10),
+            ft.Text(
+                I18n.get("filter_attribution_title"),
+                size=AppStyles.FONT_SIZE_LG,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.PRIMARY,
+            ),
+            ft.Divider(height=5, color=AppColors.DIVIDER),
+            ft.Text(
+                I18n.get("filter_attribution_note"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+            ),
+            ft.Column(rows, spacing=4),
+            _build_attribution_rank(attr.rank, column_label_fn),
+        ],
+    )
+
+
 def _build_title(stock_data: dict) -> ft.Row:
     """构建对话框标题（股票名称 + 代码）。"""
     code = stock_data.get("ts_code", "")
@@ -360,6 +504,7 @@ def _build_content(
     chart_content: ft.Control,
     width: int,
     height: int,
+    column_label_fn: Callable[[str], str] | None = None,
 ) -> ft.Container:  # pragma: no cover
     """构建详情内容（K线图 + AI分析 + 价格 + 估值 + 财务 + 基础信息）。"""
     # Chart container（content 由 chart_content state 驱动）
@@ -617,6 +762,7 @@ def _build_content(
             [
                 chart_container,
                 ai_section,
+                _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
                 price_section,
                 valuation_section,
                 financial_section,
@@ -768,6 +914,7 @@ def StockDetailDialog(
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
     on_add_to_watchlist: Callable[[str, str], None] | None = None,
+    column_label_fn: Callable[[str], str] | None = None,
 ) -> ft.Container:
     """股票详情弹窗（声明式 V1）。
 
@@ -784,6 +931,8 @@ def StockDetailDialog(
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）
         on_add_to_watchlist: 加入关注回调 (ts_code, stock_name); 为 None 时不显示按钮
+        column_label_fn: 列名 → 展示别名解析函数（消费方注入 ``vm.get_column_alias`` 的包装，
+            符合 MVVM「View 不直接 import data」契约）；为 None 时归因卡片回退裸列名。
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -835,7 +984,7 @@ def StockDetailDialog(
             modal=False,
             on_dismiss=_close,
             title=_build_title(data),
-            content=_build_content(data, chart_content, width, height),
+            content=_build_content(data, chart_content, width, height, column_label_fn),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )

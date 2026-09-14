@@ -84,6 +84,9 @@ class StrategyContext(TypedDict, total=False):
     _dependency_status: dict[str, Any]
     _diagnostics: dict[str, Any]
     _metadata: dict[str, Any]
+    # UX-04: VolumeBreakout 记录自动调整后的生效阈值 (pct_chg_min, pct_chg_max, turnover_min)，
+    # 供 build_attribution 以与展示一致的阈值生成归因 (二次检视 Ma4)。
+    _vol_break_thresholds: tuple[float, float, float]
     # D3-4: 策略执行期业务警告通道。策略检测到非致命参数/数据问题时 append
     # Message(i18n key + params)，交由 base filter 初始化本次运行通道、VM 透传、
     # View 在结果区上方渲染。符合 §3.2 策略只产出 i18n key 约束。

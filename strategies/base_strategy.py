@@ -99,6 +99,23 @@ class BaseStrategy(ABC):
         """
         return bool(getattr(self, "enable_ai_analysis", False))
 
+    attribution_enabled: bool = False
+    """UX-04: 置 True 表示子类实现 ``build_attribution``，选股详情弹窗将展示筛选归因。
+
+    默认关闭，未启用策略行为完全不变（向后兼容, 二次检视 B3)。仅策略层可见, UI 按需读取。
+    """
+
+    def build_attribution(self, row: dict, total_candidates: int, context: StrategyContext):
+        """返回该行的结构化筛选归因（UX-04）。
+
+        :param row: 该股票的原始数据行（``collect().to_pandas()`` 后的 dict, 含各筛选列的实际值）。
+        :param total_candidates: AI 截断前真实候选池总数, 用于 rank.total（一次检视 Major#1）。
+        :param context: 策略上下文（含 ``params``; 金额/数量类阈值须经 ``threshold_in_data_unit``
+            换算到数据单位后再写入 FilterCondition.threshold, 符合 R20）。
+        :return: ``FilterAttribution`` 或 None（不生成归因）。
+        """
+        return None
+
     def get_dynamic_description(self, current_params: dict) -> Message:
         """
         Return a dynamic description based on current UI parameters.
