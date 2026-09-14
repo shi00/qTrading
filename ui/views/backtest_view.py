@@ -49,6 +49,32 @@ _CREDIBILITY_TITLE_KEYS = {
 }
 
 
+def _build_warning_detail_controls(state: BacktestState) -> list[ft.Control]:
+    """UX-01 细化: 「查看详情」展开明细 (策略执行失败的交易日 + 被跳过订单原因汇总)。"""
+    controls: list[ft.Control] = []
+    if state.failed_details:
+        controls.append(
+            ft.Text(
+                I18n.get("backtest_detail_failed_dates_title"),
+                weight=ft.FontWeight.BOLD,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            )
+        )
+        for date_str, error in state.failed_details:
+            controls.append(ft.Text(f"• {date_str}: {error}", size=AppStyles.FONT_SIZE_BODY_SM))
+    if state.skipped_reasons:
+        controls.append(
+            ft.Text(
+                I18n.get("backtest_detail_skipped_orders_title"),
+                weight=ft.FontWeight.BOLD,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            )
+        )
+        for key, count in state.skipped_reasons:
+            controls.append(ft.Text("• " + I18n.get(key, count=count), size=AppStyles.FONT_SIZE_BODY_SM))
+    return controls
+
+
 def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
     """UX-01: 结果区顶部的回测可信度告警横幅。
 
@@ -62,37 +88,47 @@ def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
     is_unreliable = state.credibility_level == "unreliable"
     accent = AppColors.ERROR if is_unreliable else AppColors.WARNING
     title = I18n.get(_CREDIBILITY_TITLE_KEYS[state.credibility_level])
-    return ft.Container(
-        content=ft.Column(
+    detail_controls = _build_warning_detail_controls(state)
+    children: list[ft.Control] = [
+        ft.Row(
             [
-                ft.Row(
-                    [
-                        ft.Icon(
-                            ft.Icons.ERROR_OUTLINE if is_unreliable else ft.Icons.WARNING_AMBER,
-                            color=accent,
-                            size=AppStyles.FONT_SIZE_TITLE,
-                        ),
-                        ft.Text(
-                            title,
-                            color=accent,
-                            weight=ft.FontWeight.BOLD,
-                            size=AppStyles.FONT_SIZE_BODY,
-                        ),
-                    ],
-                    spacing=8,
+                ft.Icon(
+                    ft.Icons.ERROR_OUTLINE if is_unreliable else ft.Icons.WARNING_AMBER,
+                    color=accent,
+                    size=AppStyles.FONT_SIZE_TITLE,
                 ),
-                # 告警明细: 逐条按当前 locale 翻译 (VM 只产 i18n key, 不感知 locale)
-                *[
-                    ft.Text(
-                        "• " + I18n.get(msg.key, **dict(msg.params)),
-                        color=accent,
-                        size=AppStyles.FONT_SIZE_BODY_SM,
-                    )
-                    for msg in state.warnings
-                ],
+                ft.Text(
+                    title,
+                    color=accent,
+                    weight=ft.FontWeight.BOLD,
+                    size=AppStyles.FONT_SIZE_BODY,
+                ),
             ],
-            spacing=6,
+            spacing=8,
         ),
+        *[
+            ft.Text(
+                "• " + I18n.get(msg.key, **dict(msg.params)),
+                color=accent,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+            )
+            for msg in state.warnings
+        ],
+    ]
+    if detail_controls:
+        children.append(
+            ft.ExpansionTile(
+                title=ft.Text(
+                    I18n.get("backtest_warning_detail_title"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=accent,
+                ),
+                controls=detail_controls,
+                dense=True,
+            )
+        )
+    return ft.Container(
+        content=ft.Column(children, spacing=6),
         padding=AppStyles.SPACING_MD,
         border_radius=8,
         bgcolor=AppColors.SURFACE_VARIANT,

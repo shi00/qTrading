@@ -550,6 +550,61 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.warnings == (Message("backtest_warn_skipped_orders", {"count": 1}),)
 
     @pytest.mark.asyncio
+    async def test_failed_details_extracted(self):
+        """UX-01 细化: 策略执行失败日期明细写入 failed_details (date 或 str 日期均可)。"""
+        vm = await self._exec_backtest(
+            self._result_with(
+                failed_signal_dates=({"date": date(2024, 3, 1), "error": "e1"}, {"date": "20240102", "error": "e2"})
+            )
+        )
+
+        assert vm.state.failed_details == (("2024-03-01", "e1"), ("20240102", "e2"))
+        assert vm.state.failed_date_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_details_capped_with_overflow_message(self):
+        """UX-01 细化: 失败日期超过上限时, 明细截断且追加溢出计数文案。"""
+        many = tuple({"date": f"202401{i:02d}", "error": "x"} for i in range(25))
+        vm = await self._exec_backtest(self._result_with(failed_signal_dates=many))
+
+        assert len(vm.state.failed_details) == 20
+        assert vm.state.warnings[-1] == Message("backtest_warn_more_days", {"count": 5})
+
+    @pytest.mark.asyncio
+    async def test_skipped_reasons_grouped_by_known_reason(self):
+        """UX-01 细化: 跳过订单按 reason 汇总为 (i18n key, 笔数)。"""
+        skipped = pl.DataFrame({"reason": ["no_quote", "no_quote", "down_limit"]})
+        vm = await self._exec_backtest(self._result_with(skipped_orders=skipped))
+
+        assert sorted(vm.state.skipped_reasons) == [
+            ("backtest_skip_down_limit", 1),
+            ("backtest_skip_no_quote", 2),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skipped_unknown_reason_mapped_and_merged(self):
+        """UX-01 细化: 未知 reason 归并到通用 key, 避免产生多个无归属条目。"""
+        skipped = pl.DataFrame({"reason": ["foo_unknown", "bar_unknown"]})
+        vm = await self._exec_backtest(self._result_with(skipped_orders=skipped))
+
+        assert vm.state.skipped_reasons == (("backtest_skip_unknown", 2),)
+
+    @pytest.mark.asyncio
+    async def test_clean_result_has_no_detail(self):
+        """UX-01 细化: 无告警结果不产出任何明细字段。"""
+        vm = await self._exec_backtest(self._result_with())
+
+        assert vm.state.failed_details == ()
+        assert vm.state.skipped_reasons == ()
+
+    @pytest.mark.asyncio
+    async def test_skipped_without_reason_column_produces_no_detail(self):
+        """UX-01 细化: 缺失 reason 列的最小构造表不产出跳过明细 (兼容既有测试表)。"""
+        vm = await self._exec_backtest(self._result_with(skipped_orders=pl.DataFrame({"a": [1]})))
+
+        assert vm.state.skipped_reasons == ()
+
+    @pytest.mark.asyncio
     async def test_run_backtest_progress_callback(self):
         """测试回测进度回调。"""
         vm = BacktestViewModel()

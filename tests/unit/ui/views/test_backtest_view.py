@@ -109,6 +109,9 @@ class _FakeBacktestViewModel:
             warnings: Any = ()
             skipped_order_count: Any = 0
             failed_date_count: Any = 0
+            # UX-01 细化: 与 BacktestState 新增字段同步 (「查看详情」展开明细)
+            failed_details: Any = ()
+            skipped_reasons: Any = ()
             # BT-01: 与 BacktestState 新增字段同步 (IC 是否来自独立打分)
             has_real_score: Any = True
 

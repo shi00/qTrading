@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 TASK_NAME_PREFIX = "backtest"
 
+# UX-01 细化: 「查看详情」展开的明细上限 (仅展示前 N 条失败交易日, 其余以溢出文案计数).
+_FAILED_DETAIL_CAP = 20
+# UX-01 细化: 被跳过订单的 reason 列值 → i18n key (VM 只产出 i18n key, 不感知 locale).
+_SKIP_REASON_I18N = {
+    "no_quote": "backtest_skip_no_quote",
+    "suspended": "backtest_skip_suspended",
+    "down_limit": "backtest_skip_down_limit",
+    "up_limit": "backtest_skip_up_limit",
+    "insufficient_cash": "backtest_skip_insufficient_cash",
+    "invalid_price": "backtest_skip_invalid_price",
+}
+_SKIP_REASON_UNKNOWN = "backtest_skip_unknown"
+
 # Task 8.3: 选股→回测参数透传 — 模块级 pending prefill stash.
 # 选股页跳转前写入, 回测页 mount 时 consume_pending_prefill() 读取并清空.
 # 单次消费语义, 无持久化 (YAGNI: 跨视图临时传递, 不引入全局状态服务).
@@ -170,8 +183,11 @@ def _assess_credibility(
         level = "unreliable"
 
     if result.failed_signal_dates:
-        msgs.append(Message("backtest_warn_failed_dates", {"count": len(result.failed_signal_dates)}))
+        total = len(result.failed_signal_dates)
+        msgs.append(Message("backtest_warn_failed_dates", {"count": total}))
         level = "unreliable"
+        if total > _FAILED_DETAIL_CAP:
+            msgs.append(Message("backtest_warn_more_days", {"count": total - _FAILED_DETAIL_CAP}))
 
     if not result.skipped_orders.is_empty():
         msgs.append(Message("backtest_warn_skipped_orders", {"count": len(result.skipped_orders)}))
@@ -179,6 +195,47 @@ def _assess_credibility(
             level = "degraded"
 
     return level, tuple(msgs), len(result.skipped_orders), len(result.failed_signal_dates)
+
+
+def _extract_failed_details(result: BacktestResult) -> tuple[tuple[str, str], ...]:
+    """UX-01 细化: 提取策略执行失败的交易日明细 ``(date_str, sanitized_error)``。
+
+    支持 ``date`` 或 ``str`` 类型的日期 (engine 产 ``date``, 既有测试用字符串),
+    上限为 ``_FAILED_DETAIL_CAP``; 溢出部分由 ``backtest_warn_more_days`` 计数提示。
+    error 文本在回测引擎已由 ``DataSanitizer.sanitize_error`` 脱敏, 此处仅透传。
+    """
+    if not result.failed_signal_dates:
+        return ()
+    out: list[tuple[str, str]] = []
+    for entry in result.failed_signal_dates:
+        if len(out) >= _FAILED_DETAIL_CAP:
+            break
+        out.append((str(entry.get("date", "")), str(entry.get("error", ""))))
+    return tuple(out)
+
+
+def _extract_skipped_reasons(result: BacktestResult) -> tuple[tuple[str, int], ...]:
+    """UX-01 细化: 按原因汇总被跳过的订单, 产出 ``(i18n key, 笔数)``。
+
+    仅依赖 ``reason`` 列; 缺列或空表返回 ``()`` 以兼容最小构造的测试表。
+    未知/缺失原因归并到 ``_SKIP_REASON_UNKNOWN``, 避免产生多个无归属 key。
+    VM 只产出 i18n key, 不感知 locale (CLAUDE.md §3.2 MVVM)。
+    """
+    skipped = result.skipped_orders
+    if skipped is None or skipped.is_empty() or "reason" not in skipped.columns:
+        return ()
+    counts = {
+        str(row["reason"]): int(row["n"]) for row in skipped["reason"].value_counts(name="n").iter_rows(named=True)
+    }
+    out: list[tuple[str, int]] = []
+    for raw, count in counts.items():
+        key = _SKIP_REASON_I18N.get(raw, _SKIP_REASON_UNKNOWN)
+        existing = next((i for i, (k, _) in enumerate(out) if k == key), None)
+        if existing is not None:
+            out[existing] = (key, out[existing][1] + count)
+        else:
+            out.append((key, count))
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -227,6 +284,11 @@ class BacktestState:
     warnings: tuple[Message, ...] = ()
     skipped_order_count: int = 0
     failed_date_count: int = 0
+    # UX-01 细化: 「查看详情」展开明细 (仅告警且可展示时非空)
+    # - failed_details: (日期字符串, 已脱敏错误) 序列, 上限 _FAILED_DETAIL_CAP
+    # - skipped_reasons: (i18n key, 笔数) 序列, 按原因汇总 (VM 只产 i18n key)
+    failed_details: tuple[tuple[str, str], ...] = ()
+    skipped_reasons: tuple[tuple[str, int], ...] = ()
     # BT-01: 信号是否来自独立打分; False 时 IC 卡片呈现为「排序 IC」并附 tooltip
     has_real_score: bool = True
 
@@ -478,6 +540,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
 
                 # UX-01: 汇总回测可信度告警 (data_warnings / skipped_orders / failed_signal_dates)
                 credibility_level, warnings, skipped_order_count, failed_date_count = _assess_credibility(result)
+                # UX-01 细化: 「查看详情」展开明细 (失败交易日 + 跳过订单原因汇总)
+                failed_details = _extract_failed_details(result)
+                skipped_reasons = _extract_skipped_reasons(result)
 
                 # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(
@@ -505,6 +570,8 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     warnings=warnings,
                     skipped_order_count=skipped_order_count,
                     failed_date_count=failed_date_count,
+                    failed_details=failed_details,
+                    skipped_reasons=skipped_reasons,
                 )
 
                 return Message("backtest_success", {"sharpe": f"{result.metrics.get('sharpe_ratio', 0):.2f}"})
