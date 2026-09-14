@@ -332,7 +332,6 @@
     "settings_ai_api_key_label": "AI 接口密钥 (API Key)",
     "settings_ai_base_url_label": "API 服务地址 (Base URL)",
     "settings_sec_tuning": "AI 性能调优",
-    "settings_sec_ai_cost": "月度 AI 成本",
     "settings_ai_cost_limit": "成本上限(元)",
     "settings_hint_ai_cost_limit": "留空表示不限制；本月累计达到该预算后自动暂停 AI 分析",
     "settings_month_ai_cost": "本月已消耗 ¥{cost}",
