@@ -150,7 +150,7 @@ class BacktestResult:
     executed_at: datetime
     duration_ms: int
 
-    # UX-12 (P2-05): IC 序列对应的信号日期（仅内存透传，不持久化）。
+    # IC 序列对应的信号日期（仅内存透传，不持久化）。
     # 置于 dataclass 末尾并带默认值，避免破坏既有测试/调用方的关键字构造点。
     ic_dates: pl.Series = field(default_factory=lambda: pl.Series(dtype=pl.Date))
     # BT-01: 信号是否来自独立打分（存在 score/signal_score/rank_score/ai_score 列）。

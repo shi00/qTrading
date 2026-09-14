@@ -124,7 +124,7 @@ def _to_period_stats_rows(period_df: Any) -> tuple[tuple[str, float, float, floa
 
 
 def _to_date_strings(dates: Sequence[date | str] | None) -> tuple[str, ...]:
-    """统一 date/str 为 ``%Y-%m-%d`` 字符串元组 (UX-12 图表横轴日期)。
+    """统一 date/str 为 ``%Y-%m-%d`` 字符串元组 (回测图表横轴日期)。
 
     处理对象: polars Date 列 ``.to_list()`` 产出的 ``datetime.date``、原生 ``date``、
     以及已是 ``%Y-%m-%d`` 或透明裸串的 ``str`` (str 输入直接透传, 不二次格式化)。
@@ -141,7 +141,7 @@ def _to_date_strings(dates: Sequence[date | str] | None) -> tuple[str, ...]:
 
 
 def _build_benchmark_curve(nav0: float, returns: Sequence[float]) -> tuple[float, ...]:
-    """递推构造基准相对净值曲线 (UX-12 基准对比系列, 与净值曲线同起点对齐)。
+    """递推构造基准相对净值曲线 (基准对比系列, 与净值曲线同起点对齐)。
 
     bench[0] = nav0 (与策略净值首点显式对齐锚点);
     bench[i] = bench[i-1] * (1 + returns[i]) (i >= 1)。
@@ -272,11 +272,11 @@ class BacktestState:
     period_stats: tuple[tuple[str, float, float, float], ...] = ()
     # 已脱敏的错误详情 (Task 11.4): run_backtest 失败时由 DataSanitizer.sanitize_error 产出
     error_detail: str | None = None
-    # UX-12 (P2-05): 净值曲线横轴日期 (``%Y-%m-%d`` 字符串) / 基准相对净值曲线 / IC 横轴日期
+    # 净值曲线横轴日期 (``%Y-%m-%d`` 字符串) / 基准相对净值曲线 / IC 横轴日期
     nav_dates: tuple[str, ...] = ()
     benchmark_curve: tuple[float, ...] = ()
     ic_dates: tuple[str, ...] = ()
-    # UX-12 (P2-05): 回测文本摘要的数据来源 (策略名 / 基准代码), 供可复制摘要行
+    # 回测文本摘要的数据来源 (策略名 / 基准代码), 供可复制摘要行
     strategy_name: str | None = None
     benchmark_name: str | None = None
     # UX-01: 回测结果可信度告警 (仅引擎产生告警时非默认值)
@@ -528,7 +528,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     cancel_check=_cancel_check,
                 )
 
-                # UX-12: 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)
+                # 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)
                 nav_ns = result.nav_curve
                 nav_dates = _to_date_strings(nav_ns["trade_date"].to_list() if not nav_ns.is_empty() else None)
                 nav_values = nav_ns["nav"].to_list()

@@ -98,7 +98,7 @@ class _FakeBacktestViewModel:
             ic_series: Any = ()
             period_stats: Any = ()
             error_detail: Any = None
-            # UX-12 (P2-05): 与 BacktestState 新增字段同步 (图表语境 + 可复制摘要来源)
+            # 与 BacktestState 新增字段同步 (图表语境 + 可复制摘要来源)
             nav_dates: Any = ()
             benchmark_curve: Any = ()
             ic_dates: Any = ()

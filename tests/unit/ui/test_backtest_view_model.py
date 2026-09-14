@@ -504,7 +504,7 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.metrics == (("sharpe_ratio", 1.5), ("total_return", 0.1))
         assert vm.state.nav_curve == (1.0, 1.1)
         assert vm.state.ic_series == (0.1, 0.2)
-        # UX-12: 横轴日期与基准曲线正确透传/构造
+        # 横轴日期与基准曲线正确透传/构造
         assert vm.state.nav_dates == ("2024-01-02", "2024-01-03")
         assert vm.state.ic_dates == ("2024-01-02", "2024-01-03")
         assert vm.state.benchmark_curve == (1.0, 1.1)
@@ -1453,7 +1453,7 @@ class TestSplitterWidthPersistence:
 
 
 class TestBacktestChartHelpers:
-    """UX-12 (P2-05): 图表语境辅助纯函数测试。"""
+    """图表语境辅助纯函数测试。"""
 
     def test_to_date_strings_date_input(self):
         """date 对象格式化为 %Y-%m-%d。"""
