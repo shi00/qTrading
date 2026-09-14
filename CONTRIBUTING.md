@@ -672,10 +672,6 @@ except Exception as e:
 - [exceptions.yml](./docs/governance/exceptions.yml) — 架构边界例外注册表（rule_id 维度，协议级例外的唯一登记入口）
 - [canonical-topics.yml](./docs/governance/canonical-topics.yml) — 主题→canonical 正本映射（决策树机器可读镜像）
 
-### docs/task-plans/ — 任务计划
-
-- [ux-12-backtest-chart-context-plan.md](./docs/task-plans/ux-12-backtest-chart-context-plan.md) — 回测图表上下文计划（示例：任务计划按需归档与此）
-
 ### docs/reviews/ — AI 代码检视指南
 
 - [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）

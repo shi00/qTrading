@@ -3442,7 +3442,6 @@ class TestDocsIndexCompleteness:
             _LOCAL_ARTIFACT_DIRS,
         )
 
-        assert ROOT / "docs" / "task-plans" not in _GITIGNORED_ARTIFACT_DIRS
         assert ROOT / "docs" / "reviews" / "evals" not in _GITIGNORED_ARTIFACT_DIRS
         assert ROOT / "docs" / "reviews" / "evals" in _EX_REF_EXCLUDED_DIRS
         assert _LOCAL_ARTIFACT_DIRS == _GITIGNORED_ARTIFACT_DIRS

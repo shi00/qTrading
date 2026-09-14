@@ -11,13 +11,8 @@
 - [debt/](./debt/) — 已知架构技术债（含 Tushare 相关条目：P3-Tushare-Token-Invalid-Race / P3-Tushare-Client-Lazy-Markers）
 - [adr/](./adr/) — 架构决策记录（ADR）
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml / exceptions.yml / canonical-topics.yml）
-- [task-plans/](./task-plans/) — 任务计划（按需归档，示例见 ux-12-backtest-chart-context-plan.md）
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
-
-## 单点特性设计文档
-
-- [UX-04 选股结果结构化归因](./design-ux04-result-attribution.md) — 筛选条件/排序归因数据结构与各层实现（策略生成 → VM 解码 → View 渲染）
 
 ## 文档层次
 
