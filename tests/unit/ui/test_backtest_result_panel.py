@@ -351,7 +351,7 @@ class TestBuildNavChart:
             mock_i18n.return_value = "mock_text"
             container = _build_nav_chart((1_000_000.0, 1_010_000.0))
 
-        # UX-12: content 变为 Column（图例行 + LineChart）；LineChart 在 controls[1]
+        # content 变为 Column（图例行 + LineChart）；LineChart 在 controls[1]
         assert isinstance(container.content, ft.Column)
         assert isinstance(container.content.controls[1], fch.LineChart)
 
@@ -455,7 +455,7 @@ class TestBuildIcChart:
 
 
 class TestBacktestChartContext:
-    """UX-12 (P2-05): 图表语境增强（日期横轴/轴标题/图例/基准/摘要）.
+    """图表语境增强（日期横轴/轴标题/图例/基准/摘要）.
 
     用真实 ``I18n.get(key)`` 同源比对（不 patch 为 mock 文本），
     断言与实现采用同一取值路径，避免退化弱断言。

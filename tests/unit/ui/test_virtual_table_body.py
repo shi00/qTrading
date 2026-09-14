@@ -104,7 +104,7 @@ def _noop(e):
 
 
 def _sort_header_text(headers, col_index):
-    """UX-11: 可排序表头读屏语义挂 Text.semantics_label (不嵌套 Semantics).
+    """可排序表头读屏语义挂 Text.semantics_label (不嵌套 Semantics).
 
     结构 (col_anchor=None): headers[i].content (GestureDetector) →
     .content (Container) → .content (Text, 承载 semantics_label)。
@@ -218,7 +218,7 @@ class TestBuildHeader:
         on_sort = MagicMock()
         headers = _build_header(_make_columns(), None, True, on_sort)
         for h in headers:
-            # UX-11: on_sort 非空时 content 是 GestureDetector(on_tap=handler),
+            # on_sort 非空时 content 是 GestureDetector(on_tap=handler),
             # 其 content 内层是 Container(Text), 读屏语义挂 Text.semantics_label。
             assert isinstance(h.content, ft.GestureDetector)
             assert callable(h.content.on_tap)
@@ -246,7 +246,7 @@ class TestBuildHeader:
 
 
 class TestBuildHeaderSemantics:
-    """UX-11 (P2-03): 排序表头读屏语义三态标注 — 排序方向可被辅助技术感知。
+    """排序表头读屏语义三态标注 — 排序方向可被辅助技术感知。
 
     读屏语义挂 `Text.semantics_label`（而非嵌套 ft.Semantics）：E2E CI 实证嵌套
     Semantics 阻断 anchored COMPLEX 锚点 fold（PR #655），故表头结构为

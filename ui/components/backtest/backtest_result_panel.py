@@ -320,7 +320,7 @@ def _build_empty_content() -> ft.Column:
 
 
 def _legend_item(color: str, label: str) -> ft.Row:
-    """自绘图例项 (色块 + 文本) — UX-12 图表图例. flet_charts 无内置图例."""
+    """自绘图例项 (色块 + 文本) — 图表图例. flet_charts 无内置图例."""
     return ft.Row(
         controls=[
             ft.Container(width=12, height=12, bgcolor=color, border_radius=2),
@@ -336,7 +336,7 @@ def _build_nav_chart(
     nav_dates: tuple[str, ...] = (),
     benchmark_curve: tuple[float, ...] = (),
 ) -> ft.Container:
-    """净值/基准对比折线图（UX-12 语境增强）.
+    """净值/基准对比折线图（回测图表语境增强）.
 
     - 底轴: 日期自定义 labels（``nav_dates``）；空则回退序号自动标签。
     - 左轴: 净值单位标题。
@@ -530,7 +530,7 @@ def _build_ic_chart(
     ic_series: tuple[float, ...],
     ic_dates: tuple[str, ...] = (),
 ) -> ft.Container:
-    """IC 柱状图（UX-12 语境增强）.
+    """IC 柱状图（回测图表语境增强）.
 
     - 左轴: IC 值标题；底轴: 日期 label（``ic_dates``；空则序号）。
     - 每根柱加 hover 明细: 日期 + IC 值。
@@ -581,7 +581,7 @@ def _build_chart_summary(
     nav_curve: tuple[float, ...],
     metrics: dict,
 ) -> ft.Text:
-    """回测文本摘要（UX-12，可选中复制）.
+    """回测文本摘要（可选中复制）.
 
     聚合数据来源/回测区间/期初·期末净值/总收益/最大回撤。
     仅复用 metrics 已计算字段、nav_curve/nav_dates，不新增计算。
@@ -693,7 +693,7 @@ def _build_content(
 
     D11: 消费渲染就绪 props（metrics/trades/nav_curve/ic_series/period_stats），
     不再接收 BacktestResult 领域对象。
-    UX-12: 附加 nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name；
+    附加 nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name；
     净值 Tab 顶部加可复制文本摘要。
     """
     # V1 三件套：selected_index/on_change 在 ft.Tabs 上（ft.TabBar 无这两个参数，
@@ -785,7 +785,7 @@ def BacktestResultPanel(
         metrics/trades/nav_curve/ic_series/period_stats: BacktestState 渲染就绪字段
             （D11 拆解，源自 BacktestResult；全部为空时显示空状态）
         nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name:
-            UX-12 图表语境素材（日期横轴/基准曲线/文本摘要数据来源）。
+            图表语境素材（日期横轴/基准曲线/文本摘要数据来源）。
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)

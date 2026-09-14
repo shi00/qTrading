@@ -36,7 +36,7 @@ from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
-# UX-11 (P2-03): 行高 30→32 — WCAG 2.2 24px 最低目标之上, 缓解高频点击与系统缩放
+# 行高 30→32 — WCAG 2.2 24px 最低目标之上, 缓解高频点击与系统缩放
 ROW_HEIGHT = 32
 HEADER_HEIGHT = 35
 MIN_TABLE_WIDTH = 800
@@ -46,7 +46,7 @@ DRAG_INTERVAL = 16
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
 
-# NOTE(lazy): UX-11 (P2-03) 键盘契约降级 — Flet 0.86.5 无表格 focus/grid 键盘遍历
+# NOTE(lazy): 键盘契约降级 — Flet 0.86.5 无表格 focus/grid 键盘遍历
 # (无 Focus 控件; DataTable 无 on_key; KeyboardListener 无 focus 遍历), 键盘用户无方向键
 # 行导航与 Enter 打开详情入口 (行点击详情仅鼠标/触屏可达); 本次仅提供排序表头语义状态朗读
 # (Semantics 三态) + 行高 32. ceiling: 排序方向可感知, 完整键盘导航不可用.
@@ -194,7 +194,7 @@ def _build_header(
 ) -> list[ft.Control]:
     """构建表头单元格 (theme-dependent)。
 
-    on_sort 非空时用 Semantics(GestureDetector(on_tap)) 包裹（UX-11: 排序状态三态语义标注,
+    on_sort 非空时用 Semantics(GestureDetector(on_tap)) 包裹（排序状态三态语义标注,
     读屏可感知升/降/可排序；与行一致生成 flt-tappable 语义属性）。
     Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
     导致列头文本从语义树消失 + anchor 不可定位。
@@ -213,7 +213,7 @@ def _build_header(
         if sort_col == col_id:
             label += " ↑" if sort_asc else " ↓"
         if on_sort is not None:
-            # UX-11 (P2-03): 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
+            # 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
             if sort_col == col_id and sort_asc:
                 state_desc = I18n.get("table_sort_asc")
             elif sort_col == col_id:

@@ -656,7 +656,7 @@ class VectorBacktestEngine:
         2. forward_return = 执行价到下一次调仓执行价的收益
         3. 使用复权价格计算收益（qfq_close）
 
-        UX-12 (P2-05): 返回 ``(ic_values, ic_dates)``，``ic_dates[i]`` 为
+        返回 ``(ic_values, ic_dates)``，``ic_dates[i]`` 为
         ``ic_values[i]`` 对应的信号日期（即 ``trade_dates[i]``，非执行日期），
         供 IC 图横轴显示日期。
         """
@@ -721,7 +721,7 @@ class VectorBacktestEngine:
                 forward_return["fwd_ret"],
             )
             ic_values.append(ic)
-            ic_dates.append(signal_date)  # UX-12: 与 ic 同步记录信号日期（trade_dates[i]）
+            ic_dates.append(signal_date)  # 与 ic 同步记录信号日期（trade_dates[i]）
 
         assert len(ic_values) == len(ic_dates)
         return pl.Series(ic_values, dtype=pl.Float64), ic_dates

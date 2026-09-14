@@ -50,13 +50,10 @@
 | P1-3 | Flet 绝对化表述分层（「新代码禁止/契约守护」规则例外集中登记） | 文档体系检视（P1 系列） | [flet/v1-api-constraints.md](../flet/v1-api-constraints.md) | 使用中 |
 | P2-2 | 引入极简 ADR 目录沉淀不可逆/持续影响架构决策 | 文档体系检视（P2 系列） | [0001-record-architecture-decisions.md](../adr/0001-record-architecture-decisions.md) | 使用中 |
 | P2-4 | UI 可访问性最低标准章节（新增 UI 控件必须满足） | 文档体系检视（P2 系列） | [flet/accessibility-baseline.md](../flet/accessibility-baseline.md) | 使用中 |
-| P2-05 | 回测图表语境修复方案任务标识 | 文档体系检视（P2 系列） | [task-plans/ux-12-backtest-chart-context-plan.md](../task-plans/ux-12-backtest-chart-context-plan.md) | 使用中 |
 | P3-02 | canonical_for 链接语义正本元数据字段 | 文档体系检视（P3 系列） | [singleton-lifecycle.md](../architecture/singleton-lifecycle.md) / [mvvm.md](../patterns/mvvm.md) | 使用中 |
 | UX-01 | 导航深链协议（TOPIC_NAVIGATE） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-04 | 导航深链协议（与 UX-01 同源） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-06 | 冷启动到导航可交互端到端 SLA 未实测，以 proxy 构成基线替代 | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
-| UX-11 | 回测图表 Semantics/锚点经验（摘要/图例 data-testid 独立语义边界） | UX 专项检视 | [task-plans/ux-12-backtest-chart-context-plan.md](../task-plans/ux-12-backtest-chart-context-plan.md) | 使用中 |
-| UX-12 | 回测图表语境修复方案 | UX 专项检视 | [task-plans/ux-12-backtest-chart-context-plan.md](../task-plans/ux-12-backtest-chart-context-plan.md) | 使用中 |
 | review03-C13 | 数据库连接生命周期契约 | review03 数据层与持久化 | [patterns/data-sync.md](../patterns/data-sync.md) | 使用中 |
 | review03-C19 | embedded_pg TimeoutExpired 包装为 EmbeddedPgMaintenanceError 分类处理 | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | review05-E11 | config_handler↔db_config_service 循环打破；db 逻辑按域拆分迁至 utils/config/db.py | review05 配置与依赖治理 | [exceptions.yml](./exceptions.yml) | 使用中 |
