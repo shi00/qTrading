@@ -66,7 +66,7 @@ def __init__(self, *, config=None, clock=None):
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，18 个）**：
+**注册单例（`@register_singleton`，19 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -88,6 +88,7 @@ def __init__(self, *, config=None, clock=None):
 | `EmbeddedPgMaintenanceService` | `services/embedded_pg_maintenance_service.py` | 内置 PostgreSQL 离线维护（备份/恢复/诊断） |
 | `AppColors` | `ui/theme.py` | 双层主题色管理器（类级状态单例：Layer 2 颜色 + Observable state，`_reset_singleton` 复位 DARK 默认，根治跨测试泄漏） |
 | `WriteQuality` | `data/persistence/write_quality.py` | 表级写入质量门控（coerce 比例/行数跟踪），支撑 DAT-06 写入侧告警 |
+| `EgressAudit` | `utils/egress_audit.py` | LLM 云端外发元数据集中审计（SEC-03；JSONL 唯一事实源 + 会话计数 + recent 缓冲 + 单例写锁） |
 
 **非注册单例（无 `@register_singleton`，但事实单例）**：
 

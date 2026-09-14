@@ -142,10 +142,15 @@ def app_layout_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
 
 
 def _get_nav_rail(env: dict) -> ft.NavigationRail:
-    """从渲染树提取 NavigationRail (root.content.controls[0])."""
+    """从渲染树提取 NavigationRail (root.content.controls[0].controls[0]).
+
+    SEC-03 起根布局为 Container > Column[ Row[nav, divider, body], 状态栏 ]。
+    """
     result = env["result"]
     assert isinstance(result, ft.Container)
-    row = result.content
+    column = result.content
+    assert isinstance(column, ft.Column)
+    row = column.controls[0]
     assert isinstance(row, ft.Row)
     nav_rail = row.controls[0]
     assert isinstance(nav_rail, ft.NavigationRail)
@@ -608,7 +613,9 @@ class TestOnNavigateDeepLink:
         """
         result = render_once(env["component"])
         env["result"] = result
-        body = result.content.controls[2]  # Row([nav_rail, VerticalDivider, body])
+        # Container > Column[ Row([nav_rail, VerticalDivider, body]), 状态栏 ] (SEC-03 状态栏)
+        main_row = result.content.controls[0]
+        body = main_row.controls[2]
         stack_component = body.content
         render_once(stack_component)
         settings_mock = env["mod"].SettingsView

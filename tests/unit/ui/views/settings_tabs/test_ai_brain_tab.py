@@ -471,6 +471,7 @@ def _patch_ai_brain_common_mocks(mod, monkeypatch) -> dict:
     mock_config.get_ai_system_prompt.return_value = "default prompt"
     mock_config.get_ai_news_prompt.return_value = "default news"
     mock_config.get_setting.return_value = None
+    mock_config.is_ai_local_only_mode.return_value = False
     mock_config.save_local_ai_config.return_value = True
     mock_config.save_config.return_value = True
     mock_config.save_ai_system_prompt.return_value = True
@@ -911,6 +912,7 @@ class TestDoSaveAISettingsSaveFailedPhase:
                 "ai_max_concurrent_analysis": 3,
                 "ai_news_max_concurrent": 1,
                 "ai_cost_limit_cny": None,
+                "ai_local_only_mode": False,
             }
         )
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)

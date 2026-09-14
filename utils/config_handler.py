@@ -443,6 +443,14 @@ class ConfigHandler:
         )
 
     @staticmethod
+    def is_ai_local_only_mode() -> bool:
+        return app_prefs.is_ai_local_only_mode()
+
+    @staticmethod
+    def set_ai_local_only_mode(enabled: bool) -> bool:
+        return app_prefs.set_ai_local_only_mode(enabled)
+
+    @staticmethod
     def is_auto_update_enabled():
         return app_prefs.is_auto_update_enabled()
 

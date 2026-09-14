@@ -304,7 +304,15 @@ class AIService:
         )
 
     def is_cloud_available(self) -> bool:
-        """检查云端 LLM 是否可用 (替代 if not self.client)"""
+        """检查云端 LLM 是否可用 (替代 if not self.client)。
+
+        SEC-03 第一步: 「仅本地模式」开启时全部云端 LLM 出口禁用（选股/新闻/
+        概念同步/网页搜索均经此判断），本地模型不受影响。
+        """
+        from utils.config_handler import ConfigHandler
+
+        if ConfigHandler.is_ai_local_only_mode():
+            return False
         return self._is_cloud_configured and bool(self._litellm_config.get("api_key"))
 
     def _get_analysis_semaphore(self):
