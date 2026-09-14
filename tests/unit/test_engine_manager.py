@@ -121,3 +121,22 @@ class TestEngineProviderEngineScopedIsDisposed:
         engine_provider.mark_disposed(False)  # 新引擎就绪
         assert engine_provider.is_disposed(engine_a) is True
         assert engine_provider.is_disposed(engine_b) is False
+
+
+class TestEngineProviderGetEngine:
+    """get_engine 与 set_engine 对称的只读查询（AI-03 供 service 层惰性注入引擎）。
+
+    返回当前受管引擎引用；无受管引擎时为 None；不判定可用性（由调用方经
+    is_disposed 判活）。
+    """
+
+    def test_returns_current_managed_engine(self):
+        _reset_provider()
+        managed = object()
+        engine_provider.set_engine(managed)
+        assert engine_provider.get_engine() is managed
+        assert engine_provider.is_disposed(managed) is False
+
+    def test_returns_none_when_no_managed_engine(self):
+        _reset_provider()
+        assert engine_provider.get_engine() is None

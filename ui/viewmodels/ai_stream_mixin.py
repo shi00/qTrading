@@ -531,12 +531,18 @@ class AIStreamMixin:
                 # D3-4: 捕获策略执行期业务警告，随结果单帧透传给 state（frozen dataclass 用 tuple）。
                 # dep unready 等提前返回路径未初始化通道时 .get() 为 None，判空后 () 空载。
                 strategy_warnings = tuple(context.get("warnings") or ())
-                # AI-03(最小版本): 读取 ai_mixin 回写的本次消耗统计。
-                # ai_usage_summary 仅在其中 dict 时展开为元组；无消耗/未执行 AI 时为 None
-                # （View 据此决定是否渲染汇总行，避免 "消耗 0 次" 的误读）。
+                # AI-03(完整版): 读取 ai_mixin 回写的本次消耗统计。
+                # ai_usage_summary 仅在其中 dict 时展开为 (calls, tokens, cost_cny) 元组；
+                # 无消耗/未执行 AI 时为 None（View 据此决定是否渲染汇总行，避免 "消耗 0" 误读）。
                 _ai_usage = context.get("_ai_usage_summary")
                 ai_usage_summary = (
-                    (int(_ai_usage["calls"]), int(_ai_usage["tokens"])) if isinstance(_ai_usage, dict) else None
+                    (
+                        int(_ai_usage["calls"]),
+                        int(_ai_usage["tokens"]),
+                        round(float(_ai_usage.get("cost_cny", 0.0)), 4),
+                    )
+                    if isinstance(_ai_usage, dict)
+                    else None
                 )
 
                 if result_df is not None and not result_df.empty:

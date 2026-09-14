@@ -198,6 +198,8 @@ class AppConfig(BaseModel):
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
+    # AI-03(完整版): 月度 AI 成本预算上限(元), 默认 None=不限制; >0 时当月累计达到即软停 AI 分析
+    ai_cost_limit_cny: float | None = Field(default=None, ge=0)
     # UX-2.2: AI 自由文本（summary/thinking/ai_reason/uncertainty_factors）最大长度，可配置
     ai_free_text_max_len: int = Field(default=1000, ge=100, le=10000)
     news_poll_interval: int = Field(default=60, ge=10)

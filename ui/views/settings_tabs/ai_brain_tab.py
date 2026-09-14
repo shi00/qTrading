@@ -152,6 +152,16 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         )
     )
 
+    # --- AI-03 完整版 T7: 首次渲染挂载时调度一次本月累计成本加载 (声明式 hook) ---
+    # ft.use_effect 空依赖仅执行一次 (mount effect, 见 ui/hooks.py 用法); 经
+    # page.run_task 调度 VM 异步 command, 不阻塞渲染 (R16 async-native DB 读)。
+    def _trigger_load_month_cost() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(ai_settings_vm.load_month_cost_cny)
+
+    ft.use_effect(_trigger_load_month_cost, dependencies=[])
+
     # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
     # P1-4 批次 2: ConfirmDialog open_state (消费方驱动, 无 dirty state 检测 §0.5.11.1 #78)
     reset_ai_dialog_open, set_reset_ai_dialog_open = ft.use_state(False)
@@ -298,6 +308,30 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
+    # AI-03 完整版 T7: 月度 AI 成本上限输入 (空串=不限制) + 本月累计展示
+    ai_cost_limit_input = ft.TextField(
+        label=I18n.get("settings_ai_cost_limit"),
+        value=ai_settings_state.ai_cost_limit_value,
+        width=_INPUT_WIDTH_SMALL,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        hint_text=I18n.get("settings_hint_ai_cost_limit"),
+        tooltip=I18n.get("settings_hint_ai_cost_limit"),
+        on_change=lambda e: ai_settings_vm.set_ai_cost_limit_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+    _month_cost_value = ai_settings_state.month_cost_cny
+    if _month_cost_value is None:
+        _month_cost_text = "—"
+    else:
+        _month_cost_text = I18n.get("settings_month_ai_cost").format(cost=f"{_month_cost_value:.2f}")
+    month_cost_display = ft.Text(
+        _month_cost_text,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.TEXT_SECONDARY,
+    )
     ai_prompt_input = ft.TextField(
         label=I18n.get("settings_ai_prompt"),
         value=ai_settings_state.ai_prompt_value,
@@ -397,6 +431,13 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         color=AppColors.TEXT_HINT,
         tooltip=I18n.get("settings_hint_ai_model"),
     )
+    # AI-03 完整版 T7: 月度成本上限 help 图标
+    icon_help_cost_limit = ft.Icon(
+        ft.Icons.HELP_OUTLINE,
+        size=AppStyles.FONT_SIZE_TITLE,
+        color=AppColors.TEXT_HINT,
+        tooltip=I18n.get("settings_hint_ai_cost_limit"),
+    )
 
     section_header_tuning = SectionHeader(
         I18n.get("settings_sec_tuning"),
@@ -454,6 +495,16 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     ],
                     run_spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                # AI-03 完整版 T7: 月度 AI 成本区块 (上限输入 + 本月累计)
+                ft.Divider(height=20, color=AppColors.BORDER),
+                ft.Row(
+                    [ai_cost_limit_input, icon_help_cost_limit],
+                    spacing=5,
+                ),
+                ft.Row(
+                    [month_cost_display],
+                    spacing=5,
                 ),
             ],
         ),
