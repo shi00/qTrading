@@ -32,7 +32,7 @@ API 约束表、声明式组件契约、V1 声明式 UI 开发规范见 [v1-api-
 
 适用版本：**Flet V1**（版本号从 [`pyproject.toml`](../../pyproject.toml) 读取）。
 
-项目锁定三个包：`flet` / `flet-desktop` / `flet-charts`，具体版本以 `pyproject.toml` 为准。本文件不写补丁版本号，避免与 `pyproject.toml` 漂移；升级时同步更新本文件「最后验证日期」与 [upgrade-checklist.md](./upgrade-checklist.md)。
+项目锁定四个包：`flet` / `flet-desktop` / `flet-charts` / `flet-code-editor`，具体版本以 `pyproject.toml` 为准。本文件不写补丁版本号，避免与 `pyproject.toml` 漂移；升级时同步更新本文件「最后验证日期」与 [upgrade-checklist.md](./upgrade-checklist.md)。
 
 ---
 

@@ -249,7 +249,7 @@ def ScreenerView():
 | UI 模型 | 裸 `use_state`/`use_effect` 组件 | MVVM + `use_viewmodel` hook（CLAUDE.md §3.2 强制；`use_viewmodel` 已实现，见 [ui/hooks.py](../../ui/hooks.py)） |
 | 异步线程 | `asyncio.to_thread` / `page.run_thread` | `ThreadPoolManager.run_async(TaskType.IO/CPU)`（CLAUDE.md §3.1 R16 红线） |
 | API 约束表 | 通用手册 §17 迁移表 | 本节 [V0→V1 迁移 API 表](#v0v1-迁移-api-表) + [声明式组件内 API 契约](#声明式组件内-api-契约)（含检测方式，与 [`pyproject.toml`](../../pyproject.toml) 锁定版本对齐） |
-| 版本锁定 | 通用手册示例值 | `flet` / `flet-desktop` / `flet-charts` 三包均以 `==` 精确锁定（锁定值见 [`pyproject.toml`](../../pyproject.toml)，见 [依赖管理](../guides/dependency-management.md)） |
+| 版本锁定 | 通用手册示例值 | `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` 四包均以 `==` 精确锁定（锁定值见 [`pyproject.toml`](../../pyproject.toml)，见 [依赖管理](../guides/dependency-management.md)） |
 | 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | 沿用 Flet `ResponsiveRow` 默认断点，视图栅格经 [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置统一消费；桌面端 `page.window.min_width=1280` |
 | 桌面打包 | `flet pack`（通用手册 §13.5） | PyInstaller（[`AStockScreener.spec`](../../AStockScreener.spec)，见 [PyInstaller 打包](../guides/dependency-management.md)） |
 | Dialog 管理 | `ft.use_dialog()` Hook（通用手册 §10.1，声明式唯一推荐） | 项目规范一致：声明式组件内唯一契约为 `ft.use_dialog()`；`page.show_dialog()`/`page.pop_dialog()` 仅作为 V0→V1 迁移入口，声明式组件内禁用（见 [声明式组件内 API 契约](#声明式组件内-api-契约)） |
