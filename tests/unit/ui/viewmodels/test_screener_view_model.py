@@ -775,6 +775,85 @@ class TestExecuteScreeningSanitization:
         assert "***" in msg
 
 
+class TestLoadStrategyStats:
+    """UX-05 load_strategy_stats() 解析与容错（R19，设计 v5 §6 VM state）。"""
+
+    @pytest.fixture
+    def stats_vm_with_dao(self):
+        """ScreenerViewModel with mocked CacheManager DAO (history_mode_mixin).
+
+        yield 保持 with 内 patch 在整个测试期间生效（return 会提前退出 with
+        导致 patch 回退，从而误触真实 CacheManager 单例连接 DB）。
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        fake_dao = MagicMock()
+        fake_dao.get_strategy_review_stats = AsyncMock(return_value=())
+        fake_cache = MagicMock()
+        fake_cache.screener_dao = fake_dao
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch(
+                "ui.viewmodels.history_mode_mixin.CacheManager",
+                MagicMock(return_value=fake_cache),
+            ),
+        ):
+            vm = ScreenerViewModel()
+            yield vm, fake_dao
+
+    @pytest.mark.asyncio
+    async def test_empty_df_safe_degrade_to_empty(self, stats_vm_with_dao):
+        """空 DataFrame 不 raise, strategy_stats 降级为空元组。"""
+        vm, fake_dao = stats_vm_with_dao
+        fake_dao.get_strategy_review_stats.return_value = pd.DataFrame()
+        await vm.load_strategy_stats()
+        assert vm.state.strategy_stats == ()
+
+    @pytest.mark.asyncio
+    async def test_missing_column_safe_degrade_to_empty(self, stats_vm_with_dao):
+        """缺列时安全降级为空元组, 不 raise。"""
+        vm, fake_dao = stats_vm_with_dao
+        # 仅含 strategy_name, 缺其余必需列 → 安全降级
+        df = pd.DataFrame({"strategy_name": ["sA"]})
+        fake_dao.get_strategy_review_stats.return_value = df
+        await vm.load_strategy_stats()
+        assert vm.state.strategy_stats == ()
+
+    @pytest.mark.asyncio
+    async def test_valid_df_parses_rows(self, stats_vm_with_dao):
+        """有效数据解析为 StrategyStatRow, 基准 NULL 组归入'基准未知'组。"""
+        vm, fake_dao = stats_vm_with_dao
+        df = pd.DataFrame(
+            {
+                "strategy_name": ["sA", "sA", "sA"],
+                "benchmark_code": ["sh000001", "sh000001", None],
+                "daily_cnt": [3, 5, 2],
+                "t1_mean": [0.01, 0.02, 0.03],
+                "t5_mean": [0.02, 0.03, 0.04],
+                "alpha_mean": [0.005, 0.01, None],
+                "win_cnt": [1, 2, 1],
+                "loss_cnt": [0, 1, 0],
+            }
+        )
+        fake_dao.get_strategy_review_stats.return_value = df
+        await vm.load_strategy_stats()
+
+        rows = vm.state.strategy_stats
+        assert len(rows) == 2
+        # 基准可比组在前 (alpha 有效), 基准未知组在后 (alpha n=0)
+        known, unknown = rows
+        assert known.strategy_name == "sA"
+        assert known.benchmark_code == "sh000001"
+        assert known.alpha.n == 2  # alpha 两日非 NULL
+        assert known.win_n == 4  # 股票行 N 独立累计 (1+2+0+1)
+        assert known.avg_daily_count == pytest.approx(4.0)
+        assert unknown.benchmark_code is None
+        assert unknown.alpha.n == 0  # 基准未知组 alpha 无有效样本
+        assert unknown.t1.n == 1
+
+
 class TestBuildAiFailedBannerMessage:
     """UX-02: 整批 AI failed 占比横幅 Message 产出 (报告 04 §1.1 / 05 §1.2)."""
 

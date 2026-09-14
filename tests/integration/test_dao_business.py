@@ -26,7 +26,7 @@ from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
-from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.screener_dao import REVIEW_STATS_WINDOW_DAYS, ScreenerDao
 from data.persistence.daos.sync_dao import SyncDao
 from tests.integration.test_infra_base import make_clean_db_fixture
 
@@ -1684,3 +1684,144 @@ class TestSupplementaryAnnouncementOrdering:
 
         result = await quote_dao.get_field_completeness(trade_date=date(2024, 11, 20))
         assert result["roe"] == 1.0
+
+
+@pytest.mark.asyncio
+class TestGetStrategyReviewStats:
+    """UX-05: get_strategy_review_stats 复盘聚合统计（四审 v5 口径）。"""
+
+    @staticmethod
+    async def _seed_reviews(test_engine: AsyncEngine, rows: list[dict]) -> None:
+        async with test_engine.begin() as conn:
+            for r in rows:
+                await conn.execute(
+                    text(
+                        "INSERT INTO screening_history (run_id, trade_date, strategy_name, ts_code, "
+                        " t1_pct, t5_pct, alpha, benchmark_code, prediction_result, review_status) "
+                        "VALUES (:run, :td, :strat, :code, :t1, :t5, :alpha, :bm, :res, 'COMPLETED')"
+                    ),
+                    {
+                        "run": r["run"],
+                        "td": r["td"],
+                        "strat": r["strat"],
+                        "code": r["code"],
+                        "t1": r["t1"],
+                        "t5": r["t5"],
+                        "alpha": r["alpha"],
+                        "bm": r["bm"],
+                        "res": r["res"],
+                    },
+                )
+
+    async def test_daily_mean_independent_n_and_winrate(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """日组合均值/指标独立 N/胜率计数（当前 schema 单快照聚合，四审 M4/M2）。
+
+        覆盖去重（DISTINCT ON ... ORDER BY run_id DESC 取最新快照）针对迁移 0024 前
+        旧唯一键 (run_id, ts_code) 遗留数据；当前 schema 唯一键 (trade_date,strategy_name,ts_code)
+        已禁止同 key 多快照共存，故多快照去重路径由结构化单测守护（见 test_screener_dao.py）。
+        """
+        d0 = _RECENT_DATE  # today-1，窗口内
+        await self._seed_reviews(
+            test_engine,
+            [
+                # LIFE-03 覆盖语义：每个 (trade_date, strategy_name, ts_code) 仅一行（唯一约束保障）
+                {
+                    "run": "r_new",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000001.SZ",
+                    "t1": 2.0,
+                    "t5": 1.0,
+                    "alpha": 1.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                },
+                {
+                    "run": "r1",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000002.SZ",
+                    "t1": 3.0,
+                    "t5": 2.0,
+                    "alpha": -0.5,
+                    "bm": "sh000001",
+                    "res": "LOSS",
+                },
+                # sB 无基准：alpha NULL（指标独立 N：t1_n=1 但 alpha_n=0）
+                {
+                    "run": "r2",
+                    "td": d0,
+                    "strat": "sB",
+                    "code": "000003.SZ",
+                    "t1": 5.0,
+                    "t5": 4.0,
+                    "alpha": None,
+                    "bm": None,
+                    "res": None,
+                },
+            ],
+        )
+
+        result = await screener_dao.get_strategy_review_stats()
+        assert not result.empty
+
+        # 同 strategy/benchmark/trade_date 聚成一行
+        sa = result[(result["strategy_name"] == "sA") & (result["benchmark_code"] == "sh000001")]
+        assert len(sa) == 1
+        row = sa.iloc[0]
+        assert row["daily_cnt"] == 2
+        assert float(row["t1_mean"]) == 2.5  # (2.0+3.0)/2
+        assert row["t1_n"] == 2
+        assert float(row["t5_mean"]) == 1.5  # (1.0+2.0)/2
+        assert row["t5_n"] == 2
+        assert float(row["alpha_mean"]) == 0.25  # (1.0 + -0.5)/2
+        assert row["alpha_n"] == 2
+        assert row["win_cnt"] == 1
+        assert row["loss_cnt"] == 1
+
+        # NULL 基准拆组：benchmark_code IS NULL，alpha 组独立 N 为 0（四审 M4/L3）
+        sb = result[(result["strategy_name"] == "sB") & result["benchmark_code"].isna()]
+        assert len(sb) == 1
+        sb_row = sb.iloc[0]
+        assert sb_row["daily_cnt"] == 1
+        assert float(sb_row["t1_mean"]) == 5.0
+        assert sb_row["t1_n"] == 1
+        assert sb_row["alpha_n"] == 0
+        assert pd.isna(sb_row["alpha_mean"])  # 空组均值 None/NaN
+        assert sb_row["win_cnt"] == 0 and sb_row["loss_cnt"] == 0
+
+    async def test_window_filter(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """180 天窗口过滤：超 REVIEW_STATS_WINDOW_DAYS 天的行不纳入。"""
+        d0 = _RECENT_DATE
+        old = _TODAY - timedelta(days=REVIEW_STATS_WINDOW_DAYS + 10)
+        await self._seed_reviews(
+            test_engine,
+            [
+                {
+                    "run": "r1",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000001.SZ",
+                    "t1": 2.0,
+                    "t5": 1.0,
+                    "alpha": 1.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                },
+                {
+                    "run": "r2",
+                    "td": old,
+                    "strat": "sA",
+                    "code": "000009.SZ",
+                    "t1": 9.0,
+                    "t5": 9.0,
+                    "alpha": 8.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                },
+            ],
+        )
+
+        result = await screener_dao.get_strategy_review_stats()
+        assert not result.empty
+        assert set(result["trade_date"]) == {d0}  # 仅窗口内 d0，超窗 old 被过滤

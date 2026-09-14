@@ -21,6 +21,7 @@ from dataclasses import replace
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
+from data.domain_services.review_stats_service import compute_strategy_review_stats
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     HistoryTreeRow,
@@ -31,6 +32,20 @@ from ui.viewmodels.screener_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# UX-05: 复盘聚合统计 DAO 产出所需的列（缺列时安全降级为空, 不 raise）。
+_REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
+    {
+        "strategy_name",
+        "benchmark_code",
+        "daily_cnt",
+        "t1_mean",
+        "t5_mean",
+        "alpha_mean",
+        "win_cnt",
+        "loss_cnt",
+    }
+)
 
 
 class HistoryModeMixin:
@@ -258,6 +273,21 @@ class HistoryModeMixin:
         except Exception:
             self._set_state(loading=False)
             raise
+
+    async def load_strategy_stats(self) -> None:
+        """加载复盘聚合统计到 state.strategy_stats (UX-05, T3).
+
+        拉取 DAO 日级聚合后交给纯函数 ``compute_strategy_review_stats`` 换算为按
+        (strategy_name, benchmark_code) 分组的统计行。空结果或缺列安全降级为空元组,
+        不 raise。VM 仅持有 raw 统计（含 SampleGrade 枚举），不感知 locale；
+        View 渲染时映射 i18n key (§3.2)。
+        """
+        cache = CacheManager()
+        df = await cache.screener_dao.get_strategy_review_stats()
+        if df is None or df.empty or not _REVIEW_STATS_REQUIRED_COLUMNS.issubset(df.columns):
+            self._set_state(strategy_stats=())
+            return
+        self._set_state(strategy_stats=compute_strategy_review_stats(df))
 
     def set_history_viewing_status(
         self,

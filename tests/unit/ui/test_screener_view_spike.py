@@ -76,6 +76,8 @@ class FakeScreenerState:
     warnings: tuple = ()
     # AI-03: 本次选股 LLM 调用消耗 (镜像 ScreenerState.ai_usage_summary)
     ai_usage_summary: tuple[int, int, float] | None = None
+    # UX-05: 复盘聚合统计 (镜像 ScreenerState.strategy_stats, 默认空)
+    strategy_stats: tuple = ()
     # SEC-01 gap3: 运行时 AI 外发确认对话框内容 (镜像 ScreenerState.pending_egress_ack_*)
     pending_egress_ack_preview: str = ""
     pending_egress_ack_provider: str = ""

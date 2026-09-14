@@ -72,6 +72,21 @@ class TestScreenerDaoGetHistoryTree:
         assert len(result) == 2
         assert set(result["strategy_name"]) == {"strat_a", "strat_b"}
 
+    @pytest.mark.asyncio
+    async def test_window_interval_renders_constant(self):
+        """UX-05 回归：窗口 INTERVAL 必须插值为受控常量，而非字面花括号占位。
+
+        窗口天数由 REVIEW_STATS_WINDOW_DAYS 模块常量经 f-string 插值到 SQL；
+        若漏加 f 前缀，'{REVIEW_STATS_WINDOW_DAYS}' 以字面量进入 pg 报非法 interval，
+        导致 get_history_tree 返回空表（本用例在修复前必失败）。
+        """
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_history_tree(offset=0, limit=30)
+        sql = dao._read_db.call_args.args[0]
+        assert "REVIEW_STATS_WINDOW_DAYS}" not in sql  # 占位符必须已插值
+        assert "INTERVAL '180 days'" in sql
+
 
 class TestScreenerDaoGetHistoryRecords:
     @pytest.mark.asyncio
@@ -1175,3 +1190,42 @@ class TestScreenerDaoBackfillT5Prediction:
         with caplog.at_level(logging.WARNING, logger="data.persistence.daos.screener_dao"):
             await dao.backfill_t5_prediction(1, 3.0, 10.3)
         assert any("Failed to backfill T+5" in r.message for r in caplog.records)
+
+
+class TestScreenerDaoGetStrategyReviewStats:
+    """UX-05: get_strategy_review_stats 覆盖语义去重 SQL 结构化断言。
+
+    schema 唯一键 (trade_date, strategy_name, ts_code) 禁止新数据同 key 多快照共存，
+    DISTINCT ON ... ORDER BY run_id DESC 取最新快照仅为迁移 0024 前旧唯一键
+    (run_id, ts_code) 遗留数据的防御逻辑（生命周期：当前 schema 覆盖语义下不可经 INSERT
+    造出多快照，须以结构化单测锁定该防御 SQL，防止回归，四审 L1）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_latest_snapshot_dedup_distinct_on_and_run_id_desc(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_strategy_review_stats()
+        stmt = dao._read_db_select.call_args.args[0]
+        from sqlalchemy.dialects import postgresql
+
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        # DISTINCT ON 三列 = 覆盖语义唯一键 (trade_date, strategy_name, ts_code)
+        assert "DISTINCT ON" in sql
+        assert ("screening_history.trade_date, screening_history.strategy_name, screening_history.ts_code") in sql
+        # 快照确定性：ORDER BY 尾部 run_id DESC
+        assert "screening_history.run_id DESC" in sql
+
+    @pytest.mark.asyncio
+    async def test_windows_days_bindparam_and_grouping(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_strategy_review_stats()
+        stmt = dao._read_db_select.call_args.args[0]
+        from sqlalchemy.dialects import postgresql
+
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        # 窗口走 bindparam 而非字符串拼接常量（R4 参数化）
+        assert "window_days" in sql
+        assert "GROUP BY" in sql
+        assert "screening_history.benchmark_code" in sql

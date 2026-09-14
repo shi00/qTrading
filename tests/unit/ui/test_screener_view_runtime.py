@@ -533,6 +533,10 @@ class _FakeScreenerViewModel:
             )
         )
 
+    async def load_strategy_stats(self) -> None:
+        """UX-05: 模拟 VM load_strategy_stats (默认保持 strategy_stats 为空, 不触真实状态)."""
+        self.method_calls.append("load_strategy_stats")
+
     async def load_history_data(
         self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None
     ) -> Any:
@@ -1341,7 +1345,7 @@ class TestOnModeChange:
     """_on_mode_change: HISTORY/REALTIME 切换 + 同 mode 早返回."""
 
     def test_switch_to_history(self, screener_view_env) -> None:
-        """选 HISTORY → vm.switch_to_history + page.run_task(_load_history_tree, False)."""
+        """选 HISTORY → vm.switch_to_history + 调度复盘统计与历史树两次独立任务 (UX-05)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -1351,7 +1355,12 @@ class TestOnModeChange:
         _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
 
         assert "switch_to_history" in fake_vm.method_calls
-        assert page.run_task.call_args is not None
+        # 两次独立 run_task: 先 _load_strategy_stats, 后 _load_history_tree(False)
+        calls = [c.args for c in page.run_task.call_args_list]
+        assert len(calls) == 2, f"应调度 2 个加载任务, 实际: {calls}"
+        assert calls[0][0].__name__ == "_load_strategy_stats"
+        assert calls[1][0].__name__ == "_load_history_tree"
+        assert calls[1][1] is False
 
     def test_switch_to_realtime(self, screener_view_env) -> None:
         """选 REALTIME → vm.switch_to_realtime."""

@@ -16,6 +16,7 @@ from typing import Any
 
 import pandas as pd
 
+from data.domain_services.review_stats_service import StrategyStatRow
 from ui.viewmodels import Message
 
 # Stream card limit (moved from View, VM owns card lifecycle)
@@ -255,6 +256,9 @@ class ScreenerState:
     # 仅「有候选数据但筛选后无匹配」时设置 —— 区分「无匹配」(可调低条件) 与「无数据」(需先同步),
     # View 在结果区空态渲染该原因, 提示用户如何恢复。
     empty_message: Message | None = None
+    # UX-05: 复盘聚合统计（按 (strategy_name, benchmark_code) 分组的日序列统计行）。
+    # raw 统计含 SampleGrade 枚举, 不含 locale; View 渲染时映射 i18n key (§3.2).
+    strategy_stats: tuple[StrategyStatRow, ...] = ()
     # SEC-01 gap3: 运行时 AI 外发确认对话框待确认内容。非 None 且非空表示当前正在等待
     # 用户确认是否同意将该候选池数据外发给所选云端 provider。preview 为脱敏后的真实
     # prompt 预览文本（示例标注），provider 供对话框/回显展示。View 渲染对话框并经 VM
