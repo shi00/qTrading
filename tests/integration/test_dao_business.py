@@ -1713,24 +1713,18 @@ class TestGetStrategyReviewStats:
                     },
                 )
 
-    async def test_daily_mean_independent_n_winrate_and_dedup(self, screener_dao, clean_db, test_engine: AsyncEngine):
-        """日组合均值/指标独立 N/胜率计数/覆盖去重（DISTINCT ON 取最新快照，四审 L1/M4/M2）。"""
+    async def test_daily_mean_independent_n_and_winrate(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """日组合均值/指标独立 N/胜率计数（当前 schema 单快照聚合，四审 M4/M2）。
+
+        覆盖去重（DISTINCT ON ... ORDER BY run_id DESC 取最新快照）针对迁移 0024 前
+        旧唯一键 (run_id, ts_code) 遗留数据；当前 schema 唯一键 (trade_date,strategy_name,ts_code)
+        已禁止同 key 多快照共存，故多快照去重路径由结构化单测守护（见 test_screener_dao.py）。
+        """
         d0 = _RECENT_DATE  # today-1，窗口内
         await self._seed_reviews(
             test_engine,
             [
-                # 同 (d0, sA, 000001) 两版，run_id 字典序大者 r_new 为最新快照（覆盖语义）
-                {
-                    "run": "r_old",
-                    "td": d0,
-                    "strat": "sA",
-                    "code": "000001.SZ",
-                    "t1": 1.0,
-                    "t5": 0.5,
-                    "alpha": 0.5,
-                    "bm": "sh000001",
-                    "res": "WIN",
-                },
+                # LIFE-03 覆盖语义：每个 (trade_date, strategy_name, ts_code) 仅一行（唯一约束保障）
                 {
                     "run": "r_new",
                     "td": d0,
@@ -1771,7 +1765,7 @@ class TestGetStrategyReviewStats:
         result = await screener_dao.get_strategy_review_stats()
         assert not result.empty
 
-        # 同 strategy/benchmark/trade_date 聚成一行；旧快照 r_old 不计入（覆盖语义）
+        # 同 strategy/benchmark/trade_date 聚成一行
         sa = result[(result["strategy_name"] == "sA") & (result["benchmark_code"] == "sh000001")]
         assert len(sa) == 1
         row = sa.iloc[0]

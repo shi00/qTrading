@@ -202,7 +202,7 @@ class ScreenerDao(BaseDao):
         # 历史树按 (trade_date, strategy_name) 聚合该日该策略当前股票集（COUNT(*) = 股票数）。
         # run_id 取组内字典序最大值的 uuid 作为展示代表值（非严格"最新"，仅作就地展示；
         # 点击按 trade_date+strategy_name 载入，不依赖 run_id 过滤）。
-        sql = """
+        sql = f"""
             SELECT trade_date, strategy_name, COUNT(*) as cnt, MAX(run_id) as run_id
             FROM screening_history
             WHERE trade_date >= CURRENT_DATE - INTERVAL '{REVIEW_STATS_WINDOW_DAYS} days'
