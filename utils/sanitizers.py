@@ -173,7 +173,7 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
-    # PII 检测: 手机号、身份证号、邮箱
+    # PII 检测: 手机号、身份证号、邮箱、银行卡号、统一社会信用代码
     # 参考: https://blog.csdn.net/weixin_40369899/article/details/135644486 (手机号)
     # 参考: https://cloud.tencent.com/developer/article/2275911 (身份证)
     # 参考: https://www.regular-expressions.info/email.html (邮箱)
@@ -181,10 +181,18 @@ class DataSanitizer:
     _PATTERN_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
     _PATTERN_ID_CARD = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
     _PATTERN_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    # 境内银行卡（银联标准 16-19 位）：首 1 位卡 BIN 前缀 4/5/6/9 + 15-18 位数字。
+    # BIN 前缀限制降低误报（不以 4/5/6/9 开头的 16-19 位纯数字串如订单号/流水号不命中）。
+    _PATTERN_BANK_CARD = re.compile(r"(?<!\d)(?:4|5|6|9)\d{15,18}(?!\d)")
+    # 统一社会信用代码（18 位）：登记管理部门+机构类别 2 位 + 行政区划 6 位数字 +
+    # 主体标识+校验码 10 位；字符集排除 I/O/S/V/Z（GB 32100-2015）。
+    _PATTERN_CREDIT_CODE = re.compile(
+        r"(?<![0-9A-Za-z])[0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10}(?![0-9A-Za-z])"
+    )
 
     @staticmethod
     def _sanitize_pii_text(text: str) -> str:
-        """检测并替换文本中的 PII（手机号/身份证/邮箱）。
+        """检测并替换文本中的 PII（手机号/身份证/邮箱/银行卡/统一社会信用代码）。
 
         Args:
             text: 待检测文本
@@ -194,6 +202,8 @@ class DataSanitizer:
         """
         text = DataSanitizer._PATTERN_PHONE.sub("***", text)
         text = DataSanitizer._PATTERN_ID_CARD.sub("***", text)
+        text = DataSanitizer._PATTERN_BANK_CARD.sub("***", text)
+        text = DataSanitizer._PATTERN_CREDIT_CODE.sub("***", text)
         text = DataSanitizer._PATTERN_EMAIL.sub("***", text)
         return text
 

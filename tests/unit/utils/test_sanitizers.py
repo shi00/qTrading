@@ -889,6 +889,69 @@ class TestPIISanitization:
         result = DataSanitizer._sanitize_pii_text(text)
         assert "1381234" in result
 
+    def test_bank_card_detected(self):
+        """境内银行卡号应被脱敏（银联 16 位）"""
+        text = "收款卡号: 6222021234567890 已绑定"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "6222021234567890" not in result
+        assert "***" in result
+
+    def test_bank_card_various_lengths(self):
+        """不同位数银行卡号均被脱敏（19 位）"""
+        text = "银行卡: 6222021234567890123 退款"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "6222021234567890123" not in result
+        assert "***" in result
+
+    def test_bank_card_non_bin_prefix_not_matched(self):
+        """非卡 BIN 前缀（非 4/5/6/9 开头）的长数字串不应被银行卡误匹配"""
+        text = "订单号: 2202 021234567890 12 待发货"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "2202" in result
+
+    def test_credit_code_detected(self):
+        """统一社会信用代码应被脱敏"""
+        text = "公司信用代码: 91310110MA1K4Y1234 已完成工商登记"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "91310110MA1K4Y1234" not in result
+        assert "***" in result
+
+    def test_credit_code_detected_embedded_in_sentence(self):
+        """统一社会信用代码嵌入字符串中仍被脱敏"""
+        text = "统一社会信用代码 91110000MA0070PQ11 已备案"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "91110000MA0070PQ11" not in result
+        assert "***" in result
+
+    def test_credit_code_allow_other_char_classes(self):
+        """信用代码允许 X/Y/W 等特殊字符集字符（含校验码）"""
+        text = "信用代码: 91110000MA0070PQ1X 有效"
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "91110000MA0070PQ1X" not in result
+        assert "***" in result
+
+    def test_pii_includes_bank_card_and_credit_code(self):
+        """银行卡号与统一社会信用代码在 sanitize_error 中也应被脱敏"""
+        err = ValueError("卡号 6222021234567890 与信用代码 91310110MA1K4Y1234 已曝光")
+        result = DataSanitizer.sanitize_error(err)
+        assert "6222021234567890" not in result
+        assert "91310110MA1K4Y1234" not in result
+        assert "***" in result
+
+    def test_multiple_pii_with_new_types(self):
+        """一段文本同时包含手机、身份证、邮箱、银行卡、信用代码"""
+        text = (
+            "用户 13812345678，身份证 11010119900101123X，邮箱 a@b.com，"
+            "卡 6222021234567890，信用代码 91310110MA1K4Y1234"
+        )
+        result = DataSanitizer._sanitize_pii_text(text)
+        assert "13812345678" not in result
+        assert "11010119900101123X" not in result
+        assert "a@b.com" not in result
+        assert "6222021234567890" not in result
+        assert "91310110MA1K4Y1234" not in result
+        assert result.count("***") >= 5
+
 
 class TestSanitizePaths:
     """review05-E9: sanitize_paths 对文本中的 Windows/Unix 路径脱敏"""
