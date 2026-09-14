@@ -51,6 +51,7 @@
 | P2-2 | 引入极简 ADR 目录沉淀不可逆/持续影响架构决策 | 文档体系检视（P2 系列） | [0001-record-architecture-decisions.md](../adr/0001-record-architecture-decisions.md) | 使用中 |
 | P2-4 | UI 可访问性最低标准章节（新增 UI 控件必须满足） | 文档体系检视（P2 系列） | [flet/accessibility-baseline.md](../flet/accessibility-baseline.md) | 使用中 |
 | P3-02 | canonical_for 链接语义正本元数据字段 | 文档体系检视（P3 系列） | [singleton-lifecycle.md](../architecture/singleton-lifecycle.md) / [mvvm.md](../patterns/mvvm.md) | 使用中 |
+| P3-04 | ruleset_version 无变更日志，需极简 ruleset-changelog.md 逐次登记 | 文档体系检视（P3 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
 | UX-01 | 导航深链协议（TOPIC_NAVIGATE） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-04 | 导航深链协议（与 UX-01 同源） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-06 | 冷启动到导航可交互端到端 SLA 未实测，以 proxy 构成基线替代 | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
