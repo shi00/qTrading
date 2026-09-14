@@ -48,6 +48,30 @@ logger = logging.getLogger(__name__)
 # NOTE(lazy): 流式节流 50ms (~20fps) 平衡流畅度与 reconcile 压力. ceiling: 策略结果行数 >5000 时 20fps 可能卡顿. upgrade: 行数突破 ceiling 或用户反馈卡顿时改 33ms/动态节流.
 _STREAM_THROTTLE = 0.05  # seconds
 
+# UX-02: 整批 AI 分析失败占比严格超过该阈值时, 在结果页顶部警告横幅提示
+# 「AI 分析未能完成」, 避免用户在 50 行表格里自己数灰色行 (报告 04 §1.1 / 05 §1.2)。
+_AI_FAILED_RATIO_BANNER_THRESHOLD = 0.30
+
+
+def _build_ai_failed_banner_message(result_df: pd.DataFrame | None) -> Message | None:
+    """UX-02: 整批 AI 分析失败占比超阈值时产出结果页横幅 Message (仅产 i18n key)。
+
+    基于整批 ``result_df`` 而非当前页计算占比 (避免页码采样偏差)。以下情形返回
+    ``None`` 不告警: 空表 / 无 ``ai_status`` 列 (HISTORY 历史记录或 AI 未启用,
+    此时「未完成」属预期而非异常) / 无失败 / 占比未严格超过阈值。
+    VM 不感知 locale (CLAUDE.md §3.2 MVVM), 文案经既有 ``state.warnings``
+    通道由 View 按当前 locale 渲染。
+    """
+    if result_df is None or result_df.empty or "ai_status" not in result_df.columns:
+        return None
+    total = len(result_df)
+    if total == 0:
+        return None
+    failed = int((result_df["ai_status"] == "failed").sum())
+    if failed == 0 or failed / total <= _AI_FAILED_RATIO_BANNER_THRESHOLD:
+        return None
+    return Message("screener_ai_failed_banner", {"count": failed})
+
 
 class AIStreamMixin:
     """AI 流式聚合职责（C3-4）。组合进 ``ScreenerViewModel``。"""
@@ -541,6 +565,10 @@ class AIStreamMixin:
 
                 if result_df is not None and not result_df.empty:
                     self._full_results = result_df
+                    # UX-02: 整批 AI 分析失败占比超阈值时, 向既有 D3-4 警告通道追加
+                    # 横幅 Message (View 零改动, 复用结果区上方横幅渲染)。
+                    if (ai_failed_msg := _build_ai_failed_banner_message(result_df)) is not None:
+                        strategy_warnings = strategy_warnings + (ai_failed_msg,)
                     self._update_pagination(page_no=1, warnings=strategy_warnings)
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
