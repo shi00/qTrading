@@ -405,6 +405,31 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     card_connection = DashboardCard(
         content=ft.Column([llm_panel]),
     )
+    # SEC-02: 向用户披露提示注入防护边界（UN-07/UN-08 AI 风险知情）。
+    # 承认正则黑名单净化无法穷尽注入（prompt_guard SEC-003），并如实告知用户：
+    # AI 结果仅供参考、勿作唯一决策依据。放置于云端 LLM 连接配置正下方，用户在
+    # 启用云端外发时即可见。
+    card_data_boundary = DashboardCard(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        SectionHeader(
+                            I18n.get("settings_ai_data_boundary_title"),
+                            title_key="settings_ai_data_boundary_title",
+                        ),
+                        ft.Icon(ft.Icons.INFO_OUTLINE, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.PRIMARY),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    I18n.get("settings_ai_data_boundary_body"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+            ],
+        ),
+    )
     card_failover = DashboardCard(
         content=ft.Column([failover_panel]),
     )
@@ -580,6 +605,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column(
             controls=[
                 card_connection,
+                card_data_boundary,
                 card_failover,
                 card_local_ai,
                 card_tuning,

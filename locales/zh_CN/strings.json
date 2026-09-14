@@ -354,6 +354,8 @@
     "settings_token_desc": "请输入您的 Tushare Pro Token 以获取数据权限。",
     "settings_save_token": "保存 Tushare Token",
     "settings_ai_desc": "配置大模型 API 以启用智能选股分析功能。",
+    "settings_ai_data_boundary_title": "数据外发与防护边界",
+    "settings_ai_data_boundary_body": "AI 分析会读取公开新闻等外部文本。系统会做净化处理，但无法完全排除恶意构造内容影响 AI 输出的可能。AI 结果仅供参考，请勿作为唯一决策依据。",
     "settings_ai_model": "模型名称",
     "settings_max_candidates": "AI 初选数量",
     "settings_min_turnover": "最低换手率阈值 (%)",
