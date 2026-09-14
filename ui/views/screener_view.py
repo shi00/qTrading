@@ -1077,6 +1077,22 @@ async def _execute_load_history_tree(
             _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
 
+async def _execute_load_strategy_stats(vm: ScreenerViewModel, page: ft.Page | None) -> None:
+    """加载复盘聚合统计 (UX-05: VM 更新 state.strategy_stats).
+
+    与 ``_execute_load_history_tree`` 保持一致的异常处理: CancelledError 传播,
+    普通异常记录日志并发错误 toast, 避免计算异常静默吞没。
+    """
+    try:
+        await vm.load_strategy_stats()
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] Review stats load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+
+
 async def _execute_load_history_for_date(
     vm: ScreenerViewModel,
     page: ft.Page | None,
@@ -1955,7 +1971,7 @@ def ScreenerView(
             page.run_task(_load_history_tree, True)
 
     async def _load_strategy_stats() -> None:
-        await vm.load_strategy_stats()
+        await _execute_load_strategy_stats(vm, _get_page())
 
     def _on_mode_change(e: ft.ControlEvent) -> None:
         selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
