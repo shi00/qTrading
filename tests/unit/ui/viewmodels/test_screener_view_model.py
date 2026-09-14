@@ -6,8 +6,11 @@
 import asyncio
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
+from ui.viewmodels import Message
+from ui.viewmodels.ai_stream_mixin import _build_ai_failed_banner_message
 from ui.viewmodels.screener_view_model import (
     ScreenerViewModel,
     StreamCard,
@@ -770,3 +773,38 @@ class TestExecuteScreeningSanitization:
         msg = str(holder.exc)
         assert "sk-secret-key-123" not in msg
         assert "***" in msg
+
+
+class TestBuildAiFailedBannerMessage:
+    """UX-02: 整批 AI failed 占比横幅 Message 产出 (报告 04 §1.1 / 05 §1.2)."""
+
+    @staticmethod
+    def _df(total: int, failed: int) -> pd.DataFrame:
+        """构造 total 行、failed 行为 "failed"、其余为 "analyzed" 的批结果表."""
+        return pd.DataFrame({"ai_status": ["analyzed"] * (total - failed) + ["failed"] * failed})
+
+    def test_ratio_greater_than_threshold_emits_message(self):
+        """4/10=0.40 > 0.30 → 产出横幅 Message."""
+        msg = _build_ai_failed_banner_message(self._df(10, 4))
+        assert msg == Message("screener_ai_failed_banner", {"count": 4})
+
+    def test_ratio_exactly_threshold_no_message(self):
+        """3/10=0.30, 未严格超过阈值 → None."""
+        assert _build_ai_failed_banner_message(self._df(10, 3)) is None
+
+    def test_ratio_below_threshold_no_message(self):
+        """2/10=0.20 < 0.30 → None."""
+        assert _build_ai_failed_banner_message(self._df(10, 2)) is None
+
+    def test_no_failed_no_message(self):
+        assert _build_ai_failed_banner_message(self._df(2, 0)) is None
+
+    def test_missing_ai_status_column_no_message(self):
+        """HISTORY 记录或 AI 未启用 (无 ai_status 列) → 不告警."""
+        assert _build_ai_failed_banner_message(pd.DataFrame({"ts_code": ["600519.SH"]})) is None
+
+    def test_empty_df_no_message(self):
+        assert _build_ai_failed_banner_message(pd.DataFrame()) is None
+
+    def test_none_input_no_message(self):
+        assert _build_ai_failed_banner_message(None) is None

@@ -109,6 +109,9 @@ class _FakeBacktestViewModel:
             warnings: Any = ()
             skipped_order_count: Any = 0
             failed_date_count: Any = 0
+            # UX-01 细化: 与 BacktestState 新增字段同步 (「查看详情」展开明细)
+            failed_details: Any = ()
+            skipped_reasons: Any = ()
             # BT-01: 与 BacktestState 新增字段同步 (IC 是否来自独立打分)
             has_real_score: Any = True
 
@@ -1213,3 +1216,61 @@ class TestBacktestWarningBanner:
         first = right_content.controls[0]
         assert isinstance(first, ft.Container), "banner 应为 ft.Container"
         assert "i18n[backtest_credibility_degraded]" in self._collect_texts(first)
+
+
+class TestWarningDetailControls:
+    """UX-01 细化: ``_build_warning_detail_controls`` 展开明细分支 (R19 diff-coverage 补测).
+
+    覆盖 ``_build_backtest_warning_banner`` 依赖的 detail 渲染分支:
+    - failed_details 非空 → 失败交易日标题 + 逐条明细
+    - skipped_reasons 非空 → 跳过原因标题 + 逐条 i18n 翻译
+    - detail_controls 非空 → 横幅尾随追加 ExpansionTile
+    """
+
+    @staticmethod
+    def _texts(controls: Any) -> list[str]:
+        """收集 controls 内所有 Text.value."""
+        return [c.value for c in _walk_all_controls(controls) if isinstance(c, ft.Text) and c.value]
+
+    def test_failed_details_rendered(self, backtest_view_env) -> None:
+        """failed_details 非空 → 失败交易日标题 + 逐条 ``日期: 错误`` 明细."""
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="degraded",
+            failed_details=(("2024-01-05", "数据缺失"),),
+            skipped_reasons=(),
+        )
+        controls = mod._build_warning_detail_controls(fake_vm.state)
+        texts = self._texts(controls)
+        assert "i18n[backtest_detail_failed_dates_title]" in texts
+        assert any("2024-01-05: 数据缺失" in t for t in texts)
+
+    def test_skipped_reasons_rendered(self, backtest_view_env) -> None:
+        """skipped_reasons 非空 → 跳过原因标题 + 逐条按 i18n 翻译 (含 count 参数)."""
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="unreliable",
+            failed_details=(),
+            skipped_reasons=(("unknown", 2),),
+        )
+        controls = mod._build_warning_detail_controls(fake_vm.state)
+        texts = self._texts(controls)
+        assert "i18n[backtest_detail_skipped_orders_title]" in texts
+        assert "• i18n[unknown]" in texts
+
+    def test_banner_appends_expansion_tile_when_details_present(self, backtest_view_env) -> None:
+        """有 detail 明细时 → banner children 追加 ExpansionTile (查看详情入口)."""
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="degraded",
+            failed_details=(("2024-01-05", "数据缺失"),),
+            skipped_reasons=(("no_volume", 3),),
+        )
+        banner = mod._build_backtest_warning_banner(fake_vm.state)
+        assert isinstance(banner, ft.Container)
+        tiles = [c for c in _walk_all_controls(banner) if isinstance(c, ft.ExpansionTile)]
+        assert len(tiles) == 1, "存在 detail 明细时应渲染 1 个 ExpansionTile"
+        assert tiles[0].title.value == "i18n[backtest_warning_detail_title]"  # type: ignore[union-attr]  # title 为 view 构造的 ft.Text
