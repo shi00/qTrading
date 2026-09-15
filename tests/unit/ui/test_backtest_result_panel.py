@@ -29,6 +29,7 @@ from ui.components.backtest.backtest_result_panel import (
     _build_monthly_table,
     _build_nav_chart,
     _build_trades_table,
+    _delist_warning,
     _get_color_for_ic,
     _get_color_for_sharpe,
     _get_color_for_value,
@@ -329,6 +330,46 @@ class TestInvestedVisibility:
         # controls: [title, 告警条, row1, row2, row3]
         assert len(content.controls) == 5
         assert isinstance(content.controls[1], ft.Container)
+
+
+class TestDelistWarning:
+    """BT-02: 退市清算影响说明条 (count>0 时渲染, count=0 时 None)."""
+
+    def test_delist_warning_none_when_count_zero(self) -> None:
+        assert _delist_warning(0, 0.0) is None
+
+    def test_delist_warning_shown_when_count_positive(self) -> None:
+        """count>0 → 返回 Container, i18n key 为 backtest_delist_warning, 金额千分位."""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            warning = _delist_warning(2, 12345.6)
+
+        assert isinstance(warning, ft.Container)
+        mock_i18n.assert_called_with("backtest_delist_warning", count=2, amount="12,345.60")
+
+    def test_metrics_section_includes_delist_warning_when_positive(self) -> None:
+        """delist_liquidation_count>0 → metrics section 含退市说明条 (title 前, 位于 invested 前)."""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section(
+                {},
+                delist_liquidation_count=1,
+                delist_loss_amount=5000.0,
+            )
+
+        assert isinstance(content, ft.Column)
+        # controls: [title, delist_warning, row1, row2, row3]
+        assert len(content.controls) == 5
+        assert isinstance(content.controls[1], ft.Container)
+
+    def test_metrics_section_no_delist_warning_when_zero(self) -> None:
+        """delist_liquidation_count=0 (默认) → 无退市说明条."""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({})
+
+        assert isinstance(content, ft.Column)
+        assert len(content.controls) == 4  # title + row1 + row2 + row3
 
 
 class TestBuildEmptyContent:

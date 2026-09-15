@@ -331,6 +331,8 @@ def BacktestView(active: bool = True) -> ft.Container:
             strategy_name=state.strategy_name,
             benchmark_name=state.benchmark_name,
             has_real_score=state.has_real_score,
+            delist_liquidation_count=state.delist_liquidation_count,
+            delist_loss_amount=state.delist_loss_amount,
         )
         if warning_banner is not None:
             right_content = ft.Column([warning_banner, result_panel], spacing=12, expand=True)
