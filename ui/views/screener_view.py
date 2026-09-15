@@ -1670,7 +1670,7 @@ def _build_screener_table_card(
             expand=True,
         )
     else:
-        if is_realtime:
+        if is_realtime and state.show_ai_sections:
             # D7-3: 当前页内按 ai_status 拆分为三分区 (recommended/excluded/failed) 独立呈现;
             # VM 已保证三分区和 data.current_page_rows 行零丢失 (非三分区值归入 failed)。
             # 仅渲染有数据的分区: 空分区不留占位卡。否则小视口 (1280×720) 下有数据分区
@@ -1694,8 +1694,10 @@ def _build_screener_table_card(
                 if (rows := section_formatted.get(meta[3], []))
             ]
         else:
-            # HISTORY: 历史记录来自 ScreeningHistory 表 (无 ai_status 列), 无法按 AI 三态分区;
-            # 渲染单一结果表, 与既有历史查看行为一致 (D7-3 对抗检视 HISTORY 决策可解释回归)。
+            # 单表渲染路径: HISTORY (历史记录来自 ScreeningHistory 表, 无 ai_status 列)
+            # 或 REALTIME 下结果无 AI 介入 (非AI策略 enable_ai_analysis=False / AI 未执行,
+            # VM 置 show_ai_sections=False), 两者均无法按 AI 三态分区, 渲染单一结果表 —
+            # 避免把成功的数学筛选误标为「分析失败」(05-explainability-ux UX-02)。
             body_rows = [
                 ft.Container(
                     content=PaginatedTable(

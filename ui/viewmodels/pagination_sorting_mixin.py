@@ -80,6 +80,11 @@ class PaginationSortingMixin:
         # UX-04: 页码 clamp — 过滤/模式切换缩小 total_pages 后, 恢复的历史 page_no
         # 可能越界 (HISTORY 中修改过滤后 switch_to_realtime 恢复快照页码 → 空表格)
         pn = max(1, min(pn, total_pages)) if total_pages else 1
+        # UX-02: 本次结果是否含 AI 三态分区能力 — ai_status 列存在即 AI 管线介入过
+        # (非AI策略 enable_ai_analysis=False / AI 未执行返回无该列的候选表)。
+        # False 时 View 渲染单表而非三分区, 避免成功的数学筛选被误标「分析失败」
+        # (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
+        show_ai_sections = filtered is not None and not filtered.empty and "ai_status" in filtered.columns
         rows = self._build_current_page_rows(filtered, pn, ps)
         # 内容未变时复用引用 (NaN 会导致 value 比较误判重建, 属安全侧: 额外重格式化而非陈旧命中)
         if rows == self._state.current_page_rows:
@@ -95,6 +100,7 @@ class PaginationSortingMixin:
             ai_recommended_rows=recommended,
             ai_excluded_rows=excluded,
             ai_failed_rows=failed,
+            show_ai_sections=show_ai_sections,
             **changes,
         )
 

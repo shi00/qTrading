@@ -606,6 +606,49 @@ class TestScreenerViewModelSplitPageByAiStatus:
         assert rec == () and exc == rows and fail == ()
 
 
+class TestScreenerViewModelShowAiSections:
+    """UX-02: 结果是否含 AI 三态分区能力 (filtered 含 ai_status 列) 驱动单表/三分区渲染.
+
+    非AI策略 (enable_ai_analysis=False) 返回无 ai_status 列的候选表, 若仍按三分区
+    渲染会把成功的数学筛选全部归入 failed 分区, 误标「分析失败」(05-explainability-ux
+    UX-02; D7-3 三分区的非AI策略回归)。
+    """
+
+    def test_true_when_ai_status_column_present(self, screener_vm):
+        """AI 策略结果含 ai_status 列 → show_ai_sections=True, 三分区渲染。"""
+        screener_vm._full_results = pd.DataFrame({"ts_code": ["x0", "x1"], "ai_status": ["analyzed", "rejected"]})
+        screener_vm._update_pagination()
+        assert screener_vm.state.show_ai_sections is True
+
+    def test_false_without_ai_status_column(self, screener_vm):
+        """非AI策略结果无 ai_status 列 → show_ai_sections=False, 单表渲染。"""
+        screener_vm._full_results = pd.DataFrame({"ts_code": ["x0", "x1"]})
+        screener_vm._update_pagination()
+        assert screener_vm.state.show_ai_sections is False
+
+    def test_false_on_empty(self, screener_vm):
+        """空结果无 AI 分区能力。"""
+        screener_vm._full_results = pd.DataFrame()
+        screener_vm._update_pagination()
+        assert screener_vm.state.show_ai_sections is False
+
+    def test_false_when_full_results_none(self, screener_vm):
+        """无结果 (None) 时默认 False。"""
+        screener_vm._full_results = None
+        screener_vm._update_pagination()
+        assert screener_vm.state.show_ai_sections is False
+
+    def test_history_mode_single_table(self, screener_vm):
+        """HISTORY 记录无 ai_status 列 → show_ai_sections=False (View 走单表)。"""
+        screener_vm._full_results = pd.DataFrame({"a": [1]})
+        screener_vm._update_pagination()
+        screener_vm.switch_to_history()
+        screener_vm._full_results = pd.DataFrame({"a": [1, 2]})
+        screener_vm._update_pagination()
+        assert screener_vm.state.mode == "HISTORY"
+        assert screener_vm.state.show_ai_sections is False
+
+
 class TestScreenerViewModelSwitchToHistory:
     def test_snapshots_state(self, screener_vm):
         df = pd.DataFrame({"a": [1]})
