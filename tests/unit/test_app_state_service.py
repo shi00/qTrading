@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from data.persistence.app_state_service import get_app_state, set_app_state
+from data.persistence.app_state_service import get_app_state, set_app_state, set_app_state_max
 
 pytestmark = pytest.mark.unit
 
@@ -88,3 +88,36 @@ class TestSetAppState:
         engine = _make_begin_engine(mock_conn)
 
         await set_app_state(engine, "key", "value")
+
+
+class TestSetAppStateMax:
+    @pytest.mark.asyncio
+    async def test_does_nothing_when_engine_is_none(self):
+        result = await set_app_state_max(None, "key", "value")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_upsert_guards_against_overwriting_higher_value(self):
+        """R22：on_conflict 更新必须带 where(config_value < value)，
+        使较小值不覆盖已存在的较大值，保证高水位单调。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock()
+        engine = _make_begin_engine(mock_conn)
+
+        await set_app_state_max(engine, "sync_attempted_upto:moneyflow_daily", "20250910")
+
+        executed_stmt = mock_conn.execute.call_args[0][0]
+        compiled = executed_stmt.compile(compile_kwargs={"literal_binds": True})
+        sql = str(compiled)
+        assert "config_value" in sql
+        assert "20250910" in sql
+        # DO UPDATE ... WHERE config_value < 新值 —— 仅当现有值更小才覆盖
+        assert "config_value <" in sql
+
+    @pytest.mark.asyncio
+    async def test_handles_exception_gracefully(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
+        engine = _make_begin_engine(mock_conn)
+
+        await set_app_state_max(engine, "key", "value")

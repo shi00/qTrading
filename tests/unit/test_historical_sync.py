@@ -1671,7 +1671,7 @@ class TestHistoricalSyncWatermark:
     async def test_record_attempted_upto_writes_app_state(self):
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
-        with patch("data.sync.historical.set_app_state", new_callable=AsyncMock) as mock_sp:
+        with patch("data.sync.historical.set_app_state_max", new_callable=AsyncMock) as mock_sp:
             await strategy._record_attempted_upto("moneyflow_daily", datetime.date(2024, 6, 14))
         mock_sp.assert_awaited_once_with(ctx.cache.engine, "sync_attempted_upto:moneyflow_daily", "20240614")
 
@@ -1680,7 +1680,7 @@ class TestHistoricalSyncWatermark:
         ctx = make_ctx()
         ctx.cache.engine = None
         strategy = HistoricalSyncStrategy(ctx)
-        with patch("data.sync.historical.set_app_state", new_callable=AsyncMock) as mock_sp:
+        with patch("data.sync.historical.set_app_state_max", new_callable=AsyncMock) as mock_sp:
             await strategy._record_attempted_upto("moneyflow_daily", datetime.date(2024, 6, 14))
         mock_sp.assert_not_awaited()
 
@@ -1698,3 +1698,118 @@ class TestHistoricalSyncWatermark:
         assert "northbound_holding" in table_args
         assert "daily_quotes" not in table_args
         assert "daily_indicators" not in table_args
+
+    @pytest.mark.asyncio
+    async def test_sync_snapshot_aggregates_watermark_into_sink(self):
+        """SYNC-02：批处理路径传入 watermark_sink 时不写库，仅做内存聚合。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        sink: dict[str, datetime.date] = {}
+        with patch.object(strategy, "_record_attempted_upto", new_callable=AsyncMock) as mock_rec:
+            result = await strategy.sync_daily_market_snapshot(
+                datetime.date(2024, 6, 14), force=True, watermark_sink=sink
+            )
+        assert result is True
+        mock_rec.assert_not_awaited()  # 有 sink 时不直接落库
+        assert sink["moneyflow_daily"] == datetime.date(2024, 6, 14)
+        assert sink["moneyflow_hsgt"] == datetime.date(2024, 6, 14)
+        assert sink["northbound_holding"] == datetime.date(2024, 6, 14)
+        assert "daily_quotes" not in sink
+        assert "daily_indicators" not in sink
+
+    @pytest.mark.asyncio
+    async def test_sink_keeps_max_when_dates_out_of_order(self):
+        """R22：乱序合并时内存聚合保留最大值（高水位单调）。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        sink: dict[str, datetime.date] = {}
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, watermark_sink=sink)
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 13), force=True, watermark_sink=sink)
+        assert sink["moneyflow_daily"] == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_watermark_is_newest_after_reverse_order_sync(self):
+        """SYNC-01/02 端到端：批次按新→旧推进，聚合 + 单调写使总水位=最新日期。"""
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=["20240612", "20240613", "20240614"]  # 升序 → reversed 后为新→旧
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        result = SyncResult()
+        with (
+            patch("data.sync.historical.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch.object(strategy, "_record_attempted_upto", new_callable=AsyncMock) as mock_direct,
+            patch("data.sync.historical.ConfigHandler.get_sync_batch_size", return_value=1),
+        ):
+            await strategy._run_historical_sync(3, None, result)
+        mock_direct.assert_not_awaited()
+        by_table: dict[str, list[str]] = {}
+        for call in mock_max.await_args_list:
+            key = call.args[1]
+            if key.startswith("sync_attempted_upto:"):
+                table = key[len("sync_attempted_upto:") :]
+                by_table.setdefault(table, []).append(call.args[2])
+        assert by_table, "批处理应至少 flush 过一次稀疏表水位"
+        for table, dates in by_table.items():
+            assert max(dates) == "20240614", f"{table} 最终水位应为最新日期，实为 {max(dates)}"
+
+    @pytest.mark.asyncio
+    async def test_watermark_all_missing_adds_warning(self):
+        """SYNC-04：全部稀疏表水位缺失 → 追加告警标记（读循环仅在缓存数据已存在时执行，非首次运行异常）。"""
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy.sync_daily_market_snapshot = AsyncMock(return_value=True)
+        result = SyncResult()
+        with patch("data.sync.historical.get_app_state", new_callable=AsyncMock, return_value=None):
+            await strategy._run_historical_sync(5, None, result)
+        assert "watermark_all_missing" in result.warnings
+
+    @pytest.mark.asyncio
+    async def test_watermark_all_missing_warning_suppressed_when_watermarks_present(self):
+        """SYNC-04：存在水位时不再评估为"全部缺失"，不追加告警标记。"""
+
+        async def _present(engine, key):
+            return "20240613"
+
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy.sync_daily_market_snapshot = AsyncMock(return_value=True)
+        result = SyncResult()
+        with patch("data.sync.historical.get_app_state", new=_present):
+            await strategy._run_historical_sync(5, None, result)
+        assert "watermark_all_missing" not in result.warnings
+
+    @pytest.mark.asyncio
+    async def test_watermark_missing_warning_suppressed_when_no_sparse_tables(self):
+        """SYNC-04：无稀疏表待校验（全 dense 或无权限）时不误报"全部缺失"。"""
+        ctx = make_ctx()
+        ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614"})
+        ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
+            }
+        )
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy.sync_daily_market_snapshot = AsyncMock(return_value=True)
+        result = SyncResult()
+        with (
+            patch("data.sync.historical.get_app_state", new_callable=AsyncMock, return_value=None),
+            patch(
+                "data.external.tushare_client.TushareClient.get_effective_synced_tables",
+                return_value=["daily_quotes", "daily_indicators"],
+            ),
+        ):
+            await strategy._run_historical_sync(5, None, result)
+        assert "watermark_all_missing" not in result.warnings
