@@ -261,6 +261,7 @@
     "ai_external_acknowledgment_dialog_title": "确认 AI 数据外发",
     "ai_external_acknowledgment_dialog_confirm": "同意并分析",
     "ai_external_acknowledgment_dialog_cancel": "拒绝，跳过 AI",
+    "ai_egress_preview_providers": "将发送至：{providers}（主 / 备用云端供应商）",
     "ai_egress_preview_header": "AI 分析将向云端发送以下数据类别（示例预览，实际内容可能略有差异）：",
     "ai_egress_preview_stock": "股票基本信息/行情/财务指标（当前候选池，第一股样例）",
     "ai_egress_preview_news": "公开新闻摘要（经净化处理）",
