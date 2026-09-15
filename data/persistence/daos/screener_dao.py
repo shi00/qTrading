@@ -450,6 +450,31 @@ class ScreenerDao(BaseDao):
         df = await self._read_db_select(stmt)
         return df.to_dict("records") if df is not None and not df.empty else []
 
+    async def get_unfilled_t1_predictions(self, limit: int = 2000) -> list[dict]:
+        """BIZ-03: 返回仍缺 T+1 的 PENDING/NULL 记录（id, ts_code, trade_date）。
+
+        与 ``get_unfilled_horizon_predictions`` 对称：``run_review`` 的 10 交易日
+        窗口只覆盖近期，长期未启动应用产生的 PENDING 记录由本通道兜底，避免
+        T+1 永久缺失。限定 ``review_status IN (PENDING, NULL)`` 且 ``t1_pct IS NULL``；
+        T+1 成熟度（t0 + 1 是否落在最新行情内）由调用方
+        ``ReviewManager.backfill_t1_returns`` 判定，故本方法不重复过滤。
+        按 trade_date 升序先补最旧（优先修复 AI 学习样本），LIMIT 封顶单次工作量，
+        超出的次日继续，天然覆盖全部历史。
+        """
+        t = ScreeningHistory.__table__
+        stmt = (
+            sa.select(t.c.id, t.c.ts_code, t.c.trade_date)
+            .select_from(t)
+            .where(
+                sa.or_(t.c.review_status == REVIEW_STATUS_PENDING, t.c.review_status.is_(None)),
+                t.c.t1_pct.is_(None),
+            )
+            .order_by(t.c.trade_date.asc())
+            .limit(limit)
+        )
+        df = await self._read_db_select(stmt)
+        return df.to_dict("records") if df is not None and not df.empty else []
+
     @log_async_operation(
         operation_name="ScreenerDao.backfill_t5_prediction",
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,

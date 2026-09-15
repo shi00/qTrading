@@ -108,43 +108,8 @@ class ReviewManager:
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
-        index_cache: dict[str, float | None] = {}
-
-        try:
-            max_quote_date = str(bulk_quotes["trade_date"].max())
-            df_index_bulk = await self.cache.get_index_daily_range(
-                ts_code_list=[index_code],
-                start_date=min_pred_date,
-                end_date=max_quote_date,
-            )
-            if df_index_bulk is not None and not df_index_bulk.empty:
-                for _, i_row in df_index_bulk.iterrows():
-                    dt_val = i_row["trade_date"]
-                    if hasattr(dt_val, "strftime"):
-                        dt_str = dt_val.strftime("%Y%m%d")
-                    else:
-                        dt_str = str(dt_val).replace("-", "")[:8]
-                    raw_pct = i_row.get("pct_chg")
-                    index_cache[dt_str] = float(raw_pct) if raw_pct is not None and pd.notna(raw_pct) is True else None
-                logger.info(
-                    "[Review] Bulk loaded %d days of index data for %s.",
-                    len(df_index_bulk),
-                    index_code,
-                )
-        except asyncio.CancelledError:
-            logger.warning("[Review] Cancelled during index bulk pre-fetch.")
-            raise
-        except Exception as exc:
-            severity = classify_severity(exc, context="db")
-            log_classified(
-                logger,
-                exc,
-                "db",
-                "[Review] Failed to bulk pre-fetch index quotes (%s): %s",
-                exc_info=True,
-            )
-            if severity == "system":
-                raise
+        max_quote_date = str(bulk_quotes["trade_date"].max())
+        index_cache = await self._prefetch_index_cache(index_code, min_pred_date, max_quote_date)
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
@@ -222,43 +187,7 @@ class ReviewManager:
                     trade_date_str = t1_date_obj.strftime("%Y%m%d")
 
                     if trade_date_str not in index_cache:
-                        try:
-                            df_idx = await self.cache.quote_dao.get_index_daily(
-                                ts_code=index_code, trade_date=t1_date_obj
-                            )
-                            if df_idx is not None and not df_idx.empty:
-                                raw_pct = df_idx.iloc[0]["pct_chg"]
-                                index_cache[trade_date_str] = float(raw_pct) if pd.notna(raw_pct) is True else None
-                            else:
-                                try:
-                                    df_idx_api = await self.api.get_index_daily(
-                                        ts_code=index_code,
-                                        start_date=trade_date_str,
-                                        end_date=trade_date_str,
-                                    )
-                                    if df_idx_api is not None and not df_idx_api.empty:
-                                        raw_pct = df_idx_api.iloc[0]["pct_chg"]
-                                        index_cache[trade_date_str] = (
-                                            float(raw_pct) if pd.notna(raw_pct) is True else None
-                                        )
-                                    else:
-                                        index_cache[trade_date_str] = None
-                                except (ValueError, TypeError, KeyError):
-                                    index_cache[trade_date_str] = None
-                        except Exception as exc:
-                            severity = classify_severity(exc, context="db")
-                            log_classified(
-                                logger,
-                                exc,
-                                "db",
-                                "[Review] Cache index lookup failed for %s on %s (%s): %s",
-                                index_code,
-                                trade_date_str,
-                                exc_info=True,
-                            )
-                            if severity == "system":
-                                raise
-                            index_cache[trade_date_str] = None
+                        index_cache[trade_date_str] = await self._resolve_index_pct(index_code, t1_date_obj)
 
                     index_pct = index_cache.get(trade_date_str)
 
@@ -393,6 +322,127 @@ class ReviewManager:
             await self._batch_backfill_t5(updates)
 
         logger.info("[Review] T+%d backfill completed: %s records updated.", horizon, len(updates))
+        return len(updates)
+
+    @log_async_operation(operation_name="t1_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def backfill_t1_returns(self) -> int:
+        """阶段 1b：回填所有缺 T+1 的 PENDING/NULL 复盘记录（BIZ-03）。
+
+        ``run_review`` 只覆盖近 10 交易日的 pending 记录，一旦预测移出窗口，
+        其 T+1 不再被任何机制回访（T+5 回填通道只处理 T1_DONE，PENDING 进不去），
+        形成永久数据缺口。本方法每日调度一次即可自然覆盖全部历史，返回回填条数。
+
+        只处理 ``review_status IN (PENDING, NULL)`` 且 ``t1_pct IS NULL`` 的记录；
+        T+1 交易日未满 / 停牌缺行 / 复权计算失败 / 基准指数不可得的记录保持 NULL，
+        次日重试。与 ``run_review`` 共享 ``_qfq_return_pct`` 复权口径与
+        ``market_trade_dates`` 锚定，保证预测当天与回填口径一致。
+
+        与 T+5 回填不同，T+1 是打标签（WIN/LOSS/DRAW）与计算 alpha 的依据，故须
+        同时解析基准指数涨跌幅；状态推进由 ``update_prediction_result`` 完成
+        （t5_pct 为空 → 自动置 ``T1_DONE``，不会越级到 COMPLETED）。
+        """
+        candidates = await self.cache.screener_dao.get_unfilled_t1_predictions()
+        if not candidates:
+            logger.info("[Review] No unfilled T+1 records to backfill.")
+            return 0
+
+        all_codes = sorted({c["ts_code"] for c in candidates})
+        min_t0 = min(self._normalize_trade_date(c["trade_date"]) for c in candidates)
+
+        bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
+            ts_code_list=all_codes,
+            start_date=min_t0,
+        )
+        if bulk_quotes is None or bulk_quotes.empty:
+            logger.warning("[Review] T+1 backfill: bulk quotes fetch returned empty.")
+            return 0
+        quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
+
+        # 与 run_review 同一真实交易日口径（跨股票并集），兼容停牌缺行位置漂移防护。
+        market_trade_dates: list[datetime.date] = sorted(
+            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
+        )
+        market_pos = {d: i for i, d in enumerate(market_trade_dates)}
+
+        has_adj_factor = "adj_factor" in bulk_quotes.columns
+
+        index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+        max_quote_date = str(bulk_quotes["trade_date"].max())
+        index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
+        updates: list[dict] = []
+        for cand in candidates:
+            code = cand["ts_code"]
+            t0_date = self._normalize_trade_date(cand["trade_date"])
+            df_quotes = quotes_by_code.get(code)
+            if df_quotes is None or df_quotes.empty:
+                continue
+            stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
+            t0_idx = stock_pos.get(t0_date)
+            if t0_idx is None:
+                continue  # t0 无收盘价 → 基准价未知，无法计算，留 NULL
+            t0_ser = df_quotes.iloc[t0_idx]
+            t0_close_raw = t0_ser.get("close")
+            t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
+            if t0_close is None or t0_close == 0:
+                continue
+            t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
+            t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+
+            t0_mpos = market_pos.get(t0_date)
+            if t0_mpos is None or t0_mpos + 1 >= len(market_trade_dates):
+                continue  # T+1 尚未成熟，留 NULL 次日重试
+            t1_date = market_trade_dates[t0_mpos + 1]
+            t1_idx = stock_pos.get(t1_date)
+            if t1_idx is None:
+                continue  # T+1 日停牌/缺行 → 数据不可得，不伪造
+            t1_row = df_quotes.iloc[t1_idx]
+            # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标。
+            if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
+                continue
+            ret = _qfq_return_pct(t1_row, t0_close, t0_adj, has_adj_factor)
+            if ret is None:
+                continue
+            t1_pct = round(ret * 100.0, 4)
+            t1_close_raw = t1_row.get("close")
+            t1_price = float(t1_close_raw) if bool(pd.notna(t1_close_raw)) else None
+
+            t1_date_str = t1_date.strftime("%Y%m%d")
+            if t1_date_str not in index_cache:
+                index_cache[t1_date_str] = await self._resolve_index_pct(index_code, t1_date)
+            index_pct = index_cache.get(t1_date_str)
+            if index_pct is None:
+                logger.warning(
+                    "[Review] T+1 backfill: %s: Index return unavailable for %s, skipping to avoid label pollution",
+                    code,
+                    t1_date_str,
+                )
+                continue
+
+            alpha = round(t1_pct - index_pct, 4)
+            label = "DRAW"
+            if alpha > self.alpha_win_threshold:
+                label = "WIN"
+            elif alpha < -self.alpha_loss_threshold:
+                label = "LOSS"
+
+            updates.append(
+                {
+                    "record_id": cand["id"],
+                    "pct": t1_pct,
+                    "label": label,
+                    "index_pct": index_pct,
+                    "benchmark_code": index_code,
+                    "t1_price": t1_price,
+                    "t5_pct": None,
+                    "t5_price": None,
+                    "alpha": alpha,
+                }
+            )
+
+        if updates:
+            await self._batch_update_results(updates)
+
+        logger.info("[Review] T+1 backfill completed: %s records updated.", len(updates))
         return len(updates)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -675,6 +725,103 @@ class ReviewManager:
     def _normalize_trade_date(value: typing.Any) -> datetime.date:
         """Normalize supported trade_date input types to datetime.date."""
         return to_date(value)
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def _prefetch_index_cache(
+        self,
+        index_code: str | None,
+        start_date: datetime.date | str,
+        end_date: str,
+    ) -> dict[str, float | None]:
+        """BIZ-03: 批量预取基准指数涨跌幅到 {YYYYMMDD: pct_chg} 缓存。
+
+        run_review 与 backfill_t1_returns 共用，避免两处各自实现同一预取逻辑。
+        与 run_review 原内联逻辑一致：预取失败仅告警（非 system 级），
+        由调用方的单条兜底（_resolve_index_pct）补缺失日期。
+        """
+        index_cache: dict[str, float | None] = {}
+        try:
+            df_index_bulk = await self.cache.get_index_daily_range(
+                ts_code_list=[index_code],
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if df_index_bulk is not None and not df_index_bulk.empty:
+                for _, i_row in df_index_bulk.iterrows():
+                    dt_val = i_row["trade_date"]
+                    if hasattr(dt_val, "strftime"):
+                        dt_str = dt_val.strftime("%Y%m%d")
+                    else:
+                        dt_str = str(dt_val).replace("-", "")[:8]
+                    raw_pct = i_row.get("pct_chg")
+                    index_cache[dt_str] = float(raw_pct) if raw_pct is not None and pd.notna(raw_pct) is True else None
+                logger.info(
+                    "[Review] Bulk loaded %d days of index data for %s.",
+                    len(df_index_bulk),
+                    index_code,
+                )
+        except asyncio.CancelledError:
+            logger.warning("[Review] Cancelled during index bulk pre-fetch.")
+            raise
+        except Exception as exc:
+            severity = classify_severity(exc, context="db")
+            log_classified(
+                logger,
+                exc,
+                "db",
+                "[Review] Failed to bulk pre-fetch index quotes (%s): %s",
+                exc_info=True,
+            )
+            if severity == "system":
+                raise
+        return index_cache
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def _resolve_index_pct(
+        self,
+        index_code: str | None,
+        trade_date: datetime.date,
+    ) -> float | None:
+        """BIZ-03: 单条兜底解析指定交易日的基准指数涨跌幅（%），失败返回 None。
+
+        run_review 与 backfill_t1_returns 共用，口径一致：先查缓存（本地库），
+        缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
+        """
+        trade_date_str = trade_date.strftime("%Y%m%d")
+        try:
+            df_idx = await self.cache.quote_dao.get_index_daily(
+                ts_code=index_code,
+                trade_date=trade_date,
+            )
+            if df_idx is not None and not df_idx.empty:
+                raw_pct = df_idx.iloc[0]["pct_chg"]
+                return float(raw_pct) if pd.notna(raw_pct) is True else None
+            try:
+                df_idx_api = await self.api.get_index_daily(
+                    ts_code=index_code,
+                    start_date=trade_date_str,
+                    end_date=trade_date_str,
+                )
+                if df_idx_api is not None and not df_idx_api.empty:
+                    raw_pct = df_idx_api.iloc[0]["pct_chg"]
+                    return float(raw_pct) if pd.notna(raw_pct) is True else None
+                return None
+            except (ValueError, TypeError, KeyError):
+                return None
+        except Exception as exc:
+            severity = classify_severity(exc, context="db")
+            log_classified(
+                logger,
+                exc,
+                "db",
+                "[Review] Cache index lookup failed for %s on %s (%s): %s",
+                index_code,
+                trade_date_str,
+                exc_info=True,
+            )
+            if severity == "system":
+                raise
+            return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def save_results(

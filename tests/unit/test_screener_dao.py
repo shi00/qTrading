@@ -13,7 +13,7 @@ import pandas as pd
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import stock_alive_condition
-from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_T1_DONE
+from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
@@ -1127,6 +1127,50 @@ class TestScreenerDaoGetUnfilledHorizonPredictions:
         assert "trade_date" in sql
         compiled = stmt.compile()
         assert REVIEW_STATUS_T1_DONE in compiled.params.values()
+        assert compiled.params.get("param_1") == 2000 or compiled.params.get("limit_1") == 2000
+
+
+class TestScreenerDaoGetUnfilledT1Predictions:
+    """BIZ-03: T+1 回填候选查询 —— 只含 PENDING/NULL 且 t1_pct IS NULL，升序 + LIMIT 封顶。"""
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1, 2],
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240601", "20240610"],
+                }
+            )
+        )
+        result = await dao.get_unfilled_t1_predictions()
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["ts_code"] == "000001.SZ"
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_unfilled_t1_predictions()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_sql_encoding(self):
+        """SQL 必须限定 review_status IN (PENDING, NULL) + t1_pct IS NULL，且升序、LIMIT 封顶。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_unfilled_t1_predictions(limit=2000)
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt)
+        assert "review_status" in sql
+        assert "t1_pct IS NULL" in sql
+        assert "ORDER BY" in sql
+        assert "trade_date" in sql
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_PENDING in compiled.params.values()
         assert compiled.params.get("param_1") == 2000 or compiled.params.get("limit_1") == 2000
 
 
