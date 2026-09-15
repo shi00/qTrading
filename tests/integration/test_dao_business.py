@@ -1825,3 +1825,135 @@ class TestGetStrategyReviewStats:
         result = await screener_dao.get_strategy_review_stats()
         assert not result.empty
         assert set(result["trade_date"]) == {d0}  # 仅窗口内 d0，超窗 old 被过滤
+
+
+@pytest.mark.asyncio
+class TestGetAiAttributionStats:
+    """BIZ-04 第二层: get_ai_attribution_stats AI 结论快照回放归因（ADR-0009 口径）。"""
+
+    @staticmethod
+    async def _seed_reviews(test_engine: AsyncEngine, rows: list[dict]) -> None:
+        async with test_engine.begin() as conn:
+            for r in rows:
+                await conn.execute(
+                    text(
+                        "INSERT INTO screening_history (run_id, trade_date, strategy_name, ts_code, "
+                        " t1_pct, t5_pct, alpha, benchmark_code, prediction_result, ai_score, review_status) "
+                        "VALUES (:run, :td, :strat, :code, :t1, :t5, :alpha, :bm, :res, :ai, 'COMPLETED')"
+                    ),
+                    {
+                        "run": r["run"],
+                        "td": r["td"],
+                        "strat": r["strat"],
+                        "code": r["code"],
+                        "t1": r["t1"],
+                        "t5": r["t5"],
+                        "alpha": r["alpha"],
+                        "bm": r["bm"],
+                        "res": r["res"],
+                        "ai": r.get("ai"),  # ai_score 代理口径: 非空=AI 组
+                    },
+                )
+
+    async def test_has_ai_split_and_aggregation(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """has_ai 拆分 + 日级聚合：ai_score 非空归 AI 组，NULL 归无 AI 组，指标独立 N/胜率正确。"""
+        d0 = _RECENT_DATE
+        await self._seed_reviews(
+            test_engine,
+            [
+                # sA/sh000001: 2 只 AI 股 + 1 只无 AI 股（同 trade_date 拆两组）
+                {
+                    "run": "r1",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000001.SZ",
+                    "t1": 2.0,
+                    "t5": 1.0,
+                    "alpha": 1.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                    "ai": 0.8,
+                },
+                {
+                    "run": "r2",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000002.SZ",
+                    "t1": 3.0,
+                    "t5": 2.0,
+                    "alpha": -0.5,
+                    "bm": "sh000001",
+                    "res": "LOSS",
+                    "ai": 0.9,
+                },
+                {
+                    "run": "r3",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000003.SZ",
+                    "t1": 5.0,
+                    "t5": 4.0,
+                    "alpha": 2.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                    "ai": None,
+                },
+            ],
+        )
+
+        result = await screener_dao.get_ai_attribution_stats()
+        assert not result.empty
+
+        ai = result[(result["strategy_name"] == "sA") & (result["benchmark_code"] == "sh000001") & (result["has_ai"])]
+        no_ai = result[
+            (result["strategy_name"] == "sA") & (result["benchmark_code"] == "sh000001") & (~result["has_ai"])
+        ]
+        assert len(ai) == 1 and len(no_ai) == 1
+        ai_row = ai.iloc[0]
+        assert ai_row["daily_cnt"] == 2
+        assert float(ai_row["t1_mean"]) == 2.5
+        assert ai_row["t1_n"] == 2
+        assert float(ai_row["alpha_mean"]) == 0.25  # (1.0 + -0.5)/2
+        assert ai_row["win_cnt"] == 1 and ai_row["loss_cnt"] == 1
+        no_ai_row = no_ai.iloc[0]
+        assert no_ai_row["daily_cnt"] == 1
+        assert float(no_ai_row["t1_mean"]) == 5.0
+        assert no_ai_row["win_cnt"] == 1 and no_ai_row["loss_cnt"] == 0
+
+    async def test_window_filter(self, screener_dao, clean_db, test_engine: AsyncEngine):
+        """180 天窗口过滤：超窗行不进入归因样本。"""
+        d0 = _RECENT_DATE
+        old = _TODAY - timedelta(days=REVIEW_STATS_WINDOW_DAYS + 10)
+        await self._seed_reviews(
+            test_engine,
+            [
+                {
+                    "run": "r1",
+                    "td": d0,
+                    "strat": "sA",
+                    "code": "000001.SZ",
+                    "t1": 2.0,
+                    "t5": 1.0,
+                    "alpha": 1.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                    "ai": 0.8,
+                },
+                {
+                    "run": "r2",
+                    "td": old,
+                    "strat": "sA",
+                    "code": "000009.SZ",
+                    "t1": 9.0,
+                    "t5": 9.0,
+                    "alpha": 8.0,
+                    "bm": "sh000001",
+                    "res": "WIN",
+                    "ai": 0.9,
+                },
+            ],
+        )
+
+        result = await screener_dao.get_ai_attribution_stats()
+        assert not result.empty
+        assert set(result["trade_date"]) == {d0}  # 仅窗口内 d0，超窗 old 被过滤

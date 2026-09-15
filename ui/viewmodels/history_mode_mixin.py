@@ -21,7 +21,10 @@ from dataclasses import replace
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
-from data.domain_services.review_stats_service import compute_strategy_review_stats
+from data.domain_services.review_stats_service import (
+    compute_ai_attribution_stats,
+    compute_strategy_review_stats,
+)
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     HistoryTreeRow,
@@ -46,6 +49,9 @@ _REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
         "loss_cnt",
     }
 )
+
+# BIZ-04 第二层: AI 归因 DAO 产出所需列 = 复盘统计列 + has_ai 分组列（同上安全降级）。
+_AI_ATTRIBUTION_REQUIRED_COLUMNS = _REVIEW_STATS_REQUIRED_COLUMNS | frozenset({"has_ai"})
 
 
 class HistoryModeMixin:
@@ -288,6 +294,21 @@ class HistoryModeMixin:
             self._set_state(strategy_stats=())
             return
         self._set_state(strategy_stats=compute_strategy_review_stats(df))
+
+    async def load_ai_attribution(self) -> None:
+        """加载 AI 结论快照回放归因统计到 state.ai_attribution (BIZ-04 第二层).
+
+        拉取 DAO 日级聚合后交给纯函数 ``compute_ai_attribution_stats`` 换算为按
+        (strategy_name, benchmark_code, has_ai) 分组的归因行。空结果或缺列安全降级为
+        空元组, 不 raise。VM 仅持有 raw 统计（含 SampleGrade 枚举），不感知 locale；
+        View 渲染时映射 i18n key (§3.2)。
+        """
+        cache = CacheManager()
+        df = await cache.screener_dao.get_ai_attribution_stats()
+        if df is None or df.empty or not _AI_ATTRIBUTION_REQUIRED_COLUMNS.issubset(df.columns):
+            self._set_state(ai_attribution=())
+            return
+        self._set_state(ai_attribution=compute_ai_attribution_stats(df))
 
     def set_history_viewing_status(
         self,

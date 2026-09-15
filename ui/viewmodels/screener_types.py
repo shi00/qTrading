@@ -16,7 +16,7 @@ from typing import Any
 
 import pandas as pd
 
-from data.domain_services.review_stats_service import StrategyStatRow
+from data.domain_services.review_stats_service import AiAttributionRow, StrategyStatRow
 from ui.viewmodels import Message
 
 # Stream card limit (moved from View, VM owns card lifecycle)
@@ -264,6 +264,9 @@ class ScreenerState:
     # UX-05: 复盘聚合统计（按 (strategy_name, benchmark_code) 分组的日序列统计行）。
     # raw 统计含 SampleGrade 枚举, 不含 locale; View 渲染时映射 i18n key (§3.2).
     strategy_stats: tuple[StrategyStatRow, ...] = ()
+    # BIZ-04 第二层: AI 结论快照回放归因统计（按 (strategy_name, benchmark_code, has_ai)
+    # 分组的日序列统计行）。raw 统计含 SampleGrade 枚举, 不含 locale; View 渲染时映射 i18n key.
+    ai_attribution: tuple[AiAttributionRow, ...] = ()
     # SEC-01 gap3: 运行时 AI 外发确认对话框待确认内容。非 None 且非空表示当前正在等待
     # 用户确认是否同意将该候选池数据外发给所选云端 provider。preview 为脱敏后的真实
     # prompt 预览文本（示例标注），provider 供对话框/回显展示。View 渲染对话框并经 VM

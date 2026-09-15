@@ -362,3 +362,90 @@ def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ..
 
     rows.sort(key=lambda r: (not r.benchmark_known, r.strategy_name, r.benchmark_code or ""))
     return tuple(rows)
+
+
+@dataclass(frozen=True)
+class AiAttributionRow:
+    """单个 (strategy_name, benchmark_code, has_ai) 组的 AI 归因统计（BIZ-04 第二层）。
+
+    has_ai=True 表示该组记录历史上真实产生过 AI 判断（ai_score 非空，代理口径见 ADR-0009），
+    has_ai=False 为无 AI 组（对照组）。benchmark_code 为 None 表示「基准未知」组（alpha 无
+    有效样本）。alpha / t1 / t5 使用日序列 N；胜率使用股票行 N，独立分级。
+    """
+
+    strategy_name: str
+    benchmark_code: str | None
+    has_ai: bool
+    avg_daily_count: float  # 日均纳入股票数（等权日组合均值）
+    t1: MetricStat
+    t5: MetricStat
+    alpha: MetricStat
+    win_count: int
+    loss_count: int
+
+    @property
+    def benchmark_known(self) -> bool:
+        return self.benchmark_code is not None
+
+    @property
+    def win_n(self) -> int:
+        """胜率独立样本量（逐股二项判定的股票行总数，跨日累计）。"""
+        return self.win_count + self.loss_count
+
+    @property
+    def win_rate(self) -> float | None:
+        """WIN / (WIN+LOSS)。无任一判定时返回 None（R21 None 哨兵）。"""
+        total = self.win_n
+        if total == 0:
+            return None
+        return self.win_count / total
+
+    @property
+    def alpha_grade(self) -> SampleGrade:
+        return grade_for(self.alpha.n)
+
+    @property
+    def win_grade(self) -> SampleGrade:
+        return grade_for(self.win_n)
+
+
+def compute_ai_attribution_stats(df: pd.DataFrame) -> tuple[AiAttributionRow, ...]:
+    """将 DAO 日级聚合 DataFrame 换算为按 (strategy_name, benchmark_code, has_ai) 分组的归因行。
+
+    与 ``compute_strategy_review_stats`` 同口径（日序列 N/均值/std/CI + 胜率股票行 N），
+    仅分组键增加 has_ai 维度。AI 组（has_ai=True）在前、无 AI 组在后，便于 UI 并排对比。
+
+    Args:
+        df: ``get_ai_attribution_stats`` 产出，列含 trade_date / strategy_name /
+            benchmark_code / has_ai / daily_cnt / t1_mean / t5_mean / alpha_mean /
+            win_cnt / loss_cnt。
+
+    Returns:
+        ``AiAttributionRow`` 元组；空输入返回空元组。
+    """
+    if df.empty:
+        return ()
+
+    rows: list[AiAttributionRow] = []
+    for (strategy_name, benchmark_code, has_ai), group in df.groupby(
+        ["strategy_name", "benchmark_code", "has_ai"], dropna=False, sort=False
+    ):
+        bm: str | None = (
+            None if pd.isna(cast("float | str | None", benchmark_code)) else str(benchmark_code)
+        )  # NULL 组归一为 None
+        rows.append(
+            AiAttributionRow(
+                strategy_name=str(strategy_name),
+                benchmark_code=bm,
+                has_ai=bool(has_ai),
+                avg_daily_count=float(group["daily_cnt"].mean()),
+                t1=_metric_stat(group["t1_mean"]),
+                t5=_metric_stat(group["t5_mean"]),
+                alpha=_metric_stat(group["alpha_mean"]),
+                win_count=int(group["win_cnt"].sum()),
+                loss_count=int(group["loss_cnt"].sum()),
+            )
+        )
+
+    rows.sort(key=lambda r: (not r.benchmark_known, r.strategy_name, r.benchmark_code or "", not r.has_ai))
+    return tuple(rows)

@@ -22,6 +22,7 @@ from data.domain_services.review_stats_service import (
     _T_CRIT_0_975,
     _metric_stat,
     _t_crit,
+    compute_ai_attribution_stats,
     compute_strategy_review_stats,
     grade_for,
 )
@@ -56,6 +57,35 @@ def _metric_row(
         "win_cnt": win,
         "loss_cnt": loss,
     }
+
+
+def _ai_metric_row(
+    *,
+    strat: str,
+    bm: str | None,
+    has_ai: bool,
+    day: int,
+    t1: float | None,
+    alpha: float | None,
+    t5: float | None = None,
+    daily_cnt: int = 1,
+    win: int = 0,
+    loss: int = 0,
+) -> dict:
+    """构建一行 AI 归因 DAO 日级聚合（get_ai_attribution_stats 产出形状）。"""
+    row = _metric_row(
+        strat=strat,
+        bm=bm,
+        day=day,
+        t1=t1,
+        alpha=alpha,
+        t5=t5,
+        daily_cnt=daily_cnt,
+        win=win,
+        loss=loss,
+    )
+    row["has_ai"] = has_ai
+    return row
 
 
 class TestTFixedTable:
@@ -227,3 +257,95 @@ class TestGrouping:
 
     def test_empty_input_returns_empty(self) -> None:
         assert compute_strategy_review_stats(pd.DataFrame()) == ()
+
+
+class TestAiAttribution:
+    """AI 结论快照回放归因统计（BIZ-04 第二层，ADR-0009）。
+
+    覆盖：AI/无 AI 分组正确性、排序（AI 组在前）、基准未知组处理、
+    指标独立 N、胜率股票行 N、空输入安全降级。
+    """
+
+    def test_ai_and_no_ai_groups_split(self) -> None:
+        """同策略同基准下 has_ai=True/False 拆分为两个独立归因行，AI 组在前。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=1.0, alpha=1.0),
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=False, day=0, t1=2.0, alpha=2.0),
+        ]
+        result = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert len(result) == 2
+        assert result[0].has_ai is True
+        assert result[1].has_ai is False
+        assert result[0].alpha.mean == pytest.approx(1.0)
+        assert result[1].alpha.mean == pytest.approx(2.0)
+        # 组内指标独立 N 各为 1
+        assert result[0].alpha.n == 1
+        assert result[1].alpha.n == 1
+
+    def test_same_group_days_accumulate(self) -> None:
+        """同组跨交易日样本累计：alpha 用日序列均值/独立 N，胜率用股票行 N 跨日累计。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=1.0, alpha=1.0, win=2, loss=1),
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=1, t1=3.0, alpha=3.0, win=1, loss=0),
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=False, day=0, t1=5.0, alpha=5.0, win=0, loss=1),
+        ]
+        result = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert len(result) == 2
+        (ai_row,) = [r for r in result if r.has_ai]
+        assert ai_row.alpha.n == 2
+        assert ai_row.alpha.mean == pytest.approx(2.0)
+        assert ai_row.win_count == 3
+        assert ai_row.loss_count == 1
+        assert ai_row.win_n == 4
+        assert ai_row.win_rate == pytest.approx(3 / 4)
+
+    def test_metrics_use_independent_nonnull_series(self) -> None:
+        """alpha 部分日期有效时用其独立 N，与 t1 独立（复用 _metric_stat 口径）。"""
+        rows: list[dict] = []
+        for i in range(40):
+            alpha = float(i) if i % 2 == 0 else None
+            rows.append(_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=float(i), alpha=alpha))
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert row.t1.n == 40
+        assert row.alpha.n == 20
+        assert row.alpha.ci_lower is None  # n=20 < 30
+
+    def test_benchmark_unknown_group_last(self) -> None:
+        """基准未知组（bm=None）排最后，仍按 has_ai 拆分；alpha 无有效样本。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=1.0, alpha=1.0),
+            _ai_metric_row(strat="sA", bm="hs300", has_ai=True, day=0, t1=2.0, alpha=2.0),
+            _ai_metric_row(strat="sA", bm=None, has_ai=True, day=0, t1=3.0, alpha=None),
+            _ai_metric_row(strat="sA", bm=None, has_ai=False, day=0, t1=4.0, alpha=None),
+        ]
+        result = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert [r.benchmark_code for r in result] == ["hs300", "sh000001", None, None]
+        unknown_ai, unknown_no_ai = result[-2], result[-1]
+        assert unknown_ai.has_ai is True
+        assert unknown_no_ai.has_ai is False
+        assert unknown_ai.alpha.n == 0
+        assert unknown_ai.alpha.mean is None
+        assert unknown_no_ai.alpha.mean is None
+
+    def test_win_rate_none_when_no_games(self) -> None:
+        """无 WIN/LOSS 判定时胜率为 None（R21 None 哨兵），不伪装 0。"""
+        rows = [_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=1.0, alpha=1.0)]
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert row.win_n == 0
+        assert row.win_rate is None
+        assert row.win_grade is SampleGrade.INSUFFICIENT
+
+    def test_grade_independent(self) -> None:
+        """日序列 N 与股票行 N 独立分级（复用四审 M2 口径）。"""
+        rows: list[dict] = []
+        rows.append(_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=0.0, alpha=0.0, win=1))
+        for i in range(1, 30):
+            rows.append(_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=float(i), alpha=float(i)))
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert row.alpha.n == 30
+        assert row.win_n == 1
+        assert row.alpha_grade is SampleGrade.LIMITED
+        assert row.win_grade is SampleGrade.INSUFFICIENT
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert compute_ai_attribution_stats(pd.DataFrame()) == ()
