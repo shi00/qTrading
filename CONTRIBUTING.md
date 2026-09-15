@@ -666,6 +666,7 @@ except Exception as e:
 - [0006-override-agents-pure-pointer.md](./docs/adr/0006-override-agents-pure-pointer.md) — AGENTS.md 从纯指针改为最小安全集 + 指针
 - [0007-screening-history-override-pk.md](./docs/adr/0007-screening-history-override-pk.md) — screening_history 唯一键改覆盖语义
 - [0008-no-ai-execution.md](./docs/adr/0008-no-ai-execution.md) — 不给 AI 执行权，仅输出评分和文本
+- [0009-ai-snapshot-replay.md](./docs/adr/0009-ai-snapshot-replay.md) — AI 结论快照回放（统计归因视图落地，回测快照信号源为后续增强）
 
 ### docs/governance/ — 治理类机器可读文件
 

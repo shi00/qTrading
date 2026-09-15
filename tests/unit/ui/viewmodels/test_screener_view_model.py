@@ -854,6 +854,97 @@ class TestLoadStrategyStats:
         assert unknown.t1.n == 1
 
 
+class TestLoadAiAttribution:
+    """BIZ-04 第二层 load_ai_attribution() 解析与容错（R19，ADR-0009）。"""
+
+    @pytest.fixture
+    def ai_attr_vm_with_dao(self):
+        """ScreenerViewModel with mocked CacheManager DAO (history_mode_mixin)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        fake_dao = MagicMock()
+        fake_dao.get_ai_attribution_stats = AsyncMock(return_value=())
+        fake_cache = MagicMock()
+        fake_cache.screener_dao = fake_dao
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+            patch(
+                "ui.viewmodels.history_mode_mixin.CacheManager",
+                MagicMock(return_value=fake_cache),
+            ),
+        ):
+            vm = ScreenerViewModel()
+            yield vm, fake_dao
+
+    @pytest.mark.asyncio
+    async def test_empty_df_safe_degrade_to_empty(self, ai_attr_vm_with_dao):
+        """空 DataFrame 不 raise, ai_attribution 降级为空元组。"""
+        vm, fake_dao = ai_attr_vm_with_dao
+        fake_dao.get_ai_attribution_stats.return_value = pd.DataFrame()
+        await vm.load_ai_attribution()
+        assert vm.state.ai_attribution == ()
+
+    @pytest.mark.asyncio
+    async def test_missing_column_safe_degrade_to_empty(self, ai_attr_vm_with_dao):
+        """缺列时安全降级为空元组, 不 raise。"""
+        vm, fake_dao = ai_attr_vm_with_dao
+        df = pd.DataFrame({"strategy_name": ["sA"]})
+        fake_dao.get_ai_attribution_stats.return_value = df
+        await vm.load_ai_attribution()
+        assert vm.state.ai_attribution == ()
+
+    @pytest.mark.asyncio
+    async def test_missing_has_ai_column_safe_degrade_to_empty(self, ai_attr_vm_with_dao):
+        """缺 has_ai 分组列（区别于复盘统计列）时同样安全降级, 不 raise。"""
+        vm, fake_dao = ai_attr_vm_with_dao
+        df = pd.DataFrame(
+            {
+                "strategy_name": ["sA"],
+                "benchmark_code": ["sh000001"],
+                "daily_cnt": [3],
+                "t1_mean": [0.01],
+                "t5_mean": [0.02],
+                "alpha_mean": [0.005],
+                "win_cnt": [1],
+                "loss_cnt": [0],
+            }
+        )
+        fake_dao.get_ai_attribution_stats.return_value = df
+        await vm.load_ai_attribution()
+        assert vm.state.ai_attribution == ()
+
+    @pytest.mark.asyncio
+    async def test_valid_df_parses_ai_no_ai_rows(self, ai_attr_vm_with_dao):
+        """有效数据解析为 AiAttributionRow, AI/无 AI 组按 has_ai 拆分。"""
+        vm, fake_dao = ai_attr_vm_with_dao
+        df = pd.DataFrame(
+            {
+                "strategy_name": ["sA", "sA"],
+                "benchmark_code": ["sh000001", "sh000001"],
+                "has_ai": [True, False],
+                "daily_cnt": [3, 5],
+                "t1_mean": [0.01, 0.02],
+                "t5_mean": [0.02, 0.03],
+                "alpha_mean": [0.005, 0.01],
+                "win_cnt": [1, 2],
+                "loss_cnt": [0, 1],
+            }
+        )
+        fake_dao.get_ai_attribution_stats.return_value = df
+        await vm.load_ai_attribution()
+
+        rows = vm.state.ai_attribution
+        assert len(rows) == 2
+        ai_row, no_ai_row = rows  # AI 组在前
+        assert ai_row.has_ai is True
+        assert ai_row.alpha.n == 1
+        assert ai_row.win_n == 1
+        assert no_ai_row.has_ai is False
+        assert no_ai_row.win_n == 3
+
+
 class TestBuildAiFailedBannerMessage:
     """UX-02: 整批 AI failed 占比横幅 Message 产出 (报告 04 §1.1 / 05 §1.2)."""
 

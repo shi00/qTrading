@@ -24,7 +24,7 @@ import typing
 import flet as ft
 import pandas as pd
 
-from data.domain_services import SampleGrade, StrategyStatRow
+from data.domain_services import AiAttributionRow, SampleGrade, StrategyStatRow
 from ui.components._markdown_safe import safe_open_url
 from ui.components.flet_type_helpers import (
     get_control_attr,
@@ -757,13 +757,15 @@ def build_history_tree(
     offset: int,
     has_more: bool,
     strategy_stats: tuple[StrategyStatRow, ...],
+    ai_attribution: tuple[AiAttributionRow, ...],
     on_item_click: typing.Callable[[str, str | None, str | None], None],
     on_load_more: typing.Callable[[ft.ControlEvent], None],
 ) -> ft.Control:
     """构建历史树侧栏 (D15: 从 ScreenerView._build_history_tree 提取, props 化).
 
     状态从 ``state.history_tree`` 派生 (Task 3.2 消除双轨, 不持有 use_state)。
-    含 UX-05「策略汇总」展开区 (state.strategy_stats 派生, T4)。
+    含 UX-05「策略汇总」展开区 (state.strategy_stats 派生, T4) 与 BIZ-04 第二层
+    「AI 效果归因」展开区 (state.ai_attribution 派生)。
     """
     tree_controls: list[ft.Control] = []
     if not rows:
@@ -831,6 +833,8 @@ def build_history_tree(
     )
 
     suffix_items: list[ft.Control] = []
+    if ai_attribution:
+        suffix_items.append(_build_ai_attribution_section(ai_attribution))
     if strategy_stats:
         suffix_items.append(_build_review_stats_section(strategy_stats))
 
@@ -977,6 +981,100 @@ def _build_review_stats_section(strategy_stats: tuple[StrategyStatRow, ...]) -> 
     )
 
 
+def _build_ai_attribution_section(ai_attribution: tuple[AiAttributionRow, ...]) -> ft.Control:
+    """history 侧栏「AI 效果归因」展开区 (BIZ-04 第二层)。
+
+    按 (strategy_name, benchmark_code, has_ai) 分组: 同策略下 AI 组 (has_ai=True, 历史上
+    真实产生过 AI 判断) 与无 AI 组 (has_ai=False) 并排展示 T+1/T+5/Alpha/胜率。归因口径为
+    「历史上真实发生的 AI 判断」的事后统计 (不重放 LLM, 无前视偏差)，相关非因果 —— 文案
+    明示自选择偏差与代理口径局限 (ADR-0009)。纯声明式 (props 派生自 state.ai_attribution),
+    不持业务状态 (§3.2)。
+    """
+    tiles: list[ft.Control] = []
+    for row in ai_attribution:
+        alpha = row.alpha
+        if row.benchmark_known:
+            hm_line = f"{I18n.get('ai_attribution_alpha')}: {_format_pct(alpha.mean)}"
+            ci_line = f"{I18n.get('review_stats_ci')}: {_ci_text(alpha.ci_lower, alpha.ci_upper)}"
+            main_badge = _grade_badge(row.alpha_grade)
+        else:
+            hm_line = f"{I18n.get('review_stats_benchmark_unknown')} · {I18n.get('review_stats_no_excess_benchmark')}"
+            ci_line = ""
+            main_badge = None
+
+        main_lines = [hm_line, ci_line, f"{I18n.get('review_stats_n_dates')}: {alpha.n}"]
+        subtitle_items = [ft.Text("  ·  ".join(x for x in main_lines if x), size=AppStyles.FONT_SIZE_CAPTION)]
+        if main_badge is not None:
+            subtitle_items.append(main_badge)
+
+        win_rate_text = (
+            f"{I18n.get('review_stats_win_rate')}: {f'{row.win_rate * 100:.1f}%' if row.win_rate is not None else '—'}"
+        )
+        win_n_text = f"{I18n.get('review_stats_win_n')}: {row.win_n}"
+        win_badge = _grade_badge(row.win_grade)
+        win_items: list[ft.Control] = [
+            ft.Text("  ·  ".join([win_rate_text, win_n_text]), size=AppStyles.FONT_SIZE_CAPTION)
+        ]
+        if win_badge is not None:
+            win_items.append(win_badge)
+
+        group_key = "ai_attribution_ai" if row.has_ai else "ai_attribution_no_ai"
+        benchmark_label = row.benchmark_code or I18n.get("review_stats_benchmark_unknown")
+        tiles.append(
+            ft.ExpansionTile(
+                title=ft.Text(
+                    f"{translate_strategy_name(row.strategy_name)} · {benchmark_label} · {I18n.get(group_key)}",
+                    size=AppStyles.FONT_SIZE_BODY,
+                ),
+                subtitle=ft.Column(subtitle_items, spacing=2),
+                controls=[
+                    ft.Column(
+                        [
+                            ft.Column(win_items, spacing=2),
+                            ft.Text(
+                                f"{I18n.get('review_stats_avg_daily_count')}: {row.avg_daily_count:.1f}",
+                                size=AppStyles.FONT_SIZE_CAPTION,
+                            ),
+                            ft.Text(
+                                f"{I18n.get('review_stats_t5')}: {_format_pct(row.t5.mean)} "
+                                f"({I18n.get('review_stats_no_excess_benchmark')})",
+                                size=AppStyles.FONT_SIZE_CAPTION,
+                            ),
+                        ],
+                        spacing=8,
+                    )
+                ],
+                collapsed_icon_color=AppColors.TEXT_SECONDARY,
+                dense=True,
+            )
+        )
+
+    return ft.Column(
+        [
+            ft.Container(
+                content=ft.Text(
+                    I18n.get("ai_attribution_title"),
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                    size=AppStyles.FONT_SIZE_LG,
+                ),
+                padding=ft.Padding.only(left=12, top=10, bottom=5),
+            ),
+            ft.Container(
+                content=ft.Text(
+                    I18n.get("ai_attribution_caveat"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+                padding=ft.Padding.only(left=12, right=12, bottom=5),
+            ),
+            *tiles,
+            ft.Divider(height=1, color=AppColors.DIVIDER),
+        ],
+        spacing=0,
+    )
+
+
 async def _execute_screener_export(
     vm: ScreenerViewModel,
     file_picker: ft.FilePicker | None,
@@ -1089,6 +1187,22 @@ async def _execute_load_strategy_stats(vm: ScreenerViewModel, page: ft.Page | No
         raise
     except Exception as ex:
         logger.error("[ScreenerView] Review stats load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+        if page is not None:
+            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+
+
+async def _execute_load_ai_attribution(vm: ScreenerViewModel, page: ft.Page | None) -> None:
+    """加载 AI 结论快照回放归因统计 (BIZ-04 第二层: VM 更新 state.ai_attribution).
+
+    与 ``_execute_load_strategy_stats`` 保持一致的异常处理: CancelledError 传播,
+    普通异常记录日志并发错误 toast, 避免计算异常静默吞没。
+    """
+    try:
+        await vm.load_ai_attribution()
+    except asyncio.CancelledError:
+        raise
+    except Exception as ex:
+        logger.error("[ScreenerView] AI attribution load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
             _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
@@ -1799,6 +1913,7 @@ def _build_screener_main_body(
     log_card: ft.Container,
     history_tree: typing.Any,
     strategy_stats: tuple[StrategyStatRow, ...],
+    ai_attribution: tuple[AiAttributionRow, ...],
     on_tree_item_click: typing.Callable[[str, str | None, str | None], None],
     on_load_more_history: typing.Callable[[ft.ControlEvent], None],
     on_load_width: typing.Callable[[], int | None],
@@ -1819,6 +1934,7 @@ def _build_screener_main_body(
             history_tree.offset,
             history_tree.has_more,
             strategy_stats,
+            ai_attribution,
             on_tree_item_click,
             on_load_more_history,
         ),
@@ -1975,6 +2091,9 @@ def ScreenerView(
     async def _load_strategy_stats() -> None:
         await _execute_load_strategy_stats(vm, _get_page())
 
+    async def _load_ai_attribution() -> None:
+        await _execute_load_ai_attribution(vm, _get_page())
+
     def _on_mode_change(e: ft.ControlEvent) -> None:
         selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
         if not selected:
@@ -1987,6 +2106,7 @@ def ScreenerView(
             vm.switch_to_history()
             if page := _get_page():
                 page.run_task(_load_strategy_stats)
+                page.run_task(_load_ai_attribution)
                 page.run_task(_load_history_tree, False)
         else:
             vm.switch_to_realtime()
@@ -2100,6 +2220,7 @@ def ScreenerView(
         log_card=log_card,
         history_tree=state.history_tree,
         strategy_stats=state.strategy_stats,
+        ai_attribution=state.ai_attribution,
         on_tree_item_click=_on_tree_item_click,
         on_load_more_history=_on_load_more_history,
         on_load_width=lambda: int(vm.get_splitter_width("ui_splitter_screener_history", 250)),

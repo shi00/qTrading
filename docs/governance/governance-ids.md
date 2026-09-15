@@ -54,6 +54,7 @@
 | P3-04 | ruleset_version 无变更日志，需极简 ruleset-changelog.md 逐次登记 | 文档体系检视（P3 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
 | UX-01 | 导航深链协议（TOPIC_NAVIGATE） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
 | UX-04 | 导航深链协议（与 UX-01 同源） | UX 专项检视 | [flet/ui-ux-best-practices.md](../flet/ui-ux-best-practices.md) | 使用中 |
+| UX-05 | 复盘聚合统计（策略汇总展开区：按 (strategy_name, benchmark_code) 分组的日序列统计/样本分级） | UX 专项检视 | [review_stats_service.py](../../data/domain_services/review_stats_service.py) | 使用中 |
 | UX-06 | 冷启动到导航可交互端到端 SLA 未实测，以 proxy 构成基线替代 | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | review03-C13 | 数据库连接生命周期契约 | review03 数据层与持久化 | [patterns/data-sync.md](../patterns/data-sync.md) | 使用中 |
 | review03-C19 | embedded_pg TimeoutExpired 包装为 EmbeddedPgMaintenanceError 分类处理 | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
