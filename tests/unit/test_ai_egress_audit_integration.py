@@ -198,6 +198,38 @@ class TestFailoverRecordsEachAttempt:
 
 
 # ============================================================================
+# web_search 云端出口同样记录审计
+# ============================================================================
+
+
+class TestWebSearchRecordsEgress:
+    @pytest.mark.asyncio
+    async def test_web_search_records_egress(self, _tmp_egress_path, monkeypatch) -> None:
+        """chat_with_web_search（概念同步等）触发审计，category=web_search。
+
+        回归：该路径此前直连 _chat_completion_litellm 绕过审计点，导致这类云端外发
+        对审计面板/状态栏计数不可见（SEC-03 复核检出）。
+        """
+        svc = _make_cloud_service(monkeypatch)
+        svc._chat_completion_litellm = AsyncMock(return_value={"content": "web result", "usage": {}})
+
+        result = await svc.chat_with_web_search(
+            messages=[{"role": "user", "content": "查询某概念最新资讯"}],
+        )
+
+        assert result["content"] == "web result"
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["destination"] == "llm:deepseek/deepseek-v4-flash"
+        assert rec["category"] == "web_search"
+        assert rec["item_count"] == 1
+        assert rec["payload_size_bytes"] > 0
+        # 元数据审计不记录 prompt 内容本身（防二次泄露）
+        assert "查询某概念最新资讯" not in json.dumps(rec, ensure_ascii=False)
+
+
+# ============================================================================
 # local 不记录 / 仅本地模式拦截
 # ============================================================================
 
