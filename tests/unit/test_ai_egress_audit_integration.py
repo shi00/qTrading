@@ -36,6 +36,13 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
+def _ack_cloud_egress():
+    """SEC-01 门控：本文件验证审计记录行为，非门控本身；默认视为已确认。"""
+    with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _tmp_egress_path(tmp_path):
     """注入 EgressAudit 落盘路径到临时目录（reset 后、首次 record 前）。"""
     EgressAudit._reset_singleton()

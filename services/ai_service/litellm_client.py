@@ -26,11 +26,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from core.errors import AIConfigError
+from core.errors import AIConfigError, AIPolicyNotAcknowledgedError
 from core.i18n import Message
 from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
 from services.local_model_manager import LocalInferenceTimeoutError, LocalModelManager
+from utils.egress_ack import is_egress_acknowledged
 from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 
@@ -531,6 +532,22 @@ class LiteLLMClient:
             if not self._service.is_cloud_available():
                 raise ValueError("Cloud LLM not configured. Please set up API Key.")
 
+            # SEC-01：新闻分类通过 _chat_completion(provider="cloud", purpose="news")
+            # 是独立于 run_ai_analysis 的云端外发通道，须先通过外发知情确认门控再发起
+            # 云端请求（未确认绝不外发）。analysis 通道在入口由 run_ai_analysis 门控，
+            # 此处仅需补 news（chat_with_web_search 同理，见该方法）。非交互降级：未确认
+            # 即抛策略阻断异常，由调用方（news_classifier）降级为默认分类。
+            if purpose == "news" and not is_egress_acknowledged():
+                logger.warning(
+                    "[AIService] Cloud | News egress policy not acknowledged — skipping cloud "
+                    "classification (no external requests initiated)",
+                )
+                raise AIPolicyNotAcknowledgedError(
+                    Message("ai_external_acknowledgment_prompt"),
+                    detail="News cloud egress requires user acknowledgment (SEC-01); "
+                    "no external request was initiated.",
+                )
+
             sem = self._service._get_news_semaphore() if purpose == "news" else self._service._get_analysis_semaphore()
             async with sem:
                 logger.debug(
@@ -811,6 +828,20 @@ class LiteLLMClient:
         """
         if not self._service.is_cloud_available():
             raise ValueError("Cloud LLM not configured. Please set up API Key.")
+
+        # SEC-01：chat_with_web_search（概念 AI 标注等）是独立于 run_ai_analysis 的云端
+        # 外发通道，须先通过外发知情确认门控再发起云端请求（未确认绝不外发）。非交互
+        # 降级：未确认即抛策略阻断异常，由调用方（concept_sync）逐批失败降级处理。
+        if not is_egress_acknowledged():
+            logger.warning(
+                "[AIService] WebSearch | Egress policy not acknowledged — skipping cloud "
+                "web search (no external requests initiated)",
+            )
+            raise AIPolicyNotAcknowledgedError(
+                Message("ai_external_acknowledgment_prompt"),
+                detail="Web-search cloud egress requires user acknowledgment (SEC-01); "
+                "no external request was initiated.",
+            )
 
         web_search_config: dict = {
             "enable": True,
