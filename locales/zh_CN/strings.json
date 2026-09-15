@@ -1951,6 +1951,7 @@
     "backtest_detail_failed_dates_title": "策略执行失败的交易日",
     "backtest_detail_skipped_orders_title": "被跳过的订单",
     "backtest_warn_more_days": "…及另外 {count} 个交易日（更多详见导出报告）",
+    "backtest_caveat_ai_disabled": "本次回测未包含 AI 分析环节，结果仅反映数学筛选部分的表现，不能代表该策略在实盘启用 AI 时的表现。",
     "backtest_skip_no_quote": "无行情无法交易：{count} 笔",
     "backtest_skip_suspended": "停牌无法交易：{count} 笔",
     "backtest_skip_down_limit": "跌停无法卖出：{count} 笔",

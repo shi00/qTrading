@@ -135,6 +135,45 @@ def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
     )
 
 
+def _build_backtest_caveat_banner(state: BacktestState) -> ft.Control | None:
+    """BIZ-04: 结果区顶部的回测能力边界声明横幅。
+
+    策略可能触发 AI 分析 (supports_ai) 但本次回测禁用 AI (config.disable_ai) 时,
+    结果不含 AI 分析环节, 显式声明能力边界, 避免「回测证明了 AI 有效」的误读。
+    纯声明式: View 感知 locale, 按当前 locale 翻译 i18n key；无 caveat 时返回 None。
+    """
+    if not state.caveats:
+        return None
+    accent = AppColors.INFO
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(
+                    ft.Icons.INFO_OUTLINE,
+                    color=accent,
+                    size=AppStyles.FONT_SIZE_TITLE,
+                ),
+                ft.Column(
+                    [
+                        ft.Text(
+                            "• " + I18n.get(msg.key, **dict(msg.params)),
+                            color=accent,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                        )
+                        for msg in state.caveats
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        padding=AppStyles.SPACING_MD,
+        border_radius=8,
+        bgcolor=AppColors.SURFACE_VARIANT,
+    )
+
+
 @ft.component
 def BacktestView(active: bool = True) -> ft.Container:
     """回测视图（声明式）。
@@ -319,6 +358,8 @@ def BacktestView(active: bool = True) -> ft.Container:
     else:
         # UX-01: 结果区顶部接入回测可信度告警横幅 (不可忽略, 放在净值曲线/指标卡之上)
         warning_banner = _build_backtest_warning_banner(state)
+        # BIZ-04: 结果区顶部的回测能力边界声明 (AI 策略 + disable_ai, 置于告警横幅之上)
+        caveat_banner = _build_backtest_caveat_banner(state)
         result_panel = BacktestResultPanel(
             metrics=state.metrics,
             trades=state.trades,
@@ -334,8 +375,9 @@ def BacktestView(active: bool = True) -> ft.Container:
             delist_liquidation_count=state.delist_liquidation_count,
             delist_loss_amount=state.delist_loss_amount,
         )
-        if warning_banner is not None:
-            right_content = ft.Column([warning_banner, result_panel], spacing=12, expand=True)
+        banners = [b for b in (caveat_banner, warning_banner) if b is not None]
+        if banners:
+            right_content = ft.Column([*banners, result_panel], spacing=12, expand=True)
         else:
             right_content = result_panel
 
