@@ -1520,6 +1520,28 @@ class TestSyncDailyMarketSnapshotCancellation:
         ctx.cache.sync_dao.update_sync_status.assert_not_awaited()
 
 
+class TestSyncDailyMarketSnapshotSystemFailure:
+    """SYNC-03: 单路 fetch 系统级异常统一中止本日，且其余 fetch 协程被安全回收（无孤儿任务）。
+    改用 gather_return_exceptions_propagating_cancel 等待全部 fetch 后再统一 raise，
+    替代裸 asyncio.gather 在首个异常即中断、遗留孤儿协程持续消耗 API 配额的问题。"""
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_reraises_and_recovers_siblings(self):
+        """EngineDisposedError 传播中止本日（R5），且其余 fetch 协程已被等待完成（非孤儿）。"""
+        ctx = make_ctx()
+
+        async def _boom(*args, **kwargs):
+            raise EngineDisposedError("engine disposed")
+
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=_boom)
+        ctx.api.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(EngineDisposedError):
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        # 其余 fetch 协程在统一 raise 前已被 gather 封装等待完成（非孤儿），正常被回收。
+        ctx.api.get_suspend_d.assert_awaited()
+
+
 class TestCriticalTableErrorIsolation:
     """S8: 验证 critical 表失败不终止整个同步（错误隔离）"""
 

@@ -773,7 +773,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
         futures = [fetch_wrapper(*c) for c in task_configs]
         futures.append(fetch_indices())
 
-        results_list = await asyncio.gather(*futures)
+        # SYNC-03: 改用项目 R2 合规的 gather 封装，等待全部 14 路 fetch 完成并收集异常，
+        # 不再用裸 asyncio.gather（后者在首个异常立即抛出，其余协程沦为孤儿任务——继续
+        # 消耗 Tushare API 配额且异常永不回收）。
+        results_list = await gather_return_exceptions_propagating_cancel(*futures)
+        # 系统级失败决策上提：EngineDisposedError / system 异常在此统一中止本日（与原有
+        # "severity==system 即 raise"语义一致，触发上层记失败/熔断），同时所有 fetch 协程
+        # 已由 gather 封装安全回收，不再是孤儿任务。CancelledError 已被该封装重抛，不在其中。
+        for _raised in results_list:
+            if isinstance(_raised, BaseException):
+                raise _raised
         # S2: fetch 完成后检查取消信号，避免取消后仍执行 14+ DB 写入
         if self._shutdown_event.is_set():
             logger.debug("[HistoricalSync] DaySync | Shutdown signaled after fetch for %s", trade_date)
