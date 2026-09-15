@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -2328,6 +2329,264 @@ class TestReviewManagerBackfillSkipBranches:
         count = await rm.backfill_horizon_returns()
         assert count == 0
         rm._batch_backfill_t5.assert_not_called()
+
+
+class TestReviewManagerT1Backfill:
+    """BIZ-03: backfill_t1_returns —— T+1 延迟回填，只处理缺 t1_pct 的 PENDING/NULL 记录。
+
+    与 backfill_horizon_returns 对称：T+1 是打标签（WIN/LOSS/DRAW）与 alpha 的依据，
+    故同时解析基准指数涨跌幅；数据不可得 / 指数缺失 / 复权失败均跳过，留 NULL 次日重试。
+    """
+
+    @staticmethod
+    def _make_rm(mock_cm, candidates, quotes, *, index_daily=None, index_bulk=None):
+        """构造 rm：候选 + 行情 + 指数缓存可注入；_batch_update_results 置 mock 捕获载荷。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao.get_unfilled_t1_predictions = AsyncMock(return_value=candidates)
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.get_index_daily_range = AsyncMock(
+            return_value=index_bulk if index_bulk is not None else pd.DataFrame()
+        )
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=index_daily if index_daily is not None else pd.DataFrame({"pct_chg": [2.0]})
+        )
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._batch_update_results = AsyncMock()
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_no_candidates_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
+        count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_empty_quotes_returns_zero(self, mock_cm, mock_tc):
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_stale_pending_record_gets_t1_backfilled(self, mock_cm, mock_tc):
+        """核心场景：超期 PENDING 记录（t0=20240610）获得 T+1 回填，含标签/alpha/指数。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                }
+            ),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 1
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
+        updates = rm._batch_update_results.call_args.args[0]
+        assert len(updates) == 1
+        u = updates[0]
+        assert u["record_id"] == 1
+        assert u["pct"] == round(((10.5 / 1.0) / (10.0 / 1.0) - 1.0) * 100.0, 4)
+        assert u["t1_price"] == 10.5
+        assert u["t5_pct"] is None
+        assert u["t5_price"] is None
+        assert u["index_pct"] == 2.0
+        assert u["alpha"] == round(u["pct"] - 2.0, 4)
+        assert u["label"] == "WIN"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_immature(self, mock_cm, mock_tc):
+        """t0 为最后交易日 → T+1 越界 → 跳过，留 NULL 次日重试。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240612"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                }
+            ),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_suspended_on_t1(self, mock_cm, mock_tc):
+        """T+1 日在市场日历存在、但个股停牌缺行 → 跳过（数据不可得不伪造）。"""
+        # 000001.SZ 在 20240611 缺行（停牌）；000002.SZ 完整 → 市场并集日历含 20240611。
+        # 000001 的 t1 查无行 → 跳过；000002 正常回填。
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [
+                {"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"},
+                {"id": 2, "ts_code": "000002.SZ", "trade_date": "20240610"},
+            ],
+            pd.DataFrame(
+                {
+                    "ts_code": [
+                        "000001.SZ",
+                        "000001.SZ",
+                        "000002.SZ",
+                        "000002.SZ",
+                        "000002.SZ",
+                    ],
+                    "trade_date": [
+                        "20240610",
+                        "20240612",
+                        "20240610",
+                        "20240611",
+                        "20240612",
+                    ],
+                    "close": [10.0, 11.0, 20.0, 20.5, 21.0],
+                    "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0],
+                }
+            ),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 1
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
+        updates = rm._batch_update_results.call_args.args[0]
+        assert len(updates) == 1
+        assert updates[0]["record_id"] == 2
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_missing_pct_chg(self, mock_cm, mock_tc):
+        """D2-3 数据完整性门控：T+1 行存在但 pct_chg 缺失（停牌保留行/脏数据）→ 跳过。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                    "pct_chg": [1.0, float("nan"), 1.0],
+                }
+            ),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_skips_index_unavailable(self, mock_cm, mock_tc):
+        """基准指数不可得 → 跳过，避免标签污染（alpha 无法计算）。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                }
+            ),
+            index_daily=pd.DataFrame({"pct_chg": [float("nan")]}),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_label_loss_when_alpha_negative(self, mock_cm, mock_tc):
+        """alpha 低于 -loss 阈值 → LOSS 标签。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                }
+            ),
+            index_daily=pd.DataFrame({"pct_chg": [10.0]}),
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 1
+        updates = rm._batch_update_results.call_args.args[0]
+        assert updates[0]["label"] == "LOSS"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_no_adj_factor_fallback(self, mock_cm, mock_tc):
+        """无 adj_factor 列（存量数据/测试替身）→ 回退原始 close 比率，保持向后兼容。"""
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240610", "20240611", "20240612"],
+                "close": [10.0, 10.5, 11.0],
+            }
+        )
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            quotes,
+        )
+        count = await rm.backfill_t1_returns()
+        assert count == 1
+        updates = rm._batch_update_results.call_args.args[0]
+        assert updates[0]["pct"] == round((10.5 / 10.0 - 1.0) * 100.0, 4)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_index_cache_parses_mixed_dates(self, mock_cm, mock_tc):
+        """bulk 预取：trade_date 为 date/str 混合格式均解析为 YYYYMMDD，None pct 存 None。"""
+        rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
+        mock_cache.get_index_daily_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": [datetime.date(2024, 6, 10), "20240611", "2024-06-12"],
+                    "pct_chg": [1.0, None, 3.0],
+                }
+            )
+        )
+        cache = await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
+        assert cache == {"20240610": 1.0, "20240611": None, "20240612": 3.0}
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_index_cache_reraises_cancelled(self, mock_cm, mock_tc):
+        """R2：bulk 预取被取消必须重新抛出（CancelledError 不被吞没）。"""
+        rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
+        mock_cache.get_index_daily_range = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 测试意图即验证取消被重抛而非吞没，raises 本身即为断言
+            await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
 
 
 class TestQfqReturnPct:

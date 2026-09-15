@@ -3,13 +3,13 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
-"""services/scheduled_jobs/review_backfill 单元测试（D2-4）。
+"""services/scheduled_jobs/review_backfill 单元测试（D2-4 / BIZ-03）。
 
-T+5 延迟回填 job：调用 ReviewManager.backfill_horizon_returns 并返回回填条数。
-backfill 本身幂等（只回填 t5_pct IS NULL），故 job 无需 idempotency 标记。
+延迟回填 job：先 T+1（打标签依据），再 T+5（远期收益），返回合计回填描述。
+backfill 本身幂等（只回填 t1_pct / t5_pct IS NULL），故 job 无需 idempotency 标记。
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -28,17 +28,40 @@ class _FakeSvc:
         self.job = job
 
 
+def _make_mock_rm(t1_count: int = 7, t5_count: int = 42) -> MagicMock:
+    mock_rm = MagicMock()
+    mock_rm.backfill_t1_returns = AsyncMock(return_value=t1_count)
+    mock_rm.backfill_horizon_returns = AsyncMock(return_value=t5_count)
+    return mock_rm
+
+
 class TestBuildReviewBackfillJob:
+    @pytest.mark.asyncio
+    async def test_job_calls_both_backfills_t1_first(self):
+        """BIZ-03 顺序约束：T+1 先于 T+5（T+1 把 PENDING 推进 T1_DONE 后 T+5 通道才能取到）。"""
+        svc = _FakeSvc()
+        job = build_review_backfill_job()
+        with patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls:
+            mock_rm = _make_mock_rm()
+            mock_rm_cls.return_value = mock_rm
+            await job(svc)
+        mock_rm.assert_has_calls(
+            [
+                call.backfill_t1_returns(),
+                call.backfill_horizon_returns(),
+            ]
+        )
+
     @pytest.mark.asyncio
     async def test_job_calls_backfill_and_returns_count(self):
         svc = _FakeSvc()
         job = build_review_backfill_job()
         with patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls:
-            mock_rm = MagicMock()
-            mock_rm.backfill_horizon_returns = AsyncMock(return_value=42)
+            mock_rm = _make_mock_rm(t1_count=3, t5_count=5)
             mock_rm_cls.return_value = mock_rm
             await job(svc)
-        mock_rm.backfill_horizon_returns.assert_called_once()  # noqa: weak-assertion 无参调用无可验证参数，仅确认调度路径触达
+        mock_rm.backfill_t1_returns.assert_called_once()  # noqa: weak-assertion 无参调用无可验证参数，仅确认 T+1 调度路径触达
+        mock_rm.backfill_horizon_returns.assert_called_once()  # noqa: weak-assertion 无参调用无可验证参数，仅确认 T+5 调度路径触达
 
     @pytest.mark.asyncio
     async def test_job_propagates_backfill_error(self):
@@ -46,6 +69,7 @@ class TestBuildReviewBackfillJob:
         job = build_review_backfill_job()
         with patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls:
             mock_rm = MagicMock()
+            mock_rm.backfill_t1_returns = AsyncMock(return_value=0)
             mock_rm.backfill_horizon_returns = AsyncMock(side_effect=RuntimeError("boom"))
             mock_rm_cls.return_value = mock_rm
             with pytest.raises(RuntimeError, match="boom"):
