@@ -22,6 +22,7 @@ tests/unit/test_egress_audit.py）。
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -309,6 +310,46 @@ class TestAuditFailureDegradation:
         )
 
         assert result["score"] == 88
+
+    @pytest.mark.asyncio
+    async def test_record_cloud_egress_cancelled_error_propagates(self, _tmp_egress_path, monkeypatch) -> None:
+        """_record_cloud_egress 遇 CancelledError 必须传播（R2：不吞没、优雅停机）。
+
+        直接打桩 EgressAudit.record 抛 CancelledError。注意：仅 _append_jsonl 打桩
+        无法跨过 record() 内部隔离（其只 re-raise CancelledError、吞普通异常），
+        故在此显式覆盖 helper 的 CancelledError 传播分支。
+        """
+        svc = _make_cloud_service(monkeypatch)
+        monkeypatch.setattr(
+            EgressAudit,
+            "record",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await svc._litellm._record_cloud_egress(
+                messages=[{"role": "user", "content": "x"}],
+                model=None,
+                category="analysis",
+            )
+        assert excinfo.type is asyncio.CancelledError  # R2: 取消必须传播而非吞没
+
+    @pytest.mark.asyncio
+    async def test_record_cloud_egress_generic_exception_degraded(self, _tmp_egress_path, monkeypatch) -> None:
+        """_record_cloud_egress 遇普通异常仅降级（pass），不阻断 AI 主流程。"""
+        svc = _make_cloud_service(monkeypatch)
+        monkeypatch.setattr(
+            EgressAudit,
+            "record",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        # 不应抛错：审计降级不阻断
+        await svc._litellm._record_cloud_egress(
+            messages=[{"role": "user", "content": "x"}],
+            model=None,
+            category="analysis",
+        )
 
 
 # ============================================================================
