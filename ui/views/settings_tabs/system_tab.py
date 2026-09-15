@@ -852,13 +852,6 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # F3（检视 06）：过渡期安全告警——仍在使用 legacy 明文密钥文件时，
     # 在核心配置页顶部插入提示条。
     core_config_controls: list[ft.Control] = [section_header]
-    # SEC-05（检视 06）：本地数据存储安全提示——数据未静态加密，始终显示。
-    core_config_controls.extend(
-        [
-            ft.Container(height=10),
-            _build_storage_security_notice(),
-        ]
-    )
     if settings_state.using_legacy_key:
         core_config_controls.extend(
             [
@@ -909,6 +902,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
             ),
             row_diagnostics,
+            # SEC-05（检视 06）：本地数据存储安全提示——数据未静态加密，
+            # 置于内容后部而非顶部。置于顶部会持久占据初始视口，把语言/主题/日志
+            # 下拉区挤出视口，导致 CanvasKit 语义节点几何为 0、E2E anchor 定位失败
+            # （PR #915 回归）。后置仍满足「告知用户数据保护状态」，且不挤压核心操作区。
+            ft.Container(height=10),
+            _build_storage_security_notice(),
         ]
     )
 
