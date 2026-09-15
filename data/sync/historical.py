@@ -595,7 +595,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             )
 
             for _retry_round in range(MAX_RETRIES):
-                if not failed_dates or self._shutdown_event.is_set():
+                if not failed_dates or self._shutdown_event.is_set() or abort_sync:
                     break
                 await asyncio.sleep(2)
 
@@ -604,17 +604,46 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 retry_sem = asyncio.Semaphore(2)
 
                 async def retry_one(date: datetime.date | str, sem: asyncio.Semaphore, failed_list: list):
-                    if self._shutdown_event.is_set():
+                    nonlocal abort_sync, processed_count
+                    if self._shutdown_event.is_set() or abort_sync:
                         return
                     async with sem:
+                        # SYNC-05: 熔断检查与主批次路径一致。重试阶段若失败率已触发熔断，
+                        # 立即中止重试（否则会老实把 MAX_RETRIES 轮全部跑完，无谓消耗 API 配额）。
+                        async with counter_lock:
+                            if failure_window.should_trip:
+                                abort_sync = True
+                                result.status = "failed"
+                                result.errors.append(
+                                    f"Circuit breaker triggered during retry: failure_rate "
+                                    f"{failure_window.failure_rate_pct}% in last {failure_window_size} attempts",
+                                )
+                                logger.error(
+                                    "[HistoricalSync] Retry CircuitBreaker | ❌ Abort: failure_rate=%s%% in last %s attempts",
+                                    failure_window.failure_rate_pct,
+                                    failure_window_size,
+                                )
+                                return
                         try:
                             # P0-1: 检查返回值，False 表示取消信号触发，不计为成功
                             success = await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
                             if not success:
+                                async with counter_lock:
+                                    failure_window.record(ok=False)
                                 failed_list.append(date)
                                 return
                             logger.debug("[HistoricalSync] Retry | ✅ Recovered %s", date)
                             result.days_processed += 1
+                            # SYNC-05: 重试成功推进进度并记录熔断窗口（与主批次路径一致）
+                            async with counter_lock:
+                                processed_count += 1
+                                failure_window.record(ok=True)
+                            if progress_callback:
+                                progress_callback(
+                                    progress_base + processed_count,
+                                    progress_total,
+                                    Message("progress_sync_market", {"date": date.strftime("%Y%m%d")}),
+                                )
                         except EngineDisposedError:
                             raise
                         except Exception as retry_e:
@@ -629,11 +658,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             )
                             if severity == "system":
                                 raise
+                            # SYNC-05: 重试失败记录熔断窗口
+                            async with counter_lock:
+                                failure_window.record(ok=False)
                             failed_list.append(date)
 
                 # Batch Retry
                 for r_start in range(0, len(current_batch), BATCH_SIZE):
-                    if self._shutdown_event.is_set():
+                    if self._shutdown_event.is_set() or abort_sync:
                         break
                     r_batch = current_batch[r_start : r_start + BATCH_SIZE]
                     r_tasks = [asyncio.create_task(retry_one(d, retry_sem, failed_dates)) for d in r_batch]
