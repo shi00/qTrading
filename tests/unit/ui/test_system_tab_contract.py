@@ -615,3 +615,64 @@ class TestSystemTabComponentBody:
         page = FakePage()
         _render_with_page(mod, page)
         mod.SystemViewModel.assert_called_once()
+
+    def test_render_contains_storage_security_notice(self, system_tab_env):
+        """渲染的控件树含数据存储安全提示卡片 (INFO icon + 标题, SEC-05)。
+
+        SEC-05: 本地数据库未静态加密说明需在系统设置页始终可见。
+        """
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        ctrls = _walk_controls(result)
+        info_icons = [c for c in ctrls if isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.INFO_ROUNDED]
+        assert len(info_icons) >= 1, "控件树应包含安全提示卡片的 INFO icon"
+        texts = [c for c in ctrls if isinstance(c, ft.Text)]
+        assert any(getattr(t, "value", None) == "i18n[sys_storage_security_title]" for t in texts), (
+            "控件树应包含数据存储安全提示标题"
+        )
+
+
+class TestBuildStorageSecurityNotice:
+    """_build_storage_security_notice 模块级纯函数测试 (SEC-05)。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n):
+        self.mock_i18n = mock_i18n
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
+        self.patches = [
+            patch("ui.views.settings_tabs.system_tab.I18n", self.mock_i18n),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_returns_container(self):
+        """返回 ft.Container (安全提示卡片)。"""
+        from ui.views.settings_tabs.system_tab import _build_storage_security_notice
+
+        assert isinstance(_build_storage_security_notice(), ft.Container)
+
+    def test_title_uses_storage_security_title_key(self):
+        """标题使用 sys_storage_security_title i18n key。"""
+        from ui.views.settings_tabs.system_tab import _build_storage_security_notice
+
+        _build_storage_security_notice()
+        title_calls = [
+            c for c in self.mock_i18n.get.call_args_list if c.args and c.args[0] == "sys_storage_security_title"
+        ]
+        assert title_calls, "标题必须使用 sys_storage_security_title key"
+
+    def test_desc_passes_user_data_root(self):
+        """描述文案传入 path=USER_DATA_ROOT。"""
+        from ui.views.settings_tabs.system_tab import _build_storage_security_notice
+
+        _build_storage_security_notice()
+        desc_calls = [
+            c for c in self.mock_i18n.get.call_args_list if c.args and c.args[0] == "sys_storage_security_desc"
+        ]
+        assert desc_calls, "描述必须使用 sys_storage_security_desc key"
+        assert desc_calls[0].kwargs.get("path"), "描述必须传入 path=USER_DATA_ROOT"

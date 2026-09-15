@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from config import USER_DATA_ROOT
 from ui.components.flet_type_helpers import (
     get_control_value,
     safe_icon_str,
@@ -128,6 +129,45 @@ def _build_legacy_key_warning() -> ft.Control:
         ),
         bgcolor=ft.Colors.with_opacity(0.12, AppColors.WARNING),
         border=ft.Border.all(1, ft.Colors.with_opacity(0.4, AppColors.WARNING)),
+        border_radius=8,
+        padding=10,
+    )
+
+
+def _build_storage_security_notice() -> ft.Control:
+    """构建本地数据存储安全提示卡片（SEC-05, 检视 06）。
+
+    告知用户应用数据存储位置及未加密状态，建议启用操作系统磁盘加密。
+    内置 PostgreSQL 存有选股历史/复盘/AI 分析结果，静态未加密是合理的
+    工程取舍（本地桌面应用、性能、恢复复杂度），但用户有权知道数据
+    处于什么保护状态（检视报告 §1.5）。
+    """
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.INFO_ROUNDED, color=AppColors.INFO),
+                ft.Column(
+                    [
+                        ft.Text(
+                            I18n.get("sys_storage_security_title"),
+                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.INFO,
+                        ),
+                        ft.Text(
+                            I18n.get("sys_storage_security_desc", path=USER_DATA_ROOT),
+                            style=ft.TextThemeStyle.BODY_SMALL,
+                            color=AppColors.INPUT_TEXT,
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        bgcolor=ft.Colors.with_opacity(0.12, AppColors.INFO),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.4, AppColors.INFO)),
         border_radius=8,
         padding=10,
     )
@@ -862,6 +902,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
             ),
             row_diagnostics,
+            # SEC-05（检视 06）：本地数据存储安全提示——数据未静态加密，
+            # 置于内容后部而非顶部。置于顶部会持久占据初始视口，把语言/主题/日志
+            # 下拉区挤出视口，导致 CanvasKit 语义节点几何为 0、E2E anchor 定位失败
+            # （PR #915 回归）。后置仍满足「告知用户数据保护状态」，且不挤压核心操作区。
+            ft.Container(height=10),
+            _build_storage_security_notice(),
         ]
     )
 
