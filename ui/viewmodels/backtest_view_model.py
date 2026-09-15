@@ -291,6 +291,10 @@ class BacktestState:
     skipped_reasons: tuple[tuple[str, int], ...] = ()
     # BT-01: 信号是否来自独立打分; False 时 IC 卡片呈现为「排序 IC」并附 tooltip
     has_real_score: bool = True
+    # BT-02: 退市清算分项统计（呈现用, 源自 BacktestResult）。
+    # count>0 时 UI 展示退市影响提示条, 说明收益中有多少来自退市假设（回收率经验估计）。
+    delist_liquidation_count: int = 0
+    delist_loss_amount: float = 0.0
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -503,6 +507,8 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             warnings=(),
             skipped_order_count=0,
             failed_date_count=0,
+            delist_liquidation_count=0,
+            delist_loss_amount=0.0,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -557,6 +563,8 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     strategy_name=result.strategy_name,
                     benchmark_name=result.config.benchmark_code,
                     has_real_score=result.has_real_score,
+                    delist_liquidation_count=result.delist_liquidation_count,
+                    delist_loss_amount=result.delist_loss_amount,
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),

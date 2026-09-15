@@ -524,6 +524,49 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.failed_date_count == 0
 
     @pytest.mark.asyncio
+    async def test_delist_fields_pass_through(self):
+        """BT-02: 成功终态透传 delist_liquidation_count / delist_loss_amount，失败/取消路径归零。"""
+        # 成功: mock result 显式携带退市分项统计
+        result = self._result_with(delist_liquidation_count=3, delist_loss_amount=1234.56)
+        vm = await self._exec_backtest(result)
+
+        assert vm.state.delist_liquidation_count == 3
+        assert vm.state.delist_loss_amount == 1234.56
+
+    @pytest.mark.asyncio
+    async def test_delist_fields_reset_on_start(self):
+        """BT-02: 开始回测（running 态）时退市分项统计归零，避免残留上次结果。"""
+        result = self._result_with(delist_liquidation_count=3, delist_loss_amount=1234.56)
+        vm = await self._exec_backtest(result)
+        assert vm.state.delist_liquidation_count == 3
+
+        # 再次运行: 断言 running 初始态归零 (跟踪 state 快照)
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_delist_2"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            await vm.run_backtest("test_strategy", config)
+
+        # running 初始态已归零
+        assert vm.state.delist_liquidation_count == 0
+        assert vm.state.delist_loss_amount == 0.0
+
+    @pytest.mark.asyncio
     async def test_data_warning_marks_unreliable(self):
         """UX-01: 数据质量告警(如缺停牌/涨跌停数据)标记 unreliable 并产出后果文案。"""
         vm = await self._exec_backtest(self._result_with(data_warnings=("...", "...")))

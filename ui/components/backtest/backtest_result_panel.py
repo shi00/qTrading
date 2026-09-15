@@ -152,7 +152,43 @@ def _invested_warning(avg_invested_pct: float | None) -> ft.Container | None:
     )
 
 
-def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Column:
+def _delist_warning(delist_count: int, delist_loss_amount: float) -> ft.Container | None:
+    """BT-02: 有退市强制清算（count>0）时返回退市影响说明条，否则 None。
+
+    让用户评估退市假设（delist_recovery_rate 经验估计）对收益的影响权重：
+    显示退市清算笔数与因回收率折扣相对全额变现被扣减的账面金额。
+    """
+    if delist_count <= 0:
+        return None
+    return ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.WARNING_AMBER, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.WARNING),
+                ft.Text(
+                    I18n.get(
+                        "backtest_delist_warning",
+                        count=delist_count,
+                        amount=f"{delist_loss_amount:,.2f}",
+                    ),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                    expand=True,
+                ),
+            ],
+            spacing=8,
+        ),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.CARD_BG,
+        border_radius=8,
+    )
+
+
+def _build_metrics_section(
+    metrics: dict,
+    has_real_score: bool = True,
+    delist_liquidation_count: int = 0,
+    delist_loss_amount: float = 0.0,
+) -> ft.Column:
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
             [
@@ -272,6 +308,7 @@ def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Col
     )
 
     invested_warning = _invested_warning(float(avg_invested) if avg_invested is not None else None)
+    delist_warning = _delist_warning(delist_liquidation_count, delist_loss_amount)
 
     return ft.Column(
         [
@@ -281,6 +318,7 @@ def _build_metrics_section(metrics: dict, has_real_score: bool = True) -> ft.Col
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
             ),
+            *([delist_warning] if delist_warning is not None else []),
             *([invested_warning] if invested_warning is not None else []),
             row1,
             row2,
@@ -684,6 +722,8 @@ def _build_content(
     strategy_name: str | None,
     benchmark_name: str | None,
     has_real_score: bool,
+    delist_liquidation_count: int,
+    delist_loss_amount: float,
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -709,7 +749,12 @@ def _build_content(
 
     return ft.Column(
         [
-            _build_metrics_section(dict(metrics), has_real_score=has_real_score),
+            _build_metrics_section(
+                dict(metrics),
+                has_real_score=has_real_score,
+                delist_liquidation_count=delist_liquidation_count,
+                delist_loss_amount=delist_loss_amount,
+            ),
             ft.Divider(color=AppColors.DIVIDER),
             ft.Tabs(
                 length=4,
@@ -772,6 +817,8 @@ def BacktestResultPanel(
     strategy_name: str | None = None,
     benchmark_name: str | None = None,
     has_real_score: bool = True,
+    delist_liquidation_count: int = 0,
+    delist_loss_amount: float = 0.0,
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
@@ -809,6 +856,8 @@ def BacktestResultPanel(
             strategy_name,
             benchmark_name,
             has_real_score,
+            delist_liquidation_count,
+            delist_loss_amount,
             trades_page,
             set_trades_page,
             selected_tab,

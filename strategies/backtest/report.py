@@ -42,6 +42,13 @@ class BacktestReport:
             "",
             f"{I18n.get('report_duration')}: {result.duration_ms}ms",
         ]
+        # BT-02: 有退市强制清算时呈现分项统计，让用户评估退市假设（delist_recovery_rate
+        # 经验估计）对收益的影响权重。count=0（默认）时不输出，避免干扰无退市场景。
+        if result.delist_liquidation_count > 0:
+            lines.append("")
+            lines.append(f"{I18n.get('report_delist_liquidation_count')}: {result.delist_liquidation_count}")
+            lines.append(f"{I18n.get('report_delist_loss_amount')}: {result.delist_loss_amount:,.2f}")
+            lines.append(I18n.get("report_delist_note", rate=result.config.delist_recovery_rate))
         if result.data_warnings:
             lines.append("")
             lines.append(I18n.get("report_data_warnings", count=len(result.data_warnings)) + ":")

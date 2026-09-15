@@ -114,6 +114,9 @@ class _FakeBacktestViewModel:
             skipped_reasons: Any = ()
             # BT-01: 与 BacktestState 新增字段同步 (IC 是否来自独立打分)
             has_real_score: Any = True
+            # BT-02: 与 BacktestState 新增字段同步 (退市清算分项统计)
+            delist_liquidation_count: Any = 0
+            delist_loss_amount: Any = 0.0
 
         self._state = _State()
         # D2: 模拟 VM 初始化装配策略 + 默认选中首个
@@ -645,6 +648,8 @@ class TestStatusRendering:
             strategy_name=None,
             benchmark_name=None,
             has_real_score=True,
+            delist_liquidation_count=0,
+            delist_loss_amount=0.0,
         )
 
     def test_status_color_mapping_error(self, backtest_view_env) -> None:
@@ -860,6 +865,8 @@ class TestBacktestViewErrorState:
             strategy_name=None,
             benchmark_name=None,
             has_real_score=True,
+            delist_liquidation_count=0,
+            delist_loss_amount=0.0,
         )
 
     def test_no_strategy_error_does_not_trigger_error_state(self, backtest_view_empty_env) -> None:

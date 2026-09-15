@@ -232,6 +232,40 @@ class TestBacktestReport:
         assert f"## {I18n.get('report_section_data_warnings')}" in md
 
 
+class TestBacktestDelistSummary:
+    """BT-02: 退市清算分项统计在导出报告 summary 的呈现。
+
+    count=0（默认）时不输出，避免干扰无退市场景；count>0 时呈现
+    笔数/账面扣减/回收率提示，让用户评估退市假设影响权重。
+    """
+
+    def test_no_delist_lines_when_count_zero(self, backtest_result: BacktestResult) -> None:
+        summary = BacktestReport().format_summary(backtest_result)
+        assert I18n.get("report_delist_liquidation_count") not in summary
+        assert I18n.get("report_delist_loss_amount") not in summary
+
+    def test_delist_lines_when_count_positive(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            delist_liquidation_count=2,
+            delist_loss_amount=12345.678,
+        )
+        summary = BacktestReport().format_summary(result)
+        assert f"{I18n.get('report_delist_liquidation_count')}: 2" in summary
+        assert f"{I18n.get('report_delist_loss_amount')}: 12,345.68" in summary
+        rate = result.config.delist_recovery_rate
+        assert I18n.get("report_delist_note", rate=rate) in summary
+
+    def test_delist_lines_in_markdown(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            delist_liquidation_count=1,
+            delist_loss_amount=5000.0,
+        )
+        md = BacktestReport().to_markdown(result)
+        assert I18n.get("report_delist_liquidation_count") in md
+
+
 class TestBacktestReportI18nLocale:
     """中英文标签验证：切换 locale 后报告标签应随之变化。"""
 
