@@ -18,6 +18,13 @@ from services.ai_service import AIService
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _ack_cloud_egress():
+    """SEC-01 门控：本文件专注 web_search 工具构造，非门控行为本身；默认视为已确认。"""
+    with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
+        yield
+
+
 def _make_svc_with_cloud():
     """Factory: create AIService with cloud provider pre-configured.
 

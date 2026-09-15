@@ -20,13 +20,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.errors import AIPolicyNotAcknowledgedError
 from core.i18n import Message
+from services.ai_service.litellm_client import LiteLLMClient
 from strategies.ai_mixin import (
     AIStrategyMixin,
     _build_egress_prompt_preview,
-    _collect_cloud_ack_providers,
     _safe_preview_field,
 )
+from utils.egress_ack import collect_cloud_ack_providers, is_egress_acknowledged
 
 pytestmark = pytest.mark.unit
 
@@ -225,19 +227,19 @@ class TestCollectCloudAckProviders:
     def test_collects_ack_providers(self, fallbacks, expected):
         """failover 配置 → 收集主 + 不同云端 fallback provider，与 AIService 凭证预载语义一致。"""
         with patch(
-            "strategies.ai_mixin.ConfigHandler.get_failover_config",
+            "utils.egress_ack.ConfigHandler.get_failover_config",
             return_value={"primary": "deepseek/deepseek-chat", "fallbacks": fallbacks},
         ):
-            assert _collect_cloud_ack_providers("deepseek") == expected
+            assert collect_cloud_ack_providers("deepseek") == expected
 
     def test_exception_falls_back_to_primary_only(self, caplog):
         """failover 配置读取异常 → 降级为仅主 provider（与 AIService 预载降级一致，不吞没主路径）。"""
         with patch(
-            "strategies.ai_mixin.ConfigHandler.get_failover_config",
+            "utils.egress_ack.ConfigHandler.get_failover_config",
             side_effect=RuntimeError("config corrupt"),
         ):
-            with caplog.at_level(logging.DEBUG, logger="strategies.ai_mixin"):
-                assert _collect_cloud_ack_providers("deepseek") == ["deepseek"]
+            with caplog.at_level(logging.DEBUG, logger="utils.egress_ack"):
+                assert collect_cloud_ack_providers("deepseek") == ["deepseek"]
         assert "failover config unavailable" in caplog.text
 
 
@@ -331,3 +333,91 @@ class TestRuntimeEgressAckFailover:
         assert seen["provider"] == "deepseek"
         assert "deepseek" in seen["preview"]
         assert "qwen" in seen["preview"]
+
+
+# --- SEC-01 集中出口门控（utils.egress_ack 统一判定 + LiteLLMClient 云端出口） ---
+
+
+class TestCentralizedEgressAckGate:
+    """SEC-01 gap3 补全：utils.egress_ack 统一判定确认对象集合是否全部已确认。"""
+
+    def test_all_providers_acknowledged_returns_true(self):
+        """主 + 全部跨 provider failover 都已确认 → 允许云端外发。"""
+        with (
+            patch("utils.egress_ack.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch(
+                "utils.egress_ack.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": ["qwen/qwen-max"]},
+            ),
+            patch("utils.egress_ack.ConfigHandler.is_ai_external_acknowledged") as mock_ack,
+        ):
+            mock_ack.side_effect = lambda provider: provider in ["deepseek", "qwen"]
+            assert is_egress_acknowledged() is True
+
+    def test_unacknowledged_fallback_returns_false(self):
+        """任一确认对象未确认（fallback 未授权）→ 禁止云端外发，避免授权语义漂移。"""
+        with (
+            patch("utils.egress_ack.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch(
+                "utils.egress_ack.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": ["qwen/qwen-max"]},
+            ),
+            patch("utils.egress_ack.ConfigHandler.is_ai_external_acknowledged") as mock_ack,
+        ):
+            mock_ack.side_effect = lambda provider: provider == "deepseek"
+            assert is_egress_acknowledged() is False
+
+
+def _make_litellm_client() -> LiteLLMClient:
+    """构造已配置云端可用的 LiteLLMClient（门控测试聚焦门控行为，非真实 IO）。"""
+    svc = MagicMock()
+    svc.is_cloud_available.return_value = True
+    return LiteLLMClient(svc)
+
+
+class TestLiteLLMClientEgressGate:
+    """SEC-01 gap3 补全：services 层（news / web_search 出口）门控在未确认时阻断外发。"""
+
+    @pytest.mark.asyncio
+    async def test_news_cloud_unack_raises(self):
+        """新闻分类云端出口未确认 → 抛 AIPolicyNotAcknowledgedError，绝不发起外部请求。"""
+        client = _make_litellm_client()
+        client._service._get_news_semaphore.return_value = asyncio.Semaphore(1)
+        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=False):
+            with pytest.raises(AIPolicyNotAcknowledgedError) as exc_info:
+                await client._chat_completion(
+                    messages=[{"role": "user", "content": "分类这支新闻"}],
+                    provider="cloud",
+                    purpose="news",
+                    json_mode=True,
+                )
+        # 门控拒绝语义：异常携带外发确认提示 i18n key，供表现层翻译
+        assert exc_info.value.message.key == "ai_external_acknowledgment_prompt"
+
+    @pytest.mark.asyncio
+    async def test_web_search_unack_raises(self):
+        """概念同步/网页搜索云端出口未确认 → 抛 AIPolicyNotAcknowledgedError。"""
+        client = _make_litellm_client()
+        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=False):
+            with pytest.raises(AIPolicyNotAcknowledgedError) as exc_info:
+                await client.chat_with_web_search(messages=[{"role": "user", "content": "web"}])
+        # 门控拒绝语义：异常携带外发确认提示 i18n key，供表现层翻译
+        assert exc_info.value.message.key == "ai_external_acknowledgment_prompt"
+
+    @pytest.mark.asyncio
+    async def test_news_cloud_acknowledged_proceeds(self):
+        """新闻分类云端出口已确认 → 放行正常分类，不抛策略异常。"""
+        client = _make_litellm_client()
+        client._service._get_news_semaphore.return_value = asyncio.Semaphore(1)
+        client._service._chat_completion_litellm = AsyncMock(return_value={"content": '{"category": "tech"}'})
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch.object(client, "_record_cloud_egress", new=AsyncMock()),
+        ):
+            result = await client._chat_completion(
+                messages=[{"role": "user", "content": "分类这支新闻"}],
+                provider="cloud",
+                purpose="news",
+                json_mode=True,
+            )
+        assert result == {"category": "tech"}

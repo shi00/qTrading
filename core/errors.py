@@ -134,3 +134,29 @@ class AIConfigError(AppError):
             ),
             detail,
         )
+
+
+class AIPolicyNotAcknowledgedError(AppError):
+    """AI 云端数据外发未经用户知情确认（SEC-01 门控拒绝）。
+
+    任一云端出口（选股分析经 ``run_ai_analysis``，新闻分类/概念同步等其他出口经
+    ``utils.egress_ack``）在主 provider + failover provider 的当前 scope_version 下
+    未被确认时，禁止发起云端请求，显式抛出本异常，由调用方非交互降级（如新闻分类
+    回落 unknown、概念标注逐批失败）。
+
+    设计为**非可重试**策略阻断异常：``ErrorInfo.retryable`` 默认 ``False``，经
+    ``classify_error`` 透传后 ``_chat_completion_with_failover`` 以
+    ``should_retry=False`` 直接上报，不做跨 provider 空转重试（避免把「未确认」误判为
+    可恢复的网络/限流错误反复重试）。
+    """
+
+    def __init__(self, message: Message, detail: str = "") -> None:
+        self.message = message
+        super().__init__(
+            ErrorInfo(
+                code="ai_policy_not_acknowledged",
+                message_key=message.key,
+                format_args=dict(message.params),
+            ),
+            detail,
+        )
