@@ -109,6 +109,8 @@ class _FakeBacktestViewModel:
             warnings: Any = ()
             skipped_order_count: Any = 0
             failed_date_count: Any = 0
+            # BIZ-04: 与 BacktestState 新增字段同步 (回测能力边界声明)
+            caveats: Any = ()
             # UX-01 细化: 与 BacktestState 新增字段同步 (「查看详情」展开明细)
             failed_details: Any = ()
             skipped_reasons: Any = ()
@@ -1223,6 +1225,63 @@ class TestBacktestWarningBanner:
         first = right_content.controls[0]
         assert isinstance(first, ft.Container), "banner 应为 ft.Container"
         assert "i18n[backtest_credibility_degraded]" in self._collect_texts(first)
+
+
+# ============================================================================
+# BIZ-04: 回测能力边界声明横幅 (_build_backtest_caveat_banner)
+# ============================================================================
+
+
+class TestBacktestCaveatBanner:
+    """BIZ-04: 结果区顶部的回测能力边界声明横幅.
+
+    覆盖 ``_build_backtest_caveat_banner`` (无 caveat → None / 有 caveat → ft.Container)
+    与 view 集成 (有 caveat → right_content 置顶 caveat banner, 且位于可信度告警横幅之上).
+    """
+
+    @staticmethod
+    def _collect_texts(root: Any) -> list[str]:
+        """收集子树内所有 Text.value (用于断言横幅文案翻译)."""
+        return [ctrl.value for ctrl in _walk_all_controls(root) if isinstance(ctrl, ft.Text) and ctrl.value]
+
+    def test_no_caveats_returns_none(self, backtest_view_env) -> None:
+        """无 caveat (默认状态) → 返回 None (不渲染横幅)."""
+        mod = backtest_view_env["mod"]
+        state = backtest_view_env["fake_vm"].state
+        assert mod._build_backtest_caveat_banner(state) is None
+
+    def test_caveat_renders_translated_message(self, backtest_view_env) -> None:
+        """caveats 非空 → ft.Container, 消息按 i18n 翻译 (VM 只产 i18n key)."""
+        from ui.viewmodels import Message
+
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(caveats=(Message("backtest_caveat_ai_disabled", {}),))
+        banner = mod._build_backtest_caveat_banner(fake_vm.state)
+        assert isinstance(banner, ft.Container)
+        texts = self._collect_texts(banner)
+        assert "• i18n[backtest_caveat_ai_disabled]" in texts
+
+    def test_view_places_caveat_above_warning_banner(self, backtest_view_env) -> None:
+        """view 集成: caveat + 可信度告警同时存在 → right_content 首个控件为 caveat banner."""
+        from ui.viewmodels import Message
+
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            caveats=(Message("backtest_caveat_ai_disabled", {}),),
+            credibility_level="degraded",
+            warnings=(Message("w_backtest_param_degraded", {}),),
+            metrics=(("total_return", 0.1),),
+            trades=(),
+        )
+        _rerender(env)
+        mod = env["mod"]
+        right_content = mod.ResizableSplitter.call_args.kwargs["right_content"]
+        assert isinstance(right_content, ft.Column), "有 banner 时 right_content 应为 Column"
+        first = right_content.controls[0]
+        assert isinstance(first, ft.Container), "caveat banner 应为 ft.Container"
+        assert "• i18n[backtest_caveat_ai_disabled]" in self._collect_texts(first)
 
 
 class TestWarningDetailControls:

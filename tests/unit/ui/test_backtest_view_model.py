@@ -460,12 +460,97 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
             await vm.run_backtest("test_strategy", config)
 
         assert captured["factory"] is not None
         await captured["factory"](task_id="task_credibility")
         return vm
+
+    async def _exec_backtest_with_strategy(self, strategy_obj: Any, result: Any = None) -> BacktestViewModel:
+        """运行一次成功的回测, 使用指定策略对象 (BIZ-04: 控制 supports_ai)."""
+        vm = BacktestViewModel()
+        result = result or self._result_with()
+        vm.service.run_backtest = AsyncMock(return_value=result)
+
+        captured: dict[str, Any] = {}
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured["factory"] = coroutine_factory
+            return "task_caveat"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": strategy_obj}
+            await vm.run_backtest("test_strategy", config)
+
+            assert captured["factory"] is not None
+            await captured["factory"](task_id="task_caveat")
+        return vm
+
+    @pytest.mark.asyncio
+    async def test_ai_strategy_with_ai_disabled_emits_caveat(self):
+        """BIZ-04: AI 策略 + 回测默认禁用 AI (disable_ai=True) → 产出能力边界声明。"""
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=True))
+
+        assert vm.state.caveats == (Message("backtest_caveat_ai_disabled"),)
+
+    @pytest.mark.asyncio
+    async def test_non_ai_strategy_no_caveat(self):
+        """BIZ-04: 非 AI 策略 (supports_ai=False) → 无能力边界声明。"""
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False))
+
+        assert vm.state.caveats == ()
+
+    @pytest.mark.asyncio
+    async def test_ai_strategy_with_ai_enabled_no_caveat(self):
+        """BIZ-04: AI 策略但回测显式启用 AI (disable_ai=False) → 无能力边界声明。"""
+        result = self._result_with(
+            config=BacktestConfig(
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 12, 31),
+                disable_ai=False,
+            )
+        )
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=True), result=result)
+
+        assert vm.state.caveats == ()
+
+    @pytest.mark.asyncio
+    async def test_caveats_reset_on_next_run_start(self):
+        """BIZ-04: 再次运行 (running 初始态) 时 caveats 归零, 避免残留上次结果。"""
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=True))
+        assert vm.state.caveats == (Message("backtest_caveat_ai_disabled"),)
+
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_caveat_2"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(supports_ai=True)}
+            await vm.run_backtest("test_strategy", config)
+
+        # running 初始态已归零
+        assert vm.state.caveats == ()
 
     @pytest.mark.asyncio
     async def test_run_backtest_success_path(self):
@@ -492,7 +577,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.update_progress = MagicMock()
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -559,7 +644,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
             await vm.run_backtest("test_strategy", config)
 
         # running 初始态已归零
@@ -690,7 +775,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.update_progress = MagicMock()
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -728,7 +813,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -772,7 +857,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -806,7 +891,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             # 第一次: 失败
             vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("first fail"))
@@ -837,7 +922,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value=None)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -858,7 +943,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value="task_001")
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -881,7 +966,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value="task_002")
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -909,7 +994,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -955,7 +1040,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.update_progress = MagicMock()
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -1008,7 +1093,7 @@ class TestBacktestViewModelRunBacktest:
             mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 
@@ -1131,7 +1216,7 @@ class TestBacktestViewModelCoverageGaps:
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.is_cancelled = MagicMock(return_value=False)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
 
             await vm.run_backtest("test_strategy", config)
 

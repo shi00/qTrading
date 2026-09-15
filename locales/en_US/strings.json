@@ -1951,6 +1951,7 @@
     "backtest_detail_failed_dates_title": "Dates with failed strategy execution",
     "backtest_detail_skipped_orders_title": "Skipped orders",
     "backtest_warn_more_days": "…and {count} more trading day(s) (see exported report)",
+    "backtest_caveat_ai_disabled": "This backtest did not include the AI analysis stage; results reflect only the mathematical screening part and do not represent how this strategy would perform with AI enabled in live trading.",
     "backtest_skip_no_quote": "Skipped, no quote: {count}",
     "backtest_skip_suspended": "Skipped, suspended: {count}",
     "backtest_skip_down_limit": "Skipped, down-limit sell not allowed: {count}",

@@ -284,6 +284,8 @@ class BacktestState:
     warnings: tuple[Message, ...] = ()
     skipped_order_count: int = 0
     failed_date_count: int = 0
+    # BIZ-04: 回测能力边界声明 (仅策略支持 AI 且本次回测禁用 AI 时非空)
+    caveats: tuple[Message, ...] = ()
     # UX-01 细化: 「查看详情」展开明细 (仅告警且可展示时非空)
     # - failed_details: (日期字符串, 已脱敏错误) 序列, 上限 _FAILED_DETAIL_CAP
     # - skipped_reasons: (i18n key, 笔数) 序列, 按原因汇总 (VM 只产 i18n key)
@@ -507,6 +509,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             warnings=(),
             skipped_order_count=0,
             failed_date_count=0,
+            caveats=(),
             delist_liquidation_count=0,
             delist_loss_amount=0.0,
         )
@@ -550,6 +553,13 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 failed_details = _extract_failed_details(result)
                 skipped_reasons = _extract_skipped_reasons(result)
 
+                # BIZ-04: 能力边界声明 — 策略可能触发 AI 分析 (supports_ai) 但本次回测
+                # 禁用 AI (config.disable_ai) 时, 结果不含 AI 分析环节, 显式声明能力边界,
+                # 避免「回测证明了 AI 有效」的误读 (01-requirement-closure §2.4)。
+                caveats: tuple[Message, ...] = ()
+                if strategy_uses_ai and result.config.disable_ai:
+                    caveats = (Message("backtest_caveat_ai_disabled"),)
+
                 # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(
                     metrics=tuple(result.metrics.items()),
@@ -578,6 +588,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     warnings=warnings,
                     skipped_order_count=skipped_order_count,
                     failed_date_count=failed_date_count,
+                    caveats=caveats,
                     failed_details=failed_details,
                     skipped_reasons=skipped_reasons,
                 )
@@ -601,6 +612,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     warnings=(),
                     skipped_order_count=0,
                     failed_date_count=0,
+                    caveats=(),
                 )
                 raise
             except Exception as e:
@@ -629,11 +641,14 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     warnings=(),
                     skipped_order_count=0,
                     failed_date_count=0,
+                    caveats=(),
                 )
                 raise
 
         strategy_obj = get_strategy_registry().get(strategy_key)
         name_key = getattr(strategy_obj, "name_key", None) if strategy_obj else None
+        # BIZ-04: 提交时快照策略 AI 能力 (supports_ai), 成功终态据此组装能力边界声明
+        strategy_uses_ai = bool(getattr(strategy_obj, "supports_ai", False)) if strategy_obj else False
         # Task 3.1: VM 不调 I18n.get; task name 改为 Message, View 渲染时翻译.
         # name_key 是 i18n key (策略名), 用 *_key params 约定传给 View.
         # 若 strategy_obj 不存在或缺 name_key, 回退到 strategy_key 字面值 (无翻译).
