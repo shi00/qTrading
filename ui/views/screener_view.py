@@ -536,8 +536,10 @@ def build_param_control(
             value=str(current_val),
             keyboard_type=ft.KeyboardType.NUMBER,
             dense=True,
-            border_color=AppColors.DIVIDER,
-            focused_border_color=AppColors.PRIMARY,
+            border={
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+            },
             text_size=AppStyles.FONT_SIZE_BODY,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -552,8 +554,10 @@ def build_param_control(
             value=str(current_val),
             options=[ft.dropdown.Option(str(o)) for o in options],
             dense=True,
-            border_color=AppColors.DIVIDER,
-            focused_border_color=AppColors.PRIMARY,
+            border={
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+            },
             text_size=AppStyles.FONT_SIZE_BODY,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             width=AppStyles.CONTROL_WIDTH_MD,
@@ -571,8 +575,10 @@ def build_param_control(
             multiline=True,
             min_lines=6,
             max_lines=15,
-            border_color=AppColors.DIVIDER,
-            focused_border_color=AppColors.PRIMARY,
+            border={
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+            },
             text_size=AppStyles.FONT_SIZE_BODY_SM,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
             error=(prompt_error or None)
@@ -1441,9 +1447,11 @@ def _build_screener_control_card(
             width=AppStyles.calc_dropdown_width(strategy_options, label=strategy_label),
             text_size=AppStyles.FONT_SIZE_LG,
             bgcolor=AppColors.INPUT_BG,
-            border_color=AppColors.INPUT_BORDER,
+            border={
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+            },
             color=AppColors.INPUT_TEXT,
-            focused_border_color=AppColors.PRIMARY,
         ),
     )
 
@@ -1451,8 +1459,10 @@ def _build_screener_control_card(
         label=I18n.get("screener_filter_stock"),
         value=state.stock_filter,
         dense=True,
-        border_color=AppColors.DIVIDER,
-        focused_border_color=AppColors.PRIMARY,
+        border={
+            ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+            ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+        },
         text_size=AppStyles.FONT_SIZE_BODY,
         width=AppStyles.CONTROL_WIDTH_SM,
         on_change=safe_on_change(handlers["on_stock_filter_change"]),

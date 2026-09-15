@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import flet as ft
 import pytest
@@ -518,18 +518,16 @@ class TestWatchlistViewErrorStateCallbacks:
         # page.run_task 被调用, 传入 vm.load_watchlist
         assert page.run_task.call_args.args[0] == mock_watchlist_vm.load_watchlist
 
-    def test_on_cta_calls_page_launch_url(
+    def test_error_state_cta_uses_openurl_client_action(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
-        """on_cta 回调通过 async wrapper + page.run_task 调度 page.launch_url 打开 GitHub Issues.
+        """反馈到 GitHub Issues 的 CTA 采用 Flet 1.0.0 声明式客户端动作.
 
-        关键验证: handler 须通过 inspect.iscoroutinefunction 检查 (page.launch_url 被
-        @deprecated 装饰器破坏 iscoroutinefunction 检测, 须用 async wrapper 包裹).
+        旧实现经 async wrapper + page.run_task 调度 page.launch_url; 1.0.0 改用
+        ``action=ft.OpenUrl`` 在客户端手势内直接打开 URL (见 state_views.ErrorState),
+        测试改为验证 ErrorState 收到 ``cta_url`` (OpenUrl) 而非 ``on_cta`` 回调。
         """
-        import inspect
-
         from tests.unit.ui.component_renderer import (
-            FakePage,
             make_component,
             render_once,
             run_mount_effects,
@@ -543,30 +541,14 @@ class TestWatchlistViewErrorStateCallbacks:
             watchlist_rows=(),
         )
         component = make_component(WatchlistView, active=True)
-        page = FakePage()
-        page.launch_url = AsyncMock()  # type: ignore[assignment]
-        page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
-        run_mount_effects(component, page=page)
+        run_mount_effects(component)
         result = render_once(component)
 
-        # 定位 ErrorState Component, 提取 on_cta 回调
+        # 定位 ErrorState Component, 提取 CTA 参数
         error_state = _find_component_by_fn_name(result, "ErrorState")
         assert error_state is not None
-        on_cta = error_state.kwargs.get("on_cta")
-        assert on_cta is not None
-
-        # 触发 on_cta
-        on_cta()
-
-        # page.run_task 被调用, 传入 async wrapper (须通过 iscoroutinefunction 检查)
-        handler = page.run_task.call_args.args[0]
-        assert inspect.iscoroutinefunction(handler), "handler 须为 coroutine function (通过 run_task 检查)"
-
-        # 验证 async wrapper 内部调用 page.launch_url(GITHUB_ISSUES_URL)
-        import asyncio
-
-        asyncio.run(handler())
-        page.launch_url.assert_called_once_with(GITHUB_ISSUES_URL)
+        assert error_state.kwargs.get("cta_url") == GITHUB_ISSUES_URL
+        assert error_state.kwargs.get("on_cta") is None
 
     def test_on_retry_no_page_does_not_crash(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state

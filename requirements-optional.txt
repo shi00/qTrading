@@ -90,17 +90,17 @@ fastuuid==0.14.0
     # via litellm
 filelock==3.29.7
     # via huggingface-hub
-flet==0.86.5
+flet==1.0.0
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
     #   flet-code-editor
     #   flet-desktop
-flet-charts==0.86.5
+flet-charts==1.0.0
     # via astockscreener (pyproject.toml)
-flet-code-editor==0.86.5
+flet-code-editor==1.0.0
     # via astockscreener (pyproject.toml)
-flet-desktop==0.86.5
+flet-desktop==1.0.0
     # via astockscreener (pyproject.toml)
 fonttools==4.63.0
     # via matplotlib
