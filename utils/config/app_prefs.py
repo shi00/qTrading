@@ -71,6 +71,16 @@ def is_auto_update_enabled():
     return cfg.ConfigHandler.get_typed("auto_update_enabled", bool, DEFAULTS["auto_update_enabled"])
 
 
+def is_ai_local_only_mode() -> bool:
+    """SEC-03 第一步: 「仅本地模式」——禁用全部云端 LLM，仅使用本地模型。"""
+    return bool(cfg.ConfigHandler.get_typed("ai_local_only_mode", bool, DEFAULTS["ai_local_only_mode"]))
+
+
+def set_ai_local_only_mode(enabled: bool) -> bool:
+    """SEC-03 第一步: 设置「仅本地模式」开关。"""
+    return cfg.ConfigHandler.set_typed("ai_local_only_mode", bool(enabled))
+
+
 def get_auto_update_time():
     return cfg.ConfigHandler.get_typed("auto_update_time", str, DEFAULTS["auto_update_time"])
 

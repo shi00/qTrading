@@ -60,6 +60,8 @@ class AIBrainSettingsState:
     ai_prompt_value: str = ""
     news_prompt_value: str = ""
     save_state: str = SAVE_IDLE
+    # SEC-03 第一步: 「仅本地模式」开关（禁用全部云端 LLM，仅使用本地模型）
+    ai_local_only_mode: bool = False
     # AI-03 完整版 T7: 月度 AI 成本上限输入文本 (空串=不限制)
     ai_cost_limit_value: str = ""
     # AI-03 完整版 T7: 本月累计 AI 成本 (元, 供 UI 展示; 未加载为 None)
@@ -162,6 +164,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             ai_prompt_value=ConfigHandler.get_ai_system_prompt(),
             news_prompt_value=ConfigHandler.get_ai_news_prompt(),
             save_state=SAVE_IDLE,
+            ai_local_only_mode=ConfigHandler.is_ai_local_only_mode(),
             ai_cost_limit_value=ai_cost_limit_value,
         )
 
@@ -181,6 +184,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def set_ai_prompt_value(self, value: str) -> None:
         self._set_state(ai_prompt_value=value)
+
+    def set_ai_local_only_mode(self, value: bool) -> None:
+        self._set_state(ai_local_only_mode=bool(value))
 
     def set_news_prompt_value(self, value: str) -> None:
         self._set_state(news_prompt_value=value)
@@ -309,6 +315,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                         "ai_max_concurrent_analysis": concurrency,
                         "ai_news_max_concurrent": news_concurrency,
                         "ai_cost_limit_cny": ai_cost_limit_cny,
+                        "ai_local_only_mode": self._state.ai_local_only_mode,
                     }
                 ):
                     return False

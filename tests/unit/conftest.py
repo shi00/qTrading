@@ -48,6 +48,21 @@ def _reset_all_singletons():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_egress_audit_disk(tmp_path):
+    """隔离 EgressAudit 落盘路径到测试临时目录（R7 测试状态隔离）。
+
+    SEC-03: ai_service 云端分支测试（走真实 _chat_completion cloud 分支）会触发
+    EgressAudit().record() 审计点，若落盘指向真实 USER_DATA_ROOT/logs/egress_audit.jsonl
+    会污染真实审计文件。EgressAudit._reset_singleton 保留 _override_path（见
+    utils/egress_audit.py），此 fixture 与 reset 顺序无关，始终指向本测试独立临时目录。
+    """
+    from utils.egress_audit import EgressAudit
+
+    EgressAudit._configure_for_tests(str(tmp_path / "egress_audit.jsonl"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_toast_manager_state():
     """重置 ToastManager 模块级可变状态（R7 测试状态污染）。
 
@@ -79,6 +94,24 @@ def _reset_data_explorer_shared_engine():
     yield
     DataExplorerQueryClient._shared_engine = None
     DataExplorerQueryClient._closed = False
+
+
+@pytest.fixture(autouse=True)
+def _reset_egress_status_state():
+    """Reset EgressStatusState singleton before and after each unit test (R7).
+
+    app_layout 组件经 ``ft.use_state(get_egress_status_state)`` 订阅该模块级
+    Observable 单例；单元测试挂载组件后不卸载组件, 残留的 ObservableSubscription
+    订阅者会随单例泄漏到后续测试, 使 ``notify_egress_count`` 在无 page 上下文时
+    抛 ``RuntimeError: The context is not associated with any page``。此处重置为
+    None（连同订阅者一起丢弃）, 与 _reset_toast_manager_state 等模块级状态隔离
+    惯例一致。
+    """
+    from ui.egress_status_state import _reset_state_for_test
+
+    _reset_state_for_test()
+    yield
+    _reset_state_for_test()
 
 
 @pytest.fixture(autouse=True)

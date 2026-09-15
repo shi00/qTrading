@@ -1179,6 +1179,7 @@ _R16_SINGLETON_CLASSES = frozenset(
         "EmbeddedPgMaintenanceService",
         "AppColors",
         "WriteQuality",
+        "EgressAudit",
     }
 )
 

@@ -31,8 +31,13 @@ from ui.components.config_panels.failover_config_panel import FailoverConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.confirm_dialog import ConfirmDialog
-from ui.components.flet_type_helpers import safe_on_change, safe_on_click
-from ui.components.settings_widgets import DashboardCard, SectionHeader
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_icon_str,
+    safe_on_change,
+    safe_on_click,
+)
+from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -42,6 +47,7 @@ from ui.viewmodels.ai_brain_settings_view_model import (
     SAVE_SUCCESS,
     AIBrainSettingsViewModel,
 )
+from ui.viewmodels.egress_audit_view_model import EgressAuditViewModel
 from ui.viewmodels.failover_config_panel_view_model import FailoverConfigPanelViewModel
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
@@ -86,6 +92,16 @@ def _validate_prompt_or_warn(prompt: str, show_snack: Callable) -> bool:
 def _show_saved_snack(show_snack: Callable) -> None:
     """配置保存成功 snack（注入 LLM/failover/local_model VM 的 on_save 回调）。"""
     show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
+
+
+def _format_bytes(size_bytes: int) -> str:
+    """人类可读字节格式化（SEC-03 数据出口面板数据量列展示）。"""
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
 
 
 # ============================================================================
@@ -152,6 +168,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         )
     )
 
+    # --- SEC-03 第二步: 数据出口聚合 ViewModel (今日/本月聚合 + 会话计数) ---
+    egress_state, egress_vm = use_viewmodel(factory=EgressAuditViewModel)
+
     # --- AI-03 完整版 T7: 首次渲染挂载时调度一次本月累计成本加载 (声明式 hook) ---
     # ft.use_effect 空依赖仅执行一次 (mount effect, 见 ui/hooks.py 用法); 经
     # page.run_task 调度 VM 异步 command, 不阻塞渲染 (R16 async-native DB 读)。
@@ -161,6 +180,14 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(ai_settings_vm.load_month_cost_cny)
 
     ft.use_effect(_trigger_load_month_cost, dependencies=[])
+
+    # --- SEC-03 第二步: 数据出口面板挂载时加载一次聚合 (scan JSONL, 经 IO 池) ---
+    def _trigger_load_egress() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(egress_vm.load_aggregates)
+
+    ft.use_effect(_trigger_load_egress, dependencies=[])
 
     # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
     # P1-4 批次 2: ConfirmDialog open_state (消费方驱动, 无 dirty state 检测 §0.5.11.1 #78)
@@ -582,6 +609,130 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
+    # --- SEC-03 第二步: 「仅本地模式」开关卡片 (禁用全部云端 LLM, 数据不出本机) ---
+    # 开关仅更新 VM state (ai_local_only_mode), 点「保存 AI 设置」时随 save_ai_settings 持久化。
+    def _on_local_only_toggle(e: ft.ControlEvent) -> None:
+        ai_settings_vm.set_ai_local_only_mode(get_control_value(e.control, ft.Switch))
+
+    local_only_switch = ft.Switch(
+        label="",
+        value=ai_settings_state.ai_local_only_mode,
+        on_change=safe_on_change(_on_local_only_toggle),
+    )
+    row_local_only = SettingRow(
+        icon=safe_icon_str(ft.Icons.PHONE_LOCKED),
+        title=I18n.get("settings_ai_local_only_title"),
+        subtitle=I18n.get("settings_ai_local_only_body"),
+        control=local_only_switch,
+        icon_color=AppColors.PRIMARY,
+        title_key="settings_ai_local_only_title",
+        subtitle_key="settings_ai_local_only_body",
+    )
+    card_local_only = DashboardCard(
+        content=ft.Column(
+            [
+                row_local_only,
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.INFO_OUTLINE,
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            I18n.get("settings_ai_local_only_boundary"),
+                            size=AppStyles.FONT_SIZE_CAPTION,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                    ],
+                    spacing=6,
+                ),
+            ],
+        ),
+    )
+
+    # --- SEC-03 第二步: 「数据出口」审计面板 (今日/本月按目的地聚合 + 会话指示) ---
+    def _build_egress_table(dest_rows: list) -> ft.DataTable | ft.Column:
+        """构造今日/本月聚合表; 空 rows 时以空态文案替代表格。"""
+        if not dest_rows:
+            return ft.Column(
+                [
+                    ft.Text(
+                        I18n.get("egress_empty"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                ],
+                spacing=4,
+            )
+        columns = [
+            ft.DataColumn(label=ft.Text(I18n.get("egress_dest_col"))),
+            ft.DataColumn(label=ft.Text(I18n.get("egress_count_col")), numeric=True),
+            ft.DataColumn(label=ft.Text(I18n.get("egress_bytes_col")), numeric=True),
+        ]
+        rows = [
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(r.destination, size=AppStyles.FONT_SIZE_BODY_SM)),
+                    ft.DataCell(ft.Text(str(r.count), size=AppStyles.FONT_SIZE_BODY_SM)),
+                    ft.DataCell(ft.Text(_format_bytes(r.payload_size_bytes), size=AppStyles.FONT_SIZE_BODY_SM)),
+                ],
+            )
+            for r in dest_rows
+        ]
+        return ft.DataTable(
+            columns=columns,
+            rows=rows,
+            heading_row_color=AppColors.TABLE_HEADER_BG,
+            data_row_color={ft.ControlState.HOVERED: AppColors.TABLE_ROW_HOVER},
+            border=ft.Border.all(1, AppColors.DIVIDER),
+            vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+        )
+
+    egress_session_text = I18n.get("egress_session_indicator").format(count=egress_state.session_count)
+    card_egress = DashboardCard(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        SectionHeader(I18n.get("egress_panel_title"), title_key="egress_panel_title"),
+                        ft.Icon(ft.Icons.LOGOUT, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.PRIMARY),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    I18n.get("egress_panel_desc"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+                ft.Text(
+                    egress_session_text,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_PRIMARY,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                ft.Divider(height=20, color=AppColors.BORDER),
+                ft.Text(
+                    I18n.get("egress_today_section"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                _build_egress_table(egress_state.today_rows),
+                ft.Divider(height=20, color=AppColors.BORDER),
+                ft.Text(
+                    I18n.get("egress_month_section"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                _build_egress_table(egress_state.month_rows),
+            ],
+            spacing=8,
+        ),
+    )
+
     # 状态指示器 (从 VM state 派生)
     status_color = AppColors.SUCCESS if is_success else AppColors.ERROR if is_error else AppColors.TEXT_HINT
     status_text = I18n.get("common_saved") if is_success else I18n.get("sys_snack_save_err") if is_error else ""
@@ -610,6 +761,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 card_local_ai,
                 card_tuning,
                 card_prompt,
+                card_local_only,
+                card_egress,
                 ft.Container(
                     content=ft.Row(
                         [btn_save_ai, save_progress, status_row],

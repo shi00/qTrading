@@ -18,6 +18,7 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 from enum import IntEnum
 
 import flet as ft
@@ -28,6 +29,7 @@ from ui.components.flet_type_helpers import (
     safe_on_change,
     safe_on_click,
 )
+from ui.egress_status_state import get_egress_status_state, notify_egress_count
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
@@ -307,6 +309,8 @@ def AppLayout() -> ft.Container:
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
+    # SEC-03: 状态栏「本会话外发 N 次」指示器数据源 (会话计数变化自动重渲染)
+    egress_status_state = ft.use_state(get_egress_status_state)
 
     # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
     nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)
@@ -408,6 +412,24 @@ def AppLayout() -> ft.Container:
 
     ft.use_effect(_setup_navigate, dependencies=[], cleanup=_cleanup_navigate)
 
+    # --- SEC-03 状态栏指示器: 注册 EgressAudit 会话计数 listener (挂载即订阅, 卸载退订) ---
+    # 与 _setup_navigate 的 pubsub 订阅不同, add_listener 返回非对称退订句柄,
+    # 须用方法级闭包 holder 在 setup/cleanup 间传递 (Flet use_effect cleanup 不接收
+    # setup 返回值, 见 mcp_flet use_effect 签名)。
+    egress_unsub_holder: list[Callable[[], None]] = []
+
+    def _setup_egress_listener() -> None:
+        from utils.egress_audit import EgressAudit
+
+        egress_unsub_holder.append(EgressAudit().add_listener(notify_egress_count))
+
+    def _cleanup_egress_listener() -> None:
+        if egress_unsub_holder:
+            unsub = egress_unsub_holder.pop()
+            unsub()
+
+    ft.use_effect(_setup_egress_listener, dependencies=[], cleanup=_cleanup_egress_listener)
+
     # --- 渲染 ---
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
@@ -463,9 +485,51 @@ def AppLayout() -> ft.Container:
         bgcolor=AppColors.BACKGROUND,
     )
 
-    return ft.Container(
+    # --- SEC-03 状态栏指示器: 底部轻量「本会话外发 N 次」---
+    # 数据源 egress_status_state.count（内存读, 无阻塞, R16）; 会话计数进程内单调、重启归零。
+    status_bar_egress = ft.Container(
+        content=ft.Row(
+            [
+                ft.Icon(
+                    ft.Icons.SHIELD,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_HINT,
+                ),
+                ft.Text(
+                    I18n.get("egress_session_indicator").format(count=egress_status_state.count),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+            ],
+            spacing=6,
+        ),
+        padding=ft.Padding.only(left=16, right=16, top=6, bottom=6),
+        bgcolor=AppColors.SURFACE,
+        border=ft.Border(top=ft.BorderSide(1, AppColors.BORDER)),
+    )
+
+    # SEC-03: 状态栏以底部 overlay 呈现, 不占用 body/结果表布局净高,
+    # 避免在最小视口 1280x720 下压缩结果表可用高度致 Flet 布局跳过子节点
+    # (详见 virtual_table NOTE(lazy), 回归 E2E: test_screener_1280x720_viewport_no_collapse).
+    body_region = ft.Container(
         content=ft.Row(
             [nav_rail, ft.VerticalDivider(width=1), body],
+            expand=True,
+        ),
+        expand=True,
+    )
+    status_bar_egress.left = 0
+    status_bar_egress.right = 0
+    status_bar_egress.bottom = 0
+
+    # 保留返回 ft.Container (签名契约不变), 内部以 Stack 承载:
+    # body_region 占满净高, 状态栏为底部 overlay 不占布局高度.
+    return ft.Container(
+        content=ft.Stack(
+            [
+                body_region,
+                status_bar_egress,
+            ],
             expand=True,
         ),
         expand=True,

@@ -14,6 +14,9 @@ class TestConfigHandlerDefaults:
     def test_default_config_has_keys(self):
         assert "auto_update_time" in ConfigHandler.DEFAULT_CONFIG
         assert "auto_update_enabled" in ConfigHandler.DEFAULT_CONFIG
+        # SEC-03 第一步: 仅本地模式默认关闭
+        assert "ai_local_only_mode" in ConfigHandler.DEFAULT_CONFIG
+        assert ConfigHandler.DEFAULT_CONFIG["ai_local_only_mode"] is False
 
 
 class TestConfigHandlerDeepMerge:
@@ -84,6 +87,35 @@ class TestConfigHandlerGetAutoUpdateTime:
     def test_get_time(self, mock_load):
         mock_load.return_value = {"auto_update_time": "09:30"}
         assert ConfigHandler.get_auto_update_time() == "09:30"
+
+
+class TestConfigHandlerIsAiLocalOnlyMode:
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_enabled(self, mock_load):
+        mock_load.return_value = {"ai_local_only_mode": True}
+        assert ConfigHandler.is_ai_local_only_mode() is True
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_disabled(self, mock_load):
+        mock_load.return_value = {"ai_local_only_mode": False}
+        assert ConfigHandler.is_ai_local_only_mode() is False
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_missing_key_defaults_false(self, mock_load):
+        mock_load.return_value = {}
+        assert ConfigHandler.is_ai_local_only_mode() is False
+
+
+class TestConfigHandlerSetAiLocalOnlyMode:
+    @patch("utils.config_handler.ConfigHandler.set_typed", return_value=True)
+    def test_enable(self, mock_set):
+        assert ConfigHandler.set_ai_local_only_mode(True) is True
+        mock_set.assert_called_once_with("ai_local_only_mode", True)
+
+    @patch("utils.config_handler.ConfigHandler.set_typed", return_value=True)
+    def test_disable_coerces_bool(self, mock_set):
+        assert ConfigHandler.set_ai_local_only_mode(0) is True
+        mock_set.assert_called_once_with("ai_local_only_mode", False)
 
 
 class TestConfigHandlerIsDoubaoScheduleEnabled:

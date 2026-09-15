@@ -74,6 +74,22 @@ class AIServiceUnavailableError(Exception):
     pass
 
 
+def _resolve_effective_model(llm_config: dict, model_override: str | None) -> str:
+    """解析本次真实发送的 effective model（SEC-03 审计 destination 单点来源）。
+
+    - model_override（failover 传入，可带 provider/app 前缀如 ``qwen/qwen-max``）优先；
+    - 否则回退配置 ``provider/model`` 拼接。
+
+    与 ``_chat_completion_litellm`` 的 model 解析逻辑保持一致，抽为单点防止漂移：
+    审计记录与真实请求必须指向同一个 model。
+    """
+    if model_override:
+        return model_override
+    provider = llm_config.get("provider", "")
+    model_id = llm_config.get("model", "")
+    return f"{provider}/{model_id}" if provider else model_id
+
+
 def _ensure_litellm_loaded() -> bool:
     """惰性加载 litellm 并返回是否可用（R16）。
 
@@ -332,12 +348,7 @@ class LiteLLMClient:
         if not _ai._ensure_litellm_loaded():
             raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
 
-        if model_override:
-            effective_model = model_override
-        else:
-            _provider = llm_config.get("provider", "")
-            _model_id = llm_config.get("model", "")
-            effective_model = f"{_provider}/{_model_id}" if _provider else _model_id
+        effective_model = _resolve_effective_model(llm_config, model_override)
         supports_reasoning = _ai._check_reasoning_support(effective_model)
 
         stream = kwargs.get("stream", False) or on_chunk is not None
@@ -526,6 +537,28 @@ class LiteLLMClient:
                     "[AIService] Cloud | Invoking LiteLLM (%d messages)",
                     len(messages),
                 )
+
+                # SEC-03：集中出口元数据审计。每次云端外发前记录元数据
+                # （时间/目的地/类别/载荷字节/条目数），不记 prompt 内容本身。
+                # local 分支不记录（数据不出本机）。审计失败不阻断 AI 主流程。
+                # destination 用真实 effective model（含 failover cross-provider 前缀），
+                # 单点来源 _resolve_effective_model，与本请求实际发送的 model 一致。
+                try:
+                    from utils.egress_audit import EgressAudit
+
+                    llm_config = self._service._litellm_config
+                    effective_model = _resolve_effective_model(llm_config, model)
+                    await EgressAudit().record(
+                        destination=f"llm:{effective_model}",
+                        category=purpose,
+                        item_count=len(messages),
+                        # None/非 str content 兜底: 防 payload 计算抛错导致该次外发漏记
+                        payload_size_bytes=sum(len(m.get("content") or "") for m in messages),
+                    )
+                except asyncio.CancelledError:
+                    raise  # R2: 必须传播
+                except Exception:  # noqa: BLE001 -- 审计降级不阻断 AI 主流程
+                    pass
 
                 # 经组合根 (self._service) 调用：保证测试对 AIService 实例属性
                 # （如 `svc._chat_completion_litellm = AsyncMock(...)`）的 monkeypatch 生效。

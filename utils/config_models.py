@@ -198,6 +198,8 @@ class AppConfig(BaseModel):
     ai_external_acknowledged: dict[str, int] = Field(default_factory=dict)
     ai_max_candidates: int = Field(default=30, ge=1, le=100)
     strategy_min_turnover: float = Field(default=2.0, ge=0)
+    # SEC-03 第一步: 「仅本地模式」——禁用全部云端 LLM 调用，仅使用本地模型（数据不出本机）
+    ai_local_only_mode: bool = False
     ai_max_concurrent_analysis: int = Field(default=5, ge=1, le=20)
     # AI-03(完整版): 月度 AI 成本预算上限(元), 默认 None=不限制; >0 时当月累计达到即软停 AI 分析
     ai_cost_limit_cny: float | None = Field(default=None, ge=0)

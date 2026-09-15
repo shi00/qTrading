@@ -93,6 +93,38 @@ def _patch_save_deps():
 
 
 # ============================================================================
+# SEC-03: 仅本地模式开关 (ai_local_only_mode)
+# ============================================================================
+
+
+class TestAiLocalOnlyMode:
+    def test_load_config_to_state(self, make_vm, mock_config_handler):
+        mock_config_handler.is_ai_local_only_mode.return_value = True
+        vm = make_vm()
+        assert vm.state.ai_local_only_mode is True
+
+    def test_default_false(self, make_vm, mock_config_handler):
+        mock_config_handler.is_ai_local_only_mode.return_value = False
+        vm = make_vm()
+        assert vm.state.ai_local_only_mode is False
+
+    def test_set_ai_local_only_mode(self, make_vm):
+        vm = make_vm()
+        vm.set_ai_local_only_mode(True)
+        assert vm.state.ai_local_only_mode is True
+        vm.set_ai_local_only_mode(False)
+        assert vm.state.ai_local_only_mode is False
+
+    async def test_save_payload_includes_local_only(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        vm.set_ai_local_only_mode(True)
+        with _patch_save_deps():
+            assert await vm.save_ai_settings() is True
+        call_data = mock_config_handler.save_config.call_args.args[0]
+        assert call_data["ai_local_only_mode"] is True
+
+
+# ============================================================================
 # _load_config_to_state: ai_cost_limit_cny 读取映射
 # ============================================================================
 
