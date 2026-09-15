@@ -62,6 +62,9 @@ class AIBrainSettingsState:
     save_state: str = SAVE_IDLE
     # SEC-03 第一步: 「仅本地模式」开关（禁用全部云端 LLM，仅使用本地模型）
     ai_local_only_mode: bool = False
+    # BIZ-02: 云端 LLM 是否已配置（主 provider 有 api_key 且非仅本地模式）。
+    # View 据此展示「未配置 AI 不影响选股与复盘，仅关闭 AI 解读」提示。
+    ai_configured: bool = False
     # AI-03 完整版 T7: 月度 AI 成本上限输入文本 (空串=不限制)
     ai_cost_limit_value: str = ""
     # AI-03 完整版 T7: 本月累计 AI 成本 (元, 供 UI 展示; 未加载为 None)
@@ -156,6 +159,11 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         # AI-03 完整版 T7: ai_cost_limit_cny (元, None/0/负 视为不限制 → 空串)
         ai_cost_limit = ConfigHandler.get_setting("ai_cost_limit_cny")
         ai_cost_limit_value = "" if ai_cost_limit is None or ai_cost_limit <= 0 else str(ai_cost_limit)
+        # BIZ-02: 口径对齐 AIService.is_cloud_available 的静态部分（主 provider 有
+        # api_key 且非仅本地模式）。AIService 实例内的 _is_cloud_configured（load 状态）
+        # 此处不可静态感知，配置存在即视为已配置——UI 提示语义是「是否配置」，非「当前可用」。
+        llm_cfg = ConfigHandler.get_llm_config()
+        ai_configured = bool(llm_cfg.get("api_key")) and not ConfigHandler.is_ai_local_only_mode()
         self._state = AIBrainSettingsState(
             max_candidates_value=str(ConfigHandler.get_ai_max_candidates()),
             min_turnover_value=str(ConfigHandler.get_strategy_min_turnover()),
@@ -165,6 +173,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             news_prompt_value=ConfigHandler.get_ai_news_prompt(),
             save_state=SAVE_IDLE,
             ai_local_only_mode=ConfigHandler.is_ai_local_only_mode(),
+            ai_configured=ai_configured,
             ai_cost_limit_value=ai_cost_limit_value,
         )
 

@@ -98,6 +98,28 @@ class TestStateImmutability:
 # --- Subscribe / notify ---
 
 
+class TestAiConfiguredState:
+    """BIZ-02: ai_configured 与 AIService.is_cloud_available 同口径（主 provider 有 api_key 且非仅本地模式）。"""
+
+    def test_true_when_api_key_and_not_local_only(self, mock_config_handler):
+        mock_config_handler.get_llm_config.return_value = {"api_key": "sk-test"}
+        mock_config_handler.is_ai_local_only_mode.return_value = False
+        vm = _make_vm(mock_config_handler)
+        assert vm.state.ai_configured is True
+
+    def test_false_when_no_api_key(self, mock_config_handler):
+        mock_config_handler.get_llm_config.return_value = {}
+        mock_config_handler.is_ai_local_only_mode.return_value = False
+        vm = _make_vm(mock_config_handler)
+        assert vm.state.ai_configured is False
+
+    def test_false_when_local_only_mode(self, mock_config_handler):
+        mock_config_handler.get_llm_config.return_value = {"api_key": "sk-test"}
+        mock_config_handler.is_ai_local_only_mode.return_value = True
+        vm = _make_vm(mock_config_handler)
+        assert vm.state.ai_configured is False
+
+
 class TestSubscribeNotify:
     def test_subscribe_receives_state_changes(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)

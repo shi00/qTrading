@@ -94,6 +94,9 @@ CRITICAL_EMPTY_TABLES = {"daily_quotes", "daily_indicators"}
 REVIEW_STATUS_PENDING = "PENDING"
 REVIEW_STATUS_T1_DONE = "T1_DONE"
 REVIEW_STATUS_COMPLETED = "COMPLETED"
+# BIZ-01: 超回溯窗口的存量 PENDING 记录置为终态 EXPIRED（迁移 0026），
+# 既不进入复盘池，也不被 T+1 回填通道处理（数据过旧、回填价值低）。
+REVIEW_STATUS_EXPIRED = "EXPIRED"
 TOP_LIST_NET_AMOUNT_UNIT = "yuan"
 TOP_LIST_NET_AMOUNT_UNIT_SOURCE = {
     "provider": "tushare.top_list",

@@ -363,6 +363,7 @@
     "settings_ai_local_only_title": "仅本地模式",
     "settings_ai_local_only_body": "禁用全部云端 LLM 调用，仅使用本地模型，数据不出本机。",
     "settings_ai_local_only_boundary": "注意：AI 设置页的「测试连接」仍会发起真实请求。",
+    "settings_ai_unconfigured_review_note": "未配置 AI 不影响选股与复盘，仅关闭 AI 解读。",
     "egress_panel_title": "数据出口审计",
     "egress_panel_desc": "记录 AI 分析类云端外发元数据（目的地/时间/数据量），不记录提示词内容本身。",
     "egress_dest_col": "目的地",

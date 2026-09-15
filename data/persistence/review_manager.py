@@ -763,11 +763,13 @@ class ReviewManager:
             if ai_status is not None and ai_status != "analyzed":
                 continue  # rejected/failed 不入数据库，由上层/UI 呈现不参与学习
 
-            ai_score = row.get("ai_score", 0)
+            # BIZ-01: 缺省 None——「无 AI 分数」（纯数学策略/未配置 AI）与「AI 给 0 分」
+            # 在数据层可区分，且不把非分析结果伪装成 0 分（R21 缺失值用 None 哨兵）。
+            ai_score = row.get("ai_score")
             try:
-                ai_score = int(ai_score) if pd.notnull(ai_score) else 0  # type: ignore[union-attr]
+                ai_score = int(ai_score) if pd.notnull(ai_score) else None  # type: ignore[union-attr]
             except (ValueError, TypeError):
-                ai_score = 0
+                ai_score = None
 
             ai_reason = row.get("ai_reason", "")
             if pd.isnull(ai_reason):  # type: ignore[union-attr]
