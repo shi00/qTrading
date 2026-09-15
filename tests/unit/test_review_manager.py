@@ -167,6 +167,47 @@ class TestReviewManagerRunReview:
         await rm.run_review()
         rm._update_result.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_with_pending_no_ai_score_updates_result(self, mock_cm, mock_tc):
+        """BIZ-01: 纯数学/无 AI 记录（ai_score=None）同样进入复盘推进，不因缺 AI 分数被跳过。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [None],
+                    "ai_reason": [""],
+                }
+            )
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "pct_chg": [2.0],
+                }
+            )
+        )
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+
 
 class TestReviewManagerGetLearningContext:
     @pytest.mark.asyncio
@@ -1440,7 +1481,8 @@ class TestReviewManagerSaveResultsEdgeCases:
         await rm.save_results("test_strategy", df, trade_date="20240615")
         mock_cache.screener_dao.save_screening_results.assert_called_once()
         records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
-        assert records[0]["ai_score"] == 0
+        # BIZ-01: 无法解析的 ai_score 不再伪装为 0 分，置 None（R21 缺失值哨兵）
+        assert records[0]["ai_score"] is None
 
 
 class TestReviewManagerSaveResultsAiStatusFilter:
@@ -1485,7 +1527,7 @@ class TestReviewManagerSaveResultsAiStatusFilter:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_no_ai_status_column_keeps_legacy_behavior(self, mock_cm, mock_tc):
-        """无 ai_status 列（老调用方）时行为不变：全部写入，保持向后兼容。"""
+        """无 ai_status 列（老调用方）时全部写入；无 ai_score 时落库为 None（BIZ-01）。"""
         rm, mock_cache = self._make_rm(mock_cm)
         df = pd.DataFrame(
             {
@@ -1498,6 +1540,7 @@ class TestReviewManagerSaveResultsAiStatusFilter:
         await rm.save_results("test_strategy", df, trade_date="20240615")
         records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
         assert [r["ts_code"] for r in records] == ["S0", "S1"]
+        assert all(r["ai_score"] is None for r in records)
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")

@@ -432,6 +432,30 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     card_connection = DashboardCard(
         content=ft.Column([llm_panel]),
     )
+    # BIZ-02: 云端 LLM 未配置时提示——选股与复盘闭环不受影响（BIZ-01 修复后纯数学/
+    # 无 AI 路径均可进入复盘），仅 AI 解读关闭。仅未配置时渲染，避免布局挤压。
+    ai_unconfigured_note = (
+        ft.Container(
+            content=ft.Row(
+                [
+                    ft.Icon(
+                        ft.Icons.INFO_OUTLINE,
+                        size=AppStyles.FONT_SIZE_TITLE,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    ft.Text(
+                        I18n.get("settings_ai_unconfigured_review_note"),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                ],
+                spacing=6,
+            ),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+        )
+        if not ai_settings_state.ai_configured
+        else ft.Container()
+    )
     # SEC-02: 向用户披露提示注入防护边界（UN-07/UN-08 AI 风险知情）。
     # 承认正则黑名单净化无法穷尽注入（prompt_guard SEC-003），并如实告知用户：
     # AI 结果仅供参考、勿作唯一决策依据。放置于云端 LLM 连接配置正下方，用户在
@@ -756,6 +780,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column(
             controls=[
                 card_connection,
+                ai_unconfigured_note,
                 card_data_boundary,
                 card_failover,
                 card_local_ai,

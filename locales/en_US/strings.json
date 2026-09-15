@@ -450,6 +450,7 @@
     "settings_ai_local_only_title": "Local-only mode",
     "settings_ai_local_only_body": "Disable all cloud LLM calls and use only the local model; data stays on this machine.",
     "settings_ai_local_only_boundary": "Note: the \"Test Connection\" button on the AI settings page still sends a real request.",
+    "settings_ai_unconfigured_review_note": "AI not configured — screening and review still work; only AI interpretation is disabled.",
     "egress_panel_title": "Data egress audit",
     "egress_panel_desc": "Logs metadata (destination/time/data size) of AI analysis cloud egress; never logs prompt content itself.",
     "egress_dest_col": "Destination",

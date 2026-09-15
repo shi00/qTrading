@@ -231,7 +231,9 @@ class ScreenerDao(BaseDao):
             stmt = stmt.where(sh.c.trade_date == trade_date)
             if strategy_name:
                 stmt = stmt.where(sh.c.strategy_name == strategy_name)
-        stmt = stmt.order_by(sh.c.ai_score.desc())
+        # BIZ-01: 无 AI 记录 ai_score 为 NULL，Postgres DESC 默认 NULLS FIRST 会把
+        # 无分数记录顶到历史视图最前；显式 NULLS LAST 保持「有 AI 分数记录优先」语义。
+        stmt = stmt.order_by(sh.c.ai_score.desc().nulls_last())
         return await self._read_db_select(stmt)
 
     async def get_strategy_review_stats(self) -> pd.DataFrame:
@@ -407,13 +409,18 @@ class ScreenerDao(BaseDao):
     # --- Review Manager Methods ---
 
     async def get_pending_predictions(self, date_threshold: str):
-        """Get predictions that have no result yet since the date_threshold."""
+        """Get predictions that have no result yet since the date_threshold.
+
+        BIZ-01: 不再以 ``ai_score > 0`` 过滤——纯数学策略（enable_ai_analysis=False）
+        与无 AI 用户的记录没有 ai_score 列（落库为 NULL），此前被永久排除在复盘池外。
+        AI 学习样例（get_learning_context）已单独用 prediction_result + alpha + ai_score
+        过滤，不会被非 AI 记录污染。
+        """
         sql = """
             SELECT id, trade_date, ts_code, ai_score, ai_reason
             FROM screening_history
             WHERE trade_date >= $1
               AND (review_status IN ($2, $3) OR review_status IS NULL)
-              AND ai_score > 0
             ORDER BY trade_date DESC
         """
         df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
@@ -511,6 +518,9 @@ class ScreenerDao(BaseDao):
             t.c.alpha.isnot(None),
             t.c.t5_pct.isnot(None),
             t.c.review_status == REVIEW_STATUS_COMPLETED,
+            # BIZ-01: 学习样例仅含 AI 评分过的记录（纯数学策略记录同样满足
+            # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
+            t.c.ai_score.isnot(None),
         )
         if as_of is not None:
             if isinstance(as_of, datetime.datetime):

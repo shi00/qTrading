@@ -113,6 +113,15 @@ class TestScreenerDaoGetHistoryRecords:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
 
+    @pytest.mark.asyncio
+    async def test_ai_score_desc_nulls_last(self):
+        """BIZ-01: 历史记录按 ai_score DESC 排序，无 AI 记录（NULL）靠后（Postgres 默认 NULLS FIRST 会顶到最前）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_history_records(trade_date="20240615")
+        sql = str(dao._read_db_select.call_args[0][0])
+        assert "NULLS LAST" in sql.upper()
+
 
 class TestScreenerDaoGetPendingReviews:
     @pytest.mark.asyncio
@@ -218,6 +227,17 @@ class TestScreenerDaoGetPendingPredictions:
         result = await dao.get_pending_predictions("20240601")
         assert isinstance(result, pd.DataFrame)
 
+    @pytest.mark.asyncio
+    async def test_sql_no_ai_score_filter(self):
+        """BIZ-01: 复盘池查询不再以 ``ai_score > 0`` 过滤，纯数学/无 AI 记录可进入。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_pending_predictions("20240601")
+        sql = str(dao._read_db.call_args[0][0])
+        assert "ai_score > 0" not in sql
+        assert "review_status" in sql
+        assert "$1" in sql or "$2" in sql
+
 
 class TestScreenerDaoGetLearningContext:
     @pytest.mark.asyncio
@@ -300,6 +320,15 @@ class TestScreenerDaoGetLearningContext:
         assert "review_status" in sql
         compiled = stmt.compile()
         assert REVIEW_STATUS_COMPLETED in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_sql_includes_ai_score_not_null(self):
+        """BIZ-01: 学习样例过滤 ``ai_score IS NOT NULL``，避免非 AI 记录污染 few-shot。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        sql = str(dao._read_db_select.call_args[0][0])
+        assert "ai_score IS NOT NULL" in sql
 
     @pytest.mark.asyncio
     async def test_as_of_sql_includes_t5_pct_and_review_status(self):

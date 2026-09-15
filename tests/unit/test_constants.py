@@ -18,6 +18,7 @@ from data.constants import (
     REVIEW_STATUS_PENDING,
     REVIEW_STATUS_T1_DONE,
     REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_EXPIRED,
     SYNC_RESULT_EMPTY,
     SYNC_RESULT_FETCH_FAILED,
     SYNC_RESULT_HAS_DATA,
@@ -204,6 +205,7 @@ class TestConstantsValues:
         assert REVIEW_STATUS_PENDING == "PENDING"
         assert REVIEW_STATUS_T1_DONE == "T1_DONE"
         assert REVIEW_STATUS_COMPLETED == "COMPLETED"
+        assert REVIEW_STATUS_EXPIRED == "EXPIRED"
 
     def test_earnings_season_months(self):
         assert EARNINGS_SEASON_MONTHS == [1, 4, 7, 10]
