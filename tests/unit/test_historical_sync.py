@@ -1365,6 +1365,88 @@ class TestHistoricalSyncRunDeepBranches:
         assert result is not None
 
     @pytest.mark.asyncio
+    async def test_retry_progress_callback_and_breaker_record(self):
+        """SYNC-05：重试路径复用主批次同一套进度计数与熔断窗口。
+        主循环首日失败（窗口 size=3 未满不熔断），重试成功后 progress_callback 推进、
+        failure_window.record(ok=True)，不再让进度条在重试阶段停滞。
+        """
+        ctx = make_ctx()
+        calls = {"n": 0}
+
+        async def transient_then_success(trade_date=None):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise Exception("transient fail")
+            return pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                    "vol": [1000],
+                }
+            )
+
+        # 主路径与重试路径共用同一 fetch 计数：前两次调用失败（触发首日进 failed_dates），
+        # 之后全部成功（重试恢复），保证 snapshot 的整体成败由真实 main/retry 逻辑决定。
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=transient_then_success)
+        ctx.api.get_daily_basic = AsyncMock(side_effect=transient_then_success)
+
+        strategy = HistoricalSyncStrategy(ctx)
+        result = SyncResult()
+        progress_values: list[int] = []
+
+        def cb(done: int, _total: int, _msg) -> None:
+            progress_values.append(done)
+
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_retry_count",
+                return_value=2,
+            ),
+        ):
+            await strategy._run_historical_sync(2, cb, result)
+
+        # 进度条最终推进到全部交易日（重试成功的日期也被计入，而非停驻在主循环失败数）
+        assert progress_values, "重试成功应推进进度回调"
+        assert progress_values[-1] == 2, f"进度应推进到总交易日数，got {progress_values}"
+        assert result.days_processed == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_circuit_breaker_aborts_retry(self):
+        """SYNC-05：重试阶段持续失败计入熔断窗口并中止后续重试。
+        主循环 2 天全失败（窗口 size=3 未满不会先熔断）；重试第 1 天再失败即填满窗口并触发熔断，
+        重试提前中止而不会把 MAX_RETRIES 轮全部跑完，避免 API 完全不可用时无谓消耗配额。
+        """
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("API down"))
+        ctx.api.get_daily_basic = AsyncMock(side_effect=Exception("API down"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = SyncResult()
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_retry_count",
+                return_value=5,
+            ),
+        ):
+            await strategy._run_historical_sync(2, None, result)
+
+        # 熔断消息必须进入 result.errors（重试阶段触发的熔断，区别于主批次熔断消息）
+        assert any("Circuit breaker triggered during retry" in e for e in result.errors), result.errors
+        # 主循环 2 天各 fetch 1 次 + 重试本轮并发 2 个 task 各 fetch 1 次 = 4 次；
+        # 若熔断未生效会跑满 MAX_RETRIES(5) 轮，远超此值（2 + 5×2 = 12）。
+        # 同一轮内后一个 task 查到窗口未满即早于前一个 task 的 record，故允许本轮 2 次。
+        assert ctx.api.get_daily_quotes.call_count <= 4
+
+    @pytest.mark.asyncio
     async def test_partial_status_after_failed_dates(self):
         ctx = make_ctx()
         ctx.api.get_daily_quotes = AsyncMock(side_effect=Exception("fail"))
