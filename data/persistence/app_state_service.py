@@ -37,3 +37,28 @@ async def set_app_state(engine, key: str, value: str) -> None:
             await conn.execute(stmt)
     except Exception as e:
         logger.warning("[AppState] Failed to write key='%s': %s", key, e)
+
+
+@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+async def set_app_state_max(engine, key: str, value: str) -> None:
+    """单调写入：仅当新值字典序大于现有值时更新。
+
+    用于 YYYYMMDD 格式的"已尝试水位"（该格式下字典序与时间序一致，见治理 D1-1）。
+    并发写入由 PostgreSQL 的行级锁保证正确性（INSERT..ON CONFLICT 为单语句原子操作），
+    无需 Python 侧读-改-写。`where` 让"无需更新"变成零行更新，兼顾正确性与减少 WAL。
+
+    写失败由内部吞掉不阻断调用方；engine 未就绪时为 no-op。
+    """
+    if engine is None:
+        return
+    try:
+        async with engine.begin() as conn:
+            stmt = pg_insert(AppState).values(config_key=key, config_value=value)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["config_key"],
+                set_={"config_value": value, "updated_at": sa.func.now()},
+                where=(AppState.config_value < value),
+            )
+            await conn.execute(stmt)
+    except Exception as e:
+        logger.warning("[AppState] Failed to write max key='%s': %s", key, e)

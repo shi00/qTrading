@@ -25,7 +25,7 @@ from data.constants import (
 )
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.app_state_service import get_app_state, set_app_state
+from data.persistence.app_state_service import get_app_state, set_app_state_max
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import Message
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -359,16 +359,34 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 try:
                     # D1-1：读取各稀疏表"已尝试水位"，供 quality 评分豁免"已尝试且合法为空"的日期，
                     # 避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。读取失败由 get_app_state 吞掉。
+                    # SYNC-04：收集缺失读数并告警——读循环仅在 dates_to_verify 非空（缓存数据已存在，
+                    # 非首次运行）时执行，全部缺失即属异常（水位从未建立或 app_state 读取异常），应予告警。
+                    resume_sparse = [t for t in effective_resume_tables if t not in _DENSE_TABLES]
                     attempted_upto: dict[str, str] = {}
-                    for table in effective_resume_tables:
-                        if table in _DENSE_TABLES:
-                            continue
+                    missing_watermark_tables: list[str] = []
+                    for table in resume_sparse:
                         wm = await get_app_state(
                             self.context.cache.engine,
                             f"{_WATERMARK_KEY_PREFIX}:{table}",
                         )
                         if wm:
                             attempted_upto[table] = wm
+                        else:
+                            missing_watermark_tables.append(table)
+
+                    if resume_sparse and len(missing_watermark_tables) == len(resume_sparse):
+                        logger.warning(
+                            "[HistoricalSync] Resume | 全部稀疏表水位线缺失，本次将按全量重扫处理。"
+                            "若非首次同步，可能是水位从未建立或 app_state 不可读，请核对质量评分走势。"
+                        )
+                        if result is not None:
+                            result.warnings.append("watermark_all_missing")
+                    elif missing_watermark_tables:
+                        logger.warning(
+                            "[HistoricalSync] Resume | 部分稀疏表水位线缺失（%s）：%s，这些表本次按全量重扫处理。",
+                            len(missing_watermark_tables),
+                            ", ".join(sorted(missing_watermark_tables)),
+                        )
 
                     quality_results = await self.context.cache.get_bulk_sync_quality_scores(
                         start_date=dates_to_verify[0],
@@ -483,6 +501,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         processed_count = 0
         BATCH_SIZE = ConfigHandler.get_sync_batch_size()
         counter_lock = get_loop_local("hist_counter_lock", asyncio.Lock)
+        # SYNC-02：批处理驱动的稀疏表水位聚合桶。各日成功 fetch 的表合并进此处（取 max），
+        # 批次边界统一 flush，避免每天每表一次独立事务（days=250 时由 ~3000 降到 ~12×批次数）。
+        # 用 set_app_state_max 单调写，后续批次更旧日期不会回退已落高水位。
+        pending_watermarks: dict[str, datetime.date] = {}
 
         async def sync_one_day(date: datetime.date | str):
             nonlocal abort_sync, processed_count
@@ -512,7 +534,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
                 try:
                     # P0-1: 检查返回值，False 表示取消信号触发，部分写入不应计为成功
-                    success = await self.sync_daily_market_snapshot(date_obj, force=True, sync_result=result)
+                    success = await self.sync_daily_market_snapshot(
+                        date_obj, force=True, sync_result=result, watermark_sink=pending_watermarks
+                    )
                     if not success:
                         async with counter_lock:
                             failure_window.record(ok=False)
@@ -546,6 +570,21 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         failure_window.record(ok=False)
                         failed_dates.append(date_obj)
 
+        async def _flush_watermarks() -> None:
+            """SYNC-02：把聚合桶中累积的表水位单调写库后清空。
+
+            仅在驱动方提供了 watermark_sink（批处理路径）时才有累积数据；
+            独立单日调用不走此处。写失败由 set_app_state_max 吞掉，不阻断同步。
+            硬取消/异常传播时本次待写水位被跳过——因单调自愈，下次运行会重设为真实 max，
+            不产生错误持久值（区别于旧无条件覆盖 bug 的"永久写坏"）。
+            """
+            engine = getattr(self.context.cache, "engine", None)
+            if engine is None or not pending_watermarks:
+                return
+            for table, date in pending_watermarks.items():
+                await set_app_state_max(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", date.strftime("%Y%m%d"))
+            pending_watermarks.clear()
+
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
             if self._shutdown_event.is_set() or abort_sync or self._check_cancelled(result):
@@ -562,6 +601,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
+
+            # SYNC-02：批次边界 flush 本批水位（含本批内有失败也照常刷成功日的表）。
+            await _flush_watermarks()
 
             batch_failures = sum(1 for d in batch if d in set(failed_dates))
             if batch_failures > 0:
@@ -626,7 +668,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 return
                         try:
                             # P0-1: 检查返回值，False 表示取消信号触发，不计为成功
-                            success = await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
+                            success = await self.sync_daily_market_snapshot(
+                                date, force=True, sync_result=result, watermark_sink=pending_watermarks
+                            )
                             if not success:
                                 async with counter_lock:
                                     failure_window.record(ok=False)
@@ -681,6 +725,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     # Cooperative yield: same as main batch path
                     await asyncio.sleep(0)
 
+        # SYNC-02：重试阶段获得的水位同样落库（主路径每批已 flush，此处兜底重试新增）。
+        await _flush_watermarks()
+
         if failed_dates:
             result.errors.append(f"{len(failed_dates)} dates failed after retries")
             result.status = "partial"
@@ -706,9 +753,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
         trade_date: datetime.date | str | None,
         force: bool = False,
         sync_result: SyncResult | None = None,
+        watermark_sink: dict[str, datetime.date] | None = None,
     ):
         """
         Sync ALL data types for a single day.
+
+        `watermark_sink`（可选，SYNC-02）：批处理驱动方传入的聚合桶，本日 fetch 成功
+        （含合法空）的稀疏表水位合并进其中（取 max），不在本方法内直接写库；
+        由调用方在批次边界统一 flush。不传时回退为直接单调写库（独立单日调用，
+        事务数少，无需聚合）。
         """
         if trade_date is not None:
             trade_date = to_date(trade_date)
@@ -1242,8 +1295,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # D1-1：记录稀疏表"已尝试水位"——仅记录当日 fetch 成功（含合法空）的表，
         # 供后续 quality 评分豁免"已尝试且为空"的日期，避免 dense 已完整仍反复 re-sync。
-        # northbound 走独立过滤逻辑，df 非 None（含过滤后空）且保存成功即视为已尝试。
+        # SYNC-02：批处理驱动方传入 watermark_sink 时仅做内存聚合（取 max），
+        # 由调用方在批次边界统一 flush；独立单日调用回退为直接单调写库。
         _ok_statuses = (SYNC_RESULT_EMPTY, SYNC_RESULT_HAS_DATA)
+
+        async def _record(table: str, date: datetime.date) -> None:
+            if watermark_sink is not None:
+                cur = watermark_sink.get(table)
+                if cur is None or date > cur:
+                    watermark_sink[table] = date
+            else:
+                await self._record_attempted_upto(table, date)
+
         for _res, _tbl in (
             (mf_result, "moneyflow_daily"),
             (hsgt_result, "moneyflow_hsgt"),
@@ -1258,23 +1321,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
             (stk_limit_result, "stk_limit"),
         ):
             if isinstance(_res, dict) and _res.get("result_status") in _ok_statuses:
-                await self._record_attempted_upto(_tbl, trade_date)
+                await _record(_tbl, trade_date)
         if data_map.get("north") is not None and north_result.get("success"):
-            await self._record_attempted_upto("northbound_holding", trade_date)
+            await _record("northbound_holding", trade_date)
 
         return True
 
     async def _record_attempted_upto(self, table: str, trade_date: datetime.date | None) -> None:
         """为稀疏表写入"已尝试水位"（D1-1）。
 
-        写失败由 set_app_state 内部吞掉，不阻断同步；engine 未就绪时为 no-op。
+        单调写入（set_app_state_max）：仅当日期更新时才更新，避免批次反向推进把高水位写回旧日期。
+        写失败由 set_app_state_max 内部吞掉，不阻断同步；engine 未就绪时为 no-op。
         """
         if trade_date is None:
             return
         engine = getattr(self.context.cache, "engine", None)
         if engine is None:
             return
-        await set_app_state(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", trade_date.strftime("%Y%m%d"))
+        await set_app_state_max(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", trade_date.strftime("%Y%m%d"))
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_moneyflow(self, trade_date: datetime.date | None = None):

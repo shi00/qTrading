@@ -1120,7 +1120,7 @@ class TestDataProcessor(unittest.TestCase):
 
         call_count = 0
 
-        async def side_effect(date, force=False, sync_result=None):
+        async def side_effect(date, force=False, sync_result=None, watermark_sink=None):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
