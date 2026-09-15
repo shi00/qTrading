@@ -538,27 +538,9 @@ class LiteLLMClient:
                     len(messages),
                 )
 
-                # SEC-03：集中出口元数据审计。每次云端外发前记录元数据
-                # （时间/目的地/类别/载荷字节/条目数），不记 prompt 内容本身。
-                # local 分支不记录（数据不出本机）。审计失败不阻断 AI 主流程。
-                # destination 用真实 effective model（含 failover cross-provider 前缀），
-                # 单点来源 _resolve_effective_model，与本请求实际发送的 model 一致。
-                try:
-                    from utils.egress_audit import EgressAudit
-
-                    llm_config = self._service._litellm_config
-                    effective_model = _resolve_effective_model(llm_config, model)
-                    await EgressAudit().record(
-                        destination=f"llm:{effective_model}",
-                        category=purpose,
-                        item_count=len(messages),
-                        # None/非 str content 兜底: 防 payload 计算抛错导致该次外发漏记
-                        payload_size_bytes=sum(len(m.get("content") or "") for m in messages),
-                    )
-                except asyncio.CancelledError:
-                    raise  # R2: 必须传播
-                except Exception:  # noqa: BLE001 -- 审计降级不阻断 AI 主流程
-                    pass
+                # SEC-03：集中出口元数据审计（共享 helper，单一事实源，见
+                # _record_cloud_egress 注释）。审计失败不阻断 AI 主流程。
+                await self._record_cloud_egress(messages, model=model, category=purpose)
 
                 # 经组合根 (self._service) 调用：保证测试对 AIService 实例属性
                 # （如 `svc._chat_completion_litellm = AsyncMock(...)`）的 monkeypatch 生效。
@@ -603,6 +585,39 @@ class LiteLLMClient:
             raise ValueError(f"Invalid JSON response: {_ai.DataSanitizer.sanitize_error(response_content[:100])}...")
 
         return {"content": response_content}
+
+    async def _record_cloud_egress(
+        self,
+        messages: list,
+        *,
+        model: str | None,
+        category: str,
+    ) -> None:
+        """SEC-03 集中云端外发元数据审计（各 cloud 出口路径共享的单一事实源）。
+
+        记录时间/目的地/类别/载荷字节/条目数，**不记 prompt 内容本身**，避免二次泄露。
+        destination 用真实 effective model（含 failover cross-provider 前缀，经
+        ``_resolve_effective_model`` 单点解析），与本请求实际发送的 model 一致。
+
+        仅 **cloud** 出口调用（local 分支数据不出本机，无需记录）。审计失败不阻断 AI
+        主流程（R2：CancelledError 必须传播）。
+        """
+        try:
+            from utils.egress_audit import EgressAudit
+
+            llm_config = self._service._litellm_config
+            effective_model = _resolve_effective_model(llm_config, model)
+            await EgressAudit().record(
+                destination=f"llm:{effective_model}",
+                category=category,
+                item_count=len(messages),
+                # None/非 str content 兜底: 防 payload 计算抛错导致该次外发漏记
+                payload_size_bytes=sum(len(m.get("content") or "") for m in messages),
+            )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception:  # noqa: BLE001 -- 审计降级不阻断 AI 主流程
+            pass
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion_with_failover(
@@ -805,6 +820,11 @@ class LiteLLMClient:
             web_search_config["search_domain_filter"] = search_domain_filter
 
         tools = [{"type": "web_search", "web_search": web_search_config}]
+
+        # SEC-03：概念同步等 web_search 云端出口同样记录审计。此前该路径直连
+        # _chat_completion_litellm，绕过 _chat_completion 的审计点，导致此类云端外发
+        # 对审计面板/状态栏「外发 N 次」计数不可见；经共享 helper 补记（单一事实源）。
+        await self._record_cloud_egress(messages, model=None, category="web_search")
 
         # 经组合根 (self._service) 调用：保证测试对 AIService 实例属性
         # （如 `svc._chat_completion_litellm = AsyncMock(...)`）的 monkeypatch 生效。

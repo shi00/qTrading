@@ -22,6 +22,7 @@ tests/unit/test_egress_audit.py）。
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -198,6 +199,38 @@ class TestFailoverRecordsEachAttempt:
 
 
 # ============================================================================
+# web_search 云端出口同样记录审计
+# ============================================================================
+
+
+class TestWebSearchRecordsEgress:
+    @pytest.mark.asyncio
+    async def test_web_search_records_egress(self, _tmp_egress_path, monkeypatch) -> None:
+        """chat_with_web_search（概念同步等）触发审计，category=web_search。
+
+        回归：该路径此前直连 _chat_completion_litellm 绕过审计点，导致这类云端外发
+        对审计面板/状态栏计数不可见（SEC-03 复核检出）。
+        """
+        svc = _make_cloud_service(monkeypatch)
+        svc._chat_completion_litellm = AsyncMock(return_value={"content": "web result", "usage": {}})
+
+        result = await svc.chat_with_web_search(
+            messages=[{"role": "user", "content": "查询某概念最新资讯"}],
+        )
+
+        assert result["content"] == "web result"
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["destination"] == "llm:deepseek/deepseek-v4-flash"
+        assert rec["category"] == "web_search"
+        assert rec["item_count"] == 1
+        assert rec["payload_size_bytes"] > 0
+        # 元数据审计不记录 prompt 内容本身（防二次泄露）
+        assert "查询某概念最新资讯" not in json.dumps(rec, ensure_ascii=False)
+
+
+# ============================================================================
 # local 不记录 / 仅本地模式拦截
 # ============================================================================
 
@@ -277,6 +310,46 @@ class TestAuditFailureDegradation:
         )
 
         assert result["score"] == 88
+
+    @pytest.mark.asyncio
+    async def test_record_cloud_egress_cancelled_error_propagates(self, _tmp_egress_path, monkeypatch) -> None:
+        """_record_cloud_egress 遇 CancelledError 必须传播（R2：不吞没、优雅停机）。
+
+        直接打桩 EgressAudit.record 抛 CancelledError。注意：仅 _append_jsonl 打桩
+        无法跨过 record() 内部隔离（其只 re-raise CancelledError、吞普通异常），
+        故在此显式覆盖 helper 的 CancelledError 传播分支。
+        """
+        svc = _make_cloud_service(monkeypatch)
+        monkeypatch.setattr(
+            EgressAudit,
+            "record",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await svc._litellm._record_cloud_egress(
+                messages=[{"role": "user", "content": "x"}],
+                model=None,
+                category="analysis",
+            )
+        assert excinfo.type is asyncio.CancelledError  # R2: 取消必须传播而非吞没
+
+    @pytest.mark.asyncio
+    async def test_record_cloud_egress_generic_exception_degraded(self, _tmp_egress_path, monkeypatch) -> None:
+        """_record_cloud_egress 遇普通异常仅降级（pass），不阻断 AI 主流程。"""
+        svc = _make_cloud_service(monkeypatch)
+        monkeypatch.setattr(
+            EgressAudit,
+            "record",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        # 不应抛错：审计降级不阻断
+        await svc._litellm._record_cloud_egress(
+            messages=[{"role": "user", "content": "x"}],
+            model=None,
+            category="analysis",
+        )
 
 
 # ============================================================================
