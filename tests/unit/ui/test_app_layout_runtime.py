@@ -142,15 +142,19 @@ def app_layout_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
 
 
 def _get_nav_rail(env: dict) -> ft.NavigationRail:
-    """从渲染树提取 NavigationRail (root.content.controls[0].controls[0]).
+    """从渲染树提取 NavigationRail (root.content.controls[0].content.controls[0]).
 
-    SEC-03 起根布局为 Container > Column[ Row[nav, divider, body], 状态栏 ]。
+    SEC-03 状态栏起, 根布局为 Container > Stack[
+      Row([nav_rail, VerticalDivider, body]), 状态栏 overlay
+    ] (底部状态栏改为 Stack overlay 不占布局净高, 见 app_layout.py 注释)。
     """
     result = env["result"]
     assert isinstance(result, ft.Container)
-    column = result.content
-    assert isinstance(column, ft.Column)
-    row = column.controls[0]
+    stack = result.content
+    assert isinstance(stack, ft.Stack)
+    body_region = stack.controls[0]  # Container(content=Row)
+    assert isinstance(body_region, ft.Container)
+    row = body_region.content
     assert isinstance(row, ft.Row)
     nav_rail = row.controls[0]
     assert isinstance(nav_rail, ft.NavigationRail)
@@ -613,8 +617,10 @@ class TestOnNavigateDeepLink:
         """
         result = render_once(env["component"])
         env["result"] = result
-        # Container > Column[ Row([nav_rail, VerticalDivider, body]), 状态栏 ] (SEC-03 状态栏)
-        main_row = result.content.controls[0]
+        # Container > Stack[ Row([nav_rail, VerticalDivider, body]), 状态栏 overlay ]
+        stack = result.content
+        body_region = stack.controls[0]
+        main_row = body_region.content
         body = main_row.controls[2]
         stack_component = body.content
         render_once(stack_component)
