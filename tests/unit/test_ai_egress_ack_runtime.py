@@ -24,6 +24,7 @@ from core.i18n import Message
 from strategies.ai_mixin import (
     AIStrategyMixin,
     _build_egress_prompt_preview,
+    _collect_cloud_ack_providers,
     _safe_preview_field,
 )
 
@@ -84,6 +85,20 @@ class TestEgressPromptPreview:
         assert "close=" in parts
         assert "pct_chg=" in parts
 
+    def test_preview_includes_providers_when_given(self):
+        """SEC-01 复核修复: 传入 providers 时，预览头部展示主 + fallback 云端供应商集合。"""
+        preview = _build_egress_prompt_preview(_candidates(), {}, providers=["deepseek", "qwen"])
+        assert "deepseek" in preview
+        assert "qwen" in preview
+
+    def test_preview_unchanged_without_providers(self):
+        """不传 providers 时行为不变（既有确认对话框文案兼容）。"""
+        with_providers = _build_egress_prompt_preview(_candidates(), {}, providers=["deepseek"])
+        without = _build_egress_prompt_preview(_candidates(), {})
+        # providers 行是新增的独立段落，其余结构保持
+        assert "deepseek" in with_providers
+        assert "deepseek" not in without
+
 
 # --- 策略层 guard 运行时确认三分支 ---
 
@@ -109,6 +124,11 @@ class TestRuntimeEgressAckGuard:
         with (
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=False),
             patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            # 固定 failover 配置为空，保证 ack 对象 = 仅主 provider（测试确定性，不依赖真实配置）
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": []},
+            ),
             patch("strategies.ai_mixin.ConfigHandler.set_ai_external_acknowledged") as mock_set,
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
             patch("strategies.ai_mixin.NewsFetcher.get_stock_news") as mock_news,
@@ -172,6 +192,10 @@ class TestRuntimeEgressAckGuard:
         with (
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=False),
             patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": []},
+            ),
             patch("strategies.ai_mixin.ConfigHandler.set_ai_external_acknowledged") as mock_set,
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):
@@ -182,3 +206,128 @@ class TestRuntimeEgressAckGuard:
                 await s.run_ai_analysis(_candidates(), context)
             # 取消透传：确认回调从未被持久化触发
             assert not mock_set.called
+
+
+# --- SEC-01 复核修复: failover 确认对象收集 ---
+
+
+class TestCollectCloudAckProviders:
+    @pytest.mark.parametrize(
+        ("fallbacks", "expected"),
+        [
+            ([], ["deepseek"]),  # 无 failover → 仅主 provider
+            (["qwen/qwen-max"], ["deepseek", "qwen"]),  # "/" 前缀 fallback → 追加
+            (["qwen-max"], ["deepseek"]),  # 裸 model 名（主 provider 内部模型）→ 忽略
+            (["qwen/qwen-max", "qwen/qwen-turbo"], ["deepseek", "qwen"]),  # 同 provider 去重
+            (["deepseek/deepseek-r1"], ["deepseek"]),  # 与主 provider 同源 → 去重
+        ],
+    )
+    def test_collects_ack_providers(self, fallbacks, expected):
+        """failover 配置 → 收集主 + 不同云端 fallback provider，与 AIService 凭证预载语义一致。"""
+        with patch(
+            "strategies.ai_mixin.ConfigHandler.get_failover_config",
+            return_value={"primary": "deepseek/deepseek-chat", "fallbacks": fallbacks},
+        ):
+            assert _collect_cloud_ack_providers("deepseek") == expected
+
+    def test_exception_falls_back_to_primary_only(self, caplog):
+        """failover 配置读取异常 → 降级为仅主 provider（与 AIService 预载降级一致，不吞没主路径）。"""
+        with patch(
+            "strategies.ai_mixin.ConfigHandler.get_failover_config",
+            side_effect=RuntimeError("config corrupt"),
+        ):
+            with caplog.at_level(logging.DEBUG, logger="strategies.ai_mixin"):
+                assert _collect_cloud_ack_providers("deepseek") == ["deepseek"]
+        assert "failover config unavailable" in caplog.text
+
+
+class TestRuntimeEgressAckFailover:
+    """SEC-01 复核修复: failover 场景下确认对象 = 主 + fallback 全部 provider（授权语义不漂移）。"""
+
+    async def _run_with_failover(self, *, fallbacks, ack_result=True):
+        s = _ConcreteStrategy()
+        dp = _make_mock_dp()
+        on_progress = MagicMock()
+
+        async def ack_request(_preview, _provider):
+            return ack_result
+
+        context = {
+            "data_processor": dp,
+            "on_progress": on_progress,
+            "on_ai_egress_ack_request": ack_request,
+        }
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=False),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": fallbacks},
+            ),
+            patch("strategies.ai_mixin.ConfigHandler.set_ai_external_acknowledged") as mock_set,
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news") as mock_news,
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+            mock_news.get_stock_news = AsyncMock()
+            result = await s.run_ai_analysis(_candidates(), context)
+
+        return result, mock_set
+
+    @pytest.mark.asyncio
+    async def test_confirm_persists_all_failover_providers(self):
+        """用户同意 → 主 + fallback 全部 provider 持久化为已确认，避免 fallback 触发未授权外发。"""
+        result, mock_set = await self._run_with_failover(fallbacks=["qwen/qwen-max"])
+        set_calls = {c[1]["provider"] for c in mock_set.call_args_list}
+        assert set_calls == {"deepseek", "qwen"}
+        assert all(c[1]["acknowledged"] is True for c in mock_set.call_args_list)
+        # 已继续分析：结果不再处于 policy_not_acknowledged 跳过态
+        assert "ai_status" not in result.columns or (result["ai_status"] != "policy_not_acknowledged").all()
+
+    @pytest.mark.asyncio
+    async def test_decline_persists_nothing_with_failover(self):
+        """failover 存在但用户拒绝 → 任一 provider 均不持久化、跳过 AI。"""
+        result, mock_set = await self._run_with_failover(fallbacks=["qwen/qwen-max"], ack_result=False)
+        assert result.iloc[0]["ai_status"] == "policy_not_acknowledged"
+        mock_set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unacknowledged_fallback_triggers_ack_with_providers_preview(self):
+        """fallback 未确认 → 仍触发运行时确认，且预览中展示主 + fallback provider 集合（知情权）。"""
+        s = _ConcreteStrategy()
+        dp = _make_mock_dp()
+        seen = {}
+
+        async def ack_request(preview, provider):
+            seen["preview"] = preview
+            seen["provider"] = provider
+            return True
+
+        context = {"data_processor": dp, "on_ai_egress_ack_request": ack_request}
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=False),
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-chat", "fallbacks": ["qwen/qwen-max"]},
+            ),
+            patch("strategies.ai_mixin.ConfigHandler.set_ai_external_acknowledged"),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news") as mock_news,
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(return_value={"score": 80, "summary": "good", "decision": "Buy"})
+            mock_ai.return_value = mock_ai_instance
+            mock_news.get_stock_news = AsyncMock()
+            await s.run_ai_analysis(_candidates(), context)
+
+        # 回调收到主 provider 名 + 包含全部确认对象的预览文本
+        assert seen["provider"] == "deepseek"
+        assert "deepseek" in seen["preview"]
+        assert "qwen" in seen["preview"]
