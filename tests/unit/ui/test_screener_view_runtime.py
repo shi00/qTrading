@@ -416,6 +416,8 @@ class _FakeScreenerViewModel:
         D7-3: 与生产 VM._update_pagination 一致, 同帧原子产出按 ai_status 拆分的
         ai_recommended_rows/ai_excluded_rows/ai_failed_rows 三分区, 否则 REALTIME
         View 只渲染三分区空态, PaginatedTable 不挂载, 排序/行点击回调节点无法捕获。
+        UX-02: show_ai_sections 与生产 VM 同源 (df 含 ai_status 列), 非AI策略无该列时
+        View 走单表渲染路径。
         """
         if df is not None and not df.empty:
             rows = tuple(ScreenerRow(values=MappingProxyType(dict(record))) for record in df.to_dict("records"))
@@ -427,6 +429,7 @@ class _FakeScreenerViewModel:
                 ai_recommended_rows=recommended,
                 ai_excluded_rows=excluded,
                 ai_failed_rows=failed,
+                show_ai_sections="ai_status" in df.columns,
                 total_items=total_items,
                 total_pages=total_pages,
                 page_no=page_no,
@@ -438,6 +441,7 @@ class _FakeScreenerViewModel:
                 ai_recommended_rows=(),
                 ai_excluded_rows=(),
                 ai_failed_rows=(),
+                show_ai_sections=False,
                 total_items=0,
                 total_pages=0,
             )
@@ -2828,6 +2832,58 @@ class TestTableDataRendering:
         # PaginatedTable mock 被调用 (rows 参数含数据)
         # 验证不抛异常
         assert callable(env["captured_callbacks"]["on_sort"])
+
+
+class TestScreenerViewSectionRendering:
+    """UX-02: show_ai_sections 驱动三分区/单表渲染.
+
+    非AI策略 (enable_ai_analysis=False) 结果无 ai_status 列 → show_ai_sections=False,
+    REALTIME 下渲染单表, 不把成功的数学筛选误标为「分析失败」分区
+    (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
+    """
+
+    @staticmethod
+    def _section_titles(env: dict) -> list[str]:
+        """收集渲染树中三分区标题文本 (i18n[screener_section_*])."""
+        titles: list[str] = []
+        for ctrl in _walk_all_controls(env["result"]):
+            if isinstance(ctrl, ft.Text) and isinstance(ctrl.value, str):
+                if ctrl.value.startswith("i18n[screener_section_"):
+                    titles.append(ctrl.value)
+        return titles
+
+    def test_no_ai_sections_single_table(self, screener_view_env) -> None:
+        """REALTIME + 无 ai_status 列 (非AI策略) → 单表渲染, 无三分区标题。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "close": [10.5, 9.8]}))
+        _rerender(env)
+
+        assert fake_vm.state.show_ai_sections is False
+        assert self._section_titles(env) == [], "非AI策略不应渲染三分区标题"
+        assert "on_sort" in env["captured_callbacks"], "单表路径应挂载 PaginatedTable"
+
+    def test_ai_sections_three_panes(self, screener_view_env) -> None:
+        """REALTIME + 含 ai_status 列 (AI 策略) → 三分区标题渲染 (recommended/failed)。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "close": [10.5, 9.8],
+                    "ai_status": ["analyzed", "failed"],
+                }
+            )
+        )
+        _rerender(env)
+
+        assert fake_vm.state.show_ai_sections is True
+        titles = self._section_titles(env)
+        assert any("screener_section_recommended" in t for t in titles)
+        assert any("screener_section_failed" in t for t in titles)
 
 
 class TestTableDataMemo:

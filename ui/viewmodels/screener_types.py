@@ -203,6 +203,11 @@ class ScreenerState:
     ai_recommended_rows: tuple[ScreenerRow, ...] = ()
     ai_excluded_rows: tuple[ScreenerRow, ...] = ()
     ai_failed_rows: tuple[ScreenerRow, ...] = ()
+    # UX-02: 本次结果是否含 AI 三态分区能力 (filtered 含 ai_status 列即 AI 管线介入过)。
+    # False 表示结果无 AI 结论可分区 (非AI策略 enable_ai_analysis=False / AI 未执行 /
+    # HISTORY 无该列), View 渲染单表而非三分区, 避免把成功的数学筛选误标「分析失败」
+    # (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
+    show_ai_sections: bool = False
     # Sorting
     sort_column: str | None = None
     sort_ascending: bool = True
