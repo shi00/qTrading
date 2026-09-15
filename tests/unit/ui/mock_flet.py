@@ -4,23 +4,6 @@ import flet as ft
 from unittest.mock import MagicMock
 
 
-class MockClientStorage:
-    def __init__(self):
-        self._data = {}
-
-    def set(self, key, value):
-        self._data[key] = value
-
-    def get(self, key):
-        return self._data.get(key)
-
-    def contains_key(self, key):
-        return key in self._data
-
-    def remove(self, key):
-        self._data.pop(key, None)
-
-
 class MockSession:
     def __init__(self):
         self._data = {}
@@ -44,7 +27,6 @@ class MockFletPage:
         self.overlay = []
         self._open_dialogs = []  # R11: 独立 dialog 栈，与 overlay 解耦（overlay 可能混入 ToastManager 等非 dialog 元素）
         self.services = []
-        self._shared_preferences = MockClientStorage()
         self._session = MockSession()
         self._theme_mode = None
         self._theme = None
@@ -84,10 +66,6 @@ class MockFletPage:
         self.pubsub.send_others = MagicMock()
         self.pubsub.send_others_on_topic = MagicMock()
         self._tasks = []
-
-    @property
-    def shared_preferences(self):
-        return self._shared_preferences
 
     @property
     def session(self):
@@ -165,9 +143,6 @@ class MockFletPage:
         return mock_task
 
     def show_toast(self, message, type="info"):
-        pass
-
-    def go(self, route):
         pass
 
     def show_dialog(self, control):

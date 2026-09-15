@@ -681,7 +681,7 @@ def _build_schedule_step(
                         hint_text="HH:MM",
                         width=150,
                         text_align=ft.TextAlign.CENTER,
-                        border_color=AppColors.PRIMARY,
+                        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
                         label_style=ft.TextStyle(color=AppColors.PRIMARY),
                         on_change=lambda e: on_schedule_time_change(e.control.value),
                         # UX-09 (P2-04): 单行时间输入 Enter 提交 = 下一步主动作

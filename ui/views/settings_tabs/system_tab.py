@@ -530,7 +530,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             on_select=safe_on_select(_on_language_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
-            border_color=AppColors.INPUT_BORDER,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
             disabled=is_changing_language,  # P3-17: 切换期间禁用, 防重复提交
         ),
     )
@@ -565,7 +565,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             on_select=safe_on_select(_on_theme_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
-            border_color=AppColors.INPUT_BORDER,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
         ),
     )
 
@@ -586,7 +586,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_concurrency),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     log_opts = _build_log_level_options()
@@ -604,7 +604,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             on_select=safe_on_select(_on_log_level_change),
             bgcolor=AppColors.INPUT_BG,
             color=AppColors.INPUT_TEXT,
-            border_color=AppColors.INPUT_BORDER,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
         ),
     )
 
@@ -623,7 +623,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     db_overflow_input = ft.TextField(
@@ -641,7 +641,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     db_timeout_input = ft.TextField(
@@ -659,7 +659,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     io_workers_input = ft.TextField(
@@ -677,7 +677,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     cpu_workers_input = ft.TextField(
@@ -695,7 +695,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     no_proxy_input = ft.TextField(
@@ -710,7 +710,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_no_proxy),  # UX-09: Enter = 保存主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     diagnostics_button = ft.Button(

@@ -5,8 +5,8 @@
   （Flet 删除/重命名属性时立即失败，提醒同步 mock）
 - 排除集校验：项目扩展（show_toast 由 main.py 动态挂载）不在
   ft.Page 原生接口上，需显式排除并验证排除集仍然准确
-- V1 关键成员存在性：shared_preferences/services/show_dialog/pop_dialog/on_resize/run_task
-  在 V1 Page 上必备（R2/R3/R4/R10/R11 配方应用后），逐项断言避免 mock 漂移
+- V1 关键成员存在性：services/show_dialog/pop_dialog/on_resize/run_task
+  在 V1 Page 上必备（R2/R3/R4/R11 配方应用后），逐项断言避免 mock 漂移
 - §4.1 spike 实测结论全覆盖：入口/按钮/FilePicker/Page 字段/NavRail/flet_charts/
   事件模型/主题枚举/控件字段 8 大类 36+ 项断言守护升级配方
 """
@@ -21,21 +21,19 @@ from tests.unit.ui.mock_flet import MockFletPage
 
 pytestmark = pytest.mark.unit
 
-# 项目扩展方法/属性：由 main.py 动态挂载到 Page 实例，不在 flet 0.85.3 原生 Page 类上
+# 项目扩展方法/属性：由 main.py 动态挂载到 Page 实例，不在 flet 原生 Page 类上
 # - show_toast: main.py 动态挂载（page.show_toast = show_toast）
 # R11 已删除 mock 的 dialog/open/close，不再纳入排除集；R10 已将 client_storage 替换为
-# shared_preferences，client_storage 同样不再纳入排除集。
+# shared_preferences，而 shared_preferences 也随 Flet 1.0.0 从 Page 移除（见 mock_flet.py），
+# 二者均不再纳入排除集。
 _PROJECT_EXTENSIONS = frozenset({"show_toast"})
 
-# V1 Page 必备成员（R2/R3/R4/R10/R11 配方应用后 mock 与真实 Page 均应存在）
-# - shared_preferences: R10 替代 V0 client_storage
+# V1 Page 必备成员（R2/R3/R4/R11 配方应用后 mock 与真实 Page 均应存在）
 # - services: R4 FilePicker 服务化挂载点
 # - show_dialog/pop_dialog: R3 替代 V0 open/close/dialog
 # - on_resize: R2 替代 V0 on_resized
 # - run_task: §13.A 删除 _scheduled_tasks 后唯一协程调度入口
-_V1_REQUIRED_MEMBERS = frozenset(
-    {"shared_preferences", "services", "show_dialog", "pop_dialog", "on_resize", "run_task"}
-)
+_V1_REQUIRED_MEMBERS = frozenset({"services", "show_dialog", "pop_dialog", "on_resize", "run_task"})
 
 
 def _mock_flet_page_public_members() -> set[str]:
@@ -113,10 +111,18 @@ def test_v1_removed_members_not_on_mock():
 
     - dialog/open/close: V1 已移除，R11 已从 mock 删除
     - client_storage: V1 已移除，R10 已替换为 shared_preferences
+    - go/shared_preferences: Flet 1.0.0 从 Page 移除，mock 已同步删除
     """
     mock_members = _mock_flet_page_public_members()
-    leaked = mock_members & {"dialog", "open", "close", "client_storage"}
-    assert not leaked, f"MockFletPage 仍残留 V1 已移除的成员（R10/R11 未完全应用）: {sorted(leaked)}"
+    leaked = mock_members & {
+        "dialog",
+        "open",
+        "close",
+        "client_storage",
+        "go",
+        "shared_preferences",
+    }
+    assert not leaked, f"MockFletPage 仍残留 V1/Flet 1.0.0 已移除的成员（R10/R11 未完全应用）: {sorted(leaked)}"
 
 
 def test_text_field_focused_border_color_field_exists():
@@ -346,14 +352,15 @@ def test_v1_text_button_content_kw_accepted_text_kw_rejected():
         ft.TextButton(text="x")  # type: ignore[call-arg]
 
 
-def test_v1_button_and_elevated_button_exist():
-    """R6 契约：ft.Button 与 ft.ElevatedButton 必须可导入（A8/A9 spike ✅）。
+def test_v1_button_exists_and_elevated_button_removed():
+    """R6 契约：ft.Button 必须可导入，ft.ElevatedButton 已随 Flet 1.0.0 移除（A8 spike）。
 
     - A8: ``ft.Button`` 真实存在（``flet.controls.material.button.Button``），R6 迁移目标控件
-    - A9: ``ft.ElevatedButton`` 实测无 DeprecationWarning 仍可导入，R6 优先级降为"建议"
+    - Flet 1.0.0 顶层不再导出 ``ElevatedButton``（0.80~0.86 期间弃用后移除），
+      项目已全面改用 ``ft.Button``，故断言其移除以固化契约。
     """
     assert hasattr(ft, "Button"), "ft.Button 缺失——请检查 R6 配方（A8 spike）"
-    assert hasattr(ft, "ElevatedButton"), "ft.ElevatedButton 缺失——请检查 R6 配方（A9 spike）"
+    assert not hasattr(ft, "ElevatedButton"), "ft.ElevatedButton 在新版仍存在，需更新契约"
 
 
 def test_v1_file_picker_methods_are_coroutines():

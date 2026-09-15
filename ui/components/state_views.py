@@ -107,6 +107,7 @@ def ErrorState(
     on_cta: Callable[[], None] | None = None,
     cta_text: str | None = None,
     cta_icon: str | None = None,
+    cta_url: str | None = None,
 ) -> ft.Container:
     """错误态占位组件 (P1-3).
 
@@ -119,9 +120,13 @@ def ErrorState(
         on_retry: 重试回调 (可选); None 时不渲染重试按钮。
         retry_text: 重试按钮文案 (已翻译字符串); ``on_retry`` 非空时必填。
         on_cta: 次操作回调 (可选, 如反馈问题/导航到设置页); None 时不渲染 CTA 按钮。
-        cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta`` 非空时必填。
+            ``on_cta`` 与 ``cta_url`` 互斥: 传入 ``cta_url`` 时优先用声明式客户端动作,
+            忽略 ``on_cta``。
+        cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta``/``cta_url`` 非空时必填。
         cta_icon: 次 CTA 按钮图标 (可选, UX-03 P2-09); None 时不显示图标,
             传入时渲染该图标 — 由消费方按动作语义提供, 避免固定图标误导。
+        cta_url: CTA 打开的外部链接 (可选, Flet 1.0.0 客户端动作 ``OpenUrl``);
+            在组件渲染上下文内构造, 替代传回调的 on_click (无需 page/run_task)。
     """
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -137,6 +142,10 @@ def ErrorState(
 
     def _on_toggle_detail(_e: ft.ControlEvent) -> None:
         set_is_expanded(not is_expanded)
+
+    # Flet 1.0.0: 声明式客户端动作 (OpenUrl) 替代回调 + page.run_task 变通;
+    # 必须在组件渲染上下文内构造 (OpenUrl.__post_init__ 经 shared_service 读 context.page)。
+    cta_action = ft.OpenUrl(cta_url) if cta_url else None
 
     column_controls: list[ft.Control] = []
     if icon:
@@ -171,12 +180,13 @@ def ErrorState(
                 style=ft.ButtonStyle(color=AppColors.PRIMARY),
             ),
         )
-    if on_cta is not None and cta_text:
+    if (on_cta is not None or cta_action is not None) and cta_text:
         column_controls.append(
             ft.TextButton(
                 content=cta_text,
                 icon=cta_icon,  # UX-03 (P2-09): None → 无图标; 传入 → 按动作语义渲染
-                on_click=safe_on_click(_on_cta_click),
+                on_click=None if cta_action is not None else safe_on_click(_on_cta_click),
+                action=cta_action,
                 style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
             ),
         )

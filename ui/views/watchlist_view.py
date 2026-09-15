@@ -241,20 +241,6 @@ def WatchlistView(
         if page is not None:
             page.run_task(vm.load_watchlist)
 
-    def _on_cta() -> None:
-        """ErrorState on_cta: 打开 GitHub Issues.
-
-        page.launch_url 为 async (被 @deprecated 装饰器破坏 iscoroutinefunction 检测,
-        须用 async wrapper 包裹后通过 page.run_task 调度, R16).
-        """
-        page = _get_page()
-        if page is not None:
-
-            async def _open_issues() -> None:
-                await page.launch_url(GITHUB_ISSUES_URL)
-
-            page.run_task(_open_issues)
-
     # --- 渲染 ---
     # Task 11.2: 完全失败 (rows 空 + load_error 非空) → ErrorState 替换 body;
     # 部分失败 (rows 非空 + load_error 非空) → 保留 error_banner (不丢失已加载列表)
@@ -270,7 +256,7 @@ def WatchlistView(
             detail=state.load_error_detail,
             on_retry=_on_retry,
             retry_text=I18n.get("common_retry"),
-            on_cta=_on_cta,
+            cta_url=GITHUB_ISSUES_URL,  # Flet 1.0.0 客户端动作 OpenUrl (见 state_views.ErrorState)
             cta_text=I18n.get("error_state_contact_support"),
             cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )

@@ -263,25 +263,6 @@ def BacktestView(active: bool = True) -> ft.Container:
         except RuntimeError:
             logger.warning("[BacktestView] page not available for retry")
 
-    def _on_cta_report() -> None:
-        """Task 11.3: ErrorState on_cta — 打开 GitHub Issues.
-
-        page.launch_url 为 async (被 @deprecated 装饰器破坏 iscoroutinefunction 检测,
-        须用 async wrapper 包裹后通过 page.run_task 调度, R16).
-        """
-        try:
-            page = ft.context.page
-        except RuntimeError:
-            logger.warning("[BacktestView] page not available for launch_url")
-            return
-
-        if page is not None:
-
-            async def _open_issues() -> None:
-                await page.launch_url(GITHUB_ISSUES_URL)
-
-            page.run_task(_open_issues)
-
     def _on_cancel_backtest(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
         vm.cancel_backtest()
@@ -321,7 +302,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             on_select=safe_on_select(_on_strategy_change),
             width=AppStyles.CONTROL_WIDTH_LG,
             bgcolor=AppColors.INPUT_BG,
-            border_color=AppColors.INPUT_BORDER,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
             color=AppColors.INPUT_TEXT,
         ),
     )
@@ -351,7 +332,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             detail=state.error_detail,
             on_retry=_on_retry_backtest,
             retry_text=I18n.get("common_retry"),
-            on_cta=_on_cta_report,
+            cta_url=GITHUB_ISSUES_URL,  # Flet 1.0.0 客户端动作 OpenUrl (见 state_views.ErrorState)
             cta_text=I18n.get("error_state_contact_support"),
             cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )
