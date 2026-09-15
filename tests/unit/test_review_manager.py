@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -2559,6 +2560,33 @@ class TestReviewManagerT1Backfill:
         assert count == 1
         updates = rm._batch_update_results.call_args.args[0]
         assert updates[0]["pct"] == round((10.5 / 10.0 - 1.0) * 100.0, 4)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_index_cache_parses_mixed_dates(self, mock_cm, mock_tc):
+        """bulk 预取：trade_date 为 date/str 混合格式均解析为 YYYYMMDD，None pct 存 None。"""
+        rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
+        mock_cache.get_index_daily_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "trade_date": [datetime.date(2024, 6, 10), "20240611", "2024-06-12"],
+                    "pct_chg": [1.0, None, 3.0],
+                }
+            )
+        )
+        cache = await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
+        assert cache == {"20240610": 1.0, "20240611": None, "20240612": 3.0}
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_index_cache_reraises_cancelled(self, mock_cm, mock_tc):
+        """R2：bulk 预取被取消必须重新抛出（CancelledError 不被吞没）。"""
+        rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
+        mock_cache.get_index_daily_range = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 测试意图即验证取消被重抛而非吞没，raises 本身即为断言
+            await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
 
 
 class TestQfqReturnPct:
