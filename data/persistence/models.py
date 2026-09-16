@@ -334,11 +334,66 @@ class MarketNews(Base):
     tags = Column(String)
     publish_time = Column(DateTime(timezone=False), nullable=False)
     source = Column(String)
+    # 新闻风险解读（Phase A）新增可空字段
+    ts_code = Column(String)
+    title = Column(String)
+    url = Column(String)
+    source_kind = Column(String(32))
+    category_l1 = Column(String(32))
+    category_l2 = Column(String(64))
+    sentiment = Column(String(16))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
         UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
+        Index("idx_market_news_ts_code", "ts_code"),
+        # 首页来源过滤：source_kind = 'telegraph' OR IS NULL
+        Index("idx_market_news_source_kind_pub_time", "source_kind", "publish_time"),
+    )
+
+
+class NewsRiskBrief(Base):
+    """新闻风险解读快照（新闻风险解读第一期 Phase C，见设计方案 §7.2）。
+
+    保存一次「股票 + 30 天证据集合」的结构化分析结果。复合主键
+    ``(ts_code, input_hash)`` 无自增 id；``input_hash`` 已包含 Prompt/schema 版本
+    与 provider/model 配置指纹，可唯一标识同一次分析输入。
+
+    写入语义（§7.2）：可空结果列（risk_level / confidence / summary / events /
+    evidence_news_ids / coverage / model_id 等）声明 ``null_protected``，避免新写入
+    的 ``NULL`` 覆盖既有非空结果（失败不得覆盖成功快照）。``analysis_status`` 不声明
+    该标记，始终由 EXCLUDED 值更新以表达最新一次状态。
+    """
+
+    __tablename__ = "news_risk_brief"
+
+    ts_code = Column(String, primary_key=True)
+    input_hash = Column(String(64), primary_key=True)
+    window_start = Column(DateTime(timezone=False), nullable=False)
+    window_end = Column(DateTime(timezone=False), nullable=False)
+    analysis_status = Column(String(24), nullable=False)
+    risk_level = Column(String(16), info={"null_protected": True})
+    confidence = Column(Integer, info={"null_protected": True})
+    summary = Column(String, info={"null_protected": True})
+    events = Column(JSONB, info={"null_protected": True})
+    evidence_news_ids = Column(JSONB, info={"null_protected": True})
+    coverage = Column(JSONB, info={"null_protected": True})
+    model_id = Column(String, info={"null_protected": True})
+    analysis_profile = Column(String(64), nullable=False)
+    prompt_version = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
+
+    __table_args__ = (
+        # §11：子集例外需按 (ts_code, window_start, window_end, created_at) 查最近成功快照
+        Index(
+            "idx_news_risk_brief_ts_code_window_created",
+            "ts_code",
+            "window_start",
+            "window_end",
+            "created_at",
+        ),
     )
 
 

@@ -520,6 +520,98 @@ class TestMissingColsExcludedFromUpdate:
             assert "col_b" not in set_dict, "Missing col_b should be excluded from update_dict"
             assert "col_a" in set_dict
 
+    # A3: _save_upsert 自定义冲突键（conflict_columns）。
+    # 提供时冲突键列与主键同权，DO UPDATE 的 set_ 中排除，防 EXCLUDED 改写冲突键。
+    @pytest.mark.asyncio
+    async def test_conflict_columns_use_custom_key_and_exclude_from_set(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_hash = MagicMock()
+        mock_col_hash.name = "col_hash"
+        mock_col_hash.info = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "col_a"
+        mock_col_a.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_hash, mock_col_a]
+        mock_table.c = {"id": mock_col_pk, "col_hash": mock_col_hash, "col_a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_hash": "h", "col_a": "v"}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1], "col_hash": ["h"], "col_a": ["v"]}),
+                "test_table",
+                ["id", "col_hash", "col_a"],
+                ["id"],
+                conn=mock_conn,
+                conflict_columns=["col_hash"],
+            )
+            call_args = mock_stmt.on_conflict_do_update.call_args
+            assert call_args[1]["index_elements"] == ["col_hash"]
+            set_dict = call_args[1]["set_"]
+            assert "col_a" in set_dict
+            assert "col_hash" not in set_dict, "conflict key column must not be in set_"
+            assert "id" not in set_dict, "pk column must not be in set_"
+
+    @pytest.mark.asyncio
+    async def test_default_none_keeps_pk_behavior(self):
+        """A3: conflict_columns=None（默认）时行为不变——冲突键为 pk_columns，非主键列照常进入 set_。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_pk = MagicMock()
+        mock_col_pk.name = "id"
+        mock_col_pk.info = {}
+        mock_col_a = MagicMock()
+        mock_col_a.name = "col_a"
+        mock_col_a.info = {}
+        mock_table.columns = [mock_col_pk, mock_col_a]
+        mock_table.c = {"id": mock_col_pk, "col_a": mock_col_a}
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = None
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1, "col_a": "v"}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            await dao._save_upsert(
+                pd.DataFrame({"id": [1], "col_a": ["v"]}),
+                "test_table",
+                ["id", "col_a"],
+                ["id"],
+                conn=mock_conn,
+            )
+            call_args = mock_stmt.on_conflict_do_update.call_args
+            assert call_args[1]["index_elements"] == ["id"]
+            set_dict = call_args[1]["set_"]
+            assert "col_a" in set_dict
+            assert "id" not in set_dict
+
     @pytest.mark.asyncio
     async def test_read_with_params(self):
         mock_conn = AsyncMock()

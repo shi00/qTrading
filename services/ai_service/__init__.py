@@ -59,6 +59,8 @@ from services.ai_service.news_classifier import (
     NEWS_TEXT_MAX_LEN as NEWS_TEXT_MAX_LEN,
     NewsClassifier,
 )
+from services.ai_service.news_risk import NewsRiskAnalyzer
+from services.news_insight_models import NewsInsightRequest, NewsInsightResult
 from services.ai_service.output import (
     _FREE_TEXT_MAX_LEN as _FREE_TEXT_MAX_LEN,
     VALID_RECOMMENDATIONS as VALID_RECOMMENDATIONS,
@@ -178,6 +180,7 @@ class AIService:
             self._budget = TokenBudgetService(self)
             self._stock_analysis = StockAnalysisService(self)
             self._news_classifier = NewsClassifier(self)
+            self._news_risk = NewsRiskAnalyzer(self)
 
     @staticmethod
     def _get_prompt_dump_dir() -> str:
@@ -542,6 +545,15 @@ class AIService:
         """委托 NewsClassifier.classify_news。"""
         self._ensure_subservices()
         return await self._news_classifier.classify_news(text)
+
+    # ------------------------------------------------------------------
+    # 薄委托：NewsRiskAnalyzer（新闻风险分析）
+    # ------------------------------------------------------------------
+
+    async def analyze_news_risk(self, request: NewsInsightRequest) -> NewsInsightResult:
+        """委托 NewsRiskAnalyzer.analyze_news_risk（新闻风险解读，见设计方案 §9/§10）。"""
+        self._ensure_subservices()
+        return await self._news_risk.analyze_news_risk(request)
 
     # ------------------------------------------------------------------
     # 本地模型 / 设置锁（保留在组合根）

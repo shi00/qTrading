@@ -58,6 +58,7 @@ from ui.viewmodels.screener_view_model import (
     StreamCard,
 )
 from ui.viewmodels.backtest_view_model import set_pending_prefill
+from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -1968,6 +1969,10 @@ def _build_stock_detail_dialog(
     on_close: typing.Callable[[], None],
     on_add_to_watchlist: typing.Callable[[str, str], None],
     column_label_fn: typing.Callable[[str], str] | None = None,
+    news_state: typing.Any = None,
+    news_on_generate: typing.Callable[[], None] | None = None,
+    news_on_retry: typing.Callable[[], None] | None = None,
+    news_on_cancel: typing.Callable[[], None] | None = None,
 ) -> ft.Control | None:
     """按需构建股票详情对话框."""
     if detail_dialog_data is None:
@@ -1980,6 +1985,10 @@ def _build_stock_detail_dialog(
         on_close=on_close,
         on_add_to_watchlist=on_add_to_watchlist,
         column_label_fn=column_label_fn,
+        news_state=news_state,
+        news_on_generate=news_on_generate,
+        news_on_retry=news_on_retry,
+        news_on_cancel=news_on_cancel,
     )
 
 
@@ -1992,6 +2001,7 @@ def ScreenerView(
     """选股视图 (声明式)."""
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
     _wl_state, wl_vm = use_viewmodel(factory=lambda: WatchlistViewModel())
+    nis_state, news_vm = use_viewmodel(factory=lambda: NewsInsightViewModel())
 
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
@@ -2130,6 +2140,12 @@ def ScreenerView(
 
     def _on_row_click(row_data: dict) -> None:
         set_detail_dialog_data(typing.cast(typing.Any, row_data.get("_raw", row_data)))
+        ts_code = typing.cast(
+            str | None,
+            row_data.get("_raw", row_data).get("ts_code") if isinstance(row_data.get("_raw", row_data), dict) else None,
+        )
+        if ts_code:
+            news_vm.select_stock(ts_code)
 
     async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
         await _execute_add_to_watchlist(wl_vm, _get_page(), ts_code, stock_name)
@@ -2244,6 +2260,10 @@ def ScreenerView(
         on_close=lambda: set_detail_dialog_data(None),
         on_add_to_watchlist=_on_add_to_watchlist,
         column_label_fn=lambda col: vm.get_column_alias("screening_history", col),
+        news_state=nis_state,
+        news_on_generate=news_vm.generate,
+        news_on_retry=news_vm.retry,
+        news_on_cancel=news_vm.cancel,
     )
 
     # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，

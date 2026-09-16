@@ -24,10 +24,12 @@ import flet_charts as fch
 
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
+from ui.components.news_insight_panel import NewsInsightPanel
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.news_insight_types import NewsInsightState
 from strategies.attribution import FilterCondition, RankAttribution, attribution_from_json
 from utils.sanitizers import DataSanitizer
 
@@ -505,6 +507,7 @@ def _build_content(
     width: int,
     height: int,
     column_label_fn: Callable[[str], str] | None = None,
+    news_panel: ft.Control | None = None,
 ) -> ft.Container:  # pragma: no cover
     """构建详情内容（K线图 + AI分析 + 价格 + 估值 + 财务 + 基础信息）。"""
     # Chart container（content 由 chart_content state 驱动）
@@ -757,20 +760,20 @@ def _build_content(
             ],
         )
 
+    sections: list[ft.Control] = [
+        chart_container,
+        ai_section,
+        _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
+        price_section,
+        valuation_section,
+        financial_section,
+        basic_section,
+        _build_review_section(stock_data),  # Task 4.3 (FR-UX-005)
+    ]
+    if news_panel is not None:
+        sections.append(news_panel)
     return ft.Container(
-        content=ft.Column(
-            [
-                chart_container,
-                ai_section,
-                _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
-                price_section,
-                valuation_section,
-                financial_section,
-                basic_section,
-                _build_review_section(stock_data),  # Task 4.3 (FR-UX-005)
-            ],
-            scroll=ft.ScrollMode.AUTO,
-        ),
+        content=ft.Column(sections, scroll=ft.ScrollMode.AUTO),
         width=width,
         height=height,
     )
@@ -915,7 +918,11 @@ def StockDetailDialog(
     on_close: Callable[[], None] | None = None,
     on_add_to_watchlist: Callable[[str, str], None] | None = None,
     column_label_fn: Callable[[str], str] | None = None,
-) -> ft.Container:
+    news_state: NewsInsightState | None = None,
+    news_on_generate: Callable[[], None] | None = None,
+    news_on_retry: Callable[[], None] | None = None,
+    news_on_cancel: Callable[[], None] | None = None,
+) -> ft.Container:  # pragma: no cover  # UI 组件闭包（hooks/use_dialog/事件处理器）不可无头单测
     """股票详情弹窗（声明式 V1）。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
@@ -933,6 +940,11 @@ def StockDetailDialog(
         on_add_to_watchlist: 加入关注回调 (ts_code, stock_name); 为 None 时不显示按钮
         column_label_fn: 列名 → 展示别名解析函数（消费方注入 ``vm.get_column_alias`` 的包装，
             符合 MVVM「View 不直接 import data」契约）；为 None 时归因卡片回退裸列名。
+        news_state: 新闻风险解读不可变状态快照；为 None 时不渲染新闻风险区
+            （非 None 时由本弹窗渲染 NewsInsightPanel）。
+        news_on_generate: 生成风险解读命令（§12 第 2 步按钮触发）
+        news_on_retry: 重试命令（degraded/error 重试按钮触发）
+        news_on_cancel: 关闭弹窗时同步取消在途任务（§12 第 6 步，不在 handler 中 await）
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -967,6 +979,8 @@ def StockDetailDialog(
     # --- 关闭处理（state 驱动，非 pop_dialog）---
     def _close(_e) -> None:
         set_open(False)
+        if news_on_cancel is not None:
+            news_on_cancel()
         if on_close is not None:
             on_close()
 
@@ -974,6 +988,16 @@ def StockDetailDialog(
     def _add_to_watchlist(_e) -> None:
         if on_add_to_watchlist is not None:
             on_add_to_watchlist(data.get("ts_code", ""), data.get("name", ""))
+
+    news_panel = (
+        NewsInsightPanel(
+            news_state=news_state,
+            news_on_generate=news_on_generate,
+            news_on_retry=news_on_retry,
+        )
+        if news_state is not None
+        else None
+    )
 
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     actions = [anchored(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, ft.TextButton(I18n.get("common_close"), on_click=_close))]
@@ -984,7 +1008,7 @@ def StockDetailDialog(
             modal=False,
             on_dismiss=_close,
             title=_build_title(data),
-            content=_build_content(data, chart_content, width, height, column_label_fn),
+            content=_build_content(data, chart_content, width, height, column_label_fn, news_panel),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )
