@@ -23,6 +23,9 @@
 #     MIGRATION_TARGET: 存量允许、不得扩散
 #     WORKFLOW: 在对应任务触发
 #     EXCEPTIONABLE: 只能通过例外注册表豁免 (docs/governance/exceptions.yml)
+#   checks: 守护该红线的 check_redlines.py 检查函数名（可选字段，list[str]）。
+#     DS-11 反向不变量：check_redlines.py main() 中实际执行的 check_* 必须在本栏（或
+#     enforcement 文本中按名提及）登记，否则 check_enforcement_reverse_coverage() 报错。
 #
 # 修改规则:
 #   - 新增 R20+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
@@ -35,6 +38,8 @@ redlines:
     title: 架构越界
     description: "core/ 导入任何其他层模块；data/ 导入 services/strategies/ui/；services/ 导入 strategies/ui/；strategies/ 导入 ui/"
     enforcement: "pre-commit（import-linter 6 条契约）"
+    checks:
+      - check_R_lazy_import_whitelist
     automation_coverage: partial
     human_review_required: true
     rule_type: EXCEPTIONABLE
@@ -59,6 +64,12 @@ redlines:
     title: SQL 注入
     description: "在 asyncpg 原生查询中使用 %s 占位符（必须用 $1, $2, ...）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、text(f...) f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 text() 常量承载）"
     enforcement: "pre-commit（check_redlines.py：%s 占位符、SQL 字面量赋值、f-string 拼 SQL、text(f...) f-string、测试内同类 5 维度拦截）"
+    checks:
+      - check_R4
+      - check_R4_literal_assignments
+      - check_R4_fstring_sql
+      - check_R4_text_fstring_sql
+      - check_R4_in_tests
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -99,6 +110,8 @@ redlines:
     title: 敏感信息泄露
     description: "日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 DataSanitizer 脱敏)"
     enforcement: "安全扫描 + pre-commit（check_redlines.py，静态脱敏检查） + 仅人工评审"
+    checks:
+      - check_R_tushare_token_log
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -123,6 +136,8 @@ redlines:
     title: 未注册数据表
     description: "新增表只改 models.py 而不更新 data/data_dictionary.py 的 TABLE_DEFINITIONS"
     enforcement: "pre-commit（check_redlines.py）"
+    checks:
+      - check_R12
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -131,6 +146,8 @@ redlines:
     title: 未注册 DAO
     description: "新增 DAO 需同时登记进 _DAO_REGISTRY 并在 CacheManager.__init__ 中实例化（engine 引用由 _DAO_REGISTRY + sync_engines() 驱动循环同步；已登记的 DAO 其 engine 同步不可漏改，登记本身仍需人工确保）"
     enforcement: "pre-commit（check_redlines.py，覆盖 __init__ 注册维度）+ CI-test（test_cache_manager_dao_registry.py 反查 _DAO_REGISTRY 覆盖）"
+    checks:
+      - check_R13
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -139,6 +156,8 @@ redlines:
     title: 未注册策略
     description: "新增策略不使用 @register_strategy(\"key\") 装饰器"
     enforcement: "pre-commit（check_redlines.py）"
+    checks:
+      - check_R14
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -147,6 +166,8 @@ redlines:
     title: 未注册单例
     description: "新增单例不使用 @register_singleton 装饰器、不实现 _reset_singleton"
     enforcement: "pre-commit（check_redlines.py）"
+    checks:
+      - check_R15
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -155,6 +176,9 @@ redlines:
     title: UI 阻塞主循环
     description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)；@ft.component 渲染函数顶层不得执行 logger/print 副作用（UIX-10，须迁入 use_effect 或事件回调）"
     enforcement: "pre-commit（check_redlines.py，部分守护：VM __init__ 构造已注册单例检测 + @ft.component 渲染副作用拦截；事件处理器内同步 IO 仍仅人工评审）"
+    checks:
+      - check_R16_vm_init_singleton_construction
+      - check_no_component_render_side_effects
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -211,6 +235,9 @@ redlines:
     title: 裸 UI token
     description: "UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 AppStyles 定义的 token（FONT_SIZE_* 等）"
     enforcement: "pre-commit（check_redlines.py：check_R_no_bare_ft_colors_in_ui + check_R_no_bare_font_size_in_ui）"
+    checks:
+      - check_R_no_bare_ft_colors_in_ui
+      - check_R_no_bare_font_size_in_ui
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
