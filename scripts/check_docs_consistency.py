@@ -1264,10 +1264,14 @@ def check_exceptions_yaml_consistency() -> list[str]:
 # exceptions.yml 登记则报错」，消除 P1-01 立项要治理的红线豁免漂移（前期只消除了 R1 那一半）。
 # 为避免误报（债表大量条目含「保持现状 / 合理降级」但多数仅描述现状或推迟优化，并未豁免红线），
 # 本检查做三重收敛：① 只针对 rule_type == EXCEPTIONABLE 的红线（当前 R1 / R5）；
-# ② 仅当行内出现「豁免意图词」才视为豁免声明；③ 仅校验有稳定行 ID（第一列 `P3-...`）的条目。
+# ② 仅当行内出现「豁免意图词」才视为豁免声明；③ 债目录带稳定行 ID（第一列 `P3-...`）；
+# DS-03 起，裸级别 `**P3**` 且含豁免意图的行也报错（防静默绕过例外注册入口）。
 # 「推迟优化 / 已落地现状」等非豁免词不触发，故不误报（如 P3-CON04 / P3-M9-EmbeddedPg-TimeoutExpired）。
 _DEBT_EXEMPTION_INTENT_WORDS = ("保持现状", "合理设计", "不适用 R", "严格按 R", "豁免")
 _DEBT_ROW_ID_PATTERN = re.compile(r"^\|\s*\*\*\s*(P3-[A-Za-z0-9-]+)\s*\*\*")
+# DS-03：债目录裸级别行的行首形如 `| **P3** |`（无稳定 ID）。该 pattern 用于识别
+# 「有稳定 ID 的债目录行（应含 `**P3-xxx**`）却被写成裸级别」的行，以便无 ID 即报错。
+_DEBT_BARE_LEVEL_ROW_PATTERN = re.compile(r"^\|\s*\*\*\s*P3(?![A-Za-z0-9-])\s*\*\*")
 _DEBT_REDLINE_REF_PATTERN = re.compile(r"\bR(\d+)\b")
 
 
@@ -1321,7 +1325,17 @@ def check_exceptions_reverse_coverage() -> list[str]:
     for line in KNOWN_TECHNICAL_DEBT_PATH.read_text(encoding="utf-8").splitlines():
         row_id_match = _DEBT_ROW_ID_PATTERN.match(line)
         if not row_id_match:
-            continue  # 非表格行或无可稳定映射的行 ID，跳过
+            # DS-03：债目录若写成裸级别（`| **P3** |` 无稳定 ID）且含豁免意图，
+            # 会被「未匹配即跳过」静默漏检——新增无 ID 债目并声明豁免 EXCEPTIONABLE
+            # 红线（R1/R5）即可绕过例外唯一注册入口，违反 P1-01 立项意图。
+            if _DEBT_BARE_LEVEL_ROW_PATTERN.match(line) and any(word in line for word in _DEBT_EXEMPTION_INTENT_WORDS):
+                errors.append(
+                    f"known-technical-debt.md 债目录表格行声明了豁免意图措辞"
+                    f"（{'/'.join(_DEBT_EXEMPTION_INTENT_WORDS)}），但行首仅用裸级别 **P3** 而无稳定 ID"
+                    f"（应含 **P3-xxx**）。豁免 EXCEPTIONABLE 红线的债目录必须带稳定 ID，以防绕过"
+                    f"例外唯一注册入口：{line.strip()[:120]}"
+                )
+            continue  # 非表格行、无豁免意图或无稳定 ID 的行，跳过
         row_id = row_id_match.group(1)
         if not any(word in line for word in _DEBT_EXEMPTION_INTENT_WORDS):
             continue  # 无豁免意图（描述现状/推迟优化），不视为红线豁免

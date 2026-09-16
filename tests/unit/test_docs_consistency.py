@@ -2594,6 +2594,51 @@ class TestExceptionsYamlConsistency:
         errors = check_exceptions_reverse_coverage()
         assert errors == [], f"INVARIANT 红线豁免不应触发反向检查, got: {errors}"
 
+    def test_reverse_coverage_flags_bare_level_row_with_exemption(self, tmp_path, monkeypatch):
+        """DS-03：债目录裸级别（`| **P3** |`，无稳定 ID）且含豁免意图时应报错，防静默绕过."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        debt = tmp_path / "known-technical-debt.md"
+        debt.write_text(
+            "| 级别 | 一句话 | upgrade 触发条件 |\n"
+            "|------|--------|------------------|\n"
+            "| **P3** | #M9 R5: 吞没 EngineDisposedError，保持现状 | 重构时 |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", debt)
+        errors = check_exceptions_reverse_coverage()
+        assert any("裸级别" in e and "无稳定 ID" in e for e in errors), f"应报裸级别无 ID, got: {errors}"
+
+    def test_reverse_coverage_ignores_bare_level_row_without_exemption(self, tmp_path, monkeypatch):
+        """DS-03：债目录裸级别但无豁免意图（仅描述现状/推迟优化）不应报错."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        debt = tmp_path / "known-technical-debt.md"
+        debt.write_text(
+            "| 级别 | 一句话 | upgrade 触发条件 |\n"
+            "|------|--------|------------------|\n"
+            "| **P3** | #M9 性能监控阈值标注 DB_SINGLE_QUERY 实际批量，待评估 | 重构时 |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", debt)
+        errors = check_exceptions_reverse_coverage()
+        assert errors == [], f"无豁免意图的裸级别行不应报错, got: {errors}"
+
+    def test_reverse_coverage_pass_on_current_repo(self):
+        """真实仓库：技术债表豁免反向覆盖检查通过（所有豁免债目录均带稳定 ID 且已登记）."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        errors = check_exceptions_reverse_coverage()
+        assert errors == [], "当前仓库反向覆盖检查应通过，实际报错:\n  " + "\n  ".join(errors)
+
     def test_detects_duplicate_id(self, tmp_path, monkeypatch):
         """例外 id 重复时应报错."""
         from check_docs_consistency import check_exceptions_yaml_consistency
