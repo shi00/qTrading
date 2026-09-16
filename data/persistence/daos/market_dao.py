@@ -9,6 +9,7 @@ from data.persistence.models import (
     DailyIndicators,
     IndexWeight,
     MoneyflowHsgt,
+    NewsRiskBrief,
     get_model_columns,
     get_model_pk_columns,
 )
@@ -34,6 +35,28 @@ _MARKET_NEWS_BATCH_COLUMNS = [
     "category_l2",
     "sentiment",
 ]
+
+
+def _row_to_dict(row: dict) -> dict:
+    """清洗单行 dict：JSONB(id)/None 原样，float NaN→None，numpy 标量转原生类型。
+
+    供 brief 读取方法（get_news_risk_brief / get_latest_success_brief）整合返回，避免
+    把 ``events`` / ``evidence_news_ids`` / ``coverage`` JSONB 或数值列暴露 numpy/pandas 类型。
+    """
+    out: dict = {}
+    for k, v in row.items():
+        if isinstance(v, (dict, list)) or v is None:
+            out[k] = v
+        elif isinstance(v, float) and pd.isna(v):
+            out[k] = None
+        elif hasattr(v, "item"):
+            try:
+                out[k] = v.item()  # type: ignore[attr-defined]  # [reason: 运行时 hasattr 守卫已确认 v 为 numpy 标量（numpy2 不再子类 float），pyright 无法静态识别 numpy 基元 .item()]
+            except (ValueError, TypeError):
+                out[k] = v
+        else:
+            out[k] = v
+    return out
 
 
 class MarketDao(BaseDao):
@@ -233,6 +256,89 @@ class MarketDao(BaseDao):
         sql += f" ORDER BY publish_time DESC LIMIT ${idx}"
         params.append(limit)
         return await self._read_db(sql, params)
+
+    async def get_market_news_documents(
+        self,
+        ts_code: str,
+        start_time: typing.Any = None,
+        end_time: typing.Any = None,
+    ):
+        """按 ts_code 读取个股证据文档（source_kind in announcement/news），返回 evidence 候选。
+
+        编排：服务层将 NewsFetcher 实时抓取的公告/新闻先经 ``save_market_news_batch`` 落库取
+        id，再统一经本查询按 ts_code 读取落库后的公告/新闻作为证据基集（同时覆盖历史已入库行）。
+        ``telegraph`` 快讯不在此列（其 ts_code 恒为 NULL，打字由服务层 ``match_news_to_stock`` 判定）。
+        """
+        if not ts_code:
+            return pd.DataFrame()
+        sql = "SELECT id, content, content_hash, title, url, source_kind, source, sentiment, publish_time FROM market_news"
+        sql += " WHERE ts_code = $1"
+        params: list = [ts_code]
+        idx = 2
+        if start_time is not None:
+            sql += f" AND publish_time >= ${idx}"
+            params.append(start_time)
+            idx += 1
+        if end_time is not None:
+            sql += f" AND publish_time <= ${idx}"
+            params.append(end_time)
+            idx += 1
+        sql += " ORDER BY publish_time DESC"
+        return await self._read_db(sql, params)
+
+    async def save_news_risk_brief(self, brief: dict) -> None:
+        """持久化 NewsRiskBrief 快照（R8：走 _save_upsert 主键冲突路径）。
+
+        - 复合主键 ``(ts_code, input_hash)`` 走主键冲突；结果列已在模型声明
+          ``null_protected``，避免新写入 NULL 覆盖既有成功结果（§7.2 失败不覆盖成功）。
+        - ``updated_at`` 由 _save_upsert 在冲突命中时自动刷新。
+        """
+        if not brief:
+            return
+        df = pd.DataFrame([brief])
+        await self._save_upsert(
+            df,
+            "news_risk_brief",
+            columns=get_model_columns(NewsRiskBrief),
+            pk_columns=["ts_code", "input_hash"],
+        )
+
+    async def get_news_risk_brief(
+        self,
+        ts_code: str,
+        input_hash: str,
+    ) -> dict | None:
+        """按 (ts_code, input_hash) 读取某次输入的快照（缓存命中）。无则 None。"""
+        sql = "SELECT * FROM news_risk_brief WHERE ts_code = $1 AND input_hash = $2 LIMIT 1"
+        df = await self._read_db(sql, [ts_code, input_hash])
+        if df is None or df.empty:
+            return None
+        row = df.iloc[0].to_dict()
+        return _row_to_dict(row)
+
+    async def get_latest_success_brief(
+        self,
+        ts_code: str,
+        window_start: typing.Any,
+        window_end: typing.Any,
+    ) -> dict | None:
+        """§11 子集例外：查 (ts_code, window) 下最近一次成功快照（created_at 最新）。
+
+        成功状态 = ``analyzed_with_events`` / ``analyzed_no_event``。用于判断本次证据集是否
+        为既有成功快照证据集的真子集，以复用更完整结果、避免部分来源失败造成重复付费分析。
+        """
+        sql = (
+            "SELECT * FROM news_risk_brief "
+            "WHERE ts_code = $1 AND window_start = $2 AND window_end = $3 "
+            "AND analysis_status IN ($4, $5) ORDER BY created_at DESC LIMIT 1"
+        )
+        df = await self._read_db(
+            sql,
+            [ts_code, window_start, window_end, "analyzed_with_events", "analyzed_no_event"],
+        )
+        if df is None or df.empty:
+            return None
+        return _row_to_dict(df.iloc[0].to_dict())
 
     # --- Daily Indicators ---
     async def save_daily_indicators(self, df: pd.DataFrame, suppress_errors: bool = False):
