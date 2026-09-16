@@ -681,7 +681,7 @@ def _build_schedule_step(
                         hint_text="HH:MM",
                         width=150,
                         text_align=ft.TextAlign.CENTER,
-                        border_color=AppColors.PRIMARY,
+                        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
                         label_style=ft.TextStyle(color=AppColors.PRIMARY),
                         on_change=lambda e: on_schedule_time_change(e.control.value),
                         # UX-09 (P2-04): 单行时间输入 Enter 提交 = 下一步主动作
@@ -1142,6 +1142,9 @@ def OnboardingWizard(
                         step_indicators,
                         ft.Divider(height=10, color=AppColors.TRANSPARENT),
                         ft.Container(
+                            # key 随 step 变化强制重建子树, 规避 flet 1.0.0 客户端
+                            # 对 remove+replace 二次渲染差异的重合渲染回归
+                            key=f"wizard_step_{state.current_step}",
                             content=ft.Column(
                                 [step_content],
                                 scroll=ft.ScrollMode.AUTO,

@@ -308,7 +308,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         disabled=not settings_state.auto_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     schedule_status = ft.Text(
         _get_schedule_status_text(settings_state.auto_enabled),
@@ -330,7 +330,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     ai_concept_status = ft.Text(
         _get_schedule_status_text(settings_state.ai_enabled),
@@ -346,7 +346,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     # Task 7.3: 夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30, 提升为可配项)
     nightly_prediction_time_dropdown = ft.Dropdown(
@@ -357,7 +357,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         on_select=safe_on_select(_on_nightly_prediction_time_change),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     # --- SettingRows ---
@@ -604,7 +604,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         disabled=not settings_state.news_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     # --- SettingRows ---

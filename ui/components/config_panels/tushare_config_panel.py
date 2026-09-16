@@ -168,7 +168,7 @@ def TushareConfigPanel(
             on_change=lambda e: vm.update_token(e.control.value),
             # UX-09 (P2-04): Enter 提交 = 验证 Token 主动作 (wizard 经 enable_enter_submit=False 关闭)
             on_submit=safe_on_change(_on_verify_click_factory(vm)) if enable_enter_submit else None,
-            border_color=AppColors.PRIMARY,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
             label_style=ft.TextStyle(color=AppColors.PRIMARY),
             width=AppStyles.CONTROL_WIDTH_LG if compact else None,
             hint_text=I18n.get("tushare_token_hint") if compact else None,

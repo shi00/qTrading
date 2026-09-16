@@ -153,6 +153,27 @@ class TestErrorStateRender:
         assert len(col.controls) == 5
         assert isinstance(col.controls[4], ft.TextButton)
 
+    def test_cta_url_renders_openurl_client_action(self, mock_i18n_state, mock_app_colors_state):
+        """Flet 1.0.0: cta_url 以声明式客户端动作 OpenUrl 渲染 (替代 on_cta 回调).
+
+        OpenUrl.__post_init__ 经 shared_service 读 context.page, 故须先 attach_fake_page.
+        """
+        from tests.unit.ui.component_renderer import attach_fake_page, make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            cta_url="https://example.com/issues",
+            cta_text="Report",
+        )
+        attach_fake_page(c)
+        container = render_once(c)
+        col = container.content
+        # icon + title-less? → 仅 cta 按钮为唯一控件 (icon 默认 None 不渲染)
+        btn = col.controls[-1]
+        assert isinstance(btn, ft.TextButton)
+        assert isinstance(btn.action, ft.OpenUrl)
+        assert btn.action.url == "https://example.com/issues"
+
 
 class TestCallbacks:
     """on_cta / on_retry 回调测试。"""

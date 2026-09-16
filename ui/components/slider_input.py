@@ -136,8 +136,10 @@ def SliderInput(
         value=draft,
         keyboard_type=ft.KeyboardType.NUMBER,
         dense=True,
-        border_color=AppColors.DIVIDER,
-        focused_border_color=AppColors.PRIMARY,
+        border={
+            ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+            ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+        },
         text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=ft.Padding.symmetric(horizontal=8, vertical=6),
         width=70,

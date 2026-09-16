@@ -294,7 +294,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     strategy_min_turnover_input = ft.TextField(
         label=I18n.get("settings_min_turnover"),
@@ -307,7 +307,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     ai_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_concurrency"),
@@ -320,7 +320,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     ai_news_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_news_concurrency"),
@@ -333,7 +333,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     # AI-03 完整版 T7: 月度 AI 成本上限输入 (空串=不限制) + 本月累计展示
     ai_cost_limit_input = ft.TextField(
@@ -347,7 +347,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     _month_cost_value = ai_settings_state.month_cost_cny
     if _month_cost_value is None:
@@ -374,7 +374,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         # 经 IME 场景验证可行时恢复.
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
     ai_news_prompt_input = ft.TextField(
         label=I18n.get("settings_news_prompt"),
@@ -390,7 +390,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         # upgrade: Flet 提供带修饰键的提交事件 (如 on_submit 携带 modifierFlags) 时恢复.
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
-        border_color=AppColors.INPUT_BORDER,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
 
     btn_reset_prompt = ft.TextButton(

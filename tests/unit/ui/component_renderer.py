@@ -65,9 +65,12 @@ class FakeSession:
         pass
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class FakePage:
     """伪造的 page 对象，仅暴露 session 与 enable_components_mode 所需接口。
+
+    含 ``unsafe_hash=True``：Flet 1.0.0 的客户端动作（``shared_service`` 内部）以
+    ``WeakKeyDictionary`` 以 page 为键缓存服务实例，page 必须是可哈希的。
 
     含 ``_services`` 属性（``FakeServiceRegistry``），使 ``ft.FilePicker``
     等服务控件在 ``init()`` 时调用 ``context.page._services.register_service``
@@ -81,7 +84,7 @@ class FakePage:
     `page.web` 判断（Web 模式走 src_bytes 分支，桌面端走原逻辑）。
     """
 
-    session: FakeSession = field(default_factory=FakeSession)
+    session: FakeSession = field(default_factory=FakeSession, compare=False, hash=False)
     web: bool = False
 
     def __post_init__(self) -> None:
