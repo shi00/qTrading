@@ -4018,6 +4018,49 @@ class TestGovernanceIdGlossary:
         errors = check_governance_id_glossary()
         assert errors == [], f"全部已登记应通过, got: {errors}"
 
+    def test_detects_unregistered_uix_id(self, tmp_path, monkeypatch):
+        """受检文档中出现未登记的 UIX- 系列 ID → 报错（DS-12：UIX 前缀须可被识别）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        # 对照表只登记了 UIX-03，未登记 UIX-99
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| UIX-03 | 订阅建立时机 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 UIX-99（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors = check_governance_id_glossary()
+        assert any("UIX-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"应检出未登记 UIX ID, got: {errors}"
+        )
+
+    def test_registered_uix_id_passes(self, tmp_path, monkeypatch):
+        """受检文档中出现的 UIX- 系列 ID 已登记 → 通过（不被误判，也不被 UX- 前缀误吞）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| UIX-03 | 订阅建立时机 |\n| UX-07 | UI/UX 审视轮次 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 UIX-03 与 UX-07\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors = check_governance_id_glossary()
+        assert errors == [], f"已登记 UIX/UX 应通过, got: {errors}"
+
 
 class TestAdrIndexCompleteness:
     """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""

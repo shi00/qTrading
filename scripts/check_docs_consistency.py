@@ -2154,7 +2154,7 @@ def check_core_modules_completeness() -> list[str]:
 # 建立 docs/governance/governance-ids.md 对照表，本检查守护「自动加载文档中出现的 ID 必须已
 # 登记」，防止新增 ID 不登记（GDR-11 批评的「无门禁事实性漂移」）。
 _GOVERNANCE_ID_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])((?:P\d+-\d+)|(?:DOC-\d+)|(?:GDR-\d+)|(?:GOV-\d+)|(?:UX-\d+)|(?:review\d+-[A-Za-z0-9]+))(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])((?:P\d+-\d+)|(?:DOC-\d+)|(?:GDR-\d+)|(?:GOV-\d+)|(?:UIX-\d+)|(?:UX-\d+)|(?:review\d+-[A-Za-z0-9]+))(?![A-Za-z0-9])"
 )
 GOVERNANCE_IDS_PATH = ROOT / "docs" / "governance" / "governance-ids.md"
 
