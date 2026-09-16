@@ -382,8 +382,8 @@ class NewsRiskBrief(Base):
     model_id = Column(String, info={"null_protected": True})
     analysis_profile = Column(String(64), nullable=False)
     prompt_version = Column(String(32), nullable=False)
-    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
-    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
 
     __table_args__ = (
         # §11：子集例外需按 (ts_code, window_start, window_end, created_at) 查最近成功快照
