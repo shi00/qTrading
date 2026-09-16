@@ -54,6 +54,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import tomllib
@@ -1159,6 +1160,96 @@ def check_enforcement_mapping() -> list[str]:
     # 不变量校验
     errors.extend(_check_enforcement_invariants(redlines, env))
 
+    return errors
+
+
+# check_ 函数名正则（识别 enforcement 文本中提及的 check_redlines.py 检查函数名）
+CHECK_CALL_NAME_PATTERN = re.compile(r"\b(check_[a-zA-Z0-9_]+)\b")
+
+
+def _extract_redline_check_calls(source: str) -> set[str]:
+    """AST 提取 check_redlines.py 的 main() 中所有 check_*() 调用名。
+
+    纯函数，便于单元测试。找到名为 main 的函数后，在其中遍历所有 Call 节点，
+    收集 func 为 Name 且以 'check_' 开头的调用名。
+    """
+    tree = ast.parse(source)
+    main_func: ast.FunctionDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            main_func = node
+            break
+    if main_func is None:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(main_func):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id.startswith("check_"):
+            names.add(func.id)
+    return names
+
+
+def check_enforcement_reverse_coverage() -> list[str]:
+    """检查项: check_redlines.py 实际执行的 check_* 是否全部在 redlines.yml 登记 (DS-11 反向不变量)。
+
+    用 AST 解析 scripts/check_redlines.py 的 main()，提取所有 check_*() 调用名，
+    断言每个都能在 redlines.yml 某条红线的 `checks:` 字段（或 enforcement 文本提及）中找到登记。
+    这把 ADR-0005 的单向 enforcement 映射（文档声称的机制是否真实存在）补成双向：
+    给 check_redlines.py 新增检查而不登记，即触发一致性失败。
+
+    登记来源（取并集，两者任一命中即视为已登记）：
+    - 红线条目新增的 `checks:` 可选字段（list[str]）
+    - 红线条目 `enforcement` 文本中的 check_* 函数名（R4/R16/R23 已内联提及）
+
+    基于模块级路径常量 REDLINES_YAML_PATH / CHECK_REDLINES_SCRIPT_PATH 读取，便于测试 monkeypatch。
+    解析失败时返回精确错误列表（不抛异常）。
+    """
+    errors: list[str] = []
+
+    if not CHECK_REDLINES_SCRIPT_PATH.exists():
+        errors.append(f"check_redlines.py 不存在: {CHECK_REDLINES_SCRIPT_PATH}")
+        return errors
+    try:
+        source = CHECK_REDLINES_SCRIPT_PATH.read_text(encoding="utf-8")
+        call_names = _extract_redline_check_calls(source)
+    except (OSError, SyntaxError, UnicodeDecodeError) as e:
+        errors.append(f"解析 check_redlines.py 失败: {e}")
+        return errors
+
+    registered: set[str] = set()
+    if not REDLINES_YAML_PATH.exists():
+        errors.append(f"redlines.yml 不存在: {REDLINES_YAML_PATH}")
+        return errors
+    try:
+        import yaml  # noqa: F811
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError) as e:
+        errors.append(f"redlines.yml 解析失败: {e}")
+        return errors
+
+    if isinstance(data, dict) and isinstance(data.get("redlines"), list):
+        for entry in data["redlines"]:
+            if not isinstance(entry, dict):
+                continue
+            checks_field = entry.get("checks")
+            if isinstance(checks_field, list):
+                for c in checks_field:
+                    if isinstance(c, str):
+                        registered.add(c.strip())
+            enforcement = entry.get("enforcement")
+            if isinstance(enforcement, str):
+                registered.update(CHECK_CALL_NAME_PATTERN.findall(enforcement))
+
+    missing = sorted(call_names - registered)
+    if missing:
+        errors.append(
+            "check_redlines.py 实际执行但未在 redlines.yml 登记的检查: "
+            + ", ".join(missing)
+            + "（需在某条红线的 checks: 字段补登记，DS-11 反向不变量）"
+        )
     return errors
 
 
@@ -2295,6 +2386,8 @@ def main() -> int:
     # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
     # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
     all_errors.extend(check_enforcement_mapping())
+    # enforcement 反向覆盖（DS-11）：check_redlines.py 实际执行的 check_* 必须全部在 redlines.yml 登记
+    all_errors.extend(check_enforcement_reverse_coverage())
     # 例外注册表一致性：紧随红线一致性之后，守护集中例外治理 (P1-01)
     all_errors.extend(check_exceptions_yaml_consistency())
     # 例外反向覆盖：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已登记例外 (P1-04)

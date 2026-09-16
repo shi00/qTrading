@@ -2163,6 +2163,101 @@ jobs:
         assert any("N5" in e for e in errors), f"应检测到 pytest 缺失, got: {errors}"
 
 
+class TestEnforcementReverseCoverage:
+    """DS-11 反向不变量: check_redlines.py 实际执行的 check_* 必须全部在 redlines.yml 登记.
+
+    测试覆盖:
+    - 纯函数 _extract_redline_check_calls 正反例（提取 main() 中 check_* 调用名）
+    - 集成测试 check_enforcement_reverse_coverage() 在当前项目配置下通过
+    - 漂移检测: monkeypatch 替换 REDLINES_YAML_PATH 构造缺登记红线的反例
+    """
+
+    def test_extract_main_check_calls(self):
+        """提取 check_redlines.py main() 中所有 check_* 调用名."""
+        from check_docs_consistency import _extract_redline_check_calls
+
+        source = (
+            "def main() -> int:\n"
+            '    checks = [("R4 SQL 注入", check_R4()), ("R12 数据表未注册", check_R12())]\n'
+            "    check_R4_fstring_sql()\n"
+            "    return 0\n"
+        )
+        assert _extract_redline_check_calls(source) == {"check_R4", "check_R12", "check_R4_fstring_sql"}
+
+    def test_extract_ignores_non_main(self):
+        """未定义 main() 时返回空集合."""
+        from check_docs_consistency import _extract_redline_check_calls
+
+        assert _extract_redline_check_calls("def other():\n    check_R4()\n") == set()
+
+    def test_extract_ignores_non_check_calls(self):
+        """非 check_ 前缀的调用不应被提取."""
+        from check_docs_consistency import _extract_redline_check_calls
+
+        source = "def main() -> int:\n    configuration()\n    check_R4()\n    return 0\n"
+        assert _extract_redline_check_calls(source) == {"check_R4"}
+
+    def test_real_project_passes(self):
+        """当前项目 check_redlines.py 全部 check_* 均已在 redlines.yml 登记."""
+        from check_docs_consistency import check_enforcement_reverse_coverage
+
+        errors = check_enforcement_reverse_coverage()
+        assert errors == [], f"反向不变量应通过, got: {errors}"
+
+    def test_unregistered_check_fails(self, tmp_path, monkeypatch):
+        """redlines.yml 缺登记某 check_* 时应报错."""
+        from check_docs_consistency import check_enforcement_reverse_coverage
+
+        # 用只含 R4(登记 check_R4) 的最小清单替代 redlines.yml
+        fake_yml = tmp_path / "redlines.yml"
+        fake_yml.write_text(
+            "redlines:\n"
+            "  - id: R4\n"
+            "    title: SQL 注入\n"
+            "    description: d\n"
+            "    enforcement: pre-commit（check_redlines.py）\n"
+            "    checks:\n"
+            "      - check_R4\n"
+            "    automation_coverage: partial\n"
+            "    human_review_required: true\n"
+            "    rule_type: INVARIANT\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", fake_yml)
+
+        errors = check_enforcement_reverse_coverage()
+        # 实际项目 check_redlines.py 含 check_R12 等多个 check_*, 应报告未登记
+        assert any("未在 redlines.yml 登记" in e for e in errors), f"应检测到未登记检查, got: {errors}"
+
+    def test_registered_via_enforcement_text(self, tmp_path, monkeypatch):
+        """check_* 名称内联于 enforcement 文本亦视为已登记（R23 模式）."""
+        from check_docs_consistency import check_enforcement_reverse_coverage
+
+        # 用最小 check_redlines.py 保证只测登记来源逻辑
+        check_src = tmp_path / "check_redlines.py"
+        check_src.write_text(
+            "def main():\n    checks = [('x', check_R_no_bare_ft_colors_in_ui())]\n    return 0\n",
+            encoding="utf-8",
+        )
+        fake_yml = tmp_path / "redlines.yml"
+        fake_yml.write_text(
+            "redlines:\n"
+            "  - id: R23\n"
+            "    title: 裸 UI token\n"
+            "    description: d\n"
+            "    enforcement: pre-commit（check_redlines.py：check_R_no_bare_ft_colors_in_ui）\n"
+            "    automation_coverage: partial\n"
+            "    human_review_required: true\n"
+            "    rule_type: NEW_CODE\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", fake_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECK_REDLINES_SCRIPT_PATH", check_src)
+
+        errors = check_enforcement_reverse_coverage()
+        assert errors == [], f"enforcement 文本提及应视为已登记, got: {errors}"
+
+
 class TestFletHubCompleteness:
     """Flet 入口完整性检查（spec §11.1 + §11.2 + §11.3 + §11.4）。
 
