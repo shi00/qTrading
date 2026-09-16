@@ -6,7 +6,7 @@
 # 契约测试: tests/unit/test_docs_consistency.py::TestRedlinesYamlConsistency
 #
 # 字段说明:
-#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R22)
+#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R23)
 #   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
 #   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
 #   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
@@ -57,8 +57,8 @@ redlines:
 
   - id: R4
     title: SQL 注入
-    description: "在 asyncpg 原生查询中使用 %s 占位符 (必须用 $1, $2, ...)"
-    enforcement: "pre-commit（check_redlines.py）"
+    description: "在 asyncpg 原生查询中使用 %s 占位符（必须用 $1, $2, ...）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、text(f...) f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 text() 常量承载）"
+    enforcement: "pre-commit（check_redlines.py：%s 占位符、SQL 字面量赋值、f-string 拼 SQL、text(f...) f-string、测试内同类 5 维度拦截）"
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -153,8 +153,8 @@ redlines:
 
   - id: R16
     title: UI 阻塞主循环
-    description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)"
-    enforcement: "pre-commit（check_redlines.py，部分守护：VM __init__ 构造已注册单例检测；事件处理器内同步 IO 仍仅人工评审）"
+    description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)；@ft.component 渲染函数顶层不得执行 logger/print 副作用（UIX-10，须迁入 use_effect 或事件回调）"
+    enforcement: "pre-commit（check_redlines.py，部分守护：VM __init__ 构造已注册单例检测 + @ft.component 渲染副作用拦截；事件处理器内同步 IO 仍仅人工评审）"
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -204,5 +204,13 @@ redlines:
     description: "checkpoint / 高水位语义的持久化状态（如 set_app_state 写入的断点续传水位），写入必须单调（优先 *_max 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值"
     enforcement: "仅人工评审（AST 可行性原型 scripts/prototype_business_redlines.py 的 WatermarkVisitor 检测 set_app_state 非 *_max 写水位形态供复核；存量缺陷修复前不设自动拦截）"
     automation_coverage: none
+    human_review_required: true
+    rule_type: NEW_CODE
+
+  - id: R23
+    title: 裸 UI token
+    description: "UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 AppStyles 定义的 token（FONT_SIZE_* 等）"
+    enforcement: "pre-commit（check_redlines.py：check_R_no_bare_ft_colors_in_ui + check_R_no_bare_font_size_in_ui）"
+    automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
