@@ -30,31 +30,31 @@ dependencies = [
     "akshare==1.18.94",
     "requests>=2.34.0",
     "httpx>=0.28.0",
-    "urllib3>=2.7.0",
-    "numpy>=2.5.2",
+    "urllib3>=2.8.0",
+    "numpy>=2.5.3",
     "pandas>=3.0.5",
     "polars>=1.44.1",
     "pyarrow>=25.0.1",
     "pandas_market_calendars>=5.3.2",
     "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
     "asyncpg>=0.31.0",
-    "psycopg2-binary>=2.9.12",
-    "sqlalchemy>=2.0.52",
-    "alembic>=1.19.1",
+    "psycopg2-binary>=2.9.13",
+    "sqlalchemy>=2.0.54,<2.1",  # <2.1: 防 2.1.0 发布后 requirements-drift 自动拉到 major 破坏版本
+    "alembic>=1.20.0",
     "sqlparse>=0.6.0",
-    "litellm>=1.98.0",  # Upgrade to 1.98.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
+    "litellm>=1.101.0",  # Upgrade to 1.101.0; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
     "llama-cpp-python>=0.3.35",
     "mplfinance>=0.12.10b0",
-    "matplotlib>=3.11.1",
+    "matplotlib>=3.11.2",
     "apscheduler>=3.11.3",
-    "tzdata>=2026.2",
+    "tzdata>=2026.4",
     "pytz>=2026.3.post1",
     "python-dotenv>=1.2.3",
     "keyring>=25.7.0",
     "cryptography>=50.0.1",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1
     "readerwriterlock>=1.0.9",
     "cachetools>=7.1.7",
-    "pydantic>=2.11.0",
+    "pydantic>=2.13.5",
     "aiohttp>=3.14.3",  # Security: CVE-2026-69244/69243/59881 fixed in 3.14.3
     "pillow>=12.3.0",  # Security: PYSEC-2026-2253~2257 (decompression bomb + shell injection) fixed in 12.3.0
 ]
@@ -65,25 +65,25 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.5.0",
-    "pytest-rerunfailures>=14.0",
-    "pytest-randomly>=3.15.0",
+    "pytest-rerunfailures>=16.6.1",
+    "pytest-randomly>=5.0.0",
     "pytest-benchmark>=5.0.0",  # PRF-07: 写库热路径 _prepare_records 性能定基（xdist 激活时自动禁用测量，定向 -n0 运行）
     "pytest-timeout>=2.3.0",  # Diagnose CI integration test hang (xdist worker deadlock)
     "pytest-json-report>=1.5.0",  # JSON report for scripts/detect_flaky.py
-    "ruff>=0.16.2",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
-    "pyright>=1.1.411",
-    "pandas-stubs>=3.0.5.260730",
-    "uv>=0.12.6",
+    "ruff>=0.16.7",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
+    "pyright>=1.1.414",
+    "pandas-stubs>=3.0.5.260914",
+    "uv>=0.12.15",
     "pip-audit>=2.10.0",
-    "hypothesis>=6.165.10",
-    "syrupy>=6.0.0",
-    "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
-    "import-linter>=2.13",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
+    "hypothesis>=6.168.0",
+    "syrupy>=6.1.1",
+    "msgpack>=1.2.2",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
+    "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
     "flet-mcp==1.0.0",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
     "brotlicffi>=1.2.0.2",
-    "playwright>=1.62.0",  # E2E browser automation for Flet desktop tests
+    "playwright>=1.63.0",  # E2E browser automation for Flet desktop tests
 ]
 
 [tool.ruff]
