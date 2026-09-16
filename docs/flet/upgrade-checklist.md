@@ -19,6 +19,17 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 - [ ] V0→V1 迁移 API 表全部 21 项（见 [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表)）
 - [ ] `flet-mcp` 可用性验证（`venv/Scripts/python.exe -c "from flet_mcp import mcp; mcp.run()"` 能启动，见 [mcp-usage.md](./mcp-usage.md)）；flet-mcp 版本与 flet 主包版本对齐
 
+### 1.1 版本一致性：`flet-web` 硬编码 pin 同步（必查）
+
+> 背景：`.github/workflows/ci_cd.yml` 的多个 job（我们 CI 中目前是 4 处在 `install dependencies` 段）为规避 Flet 运行时自动安装 `flet-web` 引发的并发 pip install Windows 文件锁 / 无 venv 崩溃问题，硬编码了 `uv pip install --system flet-web==<version>`。`flet-web` 作为 `flet` 的 transitive dependency 与主包同版本发布（见 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md)），若不与 `pyproject.toml` 锁定的 `flet` 主包同步升级，会在 CI 中残留旧版本 pin。虽然 Flet 启动时 `ensure_flet_web_package_installed()` 会把版本纠正到匹配主包，但这是靠运行时自愈掩盖，会造成每次启动额外重装，且在该自愈路径与并发安装并存时存在文件锁隐患——正是当初引入硬编码 pin 想避免的问题。
+
+该 pin 不在 `pyproject.toml` 显式依赖内，`check_docs_consistency.py` 等脚本不会扫描它，属于**版本一致性检查盲区**，只能靠本清单人工同步。
+
+- [ ] **同步 `flet-web==` pin**：CI 中所有 `uv pip install --system flet-web==` 的版本号与 `pyproject.toml` 锁定的 `flet` 主包一致
+  - 检查命令：`grep -n "flet-web==" .github/workflows/ci_cd.yml`
+  - 对照目标版本：`python -c "import flet; print(flet.__version__)"`（须与 `pyproject.toml` 中 `flet==X.Y.Z` 一致）
+  - 若 ci_cd 的 pin 仍是旧版本号 → 逐处改为目标版本并提交
+
 ## 2. 兼容性测试与文档检查
 
 ```bash
@@ -78,7 +89,7 @@ python scripts/sync_e2e_fonts.py --force
 - [ ] **比较 engineRevision**：对比升级前后的 `flutter_bootstrap.js` 中 `_flutter.buildConfig.engineRevision` 字段
   - 升级前：从当前 `pyproject.toml` 锁定版本的 `flet_web` wheel 中读取
   - 升级后：从新安装的 `site-packages/flet_web/web/flutter_bootstrap.js` 读取
-  - 命令示例：`python -c "import re,pathlib; p=pathlib.Path(__import__('flet_web').__file__).parent/'web/flutter_bootstrap.js'; print(re.findall(r'engineRevision\\":\\"([^"]+)\\"', p.read_text(encoding='utf-8')))"`
+  - 命令示例：`python -c "import re,pathlib; p=pathlib.Path(__import__('flet_web').__file__).parent/'web/flutter_bootstrap.js'; print(re.findall(r'engineRevision\":\"([^\"]+)\"', p.read_text(encoding='utf-8')))"`（`flutter_bootstrap.js` 的 buildConfig 为普通 JSON，引号前无反斜杠；`\"` 仅用于让双引号在选中 shell 的引号上下文内合法转义，regex 匹配的是无转义的 `engineRevision":"..."`）
 - [ ] **若 engineRevision 变化**：从新版本 `site-packages/flet_web/web/canvaskit/` 复制 `canvaskit.js` 和 `canvaskit.wasm` 到 `tests/e2e/mock_assets/canvaskit/`
   - 复制命令：`cp <site-packages>/flet_web/web/canvaskit/canvaskit.{js,wasm} tests/e2e/mock_assets/canvaskit/`
   - 验证文件大小变化（确认复制成功）
@@ -157,10 +168,10 @@ args = (
   - 验证方法：`test_anchor.py` 中 LABEL kind 的 textContent 匹配测试通过
   - 若失败：CanvasKit 改变了合并格式，需更新 `anchor_page.py:_locate_by_text` 的 `t.startsWith(label + '\n')` 逻辑
 - [ ] **坑点2：合成 click 事件失效**：`flt-semantics` 节点仍不响应 Playwright `locator.click()` 合成事件，必须用 `page.mouse.click(bbox_center)` 物理鼠标点击
-  - 验证方法：运行 1-2 个关键 E2E 用例（如 `test_screener_run_button`）确认 click 交互正常
+  - 验证方法：运行 1-2 个关键 E2E 用例（如 `test_run_screener_strategy`）确认 click 交互正常
   - 若失败：CanvasKit 开始响应合成事件，可评估简化 `anchor_page.py.click` 为 `locator.click()`（但需全量 E2E 验证）
 - [ ] **坑点3：Dropdown actionability 不稳定**：选项面板 `flt-semantics` 节点的 Playwright actionability check 仍不稳定，需 `force=True` 物理点击
-  - 验证方法：运行含 Dropdown 交互的 E2E 用例（如 `test_settings_flow` 中的 select_option 路径）
+  - 验证方法：运行含 Dropdown 交互的 E2E 用例（如 `test_settings_language_switch` 中的语言下拉选项路径）
   - 若失败：CanvasKit 改进了 actionability 稳定性，可评估移除 `force=True`（但需 Dropdown 相关 E2E 全量验证）
 
 > 排查指南：若升级后 E2E 测试大面积超时失败（等待 `flt-semantics` 节点或文本不出现），优先检查双轨语义映射规则是否漂移。DOM 诊断方法见 [conftest.py](../../tests/e2e/conftest.py) `_trigger_sidecar_startup_via_browser` 中的 `page.evaluate` DOM 诊断代码。
