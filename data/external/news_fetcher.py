@@ -13,7 +13,7 @@ from cachetools import TTLCache
 from utils.sanitizers import DataSanitizer
 from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import CST_TZ, get_now
+from utils.time_utils import CST_TZ, get_now, to_utc_for_db
 from utils.error_classifier import classify_error, classify_severity
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,27 @@ def _ensure_dataframe(result, source: str = "") -> pd.DataFrame | None:
             return None
     logger.warning("[NewsFetcher] Unexpected return type from %s: %s", source, type(result).__name__)
     return None
+
+
+def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.datetime | None:
+    """把公历时间字符串解析为存库格式：CST 本地化后转 UTC tz-naive（参考 CLS 时间戳/DB 存储口径）。
+
+    - day_only=True：仅日期（公告），统一补 00:00:00。
+    - 解析失败返回 None（调用方按缺失时间处理，不影响其余文档）。
+    """
+    raw_text = (raw or "").strip()
+    if not raw_text:
+        return None
+    text = f"{raw_text} 00:00:00" if day_only else raw_text
+    try:
+        if len(text) >= 19 and len(text) <= 23:
+            parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        else:
+            return None
+    except ValueError:
+        return None
+    # 无 tz 的东财/巨潮时间为 CST 本地时间 → 本地化后转 UTC naive 存库
+    return to_utc_for_db(parsed)
 
 
 class NewsFetcher:
@@ -281,6 +302,166 @@ class NewsFetcher:
                 DataSanitizer.sanitize_error(e),
             )
             return []
+
+    @staticmethod
+    @log_async_operation(
+        operation_name="news_get_stock_news_documents",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
+    async def get_stock_news_documents(
+        ts_code: str,
+        window_days: int = 30,
+        limit: int = 50,
+    ) -> dict:
+        """合并个股新闻：巨潮公告 + 东财新闻（非二选一回退）。
+
+        返回 ``{"docs": [...], "coverage": {"announcement": "ok"/"fail", "news": "ok"/"fail"}}``。
+        每个 doc 含：ts_code / source_kind（announcement|news）/ title / publish_time（UTC tz-naive datetime，
+        存库格式；公告仅日期已补 00:00:00）/ url（无则 None）/ content（可用正文或空串）。
+
+        解析顺序不依赖 ``head()``：收集两源 → 按 publish_time 降序 → 严格过滤到 window_days 窗口 → 再限量。
+        单源失败仍返回另一源结果 + coverage 状态；asyncio.CancelledError 必须传播（R2）。
+        as_of 历史回放（look-ahead 防护）由时间窗口本身承担，本接口不做单独 as_of 判断。
+        """
+        if not ts_code:
+            return {"docs": [], "coverage": {}}
+
+        symbol = ts_code.split(".")[0]
+
+        # 复用现有 CNINFO market 动态解析（与 get_stock_news 同法，避免 GBK/UTF-8 乱码）
+        market = ""
+        try:
+            import akshare.stock_feature.stock_disclosure_cninfo as mod
+
+            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
+        except (ImportError, AttributeError, IndexError, TypeError) as exc:
+            _log_with_severity(
+                exc,
+                "[NewsFetcher] Failed to read akshare default market: %s",
+                DataSanitizer.sanitize_error(exc),
+            )
+            market = "沪深京"
+
+        def _fetch():
+            docs: list[dict] = []
+            coverage = {"announcement": "fail", "news": "fail"}
+
+            def _fetch_locked():
+                # Layer 1: 巨潮公告（announcement）
+                try:
+                    end_date = get_now().strftime("%Y%m%d")
+                    start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
+                    df_cninfo = _ensure_dataframe(
+                        ak.stock_zh_a_disclosure_report_cninfo(
+                            symbol=symbol,
+                            market=market,
+                            start_date=start_date,
+                            end_date=end_date,
+                        ),
+                        source="stock_zh_a_disclosure_report_cninfo",
+                    )
+                    if df_cninfo is not None and not df_cninfo.empty:
+                        cls = list(df_cninfo.columns)
+                        title_col = "公告标题" if "公告标题" in cls else (cls[2] if len(cls) > 2 else None)
+                        time_col = "公告时间" if "公告时间" in cls else (cls[3] if len(cls) > 3 else None)
+                        url_col = "公告链接" if "公告链接" in cls else None
+                        if title_col:
+                            for _, row in df_cninfo.iterrows():
+                                title = str(row.get(title_col, "") or "").strip()
+                                if not title:
+                                    continue
+                                raw_date = str(row.get(time_col, "")) if time_col else ""
+                                publish_time = _parse_news_time(raw_date, day_only=True)
+                                url = str(row.get(url_col, "")) if url_col else ""
+                                docs.append(
+                                    {
+                                        "ts_code": ts_code,
+                                        "source_kind": "announcement",
+                                        "title": title,
+                                        "publish_time": publish_time,
+                                        "url": url or None,
+                                        "content": "",
+                                    }
+                                )
+                            coverage["announcement"] = "ok"
+                except Exception as e:
+                    _log_with_severity(
+                        e,
+                        "[News] documents CNINFO disclosure failed for %s: %s",
+                        ts_code,
+                        DataSanitizer.sanitize_error(e),
+                    )
+
+                # Layer 2: 东财新闻（news）
+                try:
+                    df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
+                    if df_em is not None and not df_em.empty:
+                        for _, row in df_em.iterrows():
+                            title = str(row.get("新闻标题", row.get("新闻内容", "")) or "").strip()
+                            if not title:
+                                continue
+                            raw_time = row.get("新闻时间", row.get("发布时间", ""))
+                            publish_time = _parse_news_time(str(raw_time))
+                            url = str(row.get("新闻链接", "") or "") if "新闻链接" in df_em.columns else ""
+                            content = str(row.get("新闻内容", "") or "").strip()
+                            docs.append(
+                                {
+                                    "ts_code": ts_code,
+                                    "source_kind": "news",
+                                    "title": title,
+                                    "publish_time": publish_time,
+                                    "url": url or None,
+                                    "content": content,
+                                }
+                            )
+                        coverage["news"] = "ok"
+                except Exception as e:
+                    _log_with_severity(
+                        e,
+                        "[News] documents EM search failed for %s: %s",
+                        ts_code,
+                        DataSanitizer.sanitize_error(e),
+                    )
+                return docs, coverage
+
+            try:
+                docs, coverage = _run_with_python_string_storage(_fetch_locked)
+            except Exception as outer_e:
+                _log_with_severity(
+                    outer_e,
+                    "[News] Fatal error fetching stock news documents for %s: %s",
+                    ts_code,
+                    DataSanitizer.sanitize_error(outer_e),
+                )
+                # docs/coverage 闭包保留已部分收集的结果
+
+            # 收集两源 → 时间降序 → 窗口过滤 → 限量
+            docs.sort(key=lambda d: d["publish_time"] or datetime.datetime.min, reverse=True)
+            now_utc = get_now().astimezone(datetime.UTC).replace(tzinfo=None)
+            cutoff = now_utc - timedelta(days=window_days)
+            windowed = [d for d in docs if d["publish_time"] is None or d["publish_time"] >= cutoff]
+            return windowed[:limit], coverage
+
+        try:
+            future = ThreadPoolManager().run_async(TaskType.IO, _fetch)
+            docs, coverage = await asyncio.wait_for(future, timeout=15.0)
+            return {"docs": docs, "coverage": coverage}
+        except TimeoutError as e:
+            _log_with_severity(e, "[News] documents fetch timeout for %s", ts_code)
+            logger.warning(
+                "[News] Background IO task for %s may still be running after "
+                "15s timeout (uncancelable in Python thread pool).",
+                ts_code,
+            )
+            return {"docs": [], "coverage": {}}
+        except Exception as e:
+            _log_with_severity(
+                e,
+                "[News] Error dispatching news documents task for %s: %s",
+                ts_code,
+                DataSanitizer.sanitize_error(e),
+            )
+            return {"docs": [], "coverage": {}}
 
     @staticmethod
     @log_async_operation(
