@@ -167,12 +167,14 @@ def test_required_quality_tier():
 
 def test_market_trend_filter_selects_in_range():
     strategy = VolumeBreakoutStrategy()
-    df = pd.DataFrame({
-        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
-        "pct_chg": [3.0, 8.0, 5.0],
-        "turnover_rate": [5.0, 5.0, 5.0],
-        "total_mv": [100.0, 200.0, 300.0],
-    })
+    df = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "pct_chg": [3.0, 8.0, 5.0],
+            "turnover_rate": [5.0, 5.0, 5.0],
+            "total_mv": [100.0, 200.0, 300.0],
+        }
+    )
     lf = pl.from_pandas(df).lazy()
     result = strategy._filter_logic(lf, {"params": {}}).collect()
     assert set(result["ts_code"].to_list()) == {"000001.SZ", "000003.SZ"}
