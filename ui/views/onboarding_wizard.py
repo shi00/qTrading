@@ -1142,6 +1142,9 @@ def OnboardingWizard(
                         step_indicators,
                         ft.Divider(height=10, color=AppColors.TRANSPARENT),
                         ft.Container(
+                            # key 随 step 变化强制重建子树, 规避 flet 1.0.0 客户端
+                            # 对 remove+replace 二次渲染差异的重合渲染回归
+                            key=f"wizard_step_{state.current_step}",
                             content=ft.Column(
                                 [step_content],
                                 scroll=ft.ScrollMode.AUTO,

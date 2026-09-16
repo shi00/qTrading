@@ -332,11 +332,11 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          # Pre-install flet-web to prevent Flet 0.86 from auto-installing it at app startup.
+          # Pre-install flet-web to prevent the Flet runtime from auto-installing it at app startup.
           # Without this, 4 xdist workers concurrently pip install flet-web to the same
           # site-packages, triggering Windows file lock errors (WinError 32 / Permission denied)
           # and causing workers to crash in setup phase (root cause of run 29655213301).
-          uv pip install --system flet-web==0.86.3
+          uv pip install --system flet-web==1.0.0
           pip install playwright pytest-playwright
 
       - name: Free disk space
@@ -647,14 +647,14 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          # Pre-install flet-web to prevent Flet 0.86 from auto-installing it at app startup.
+          # Pre-install flet-web to prevent the Flet runtime from auto-installing it at app startup.
           # Without this, E2E tests on Linux fail because Flet tries to pip install flet-web
           # at runtime into a system Python without a venv, causing:
           #   "error: No virtual environment found; run `uv venv` to create an environment"
           # and "OSError: [Errno 2] No such file or directory: '.../flet_web/web/flutter.js.map'"
           # (root cause of Embedded PG Tests (linux) failure in run 30110045876).
           # Same fix as the e2e-tests job (see line 322-326).
-          uv pip install --system flet-web==0.86.3
+          uv pip install --system flet-web==1.0.0
 
       - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@stable
@@ -842,8 +842,8 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          # Pre-install flet-web 防止 Flet 0.86 启动时并发 pip install 触发 Windows 文件锁
-          uv pip install --system flet-web==0.86.3
+          # Pre-install flet-web 防止 Flet 启动时并发 pip install 触发 Windows 文件锁
+          uv pip install --system flet-web==1.0.0
           pip install playwright pytest-playwright
 
       - name: Free disk space
@@ -1068,7 +1068,7 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          uv pip install --system flet-web==0.86.3
+          uv pip install --system flet-web==1.0.0
           pip install playwright pytest-playwright
 
       - name: Free disk space
