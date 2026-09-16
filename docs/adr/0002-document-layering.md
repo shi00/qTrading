@@ -5,6 +5,7 @@
 > Owner: 架构维护者
 > Supersedes: CONTRIBUTING.md 历史版本中「3b/3c 过度工程不做」决策的部分前提（3b 由 ADR-0003 单独推翻）
 > 注：3c 部分后续由 ADR-0005 推翻（详见 ADR-0005）；AGENTS.md 的纯指针定位后续由 ADR-0006 修改（详见 ADR-0006）；检视报告落盘位置由 2026-09-08 Errata 澄清（详见职责边界约束）。
+> 注（2026-09-16 Errata）：红线编号自本 ADR（记录为 R1~R18）后已扩展至 R22；下方决策正文中的红线编号为当时快照，当前红线范围一律以 docs/governance/redlines.yml 机器可读正本为准。
 
 ## Context
 
