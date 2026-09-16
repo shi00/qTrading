@@ -122,7 +122,7 @@
 | 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) |
 | 新增/修改 UI 视图 / 布局 / i18n | [docs/flet/README.md](./docs/flet/README.md)（条件路由到各专题） |
 | 新增/修改 ViewModel | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)（MVVM 架构与 ViewModel 生命周期 SSOT） |
-| 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」 |
+| 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式) |
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile） |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) |
@@ -130,11 +130,11 @@
 | 调整 CI / 依赖 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 版本发布 / Release 管理 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) |
-| 新增/修改回测 | docs/guides/how-to.md「7. 新增回测配置」 |
+| 新增/修改回测 | [docs/guides/how-to.md「7. 新增回测配置」](./docs/guides/how-to.md#7-新增回测配置) |
 | 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
 | 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) |
 | Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)（PR/Issue 必须用模板，禁止手写简化 body） |
-| 内置 PostgreSQL 离线维护 / 数据恢复 | docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」（操作前确认应用已完全退出） |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护)（操作前确认应用已完全退出） |
 | 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md)；存在多个长期方案或不可逆决策时先形成计划并请求确认；满足 ADR-0001 触发条件时新增 ADR（P2-17） |
 | 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md)（分层职责与登记约定） |
 | 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 |
