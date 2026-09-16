@@ -283,7 +283,8 @@ def NewsInsightPanel(
     elif phase == PHASE_READY:
         body = _build_ready(news_state, _build_event_cards(news_state, expanded_idx, _toggle_event))
     elif phase == PHASE_DEGRADED:
-        rows = [ft.Text(_translate_message(news_state.message))]
+        rows: list[ft.Control] = []
+        rows.append(ft.Text(_translate_message(news_state.message)))
         if news_on_retry is not None:
             rows.append(ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()))
         body = ft.Column(rows, spacing=8)
@@ -295,9 +296,7 @@ def NewsInsightPanel(
             rows.append(ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()))
         rows.append(_build_evidence_list(news_state.evidence))
         if phase == PHASE_EVIDENCE_READY and news_on_generate is not None:
-            rows.append(
-                ft.ElevatedButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: news_on_generate())
-            )
+            rows.append(ft.FilledButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: news_on_generate()))
         body = ft.Column(rows, spacing=8)
 
     return ft.Container(
