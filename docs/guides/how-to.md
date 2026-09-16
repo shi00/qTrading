@@ -56,7 +56,7 @@
 新增/修改 Tushare API 接入时遵循以下工作流：
 
 1. **客户端封装**：在 `data/external/tushare_client.py` 的 `TushareProApi` Protocol 中声明 API callable，并在对应 wrapper 方法中调用 `self._handle_api_call(...)` 统一限流/重试/熔断。
-2. **积分档位映射**：若新 API 有积分要求，在 `data/constants.py` 的 `TUSHARE_POINT_TIERS` 与 `TushareClient._TIER_API_COVERAGE` 中追加（保持单一真相源）。
+2. **积分档位映射**：若新 API 有积分要求，新增积分档位追加到 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`，API↔档位映射追加到 `data/external/tushare_client.py` 的 `TushareClient._TIER_API_COVERAGE`。注意 `data/constants.py` 中的 `TUSHARE_POINT_TIERS` 仅为兼容再导出（`from utils.constants import TUSHARE_POINT_TIERS`），新增档位只改 `utils` 侧。定位原因：`utils` 为横切叶子层（CLAUDE.md §4.1），R1 契约禁止 `utils` 导入 `data`，故真相源置于 `utils.constants`。
 3. **同步策略**：在 `data/sync/` 下对应 syncer 文件中实现 `ISyncStrategy.sync()`，通过 `SyncContext` 注入 `cancel_event`，分块调用 `TushareClient` wrapper。
 4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
 5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
