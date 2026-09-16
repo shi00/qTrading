@@ -14,7 +14,7 @@ akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
 akshare==1.18.94
     # via astockscreener (pyproject.toml)
-alembic==1.19.1
+alembic==1.20.0
     # via astockscreener (pyproject.toml)
 annotated-types==0.7.0
     # via pydantic
@@ -164,7 +164,7 @@ greenlet==3.5.3 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or 
     # via sqlalchemy
 griffelib==2.1.0
     # via fastmcp-slim
-grimp==3.15
+grimp==3.17
     # via import-linter
 h11==0.16.0
     # via
@@ -189,7 +189,7 @@ httpx-sse==0.4.3
     # via mcp
 huggingface-hub==1.23.0
     # via tokenizers
-hypothesis==6.165.10
+hypothesis==6.168.0
     # via astockscreener (pyproject.toml)
 idna==3.18
     # via
@@ -198,7 +198,7 @@ idna==3.18
     #   httpx
     #   requests
     #   yarl
-import-linter==2.13
+import-linter==2.15
     # via astockscreener (pyproject.toml)
 importlib-metadata==8.9.0
     # via litellm
@@ -250,7 +250,7 @@ korean-lunar-calendar==0.4.0
     # via exchange-calendars
 license-expression==30.4.4
     # via cyclonedx-python-lib
-litellm==1.98.0
+litellm==1.101.0
     # via astockscreener (pyproject.toml)
 llama-cpp-python==0.3.35
     # via astockscreener (pyproject.toml)
@@ -266,7 +266,7 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   mako
-matplotlib==3.11.1
+matplotlib==3.11.2
     # via
     #   astockscreener (pyproject.toml)
     #   mplfinance
@@ -282,7 +282,7 @@ more-itertools==11.1.0
     #   jaraco-functools
 mplfinance==0.12.10b0
     # via astockscreener (pyproject.toml)
-msgpack==1.2.1
+msgpack==1.2.2
     # via
     #   astockscreener (pyproject.toml)
     #   cachecontrol
@@ -293,7 +293,7 @@ multidict==6.7.1
     #   yarl
 nodeenv==1.10.0
     # via pyright
-numpy==2.5.2
+numpy==2.5.3
     # via
     #   astockscreener (pyproject.toml)
     #   contourpy
@@ -335,7 +335,7 @@ pandas==3.0.5
     #   tushare
 pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
-pandas-stubs==3.0.5.260730
+pandas-stubs==3.0.5.260914
     # via astockscreener (pyproject.toml)
 pathable==0.6.0
     # via jsonschema-path
@@ -367,7 +367,7 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
-psycopg2-binary==2.9.12
+psycopg2-binary==2.9.13
     # via astockscreener (pyproject.toml)
 py-cpuinfo2==10.1.1
     # via pytest-benchmark
@@ -381,7 +381,7 @@ pyarrow==25.0.1
     # via astockscreener (pyproject.toml)
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
-pydantic==2.13.4
+pydantic==2.13.5
     # via
     #   astockscreener (pyproject.toml)
     #   fastmcp-slim
@@ -390,9 +390,9 @@ pydantic==2.13.4
     #   openai
     #   openapi-pydantic
     #   pydantic-settings
-pydantic-core==2.46.4
+pydantic-core==2.46.5
     # via pydantic
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
     # via
     #   fastmcp-slim
     #   litellm
@@ -412,7 +412,7 @@ pyparsing==3.3.2
     #   pip-requirements-parser
 pyperclip==1.11.0
     # via fastmcp-slim
-pyright==1.1.411
+pyright==1.1.414
     # via astockscreener (pyproject.toml)
 pytest==9.1.1
     # via
@@ -437,9 +437,9 @@ pytest-json-report==1.5.0
     # via astockscreener (pyproject.toml)
 pytest-metadata==3.1.1
     # via pytest-json-report
-pytest-randomly==4.1.0
+pytest-randomly==5.0.0
     # via astockscreener (pyproject.toml)
-pytest-rerunfailures==16.6
+pytest-rerunfailures==16.6.1
     # via astockscreener (pyproject.toml)
 pytest-timeout==2.4.0
     # via astockscreener (pyproject.toml)
@@ -505,7 +505,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.2
+ruff==0.16.7
     # via astockscreener (pyproject.toml)
 s3transfer==0.19.2
     # via boto3
@@ -526,7 +526,7 @@ sortedcontainers==2.4.0
     #   hypothesis
 soupsieve==2.8.4
     # via beautifulsoup4
-sqlalchemy==2.0.52
+sqlalchemy==2.0.54
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
@@ -539,7 +539,7 @@ starlette==1.3.1
     #   fastmcp-slim
     #   mcp
     #   sse-starlette
-syrupy==6.0.0
+syrupy==6.1.1
     # via astockscreener (pyproject.toml)
 tabulate==0.10.0
     # via akshare
@@ -584,7 +584,7 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
-tzdata==2026.3
+tzdata==2026.4
     # via
     #   astockscreener (pyproject.toml)
     #   exchange-calendars
@@ -594,13 +594,13 @@ tzlocal==5.4.4
     # via apscheduler
 uncalled-for==0.3.2
     # via fastmcp-slim
-urllib3==2.7.0
+urllib3==2.8.0
     # via
     #   astockscreener (pyproject.toml)
     #   akshare
     #   botocore
     #   requests
-uv==0.12.6
+uv==0.12.15
     # via astockscreener (pyproject.toml)
 uvicorn==0.51.0
     # via
