@@ -166,6 +166,43 @@ class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
         sql_str = str(compiled)
         self.assertIn("COMPLETED", sql_str)
 
+    def test_guard_t1_only_emits_t1_pct_is_null_where(self):
+        """BIZ-03：guard_t1=True 时 UPDATE 的 WHERE 追加 t1_pct IS NULL，默认不追加。
+
+        与 T+5 回填 backfill_t5_prediction 的 t5_pct IS NULL 幂等语义对称；
+        默认 False 供 run_review 对 T1_DONE 记录补 T+5（t1_pct 已非 NULL，须允许覆盖）。
+        """
+        from data.persistence.daos.screener_dao import ScreenerDao
+
+        def _make_dao():
+            dao = ScreenerDao.__new__(ScreenerDao)
+            dao.engine = MagicMock()
+            dao.engine._disposed = False  # bypass _check_engine
+            dao._check_engine = MagicMock()
+            dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+            return dao
+
+        import asyncio
+
+        def _run(guard_t1):
+            dao = _make_dao()
+            mock_conn = AsyncMock()
+            asyncio.run(
+                dao.update_prediction_result(
+                    record_id=1,
+                    pct=5.0,
+                    label="WIN",
+                    t1_price=10.5,
+                    conn=mock_conn,
+                    guard_t1=guard_t1,
+                )
+            )
+            executed_stmt = mock_conn.execute.call_args[0][0]
+            return str(executed_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        self.assertIn("t1_pct IS NULL", _run(True))
+        self.assertNotIn("t1_pct IS NULL", _run(False))
+
     def test_conn_none_path_compiles_valid_sql(self):
         """Verify conn=None path compiles SQLAlchemy stmt into valid SQL with correct params."""
         from data.persistence.daos.screener_dao import ScreenerDao

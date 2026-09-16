@@ -340,6 +340,9 @@ class ReviewManager:
         与 T+5 回填不同，T+1 是打标签（WIN/LOSS/DRAW）与计算 alpha 的依据，故须
         同时解析基准指数涨跌幅；状态推进由 ``update_prediction_result`` 完成
         （t5_pct 为空 → 自动置 ``T1_DONE``，不会越级到 COMPLETED）。
+        写库经 ``_batch_update_results(guard_t1=True)`` 启用 T+1 幂等守卫
+        （WHERE 带 ``t1_pct IS NULL``），与 T+5 回填的 ``t5_pct IS NULL`` 语义对称，
+        避免与 run_review 同批并行时把已填的 T+1 重复覆盖。
         """
         candidates = await self.cache.screener_dao.get_unfilled_t1_predictions()
         if not candidates:
@@ -440,7 +443,7 @@ class ReviewManager:
             )
 
         if updates:
-            await self._batch_update_results(updates)
+            await self._batch_update_results(updates, guard_t1=True)
 
         logger.info("[Review] T+1 backfill completed: %s records updated.", len(updates))
         return len(updates)
@@ -644,8 +647,12 @@ class ReviewManager:
         return xml
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def _batch_update_results(self, updates: list[dict]):
-        """Update all review results within a single transaction."""
+    async def _batch_update_results(self, updates: list[dict], *, guard_t1: bool = False):
+        """Update all review results within a single transaction.
+
+        ``guard_t1`` 透传给 ``update_prediction_result``：仅 stale T+1 回填传递 True，
+        为主路径与逐条降级两条写入路径统一加 T+1 幂等守卫。
+        """
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
@@ -666,6 +673,7 @@ class ReviewManager:
                         benchmark_code=u.get("benchmark_code"),
                         alpha=u["alpha"],
                         conn=conn,
+                        guard_t1=guard_t1,
                     )
         except EngineDisposedError:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
@@ -684,6 +692,7 @@ class ReviewManager:
                         t5_pct=u["t5_pct"],
                         t5_price=u["t5_price"],
                         alpha=u["alpha"],
+                        guard_t1=guard_t1,
                     )
                 except EngineDisposedError:
                     # R5 一致性： disposed 引擎不可恢复，fallback 路径同样必须上抛（与主路径对齐）.
@@ -706,6 +715,7 @@ class ReviewManager:
         t5_price: typing.Any = None,
         alpha: typing.Any = None,
         review_status: typing.Any = None,
+        guard_t1: bool = False,
     ):
         """Update DB with T+1/T+5 review metrics and review_status."""
         await self.cache.screener_dao.update_prediction_result(
@@ -719,6 +729,7 @@ class ReviewManager:
             benchmark_code=benchmark_code,
             alpha=alpha,
             review_status=review_status,
+            guard_t1=guard_t1,
         )
 
     @staticmethod

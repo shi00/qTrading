@@ -2399,6 +2399,9 @@ class TestReviewManagerT1Backfill:
         assert count == 1
         rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
         updates = rm._batch_update_results.call_args.args[0]
+        # BIZ-03 幂等守卫：stale T+1 回填必须向 _batch_update_results 传递 guard_t1=True，
+        # 与 T+5 回填的 t5_pct IS NULL 语义对称，防止与 run_review 并行时重复覆盖已填 T+1。
+        assert rm._batch_update_results.call_args.kwargs == {"guard_t1": True}
         assert len(updates) == 1
         u = updates[0]
         assert u["record_id"] == 1
@@ -2469,6 +2472,9 @@ class TestReviewManagerT1Backfill:
         assert count == 1
         rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
         updates = rm._batch_update_results.call_args.args[0]
+        # BIZ-03 幂等守卫：stale T+1 回填必须向 _batch_update_results 传递 guard_t1=True，
+        # 与 T+5 回填的 t5_pct IS NULL 语义对称，防止与 run_review 并行时重复覆盖已填 T+1。
+        assert rm._batch_update_results.call_args.kwargs == {"guard_t1": True}
         assert len(updates) == 1
         assert updates[0]["record_id"] == 2
 

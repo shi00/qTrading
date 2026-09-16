@@ -633,8 +633,16 @@ class ScreenerDao(BaseDao):
         alpha: float | None = None,
         review_status: str | None = None,
         conn: typing.Any = None,
+        guard_t1: bool = False,
     ):
-        """Update review metrics and advance review_status according to available horizons."""
+        """Update review metrics and advance review_status according to available horizons.
+
+        ``guard_t1``：T+1 幂等守卫。为 True 时 UPDATE 的 WHERE 追加 ``t1_pct IS NULL``，
+        与 T+5 回填 ``backfill_t5_prediction`` 的 ``t5_pct IS NULL`` 语义对称，避免同时写入方
+        （run_review 窗内新写）把 stale T+1 回填已填/正在填的值重复覆盖。
+        默认 False：run_review 会对 T1_DONE 记录二次调用以补 T+5，此时 t1_pct 已非 NULL，
+        必须允许覆盖，故仅 stale T+1 回填路径（``ReviewManager.backfill_t1_returns``）启用守卫。
+        """
         self._check_engine()
         effective_status = review_status
         if effective_status is None:
@@ -661,6 +669,9 @@ class ScreenerDao(BaseDao):
             values["benchmark_code"] = benchmark_code
 
         stmt = sa.update(table).where(table.c.id == record_id).values(**values)
+        if guard_t1:
+            # BIZ-03 幂等守卫：仅 stale T+1 回填启用，防止把已填/正在填的 t1_pct 重复覆盖。
+            stmt = stmt.where(table.c.t1_pct.is_(None))
 
         # DAT-01: 与 base_dao 一致，维护事件放行后复查引擎，防范 conn 路径 TOCTOU
         # （conn 由裸 engine.begin() 提供，无 _guarded_begin 守卫，须在此复查）
