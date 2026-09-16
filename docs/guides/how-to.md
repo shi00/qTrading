@@ -16,7 +16,7 @@
 2. 实现读写方法，**只用** `_read_db_select` / `_save_upsert` / `chunked_in_query`，禁止裸 SQL 字符串拼接。
 3. 在 `data/cache/dao_registry.py` 的 `DaoRegistry._DAO_REGISTRY` 中登记新 DAO，追加 `("xxx_dao", XxxDao)` 条目。engine 引用同步由 `sync_engines()` 统一驱动，**不要**手工赋值 `.engine`。
 4. 在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 中显式实例化并赋值：`self.xxx_dao = XxxDao(self.engine)`（R13 pre-commit 只覆盖 `__init__` 实例化维度，pyright 也依赖此显式赋值推断类型）。
-5. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB。
+5. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB（[测试编写模板：DAO 单测](../guides/testing.md#测试编写模板)）。
 
 ### 3. 新增一个策略
 
@@ -26,7 +26,7 @@
 4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。继承 `PolarsBaseStrategy` 时已自带 AI 阶段（可通过 `enable_ai_analysis = False` 关闭）。
 5. 在 `strategies/all_strategies.py` 的 `_import_all_strategies()` 中导入该模块以触发自动注册。
 6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
-7. 在 `tests/unit/` 下编写单测。
+7. 在 `tests/unit/` 下编写单测（[测试编写模板：策略单测](../guides/testing.md#测试编写模板)）。
 
 ### 4. 新增一个 UI 视图
 
@@ -63,7 +63,7 @@
 6. **质量门控**：syncer 写入前挂 `@require_quality(QualityTier.X)`，同步后由 `QuoteDAO.get_sync_quality_score()` 评估质量分数。
 7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`，主动退出时 `raise asyncio.CancelledError`（R2 红线）。
 8. **错误处理**：`except asyncio.CancelledError: raise`；`TushareAPIPermissionError` 捕获后跳过对应 API；其他异常经 `classify_error()` 分类。
-9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API。
+9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
 详细设计模式（限流/质量门控/错误处理/取消传播）见 [data-sync.md](../patterns/data-sync.md#tushare-syncer-设计模式)。
 
@@ -105,7 +105,7 @@
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
 6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本，勿改 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)，§4.3 仅含登记指引）。
-7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。
+7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
 ### 9. 内置 PostgreSQL 离线维护
 
