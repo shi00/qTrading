@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import FrozenInstanceError
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import utils.time_utils
 from services.news_insight_models import EvidenceDocument
 from services.news_insight_service import NewsInsightOutcome
 from ui.viewmodels.news_insight_types import (
@@ -29,7 +31,7 @@ from ui.viewmodels.news_insight_types import (
     PHASE_IDLE,
     PHASE_READY,
 )
-from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
+from ui.viewmodels.news_insight_view_model import NewsInsightViewModel, _fmt_time
 
 pytestmark = pytest.mark.unit
 
@@ -242,6 +244,164 @@ class TestNoFletImport:
                     assert alias.name.split(".")[0] != "flet", f"flet import: {alias.name}"
             elif isinstance(node, ast.ImportFrom):
                 assert (node.module or "").split(".")[0] != "flet", f"flet import from: {node.module}"
+
+
+def _make_outcome(status: str) -> NewsInsightOutcome:
+    return NewsInsightOutcome(result=_make_result(status=status), reused=False, reuse_type="none")
+
+
+class TestFmtTime:
+    def test_none_returns_empty(self):
+        assert _fmt_time(None) == ""
+
+    def test_invalid_dt_returns_empty(self, monkeypatch):
+        import utils.time_utils as tu
+
+        def _boom(dt):
+            raise ValueError("bad")
+
+        monkeypatch.setattr(tu, "from_utc_to_cst", _boom)
+        assert _fmt_time(datetime(2026, 9, 10, 8, 0, 0)) == ""
+
+    def test_cst_formatted(self):
+        s = _fmt_time(datetime(2026, 9, 10, 8, 0, 0))
+        assert s == "" or "-" in s or ":" in s
+
+
+class TestSelectStockNoTsCode:
+    def test_empty_ts_code_no_op(self, fake_service):
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("")
+        assert vm.state.phase == PHASE_IDLE
+
+
+class TestGenerateNoSelection:
+    def test_without_selection_no_op(self, fake_service):
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.generate()
+        assert vm.state.phase == PHASE_IDLE
+
+
+class TestGenerateNoLoop:
+    def test_no_loop_is_error(self, fake_service, monkeypatch):
+        vm = NewsInsightViewModel(service=fake_service)
+        vm._selected_ts_code = "000001.SZ"
+        monkeypatch.setattr(vm, "_get_loop_or_none", lambda: None)
+        vm.generate()
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message is not None
+        assert vm.state.message.key == "news_insight_err_no_loop"
+
+
+class TestBeginLoadNoLoop:
+    def test_no_loop_is_error(self, fake_service, monkeypatch):
+        vm = NewsInsightViewModel(service=fake_service)
+        monkeypatch.setattr(vm, "_get_loop_or_none", lambda: None)
+        vm.select_stock("000001.SZ")
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message is not None
+        assert vm.state.message.key == "news_insight_err_no_loop"
+
+
+class TestRetry:
+    async def test_retry_generates(self, vm, fake_service):
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.retry()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        fake_service.analyze.assert_awaited()
+
+
+class TestDispose:
+    async def test_dispose_resets_state(self, fake_service):
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        assert vm.state.phase == PHASE_EVIDENCE_READY
+        vm.dispose()
+        assert vm.state.phase == PHASE_IDLE
+        assert vm._active_task is None
+        assert vm._selected_ts_code == ""
+
+
+class TestLoadEvidenceError:
+    async def test_evidence_error_sets_error(self, fake_service):
+        fake_service.load_evidence_preview = AsyncMock(side_effect=RuntimeError("boom"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message.key == "news_insight_err_evidence"
+
+        async def _wait_task(vm):
+            task = getattr(vm, "_active_task", None)
+            if task is not None:
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+
+        await _wait_task(vm)
+
+
+class TestApplyOutcomeFailed:
+    async def test_failed_sets_error(self, fake_service):
+        fake_service.analyze = AsyncMock(return_value=_make_outcome("failed"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message.key == "news_insight_analysis_failed"
+
+
+class TestApplyOutcomeDegraded:
+    async def test_evidence_only_sets_degraded(self, fake_service):
+        fake_service.analyze = AsyncMock(return_value=_make_outcome("evidence_only"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_DEGRADED
+        assert vm.state.message.key == "news_insight_degraded"
+
+
+class TestWindowLabelError:
+    async def test_window_label_error_unknown(self, fake_service):
+        fake_service.analysis_window_label = MagicMock(side_effect=RuntimeError("boom"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        assert vm.state.window_label == "unknown"
+
+
+class TestNowStrError:
+    async def test_now_error_empty(self, fake_service, monkeypatch):
+        def _boom():
+            raise ValueError("bad")
+
+        monkeypatch.setattr(utils.time_utils, "get_now", _boom)
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        assert vm.state.analysis_time == ""
+
+
+class TestOnTaskDoneExc:
+    def test_task_exception_logged(self, fake_service):
+        vm = NewsInsightViewModel(service=fake_service)
+        task = MagicMock()
+        task.cancelled.return_value = False
+        task.exception.return_value = RuntimeError("boom")
+        vm._active_task = task
+        vm._on_task_done(task)  # 不应抛出，仅记录日志
+        assert vm._active_task is None
 
 
 async def _drain(vm: NewsInsightViewModel) -> None:

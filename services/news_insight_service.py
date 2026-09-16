@@ -83,14 +83,14 @@ class NewsInsightService:
             model = llm.get("model", "")
             parts.append(f"cloud:{provider}/{model}" if provider and model else "cloud:none")
         except Exception as e:
-            log_classified(logger, e, "general", "[NewsInsight] read llm config failed: %s")
+            log_classified(logger, e, "general", "[NewsInsight] read llm config failed (%s): %s")
             parts.append("cloud:none")
         try:
             local_path = ConfigHandler.get_setting("local_model_path")
             if local_path:
                 parts.append(f"local:{os.path.basename(os.fspath(local_path))}")
         except Exception as e:
-            log_classified(logger, e, "general", "[NewsInsight] read local model path failed: %s")
+            log_classified(logger, e, "general", "[NewsInsight] read local model path failed (%s): %s")
         return ",".join(sorted(parts))
 
     @staticmethod
@@ -184,7 +184,7 @@ class NewsInsightService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log_classified(logger, e, "external", "[NewsInsight] fetch documents failed (%s): %s", ts_code)
+            log_classified(logger, e, "external", "[NewsInsight] fetch documents failed (%s): %s (ts_code=%s)", ts_code)
         fetched_docs = fetched.get("docs") or []
         fetched_coverage = fetched.get("coverage") or {}
         for src in ("announcement", "news"):
@@ -195,7 +195,7 @@ class NewsInsightService:
             try:
                 await self.dao.save_market_news_batch(fetched_docs)
             except Exception as e:
-                log_classified(logger, e, "db", "[NewsInsight] save fetched docs failed (%s): %s", ts_code)
+                log_classified(logger, e, "db", "[NewsInsight] save fetched docs failed (%s): %s (ts_code=%s)", ts_code)
 
         await self._maybe_cancel(cancel_event)
 
@@ -231,7 +231,9 @@ class NewsInsightService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log_classified(logger, e, "db", "[NewsInsight] fetch telegraph candidates failed (%s): %s", ts_code)
+            log_classified(
+                logger, e, "db", "[NewsInsight] fetch telegraph candidates failed (%s): %s (ts_code=%s)", ts_code
+            )
             df_t = None
         if df_t is not None and not df_t.empty:
             candidates_pool = [{"ts_code": ts_code, "name": stock_name or ""}]
