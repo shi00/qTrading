@@ -627,9 +627,31 @@ TABLE_DEFINITIONS = {
     },
     "market_news": {
         "alias": "tab_market_news",
+        "desc": "市场新闻/快讯（新闻风险解读 Phase A 扩展字段）",
         "columns": {
+            "id": "col_id",
+            "content": "col_content",
             "content_hash": "col_content_hash",
+            "tags": "col_tags",
+            "publish_time": "col_publish_time",
+            "source": "col_source",
+            "ts_code": "col_ts_code",
+            "title": "col_title",
+            "url": "col_url",
+            "source_kind": "col_source_kind",
+            "category_l1": "col_category_l1",
+            "category_l2": "col_category_l2",
+            "sentiment": "col_sentiment",
+            "created_at": "col_created_at",
         },
+        "unique_constraints": [
+            {"name": "uq_market_news_hash_time", "columns": ["content_hash", "publish_time"]},
+        ],
+        "indexes": [
+            "idx_market_news_pub_source",
+            "idx_market_news_ts_code",
+            "idx_market_news_source_kind_pub_time",
+        ],
     },
     "trade_cal": {
         "alias": "tab_trade_cal",

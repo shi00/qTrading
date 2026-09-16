@@ -334,11 +334,22 @@ class MarketNews(Base):
     tags = Column(String)
     publish_time = Column(DateTime(timezone=False), nullable=False)
     source = Column(String)
+    # 新闻风险解读（Phase A）新增可空字段
+    ts_code = Column(String)
+    title = Column(String)
+    url = Column(String)
+    source_kind = Column(String(32))
+    category_l1 = Column(String(32))
+    category_l2 = Column(String(64))
+    sentiment = Column(String(16))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
         UniqueConstraint("content_hash", "publish_time", name="uq_market_news_hash_time"),
         Index("idx_market_news_pub_source", "publish_time", "source"),
+        Index("idx_market_news_ts_code", "ts_code"),
+        # 首页来源过滤：source_kind = 'telegraph' OR IS NULL
+        Index("idx_market_news_source_kind_pub_time", "source_kind", "publish_time"),
     )
 
 

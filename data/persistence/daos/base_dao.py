@@ -691,10 +691,14 @@ class BaseDao:
         pk_columns: typing.Any,
         suppress_errors: bool = False,
         conn: typing.Any = None,
+        conflict_columns: list[str] | None = None,
     ):
         """
         Generic helper for bulk UPSERT using PostgreSQL ON CONFLICT syntax.
         Leverages SQLAlchemy Core for robust type coercion from Pandas to asyncpg natively.
+
+        conflict_columns: 自定义 ON CONFLICT 冲突键。默认 None 即使用 pk_columns；
+        提供时以此为冲突键，且这些列在 DO UPDATE 的 set_ 中排除（与主键同权，防 EXCLUDED 改写冲突键）。
         """
         if df is None or df.empty:
             return 0
@@ -799,10 +803,12 @@ class BaseDao:
         self._check_engine(context="upsert:post-prepare")
 
         stmt = pg_insert(table)
-        update_cols = [c for c in columns if c not in pk_columns and c != "created_at" and c not in missing_cols]
+        conflict_key = conflict_columns if conflict_columns is not None else pk_columns
+        update_exclude = set(pk_columns) | set(conflict_key)
+        update_cols = [c for c in columns if c not in update_exclude and c != "created_at" and c not in missing_cols]
 
         if not update_cols:
-            stmt = stmt.on_conflict_do_nothing(index_elements=pk_columns)
+            stmt = stmt.on_conflict_do_nothing(index_elements=conflict_key)
         else:
             null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
             update_dict = {}
@@ -815,7 +821,7 @@ class BaseDao:
             if has_updated_at:
                 update_dict["updated_at"] = sa.func.now()
             stmt = stmt.on_conflict_do_update(
-                index_elements=pk_columns,
+                index_elements=conflict_key,
                 set_=update_dict,
             )
 

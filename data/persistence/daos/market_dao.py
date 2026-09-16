@@ -55,6 +55,7 @@ class MarketDao(BaseDao):
         limit: int | None = 50,
         offset: int = 0,
         min_publish_time: typing.Any = None,
+        home_filter: bool = True,
     ):
         sql = "SELECT * FROM market_news WHERE 1=1"
         params = []
@@ -63,6 +64,11 @@ class MarketDao(BaseDao):
             # review03-C7: 占位符编号为代码自增整数（非用户输入），普通拼接避免 f-string 拼 SQL
             sql += " AND publish_time >= $" + str(idx)
             params.append(min_publish_time)
+            idx += 1
+        # 首页来源过滤（A2）：只返回快讯/存量（source_kind IS NULL）行，剔除 announcement/news 文档。
+        if home_filter:
+            sql += " AND (source_kind = $" + str(idx) + " OR source_kind IS NULL)"
+            params.append("telegraph")
             idx += 1
         sql += " ORDER BY publish_time DESC LIMIT $" + str(idx) + " OFFSET $" + str(idx + 1)
         params.extend([limit, offset])

@@ -84,6 +84,29 @@ class TestMarketDaoGetMarketNews:
         result = await dao.get_market_news(limit=10, min_publish_time="2024-06-15")
         assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_home_filter_default_applies_telegraph(self):
+        """A2: 默认 home_filter=True 应过滤出 telegraph/存量(NULL) 行，剔除 announcement/news 文档。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        await dao.get_market_news(limit=10)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "source_kind = $1" in sql
+        assert "source_kind IS NULL" in sql
+        params = call_args[0][1]
+        assert "telegraph" in params
+
+    @pytest.mark.asyncio
+    async def test_home_filter_false_omits_source_kind_clause(self):
+        """A2: home_filter=False 时保持原查询不追加来源过滤。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        await dao.get_market_news(limit=10, home_filter=False)
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "source_kind" not in sql
+
 
 class TestMarketDaoSaveDailyIndicators:
     @pytest.mark.asyncio
