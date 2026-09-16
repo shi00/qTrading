@@ -62,3 +62,12 @@
 | review05-E15 | toast_manager 去单例化薄壳复核（非事实单例，R7 隔离改 conftest autouse fixture） | review05 配置与依赖治理 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | review07-G5 | tests/ 非 attr-defined `# type: ignore` 存量 226 处无 human reason（渐进升级） | review07 治理与门禁审计 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | review07-G20 | R16 部分守护：VM `__init__` 构造已注册单例检测实现 | review07 治理与门禁审计 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| UIX-03 | 订阅在 mount effect 阶段才建立，消除首帧通知丢失 | 本地检视报告（gitignored） | [hooks.py](../../ui/hooks.py) | 使用中 |
+| UIX-04 | dependencies 用 resolved_vm 对象身份，替代恒为 `[]` 的 deps（换实例重订阅） | 本地检视报告（gitignored） | [hooks.py](../../ui/hooks.py) | 使用中 |
+| UIX-09 | ViewModel 可观察协议薄门面（组合化契约强化） | 本地检视报告（gitignored） | [observable_mixin.py](../../ui/viewmodels/observable_mixin.py) | 使用中 |
+| UIX-10 | `@ft.component` 渲染函数顶层不得执行 logger/print 副作用（须迁入 use_effect 或事件回调） | 本地检视报告（gitignored） | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
+| UIX-12 | 字段级错误提示（`ft.TextField(error=...)` 原生插槽程序化关联） | 本地检视报告（gitignored） | [backtest_config_panel.py](../../ui/components/backtest/backtest_config_panel.py) | 使用中 |
+| UIX-14 | 声明式三态组件（空态/错误态/加载态）统一复用，消除手工复制 | 本地检视报告（gitignored） | [state_views.py](../../ui/components/state_views.py) | 使用中 |
+| UIX-16 | 未引用 i18n key 的 ratchet baseline 门禁（基线计数只降不升） | 本地检视报告（gitignored） | [test_i18n_keys_completeness.py](../../tests/unit/test_i18n_keys_completeness.py) | 使用中 |
+| UIX-17 | VM locale remediation——placeholder 卡 error 的 i18n fallback，去硬编码中文默认值 | 本地检视报告（gitignored） | [test_uix_17_vm_locale_remediation.py](../../tests/unit/ui/viewmodels/test_uix_17_vm_locale_remediation.py) | 使用中 |
+| UIX-18 | e2e_ids.py 已声明 public 常量/方法未引用或未标注 `# reserved` 即报错 | 本地检视报告（gitignored） | [check_e2e_anchors.py](../../scripts/check_e2e_anchors.py) | 使用中 |
