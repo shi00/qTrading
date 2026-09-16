@@ -43,3 +43,139 @@
 > - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
 > - **覆盖率排除行**：`pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
 > - **覆盖率 omit 文件**：`pyproject.toml` `[tool.coverage.run].omit` 含 `main.py`（标注 `NOTE(lazy)`；升级触发条件：重构 `main.py` 拆出可测的 bootstrap 模块后移除 omit）
+
+### 测试编写模板
+
+> R19（未配套测试的业务逻辑变更）由 CI 强制，AI 必须交付符合项目约定的测试。下列模板为可直接复制的最小可运行样例（真实测试惯例摘录，`how-to.md` 各流程末尾的"编写单测"指向此处对应模板锚点）。
+
+#### 模板 1：DAO 单测（mock engine 隔离 DB）
+
+```python
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+import pandas as pd
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from data.persistence.daos.holder_dao import HolderDao
+
+pytestmark = pytest.mark.unit
+
+
+def _make_dao():
+    dao = HolderDao(MagicMock(spec=AsyncEngine))
+    dao._save_upsert = AsyncMock(return_value=5)
+    dao._read_db = AsyncMock(return_value=None)
+    dao._write_db = AsyncMock(return_value=0)
+    return dao
+
+
+@pytest.mark.asyncio
+async def test_save_valid():
+    dao = _make_dao()
+    df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240630"], "holder_num": [100]})
+    assert await dao.save_holder_number(df) == 5
+    dao._write_db.assert_called_once()
+```
+
+要点：用 `MagicMock(spec=AsyncEngine)` 构造 DAO 隔离真实 DB；对 `_save_upsert` / `_read_db` / `_write_db` 打 `AsyncMock` 桩；busy 写入路径等若涉事务须覆盖 `_guarded_begin`（可 `@asynccontextmanager` mock）。对应 [how-to.md 第 2 条流程第 5 步](../../docs/guides/how-to.md#2-新增一个-dao)。
+
+#### 模板 2：ViewModel 单测（state 快照 + subscribe 通知）
+
+```python
+import asyncio
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from ui.viewmodels.system_viewmodel import SystemViewModel
+
+pytestmark = pytest.mark.unit
+
+
+def _subscribe(vm):
+    snapshots = []
+    vm.subscribe(lambda s: snapshots.append(s))
+    return snapshots
+
+
+@pytest.mark.asyncio
+async def test_command_updates_state(monkeypatch):
+    # 覆盖 VM 依赖（ConfigHandler / TushareClient / ThreadPoolManager），
+    # 使 ThreadPoolManager.run_async 直接调用同步函数（避免线程池依赖）
+    mock_client = MagicMock()
+    mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
+
+    async def _mock_run_async(task_type, func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    mock_tp = MagicMock()
+    mock_tp.return_value.run_async = _mock_run_async
+
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
+
+    vm = SystemViewModel()
+    snapshots = _subscribe(vm)
+    await vm.on_tier_changed("points_5000")
+
+    assert vm.state.probe_result is not None
+    assert any(s.probe_result is not None for s in snapshots)  # subscribe 通知收到
+```
+
+要点：`vm.subscribe(cb)` 收集 state 快照；`await vm.<command>(...)` 触发；断言 `vm.state` 不可变快照 + 快照列表（验证订阅通知，对应 mvvm.md VM 契约）。VM 构造依赖外部 service 时用 `monkeypatch.setattr` 覆盖依赖（必要时 `MagicMock(spec=...)` 强制接口契约）。对应 [how-to.md 第 4 条流程第 5 步](../../docs/guides/how-to.md#4-新增一个-ui-视图)。
+
+#### 模板 3：异步取消单测（R2 取消传播）
+
+```python
+import asyncio
+import pytest
+from utils.async_utils import gather_return_exceptions_propagating_cancel
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_propagated():
+    async def ok():
+        return "ok"
+
+    async def cancel():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await gather_return_exceptions_propagating_cancel(ok(), cancel())
+```
+
+要点：R2（异常吞没）唯一可自动验证的表达方式即 `pytest.raises(asyncio.CancelledError)`。凡涉业务并发的循环/分组收集逻辑，须断言取消不被吞没。
+
+#### 模板 4：策略单测（Polars 夹具 + 依赖声明）
+
+```python
+import pandas as pd
+import polars as pl
+import pytest
+
+from data.persistence.quality_gate import QualityTier
+from strategies.market import VolumeBreakoutStrategy
+
+pytestmark = pytest.mark.unit
+
+
+def test_required_quality_tier():
+    assert VolumeBreakoutStrategy.required_quality_tier == QualityTier.SILVER
+
+
+def test_market_trend_filter_selects_in_range():
+    strategy = VolumeBreakoutStrategy()
+    df = pd.DataFrame({
+        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+        "pct_chg": [3.0, 8.0, 5.0],
+        "turnover_rate": [5.0, 5.0, 5.0],
+        "total_mv": [100.0, 200.0, 300.0],
+    })
+    lf = pl.from_pandas(df).lazy()
+    result = strategy._filter_logic(lf, {"params": {}}).collect()
+    assert set(result["ts_code"].to_list()) == {"000001.SZ", "000003.SZ"}
+```
+
+要点：先断言 `required_quality_tier` 类属性（质量门控依赖声明，对应 §3.2 强制要求）；用 `pd.DataFrame` → `pl.from_pandas().lazy()` 构造向量化输入，断言 `_filter_logic` 结果。对应 [how-to.md 第 3 条流程第 7 步](../../docs/guides/how-to.md#3-新增一个策略)。

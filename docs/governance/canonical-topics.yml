@@ -92,6 +92,7 @@ topics:
   - id: testing
     title: 新增测试
     canonical: docs/guides/testing.md
+    section: 测试编写模板
 
   - id: e2e-testing
     title: 新增/修改 E2E 测试
