@@ -10,9 +10,11 @@ if TYPE_CHECKING:
     from data.domain_services.market_data_service import MarketDataService
     from data.domain_services.offline_calendar import OfflineCalendar
     from data.domain_services.review_stats_service import (
+        AiAttributionRow,
         MetricStat,
         SampleGrade,
         StrategyStatRow,
+        compute_ai_attribution_stats,
         compute_strategy_review_stats,
         grade_for,
     )
@@ -53,6 +55,14 @@ def __getattr__(name):
         from data.domain_services.review_stats_service import StrategyStatRow
 
         return StrategyStatRow
+    if name == "AiAttributionRow":
+        from data.domain_services.review_stats_service import AiAttributionRow
+
+        return AiAttributionRow
+    if name == "compute_ai_attribution_stats":
+        from data.domain_services.review_stats_service import compute_ai_attribution_stats
+
+        return compute_ai_attribution_stats
     if name == "compute_strategy_review_stats":
         from data.domain_services.review_stats_service import compute_strategy_review_stats
 
@@ -73,6 +83,8 @@ __all__ = [
     "MetricStat",
     "SampleGrade",
     "StrategyStatRow",
+    "AiAttributionRow",
+    "compute_ai_attribution_stats",
     "compute_strategy_review_stats",
     "grade_for",
 ]

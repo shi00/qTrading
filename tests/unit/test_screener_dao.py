@@ -1302,3 +1302,23 @@ class TestScreenerDaoGetStrategyReviewStats:
         assert "window_days" in sql
         assert "GROUP BY" in sql
         assert "screening_history.benchmark_code" in sql
+
+
+class TestScreenerDaoGetAiAttributionStats:
+    """BIZ-04 第二层: get_ai_attribution_stats 聚合 SQL 构建 (mock 读通道)。"""
+
+    @pytest.mark.asyncio
+    async def test_builds_ai_attribution_aggregation_sql(self) -> None:
+        """构建 DISTINCT ON 最新快照 + ai_score 判定 has_ai + WIN/LOSS 计数聚合。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_ai_attribution_stats()
+
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt)
+        # DISTINCT ON 最新快照覆盖语义在 latest 子查询内 (外层 str 不内联), 其正确性由集成测试对真实库验证。
+        assert "window_days" in sql  # R4 参数化绑定, 无拼接注入
+        assert "win_cnt" in sql
+        assert "loss_cnt" in sql
+        assert "group by" in sql.lower()
+        dao._read_db_select.assert_awaited_once()

@@ -541,6 +541,10 @@ class _FakeScreenerViewModel:
         """UX-05: 模拟 VM load_strategy_stats (默认保持 strategy_stats 为空, 不触真实状态)."""
         self.method_calls.append("load_strategy_stats")
 
+    async def load_ai_attribution(self) -> None:
+        """BIZ-04: 模拟 VM load_ai_attribution (默认保持 ai_attribution 为空, 不触真实状态)."""
+        self.method_calls.append("load_ai_attribution")
+
     async def load_history_data(
         self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None
     ) -> Any:
@@ -1349,7 +1353,7 @@ class TestOnModeChange:
     """_on_mode_change: HISTORY/REALTIME 切换 + 同 mode 早返回."""
 
     def test_switch_to_history(self, screener_view_env) -> None:
-        """选 HISTORY → vm.switch_to_history + 调度复盘统计与历史树两次独立任务 (UX-05)."""
+        """选 HISTORY → vm.switch_to_history + 调度复盘统计/AI 归因/历史树三次独立任务 (UX-05 + BIZ-04)."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -1359,12 +1363,16 @@ class TestOnModeChange:
         _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
 
         assert "switch_to_history" in fake_vm.method_calls
-        # 两次独立 run_task: 先 _load_strategy_stats, 后 _load_history_tree(False)
+        # 三次独立 run_task: _load_strategy_stats, _load_ai_attribution, _load_history_tree(False)
         calls = [c.args for c in page.run_task.call_args_list]
-        assert len(calls) == 2, f"应调度 2 个加载任务, 实际: {calls}"
+        assert len(calls) == 3, f"应调度 3 个加载任务, 实际: {calls}"
         assert calls[0][0].__name__ == "_load_strategy_stats"
-        assert calls[1][0].__name__ == "_load_history_tree"
-        assert calls[1][1] is False
+        assert calls[1][0].__name__ == "_load_ai_attribution"
+        assert calls[2][0].__name__ == "_load_history_tree"
+        assert calls[2][1] is False
+        # BIZ-04: 实际执行 _load_ai_attribution 闭包, 覆盖其调用 VM.load_ai_attribution 路径
+        asyncio.run(calls[1][0]())
+        assert "load_ai_attribution" in fake_vm.method_calls
 
     def test_switch_to_realtime(self, screener_view_env) -> None:
         """选 REALTIME → vm.switch_to_realtime."""
@@ -3405,3 +3413,40 @@ class TestBuildHistoryTreeRowsVectorized:
         df = pd.DataFrame({"trade_date": ["20250728"]})
         with pytest.raises(KeyError, match="strategy_name"):
             HistoryModeMixin._build_history_tree_rows(df)
+
+
+class TestExecuteLoadAiAttribution:
+    """BIZ-04: _execute_load_ai_attribution 异常/取消路径独立单测 (成功路径在 switch_to_history 覆盖)。"""
+
+    @staticmethod
+    def _vm(exc: BaseException | None = None):
+        class _Vm:
+            async def load_ai_attribution(self) -> None:
+                if exc is not None:
+                    raise exc
+
+        return _Vm()
+
+    def test_exception_logs_and_shows_error_toast(self) -> None:
+        from ui.views.screener_view import _execute_load_ai_attribution
+
+        page = MagicMock()
+        page.show_toast = MagicMock()
+        with patch("ui.views.screener_view.DataSanitizer"):
+            asyncio.run(_execute_load_ai_attribution(self._vm(ValueError("boom")), page))
+        assert page.show_toast.call_count == 1
+        assert page.show_toast.call_args[0][1] == "error"
+
+    def test_exception_with_none_page_no_crash(self) -> None:
+        from ui.views.screener_view import _execute_load_ai_attribution
+
+        with patch("ui.views.screener_view.DataSanitizer"):
+            asyncio.run(_execute_load_ai_attribution(self._vm(ValueError("boom")), None))
+
+    def test_cancelled_error_propagates(self) -> None:
+        from ui.views.screener_view import _execute_load_ai_attribution
+
+        vm = self._vm(asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            asyncio.run(_execute_load_ai_attribution(vm, MagicMock()))
+        assert isinstance(excinfo.value, asyncio.CancelledError)  # R2: 取消信号必须传播, 不吞没

@@ -292,6 +292,66 @@ class ScreenerDao(BaseDao):
         )
         return await self._read_db_select(stmt)
 
+    async def get_ai_attribution_stats(self) -> pd.DataFrame:
+        """按 (strategy_name, benchmark_code, has_ai, trade_date) 返回 AI 归因日组合聚合（BIZ-04 第二层）。
+
+        口径与 ``get_strategy_review_stats`` 对齐（设计 v5）：
+        - 覆盖语义：同 (trade_date, strategy_name, ts_code) 仅保留最新快照
+          （DISTINCT ON ... ORDER BY run_id DESC），消除被淘汰股票行/多运行日加权残留。
+        - has_ai 分组：``ai_score IS NOT NULL`` 视为「历史上真实发生的 AI 判断」组
+          （AI 启用且产生结论），NULL 为无 AI 组。代理口径局限见 ADR-0009（无 AI 组可能
+          混入「AI 启用但失败/未确认」记录；组间差异含自选择偏差，相关非因果）。
+        - 指标独立 N：t1_pct / t5_pct / alpha 各以非 NULL 股票独立聚类求日组合均值与有效
+          样本数（AVG/COUNT 自动忽略 NULL）。
+        - 胜率：prediction_result 为 WIN/LOSS 的逐股计数。
+        - 窗口：近 REVIEW_STATS_WINDOW_DAYS 天。
+        全 SQLAlchemy Core（参数化 window_days），无 SQL 注入（R4）。
+        """
+        sh = ScreeningHistory.__table__
+        latest = (
+            sa.select(
+                sh.c.trade_date,
+                sh.c.strategy_name,
+                sh.c.ts_code,
+                sh.c.benchmark_code,
+                sh.c.ai_score,
+                sh.c.t1_pct,
+                sh.c.t5_pct,
+                sh.c.alpha,
+                sh.c.prediction_result,
+            )
+            .where(
+                sh.c.trade_date
+                >= sa.func.current_date() - sa.bindparam("window_days", REVIEW_STATS_WINDOW_DAYS, type_=sa.INTEGER)
+            )
+            # DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... run_id DESC
+            .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
+            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.run_id.desc())
+            .subquery("latest_ai_attribution")
+        )
+        has_ai = latest.c.ai_score.isnot(None).label("has_ai")
+        stmt = (
+            sa.select(
+                latest.c.trade_date,
+                latest.c.strategy_name,
+                latest.c.benchmark_code,
+                has_ai,
+                sa.func.count().label("daily_cnt"),
+                sa.func.avg(latest.c.t1_pct).label("t1_mean"),
+                sa.func.count(latest.c.t1_pct).label("t1_n"),
+                sa.func.avg(latest.c.t5_pct).label("t5_mean"),
+                sa.func.count(latest.c.t5_pct).label("t5_n"),
+                sa.func.avg(latest.c.alpha).label("alpha_mean"),
+                sa.func.count(latest.c.alpha).label("alpha_n"),
+                sa.func.count().filter(latest.c.prediction_result == "WIN").label("win_cnt"),
+                sa.func.count().filter(latest.c.prediction_result == "LOSS").label("loss_cnt"),
+            )
+            .select_from(latest)
+            .group_by(latest.c.trade_date, latest.c.strategy_name, latest.c.benchmark_code, has_ai)
+            .order_by(latest.c.strategy_name, latest.c.benchmark_code, has_ai, latest.c.trade_date)
+        )
+        return await self._read_db_select(stmt)
+
     async def get_pending_reviews(self):
         t = ScreeningHistory.__table__
         stmt = (
