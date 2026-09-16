@@ -339,6 +339,29 @@ class NewsInsightService:
             return
         # evidence_only / no_evidence：确定性/降级结果，不作为可缓存快照持久化
 
+    async def load_evidence_preview(
+        self,
+        ts_code: str,
+        stock_name: str | None = None,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> tuple[list[EvidenceDocument], dict]:
+        """仅加载并整理证据（UI 打开详情的 preview 阶段，不触发 AI，§12 第 2 步）。
+
+        ``select_stock`` 阶段由 VM 调用以展示材料与覆盖状态；返回 ``(evidence, coverage)``，
+        与 ``analyze`` 内部证据加载共用同一实现（``_window`` + ``_load_evidence``），
+        避免 UI 侧复制证据整理逻辑。
+        """
+        if not ts_code:
+            raise ValueError("ts_code is required")
+        window_start_utc, window_end_utc, _s, _e = self._window()
+        return await self._load_evidence(ts_code, stock_name, window_start_utc, window_end_utc, cancel_event)
+
+    def analysis_window_label(self) -> str:
+        """分析窗口的可展示标签（CST 自然日）``YYYY-MM-DD ~ YYYY-MM-DD``。"""
+        _start_utc, _end_utc, start_cst, end_cst = self._window()
+        return f"{start_cst.isoformat()} ~ {end_cst.isoformat()}"
+
     # ------------------------------------------------------------------
     # 主流程
     # ------------------------------------------------------------------
