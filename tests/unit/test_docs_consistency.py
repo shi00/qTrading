@@ -3529,6 +3529,26 @@ class TestDocsIndexCompleteness:
         errors = check_docs_index_completeness()
         assert any("b.md" in e and "未被 CONTRIBUTING.md" in e for e in errors), f"应检出未覆盖 b.md, got: {errors}"
 
+    def test_detects_uncovered_yml_file(self, tmp_path, monkeypatch):
+        """docs/ 下未覆盖的 .yml 治理文件同样应被索引门禁检出（DS-10 范围扩展）."""
+        from check_docs_consistency import check_docs_index_completeness
+
+        docs_dir = tmp_path / "docs"
+        gov = docs_dir / "governance"
+        gov.mkdir(parents=True)
+        (docs_dir / "README.md").write_text("# Index\n", encoding="utf-8")
+        (gov / "orphan.yml").write_text("rules: []\n", encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# Contrib\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.DOCS_README_PATH", docs_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_docs_index_completeness()
+        assert any("orphan.yml" in e and "未被 CONTRIBUTING.md" in e for e in errors), (
+            f"应检出未覆盖 orphan.yml, got: {errors}"
+        )
+
     def test_directory_link_covers_subfiles(self, tmp_path, monkeypatch):
         """目录级引用应覆盖其下全部文件（含子目录）."""
         from check_docs_consistency import check_docs_index_completeness
@@ -3586,6 +3606,72 @@ class TestDocsIndexCompleteness:
         assert ROOT / "docs" / "reviews" / "evals" not in _GITIGNORED_ARTIFACT_DIRS
         assert ROOT / "docs" / "reviews" / "evals" in _EX_REF_EXCLUDED_DIRS
         assert _LOCAL_ARTIFACT_DIRS == _GITIGNORED_ARTIFACT_DIRS
+
+
+class TestRulesetChangelogVersion:
+    """规则集变更日志顶行版本与宪法正本 ruleset_version 一致（DS-10）."""
+
+    def test_changelog_pass_on_current_repo(self):
+        """真实 ruleset-changelog.md 顶行应等于 CLAUDE.md ruleset_version（无错误）."""
+        from check_docs_consistency import check_ruleset_changelog_version
+
+        assert check_ruleset_changelog_version() == []
+
+    def test_detects_version_drift(self, tmp_path, monkeypatch):
+        """变更日志顶行版本与 CLAUDE ruleset_version 不一致 → 报错."""
+        from check_docs_consistency import check_ruleset_changelog_version
+
+        changelog = tmp_path / "ruleset-changelog.md"
+        changelog.write_text(
+            "# Changelog\n\n| version | date | note |\n|---|---|---|\n| 1.2.0 | 2026-09-14 | drift |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+
+        errors = check_ruleset_changelog_version()
+        assert any("!= CLAUDE.md" in e for e in errors), f"应检出版本漂移, got: {errors}"
+
+    def test_missing_changelog(self, tmp_path, monkeypatch):
+        """变更日志文件不存在 → 报错."""
+        from check_docs_consistency import check_ruleset_changelog_version
+
+        missing = tmp_path / "ruleset-changelog.md"
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", missing)
+        assert any("规则集变更日志不存在" in e for e in check_ruleset_changelog_version())
+
+    def test_no_valid_version_row(self, tmp_path, monkeypatch):
+        """变更记录表首行无合法 x.y.z 版本号 → 报错."""
+        from check_docs_consistency import check_ruleset_changelog_version
+
+        changelog = tmp_path / "ruleset-changelog.md"
+        changelog.write_text("# Changelog\n\n| version | date | note |\n|---|---|---|\n", encoding="utf-8")
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("> - ruleset_version: 1.3.0\n> - last_reviewed: 2026-09-03\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+
+        errors = check_ruleset_changelog_version()
+        assert any("未找到首行合法" in e for e in errors), f"应检出缺版本号, got: {errors}"
+
+    def test_claude_missing_ruleset_version(self, tmp_path, monkeypatch):
+        """CLAUDE.md 缺 ruleset_version → 报错."""
+        from check_docs_consistency import check_ruleset_changelog_version
+
+        changelog = tmp_path / "ruleset-changelog.md"
+        changelog.write_text(
+            "# Changelog\n\n| version | date | note |\n|---|---|---|\n| 1.3.0 | 2026-09-14 | ok |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("# no metadata\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+
+        errors = check_ruleset_changelog_version()
+        assert any("缺少 ruleset_version" in e for e in errors), f"应检出缺元数据, got: {errors}"
 
 
 class TestReviewsIndexCompleteness:

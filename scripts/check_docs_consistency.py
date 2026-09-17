@@ -83,6 +83,7 @@ KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
 REDLINES_YAML_PATH = ROOT / "docs" / "governance" / "redlines.yml"
 EXCEPTIONS_YAML_PATH = ROOT / "docs" / "governance" / "exceptions.yml"
 CANONICAL_TOPICS_YAML_PATH = ROOT / "docs" / "governance" / "canonical-topics.yml"
+RULESET_CHANGELOG_PATH = ROOT / "docs" / "governance" / "ruleset-changelog.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
@@ -1683,6 +1684,61 @@ def check_ruleset_metadata_consistency() -> list[str]:
     return errors
 
 
+def check_ruleset_changelog_version() -> list[str]:
+    """检查项：规则集变更日志顶行版本与宪法正本一致（DS-10）。
+
+    ruleset-changelog.md「变更记录」表在每次 ruleset_version 递增时于顶部追加一行，
+    首条数据行应为当前正本最新版本。断言其与 CLAUDE.md 的 ruleset_version 一致
+    （CLAUDE/CONTRIBUTING/AGENTS 三文件 ruleset_version 同步已由
+    check_ruleset_metadata_consistency 守护，故取 CLAUDE.md 为正本即可）。
+    变更日志缺失、首行无合法版本号、或版本漂移时一律 fail-closed 报错。
+    """
+    errors: list[str] = []
+    if not RULESET_CHANGELOG_PATH.exists():
+        try:
+            display = RULESET_CHANGELOG_PATH.relative_to(ROOT)
+        except ValueError:
+            display = RULESET_CHANGELOG_PATH  # 注入/外部路径不在 ROOT 下
+        errors.append(f"规则集变更日志不存在: {display}")
+        return errors
+
+    changelog_ver: str | None = None
+    changelog_lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
+    # 锚定「变更记录」标题后的片段：避免文件其它位置出现 x.y.z 首列行干扰取行（对抗检视 P2）
+    start = 0
+    for _i, _line in enumerate(changelog_lines):
+        if _line.strip() == "## 变更记录":
+            start = _i + 1
+            break
+    for line in changelog_lines[start:]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if re.fullmatch(r"\|[\s\-:]+\|", stripped):
+            continue  # 表格分隔行（|---|）
+        cols = [c.strip() for c in stripped.strip("|").split("|")]
+        if not cols or cols[0] in {"", "ruleset_version"}:
+            continue  # 表头（首列固定为 ruleset_version 标题）或空行
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]):
+            changelog_ver = cols[0]
+            break  # 首条数据行即最新版本
+
+    if changelog_ver is None:
+        errors.append("ruleset-changelog.md「变更记录」表未找到首行合法 x.y.z 版本号")
+        return errors
+
+    claude_ver, _ = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
+    if claude_ver is None:
+        errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
+        return errors
+    if claude_ver != changelog_ver:
+        errors.append(
+            f"ruleset-changelog 顶行版本({changelog_ver}) != CLAUDE.md ruleset_version({claude_ver}) "
+            "(ruleset_version 递增须在 ruleset-changelog.md 变更记录表顶部追加一行)"
+        )
+    return errors
+
+
 # --- DOC-04: 决策树与其机器可读镜像的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
 # CLAUDE.md §1.8「必读入口」列既可能以 markdown 链接 `[text](./docs/x.md)` 出现，
 # 也可能以裸路径文本出现（如 `docs/guides/how-to.md「7. 新增回测配置」`、`CONTRIBUTING.md「...」`）。
@@ -1915,12 +1971,15 @@ def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
 def check_docs_index_completeness() -> list[str]:
     """检查项 15：文档索引全覆盖（DOC-07 / DOC-11）。
 
-    断言 `docs/**/*.md` 中每个文件（排除 docs/README.md 自身）都能在
+    断言 `docs/` 下每个治理文件（markdown + yml/yaml/json）都能在
     `CONTRIBUTING.md`「文档索引」或 `docs/README.md`「目录结构」中被引用，
     目录级引用（指向目录的链接）视为覆盖其下全部文件。
 
     这是 check_flet_hub_completeness() 向全 docs 目录的推广，同时闭合
     DOC-07（reviews 检视报告不可发现）与 DOC-11（索引自称全覆盖实缺目录）。
+    DS-10：扫描范围由仅 `.md` 扩展为 `.md`/`.yml`/`.yaml`/`.json`，使
+    docs/ 下非 markdown 治理文件（redlines.yml / canonical-topics.yml 等）
+    同样纳入索引全覆盖门禁，避免新增治理文件成为不可发现的暗坑。
     """
     errors: list[str] = []
     if not DOCS_README_PATH.exists():
@@ -1928,7 +1987,9 @@ def check_docs_index_completeness() -> list[str]:
 
     docs_root = DOCS_README_PATH.parent
     index_sources = [CONTRIBUTING_PATH, DOCS_README_PATH]
-    for doc in sorted(docs_root.rglob("*.md")):
+    covered_suffixes = (".md", ".yml", ".yaml", ".json")
+    candidates = sorted(p for p in docs_root.rglob("*") if p.is_file() and p.suffix in covered_suffixes)
+    for doc in candidates:
         if doc == DOCS_README_PATH:
             continue
         # 真实 gitignored 本地产物 / 归档目录豁免：Path.rglob 不识别 .gitignore，未跟踪/被忽略产物
@@ -2402,6 +2463,7 @@ def main() -> int:
     # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
     # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
     all_errors.extend(check_ruleset_metadata_consistency())
+    all_errors.extend(check_ruleset_changelog_version())
     all_errors.extend(check_decision_tree_mapping())
     all_errors.extend(check_canonical_routing())
     all_errors.extend(check_docs_index_completeness())
@@ -2427,7 +2489,7 @@ def main() -> int:
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "ADR 索引完整性）"
+        "规则集变更日志版本一致 / ADR 索引完整性）"
     )
     return 0
 
