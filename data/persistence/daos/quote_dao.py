@@ -300,6 +300,16 @@ class QuoteDao(BaseDao):
         ts_code_list: list | None = None,
         suppress_errors: bool = True,
     ):
+        """查询日线行情，返回按 (ts_code, trade_date) 升序的行序（DAO 契约，D3-M3）。
+
+        行序是契约：下游普遍依赖 (ts_code, trade_date) 有序做滚动窗口 / shift / iloc[-1]。
+        两条返回路径必须一致：
+        - 直查分支（不传 ts_code_list）：本方法在 WHERE 条件拼完后追加
+          ``ORDER BY ts_code, trade_date``（见下方直查分支，与 get_index_daily_range 先例一致）；
+        - ts_code_list 分块分支：chunked_in_query 各块内 SQL 虽逐块排序，但
+          ``pd.concat(ignore_index=True)`` 不保证跨块全局有序，故须在 concat 后
+          由方法内 ``sort_values(["ts_code", "trade_date"])`` 统一排序。
+        """
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
         idx = 1
@@ -334,6 +344,10 @@ class QuoteDao(BaseDao):
                     df = df.sort_values(sort_cols, ignore_index=True)
             return attach_daily_quotes_column_units(df)
 
+        # D3-M3: 直查分支补 ORDER BY，保证与 ts_code_list 分支（concat 后 sort_values）
+        # 返回一致的行序契约。仅在此处追加，避免破坏上方 chunked 分支的
+        # "AND ts_code IN ({placeholders})" 拼接（ORDER BY 需在全部 WHERE 之后）。
+        sql += " ORDER BY ts_code, trade_date"
         df = await self._read_db(sql, params, suppress_errors=suppress_errors)
         return attach_daily_quotes_column_units(df)
 
