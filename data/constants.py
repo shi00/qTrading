@@ -325,6 +325,12 @@ HEALTH_REPORT_ORDER = [
     "fina_audit",
 ]
 
+# R22 水位键前缀白名单（D3-m1）：checkpoint/高水位语义的持久化状态键前缀集中登记于此。
+# 语义：匹配这些前缀的 key 写入必须单调（优先 *_max/GREATEST 语义），禁止用 set_app_state
+# 无条件覆盖写。新增水位键时在此登记前缀，并被 scripts/check_redlines.py 的 check_R22 守护。
+# 本清单为唯一真相源，data/sync/historical.py 的 _WATERMARK_KEY_PREFIX 必须引用此项而非硬编码。
+WATERMARK_KEY_PREFIXES: tuple[str, ...] = ("sync_attempted_upto",)
+
 # Tushare 积分档位枚举（5 档，按积分升序）
 # 单一真相源：所有引用此枚举的代码必须从此常量派生，禁止散落硬编码字符串。
 # 注：tushare_client.py 中的 _POINT_TIER_PRESETS / _TIER_ORDER / _TIER_API_COVERAGE

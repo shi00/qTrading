@@ -28,6 +28,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _base_class_names,
     _check_R16_in_tree,
     _check_R20_in_tree,
+    _check_R22_in_tree,
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
@@ -39,6 +40,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _extract_dao_classes,
     _extract_table_definition_keys,
     _extract_tablenames_from_models,
+    _extract_watermark_key_prefixes,
     _is_settings_tabs_dir,
     _is_singleton_class,
     _is_strategy_subclass,
@@ -48,6 +50,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R15,
     check_R16_vm_init_singleton_construction,
     check_R20,
+    check_R22,
     check_R4,
     check_R4_in_tests,
     check_R4_literal_assignments,
@@ -1007,6 +1010,113 @@ class TestR20IntegrationOnCurrentCodebase:
 
         monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
         assert check_redlines.check_R20() is None
+
+
+class TestR22:
+    """R22 纯函数测试：set_app_state 写水位前缀 key 的单调检测与豁免边界。
+
+    覆盖窄判定：set_app_state（非 max）写白名单前缀 → 报错；set_app_state_max 合法；
+    非水位 key / 动态 key / 非常量 f-string 插值 → 豁免（保持人工评审）。
+    """
+
+    R22_PREFIXES = ["sync_attempted_upto"]
+
+    def _check(self, code: str, path: Path) -> list[str]:
+        tree = ast.parse(code)
+        return _check_R22_in_tree(tree, path, list(self.R22_PREFIXES))
+
+    def test_set_app_state_with_watermark_prefix_flagged(self, tmp_path):
+        """set_app_state 写水位前缀 key（positional）应报 R22。"""
+        code = "set_app_state('quotes', 'sync_attempted_upto:daily_quotes')\n"
+        errors = self._check(code, tmp_path / "m.py")
+        assert len(errors) == 1
+        assert "R22" in errors[0]
+        assert "set_app_state_max" in errors[0]
+
+    def test_set_app_state_with_keyword_key_flagged(self, tmp_path):
+        """set_app_state 以 keyword key= 写水位前缀同样报 R22。"""
+        code = "set_app_state(state='quotes', key='sync_attempted_upto:fin')\n"
+        errors = self._check(code, tmp_path / "m.py")
+        assert len(errors) == 1
+        assert "R22" in errors[0]
+
+    def test_set_app_state_max_with_watermark_prefix_allowed(self, tmp_path):
+        """set_app_state_max 写水位前缀为单调写入，应豁免。"""
+        code = "set_app_state_max('quotes', 'sync_attempted_upto:daily_quotes')\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_set_app_state_with_non_watermark_key_allowed(self, tmp_path):
+        """set_app_state 写非水位前缀 key 不受 R22 约束。"""
+        code = "set_app_state('schema', 'db_version')\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_dynamic_key_skipped(self, tmp_path):
+        """set_app_state 写变量 key 无法静态判定，豁免（人工评审兜底）。"""
+        code = "set_app_state('quotes', key)\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_fstring_key_skipped(self, tmp_path):
+        """f-string key（含插值片段，即使前置常量前缀）无法静态判定，豁免（人工评审兜底）。"""
+        code = "set_app_state('quotes', f'{PREFIX}:daily_quotes')\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_fstring_key_with_interpolated_nonconst_part_skipped(self, tmp_path):
+        """f-string 含动态插值片段（f'{PREFIX}:{table}'）同样豁免。"""
+        code = "set_app_state('quotes', f'{PREFIX}:{table}')\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_func_name_not_set_app_state_ignored(self, tmp_path):
+        """函数名非 set_app_state（如 set_app_state_max / 其他调用）不误报。"""
+        code = "persist_state('quotes', 'sync_attempted_upto:daily_quotes')\n"
+        assert self._check(code, tmp_path / "m.py") == []
+
+    def test_empty_prefixes_returns_empty(self, tmp_path):
+        """prefixes 为空时不做判定（不产生误报、丢失守护）。"""
+        tree = ast.parse("set_app_state('quotes', 'sync_attempted_upto:daily_quotes')\n")
+        assert _check_R22_in_tree(tree, tmp_path / "m.py", []) == []
+
+    def test_prefixed_attr_func_flagged(self, tmp_path):
+        """属性形态调用（obj.set_app_state）同样匹配函数名。"""
+        code = "cache.set_app_state('quotes', 'sync_attempted_upto:daily_quotes')\n"
+        errors = self._check(code, tmp_path / "m.py")
+        assert len(errors) == 1
+        assert "R22" in errors[0]
+
+
+class TestR22ExtractPrefixedKey:
+    """R22 白名单前缀提取：从 constants.py 元组字面量（含 AnnAssign 带注解形态）解析。"""
+
+    def test_extract_prefixes_from_constants(self, tmp_path):
+        """从带类型注解的元组常量（AnnAssign）提取前缀。"""
+        constants_py = tmp_path / "constants.py"
+        constants_py.write_text(
+            'WATERMARK_KEY_PREFIXES: tuple[str, ...] = (\n    "sync_attempted_upto",\n    "next_watermark",\n)\n',
+            encoding="utf-8",
+        )
+        prefixes = _extract_watermark_key_prefixes(constants_py)
+        assert "sync_attempted_upto" in prefixes
+        assert "next_watermark" in prefixes
+
+    def test_extract_prefixes_from_plain_assign(self, tmp_path):
+        """普通赋值（Assign，无类型注解）同样解析。"""
+        constants_py = tmp_path / "constants.py"
+        constants_py.write_text(
+            'WATERMARK_KEY_PREFIXES = ("sync_attempted_upto",)\n',
+            encoding="utf-8",
+        )
+        assert _extract_watermark_key_prefixes(constants_py) == ["sync_attempted_upto"]
+
+    def test_extract_prefixes_from_missing_constants_returns_empty(self, tmp_path):
+        """constants 文件不存在或无该常量时返回空清单（不抛错）。"""
+        assert _extract_watermark_key_prefixes(tmp_path / "nope.py") == []
+
+
+class TestR22IntegrationOnCurrentCodebase:
+    """R22 集成测试：当前代码库不应有任何 set_app_state 写白名单前缀 key 的调用。"""
+
+    def test_check_R22_runs_clean_on_codebase(self):
+        """全库扫描（排除 ui/app/tests 后）R22 无报警（合规基线契约）。"""
+        assert check_R22() == []
 
 
 # ============================================================================

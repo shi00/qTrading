@@ -970,6 +970,122 @@ def check_R_tushare_token_log() -> list[str]:
 
 
 # ============================================================================
+# R22: 水位线单调性（部分自动化，D3-m1）
+# ============================================================================
+
+_R22_CONSTANTS_PATH = Path("data").joinpath("constants.py")
+# set_app_state_max 为单调写入，合法；set_app_state 为无条件覆盖写，写水位 key 即违规。
+
+
+def _extract_watermark_key_prefixes(constants_path: Path) -> list[str]:
+    """从 data/constants.py 的 WATERMARK_KEY_PREFIXES 元组字面量提取前缀清单。
+
+    用 AST 解析而非 import data.constants，避免 check 脚本拉取 data 层完整依赖
+    （R4 扫描需独立于业务包运行）。解析失败返回空清单（不产生误报，仅丢失守护）。
+    """
+    tree = _parse_module(constants_path)
+    if tree is None:
+        return []
+    for node in ast.walk(tree):
+        # 兼容带显式类型注解的常量赋值（AST 为 AnnAssign）与普通赋值（Assign）
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if value is None:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name) or target.id != "WATERMARK_KEY_PREFIXES":
+                continue
+            if not isinstance(value, (ast.Tuple, ast.Constant)):
+                continue
+            elements = value.elts if isinstance(value, ast.Tuple) else [value]
+            return [el.value for el in elements if isinstance(el, ast.Constant) and isinstance(el.value, str)]
+    return []
+
+
+def _resolve_static_str_key(node: ast.AST) -> str | None:
+    """尝试将 set_app_state 的 key 参数解析为静态字符串字面量。
+
+    仅纯字符串字面量（ast.Constant str）可静态解析；变量 / f-string 插值
+    （含 `f"{PREFIX}:{table}"` 这类前置常量前缀）含动态片段均返回 None，
+    不纳入自动检查（保持人工评审兜底，诚实降级范围）。
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _check_R22_in_tree(tree: ast.Module, source_path: Path, prefixes: list[str]) -> list[str]:
+    """纯函数：检查 AST 中 set_app_state（非 max）调用写水位前缀 key。"""
+    errors: list[str] = []
+    if not prefixes:
+        return errors
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        rel = source_path
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        # 精确匹配 set_app_state / set_app_state_max 函数名（Name 或 Attribute.attr）
+        func = node.func
+        if isinstance(func, ast.Name):
+            func_name = func.id
+        elif isinstance(func, ast.Attribute):
+            func_name = func.attr
+        else:
+            continue
+        if func_name != "set_app_state":  # 仅非 max 变体违规；set_app_state_max 合法
+            continue
+
+        # 定位 key 参数（位置第 2 个，或 keyword key=）
+        key_node: ast.AST | None = None
+        if len(node.args) >= 2:
+            key_node = node.args[1]
+        else:
+            for kw in node.keywords:
+                if kw.arg == "key":
+                    key_node = kw.value
+                    break
+        if key_node is None:
+            continue
+
+        key = _resolve_static_str_key(key_node)
+        if key is None:
+            continue
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                errors.append(
+                    f"{rel}:{node.lineno}: R22 水位线单调性 — set_app_state 写水位前缀 key {key[:40]!r} "
+                    f"(匹配白名单前缀 {prefix!r})，必须改用 set_app_state_max 保证单调写入"
+                )
+                break
+    return errors
+
+
+def check_R22() -> list[str]:
+    """R22（部分自动化，D3-m1）：扫描对 set_app_state 写水位前缀 key 的调用。
+
+    水位 key 语义（data/constants.py 的 WATERMARK_KEY_PREFIXES 白名单）必须单调写入
+    （set_app_state_max）；用 set_app_state 无条件覆盖写即违规。仅对静态可解析的
+    字符串字面量 key 判定，动态变量 key 无法静态分析，保持人工评审（诚实降级范围）。
+    """
+    prefixes = _extract_watermark_key_prefixes(ROOT / _R22_CONSTANTS_PATH)
+    errors: list[str] = []
+    for p in _iter_py_files(ROOT, exclude_dirs=_SKIP_DIRS | frozenset({"ui", "app"})):
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        errors.extend(_check_R22_in_tree(tree, p, prefixes))
+    return errors
+
+
+# ============================================================================
 # R_no_bare_font_size_in_ui: UI 层裸字号数值拦截（必须用 AppStyles.FONT_SIZE_* token）
 # ============================================================================
 
@@ -1519,6 +1635,7 @@ def main() -> int:
         ("R_tushare_token_log", check_R_tushare_token_log()),
         ("R_lazy_import_whitelist", check_R_lazy_import_whitelist()),
         ("UI 渲染期副作用 (UIX-10)", check_no_component_render_side_effects()),
+        ("R22 水位线单调性 (D3-m1)", check_R22()),
     ]
     # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr
     check_R4_fstring_sql()
@@ -1535,7 +1652,7 @@ def main() -> int:
         return 1
 
     print(
-        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用）"
+        "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用 + R22 水位线单调性）"
     )
     return 0
 
