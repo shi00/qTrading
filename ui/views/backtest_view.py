@@ -237,6 +237,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             commission_rate=config["commission_rate"],
             stamp_duty_rate=config["stamp_duty_rate"],
             slippage_bps=config["slippage_bps"],
+            on_empty_signal=config["on_empty_signal"],
         )
         try:
             page = ft.context.page

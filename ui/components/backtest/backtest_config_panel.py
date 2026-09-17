@@ -95,6 +95,7 @@ def _get_config_from_state(
     end_date: date,
     initial_capital_str: str,
     rebalance_freq: str,
+    on_empty_signal: str,
     max_positions_str: str,
     commission: float,
     stamp_duty_auto: bool,
@@ -127,6 +128,7 @@ def _get_config_from_state(
         "end_date": end_date,
         "initial_capital": initial_capital,
         "rebalance_freq": rebalance_freq or "signal",
+        "on_empty_signal": on_empty_signal or "hold",
         "max_position_count": max_positions,
         "commission_rate": commission / 10000,
         "stamp_duty_rate": stamp_duty_rate_val,
@@ -188,6 +190,7 @@ def BacktestConfigPanel(
     end_date, set_end_date = ft.use_state(today)
     initial_capital, set_initial_capital = ft.use_state("1000000")
     rebalance_freq, set_rebalance_freq = ft.use_state("signal")
+    on_empty_signal, set_on_empty_signal = ft.use_state("hold")
     max_positions, set_max_positions = ft.use_state("50")
     commission, set_commission = ft.use_state(3.0)
     stamp_duty_auto, set_stamp_duty_auto = ft.use_state(True)
@@ -265,6 +268,7 @@ def BacktestConfigPanel(
                 end_date=end_date,
                 initial_capital_str=initial_capital,
                 rebalance_freq=rebalance_freq,
+                on_empty_signal=on_empty_signal,
                 max_positions_str=max_positions,
                 commission=commission,
                 stamp_duty_auto=stamp_duty_auto,
@@ -344,6 +348,22 @@ def BacktestConfigPanel(
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
         color=AppColors.INPUT_TEXT,
         on_select=safe_on_select(_on_rebalance_select),
+    )
+
+    def _on_empty_signal_select(e: ft.ControlEvent) -> None:
+        set_on_empty_signal(get_control_value(e.control, ft.Dropdown) or "hold")
+
+    on_empty_signal_dropdown = ft.Dropdown(
+        label=I18n.get("backtest_on_empty_signal"),
+        options=[
+            ft.dropdown.Option("hold", I18n.get("backtest_on_empty_signal_hold")),
+            ft.dropdown.Option("liquidate", I18n.get("backtest_on_empty_signal_liquidate")),
+        ],
+        value=on_empty_signal,
+        bgcolor=AppColors.INPUT_BG,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        color=AppColors.INPUT_TEXT,
+        on_select=safe_on_select(_on_empty_signal_select),
     )
 
     def _on_max_positions_change(e: ft.ControlEvent) -> None:
@@ -507,6 +527,11 @@ def BacktestConfigPanel(
                         ),
                         ft.Column(
                             [rebalance_dropdown],
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
+                        ft.Column(
+                            [on_empty_signal_dropdown],
                             col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),

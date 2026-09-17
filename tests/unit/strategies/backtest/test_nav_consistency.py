@@ -9,6 +9,7 @@
 """
 
 from datetime import date
+from dataclasses import replace
 
 import polars as pl
 import pytest
@@ -692,7 +693,9 @@ class TestLastKnownPriceValuation:
         """
         卖出持仓后，_last_known_prices 中对应缓存应被清理。
         """
-        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator = PortfolioSimulator(
+            replace(config, on_empty_signal="liquidate"), TransactionCostModel(TransactionCostConfig())
+        )
 
         # Day 1: 买入
         signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
@@ -805,6 +808,7 @@ class TestNavNoJumpOnEntry:
             cash_reserve_pct=0.0,
             execution_price="next_close",
             rebalance_freq="signal",
+            on_empty_signal="liquidate",
         )
         simulator = PortfolioSimulator(config, cost_model)
 

@@ -454,6 +454,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         max_position_count: int = 50,
         benchmark_code: str = DEFAULT_BENCHMARK_INDEX,
         risk_free_rate: float = 0.02,
+        on_empty_signal: str = "hold",
     ) -> BacktestConfig:
         """创建回测配置。"""
         return BacktestConfig(
@@ -468,6 +469,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             max_position_count=max_position_count,
             benchmark_code=benchmark_code,
             risk_free_rate=risk_free_rate,
+            on_empty_signal=on_empty_signal,  # type: ignore[arg-type]
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
