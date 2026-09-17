@@ -511,6 +511,27 @@ class TestOversoldComputeSectorStats(unittest.TestCase):
         self.assertIn("白酒Ⅱ", result)
         self.assertEqual(result["白酒Ⅱ"]["up_count"], 1)
 
+    def test_null_industry_grouped_as_unknown(self):
+        """D2-m2: industry_sw_l2 为 NULL 的样本不应被 groupby dropna=True 静默丢弃，
+        应归入「未知」组，使行业计数口径完整。"""
+        s = OversoldStrategy()
+        data = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "industry_sw_l2": ["电子", None, float("nan")],
+                "pct_chg": [1.0, -2.0, 0.5],
+            }
+        )
+        result = s._compute_sector_stats(data)
+        self.assertIn("电子", result)
+        self.assertIn("未知", result)
+        self.assertEqual(result["未知"]["count"], 2)
+        self.assertEqual(result["未知"]["up_count"], 1)
+        self.assertEqual(result["未知"]["down_count"], 1)
+        # 总样本数不丢失：电子 1 + 未知 2 = 3
+        total_count = sum(stats["count"] for stats in result.values())
+        self.assertEqual(total_count, 3)
+
 
 class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
     def test_shrink_trend(self):

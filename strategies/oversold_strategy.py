@@ -508,7 +508,12 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             return {}
 
         stats = {}
-        for industry, group in screening_data.groupby("industry_sw_l2"):
+        for industry, group in screening_data.groupby("industry_sw_l2", dropna=False):
+            # D2-m2: groupby 默认 dropna=True 会静默丢弃 industry_sw_l2 为 NULL 的样本
+            # （LATERAL join 无申万归属时返回 NULL），使行业计数口径偏小；
+            # dropna=False 保留后归入「未知」，计数口径完整。
+            if pd.isna(industry):
+                industry = "未知"
             stats[industry] = {
                 "count": len(group),
                 "up_count": (group["pct_chg"] > 0).sum(),
