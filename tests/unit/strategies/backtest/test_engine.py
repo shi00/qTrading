@@ -2,6 +2,7 @@
 # pyright: reportAttributeAccessIssue=false
 
 import math
+from dataclasses import replace
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1398,7 +1399,7 @@ class TestEngineEndToEndPipeline:
             }
         )
 
-        simulator = PortfolioSimulator(engine.config, engine.cost_model)
+        simulator = PortfolioSimulator(replace(engine.config, on_empty_signal="liquidate"), engine.cost_model)
         simulator.positions["000001.SZ"] = {
             "volume": 100,
             "cost_basis": 1000.0,

@@ -401,6 +401,19 @@ class TestBacktestConfigPanelMount:
         dd = _find_dropdown(result, "i18n[backtest_rebalance_freq]")
         assert dd.value == "signal"
 
+    def test_render_includes_on_empty_signal_options(self) -> None:
+        """on_empty_signal_dropdown 含 2 个选项 (hold/liquidate)。"""
+        _, _, result, _ = _render_panel()
+        dd = _find_dropdown(result, "i18n[backtest_on_empty_signal]")
+        keys = {o.key for o in dd.options}
+        assert keys == {"hold", "liquidate"}
+
+    def test_on_empty_signal_dropdown_default_value(self) -> None:
+        """on_empty_signal_dropdown 默认 value = 'hold'。"""
+        _, _, result, _ = _render_panel()
+        dd = _find_dropdown(result, "i18n[backtest_on_empty_signal]")
+        assert dd.value == "hold"
+
 
 # ============================================================================
 # 组件运行时: _on_run_click
@@ -418,9 +431,10 @@ class TestOnRunClick:
         on_run.assert_called_once()
         config = on_run.call_args.args[0]
         assert isinstance(config, dict)
+        assert config["on_empty_signal"] == "hold"
 
     def test_run_click_config_has_required_keys(self) -> None:
-        """config dict 含 8 个必需 key。"""
+        """config dict 含 9 个必需 key。"""
         on_run, _, result, _ = _render_panel()
         run_btn = _find_run_button(result)
         _invoke(run_btn.on_click, _make_event())
@@ -430,6 +444,7 @@ class TestOnRunClick:
             "end_date",
             "initial_capital",
             "rebalance_freq",
+            "on_empty_signal",
             "max_position_count",
             "commission_rate",
             "stamp_duty_rate",

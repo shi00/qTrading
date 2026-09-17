@@ -304,6 +304,7 @@ def _make_config() -> dict:
         "end_date": "2024-12-31",
         "initial_capital": 1_000_000.0,
         "rebalance_freq": "signal",
+        "on_empty_signal": "hold",
         "max_position_count": 50,
         "commission_rate": 3e-4,
         "stamp_duty_rate": 1e-3,
@@ -488,7 +489,7 @@ class TestOnRunBacktest:
     """_on_run_backtest: create_config 参数 / page=None 守卫 / page.run_task 调用."""
 
     def test_create_config_called_with_correct_args(self, backtest_view_env) -> None:
-        """有策略 → vm.create_config 参数正确性 (8 个字段全部透传)."""
+        """有策略 → vm.create_config 参数正确性 (9 个字段全部透传)."""
         env = backtest_view_env
         fake_vm = env["fake_vm"]
         on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
@@ -499,6 +500,7 @@ class TestOnRunBacktest:
             end_date="2024-12-31",
             initial_capital=1_000_000.0,
             rebalance_freq="signal",
+            on_empty_signal="hold",
             max_position_count=50,
             commission_rate=3e-4,
             stamp_duty_rate=1e-3,

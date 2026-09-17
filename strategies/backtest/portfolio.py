@@ -101,7 +101,7 @@ class PortfolioSimulator:
           3. 新增或需增持/减持到目标权重的标的 → 差额调仓。
         """
         if day_signals.is_empty():
-            self._sell_all_positions(exec_date, day_quotes)
+            self._handle_empty_signal(exec_date, day_quotes)
             return
 
         from strategies.backtest.position_sizer import apply_max_weight_constraint, get_sizer
@@ -123,7 +123,7 @@ class PortfolioSimulator:
             )
         target_weights = {r["ts_code"]: float(r["weight"]) for r in weights_df.iter_rows(named=True)}
         if not target_weights or sum(target_weights.values()) <= 0:
-            self._sell_all_positions(exec_date, day_quotes)
+            self._handle_empty_signal(exec_date, day_quotes)
             return
 
         # 当前各持仓在调仓时的估值口径价值（qfq，与 NAV 一致；无当日报价用最后已知价/成本兜底）
@@ -173,6 +173,25 @@ class PortfolioSimulator:
             # 避免二次扣减 reserve 造成过度缩仓；现金不足时触发等比缩放（确定性）。
             budget = min(investable, self.cash)
             self._buy_to_target(exec_date, to_buy, quotes_by_code, budget)
+
+    def _handle_empty_signal(
+        self,
+        exec_date: date,
+        day_quotes: pl.DataFrame,
+    ) -> None:
+        """再平衡日无信号时的持仓处理（D1-M5）。
+
+        旧实现无条件全清仓（静默）。修复后按 ``on_empty_signal`` 处理：
+        - hold：保持现有持仓不动；
+        - liquidate：全清仓（沿用旧语义）。
+
+        无论哪种模式都向 warnings 告警，以便 UI 展示「无信号」事件、
+        接入可信度（unreliable）判定，避免静默清仓。
+        """
+        mode = self.config.on_empty_signal
+        if mode == "liquidate":
+            self._sell_all_positions(exec_date, day_quotes)
+        self.warnings.append(f"{exec_date}: rebalance day with no signal → {mode}")
 
     def _sell_all_positions(
         self,

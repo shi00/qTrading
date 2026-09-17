@@ -473,7 +473,7 @@ class TestLimitControl:
         assert len(down_limit_skips) >= 1
 
     def test_allow_limit_down_sell(self):
-        engine = self._make_engine(rebalance_freq="daily", allow_limit_down_sell=True)
+        engine = self._make_engine(rebalance_freq="daily", allow_limit_down_sell=True, on_empty_signal="liquidate")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         signals = pl.DataFrame(
             {
@@ -1212,9 +1212,10 @@ class TestDiffRebalance:
     def test_rebalance_with_invalid_weights_sells_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """权重计算无效（空权重）时按全清仓处理，不买入任何新仓（覆盖 100-101）。
 
-        语义：无法确定目标权重属于数据异常，保守全清仓（与空信号分支行为一致）。
+        语义：无法确定目标权重属于数据异常，选择 on_empty_signal="liquidate"
+        时保守全清仓；该分支与空信号分支共用 _handle_empty_signal。
         """
-        sim, _config = self._make_simulator()
+        sim, _config = self._make_simulator(on_empty_signal="liquidate")
         self._add_pos(sim, "000001.SZ", 1000, 10.0)
         sim.cash = 0.0
 
@@ -1237,6 +1238,59 @@ class TestDiffRebalance:
 
         assert "000001.SZ" in [t["ts_code"] for t in sim.trades_list if t["action"] == "sell"]
         assert "000002.SZ" not in sim.positions
+
+    def test_empty_signal_hold_keeps_positions(self) -> None:
+        """D1-M5：on_empty_signal="hold"（默认）时空信号再平衡日保留持仓、不产生交易。
+
+        场景：周度再平衡，1/8 建仓后，1/15 当日信号为空 → 保持现有持仓，
+        卖出表为空、持仓仍存在，warnings 记录「无信号 → hold」。
+        """
+        sim, _config = self._make_simulator(rebalance_freq="weekly", on_empty_signal="hold")
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.cash = 10000.0
+        empty_signals = pl.DataFrame(
+            {
+                "execution_date": [],
+                "ts_code": [],
+                "signal_rank": [],
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 15), empty_signals, self._quote(date(2024, 1, 15)))
+
+        assert "000001.SZ" in sim.positions
+        assert not [t for t in sim.trades_list if t["action"] == "sell"]
+        assert any("no signal → hold" in w for w in sim.warnings)
+
+    def test_empty_signal_liquidate_sells_all(self) -> None:
+        """D1-M5：on_empty_signal="liquidate" 时空信号再平衡日全清仓。
+
+        语义：显式选择「全部清仓」时沿用旧行为——清空所有持仓并记录警告。
+        """
+        sim, _config = self._make_simulator(rebalance_freq="weekly", on_empty_signal="liquidate")
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim.cash = 10000.0
+        empty_signals = pl.DataFrame(
+            {
+                "execution_date": [],
+                "ts_code": [],
+                "signal_rank": [],
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 15), empty_signals, self._quote(date(2024, 1, 15)))
+
+        assert "000001.SZ" not in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"]
+        assert any("no signal → liquidate" in w for w in sim.warnings)
+
+    def test_config_validate_rejects_bad_on_empty_signal(self) -> None:
+        """D1-M5：on_empty_signal 取值非法时 validate() 报错。"""
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            on_empty_signal="sell_all",  # type: ignore[arg-type]
+        )
+        errors = config.validate()
+        assert any("on_empty_signal" in e for e in errors)
 
     def test_rebalance_uses_entry_price_when_no_quote_for_held_position(self) -> None:
         """已持仓标的当日无报价时用 entry_price 兜底估算市值（覆盖 115）。

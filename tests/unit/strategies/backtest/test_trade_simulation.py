@@ -1,6 +1,7 @@
 """交易模拟测试（涨跌停/停牌处理）"""
 
 from datetime import date
+from dataclasses import replace
 
 import polars as pl
 import pytest
@@ -1031,7 +1032,7 @@ class TestSuspendedMarketValueEstimation:
         # delist_date 为 None（未退市）
         stock_meta = {"000001.SZ": {"delist_date": None}}
         simulator = PortfolioSimulator(
-            config,
+            replace(config, on_empty_signal="liquidate"),
             TransactionCostModel(TransactionCostConfig()),
             stock_meta=stock_meta,
         )

@@ -61,6 +61,16 @@ class BacktestConfig:
     position_sizing: Literal["equal_weight", "market_cap_weight", "rank_weighted"] = "equal_weight"
     max_position_count: int = 50
     max_single_weight: float = 0.1
+    on_empty_signal: Literal["liquidate", "hold"] = "hold"
+    """再平衡日无信号时的持仓处理（D1-M5）。
+
+    旧实现：再平衡日信号为空 → 无条件全清仓（静默，无配置项、用户不可见），
+    策略失效/数据异常时会误清空已持仓。
+
+    修复后：
+    - hold（默认）：保持现有持仓不动，仅向 warnings 告警；
+    - liquidate：保留下沉到「全清仓」语义（沿用旧行为，供显式选择）。
+    """
 
     renormalize_after_cap: bool = False
     """截顶后是否重新归一化到满仓（BT-03）。False=保留现金（默认，风控优先）；
@@ -101,6 +111,8 @@ class BacktestConfig:
             errors.append("commission_rate should be between 0 and 1%")
         if self.max_single_weight <= 0 or self.max_single_weight > 1:
             errors.append("max_single_weight must be in (0, 1]")
+        if self.on_empty_signal not in ("liquidate", "hold"):
+            errors.append("on_empty_signal must be one of 'liquidate' or 'hold'")
         if not 0 < self.delist_recovery_rate <= 1:
             errors.append("delist_recovery_rate must be in (0, 1]")
         if self.cash_reserve_pct < 0 or self.cash_reserve_pct >= 1:
@@ -214,4 +226,5 @@ class BacktestResult:
             "allow_limit_up_buy": self.config.allow_limit_up_buy,
             "allow_limit_down_sell": self.config.allow_limit_down_sell,
             "slippage_model": self.config.slippage_model,
+            "on_empty_signal": self.config.on_empty_signal,
         }
