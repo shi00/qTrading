@@ -186,38 +186,22 @@ class AIStrategyMixin:
 
     def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Ensure candidates are sorted by relevance before AI analysis truncation.
-        P1-13 fix: Default sort by market cap (descending) or volume (descending)
-        to ensure high-quality candidates are prioritized when capped.
+        Preserve the strategy's business sort order for AI analysis truncation.
+        D2-M2: previously the default sorted by market cap / volume (descending),
+        injecting a large-cap preference into every AI strategy regardless of the
+        strategy's own ranking. Now the default keeps the input order so truncation
+        honors the strategic ranking produced by ``_filter_logic``.
 
-        Subclasses should override if the default sort order is not
-        the best proxy for "most promising candidate first".
+        Subclasses should override if a custom order better matches the strategy
+        intent (e.g. OversoldStrategy sorts by RSI ascending).
         """
-        if len(df) <= 1:
+        if df.empty:
             return df
-
-        sort_cols = []
-        if "total_mv" in df.columns:
-            sort_cols.append(("total_mv", False))
-        elif "circ_mv" in df.columns:
-            sort_cols.append(("circ_mv", False))
-        elif "amount" in df.columns:
-            sort_cols.append(("amount", False))
-        elif "vol" in df.columns:
-            sort_cols.append(("vol", False))
-
-        if sort_cols:
-            col, ascending = sort_cols[0]
-            df = df.sort_values(by=col, ascending=ascending, na_position="last")
-            logger.debug(
-                "[%s] Sorted %d candidates by %s (descending) for AI analysis",
-                self.__class__.__name__,
-                len(df),
-                col,
-            )
-        else:
-            logger.debug("[%s] Using default order for AI analysis (%d candidates)", self.__class__.__name__, len(df))
-
+        logger.debug(
+            "[%s] Using default (business) order for AI analysis (%d candidates)",
+            self.__class__.__name__,
+            len(df),
+        )
         return df.reset_index(drop=True)
 
     def get_context_blocks(self) -> list[str]:
@@ -468,12 +452,18 @@ class AIStrategyMixin:
         # --- Cost Control: Cap candidates ---
         cap = max_stocks or ConfigHandler.get_ai_max_candidates()
         if len(candidates_df) > cap:
+            total_before = len(candidates_df)
             logger.info(
                 "[AIStrategyMixin] Capping candidates from %d to %d",
-                len(candidates_df),
+                total_before,
                 cap,
             )
             candidates_df = candidates_df.head(cap)
+            # D2-M2: 截断不再静默 — 复用 warnings 通道，VM/View 经既有 state.warnings
+            # 横幅渲染，用户在结果页可见「候选被截断」提示（D3-4 / screener_param_impact 惯例）。
+            context.setdefault("warnings", []).append(
+                Message("strategy_ai_candidate_truncated", {"total": total_before, "analyzed": cap})
+            )
 
         # --- Calculate News as_of ---
         news_as_of = None
