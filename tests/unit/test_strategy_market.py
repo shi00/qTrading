@@ -752,6 +752,29 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         out = asyncio.run(strat.filter(ctx))
         assert len(out) == 0
 
+    def test_get_dynamic_description_echoes_current_params(self):
+        """D2-C1: get_dynamic_description 回显当前可调阈值，而非硬编码静态值."""
+        strat = NorthboundFlowStrategy()
+        msg = strat.get_dynamic_description({})
+        assert isinstance(msg, Message)
+        assert msg.key == "strategy_northbound_flow_dynamic_desc"
+        assert msg.params == {"nb_flow_min": 50, "total_mv_min": 100}
+
+        msg2 = strat.get_dynamic_description({"nb_flow_min": 90, "total_mv_min": 300})
+        assert msg2.params == {"nb_flow_min": 90, "total_mv_min": 300}
+
+    def test_dynamic_desc_declares_no_per_stock_northbound_claim(self):
+        """D2-C1: 动态描述如实披露「仅全市场择时、不使用个股北向数据」，与名称/描述口径一致，
+        消除用户对「策略筛出的是北向资金买入个股」的误解."""
+        import core.i18n as i18n
+
+        strat = NorthboundFlowStrategy()
+        msg = strat.get_dynamic_description({})
+        zh = i18n.I18n.get(msg.key, locale="zh_CN", **msg.params)
+        en = i18n.I18n.get(msg.key, locale="en_US", **msg.params)
+        assert "不使用个股" in zh
+        assert "does not use per-stock northbound data" in en
+
 
 class TestContextKeyTableMap(unittest.TestCase):
     def test_northbound_flow_data_mapped_to_moneyflow_hsgt(self):
