@@ -90,6 +90,29 @@ class TestQuoteDaoGetDailyQuotes:
         result = await dao.get_daily_quotes(ts_code_list=codes)
         assert isinstance(result, pd.DataFrame) and "ts_code" in result.columns
 
+    @pytest.mark.asyncio
+    async def test_code_list_branch_sorts(self):
+        """证伪 D3-M5: ts_code_list 分支 concat 后必须按 (ts_code, trade_date) 升序返回。
+
+        直查分支由 SQL ``ORDER BY`` 保证（见 TestQuoteDaoGetDailyQuotesNoParams.test_no_params），
+        分块分支由方法内 concat 后 sort_values 保证——两条路径行序一致为 DAO 契约（D3-M3）。
+        此处 mock chunked_in_query 返回乱序数据，断言 get_daily_quotes 归一为契约行序。
+        """
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.chunked_in_query = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000002.SZ", "000001.SZ", "000002.SZ", "000001.SZ"],
+                    "trade_date": ["20240105", "20240103", "20240102", "20240102"],
+                }
+            )
+        )
+        result = await dao.get_daily_quotes(ts_code_list=["000001.SZ", "000002.SZ"])
+        assert result is not None
+        # 先 ts_code 升序；同 ts_code 内 trade_date 升序
+        assert list(result["ts_code"]) == ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"]
+        assert list(result["trade_date"]) == ["20240102", "20240103", "20240102", "20240105"]
+
 
 class TestQuoteDaoGetLatestTradeDate:
     @pytest.mark.asyncio
@@ -1320,7 +1343,7 @@ class TestQuoteDaoGetDailyQuotesNoParams:
         result = await dao.get_daily_quotes()
         assert isinstance(result, pd.DataFrame)
         dao._read_db.assert_called_once_with(
-            "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1",
+            "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1 ORDER BY ts_code, trade_date",
             [],
             suppress_errors=True,
         )
