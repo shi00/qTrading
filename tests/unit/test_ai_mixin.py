@@ -766,6 +766,29 @@ class TestGetAiContext:
         assert "000001.SZ" in result
 
 
+class TestAiEnabledStrategiesOverrideGetAiContext:
+    """D2-M3 举一反三门禁：enable_ai_analysis=True 的策略必须覆写 get_ai_context。
+
+    AIStrategyMixin 契约「Subclasses MUST override get_ai_context(row)」，未覆写则走
+    基类默认空串实现，AI 拿到通用上下文而不知该股被选中的原因（context vacuum）。
+    """
+
+    def test_all_ai_enabled_strategies_override(self):
+        import strategies.fundamental  # noqa: F401
+        import strategies.market  # noqa: F401
+        import strategies.oversold_strategy  # noqa: F401
+        from strategies.base_strategy import get_strategy_registry
+
+        registry = get_strategy_registry()
+        assert registry, "真实策略注册表不应为空"
+        unnoverridden = [
+            key
+            for key, cls in registry.items()
+            if getattr(cls, "enable_ai_analysis", False) and cls.get_ai_context is AIStrategyMixin.get_ai_context
+        ]
+        assert unnoverridden == [], f"启用 AI 但未覆写 get_ai_context 的策略: {unnoverridden}"
+
+
 class TestNormalizeTradeDateForCache:
     def test_none(self):
         result = AIStrategyMixin._normalize_trade_date_for_cache(None)

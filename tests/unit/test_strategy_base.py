@@ -303,7 +303,12 @@ class TestAIIntegration(unittest.TestCase):
                 )
 
     def test_market_strategies_use_default_get_ai_context(self):
+        # D2-M3: 仅「未启用 AI」的 market 策略才应走基类默认空实现；
+        # InstitutionalStrategy（enable_ai_analysis=True）已覆写 get_ai_context，
+        # 按 Mixin 契约必须注入策略上下文，故从「默认空」断言中排除。
         for cls in self.MARKET_STRATEGY_CLASSES:
+            if getattr(cls, "enable_ai_analysis", False):
+                continue
             with self.subTest(strategy=cls.__name__):
                 instance = cls()
                 ctx = instance.get_ai_context({"pe_ttm": 10})

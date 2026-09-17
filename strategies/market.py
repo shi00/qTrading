@@ -310,6 +310,21 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             },
         ]
 
+    def get_ai_context(self, row: dict) -> str:
+        """D2-M3：覆写基类默认空实现，告知 AI 该股被选中的机构席位原因，杜绝 context vacuum。
+
+        net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），除以 10000 换算为万元展示。
+        """
+        net = row.get("net_amount")
+        net_wan = round(float(net) / 10000, 1) if net not in (None, "") else "N/A"
+        return (
+            f"该股票由龙虎榜机构席位策略筛选：当日机构专用席位净买入 {net_wan} 万元。\n"
+            f"请评估该笔机构买入的性质：是长线配置资金建仓，还是游资借机构席位做短线接力？\n"
+            f"重点核对：净买入金额相对流通市值的占比是否足以形成支撑；"
+            f"上榜原因（涨跌幅/换手率异动）是否说明该股已处于情绪高位；"
+            f"若同时出现机构席位净卖出对倒，请直接 reject。"
+        )
+
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         lhb = context.get("top_list")
         p = context.get("params", {})
@@ -323,7 +338,12 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 
         try:
             top_lf = pl.from_pandas(lhb).lazy()
-            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
+            # D2-M3：base universe 缺 circ_mv 时降级跳过，仅当存在才保留，供
+            # get_ai_context 计算「净买入/流通市值」关键比值；避免无条件 select 崩列。
+            base_cols = ["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"]
+            if "circ_mv" in lf.columns:
+                base_cols.append("circ_mv")
+            base_lf = lf.select(base_cols)
 
             # DATA-02: net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），参数 inst_net_min 单位为万，
             # 换算到数据单位（元）再比较，修复 10000 倍单位错位；未知单位抛 StrategyParamError（catch→空）。

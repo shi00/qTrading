@@ -374,6 +374,8 @@ class TestInstitutionalStrategy:
                 "industry_sw_l2": ["x", "y"],
                 "pe_ttm": [10.0, 20.0],
                 "total_mv": [100.0, 200.0],
+                # D2-M3: base 含 circ_mv 时须保留，供 get_ai_context 计算「净买入/流通市值」比值。
+                "circ_mv": [80.0, 180.0],
             }
         )
         lhb_df = pd.DataFrame(
@@ -388,6 +390,16 @@ class TestInstitutionalStrategy:
         codes = result["ts_code"].to_list()
         assert "000001.SZ" in codes
         assert "000002.SZ" not in codes
+        assert "circ_mv" in result.columns
+        assert result["circ_mv"].to_list() == [80.0]
+
+    def test_get_ai_context_reports_net_amount_in_wan(self) -> None:
+        """D2-M3：get_ai_context 将 net_amount（元）换算为万元并注入 AI 上下文。"""
+        strategy = InstitutionalStrategy()
+        text = strategy.get_ai_context({"net_amount": 30000000.0})
+        assert "净买入 3000.0 万元" in text
+        text_missing = strategy.get_ai_context({"ts_code": "000001.SZ"})
+        assert "N/A" in text_missing
 
     def test_get_parameters_returns_one_param(self) -> None:
         strategy = InstitutionalStrategy()
