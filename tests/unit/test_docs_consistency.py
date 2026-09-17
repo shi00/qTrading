@@ -4287,6 +4287,110 @@ class TestGovernanceIdGlossary:
         errors = check_governance_id_glossary()
         assert errors == [], f"已登记 UIX/UX 应通过, got: {errors}"
 
+    # --- DS-02: .py 注释中的治理 ID 以 WARNING 分级校验 ---
+
+    def test_py_comment_unregistered_id_warns(self, tmp_path, monkeypatch, capsys):
+        """scripts/tests 下 .py 注释中的未登记 ID → 打 ::warning::（不报 error、不阻断）."""
+        import check_docs_consistency
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        # 文档侧只引用已登记 ID，避免 doc 部分产生 error（隔离 .py warning 效果）
+        claude.write_text("引用 P2-07\n", encoding="utf-8")
+        skt = tmp_path / "scripts"
+        skt.mkdir(parents=True)
+        # scripts/a.py 注释含未登记 ID（P1-04 / P2-1 均不在对照表）→ 应打 warning
+        (skt / "a.py").write_text(
+            "# 本测试守护 P1-04 例外反向覆盖\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(check_docs_consistency, "GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr(check_docs_consistency, "ROOT", tmp_path)
+        monkeypatch.setattr(check_docs_consistency, "CHECKED_DOCS", [claude])
+
+        from check_docs_consistency import check_governance_id_glossary
+
+        errors = check_governance_id_glossary()
+        out = capsys.readouterr().out
+        assert errors == [], f".py warning 不应报 error: {errors}"
+        assert any("P1-04" in line and "::warning::" in line for line in out.splitlines()), (
+            f"应在 warning 中输出 P1-04, got: {out}"
+        )
+
+    def test_py_docstring_fake_id_not_warned(self, tmp_path, monkeypatch):
+        """docstring/字符串中的演示假 ID（未登记）不应被 .py 扫描误报（DS-02 防误报）."""
+        import check_docs_consistency
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 P2-07\n", encoding="utf-8")
+        skt = tmp_path / "scripts"
+        skt.mkdir(parents=True)
+        # docstring 中的假 ID 与字符串字面量中的假 ID 均不应被识别为"在用 ID"
+        (skt / "b.py").write_text(
+            '"""展示未登记示例 ID（如 P9-99）在 docstring 中。"""\nMSG = "未登记演示 P9-99"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(check_docs_consistency, "GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr(check_docs_consistency, "ROOT", tmp_path)
+        monkeypatch.setattr(check_docs_consistency, "CHECKED_DOCS", [claude])
+
+        from check_docs_consistency import _extract_py_governance_ids
+
+        ids = _extract_py_governance_ids(skt / "b.py")
+        assert "P9-99" not in ids, f"docstring/字符串中的假 ID 不应被提取: {ids}"
+
+    def test_extract_py_governance_ids_comment_only(self, tmp_path, monkeypatch):
+        """辅助函数只提取注释中的 ID，不提取字符串/docstring 里的 ID."""
+        from check_docs_consistency import _extract_py_governance_ids
+
+        f = tmp_path / "c.py"
+        f.write_text(
+            '# 注释引用 P1-04\nx = \'字符串引用 P1-05\'\n"""docstring 引用 P1-06"""\n',
+            encoding="utf-8",
+        )
+        ids = _extract_py_governance_ids(f)
+        assert ids == {"P1-04"}, f"应只取注释 ID P1-04, got: {ids}"
+
+    def test_glossary_self_reference_counterexample_not_flagged(self, tmp_path, monkeypatch):
+        """对照表纳入扫描后，其正文以规避措辞（如 `-1`/`-01` 无前缀）引用的反例不误报（DS-02）.
+
+        反例若写成可匹配正则的完整 ID 形态（如 `P2-1`/`P2-01`）会被同规则判为未登记而报
+        error——故对照表正文的「编号格式规范」必须用不匹配正则的规避措辞，本测试锁定该形态防回归。
+        """
+        import check_docs_consistency
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        glossary = gov_dir / "governance-ids.md"
+        # 正文以规避措辞（无前缀的 `-1`/`-01`）说明编号规范；表格仅登记 P2-07
+        glossary.write_text(
+            "## 编号格式规范\n同一前缀不得混用单位数与补零形式（如某前缀下用 `-1`、另一文档用 `-01` 视为不同 ID）。\n\n"
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 P2-07\n", encoding="utf-8")
+
+        monkeypatch.setattr(check_docs_consistency, "GOVERNANCE_IDS_PATH", glossary)
+        monkeypatch.setattr(check_docs_consistency, "ROOT", tmp_path)
+        monkeypatch.setattr(check_docs_consistency, "CHECKED_DOCS", [claude, glossary])
+
+        from check_docs_consistency import check_governance_id_glossary
+
+        errors = check_governance_id_glossary()
+        assert errors == [], f"规避措辞的对照表正文不应报 ERROR, got: {errors}"
+
 
 class TestAdrIndexCompleteness:
     """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""

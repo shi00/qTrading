@@ -55,8 +55,10 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
 import sys
+import tokenize
 import tomllib
 import typing
 from dataclasses import dataclass
@@ -2354,16 +2356,24 @@ def check_governance_id_glossary() -> list[str]:
     自动加载文档（CLAUDE.md + AGENTS.md）中出现的治理 ID 必须全部已在
     docs/governance/governance-ids.md 登记——新会话读不到 gitignored 检视报告，
     未登记 ID 即纯上下文噪声且诱发臆测（违反 §1.10 反幻觉护栏精神）。
+
+    DS-02：扫描范围扩展到 scripts/**/*.py 与 tests/**/*.py 的行注释中的治理 ID。
+    .py 中发现的未登记 ID 以 `::warning::` 输出（WARNING 分级，不阻断）；markdown / yml
+    中发现的未登记 ID 保持 ERROR 阻断。存量约 100 条 ID 未登记时以 WARNING 渐进部署，
+    存量清零后翻转 ERROR（见 docs/governance/governance-ids.md 维护规则与
+    docs/debt/known-technical-debt.md）。
     """
     errors: list[str] = []
     registered = _load_glossary_ids()
     if registered is None:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors
-    refs: set[str] = set()
+    doc_refs: set[str] = set()
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
     # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
-    # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
+    # 其余 CHECKED_DOCS 全部纳入（含对照表自身——其正文若引用未登记 ID 应当被同规则
+    # 守护，反例以表外不匹配正则的措辞规避，见 governance-ids.md「编号格式规范」）。
+    # 另补扫 docs/governance/ 下的机器可读治理文件
     # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
     governance_yml = [
         p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
@@ -2371,10 +2381,48 @@ def check_governance_id_glossary() -> list[str]:
     scan_paths = [p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md")] + governance_yml
     for path in scan_paths:
         if path.exists():
-            refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
-    for gov_id in sorted(refs - registered):
+            doc_refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
+    for gov_id in sorted(doc_refs - registered):
         errors.append(f"治理 ID 对照表: {gov_id} 出现在受检文档中，但未在 governance-ids.md 登记")
+
+    # DS-02：对 scripts/ 与 tests/ 下 .py 的行注释中的治理 ID 以 WARNING 分级校验。
+    # 只提取注释中的 ID（tokenize 排除字符串字面量与 docstring），避免测试 fixture 里
+    # 写在字符串/docstring 中的演示假 ID 自触发误报。此处扫描范围固定为 scripts/ 与
+    # tests/ 两个子目录，无需（也不应）复用 _NOTE_LAZY_SKIP_DIRS——其含 `.worktrees`，
+    # 在 worktree 隔离开发时 ROOT 自身位于 .worktrees/ 下，会让全部 .py 被跳过、造成
+    # 开发环境静默漏扫、与主分支 CI 行为分裂。
+    py_refs: set[str] = set()
+    for py_path in sorted((ROOT / "scripts").rglob("*.py")) + sorted((ROOT / "tests").rglob("*.py")):
+        py_refs.update(_extract_py_governance_ids(py_path))
+    for gov_id in sorted(py_refs - registered):
+        print(
+            "::warning::治理 ID 对照表: "
+            f"{gov_id} 出现在 scripts/tests 的 .py 行注释中，但未在 governance-ids.md 登记"
+            "（DS-02 WARNING 分级渐进部署，存量清零后翻转 ERROR）"
+        )
     return errors
+
+
+def _extract_py_governance_ids(path: Path) -> set[str]:
+    """提取 .py 文件注释中的治理 ID（tokenize 的 COMMENT token）。
+
+    只取注释、显式排除字符串字面量与 docstring：测试 fixture 常把未登记 ID 写在
+    docstring / 字符串里作演示（出现"P9 一杠 99 即应报错"这类用例），若纳入会自触发
+    误报。检视证据（DS-02）显示治理 ID 标注实际落在**行注释**中，故只扫注释即可。
+    """
+    ids: set[str] = set()
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ids
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT:
+                ids.update(_GOVERNANCE_ID_PATTERN.findall(tok.string))
+    except (tokenize.TokenError, IndentationError, UnicodeDecodeError):
+        # 无法 tokenize（如语法非法文件）则跳过，避免阻断；此类文件有专门的门禁守护。
+        return ids
+    return ids
 
 
 # GDR-13: 书名号式章节引用——形如 `<文档路径>「<章节名>」`（如 `CONTRIBUTING.md「错误处理标准模式」`）。
