@@ -2114,5 +2114,6 @@
     "news_insight_event_uncertainty": "不确定性：",
     "news_insight_event_quotes": "来源引用",
     "news_insight_event_empty": "未识别出明确的风险事件",
+    "news_insight_summary": "风险摘要",
     "news_insight_evidence_title": "原始来源"
 }

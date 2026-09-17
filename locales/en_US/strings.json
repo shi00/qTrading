@@ -2114,5 +2114,6 @@
     "news_insight_event_uncertainty": "Uncertainty: ",
     "news_insight_event_quotes": "Source quotes",
     "news_insight_event_empty": "No clear risk events identified",
+    "news_insight_summary": "Risk summary",
     "news_insight_evidence_title": "Original sources"
 }

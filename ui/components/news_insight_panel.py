@@ -19,6 +19,8 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.news_insight_types import (
     EvidenceItem,
@@ -179,11 +181,14 @@ def _build_ready(state: NewsInsightState, event_cards: ft.Control) -> ft.Control
     info_rows = [
         ft.Row(
             [
-                ft.Text(
-                    f"{I18n.get('news_insight_level_label')}: {level_txt}",
-                    size=AppStyles.FONT_SIZE_LG,
-                    weight=ft.FontWeight.BOLD,
-                    color=level_color,
+                anchored(
+                    EIDS.NEWS_RISK.RISK_LEVEL,
+                    ft.Text(
+                        f"{I18n.get('news_insight_level_label')}: {level_txt}",
+                        size=AppStyles.FONT_SIZE_LG,
+                        weight=ft.FontWeight.BOLD,
+                        color=level_color,
+                    ),
                 ),
             ]
         )
@@ -215,15 +220,40 @@ def _build_ready(state: NewsInsightState, event_cards: ft.Control) -> ft.Control
 
     children: list[ft.Control] = [
         ft.Column(info_rows, spacing=4),
-        _build_coverage(state.coverage),
+        anchored(EIDS.NEWS_RISK.COVERAGE, _build_coverage(state.coverage)),
     ]
+    if state.summary:
+        children.append(
+            ft.Column(
+                [
+                    ft.Text(
+                        I18n.get("news_insight_summary"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    anchored(
+                        EIDS.NEWS_RISK.SUMMARY,
+                        ft.Text(
+                            state.summary,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                            selectable=True,
+                        ),
+                    ),
+                ],
+                spacing=2,
+            )
+        )
     # 无事件：用 None 表达"未知"（R21），不渲染绿色低风险
     if not state.events:
         children.append(
-            ft.Text(
-                I18n.get("news_insight_event_empty"),
-                size=AppStyles.FONT_SIZE_BODY_SM,
-                color=AppColors.TEXT_SECONDARY,
+            anchored(
+                EIDS.NEWS_RISK.EVENT_EMPTY,
+                ft.Text(
+                    I18n.get("news_insight_event_empty"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
             )
         )
     children.append(
@@ -239,7 +269,10 @@ def _build_ready(state: NewsInsightState, event_cards: ft.Control) -> ft.Control
 
 def _build_event_cards(state: NewsInsightState, expanded_idx: int, on_toggle) -> ft.Control:
     """风险事件卡片列（展开态由上层组件持有）。"""
-    rows = [_build_event_card(ev, expanded_idx == i, on_toggle(i)) for i, ev in enumerate(state.events)]
+    rows = [
+        anchored(EIDS.NEWS_RISK.event_card(i), _build_event_card(ev, expanded_idx == i, on_toggle(i)))
+        for i, ev in enumerate(state.events)
+    ]
     return ft.Column(rows, spacing=6)
 
 
@@ -269,16 +302,22 @@ def NewsInsightPanel(
     body: ft.Control
     phase = news_state.phase
     if phase == PHASE_LOADING_EVIDENCE:
-        body = ft.Column(
-            [ft.ProgressRing(width=22, height=22), ft.Text(I18n.get("news_insight_loading_evidence"))],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=8,
+        body = anchored(
+            EIDS.NEWS_RISK.LOADING_EVIDENCE,
+            ft.Column(
+                [ft.ProgressRing(width=22, height=22), ft.Text(I18n.get("news_insight_loading_evidence"))],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
         )
     elif phase == PHASE_ANALYZING:
-        body = ft.Column(
-            [ft.ProgressRing(width=22, height=22), ft.Text(I18n.get("news_insight_analyzing"))],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=8,
+        body = anchored(
+            EIDS.NEWS_RISK.ANALYZING,
+            ft.Column(
+                [ft.ProgressRing(width=22, height=22), ft.Text(I18n.get("news_insight_analyzing"))],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
+            ),
         )
     elif phase == PHASE_READY:
         body = _build_ready(news_state, _build_event_cards(news_state, expanded_idx, _toggle_event))
@@ -286,17 +325,33 @@ def NewsInsightPanel(
         rows: list[ft.Control] = []
         rows.append(ft.Text(_translate_message(news_state.message)))
         if news_on_retry is not None:
-            rows.append(ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()))
+            rows.append(
+                anchored(
+                    EIDS.NEWS_RISK.RETRY_BUTTON,
+                    ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()),
+                )
+            )
         body = ft.Column(rows, spacing=8)
     else:  # evidence_ready / error / idle
         rows: list[ft.Control] = []
         if news_state.message is not None:
-            rows.append(ft.Text(_translate_message(news_state.message), color=AppColors.TEXT_SECONDARY))
+            msg = ft.Text(_translate_message(news_state.message), color=AppColors.TEXT_SECONDARY)
+            rows.append(anchored(EIDS.NEWS_RISK.ERROR, msg) if phase == PHASE_ERROR else msg)
         if phase == PHASE_ERROR and news_on_retry is not None:
-            rows.append(ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()))
+            rows.append(
+                anchored(
+                    EIDS.NEWS_RISK.RETRY_BUTTON,
+                    ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()),
+                )
+            )
         rows.append(_build_evidence_list(news_state.evidence))
         if phase == PHASE_EVIDENCE_READY and news_on_generate is not None:
-            rows.append(ft.FilledButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: news_on_generate()))
+            rows.append(
+                anchored(
+                    EIDS.NEWS_RISK.GENERATE_BUTTON,
+                    ft.FilledButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: news_on_generate()),
+                )
+            )
         body = ft.Column(rows, spacing=8)
 
     return ft.Container(

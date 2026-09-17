@@ -281,6 +281,7 @@ _PANEL_KEYS = {
     "news_insight_event_uncertainty",
     "news_insight_event_quotes",
     "news_insight_event_empty",
+    "news_insight_summary",
     "news_insight_evidence_title",
 }
 

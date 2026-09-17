@@ -180,6 +180,82 @@ class ScreenerPage:
         ) from last_exc
 
 
+class NewsRiskPage:
+    """新闻风险解读页对象（Phase E3）：详情对话框内「证据 → 生成 → 解读」流。
+
+    封装：运行放量突破策略打开详情 → 等待证据模式（生成按钮出现）→ 生成风险解读 →
+    断言各 anchor（RISK_LEVEL / SUMMARY / EVENT_CARD / COVERAGE / EVENT_EMPTY）。
+    仅封装 news-risk anchor 化交互；文本级断言仍透传 ``page.expect_text``。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.screener = ScreenerPage(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open_detail(self, ts_code: str = "000001.SZ") -> None:
+        """运行放量突破策略并打开平安银行详情对话框（种子数据 1 行命中）。"""
+        await self.screener.open()
+        await self.screener.select_strategy("volume_breakout")
+        await self.screener.run()
+        await self.screener.expect_result("平安银行")
+        await self.screener.open_detail_dialog(ts_code)
+
+    async def wait_evidence_ready(self, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
+        """等待证据模式就绪（生成按钮出现，即 PHASE_EVIDENCE_READY）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=timeout_ms)
+
+    async def generate(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击「生成风险解读」按钮（retry 抗吞）。
+
+        run 按钮已实证 CanvasKit 会吞点击，generate 同为 INTERACTIVE，用
+        ``retry_until_triggered`` 包裹并确认按钮消失（进入 analyzing/ready）。
+        confirm 以 generate_button 隐藏为触发判据（phase 离开 evidence_ready）。
+        """
+
+        async def _interact() -> None:
+            await self.ap.click(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=timeout_ms)
+
+        async def _confirm() -> bool:
+            try:
+                await self.ap.expect_hidden(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=TIMEOUTS.FAST)
+                return True
+            except Exception:
+                return False
+
+        await retry_until_triggered(_interact, _confirm)
+
+    async def wait_analyzing(self, timeout_ms: int = TIMEOUTS.FAST) -> None:
+        """等待进入分析中阶段（ProgressRing + 文案）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.ANALYZING, timeout_ms=timeout_ms)
+
+    async def wait_ready(self, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
+        """等待 ready 阶段完成（RISK_LEVEL anchor 出现）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_risk_level_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_risk_level_hidden(self, timeout_ms: int = TIMEOUTS.FAST) -> None:
+        """断言风险等级不在 DOM（无 AI/生成前的证据模式不应渲染）。"""
+        await self.ap.expect_hidden(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_event_card_visible(self, idx: int = 0, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.event_card(idx), timeout_ms=timeout_ms)
+
+    async def assert_summary_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.SUMMARY, timeout_ms=timeout_ms)
+
+    async def assert_coverage_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.COVERAGE, timeout_ms=timeout_ms)
+
+    async def assert_event_empty_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.EVENT_EMPTY, timeout_ms=timeout_ms)
+
+    async def close_detail(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.screener.close_detail_dialog(timeout_ms=timeout_ms)
+
+
 # ============================================================================
 # PR-3: SettingsPage / DataPage / BacktestPage / WizardPage
 #

@@ -157,6 +157,32 @@ class AnchorPage:
             if r and r["w"] > 0 and r["h"] > 0:
                 return r
             await self.page.wait_for_timeout(int(step_s * 1000))
+        # TEMP-DIAG: dump all flt-semantics to diagnose LABEL anchor mapping
+        tmp_dump = await self.page.evaluate(
+            r"""() => Array.from(document.querySelectorAll('flt-semantics')).map(e => ({
+                tag: e.tagName,
+                aria: (e.getAttribute('aria-label') || ''),
+                role: e.getAttribute('role') || '',
+                txt: (e.textContent || '').replace(/\n/g, '\\n').slice(0, 120),
+            })).filter(n => n.aria || n.txt)"""
+        )
+        print(
+            f"TEMP-DIAG anchor={eid_str!r} exact={exact} role_filter={role_filter}\n"
+            + "\n".join(f"  aria={n['aria']!r} role={n['role']!r} txt={n['txt']!r}" for n in tmp_dump),
+            flush=True,
+        )
+        import tempfile
+        import os
+
+        try:
+            _df = os.path.join(tempfile.gettempdir(), "temple_sem_dump.txt")
+            with open(_df, "w", encoding="utf-8") as _f:
+                _f.write(f"anchor={eid_str!r} exact={exact} role_filter={role_filter}\n")
+                for n in tmp_dump:
+                    _f.write(f"  aria={n['aria']!r} role={n['role']!r} txt={n['txt']!r}\n")
+            print(f"TEMP-DIAG written to {_df}", flush=True)
+        except Exception as _e:  # pragma: no cover
+            print(f"TEMP-DIAG write failed: {_e}", flush=True)
         raise RuntimeError(
             f"AnchorPage: textContent anchor {eid_str!r} (exact={exact}, "
             f"role_filter={role_filter}) not found in {self._tm(timeout_ms)}ms"

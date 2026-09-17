@@ -100,6 +100,36 @@ class _DetailDialogIds:
     CLOSE_BUTTON: Eid = ("e2e.detail_dialog.close_button", AnchorKind.INTERACTIVE)
 
 
+class _NewsRiskIds:
+    """新闻风险解读面板 anchor 命名空间（Phase E3, e2e.news_risk.*）。
+
+    对应 ``ui/components/news_insight_panel.py`` 按 phase 渲染的各区块：
+    - loading/analyzing 阶段用 ``LOADING_EVIDENCE`` / ``ANALYZING``（LABEL, 存在性探测）
+    - evidence_ready 阶段 ``GENERATE_BUTTON``（INTERACTIVE 触发生成）
+    - degraded/error 阶段 ``RETRY_BUTTON``（INTERACTIVE 触发重试）；error 语义
+      ``ERROR``（LABEL）与说明文本同节点
+    - ready 阶段 ``RISK_LEVEL`` / ``SUMMARY`` / ``EVENT_EMPTY`` / ``COVERAGE``（LABEL）
+      及动态 ``event_card(idx)``（LABEL, 卡片可点展开但 AnchorPage 断言定位即可）
+    """
+
+    LOADING_EVIDENCE: Eid = ("e2e.news_risk.loading_evidence", AnchorKind.LABEL)
+    ANALYZING: Eid = ("e2e.news_risk.analyzing", AnchorKind.LABEL)
+    GENERATE_BUTTON: Eid = ("e2e.news_risk.generate_button", AnchorKind.INTERACTIVE)
+    RETRY_BUTTON: Eid = ("e2e.news_risk.retry_button", AnchorKind.INTERACTIVE)
+    RISK_LEVEL: Eid = ("e2e.news_risk.risk_level", AnchorKind.LABEL)
+    SUMMARY: Eid = ("e2e.news_risk.summary", AnchorKind.LABEL)
+    EVENT_EMPTY: Eid = ("e2e.news_risk.event_empty", AnchorKind.LABEL)
+    COVERAGE: Eid = ("e2e.news_risk.coverage", AnchorKind.LABEL)
+    ERROR: Eid = ("e2e.news_risk.error", AnchorKind.LABEL)
+
+    _EVENT_CARD_PREFIX = "e2e.news_risk.event_card"
+
+    @staticmethod
+    def event_card(idx: int) -> Eid:
+        """生成第 idx 张风险事件卡片 anchor（LABEL, 定位/断言用）。"""
+        return (f"{_NewsRiskIds._EVENT_CARD_PREFIX}.{idx}", AnchorKind.LABEL)
+
+
 class _SettingsIds:
     """设置页 anchor 命名空间。"""
 
@@ -231,6 +261,7 @@ class EIDS:
 
     SCREENER = _ScreenerIds
     DETAIL_DIALOG = _DetailDialogIds
+    NEWS_RISK = _NewsRiskIds
     SETTINGS = _SettingsIds
     DATA = _DataIds
     BACKTEST = _BacktestIds

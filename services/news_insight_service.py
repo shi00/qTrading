@@ -33,6 +33,7 @@ from services.news_insight_models import (
     NewsInsightRequest,
     NewsInsightResult,
 )
+from utils.app_env import is_e2e_mode
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -67,7 +68,20 @@ class NewsInsightService:
 
     def __init__(self, market_dao=None, ai_service: AIService | None = None) -> None:
         self.dao = market_dao if market_dao is not None else CacheManager().market_dao
-        self.ai = ai_service if ai_service is not None else AIService()
+        self.ai = ai_service if ai_service is not None else self._resolve_ai_service()
+
+    def _resolve_ai_service(self):
+        """按环境解析 AI 服务：E2E 模式下可选 fake（env 驱动），否则真实 AIService。
+
+        E2E 子进程是独立 Python 进程，无法经 unittest.mock 注入；故在装配处由
+        ``is_e2e_mode()`` + ``NEWS_AISERVICE_MOCK`` env 选型 fake（Phase E3）。
+        生产构建不满足 env 分支，恒走真实 ``AIService()``，零副作用。
+        """
+        if is_e2e_mode() and os.environ.get("NEWS_AISERVICE_MOCK"):
+            from services.news_insight_e2e_fake import E2EFakeAIService  # lazy-import: 仅 E2E 生产不加载
+
+            return E2EFakeAIService()
+        return AIService()
 
     # ------------------------------------------------------------------
     # 纯工具
@@ -177,14 +191,19 @@ class NewsInsightService:
 
         await self._maybe_cancel(cancel_event)
 
-        # 1) 实时抓取公告 + 新闻并落库（取 id 由 get_market_news_documents 反查）
+        # 1) 实时抓取公告 + 新闻并落库（取 id 由 get_market_news_documents 反查）。
+        #    E2E 独立子进程无外网且无法 mock，故 E2E 模式跳过实时抓取，直接用 DB 种子
+        #    证据（tests/e2e/conftest.py market_news 已播种），保证 UI 阶段可确定性进入。
         fetched: dict = {"docs": [], "coverage": {}}
-        try:
-            fetched = await NewsFetcher.get_stock_news_documents(ts_code, window_days=_WINDOW_DAYS)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log_classified(logger, e, "external", "[NewsInsight] fetch documents failed (%s): %s (ts_code=%s)", ts_code)
+        if not is_e2e_mode():
+            try:
+                fetched = await NewsFetcher.get_stock_news_documents(ts_code, window_days=_WINDOW_DAYS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_classified(
+                    logger, e, "external", "[NewsInsight] fetch documents failed (%s): %s (ts_code=%s)", ts_code
+                )
         fetched_docs = fetched.get("docs") or []
         fetched_coverage = fetched.get("coverage") or {}
         for src in ("announcement", "news"):
