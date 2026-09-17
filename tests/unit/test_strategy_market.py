@@ -548,6 +548,29 @@ class TestBlockTradeStrategy(unittest.TestCase):
 
         self.assertEqual(result.height, 0)
 
+    def test_block_trade_respects_amount_unit_metadata(self):
+        """R20/D2-M1: amount 列带单位元数据时经统一入口换算，而非裸 `amount > target_amount`。
+
+        声明 amount 为「元」、block_amount_min=1000(万) → 阈值 1e7 元。
+        若实现退化回裸比较 `amount > 1000`，两个样本都会被保留，本断言将失败。
+        """
+        lf = pl.from_pandas(self.base_df).lazy()
+        block_in_yuan = pd.DataFrame(
+            [
+                # 500 万元 < 1000 万 → 应排除
+                {"ts_code": "000001.SZ", "amount": 5_000_000.0, "vol": 100, "price": 10.0},
+                # 1200 万元 > 1000 万 → 应保留
+                {"ts_code": "000002.SZ", "amount": 12_000_000.0, "vol": 50, "price": 8.0},
+            ]
+        )
+        block_in_yuan.attrs["column_units"] = {"amount": "yuan"}
+        context = {"params": {"block_amount_min": 1000}, "block_trade": block_in_yuan}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertNotIn("000001.SZ", ts_codes)
+        self.assertIn("000002.SZ", ts_codes)
+
 
 if __name__ == "__main__":
     unittest.main()

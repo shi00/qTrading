@@ -454,6 +454,24 @@ class TestLargePEStrategy(unittest.TestCase):
         mv_values = result["total_mv"].to_list()
         self.assertEqual(mv_values, sorted(mv_values, reverse=True))
 
+    def test_large_pe_boundary_uses_converted_threshold(self):
+        """R20/D2-M1: cap_min 经统一入口换算为精确阈值，严格 `>` 排除恰等于阈值的行。
+
+        500(亿) 换算到万元列 = 500 * 10000 = 5_000_000 万元。恰等于的行应被严格 `>`
+        排除、高于一个单位（5_000_001）的行保留，以固定换算返回值的精确性。
+        """
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "恰等边界", "total_mv": 5_000_000, "pe_ttm": 10.0},
+                {"ts_code": "000002.SZ", "name": "超边界", "total_mv": 5_000_001, "pe_ttm": 10.0},
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"market_cap_min": 500, "pe_max": 100}}
+        ts_codes = self.strategy._filter_logic(lf, context).collect()["ts_code"].to_list()
+        self.assertNotIn("000001.SZ", ts_codes)
+        self.assertIn("000002.SZ", ts_codes)
+
     def test_large_pe_strategy_declares_dependencies(self):
         """LargePEStrategy 显式声明 required_context_keys 与 required_tables"""
         self.assertEqual(self.strategy.required_context_keys, ("screening_data",))

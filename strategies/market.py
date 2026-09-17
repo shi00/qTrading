@@ -5,7 +5,7 @@ import pandas as pd
 import polars as pl
 
 from core.i18n import Message
-from data.constants import HSGT_NORTH_MONEY_UNIT, TOP_LIST_NET_AMOUNT_UNIT
+from data.constants import BLOCK_TRADE_AMOUNT_UNIT, HSGT_NORTH_MONEY_UNIT, TOP_LIST_NET_AMOUNT_UNIT
 from data.persistence.quality_gate import QualityTier
 from strategies.attribution import FilterAttribution, FilterCondition, RankAttribution, fnum
 from strategies.base_strategy import register_strategy
@@ -391,8 +391,12 @@ class BlockTradeStrategy(PolarsBaseStrategy):
             block_lf = pl.from_pandas(block).lazy()
             base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
 
+            # R20：amount 为红线列，禁止裸数值比较；经统一入口换算（block 无单位元数据时回退声明单位 wan_cny）。
+            amount_threshold = threshold_in_data_unit(
+                block, "amount", BLOCK_TRADE_AMOUNT_UNIT, target_amount, "wan_cny"
+            )
             return (
-                block_lf.filter(pl.col("amount") > target_amount)
+                block_lf.filter(pl.col("amount") > amount_threshold)
                 .group_by("ts_code")
                 .agg(
                     [

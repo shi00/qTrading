@@ -7,7 +7,7 @@ from data.persistence.quality_gate import QualityTier
 from strategies.attribution import FilterAttribution, FilterCondition, RankAttribution, fnum
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
-from strategies.utils import fmt_val
+from strategies.utils import fmt_val, threshold_in_data_unit
 
 
 @register_strategy("value")
@@ -381,7 +381,8 @@ class LargePEStrategy(PolarsBaseStrategy):
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
-        cap_min = p.get("market_cap_min", 500) * 10000
+        # R20：total_mv 为红线列，禁止裸乘换算；与 NorthboundFlowStrategy 共用统一入口（亿 → 万元）。
+        cap_min = threshold_in_data_unit(lf, "total_mv", "wan_cny", p.get("market_cap_min", 500), "yi_cny")
         pe_max = p.get("pe_max", 15)
         return (
             lf.drop_nulls(subset=["total_mv", "pe_ttm"])
