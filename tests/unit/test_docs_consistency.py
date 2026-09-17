@@ -3144,6 +3144,90 @@ class TestRulesetMetadataConsistency:
         errors = check_ruleset_metadata_consistency()
         assert any("AGENTS.md 缺少 ruleset_version" in e for e in errors), f"应检出 AGENTS 缺字段, got: {errors}"
 
+    def _write_changelog(self, tmp_path, version="1.6.0", date_str="2026-09-14"):
+        changelog = tmp_path / "ruleset-changelog.md"
+        changelog.write_text(
+            "## 变更记录\n\n"
+            "| ruleset_version | 变更日期 | 变更摘要 |\n"
+            "|-----------------|----------|---------|\n"
+            f"| {version} | {date_str} | x |\n",
+            encoding="utf-8",
+        )
+        return changelog
+
+    def _write_three(self, tmp_path, reviewed="2026-09-17", agents_reviewed=None, agents_missing_reviewed=False):
+        claude = tmp_path / "CLAUDE.md"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        agents = tmp_path / "AGENTS.md"
+        claude.write_text(f"> - ruleset_version: 1.6.0\n> - last_reviewed: {reviewed}\n", encoding="utf-8")
+        contributing.write_text(f"> - ruleset_version: 1.6.0\n> - last_reviewed: {reviewed}\n", encoding="utf-8")
+        if agents_missing_reviewed:
+            agents.write_text("> - ruleset_version: 1.6.0\n", encoding="utf-8")
+        else:
+            agents.write_text(
+                f"> - ruleset_version: 1.6.0\n> - last_reviewed: {agents_reviewed or reviewed}\n",
+                encoding="utf-8",
+            )
+        return claude, contributing, agents
+
+    def test_passes_when_last_reviewed_not_earlier_than_changelog(self, tmp_path, monkeypatch):
+        """三份 last_reviewed 均不早于 changelog 顶行变更日期、且 AGENTS 无倒挂 → 无错误."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude, contributing, agents = self._write_three(tmp_path, reviewed="2026-09-17")
+        changelog = self._write_changelog(tmp_path, date_str="2026-09-14")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+
+        errors = check_ruleset_metadata_consistency()
+        assert errors == [], f"应无错误, got: {errors}"
+
+    def test_detects_last_reviewed_earlier_than_changelog(self, tmp_path, monkeypatch):
+        """last_reviewed 早于 changelog 顶行变更日期 → 报错（DS-05）."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude, contributing, agents = self._write_three(tmp_path, reviewed="2026-09-03")
+        changelog = self._write_changelog(tmp_path, date_str="2026-09-14")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("早于" in e and "ruleset-changelog" in e for e in errors), f"应检出 changelog 倒挂, got: {errors}"
+
+    def test_detects_agents_last_reviewed_earlier_than_claude(self, tmp_path, monkeypatch):
+        """AGENTS 的 last_reviewed 早于 CLAUDE → 报错."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude, contributing, agents = self._write_three(tmp_path, reviewed="2026-09-17", agents_reviewed="2026-09-01")
+        changelog = self._write_changelog(tmp_path, date_str="2026-09-14")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("AGENTS.md" in e and "早于 CLAUDE.md" in e for e in errors), f"应检出 AGENTS 倒挂, got: {errors}"
+
+    def test_detects_agents_missing_last_reviewed(self, tmp_path, monkeypatch):
+        """AGENTS 存在但缺 last_reviewed → 报错（DS-05 纳入双重同步）."""
+        from check_docs_consistency import check_ruleset_metadata_consistency
+
+        claude, contributing, agents = self._write_three(tmp_path, agents_missing_reviewed=True)
+        changelog = self._write_changelog(tmp_path, date_str="2026-09-14")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.RULESET_CHANGELOG_PATH", changelog)
+
+        errors = check_ruleset_metadata_consistency()
+        assert any("AGENTS.md 缺少 last_reviewed" in e for e in errors), (
+            f"应检出 AGENTS 缺 last_reviewed, got: {errors}"
+        )
+
 
 class TestDecisionTreeMapping:
     """决策树与其机器可读镜像双向一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml."""
