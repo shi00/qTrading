@@ -2140,10 +2140,14 @@ def ScreenerView(
 
     def _on_row_click(row_data: dict) -> None:
         set_detail_dialog_data(typing.cast(typing.Any, row_data.get("_raw", row_data)))
-        ts_code = typing.cast(
-            str | None,
-            row_data.get("_raw", row_data).get("ts_code") if isinstance(row_data.get("_raw", row_data), dict) else None,
+        # #423 反查：详情数据可用 _raw（mappingproxy，行原始投影）展示；但 ts_code 需优先
+        # 取 row_data 顶层（可见列），因 row.values/_raw 为只读 mappingproxy 不含 ts_code。
+        src = (
+            row_data
+            if isinstance(row_data, dict) and row_data.get("ts_code")
+            else (row_data.get("_raw") if isinstance(row_data.get("_raw"), dict) else None)
         )
+        ts_code = typing.cast(str | None, src.get("ts_code") if isinstance(src, dict) else None)
         if ts_code:
             news_vm.select_stock(ts_code)
 

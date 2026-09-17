@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import datetime
 import io
 import json
 import logging
@@ -14,6 +15,7 @@ import sys
 import tarfile
 import time
 import typing
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
@@ -408,13 +410,14 @@ def _spawn_app_session(
     *,
     pool_name: str,
     embedded_url_file: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> AppServer:
     """启动一个 Flet app 实例（embedded 模式），供 session-scoped fixture 复用。
 
     pool_name: data_root 目录命名（ro/mut），隔离两个 pool 的 PG data 目录。
     embedded_url_file: 若提供，sidecar 启动后将 URL 写入该文件（供 seed_e2e_data 读取）。
-                       None 时不设置 QTRADING_EMBEDDED_PG_URL_FILE（与 wizard_app 一致，
-                       mutates_config 用例不依赖种子数据）。
+                       None 时不设置 QTRADING_EMBEDDED_PG_URL_FILE（与 wizard_app 一致，"" mutates_config 用例不依赖种子数据）。
+    extra_env: 附加注入子进程的环境变量（Phase E3 news-risk 场景池用于 NEWS_AISERVICE_MOCK）。
     """
     data_root = tmp_path_factory.mktemp(f"embedded_pg_data_{pool_name}")
     env_overrides: dict[str, str] = {
@@ -427,6 +430,7 @@ def _spawn_app_session(
         # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
         # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        **(extra_env or {}),
     }
     if embedded_url_file is not None:
         env_overrides["QTRADING_EMBEDDED_PG_URL_FILE"] = str(embedded_url_file)
@@ -766,7 +770,9 @@ async def _seed_e2e_data(db_url: str) -> None:
                     index_daily,
                     sync_status,
                     stock_basic,
-                    trade_cal
+                    trade_cal,
+                    market_news,
+                    news_risk_brief
                 CASCADE
                 """
             )
@@ -949,6 +955,53 @@ async def _seed_e2e_data(db_url: str) -> None:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 index_rows,
+            )
+
+            # market_news — 平安银行 30 天窗口内的证据文档（新闻风险解读 E3）。
+            # 证据加载落在 market_news 表（get_market_news_documents 按 ts_code 读取），
+            # 使打开详情进入证据模式时有材料可展示；publish_time 用 naive UTC（DB 存 UTC）。
+            _nr_now_utc = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+            _nr_news_rows = [
+                (
+                    "平安银行发布2026年度中期权益分派预案 每股派现0.28元",
+                    "平安银行披露2026年度中期利润分配方案，拟向全体股东每10股派发现金红利2.8元，"
+                    "合计拟派发现金股利总额约54亿元，分红比例较上年同期有所提升。",
+                    "a" * 64,
+                    _nr_now_utc - datetime.timedelta(days=2, hours=3),
+                    "巨潮资讯",
+                    "000001.SZ",
+                    "announcement",
+                    "neutral",
+                ),
+                (
+                    "平安银行召开2026年半年度业绩说明会",
+                    "平安银行管理层在业绩说明会上表示，将有序压降高风险资产占比，零售转型进入深水区，"
+                    "全年资产质量有望维持稳定。",
+                    "b" * 64,
+                    _nr_now_utc - datetime.timedelta(days=5, hours=1),
+                    "巨潮资讯",
+                    "000001.SZ",
+                    "announcement",
+                    "neutral",
+                ),
+                (
+                    "市场关注平安银行净息差与资产质量走势",
+                    "多家券商发布研报关注平安银行净息差收窄压力，认为其拨备覆盖率充足，风险抵补能力稳健，维持评级。",
+                    "c" * 64,
+                    _nr_now_utc - datetime.timedelta(days=1, hours=6),
+                    "新浪财经",
+                    "000001.SZ",
+                    "news",
+                    "neutral",
+                ),
+            ]
+            await conn.executemany(
+                """
+                INSERT INTO market_news
+                    (title, content, content_hash, publish_time, source, ts_code, source_kind, sentiment)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                _nr_news_rows,
             )
 
             # sync_status — 质量门控评级依据
@@ -1586,6 +1639,122 @@ async def e2e_page_1280x720(e2e_browser, _e2e_app_dep: AppServer, request):
     最小宽度下主要视图无塌陷（PR373 视口塌陷回归防护）。
     """
     async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1280, 720)) as fp:
+        yield fp
+
+
+# ============================================================================
+# 新闻风险解读 E2E 场景池（Phase E3）
+#
+# 由 env 驱动 fake AI（services.news_insight_e2e_fake，仅在 E2E_TESTING + env 下启用）。
+# 每个场景用独立 app 进程（独立 embedded PG data 目录），否则 env 在子进程内不可变、
+# 无法在单会话内切换场景。success 池带 1500ms 分析延迟，供「取消恢复」用例在 analyzing
+# 阶段可捕获地取消；noevents 池用于「AI 成功但无事件」验收点。
+# 页面经 _e2e_page_with_viewport 复用统一生命周期（canary + teardown + 视口）。
+# ============================================================================
+
+
+async def _seed_app_database(app: AppServer, embedded_url_file: Path, e2e_browser):
+    """触发场景 app 的 sidecar 启动并按共享逻辑播种（复用 _seed_e2e_data）。
+
+    与 seed_e2e_data 同机制：保持临时 page 打开（keep-alive），防止第一次
+    main(page) 被取消导致单例资源被清理，影响后续测试 page 的 DB 初始化。
+    """
+    keep_alive_context = None
+    if os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded":
+        if not embedded_url_file.exists():
+            logger.info("[E2E Seeding] triggering sidecar via browser for scenario pool")
+            keep_alive_context = await _trigger_sidecar_startup_via_browser(
+                app, e2e_browser, embedded_url_file, timeout_s=600.0
+            )
+        if not embedded_url_file.exists():
+            raise RuntimeError(f"embedded_url_file not found at {embedded_url_file}")
+        db_url = embedded_url_file.read_text(encoding="utf-8").strip()
+        if not db_url:
+            raise RuntimeError(f"embedded_url_file is empty: {embedded_url_file}")
+    else:
+        db_url = TEST_DATABASE_URL
+
+    def _run_in_selector_loop() -> None:
+        loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_seed_e2e_data(db_url))
+        finally:
+            loop.close()
+
+    await asyncio.to_thread(_run_in_selector_loop)
+    return keep_alive_context
+
+
+@pytest.fixture(scope="session")
+def embedded_url_file_nr_success(tmp_path_factory):
+    return tmp_path_factory.mktemp("embedded_url_nr_success") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def embedded_url_file_nr_noevents(tmp_path_factory):
+    return tmp_path_factory.mktemp("embedded_url_nr_noevents") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def news_risk_app_success(
+    tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_nr_success
+) -> Iterator[AppServer]:
+    """News-risk success_events 场景池：AI 成功且有风险事件；1500ms 延迟供取消用。"""
+    app = _spawn_app_session(
+        tmp_path_factory,
+        real_sidecar_binary_e2e,
+        pool_name="nr_success",
+        embedded_url_file=embedded_url_file_nr_success,
+        extra_env={
+            "NEWS_AISERVICE_MOCK": "success_events",
+            "NEWS_AISERVICE_MOCK_DELAY_MS": "1500",
+        },
+    )
+    yield app
+    _terminate(app.proc)
+
+
+@pytest.fixture(scope="session")
+def news_risk_app_noevents(
+    tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_nr_noevents
+) -> Iterator[AppServer]:
+    """News-risk success_no_events 场景池：AI 成功但未识别到风险事件。"""
+    app = _spawn_app_session(
+        tmp_path_factory,
+        real_sidecar_binary_e2e,
+        pool_name="nr_noevents",
+        embedded_url_file=embedded_url_file_nr_noevents,
+        extra_env={"NEWS_AISERVICE_MOCK": "success_no_events"},
+    )
+    yield app
+    _terminate(app.proc)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def seed_nr_success(e2e_browser, news_risk_app_success, embedded_url_file_nr_success):
+    keep_alive = await _seed_app_database(news_risk_app_success, embedded_url_file_nr_success, e2e_browser)
+    yield
+    if keep_alive is not None:
+        await keep_alive.close()
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def seed_nr_noevents(e2e_browser, news_risk_app_noevents, embedded_url_file_nr_noevents):
+    keep_alive = await _seed_app_database(news_risk_app_noevents, embedded_url_file_nr_noevents, e2e_browser)
+    yield
+    if keep_alive is not None:
+        await keep_alive.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def news_risk_page_success(e2e_browser, seed_nr_success, news_risk_app_success, request):
+    async with _e2e_page_with_viewport(e2e_browser, news_risk_app_success, request, viewport=(1400, 900)) as fp:
+        yield fp
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def news_risk_page_noevents(e2e_browser, seed_nr_noevents, news_risk_app_noevents, request):
+    async with _e2e_page_with_viewport(e2e_browser, news_risk_app_noevents, request, viewport=(1400, 900)) as fp:
         yield fp
 
 

@@ -180,6 +180,93 @@ class ScreenerPage:
         ) from last_exc
 
 
+class NewsRiskPage:
+    """新闻风险解读页对象（Phase E3）：详情对话框内「证据 → 生成 → 解读」流。
+
+    封装：运行放量突破策略打开详情 → 等待证据模式（生成按钮出现）→ 生成风险解读 →
+    断言各 anchor（RISK_LEVEL / SUMMARY / EVENT_CARD / COVERAGE / EVENT_EMPTY）。
+    仅封装 news-risk anchor 化交互；文本级断言仍透传 ``page.expect_text``。
+    """
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.screener = ScreenerPage(page)
+        self.ap = AnchorPage(page.page, page)
+
+    async def open_detail(self, ts_code: str = "000001.SZ") -> None:
+        """运行放量突破策略并打开平安银行详情对话框（种子数据 1 行命中）。"""
+        await self.screener.open()
+        await self.screener.select_strategy("volume_breakout")
+        await self.screener.run()
+        await self.screener.expect_result("平安银行")
+        await self.screener.open_detail_dialog(ts_code)
+
+    async def wait_evidence_ready(self, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
+        """等待证据模式就绪（生成按钮出现，即 PHASE_EVIDENCE_READY）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=timeout_ms)
+
+    async def generate(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击「生成风险解读」按钮（retry 抗吞）。
+
+        E3 修复：detail dialog 内 evidence 列表会把生成按钮推到视口外（E2E 实证
+        generate 按钮 y~1768 远超视口 900，playwright mouse.click 点击视口外坐标
+        Flutter 收不到）。故先 ``scroll_into_view`` 把按钮滚入视口再 ``click``。
+
+        _confirm 用短轮询等待 GENERATE_BUTTON 消失（触发后 phase→ANALYZING 按钮
+        被替换）。对齐 ScreenerPage.run：区分"点击成功但异步渲染延迟（数帧内消失
+        → True）"与"点击被吞（按钮持续可见 → 轮询超时 → False → 重试）"。首次生成
+        缓存未命中（XP5 场景刻意前置）走 DELAY_MS=1500 的生成中阶段，2s 窗口内
+        按钮保持隐藏，确认信号稳定。
+        """
+
+        async def _interact() -> None:
+            await self.ap.scroll_into_view(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=timeout_ms)
+            await self.ap.click(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=timeout_ms)
+
+        async def _confirm() -> bool:
+            try:
+                await self.ap.expect_hidden(EIDS.NEWS_RISK.GENERATE_BUTTON, timeout_ms=2000)
+                return True
+            except PlaywrightTimeoutError:
+                return False
+
+        await retry_until_triggered(_interact, _confirm)
+
+    async def wait_analyzing(self, timeout_ms: int = TIMEOUTS.FAST) -> None:
+        """等待进入分析中阶段（ProgressRing + 文案）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.ANALYZING, timeout_ms=timeout_ms)
+
+    async def wait_ready(self, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
+        """等待 ready 阶段完成（RISK_LEVEL anchor 出现）。"""
+        await self.ap.expect_visible(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_risk_level_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_risk_level_hidden(self, timeout_ms: int = TIMEOUTS.FAST) -> None:
+        """断言风险等级不在 DOM（无 AI/生成前的证据模式不应渲染）。"""
+        await self.ap.expect_hidden(EIDS.NEWS_RISK.RISK_LEVEL, timeout_ms=timeout_ms)
+
+    async def assert_event_card_visible(self, idx: int = 0, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.event_card(idx), timeout_ms=timeout_ms)
+
+    async def assert_summary_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        # flet 1.0.0 out-of-sync 会部分丢弃嵌套的 Semantics 节点：E3 实证页面里
+        # risk_level/coverage/event_card 锚点都渲染成功，唯独 SUMMARY 的 Semantics
+        # 锚点缺失，而「风险摘要」裸标题 Text 稳定渲染。故改等标题文本（expect_text
+        # 已具备 textContent + aria-label 双轨匹配），抗 out-of-sync。
+        await self.page.expect_text(I18n.get("news_insight_summary"), timeout_ms=timeout_ms)
+
+    async def assert_coverage_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.COVERAGE, timeout_ms=timeout_ms)
+
+    async def assert_event_empty_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.ap.expect_visible(EIDS.NEWS_RISK.EVENT_EMPTY, timeout_ms=timeout_ms)
+
+    async def close_detail(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        await self.screener.close_detail_dialog(timeout_ms=timeout_ms)
+
+
 # ============================================================================
 # PR-3: SettingsPage / DataPage / BacktestPage / WizardPage
 #

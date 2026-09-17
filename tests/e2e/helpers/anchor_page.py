@@ -103,12 +103,19 @@ class AnchorPage:
     async def _locate_by_text(
         self, eid_str: str, exact: bool, role_filter: str | None = None
     ) -> dict[str, float] | None:
-        """LABEL/COMPLEX: textContent 匹配 (JS 侧, 因 Playwright :text-is 对非 role 节点不精确).
+        """LABEL/COMPLEX: textContent / aria-label 匹配 (JS 侧, 因 Playwright :text-is 对非 role 节点不精确).
 
         返回节点 bounding rect dict {x,y,w,h} 或 None.
-        exact=True:  textContent.trim() === eid_str       (LABEL)
+        exact=True:  textContent.trim() === eid_str, 或 aria-label === eid_str
+                     (LABEL；EID 落点双轨，见下)
         exact=False: textContent.trim().startsWith(eid_str + [. | \\n])
                      (COMPLEX：Dropdown 用 "."，GestureDetector 合并节点用 "\\n"）
+
+        E3 实证：LABEL 的 EID 落点依 content 结构而异——纯文本/简单内容走
+        ``textContent`` 轨；content 含动画控件（ProgressRing 等）时 CanvasKit
+        把"EID\\n显示文本"整体提升为 ``aria-label``、textContent 为空。故 exact
+        匹配需同时识别两轨（aria 形态同为 ``label + "\\n"`` 前缀，与 textContent
+        同构）。
 
         前缀匹配用**分隔符边界**规避嵌套冲突：避免
         `e2e.screener.run_button` 误命中 `e2e.screener.run_button_v2`。
@@ -124,7 +131,12 @@ class AnchorPage:
                 const el = Array.from(document.querySelectorAll(q))
                     .find(e => {
                         const t = (e.textContent || '').trim();
-                        if (exact) return t === label || t.startsWith(label + '\n');
+                        if (exact) {
+                            // 双轨：textContent 或 aria-label 前缀匹配（aria 形态 label + "\\n" + content）
+                            const a = (e.getAttribute('aria-label') || '');
+                            return t === label || t.startsWith(label + '\n')
+                                || a === label || a.startsWith(label + '\n');
+                        }
                         // 前缀匹配: t === label, 或 t 以 label + "." / "\n" 开头
                         // ("." = EID 命名空间层级; "\n" = GD 合并节点 EID 与显示文本分隔)
                         return t === label
@@ -198,6 +210,47 @@ class AnchorPage:
         if not box:
             raise RuntimeError(f"AnchorPage: no bbox for input under [aria-label={eid_str!r}]")
         return dict(box)
+
+    async def scroll_into_view(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """把 anchor 所在节点滚动到视口中心，供 click 前调用。
+
+        E3 实证：dialog/长表单内目标控件可能被内容流推到视口外，Playwright
+        `mouse.click(bbox_center)` 对视口外坐标无效（点击落空，Flutter 收不到）。
+        滚动使控件进入视口后再点。用 JS `scrollIntoView({block,inline:'center'})`
+        而非 Playwright `scroll_into_view_if_needed`：CanvasKit 语义节点经测试仅响应
+        原生 scrollIntoView，且统一走 evaluate 避免双轨差异。
+
+        INTERACTIVE/INPUT 按 aria 后缀匹配定位；COMPLEX 按 role=button 文本前缀匹配
+        （与 _locate_by_text 对齐）。滚动画后短暂等待 Flutter 滚动动画稳定。
+        """
+        eid_str, kind = eid
+        if kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
+            await self.page.evaluate(
+                r"""(args) => {
+                    const {label} = args;
+                    const el = document.querySelector('flt-semantics[aria-label$="' + label + '"]');
+                    if (el) el.scrollIntoView({block: 'center', inline: 'center'});
+                }""",
+                {"label": eid_str},
+            )
+        elif kind == AnchorKind.COMPLEX:
+            await self.page.evaluate(
+                r"""(args) => {
+                    const {label} = args;
+                    const el = Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+                        .find(e => {
+                            const t = (e.textContent || '').trim();
+                            return t === label || t.startsWith(label + '.') || t.startsWith(label + '\\n');
+                        });
+                    if (el) el.scrollIntoView({block: 'center', inline: 'center'});
+                }""",
+                {"label": eid_str},
+            )
+        else:  # LABEL
+            raise RuntimeError(
+                f"AnchorPage.scroll_into_view: LABEL kind ({eid_str!r}) is display-only, not scrollable target"
+            )
+        await self.page.wait_for_timeout(300)
 
     @staticmethod
     def _normalize_box(box: dict[str, Any]) -> dict[str, float]:
