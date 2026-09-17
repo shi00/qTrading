@@ -49,6 +49,11 @@ class PortfolioSimulator:
         # BT-02: 退市清算分项统计（供 engine 透传到 BacktestResult 评估影响权重）
         self.delist_liquidation_count: int = 0
         self.delist_loss_amount: float = 0.0
+        # D1-C1: 长停（临时停牌）穿越回测区间被 `estimated=True` 按最后已知价估值。
+        # 累计每只持仓被 estimated 估值的连续交易天数，超阈值后向 warnings 告警，
+        # warnings 会沿线汇入 data_warnings，触发 UI 可信度（unreliable）判定。
+        self._stale_estimate_days: dict[str, int] = {}
+        self._stale_estimate_warned: set[str] = set()
 
     def reset(self) -> None:
         self.cash = self.config.initial_capital
@@ -60,6 +65,8 @@ class PortfolioSimulator:
         self._last_known_prices = {}
         self.delist_liquidation_count = 0
         self.delist_loss_amount = 0.0
+        self._stale_estimate_days = {}
+        self._stale_estimate_warned = set()
 
     def process_day(
         self,
@@ -68,6 +75,9 @@ class PortfolioSimulator:
         day_quotes: pl.DataFrame,
         is_rebalance: bool,
     ) -> None:
+        # BT-02 补全（D1-C1）：退市清算不依赖再平衡节奏，每个交易日先结清已退市持仓，
+        # 否则 rebalance_freq=signal/monthly 时退市持仓会按最后已知价长期计入 NAV。
+        self._liquidate_delisted_on(exec_date, day_quotes)
         if is_rebalance:
             self._rebalance_diff(exec_date, day_signals, day_quotes)
 
@@ -547,6 +557,25 @@ class PortfolioSimulator:
         delist_date = meta.get("delist_date")
         return delist_date is not None and exec_date >= delist_date
 
+    def _liquidate_delisted_on(self, exec_date: date, day_quotes: pl.DataFrame) -> None:
+        """D1-C1: 每个交易日先结清已退市持仓（不依赖再平衡节奏）。
+
+        退市整理期仍有报价时跳过强制清算，走正常撮合路径；
+        无报价的已退市持仓按《最后已知价 × delist_recovery_rate》清算。
+        """
+        quotes_by_code = (
+            {k[0]: v for k, v in day_quotes.partition_by("ts_code", as_dict=True).items()}
+            if not day_quotes.is_empty()
+            else {}
+        )
+        for ts_code, pos in list(self.positions.items()):
+            if not self._is_delisted(ts_code, exec_date):
+                continue
+            quote = quotes_by_code.get(ts_code)
+            if quote is not None and not quote.is_empty():
+                continue  # 退市整理期仍有报价，走正常撮合路径
+            self._liquidate_delisted_position(ts_code, pos, exec_date)
+
     def _liquidate_delisted_position(self, ts_code: str, pos: dict, exec_date: date) -> None:
         """BT-02: 退市标的按「最后已知价 × 回收率」清算，并计交易成本。
 
@@ -640,6 +669,8 @@ class PortfolioSimulator:
             if quote is not None and not quote.is_empty():
                 qfq_close = float(quote.select("qfq_close").item())
                 self._last_known_prices[ts_code] = qfq_close
+                # D1-C1: 恢复交易则复位连续估值天数计数（仅统计连续停牌段）
+                self._stale_estimate_days[ts_code] = 0
                 qfq_market_value = pos["volume"] * qfq_close
                 raw_market_value = pos["volume"] * float(quote.select("raw_close").item())
                 total_value += qfq_market_value
@@ -665,6 +696,16 @@ class PortfolioSimulator:
                         "pnl": estimated_value - qfq_cost_basis,
                         "estimated": True,
                     }
+                    # D1-C1: 长停（临时停牌）可见性护栏——累计连续估值天数，
+                    # 超阈值向 warnings 告警。warnings 沿线汇入 data_warnings，
+                    # 触发 UI 可信度（unreliable）判定，避免长期按最后已知价估值被掩盖。
+                    self._stale_estimate_days[ts_code] = self._stale_estimate_days.get(ts_code, 0) + 1
+                    if self._stale_estimate_days[ts_code] >= 30 and ts_code not in self._stale_estimate_warned:
+                        self._stale_estimate_warned.add(ts_code)
+                        self.warnings.append(
+                            f"{exec_date}: {ts_code} valued at last known price for "
+                            f">={self._stale_estimate_days[ts_code]} trading days (suspension)"
+                        )
 
         self.positions_list.append(
             {
