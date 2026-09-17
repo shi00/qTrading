@@ -357,6 +357,7 @@ class TestBacktestQualityProxy:
     async def test_preload_range_success(self) -> None:
         """验证 preload_range 成功读取数据并在 build_context 中进行内存切片。"""
         cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
         cache.screener_dao.get_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -393,6 +394,7 @@ class TestBacktestQualityProxy:
         """验证在预加载抛出异常时，能够优雅降级回单日查询逻辑。"""
         cache = MagicMock()
         # 范围查询抛出异常
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
         cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
@@ -438,6 +440,7 @@ class TestBacktestQualityProxy:
 
         cache = MagicMock()
         # 模拟其中一个方法抛出 CancelledError
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
         cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
@@ -475,6 +478,7 @@ class TestBacktestQualityProxy:
     async def test_preload_range_custom_limit_allows_wider_range(self) -> None:
         """验证自定义 preload_max_days=730 允许超过 366 但小于 730 天的范围预加载。"""
         cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
         cache.screener_dao.get_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
@@ -499,8 +503,9 @@ class TestBacktestQualityProxy:
 
         # 预加载应正常初始化（不为 None）
         assert provider._preloaded is not None
-        # 范围查询应被调用（验证归一化后的日期参数）
-        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515")
+        # 范围查询应被调用（验证归一化后的日期参数 + 自适应护栏 max_rows）
+        # count_expected_rows=100 → guard=min(max(1_500_000, 100*1.5), 5_000_000)=1_500_000（兜底常量）
+        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515", max_rows=1_500_000)
 
     @pytest.mark.asyncio
     async def test_preload_range_custom_limit_skips_when_exceeded(self) -> None:
@@ -519,6 +524,7 @@ class TestBacktestQualityProxy:
     async def test_preload_range_robust_date_handling(self) -> None:
         """验证对于 null, NaT, None 等无效日期，能够进行过滤且不报错。"""
         cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
         import numpy as np
 
         # 返回含有 None/NaT 的非法数据
@@ -549,6 +555,125 @@ class TestBacktestQualityProxy:
         assert len(preloaded_df_dict) == 1
         assert "20240102" in preloaded_df_dict
         assert len(preloaded_df_dict["20240102"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_preload_range_adaptive_guard_scales_with_expected_rows(self) -> None:
+        """D3-M4: 行数护栏随 count_expected_rows 真实规模自适应放大，避免固定护栏过早静默降级。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=3_000_000)
+        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache, preload_max_days=730)
+        await provider.preload_range(date(2024, 1, 1), date(2025, 5, 15))
+
+        # expected=3M ×1.5=4.5M，介于兜底常量与绝对上限之间 → max_rows=4_500_000
+        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515", max_rows=4_500_000)
+        cache.screener_dao.get_fundamental_screening_data_range.assert_called_once_with(
+            "20240101", "20250515", max_rows=4_500_000
+        )
+
+    @pytest.mark.asyncio
+    async def test_preload_range_guard_capped_at_absolute_max(self) -> None:
+        """D3-M4: 畸形区间（join 爆炸/参数错误）时护栏封顶于绝对上限，防随错误规模无限膨胀。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=9_000_000)
+        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache, preload_max_days=366)
+        await provider.preload_range(date(2024, 1, 1), date(2024, 12, 31))
+
+        # expected=9M ×1.5=13.5M → min(13.5M, 5M)=5_000_000（绝对上限封顶）
+        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20241231", max_rows=5_000_000)
+
+    @pytest.mark.asyncio
+    async def test_preload_range_guard_falls_back_constant_when_count_fails(self) -> None:
+        """D3-M4: count_expected_rows 失败时护栏退化回固定兜底常量，行为与现状一致且安全。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(side_effect=Exception("estimate boom"))
+        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache, preload_max_days=366)
+        await provider.preload_range(date(2024, 1, 1), date(2024, 3, 1))
+
+        # count 失败 → expected_rows=1 → guard=min(max(1_500_000, 1*1.5), 5M)=1_500_000
+        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20240301", max_rows=1_500_000)
+        # count 失败仅属护栏计算兜底，预加载本身未被破坏，不应产生降级警告
+        assert cache.screener_dao.get_screening_data_range.await_count == 1
+        assert provider.range_preload_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_preload_range_too_wide_records_warning(self) -> None:
+        """D3-M4: 区间超限跳过预加载时降级必须可见（写入 range_preload_warnings）。"""
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache)
+
+        # 超过 366 天的范围 (2024-01-01 到 2025-02-01)
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 1))
+
+        assert provider._preloaded is None
+        assert cache.screener_dao.get_screening_data_range.assert_not_called() is None
+        assert any(w.startswith("preload_range_too_wide") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_preload_range_per_key_failure_records_warning(self) -> None:
+        """D3-M4: 单表范围预载失败（含护栏超限抛 ValueError）时降级可见。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=ValueError("MAX_ROWS exceeded"))
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 1), date(2024, 3, 1))
+
+        assert provider._preloaded is not None
+        assert provider._preloaded["screening_data"] is None
+        assert any(w.startswith("range_preload_failed:screening_data") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_range_preload_warnings_reset_each_call(self) -> None:
+        """D3-M4: 每次预载前重置降级警告列表，避免跨多次 preload_range 调用累积旧状态。"""
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache)
+
+        # 第一次：区间超限 → 产生降级警告
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 1))
+        assert provider.range_preload_warnings
+
+        # 第二次：正常预载（无 warnings 累积）
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        await provider.preload_range(date(2024, 1, 1), date(2024, 3, 1))
+        assert provider.range_preload_warnings == []
 
 
 class TestBacktestDataProviderAuxiliaryTables:

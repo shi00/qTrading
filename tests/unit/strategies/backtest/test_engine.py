@@ -1097,6 +1097,104 @@ class TestRunMethod:
             await engine.run(strategy=MagicMock())
 
 
+class TestRunMergesRangePreloadWarnings:
+    """D3-M4: engine.run 将区间预载降级警告并入 BacktestResult.data_warnings。"""
+
+    @pytest.mark.asyncio
+    async def test_run_includes_range_preload_warnings(self, monkeypatch):
+        """区间预载走了慢路径（range_preload_warnings 非空）时，result 应携带该警告，让降级在 UI 可见。"""
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = [
+            "preload_range_too_wide: preload_max_days=366, requested=370 days. Fallback to daily query."
+        ]
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        # 短路内部依赖，仅验证 all_warnings 汇入逻辑
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+        )
+        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        # stub 静态指标计算，避免依赖真实财务逻辑
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_nav_curve", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy)
+
+        assert any(w.startswith("preload_range_too_wide") for w in result.data_warnings)
+
+    @pytest.mark.asyncio
+    async def test_run_omits_when_no_range_preload_warnings(self, monkeypatch):
+        """无区间预载降级时 data_warnings 不含该通道警告。"""
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+        )
+        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_nav_curve", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy)
+
+        assert not any(w.startswith("preload_range_too_wide") for w in result.data_warnings)
+
+
 class TestEnrichSuspendStatus:
     def _make_engine(self):
         config = BacktestConfig(
