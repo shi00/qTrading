@@ -80,8 +80,9 @@ def test_get_dynamic_description(strategies_ctx):
     from core.i18n import Message
 
     assert isinstance(desc, Message)
-    assert desc.key == s.desc_key
-    assert desc.params == {}
+    # D2-M4: 默认实现从 get_parameters() 派生，value 有可调参数且已提供 _desc_dynamic 模板
+    assert desc.key == "strategy_value_desc_dynamic"
+    assert desc.params == {"pe_min": 5, "pe_max": 20, "pb_max": 3, "dv_min": 2}
 
 
 async def test_value_strategy(strategies_ctx):

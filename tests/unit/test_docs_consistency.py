@@ -2473,6 +2473,56 @@ class TestFletHubCompleteness:
         )
 
 
+class TestStrategyDescDynamicConsistency:
+    """D2-M4 策略静态描述与可调参数一致性门禁。
+
+    覆盖:
+    - main() 在当前项目状态下通过（静态 desc 含数字字面量的策略均已补 _desc_dynamic）
+    - 漂移检测: 仅移除某策略的 _desc_dynamic 键后应报错（fail closed）
+    - 未含数字字面量的静态 desc 不应被门禁触发
+    """
+
+    def test_main_passes_with_dynamic_descs(self):
+        """当前项目已为含数字字面量的策略补 _desc_dynamic，main() 应通过。"""
+        from check_docs_consistency import check_strategy_desc_dynamic_consistency
+
+        errors = check_strategy_desc_dynamic_consistency()
+        assert errors == [], "现有 locales 应通过 D2-M4 门禁:\n  " + "\n  ".join(errors)
+
+    def test_missing_dynamic_key_fails(self, tmp_path, monkeypatch):
+        """静态 desc 含数字字面量但缺少 _desc_dynamic 时应报错。"""
+        from check_docs_consistency import check_strategy_desc_dynamic_consistency
+
+        fake = tmp_path / "locales" / "zh_CN"
+        fake.mkdir(parents=True)
+        (fake / "strings.json").write_text(
+            '{"strategy_foo_desc": "标准：阈值 > 3000万"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_strategy_desc_dynamic_consistency()
+        assert any("strategy_foo_desc" in e and "缺少动态模板" in e for e in errors), (
+            f"应检测缺 _desc_dynamic, got: {errors}"
+        )
+
+    def test_desc_without_number_not_flagged(self, tmp_path, monkeypatch):
+        """静态 desc 无数字字面量（如 '持股比例 > 设定值'）不应触发门禁。"""
+        from check_docs_consistency import check_strategy_desc_dynamic_consistency
+
+        fake = tmp_path / "locales" / "zh_CN"
+        fake.mkdir(parents=True)
+        # desc 无数字字面量，成员又不含 _dynamic 键 → 不报错（无硬编码阈值可脱钩）
+        (fake / "strings.json").write_text(
+            '{"strategy_foo_desc": "标准：持股比例 > 设定值"}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_strategy_desc_dynamic_consistency()
+        assert errors == [], f"无数字字面量的 desc 不应触发门禁, got: {errors}"
+
+
 class TestExceptionsYamlConsistency:
     """例外注册表一致性校验 (P1-01: 集中例外治理).
 

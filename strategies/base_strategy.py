@@ -3,7 +3,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
-from core.i18n import Message
+from core.i18n import I18n, Message
 from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
@@ -128,12 +128,18 @@ class BaseStrategy(ABC):
 
         # [PITFALL_WARNING] E2E 测试断言避坑指南
         # 坑点：测试工程师在写 E2E 时，经常图省事直接用 ``I18n.get(self.desc_key)`` 去页面上断言策略描述。
-        # 原因：部分策略（如 OversoldStrategy）会重写此方法，返回带滑动条参数（如 RSI < 30）的动态 Message。
+        # 原因：本默认实现会把 ``get_parameters()`` 声明的可调参数投影到 ``{desc_key}_dynamic`` 模板
+        #        （若区域文件提供了该文案），生成带参 Message；若未提供 _dynamic 模板则回退静态 desc_key。
         # 后果：如果 UI 渲染的是带参动态文本，而测试代码还在傻傻等待静态文本，必然导致 TimeoutError。
         # 正确做法：在 E2E 测试中断言策略描述时，必须去对应策略子类检查其是否重写了此方法，
         #         如果是，必须用 ``I18n.get(msg.key, **msg.params)`` 构造出真正的动态预期字符串后再进行 expect_text。
         """
-        return Message(self._desc_key, {})
+        params = {p["name"]: current_params.get(p["name"], p["default"]) for p in self.get_parameters()}
+        dynamic_key = f"{self._desc_key}_dynamic"
+        # 有可调参数时才回显动态阈值；无参数 → 等价于静态 desc_key（params 为空）。
+        if self.get_parameters() and I18n.has(dynamic_key):
+            return Message(dynamic_key, params)
+        return Message(self._desc_key, params)
 
     def get_parameters(self) -> list[dict[str, Any]]:
         """

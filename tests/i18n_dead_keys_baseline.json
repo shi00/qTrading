@@ -1,6 +1,6 @@
 {
   "_description": "UIX-16: Ratchet baseline for unreferenced i18n keys. This count may only decrease.",
-  "count": 304,
+  "count": 311,
   "keys": [
     "ai_analyzing_stock",
     "ai_btn_test",
@@ -222,8 +222,15 @@
     "snack_save_fail",
     "snack_sync_not_completed",
     "status_running",
+    "strategy_block_trade_desc_dynamic",
+    "strategy_cashflow_desc_dynamic",
     "strategy_chips_desc",
     "strategy_dep_unready",
+    "strategy_dividend_desc_dynamic",
+    "strategy_growth_desc_dynamic",
+    "strategy_institutional_desc_dynamic",
+    "strategy_large_pe_desc_dynamic",
+    "strategy_volume_breakout_desc_dynamic",
     "sync_result_empty",
     "sync_result_fetch_failed",
     "sync_result_has_data",

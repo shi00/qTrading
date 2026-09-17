@@ -40,6 +40,9 @@
 20. 书名号章节引用一致性检查（GDR-13）：扫描受检 markdown 中形如 `<文档路径>「<章节名>」`
    的引用，断言目标文档存在同名标题（或标题以「：」+ 章节名 结尾，容忍「第三部分：实现规范手册」
    这类前缀修饰）；章节改名或删除时不再无报警。
+21. 策略静态描述与可调参数一致性检查（D2-M4）：扫描 `strategy_*_desc` 静态描述中硬编码的
+   数字字面量阈值，若含数字则必须配套 `strategy_*_desc_dynamic` 动态模板，避免 UI 展示阈值
+   与可调参数脱钩漂移。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -55,6 +58,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 import tomllib
@@ -2514,6 +2518,46 @@ def check_guillemet_references() -> list[str]:
     return errors
 
 
+def check_strategy_desc_dynamic_consistency() -> list[str]:
+    """检查项 21：策略静态描述与可调参数的一致性（D2-M4）。
+
+    扫描 ``locales/*/strings.json`` 中形如 ``strategy_*_desc`` 的静态描述 key，
+    若其值含数字字面量（硬编码阈值，如 ``> 3000万``），则该策略存在可调参数，
+    必须同时提供动态描述 ``strategy_*_desc_dynamic``，避免 UI 展示的阈值与
+    用户拖动的滑块参数脱钩而漂移。
+    """
+    errors: list[str] = []
+    number_re = re.compile(r"\d")
+    for locale_dir in ("zh_CN", "en_US"):
+        path = ROOT / "locales" / locale_dir / "strings.json"
+        if not path.exists():
+            continue
+        try:
+            strings = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            errors.append(f"策略描述动态一致性: {locale_dir}/strings.json JSON 解析失败: {e}")
+            continue
+        for key, value in strings.items():
+            if not key.startswith("strategy_") or not key.endswith("_desc"):
+                continue
+            # 排除已带 _dynamic 后缀的动态 key（其为最终消费形态，不要求再嵌套）
+            if key.endswith("_desc_dynamic") or key.endswith("_dynamic_desc"):
+                continue
+            # 静态 desc 仅当含硬编码数字字面量时才触发门禁
+            if not isinstance(value, str) or not number_re.search(value):
+                continue
+            # 兼容两种动态模板命名：基类派生 `strategy_*_desc_dynamic` 与手工覆写 `strategy_*_dynamic_desc`
+            dynamic_key = f"{key}_dynamic"
+            alt_dynamic_key = key.replace("_desc", "_dynamic_desc")
+            if dynamic_key not in strings and alt_dynamic_key not in strings:
+                errors.append(
+                    f"策略描述动态一致性: {locale_dir}「{key}」含数字字面量 '{value}'，"
+                    f"但缺少动态模板 '{dynamic_key}' / '{alt_dynamic_key}'"
+                    f"（硬编码阈值与可调参数脱钩，见 D2-M4）"
+                )
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -2561,6 +2605,8 @@ def main() -> int:
             print(f"  - {w}")
     # 书名号式章节引用：补上锚点/相对链接门禁之外的最后一类跨文档引用（GDR-13）
     all_errors.extend(check_guillemet_references())
+    # 策略静态描述与可调参数一致性（D2-M4）：硬编码数字阈值必须配套 _desc_dynamic 动态模板
+    all_errors.extend(check_strategy_desc_dynamic_consistency())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -2575,7 +2621,7 @@ def main() -> int:
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "规则集变更日志版本一致 / ADR 索引完整性）"
+        "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性）"
     )
     return 0
 
