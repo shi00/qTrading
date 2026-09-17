@@ -254,6 +254,65 @@ class TestCalcICSeries:
         assert ic_series.len() == 1
         assert not math.isnan(ic_series[0])
 
+    def test_ic_exit_price_uses_open_for_next_open(self):
+        """D1-m2: execution_price=next_open 时，IC 出场价用 qfq_open_exit（与撮合层口径一致）。
+
+        构造：入口价（execution 日）三股同为 10；出场日 open 差随 signal_rank 单调递增
+        （qfq_open_exit=[11,12,13]→fwd_ret 正相关→IC≈+1），而 qfq_close_exit=[13,12,11]
+        （逆序→IC≈-1）。若修复回退（误用 qfq_close_exit），断言即失败。
+        """
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)] * 3,
+                "execution_date": [date(2024, 1, 3)] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes + codes,
+                "trade_date": [date(2024, 1, 3)] * 3 + [date(2024, 1, 4)] * 3,
+                "qfq_open": [10.0, 10.0, 10.0, 11.0, 12.0, 13.0],
+                "qfq_close": [10.0, 10.0, 10.0, 13.0, 12.0, 11.0],
+            }
+        )
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        engine = self._make_engine(execution_price="next_open")
+        ic_series, _ = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert ic_series.len() == 1
+        assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
+
+    def test_ic_exit_price_uses_close_for_next_close(self):
+        """D1-m2: execution_price=next_close 时，IC 出场价仍用 qfq_close_exit（行为不变）。
+
+        入口价同为 10；出场日 close 差随 signal_rank 递增（qfq_close_exit=[11,12,13]→IC≈+1），
+        而 qfq_open_exit=[13,12,11]（逆序→IC≈-1）。
+        """
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)] * 3,
+                "execution_date": [date(2024, 1, 3)] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes + codes,
+                "trade_date": [date(2024, 1, 3)] * 3 + [date(2024, 1, 4)] * 3,
+                "qfq_close": [10.0, 10.0, 10.0, 11.0, 12.0, 13.0],
+                "qfq_open": [10.0, 10.0, 10.0, 13.0, 12.0, 11.0],
+            }
+        )
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        engine = self._make_engine(execution_price="next_close")
+        ic_series, _ = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert ic_series.len() == 1
+        assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
+
 
 class TestApplyQfq:
     def _make_engine(self):
