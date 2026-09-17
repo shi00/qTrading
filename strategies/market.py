@@ -200,6 +200,15 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
     def __init__(self):
         super().__init__("strategy_northbound_flow_name", "strategy_northbound_flow_desc")
 
+    def get_dynamic_description(self, current_params: dict) -> Message:
+        """回显当前可调阈值（D2-C1：名称/描述如实披露后，随参数动态更新阈值）."""
+        nb_flow_min = current_params.get("nb_flow_min", 50)
+        total_mv_min = current_params.get("total_mv_min", 100)
+        return Message(
+            "strategy_northbound_flow_dynamic_desc",
+            {"nb_flow_min": nb_flow_min, "total_mv_min": total_mv_min},
+        )
+
     def get_parameters(self):
         return [
             {
