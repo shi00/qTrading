@@ -114,7 +114,7 @@ class E2EFakeAIService:
                     {"news_id": news_id, "quote": "来自已引用证据的确定性摘录。"} for news_id in evidence_news_ids[:1]
                 ],
             }
-            for news_id in evidence_news_ids
+            for _ in evidence_news_ids
         ]
         if not events:
             events = [
