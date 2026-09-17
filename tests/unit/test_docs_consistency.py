@@ -4154,7 +4154,7 @@ class TestGovernanceIdGlossary:
         """真实仓库：自动加载文档中出现的治理 ID 全部已登记（无错误）."""
         from check_docs_consistency import check_governance_id_glossary
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert errors == [], f"治理 ID 对照表检查应通过，实际报错: {errors}"
 
     def test_detects_unregistered_id_in_claude(self, tmp_path, monkeypatch):
@@ -4174,7 +4174,7 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert any("P9-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 ID, got: {errors}"
         )
@@ -4196,7 +4196,7 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [agents])
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert any("DOC-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 ID, got: {errors}"
         )
@@ -4215,7 +4215,7 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", missing)
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert len(errors) == 1
         assert "不存在或无法解析" in errors[0]
 
@@ -4241,7 +4241,7 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude, agents])
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert errors == [], f"全部已登记应通过, got: {errors}"
 
     def test_detects_unregistered_uix_id(self, tmp_path, monkeypatch):
@@ -4262,7 +4262,7 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert any("UIX-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 UIX ID, got: {errors}"
         )
@@ -4284,8 +4284,103 @@ class TestGovernanceIdGlossary:
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
-        errors = check_governance_id_glossary()
+        errors, _ = check_governance_id_glossary()
         assert errors == [], f"已登记 UIX/UX 应通过, got: {errors}"
+
+    # ---- DS-02：.py（scripts/ + tests/）扫描以 WARNING 渐进部署，不阻断 ----
+    def test_py_scan_reports_warning_for_unregistered(self, tmp_path, monkeypatch):
+        """.py 中出现未登记治理 ID → 进 WARNING（不阻断），不进 error."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "x.py").write_text("'''本测试守护 P9-98（未登记）的退出路径.'''\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f".py 未登记 ID 不应进 error, got: {errors}"
+        assert any("P9-98" in w for w in warnings), f"应产生 .py 未登记 WARNING, got: {warnings}"
+
+    def test_py_scan_silent_when_registered(self, tmp_path, monkeypatch):
+        """.py 中治理 ID 已登记 → 无 error 亦无 WARNING."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "t.py").write_text("'''本测试守护 P2-07 的语义.'''\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [] and warnings == [], f"已登记 ID 应零告警, got: errors={errors}, warnings={warnings}"
+
+    def test_py_warning_channel_does_not_suppress_doc_error(self, tmp_path, monkeypatch):
+        """受检文档未登记 ID 仍为 error；.py 未登记 ID 为 WARNING——两通道并存互不遮蔽."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 P9-98（未登记）\n", encoding="utf-8")
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "x.py").write_text("'''本测试守护 P9-97（未登记）.'''\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, warnings = check_governance_id_glossary()
+        assert any("P9-98" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"受检文档未登记 ID 仍应是 error, got: {errors}"
+        )
+        assert any("P9-97" in w for w in warnings), f".py 未登记 ID 应为 WARNING, got: {warnings}"
+
+    def test_glossary_excludes_self_reference(self, tmp_path, monkeypatch):
+        """登记正本 governance-ids.md 自身说明文字（夹具/别名示例）不触发未登记 error.
+
+        登记正本被 scan_paths 显式排除：其文本除登记行外还含说明性 ID（如夹具
+        DOC-99、别名 P1-4），这些是元解释而非「引用需登记」对象。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        glossary = gov_dir / "governance-ids.md"
+        # 说明文字含夹具/别名 ID（均不得登记），登记表仅 P2-07
+        glossary.write_text(
+            "> `-99` 后缀（如 DOC-99）为门禁测试夹具，不得登记。\n"
+            "> 单位数写法（如 P1-4、UX-2）为无前导零别名。\n"
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        # 登记正本虽在 CHECKED_DOCS 中，但自身被 scan_paths 显式排除
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [glossary])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f"登记正本自身说明文字不应报未登记 error, got: {errors}"
+        assert warnings == [], f"不应产生未登记警告, got: {warnings}"
 
 
 class TestAdrIndexCompleteness:

@@ -2348,33 +2348,55 @@ def _load_glossary_ids() -> set[str] | None:
     return ids
 
 
-def check_governance_id_glossary() -> list[str]:
+def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     """检查项 19：治理 ID 对照表一致性（GDR-09）。
 
     自动加载文档（CLAUDE.md + AGENTS.md）中出现的治理 ID 必须全部已在
     docs/governance/governance-ids.md 登记——新会话读不到 gitignored 检视报告，
     未登记 ID 即纯上下文噪声且诱发臆测（违反 §1.10 反幻觉护栏精神）。
+
+    返回 (errors, warnings)：受检治理文档（markdown + docs/governance/*.yml）中未登记
+    的 ID 为硬性 error；scripts/ 与 tests/ 的 .py 中未登记 ID 暂为 WARNING（渐进部署，
+    参照 check_redlines 的分级先例，存量清零后翻转 ERROR）。
     """
     errors: list[str] = []
+    warnings: list[str] = []
     registered = _load_glossary_ids()
     if registered is None:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
-        return errors
+        return errors, warnings
     refs: set[str] = set()
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
     # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
+    # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（别名/夹具
+    # 示例如 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7），这些不是「引用需登记」对象。
     # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
     # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
     governance_yml = [
         p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
     ]
-    scan_paths = [p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md")] + governance_yml
+    scan_paths = [
+        p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md")
+    ] + governance_yml
     for path in scan_paths:
         if path.exists():
             refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8")))
     for gov_id in sorted(refs - registered):
         errors.append(f"治理 ID 对照表: {gov_id} 出现在受检文档中，但未在 governance-ids.md 登记")
-    return errors
+
+    # DS-02：将扫描范围扩到 scripts/ 与 tests/ 的 .py。测试注释中的治理 ID 是「这个断言
+    # 为什么存在」的高价值线索（如 review03-C1 标注守护性断言的来源检视发现）；存量约
+    # 100 个未登记，先以 WARNING 落地（渐进部署，不阻断），存量清零后再翻转 ERROR。
+    py_refs: set[str] = set()
+    for py_dir in ("scripts", "tests"):
+        for path in (ROOT / py_dir).rglob("*.py"):
+            if path.is_file():
+                py_refs.update(_GOVERNANCE_ID_PATTERN.findall(path.read_text(encoding="utf-8", errors="replace")))
+    for gov_id in sorted(py_refs - registered):
+        warnings.append(
+            f"治理 ID 对照表(WARNING): {gov_id} 出现在 .py 中但未在 governance-ids.md 登记（渐进部署，存量清零后翻转为 ERROR）"
+        )
+    return errors, warnings
 
 
 # GDR-13: 书名号式章节引用——形如 `<文档路径>「<章节名>」`（如 `CONTRIBUTING.md「错误处理标准模式」`）。
@@ -2471,8 +2493,14 @@ def main() -> int:
     all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_governance_id_references())
     all_errors.extend(check_core_modules_completeness())
-    # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后
-    all_errors.extend(check_governance_id_glossary())
+    # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后。
+    # .py 扫描（scripts/ + tests/）的未登记 ID 暂为 WARNING，不阻断（DS-02 渐进部署）。
+    glossary_errors, glossary_warnings = check_governance_id_glossary()
+    all_errors.extend(glossary_errors)
+    if glossary_warnings:
+        print("::warning::治理 ID 对照表（.py 扫描，渐进部署，不阻断）存在未在 governance-ids.md 登记的治理 ID：")
+        for w in glossary_warnings:
+            print(f"  - {w}")
     # 书名号式章节引用：补上锚点/相对链接门禁之外的最后一类跨文档引用（GDR-13）
     all_errors.extend(check_guillemet_references())
 
