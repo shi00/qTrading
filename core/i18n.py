@@ -168,6 +168,17 @@ class I18n:
         return template
 
     @classmethod
+    def has(cls, key: str) -> bool:
+        """判断当前 locale 是否已定义 ``key`` 的翻译（不触发 missing-key 告警）。
+
+        用于 ``BaseStrategy.get_dynamic_description`` 等需要事实查询、而非取值的场景，
+        避免用 ``get(key, default=...)`` 探测缺失 key 时污染 ``_missing_keys`` 并刷日志。
+        """
+        if not cls._initialized:
+            cls.initialize()
+        return key in cls._get_strings(cls._locale)
+
+    @classmethod
     def set_locale(cls, locale: str):
         """Change locale and notify listeners.
 
