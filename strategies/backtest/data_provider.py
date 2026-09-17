@@ -165,7 +165,8 @@ class BacktestDataProvider:
         # D3-M4: 按区间真实规模计算自适应护栏，传给 screening DAO。
         # 固定护栏与 A 股扩容后的真实行数过近会静默触发降级；count_expected_rows 失败（返回 1，
         # 见 stock_dao）时护栏退化回固定常量，行为与现状一致且安全。
-        expected_rows = 1
+        # 注意：不再预置 expected_rows=1（CodeQL CWE-563 冗余赋值告警），成功路径取下限保护、
+        # 异常路径在 except 兜底为 1，使用点前的所有路径均已赋值。
         try:
             expected_rows = await self.cache.stock_dao.count_expected_rows(start_date_obj, end_date_obj) or 1
         except asyncio.CancelledError:
