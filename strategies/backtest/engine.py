@@ -250,11 +250,16 @@ class VectorBacktestEngine:
         if limit_warning:
             data_warnings.append(limit_warning)
 
+        # D1-m1: 先按 ts_code/trade_date 排序再计算 avg_daily_volume，保证
+        # _compute_avg_daily_volume 的 rolling_mean(over ts_code) 与 qfq 计算的行序确定，
+        # 消除对上游输入行序的隐式依赖；_apply_qfq 内部另有排序兜底，二者叠加亦幂等。
+        quotes_df = quotes_df.sort(["ts_code", "trade_date"])
+
         quotes_df = self._compute_avg_daily_volume(quotes_df)
 
         quotes_df = self._apply_qfq(quotes_df)
 
-        return quotes_df.sort(["ts_code", "trade_date"]), data_warnings
+        return quotes_df, data_warnings
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _enrich_suspend_status(
