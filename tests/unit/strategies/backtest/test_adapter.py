@@ -743,3 +743,62 @@ class TestBacktestStrategyAdapter:
         assert result["score"].to_list() == [None, None, None]
         # rank 语义不变：仍表达策略排序偏好（rank 大 = 信号强）
         assert result["signal_rank"].to_list() == [3, 2, 1]
+
+    def test_normalize_signal_output_drops_null_score(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """D1-C2：空分数不参与排名，且空分标的不被建仓。
+
+        策略返回 ai_score=[None, 90, 50] → 空分行应从输出剔除，
+        且 signal_rank 最大者（最强信号）应为 ai_score=90 的标的。
+        """
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "ai_score": [None, 90.0, 50.0],
+            }
+        )
+
+        result = adapter._normalize_signal_output(
+            result_df,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert len(result) == 2  # 空分行被剔除
+        assert "000001.SZ" not in result["ts_code"].to_list()  # 空分标的建仓问题
+        rank_by_code = {row["ts_code"]: row["signal_rank"] for row in result.to_dicts()}
+        assert rank_by_code["000002.SZ"] == 2  # ai_score=90 最强 → 最大 rank
+        assert rank_by_code["000003.SZ"] == 1  # ai_score=50 → rank=1
+
+    def test_normalize_signal_output_all_null_returns_empty(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """D1-C2：全部为空分数时返回空 DataFrame，而非任意排名。"""
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "ai_score": [None, None],
+            }
+        )
+
+        result = adapter._normalize_signal_output(
+            result_df,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert result.is_empty()
+
+    def test_polars_sort_desc_nulls_last_guard(self) -> None:
+        """D1-C2 排序护栏：Polars sort 默认 nulls_last=False（null 排在降序最前）。
+
+        若 Polars 未来变更默认行为使 null 排到最后，此测试会先红，
+        提示需要同步调整 adapter 对空分数的处理。
+        """
+        s = pl.Series([None, 1.0]).sort(descending=True)
+        assert s.to_list() == [None, 1.0]  # 当前默认:null 在降序最前
+        s_last = pl.Series([None, 1.0]).sort(descending=True, nulls_last=True)
+        assert s_last.to_list() == [1.0, None]  # 显式 nulls_last:null 在最后

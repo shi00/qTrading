@@ -141,7 +141,13 @@ class BacktestStrategyAdapter:
                 break
 
         if score_col_name is not None:
-            df = df.sort(score_col_name, descending=True)
+            # D1-C2：空分数 = 该股未产出有效信号强度（AI 失败/未评分），不得参与排名。
+            # Polars sort 默认 nulls_last=False 会把 null 顶到最强位，必须显式 nulls_last=True；
+            # 同时直接剔除空分行，避免"最弱信号"仍被建仓。
+            df = df.filter(pl.col(score_col_name).is_not_null()).sort(score_col_name, descending=True, nulls_last=True)
+            num_rows = len(df)
+            if num_rows == 0:
+                return pl.DataFrame()
 
         ts_codes = df["ts_code"].to_list()
         score_col = df[score_col_name].to_list() if score_col_name else None
