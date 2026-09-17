@@ -1878,6 +1878,7 @@
     "backtest_metrics_title": "Backtest Metrics",
     "backtest_metric_total_return": "Total Return",
     "backtest_metric_annual_return": "Annual Return",
+    "backtest_metric_annual_return_na_tooltip": "Backtest span < 60 trading days, annualized metric not extrapolated",
     "backtest_metric_sharpe": "Sharpe Ratio",
     "backtest_metric_max_dd": "Max Drawdown",
     "backtest_metric_calmar": "Calmar Ratio",
