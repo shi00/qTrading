@@ -176,4 +176,9 @@ class BacktestStrategyAdapter:
             "reason": reason_col if reason_col else [None] * num_rows,
         }
 
+        # D1-M2：透传信号日（T）快照的 total_mv，供市值加权 sizer 使用，
+        # 避免其回退到执行日(T+1)收盘后才确定的市值（前视）。缺失时不参与。
+        if "total_mv" in df.columns:
+            signal_data["total_mv"] = df["total_mv"].to_list()
+
         return pl.DataFrame(signal_data)

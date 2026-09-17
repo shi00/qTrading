@@ -85,20 +85,43 @@ class MarketCapWeightSizer(PositionSizer):
         quotes: pl.DataFrame,
         config: BacktestConfig,
     ) -> pl.DataFrame:
-        if "total_mv" not in quotes.columns:
+        # D1-M2：PIT —— 权重只能依赖信号日（T）已收盘的信息，不能用执行日(T+1)收盘后才
+        # 确定的市值（total_mv 来自 daily_indicators）。signals 携带信号日快照 total_mv
+        # （由 adapter._normalize_signal_output 透传），优先取信号侧；仅信号侧缺失才回退行情侧。
+        if "total_mv" in signals.columns:
+            unique_mv = signals.select(["ts_code", "total_mv"]).unique(subset=["ts_code"])
+        elif "total_mv" in quotes.columns:
+            unique_mv = quotes.select(["ts_code", "total_mv"]).unique(subset=["ts_code"])
+        else:
             logger.warning("[MarketCapWeightSizer] total_mv column not found, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
 
-        unique_quotes = quotes.select(["ts_code", "total_mv"]).unique(subset=["ts_code"])
+        # left join 替代原 how="inner"：缺失市值不静默丢弃（原 inner 会让该股不入
+        # target_weights，在 _rebalance_diff 中被归入 exit_codes 全额清仓）。
+        signals_with_mv = signals.join(unique_mv, on="ts_code", how="left")
 
-        signals_with_mv = signals.join(unique_quotes, on="ts_code", how="inner")
+        valid_mv = pl.col("total_mv").is_not_null() & (pl.col("total_mv") > 0)
+        valid = signals_with_mv.filter(valid_mv)
 
-        # 过滤非正市值（数据异常或退市残留），避免负权重污染
-        signals_with_mv = signals_with_mv.filter(pl.col("total_mv") > 0)
-
-        if signals_with_mv.is_empty():
+        if valid.is_empty():
             logger.warning("[MarketCapWeightSizer] No valid market cap data, falling back to equal weight")
             return EqualWeightSizer().compute_weights(signals, quotes, config)
+
+        # 缺失/非正市值标的以「候选内等权均值市值」兜底参与分配（R21：不填 0 伪装合法市值）。
+        # mean 仅对正市值候选求均值，恒为正。
+        mean_mv = float(valid.select(pl.col("total_mv").mean()).item())
+
+        invalid = signals_with_mv.filter(~valid_mv)
+        if not invalid.is_empty():
+            logger.warning(
+                "[MarketCapWeightSizer] %d signals lack total_mv, using candidate equal-weight mean mv: %s",
+                invalid.height,
+                invalid["ts_code"].to_list()[:10],
+            )
+
+        signals_with_mv = signals_with_mv.with_columns(
+            pl.when(valid_mv).then(pl.col("total_mv")).otherwise(pl.lit(mean_mv)).alias("total_mv")
+        )
 
         total_mv_sum = signals_with_mv.select(pl.col("total_mv").sum()).item()
 

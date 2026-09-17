@@ -330,8 +330,8 @@ class TestMarketCapWeightSizer:
         assert "signal_rank" in result.columns
         assert "total_mv" not in result.columns
 
-    def test_market_cap_negative_mv_filtered(self):
-        """测试负市值记录被过滤，不参与权重计算"""
+    def test_market_cap_negative_mv_bucketed_to_mean(self):
+        """D1-M2：负市值记录不再被静默丢弃，以候选等权均值市值兜底参与分配。"""
         from strategies.backtest.position_sizer import MarketCapWeightSizer
 
         signals = pl.DataFrame(
@@ -354,14 +354,16 @@ class TestMarketCapWeightSizer:
         sizer = MarketCapWeightSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
-        # 负市值被过滤，只剩 2 条记录
-        assert len(result) == 2
-        assert "000002.SZ" not in result["ts_code"].to_list()
-        # 权重应基于正市值总和 100+300=400
+        # 负市值 000002 被兜底为候选等权均值 (100+300)/2=200，仍参与分配（不消失）
+        assert len(result) == 3
+        assert "000002.SZ" in result["ts_code"].to_list()
+        # 权重基于兜底后总和 100+200+300=600
         w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
+        w2 = float(result.filter(pl.col("ts_code") == "000002.SZ").select("weight").item())
         w3 = float(result.filter(pl.col("ts_code") == "000003.SZ").select("weight").item())
-        assert abs(w1 - 100 / 400) < 1e-6
-        assert abs(w3 - 300 / 400) < 1e-6
+        assert abs(w1 - 100 / 600) < 1e-6
+        assert abs(w2 - 200 / 600) < 1e-6
+        assert abs(w3 - 300 / 600) < 1e-6
 
     def test_market_cap_all_negative_mv_fallback(self):
         """测试全部市值为负时回退到等权重"""
@@ -390,6 +392,71 @@ class TestMarketCapWeightSizer:
         # 全部过滤后为空，fallback 到等权重
         weights = result["weight"].to_list()
         assert all(abs(w - 0.5) < 1e-6 for w in weights)
+
+    def test_market_cap_prefers_signal_mv_over_quotes(self):
+        """D1-M2：signals 自带 total_mv 时优先用信号日快照，不用执行日行情（防前视）。"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        # 信号日快照市值
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+                "total_mv": [100, 200],
+            }
+        )
+        # 执行日（T+1）行情市值不同——若被误用则权重错误
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "total_mv": [1000, 2000],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # 必须基于信号侧 100/300、200/300，而非行情侧
+        w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
+        w2 = float(result.filter(pl.col("ts_code") == "000002.SZ").select("weight").item())
+        assert abs(w1 - 100 / 300) < 1e-6
+        assert abs(w2 - 200 / 300) < 1e-6
+
+    def test_market_cap_missing_mv_keeps_signal(self):
+        """D1-M2：信号缺失总市值时不丢股，以候选等权均值市值兜底。"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [3, 2, 1],
+            }
+        )
+        # 000001 在行情中无 total_mv（新股/未同步），left join 后为 null
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "total_mv": [None, 200, 300],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+
+        sizer = MarketCapWeightSizer()
+        result = sizer.compute_weights(signals, quotes, config)
+
+        # 缺失市值股必须仍在结果中
+        assert len(result) == 3
+        assert "000001.SZ" in result["ts_code"].to_list()
+        # 兜底均值 = (200+300)/2 = 250；总和 = 250+200+300 = 750
+        w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
+        assert abs(w1 - 250 / 750) < 1e-6
 
 
 class TestRankWeightedSizer:

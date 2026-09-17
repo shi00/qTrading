@@ -792,6 +792,30 @@ class TestBacktestStrategyAdapter:
 
         assert result.is_empty()
 
+    def test_normalize_signal_output_passes_total_mv(
+        self,
+        adapter: BacktestStrategyAdapter,
+    ) -> None:
+        """D1-M2：策略输出带 total_mv 时透传到信号 schema，供市值加权 sizer 防前视。"""
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "score": [0.9, 0.8],
+                "total_mv": [100.0, 200.0],
+            }
+        )
+
+        result = adapter._normalize_signal_output(
+            result_df,
+            signal_date=date(2024, 1, 1),
+            execution_date=date(2024, 1, 2),
+        )
+
+        assert len(result) == 2
+        assert "total_mv" in result.columns
+        # 与 ts_code 同序（score 降序：000001.SZ 先）
+        assert result["total_mv"].to_list() == [100.0, 200.0]
+
     def test_polars_sort_desc_nulls_last_guard(self) -> None:
         """D1-C2 排序护栏：Polars sort 默认 nulls_last=False（null 排在降序最前）。
 
