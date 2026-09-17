@@ -16,6 +16,14 @@ import pandas as pd
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from data.persistence.quality_gate import QualityTier
+from data.persistence.daos.screener_dao import _MAX_SCREENING_RANGE_ROWS
+
+# D3-M4: 区间预载行数护栏随真实规模自适应。
+# 固定护栏与 A 股扩容后的真实行数（2026 约 5400 存活 × 244 交易日 ≈ 132 万）过于接近，
+# 默认 preload_max_days=366 会在 2~3 年内稳定超限并静默降级；故按 count_expected_rows 放大，
+# 并对畸形区间（join 爆炸/参数错误）保留绝对上限，避免护栏随错误规模无限膨胀。
+_SCREENING_ROWS_SAFETY_FACTOR = 1.5
+_SCREENING_MAX_RANGE_ROWS = 5_000_000
 
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
@@ -92,6 +100,14 @@ class BacktestDataProvider:
         self._quality_proxy = _BacktestQualityProxy(delegate=data_processor)
         self._preloaded: dict | None = None
         self.preload_max_days = preload_max_days
+        # D3-M4: 本次回测区间预载的降级警告（区间超限 / 范围预载失败 / 护栏超限），
+        # 由 engine 在组装 BacktestResult.data_warnings 时并入，让「走了慢路径」在 UI 可见。
+        self._range_preload_warnings: list[str] = []
+
+    @property
+    def range_preload_warnings(self) -> list[str]:
+        """本次回测区间预载的降级警告（D3-M4），供 engine 并入 BacktestResult.data_warnings。"""
+        return self._range_preload_warnings
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def preload_range(self, start_date: date, end_date: date):
@@ -130,13 +146,42 @@ class BacktestDataProvider:
                 (end_date_obj - start_date_obj).days,
                 days_limit,
             )
+            # D3-M4: 降级必须可见，写入本 provider 供 engine 并入 BacktestResult.data_warnings
+            self._range_preload_warnings.append(
+                f"preload_range_too_wide: preload_max_days={days_limit}, "
+                f"requested={(end_date_obj - start_date_obj).days} days. Fallback to daily query."
+            )
             self._preloaded = None
             return
+
+        # 每次预载重置降级警告列表，避免跨多次 preload_range 调用累积旧状态
+        self._range_preload_warnings = []
 
         start_str = self._normalize_trade_date(start_date_obj)
         end_str = self._normalize_trade_date(end_date_obj)
 
         logger.info("[BacktestDataProvider] Preloading range %s to %s...", start_str, end_str)
+
+        # D3-M4: 按区间真实规模计算自适应护栏，传给 screening DAO。
+        # 固定护栏与 A 股扩容后的真实行数过近会静默触发降级；count_expected_rows 失败（返回 1，
+        # 见 stock_dao）时护栏退化回固定常量，行为与现状一致且安全。
+        # 注意：不再预置 expected_rows=1（CodeQL CWE-563 冗余赋值告警），成功路径取下限保护、
+        # 异常路径在 except 兜底为 1，使用点前的所有路径均已赋值。
+        try:
+            expected_rows = await self.cache.stock_dao.count_expected_rows(start_date_obj, end_date_obj) or 1
+        except asyncio.CancelledError:
+            raise
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出预期行数估算异常. upgrade: 策略层重构时统一走 classify_error.
+        except Exception as e:
+            logger.warning(
+                "[BacktestDataProvider] Failed to estimate range rows, use default guard: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            expected_rows = 1
+        screening_guard_rows = min(
+            max(_MAX_SCREENING_RANGE_ROWS, int(expected_rows * _SCREENING_ROWS_SAFETY_FACTOR)),
+            _SCREENING_MAX_RANGE_ROWS,
+        )
 
         self._preloaded = {}
 
@@ -159,8 +204,10 @@ class BacktestDataProvider:
                 )
             # 并行查询所有数据
             results = await asyncio.gather(
-                self.cache.screener_dao.get_screening_data_range(start_str, end_str),
-                self.cache.screener_dao.get_fundamental_screening_data_range(start_str, end_str),
+                self.cache.screener_dao.get_screening_data_range(start_str, end_str, max_rows=screening_guard_rows),
+                self.cache.screener_dao.get_fundamental_screening_data_range(
+                    start_str, end_str, max_rows=screening_guard_rows
+                ),
                 self.cache.quote_dao.get_northbound_range(start_str, end_str),
                 self.cache.market_dao.get_moneyflow_hsgt_range(start_str, end_str),
                 self.cache.quote_dao.get_moneyflow_range(start_str, end_str),
@@ -187,6 +234,11 @@ class BacktestDataProvider:
                         "[BacktestDataProvider] Range preload failed for %s: %s. Fallback to daily query.",
                         key,
                         res,
+                    )
+                    # D3-M4: 降级必须可见（含护栏超限抛出的 ValueError）
+                    # res 为 gather return_exceptions 返回的 BaseException，统一转 str 后经 sanitize_error 脱敏（R9）
+                    self._range_preload_warnings.append(
+                        f"range_preload_failed:{key}: {DataSanitizer.sanitize_error(str(res))}. Fallback to daily query."
                     )
                     self._preloaded[key] = None
                 elif res is not None and not res.empty:
@@ -230,6 +282,10 @@ class BacktestDataProvider:
         except Exception as e:
             logger.error(
                 "[BacktestDataProvider] Failed to preload range: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
+            # D3-M4: 整体预载失败同样可见，供 UI 提示本次回测走了逐日慢路径
+            self._range_preload_warnings.append(
+                f"range_preload_error: {DataSanitizer.sanitize_error(e)}. Fallback to daily query."
             )
             self._preloaded = None
 

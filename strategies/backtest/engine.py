@@ -161,6 +161,9 @@ class VectorBacktestEngine:
         # backtest_view_model 的 `unreliable` 判定，让相对指标降级在 UI 可见。
         if benchmark_warning is not None:
             all_warnings.append(str(benchmark_warning))
+        # D3-M4: 区间预载降级（区间超限/范围预载失败/护栏超限→逐日慢路径）接入 all_warnings，
+        # 与其它 data_warnings 同通道进入 unreliable 判定，让「本次回测走了慢路径」首屏可见。
+        all_warnings.extend(self.data_provider.range_preload_warnings)
 
         # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
         # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。

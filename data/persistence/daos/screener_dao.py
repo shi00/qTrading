@@ -448,22 +448,24 @@ class ScreenerDao(BaseDao):
             stock_alive_condition(alias="b.", as_of="cal.cal_date"),
         )
 
-    async def get_screening_data_range(self, start_date: str, end_date: str):
+    async def get_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
         sql = self._build_screening_sql_range(require_close=True)
         # DAT-10: 区间预载携带行数护栏，超限抛 ValueError 由上游降级逐日查询
         # DAT-26: 边界显式转 date
+        # D3-M4: max_rows 由调用方按区间真实规模自适应传入（None 沿用常量兜底），
+        # 防止固定护栏与 A 股扩容后的真实行数过于接近而静默触发降级。
         return await self._read_db(
             sql,
             (self._to_db_date(start_date), self._to_db_date(end_date)),
-            max_rows=_MAX_SCREENING_RANGE_ROWS,
+            max_rows=max_rows if max_rows is not None else _MAX_SCREENING_RANGE_ROWS,
         )
 
-    async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
+    async def get_fundamental_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
         sql = self._build_screening_sql_range(require_close=False)
         return await self._read_db(
             sql,
             (self._to_db_date(start_date), self._to_db_date(end_date)),
-            max_rows=_MAX_SCREENING_RANGE_ROWS,
+            max_rows=max_rows if max_rows is not None else _MAX_SCREENING_RANGE_ROWS,
         )
 
     # --- Review Manager Methods ---
