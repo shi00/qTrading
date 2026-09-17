@@ -4,7 +4,9 @@
 >
 > **状态取值**：`使用中`（当前文档引用）/ `历史`（仅出现在已归档轮次）。
 >
-> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件）；来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
+> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件；`.py`（`scripts/` + `tests/`）扫描自 DS-02 起以 WARNING 渐进部署）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
+>
+> **编号格式规范（DS-02）**：治理 ID 中的数字序号统一采用两位前导零形式（如 `P1-04` / `P2-09` / `UX-03`，不用 `P1-4` / `UX-3`）。存量代码中存在的单位数写法（如 `P1-4`、`UX-2`）视为同一发现的无前导零别名，在表格中以独立行登记并在「一句话含义」注明「即 P1-04 的无前导零别名」后即被门禁放行。`-99` 后缀（如 `DOC-99` / `P9-99` / `UIX-99`）为门禁测试夹具 ID，**不得登记**。新增使用治理 ID 时须用规范形，不引入新的三/多位数写法。
 
 ## ID 对照表
 
@@ -75,3 +77,38 @@
 | UIX-16 | 未引用 i18n key 的 ratchet baseline 门禁（基线计数只降不升） | 本地检视报告（gitignored） | [test_i18n_keys_completeness.py](../../tests/unit/test_i18n_keys_completeness.py) | 使用中 |
 | UIX-17 | VM locale remediation——placeholder 卡 error 的 i18n fallback，去硬编码中文默认值 | 本地检视报告（gitignored） | [test_uix_17_vm_locale_remediation.py](../../tests/unit/ui/viewmodels/test_uix_17_vm_locale_remediation.py) | 使用中 |
 | UIX-18 | e2e_ids.py 已声明 public 常量/方法未引用或未标注 `# reserved` 即报错 | 本地检视报告（gitignored） | [check_e2e_anchors.py](../../scripts/check_e2e_anchors.py) | 使用中 |
+| GDR-03 | 未登记的日期前缀检视报告文件须提示「轮次表未登记」并指引落根目录 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GDR-04 | requirement 主题正本存在且能被 `_extract_decision_tree_targets` 决策树提取 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GDR-05 | 真实 redlines.yml 中 R9 的 enforcement 含 check_redlines.py 与安全扫描（N1/N4 断言） | 文档体系检视（GDR 系列） | [test_docs_consistency.py](../../tests/unit/test_docs_consistency.py) | 使用中 |
+| GDR-07 | `_GITIGNORED_ARTIFACT_DIRS` 仅含真实 gitignored 目录；EX 引用语料豁免目录 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GDR-08 | release/packaging 主题存在，决策树映射与合并白名单正确绑定 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GDR-11 | 校验 CLAUDE.md §4.2 声明的 core/ 模块清单与实际 core/*.py 文件一致 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| review01-A4 | 引擎生命周期与 DAO 注册清单自 CacheManager 拆分为 EngineManager / DaoRegistry 组合对象 | review01 架构分层与依赖治理 | [engine_manager.py](../../data/cache/engine_manager.py) | 使用中 |
+| review01-A7 | 应用会话入口自 main.py 迁移至 app/application.py（main.py 瘦身收敛） | review01 架构分层与依赖治理 | [application.py](../../app/application.py) | 使用中 |
+| review01-A8 | 启动编排提取为 ApplicationSession 上下文，分阶段 partial_state 供调用方决定回滚粒度 | review01 架构分层与依赖治理 | [application.py](../../app/application.py) | 使用中 |
+| review01-A9 | per-session 服务初始化状态（替代 bootstrap 模块级 flag，多 session 下安全） | review01 架构分层与依赖治理 | [startup_controller.py](../../app/startup_controller.py) | 使用中 |
+| review01-A13 | 收口全项目异常类型标注到统一入口（error_classifier 默认归 operational） | review01 架构分层与依赖治理 | [error_classifier.py](../../utils/error_classifier.py) | 使用中 |
+| review03-C1 | 读路径块级失败显式化（fail-fast，禁止 `_read_db` 默认 suppress_errors=True 吞错） | review03 数据层与持久化 | [base_dao.py](../../data/persistence/daos/base_dao.py) | 使用中 |
+| review03-C2 | 超大批量 `_save_upsert` 每块独立事务（UPSERT 幂等，重跑安全） | review03 数据层与持久化 | [base_dao.py](../../data/persistence/daos/base_dao.py) | 使用中 |
+| review03-C4 | `_read_db_select` max_rows 安全阀（结果行数超限抛 ValueError） | review03 数据层与持久化 | [base_dao.py](../../data/persistence/daos/base_dao.py) | 使用中 |
+| review03-C7 | 消除 f-string 拼 SQL；选股/行情 SQL 改静态模板 + 确定性占位符 | review03 数据层与持久化 | [screener_dao.py](../../data/persistence/daos/screener_dao.py) | 使用中 |
+| review03-C9 | 数据字典不得存在空 columns 字段（删除优于空壳残留） | review03 数据层与持久化 | [test_data_dictionary.py](../../tests/unit/test_data_dictionary.py) | 使用中 |
+| review03-C12 | 写入失败默认不再吞错（suppress_errors=False 保底，data 写丢失不可静默） | review03 数据层与持久化 | [cache_manager.py](../../data/cache/cache_manager.py) | 使用中 |
+| review03-C14 | 共享交易日回退链：日历服务→已同步行情最大日期→显式抛 TradeDateUnavailableError | review03 数据层与持久化 | [trade_calendar_service.py](../../data/domain_services/trade_calendar_service.py) | 使用中 |
+| review03-C15 | 生产构建（非 E2E/DEBUG）下 STRICT_QUALITY_GATE=false 拒绝启动 | review03 数据层与持久化 | [bootstrap.py](../../app/bootstrap.py) | 使用中 |
+| review03-C16 | E2E 模式判定统一收口到 utils/app_env（单一事实来源） | review03 数据层与持久化 | [app_env.py](../../utils/app_env.py) | 使用中 |
+| review03-C18 | embedded PG start/stop 状态变迁统一由 RLock 串行化（避免双 Popen） | review03 数据层与持久化 | [service.py](../../data/persistence/embedded_postgres/service.py) | 使用中 |
+| review05-E1 | 异常类型未命中 isinstance/type 分支、依赖字符串匹配时须留 debug 日志 | review05 配置与依赖治理 | [error_classifier.py](../../utils/error_classifier.py) | 使用中 |
+| review05-E3 | 结构化异常基类 AppError（ErrorInfo，语义由异常自身携带，免事后推断） | review05 配置与依赖治理 | [errors.py](../../core/errors.py) | 使用中 |
+| review05-E8 | 兜底裸 token 检测/部分遮蔽（无 key=/URL/JSON 前缀的最后防线） | review05 配置与依赖治理 | [sanitizers.py](../../utils/sanitizers.py) | 使用中 |
+| review05-E9 | sanitize_paths 对文本中 Windows/Unix 路径脱敏（traceback 路径替换为 `<PATH>`） | review05 配置与依赖治理 | [sanitizers.py](../../utils/sanitizers.py) | 使用中 |
+| review05-E18 | DAO 三原语慢操作阈值上收到 log_decorators（单一权威源，即 Q-P2-7） | review05 配置与依赖治理 | [log_decorators.py](../../utils/log_decorators.py) | 使用中 |
+| review05-E19 | 进程内运行时指标聚合 MetricsRegistry（成功/失败计数，诊断包导出） | review05 配置与依赖治理 | [metrics.py](../../utils/metrics.py) | 使用中 |
+| review07-G1 | 未确认 AI 外发政策的具名 fixture（安全门控未确认路径专项覆盖） | review07 治理与门禁审计 | [test_ai_mixin.py](../../tests/unit/test_ai_mixin.py) | 使用中 |
+| review07-G2 | 同类用例参数化合并保留原断言强度（删除焊死私有方法签名的 inspect.signature 断言） | review07 治理与门禁审计 | [test_base_dao.py](../../tests/unit/test_base_dao.py) | 使用中 |
+| review07-G3 | 弱断言 baseline 下降 KPI（每季度降≥10%，WARNING 不阻断） | review07 治理与门禁审计 | [scan_weak_assertions.py](../../scripts/scan_weak_assertions.py) | 使用中 |
+| review07-G9 | mock 真实外部边界（而非 mock 业务方法），使被测业务逻辑真实走查 | review07 治理与门禁审计 | [conftest.py](../../tests/conftest.py) | 使用中 |
+| review07-G11 | `_reset_singleton` 改行为断言，不焊死内部 key 名 | review07 治理与门禁审计 | [test_singletons_isolation.py](../../tests/unit/test_singletons_isolation.py) | 使用中 |
+| review07-G14 | 分层覆盖率达标率统计（不阻断，CI 观测分层门禁差距） | review07 治理与门禁审计 | [check_per_file_coverage.py](../../scripts/check_per_file_coverage.py) | 使用中 |
+| review07-G18 | R4 补充检测：业务层「SQL 关键字开头+%s」字面量 + f-string SQL 模板 | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
+| review07-G19 | 单例识别条件扩展（DAO 注册引擎同步不可漏改，与 R13 描述一致） | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
