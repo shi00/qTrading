@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.market_dao import MarketDao, _row_to_dict
 
 pytestmark = pytest.mark.unit
@@ -503,6 +504,30 @@ class TestMarketDaoGetTelegraphNewsForStocks:
         await dao.get_telegraph_news_for_stocks([], ["ab"])
         call_args = dao._read_db.call_args
         assert "ILIKE" not in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_read_db_not_suppressed(self):
+        """对抗性检视 Major①：证据读取必须显式失败，不得被 _read_db 默认吞成空 DF。
+
+        suppress_errors=False 保证 DB 故障向上抛异常，服务层据此映射 db_error，
+        而非伪装成 no_evidence（§8.1 / §10.3）。
+        """
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        await dao.get_telegraph_news_for_stocks(["000001.SZ"], ["平安银行"], "2024-06-01", "2024-06-15")
+        assert dao._read_db.call_args.kwargs.get("suppress_errors") is False
+
+    @pytest.mark.asyncio
+    async def test_engine_error_propagates(self):
+        """DB 引擎异常须原样传播（不被 suppress_errors 吞掉），供服务层捕获识别。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+
+        async def boom(*a, **k):
+            raise EngineDisposedError("engine disposed")
+
+        dao._read_db = AsyncMock(side_effect=boom)
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion 引擎异常须显式传播，异常类型即测试目标
+            await dao.get_telegraph_news_for_stocks(["000001.SZ"], ["平安银行"], "2024-06-01", "2024-06-15")
 
 
 class TestMarketDaoGetMarketNewsDocuments:

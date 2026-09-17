@@ -44,9 +44,6 @@ _TOTAL_EVIDENCE_BODY_MAX_LEN = 6000
 # 本地模型推理 max_tokens（新闻风险为结构化 JSON，需足够空间承载事件数组）。
 _LOCAL_MAX_TOKENS = 2048
 
-# LLM 输出省略号标记：视为非连续标记，不参与子串匹配（§9.4）。
-_ELLIPSIS_RE = re.compile(r"[…]|\.\.\.")
-
 
 class RiskQuote(BaseModel):
     """单条原文摘录引用：只能引用本次输入证据，且 quote 须为对应 quoteable_text 连续子串。"""
@@ -91,12 +88,13 @@ class RiskOutput(BaseModel):
 def normalize_quote_text(text: str | None) -> str:
     """§9.4 摘录归一化：NFKC + 全角转半角 + 连续空白折叠为单空格 + 去首尾空白。
 
-    NFKC 同时完成全角→半角映射（Ｆ→F 等）。省略号标记由调用方在子串匹配时剔除判断。
+    对抗性检视 Minor（省略号）：**保留**省略号标记（``…`` / ``...``）不剔除——省略号
+    表示原文中的非连续间隙，剔除后再做子串匹配会让 quote 跨越间隙仍被判为连续子串，
+    放宽了 §9.4 约束；保留后 quote 中的省略号必须与原文省略号逐字对应才可匹配。
     """
     if not text:
         return ""
     s = unicodedata.normalize("NFKC", text or "")
-    s = _ELLIPSIS_RE.sub("", s)
     return re.sub(r"\s+", " ", s).strip()
 
 

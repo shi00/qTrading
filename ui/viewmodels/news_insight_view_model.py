@@ -23,7 +23,7 @@ import asyncio
 import logging
 
 from services.news_insight_models import EvidenceDocument
-from services.news_insight_service import NewsInsightService
+from services.news_insight_service import NewsInsightService, NewsInsightSourceDbError
 from ui.viewmodels import Message
 from ui.viewmodels.news_insight_types import (
     EvidenceItem,
@@ -223,12 +223,21 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
     async def _load_evidence_task(self, ts_code: str, stock_name: str) -> None:
         """证据加载子任务（不触发 AI）。"""
         cancel_event = self._cancel_event()
+        cancel_event.clear()  # 清除上次取消残留，保证本次操作不被陈旧取消信号中断
         try:
             evidence, coverage = await self._service.load_evidence_preview(
                 ts_code, stock_name or None, cancel_event=cancel_event
             )
         except asyncio.CancelledError:
             raise
+        except NewsInsightSourceDbError as e:
+            # 对抗性检视 Major①：DB 读取故障 → error 可重试，不得降级为 no_evidence 文案
+            logger.error("[NewsInsightVM] evidence DB read failed (%s): %s", ts_code, DataSanitizer.sanitize_error(e))
+            self._set_state(
+                phase=PHASE_ERROR,
+                message=Message("news_insight_db_error", params={"ts_code": ts_code}),
+            )
+            return
         except Exception as e:
             logger.error("[NewsInsightVM] load evidence failed (%s): %s", ts_code, DataSanitizer.sanitize_error(e))
             self._set_state(
@@ -247,10 +256,19 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
     async def _analyze_task(self, ts_code: str) -> None:
         """分析子任务（ready/error；缓存命中直接 ready 并标注复用）。"""
         cancel_event = self._cancel_event()
+        cancel_event.clear()  # 清除上次取消残留，保证本次操作不被陈旧取消信号中断
         try:
             outcome = await self._service.analyze(ts_code, self._state.stock_name or None, cancel_event=cancel_event)
         except asyncio.CancelledError:
             raise
+        except NewsInsightSourceDbError as e:
+            # 对抗性检视 Major①：DB 读取故障 → error 可重试，不得伪装 no_evidence
+            logger.error("[NewsInsightVM] analyze DB read failed (%s): %s", ts_code, DataSanitizer.sanitize_error(e))
+            self._set_state(
+                phase=PHASE_ERROR,
+                message=Message("news_insight_db_error", params={"ts_code": ts_code}),
+            )
+            return
         except Exception as e:
             logger.error("[NewsInsightVM] analyze failed (%s): %s", ts_code, DataSanitizer.sanitize_error(e))
             self._set_state(
@@ -317,9 +335,20 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
         return get_loop_local("news_insight_vm_cancel_event", asyncio.Event)
 
     def _cancel_active(self) -> None:
-        """取消在途任务（幂等）。"""
+        """取消在途任务（幂等）：任务级取消 + 事件级协同检查点（§12 第 6 步）。
+
+        对抗性检视 Minor（cancel_event 恒假守卫）：置位取消事件，让服务层 ``_maybe_cancel``
+        边界检查真实生效；新操作（select_stock/generate）在任务启动时 ``clear`` 清除残留。
+        循环外（同步上下文 dispose 等）仅靠 ``task.cancel()`` 传播取消。
+        """
         task = self._active_task
         self._active_task = None
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            self._cancel_event().set()
         if task is not None and not task.done():
             task.cancel()
 

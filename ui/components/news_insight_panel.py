@@ -59,9 +59,12 @@ def coverage_source_label_key(source: str) -> str:
 
 
 def source_status_label_key(status: str) -> str:
-    """来源状态 → i18n key（ok / fail）。"""
-    key = "news_insight_coverage_ok" if status == "ok" else "news_insight_coverage_fail"
-    return key
+    """来源状态 → i18n key（ok / db_error / fail）。"""
+    if status == "ok":
+        return "news_insight_coverage_ok"
+    if status == "db_error":
+        return "news_insight_coverage_db_error"
+    return "news_insight_coverage_fail"
 
 
 # --- 声明式组件 ---
