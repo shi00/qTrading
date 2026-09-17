@@ -436,7 +436,8 @@ class TestAIStrategyMixinSortForAI:
         result = s._sort_for_ai(df)
         assert len(result) == 1
 
-    def test_sort_by_total_mv(self):
+    def test_preserves_input_order_with_total_mv_col(self):
+        # D2-M2: 默认可不再按市值排序，保留策略 _filter_logic 的业务排序。
         s = ConcreteStrategy()
         df = pd.DataFrame(
             {
@@ -445,9 +446,10 @@ class TestAIStrategyMixinSortForAI:
             }
         )
         result = s._sort_for_ai(df)
-        assert result.iloc[0]["ts_code"] == "000002.SZ"
+        assert list(result["ts_code"]) == ["000001.SZ", "000002.SZ"]
 
-    def test_sort_by_vol(self):
+    def test_preserves_input_order_with_vol_col(self):
+        # D2-M2: 默认可不再按成交量排序。
         s = ConcreteStrategy()
         df = pd.DataFrame(
             {
@@ -456,27 +458,19 @@ class TestAIStrategyMixinSortForAI:
             }
         )
         result = s._sort_for_ai(df)
-        assert result.iloc[0]["ts_code"] == "000002.SZ"
+        assert list(result["ts_code"]) == ["000001.SZ", "000002.SZ"]
 
-    def test_no_sort_cols(self):
-        s = ConcreteStrategy()
-        df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SZ", "000002.SZ"],
-            }
-        )
-        result = s._sort_for_ai(df)
-        assert len(result) == 2
-
-    def test_sort_by_total_mv_descending(self):
+    def test_preserves_order_descending_input(self):
+        # D2-M2: 即使输入含 total_mv，也不注入大盘股偏好，保持原顺序。
         df = pd.DataFrame({"ts_code": ["A", "B", "C"], "total_mv": [100, 500, 200]})
         result = AIStrategyMixin()._sort_for_ai(df)
-        assert list(result["ts_code"]) == ["B", "C", "A"]
+        assert list(result["ts_code"]) == ["A", "B", "C"]
 
-    def test_sort_by_vol_when_no_mv(self):
+    def test_preserves_order_when_no_mv(self):
+        # D2-M2: 即使输入含 vol，也不注入成交量偏好，保持原顺序。
         df = pd.DataFrame({"ts_code": ["A", "B", "C"], "vol": [1000, 5000, 2000]})
         result = AIStrategyMixin()._sort_for_ai(df)
-        assert list(result["ts_code"]) == ["B", "C", "A"]
+        assert list(result["ts_code"]) == ["A", "B", "C"]
 
     def test_empty_dataframe_returns_empty(self):
         df = pd.DataFrame()
@@ -874,6 +868,8 @@ class TestRunAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_with_candidates_cap(self):
+        from core.i18n import Message
+
         s = ConcreteStrategy()
         dp = MagicMock()
         dp.is_cancelled = MagicMock(return_value=False)
@@ -886,9 +882,9 @@ class TestRunAiAnalysis:
         context = {"data_processor": dp}
         candidates = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
-                "name": ["股票1", "股票2", "股票3", "股票4"],
-                "close": [10.0, 15.0, 20.0, 25.0],
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"],
+                "name": ["股票1", "股票2", "股票3", "股票4", "股票5"],
+                "close": [10.0, 15.0, 20.0, 25.0, 30.0],
             }
         )
         with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -903,6 +899,10 @@ class TestRunAiAnalysis:
                     mock_prefetch.return_value = PreFetchedContext()
                     result = await s.run_ai_analysis(candidates, context)
                     assert len(result) <= 2
+                    # D2-M2: 截断不再静默 — 截断须向 context["warnings"] 通道追加提示，
+                    # total 为截断前候选总数（非截断后 + cap）。
+                    warnings = context.get("warnings")
+                    assert warnings == [Message("strategy_ai_candidate_truncated", {"total": 5, "analyzed": 2})]
 
     @pytest.mark.asyncio
     async def test_disable_ai_skips_ai_analysis(self):
