@@ -1451,3 +1451,32 @@ class TestDiffRebalance:
         assert sim.cash / total_assets >= config.cash_reserve_pct - 1e-9
         # 且预留比例被真正扣除（investable 已按 1 - reserve 缩小，现金不可能是满仓结算）
         assert sim.cash / total_assets < 1.0 - 0.01
+
+    def test_sparse_signal_cap_appends_warning(self) -> None:
+        """D1-M3：候选数 N < 1/max_single_weight 时向 warnings 注入仓位上限告警。"""
+        sim, _config = self._make_simulator(rebalance_freq="weekly", max_single_weight=0.1)
+        sim.cash = 100000.0
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8)] * 3,
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [3, 2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "trade_date": [date(2024, 1, 8)] * 3,
+                "raw_open": [10.0] * 3,
+                "raw_close": [10.0] * 3,
+                "qfq_open": [10.0] * 3,
+                "qfq_close": [10.0] * 3,
+                "is_tradable": [True] * 3,
+                "limit_status": [None] * 3,
+                "avg_daily_volume": [5_000_000.0] * 3,
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 8), signals, quotes)
+
+        assert any("sparse signals" in w for w in sim.warnings)
+        assert any("effective position ceiling" in w for w in sim.warnings)

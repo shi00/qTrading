@@ -112,6 +112,15 @@ class PortfolioSimulator:
         weights_df = apply_max_weight_constraint(
             weights_df, self.config.max_single_weight, renormalize=self.config.renormalize_after_cap
         )
+        # D1-M3：稀疏信号（候选数 N < 1/max_single_weight）无法满仓，实际仓位上限被压到
+        # N×max_single_weight，向 warnings 告警以接入 UI 可信度（unreliable）判定。
+        n_candidates = weights_df.height
+        cap_max = self.config.max_single_weight
+        if n_candidates > 0 and n_candidates * cap_max < 1.0:
+            self.warnings.append(
+                f"{exec_date}: sparse signals n={n_candidates} < 1/max_single_weight={1.0 / cap_max:.2f}, "
+                f"effective position ceiling = {n_candidates}×{cap_max} = {n_candidates * cap_max:.4f}"
+            )
         target_weights = {r["ts_code"]: float(r["weight"]) for r in weights_df.iter_rows(named=True)}
         if not target_weights or sum(target_weights.values()) <= 0:
             self._sell_all_positions(exec_date, day_quotes)
