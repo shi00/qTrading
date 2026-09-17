@@ -96,12 +96,11 @@ class ReviewManager:
             return
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
-        # D2-3: 从 bulk_quotes 提取全市场真实交易日集合（复权收益 + T+N 停牌位置防护基准）。
-        # 停牌个股在 daily_quotes 缺行，行位置 t0_idx+1/+5 在停牌时并非真实 T+N；
-        # 以跨股票并集的唯一交易日作为"真实交易日"序列，避免为每笔记录额外查 DAO
-        # （同时保持现有测试返回的 quotes mock 语义不变）。
-        market_trade_dates: list[datetime.date] = sorted(
-            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
+        # D3-M1: T+N 锚定的唯一交易日来源 = 全市场交易日历（TradeCalendarService，与回测层同通路）。
+        # 候选股少或集中停牌时跨股票行情并集会整体丢日，导致 T+1/T+5 静默错位并污染标签。
+        market_trade_dates: list[datetime.date] = await self._market_trade_dates(
+            self._normalize_trade_date(min_pred_date),
+            self._normalize_trade_date(bulk_quotes["trade_date"].max()),
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
@@ -270,10 +269,9 @@ class ReviewManager:
             return 0
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
-        # 与 run_review 同一真实交易日口径（跨股票并集），兼容停牌缺行位置漂移防护。
-        market_trade_dates: list[datetime.date] = sorted(
-            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
-        )
+        # D3-M1: 与 run_review 同一 T+N 锚定口径，全市场交易日历（TradeCalendarService）。
+        max_quote_date = self._normalize_trade_date(bulk_quotes["trade_date"].max())
+        market_trade_dates: list[datetime.date] = await self._market_trade_dates(min_t0, max_quote_date)
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
@@ -361,16 +359,17 @@ class ReviewManager:
             return 0
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
-        # 与 run_review 同一真实交易日口径（跨股票并集），兼容停牌缺行位置漂移防护。
-        market_trade_dates: list[datetime.date] = sorted(
-            {self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]}
+        # D3-M1: 与 run_review 同一 T+N 锚定口径，全市场交易日历（TradeCalendarService）。
+        max_quote_date = str(bulk_quotes["trade_date"].max())
+        market_trade_dates: list[datetime.date] = await self._market_trade_dates(
+            min_t0,
+            self._normalize_trade_date(max_quote_date),
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
-        max_quote_date = str(bulk_quotes["trade_date"].max())
         index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
         updates: list[dict] = []
         for cand in candidates:
@@ -736,6 +735,25 @@ class ReviewManager:
     def _normalize_trade_date(value: typing.Any) -> datetime.date:
         """Normalize supported trade_date input types to datetime.date."""
         return to_date(value)
+
+    async def _market_trade_dates(self, start, end) -> list[datetime.date]:
+        """T+N 锚定的唯一交易日来源：与回测层共用 TradeCalendarService（同一通路）。
+        候选股少或集中停牌时行情并集会整体丢日，导致 T+1/T+5 静默错位并污染
+        WIN/LOSS 标签与 AI few-shot 样本；全市场日历不受候选股范围影响。
+
+        返回空日历（日历数据源不可用 / start>end 等退化态）时记警告日志，
+        避免调用方在无有效日历下静默跳过全部 T+N 锚定（R3 反静默）。
+        """
+        from data.domain_services.trade_calendar_service import TradeCalendarService
+
+        dates = await TradeCalendarService(self.cache, None).get_trade_dates(start, end)
+        if not dates:
+            logger.warning(
+                "[Review] Market trade calendar empty for [%s, %s]: T+N anchoring disabled for this run.",
+                start,
+                end,
+            )
+        return dates
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _prefetch_index_cache(
