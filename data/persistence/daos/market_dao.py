@@ -255,7 +255,9 @@ class MarketDao(BaseDao):
             sql += " AND (" + " OR ".join(clauses) + ")"
         sql += f" ORDER BY publish_time DESC LIMIT ${idx}"
         params.append(limit)
-        return await self._read_db(sql, params)
+        # 证据读取不得吞 DB 故障（§10.3）：_read_db 默认 suppress_errors=True 会把
+        # 基础设施故障伪装成"空结果"，导致服务层误判 no_evidence（对抗性检视 Major①）。
+        return await self._read_db(sql, params, suppress_errors=False)
 
     async def get_market_news_documents(
         self,
@@ -284,7 +286,9 @@ class MarketDao(BaseDao):
             params.append(end_time)
             idx += 1
         sql += " ORDER BY publish_time DESC"
-        return await self._read_db(sql, params)
+        # 证据读取不得吞 DB 故障（§10.3）：与 get_telegraph_news_for_stocks 同理由，
+        # suppress_errors=False 让 DB 故障显式抛异常，避免伪装成 no_evidence。
+        return await self._read_db(sql, params, suppress_errors=False)
 
     async def save_news_risk_brief(self, brief: dict) -> None:
         """持久化 NewsRiskBrief 快照（R8：走 _save_upsert 主键冲突路径）。

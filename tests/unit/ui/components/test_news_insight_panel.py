@@ -250,6 +250,7 @@ def test_translate_message_formats_params():
 _PANEL_KEYS = {
     "news_insight_err_no_loop",
     "news_insight_err_evidence",
+    "news_insight_db_error",
     "news_insight_no_evidence",
     "news_insight_err_analyze",
     "news_insight_analysis_failed",
@@ -271,6 +272,7 @@ _PANEL_KEYS = {
     "news_insight_reused_badge",
     "news_insight_coverage_fetched",
     "news_insight_coverage_ok",
+    "news_insight_coverage_db_error",
     "news_insight_coverage_fail",
     "news_insight_src_announcement",
     "news_insight_src_news",

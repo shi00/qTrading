@@ -108,8 +108,12 @@ class TestNormalizeQuoteText:
     def test_collapse_whitespace(self):
         assert normalize_quote_text("  风险   提示  ") == "风险 提示"
 
-    def test_strip_ellipsis(self):
-        assert normalize_quote_text("风险…提示...") == "风险提示"
+    def test_preserves_ellipsis(self):
+        """对抗性检视 Minor（省略号）：归一化保留省略号标记，不得先删后匹配。
+
+        NFKC 会把全角省略号 ``…`` 归一化为半角 ``...``，标记本身仍保留（未剔除）。
+        """
+        assert normalize_quote_text("风险…提示...") == "风险...提示..."
 
     def test_strips_edges(self):
         assert normalize_quote_text("  正文  ") == "正文"
@@ -126,6 +130,25 @@ class TestValidateEvents:
         assert valid[0]["event_type"] == "litigation"
         assert valid[0]["severity"] == "high"
         assert valid[0]["evidence_quotes"][0]["news_id"] == 1
+        assert dropped == []
+
+    def test_quote_cannot_span_ellipsis_gap(self):
+        """对抗性检视 Minor（省略号）：quote 不得跨越原文省略号间隙仍判为连续子串。
+
+        原文含省略号（``公告…称``），quote ``公告称`` 无省略号标记——即使剔除省略号后
+        是子串，也应判定为跨间隙引用而被剔除（§9.4 连续子串约束收紧）。
+        """
+        ev = _event(quote="公告称")
+        valid, dropped = validate_events([ev], [_evidence(news_id=1, text="公司发布公告…称经营正常")])
+        assert valid == []
+        assert dropped[0]["drop_reason"] == "no_valid_evidence_quote"
+
+    def test_quote_with_matching_ellipsis_valid(self):
+        """quote 显式保留与原文一致的省略号标记 → 逐字对应，仍为合法引用。"""
+        ev = _event(quote="公告…称")
+        valid, dropped = validate_events([ev], [_evidence(news_id=1, text="公司发布公告…称经营正常")])
+        assert len(valid) == 1
+        assert valid[0]["evidence_quotes"][0]["quote"] == "公告…称"
         assert dropped == []
 
     def test_news_id_not_in_evidence_dropped(self):

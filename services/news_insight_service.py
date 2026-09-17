@@ -63,6 +63,15 @@ class NewsInsightOutcome:
     reuse_type: str = "none"
 
 
+class NewsInsightSourceDbError(RuntimeError):
+    """全部证据来源数据库读取失败（对抗性检视 Major① 修复）。
+
+    §8.1 不得把"未观测数据"表述为"不存在"；§10.3 数据库缓存读取失败仍可尝试即时生成。
+    该异常把 DB 基础设施故障向上显式暴露，由 VM 映射为可重试的 ``error`` 态，
+    而非伪装成 ``no_evidence``（近 30 天未获取到相关材料）。
+    """
+
+
 class NewsInsightService:
     """按需新闻风险解读编排（可注入普通服务，非单例）。"""
 
@@ -219,7 +228,16 @@ class NewsInsightService:
         await self._maybe_cancel(cancel_event)
 
         # 2) 落库后的公告/新闻（覆盖实时抓取与历史已入库行）
-        df = await self.dao.get_market_news_documents(ts_code, window_start_utc, window_end_utc)
+        #    读取失败显式标记 db_error（对抗性检视 Major①：不得吞成空证据伪装 no_evidence）。
+        try:
+            df = await self.dao.get_market_news_documents(ts_code, window_start_utc, window_end_utc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(logger, e, "db", "[NewsInsight] read documents failed (%s): %s (ts_code=%s)", ts_code)
+            df = None
+            coverage["announcement"]["status"] = "db_error"
+            coverage["news"]["status"] = "db_error"
         if df is not None and not df.empty:
             for _, r in df.iterrows():
                 candidates.append(
@@ -254,6 +272,8 @@ class NewsInsightService:
                 logger, e, "db", "[NewsInsight] fetch telegraph candidates failed (%s): %s (ts_code=%s)", ts_code
             )
             df_t = None
+            # DB 读取故障显式标记 db_error（非实时抓取失败；对抗性检视 Major①）
+            coverage["telegraph"]["status"] = "db_error"
         if df_t is not None and not df_t.empty:
             candidates_pool = [{"ts_code": ts_code, "name": stock_name or ""}]
             for _, r in df_t.iterrows():
@@ -274,6 +294,11 @@ class NewsInsightService:
                     )
 
         await self._maybe_cancel(cancel_event)
+
+        # 全部证据来源数据库读取失败 → 显式失败（§8.1 不得把未观测数据表述为不存在）。
+        # 用户决策：全来源 db_error 进 error 可重试；VM 依本异常映射 error 态。
+        if all(coverage[src]["status"] == "db_error" for src in ("announcement", "news", "telegraph")):
+            raise NewsInsightSourceDbError(f"all evidence sources DB read failed (ts_code={ts_code})")
 
         # 4) 确定性去重（§8.4，仅同 source_kind 内）
         kept, _dropped = dedupe_documents(candidates)
@@ -412,8 +437,14 @@ class NewsInsightService:
         analysis_profile = self._analysis_profile()
         input_hash = self._build_input_hash(ts_code, start_cst, end_cst, content_hashes, analysis_profile)
 
-        # 无有效证据 → no_evidence（§10.3），不持久化、不调用 AI
+        # 无有效证据 → no_evidence（§10.3），不持久化、不调用 AI。
+        # 对抗性检视 Major①：空证据 + 任一来源 db_error 时不得伪装 no_evidence——
+        # DB 读取故障意味着"未观测到数据"而非"数据不存在"，须显式失败（VM 映射 error 可重试）。
         if not evidence:
+            if any(isinstance(c, dict) and c.get("status") == "db_error" for c in coverage.values()):
+                raise NewsInsightSourceDbError(
+                    f"no evidence and DB read failed (ts_code={ts_code}, sources={sorted(coverage)})"
+                )
             return NewsInsightOutcome(
                 result=NewsInsightResult(
                     analysis_status="no_evidence",
@@ -440,13 +471,16 @@ class NewsInsightService:
                     reuse_type="cache_hit",
                 )
 
-        # 子集例外（§11）：本次来源失败导致证据集为既有成功快照真子集时，复用更完整快照
+        # 子集例外（§11）：本次来源失败导致证据集为既有成功快照真子集时，复用更完整快照。
+        # 对抗性检视 Minor 假子集：仅当本次 coverage 含任一来源 db_error 才启用该例外——
+        # 去重/top-12 截取导致的真子集并非"部分来源失败"，不得误报 reuse_type='subset'。
         if not regenerate:
             latest = await self.dao.get_latest_success_brief(ts_code, window_start_utc, window_end_utc)
             if latest is not None and latest.get("evidence_news_ids"):
                 curr_ids = {ev.news_id for ev in evidence}
                 snap_ids = set(latest.get("evidence_news_ids") or [])
-                if curr_ids < snap_ids:
+                has_db_error = any(isinstance(c, dict) and c.get("status") == "db_error" for c in coverage.values())
+                if curr_ids < snap_ids and has_db_error:
                     return NewsInsightOutcome(
                         result=self._row_to_result(latest, coverage),
                         reused=True,

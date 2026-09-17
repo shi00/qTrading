@@ -25,7 +25,7 @@ from services.news_insight_models import (
     EvidenceDocument,
     NewsInsightResult,
 )
-from services.news_insight_service import NewsInsightService
+from services.news_insight_service import NewsInsightService, NewsInsightSourceDbError
 from utils.config_handler import ConfigHandler
 
 pytestmark = pytest.mark.unit
@@ -420,7 +420,8 @@ class TestLoadEvidence:
         evidence, _ = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
         assert len(evidence) == 1
 
-    def test_telegraph_fetch_failure(self, monkeypatch):
+    def test_telegraph_db_error_marks_db_error(self, monkeypatch):
+        """对抗性检视 Major①：telegraph 快讯 DB 读取失败标记 db_error（非实时抓取 fail）。"""
         dao = _make_dao()
 
         async def boom(*a, **k):
@@ -436,7 +437,51 @@ class TestLoadEvidence:
 
         evidence, coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
         assert evidence == []
-        assert coverage["telegraph"]["status"] == "fail"
+        assert coverage["telegraph"]["status"] == "db_error"
+
+    def test_documents_db_error_marks_db_error(self, monkeypatch):
+        """对抗性检视 Major①：get_market_news_documents DB 故障不再被吞成空证据。
+
+        _load_evidence 须捕获读异常并把对应来源 coverage status 置为 ``db_error``，
+        不得落入 ``fail``（fail 语义是"实时抓取失败"，db_error 语义是"数据库读取失败"）。
+        """
+        dao = _make_dao()
+
+        async def boom(*a, **k):
+            raise RuntimeError("db-down")
+
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(side_effect=boom)
+        dao.get_telegraph_news_for_stocks = AsyncMock(return_value=pd.DataFrame())
+        monkeypatch.setattr(module, "log_classified", _validating_log_classified)
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10)
+
+        evidence, coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+        assert evidence == []
+        assert coverage["announcement"]["status"] == "db_error"
+        assert coverage["news"]["status"] == "db_error"
+
+    def test_all_sources_db_error_raises(self, monkeypatch):
+        """对抗性检视 Major① + 用户决策：全部证据来源均 db_error 时抛可识别异常。"""
+        dao = _make_dao()
+
+        async def boom(*a, **k):
+            raise RuntimeError("db-down")
+
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(side_effect=boom)
+        dao.get_telegraph_news_for_stocks = AsyncMock(side_effect=boom)
+        monkeypatch.setattr(module, "log_classified", _validating_log_classified)
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10)
+
+        with pytest.raises(NewsInsightSourceDbError):  # noqa: weak-assertion 全来源 DB 故障须暴露可识别异常，异常类型即测试目标
+            asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
 
     def test_cancel_propagates(self, monkeypatch):
         dao = _make_dao()
@@ -563,13 +608,14 @@ class TestPreview:
 # --- analyze ---
 
 
-def _make_svc_with_fake_load(monkeypatch, dao=None, ai=None, *, evidence):
+def _make_svc_with_fake_load(monkeypatch, dao=None, ai=None, *, evidence, coverage=None):
     dao = dao or _make_dao()
     ai = ai or _make_ai()
     svc = NewsInsightService(market_dao=dao, ai_service=ai)
+    _coverage = coverage if coverage is not None else {"announcement": {"status": "ok"}}
 
     async def fake_load(ts, name, ws, we, ce):
-        return (list(evidence), {"announcement": {"status": "ok"}})
+        return (list(evidence), _coverage)
 
     monkeypatch.setattr(svc, "_load_evidence", fake_load)
     return svc, dao, ai
@@ -586,6 +632,47 @@ class TestAnalyze:
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.result.analysis_status == "no_evidence"
         assert outcome.reused is False
+        ai.analyze_news_risk.assert_not_awaited()
+
+    def test_empty_evidence_with_db_error_raises(self, monkeypatch):
+        """对抗性检视 Major①：空证据 + 任一来源 db_error 时，不得落入 no_evidence。
+
+        §8.1 不得把"未观测数据"表述为"不存在"；§10.3 数据库缓存读取失败仍可尝试即时生成。
+        DB 读取故障应以可识别异常向上暴露（VM 映射 error 可重试），而非伪装 no_evidence。
+        """
+        svc, _dao, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            evidence=[],
+            coverage={"announcement": {"status": "db_error"}},
+        )
+        with pytest.raises(NewsInsightSourceDbError):  # noqa: weak-assertion db_error 须显式失败并携带故障语义，异常类型即测试目标
+            asyncio.run(svc.analyze("000001.SZ"))
+        ai.analyze_news_risk.assert_not_awaited()
+
+    def test_empty_evidence_with_partial_db_error_raises(self, monkeypatch):
+        """空证据但仅部分来源 db_error：仍不得伪装 no_evidence（§8.1 不得把未观测数据表述为不存在）。"""
+        svc, _dao, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            evidence=[],
+            coverage={
+                "announcement": {"status": "fail"},
+                "news": {"status": "fail"},
+                "telegraph": {"status": "db_error"},
+            },
+        )
+        with pytest.raises(NewsInsightSourceDbError):  # noqa: weak-assertion 与 test_empty_evidence_with_db_error_raises 同理
+            asyncio.run(svc.analyze("000001.SZ"))
+        ai.analyze_news_risk.assert_not_awaited()
+
+    def test_empty_evidence_without_db_error_stays_no_evidence(self, monkeypatch):
+        """回归守卫：无 db_error 时空证据仍按既有契约走 no_evidence（§10.3 正常无证据）。"""
+        svc, dao, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            evidence=[],
+            coverage={"announcement": {"status": "fail"}, "news": {"status": "fail"}, "telegraph": {"status": "fail"}},
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.result.analysis_status == "no_evidence"
         ai.analyze_news_risk.assert_not_awaited()
 
     def test_cache_hit(self, monkeypatch):
@@ -626,13 +713,44 @@ class TestAnalyze:
         dao.get_news_risk_brief = AsyncMock(return_value=None)
         dao.get_latest_success_brief = AsyncMock(return_value=latest)
         svc, _, ai = _make_svc_with_fake_load(
-            monkeypatch, dao=dao, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
         )
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is True
         assert outcome.reuse_type == "subset"
         assert outcome.result.summary == "更完整"
         ai.analyze_news_risk.assert_not_awaited()
+
+    def test_no_subset_without_db_error(self, monkeypatch):
+        """Minor 假子集：无 db_error 时证据集为既有快照真子集不得误报 reuse_type='subset'。
+
+        去重/top-12 截取导致的真子集不是"部分来源失败"，应继续走 AI 分析而非复用历史快照。
+        """
+        latest = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "medium",
+            "confidence": 60,
+            "summary": "更完整",
+            "events": [],
+            "evidence_news_ids": [1, 2, 3],
+            "model_id": "local",
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.get_latest_success_brief = AsyncMock(return_value=latest)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "ok"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is False
+        assert outcome.reuse_type == "none"
+        ai.analyze_news_risk.assert_awaited_once()
 
     def test_no_cache_calls_ai_and_persists(self, monkeypatch):
         dao = _make_dao()

@@ -22,7 +22,7 @@ import pytest
 
 import utils.time_utils
 from services.news_insight_models import EvidenceDocument
-from services.news_insight_service import NewsInsightOutcome
+from services.news_insight_service import NewsInsightOutcome, NewsInsightSourceDbError
 from ui.viewmodels.news_insight_types import (
     PHASE_ANALYZING,
     PHASE_DEGRADED,
@@ -340,6 +340,49 @@ class TestLoadEvidenceError:
                 await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
 
         await _wait_task(vm)
+
+
+class TestDbError:
+    async def test_load_evidence_db_error_sets_error(self, fake_service):
+        """对抗性检视 Major①：证据加载 DB 故障 → error 可重试，不得降级为 no_evidence 文案。"""
+        fake_service.load_evidence_preview = AsyncMock(side_effect=NewsInsightSourceDbError("db down"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message is not None
+        assert vm.state.message.key == "news_insight_db_error"
+
+    async def test_analyze_db_error_sets_error(self, fake_service):
+        """对抗性检视 Major①：分析阶段 DB 故障 → error 可重试，不得伪装 no_evidence。"""
+        fake_service.analyze = AsyncMock(side_effect=NewsInsightSourceDbError("db down"))
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_ERROR
+        assert vm.state.message is not None
+        assert vm.state.message.key == "news_insight_db_error"
+
+
+class TestCancelEventWiring:
+    async def test_cancel_sets_event(self, fake_service):
+        """对抗性检视 Minor：取消置位取消事件，服务层 _maybe_cancel 边界检查真实生效。"""
+        vm = NewsInsightViewModel(service=fake_service)
+        vm._cancel_active()
+        assert vm._cancel_event().is_set()
+
+    async def test_new_operation_clears_event(self, fake_service):
+        """对抗性检视 Minor：新操作（select_stock）启动时清除取消残留，陈旧信号不中断新任务。"""
+        vm = NewsInsightViewModel(service=fake_service)
+        vm._cancel_active()
+        assert vm._cancel_event().is_set()
+        vm.select_stock("000001.SZ")
+        await asyncio.sleep(0)  # 让 _load_evidence_task 执行 cancel_event.clear()
+        assert not vm._cancel_event().is_set()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_EVIDENCE_READY
 
 
 class TestApplyOutcomeFailed:
