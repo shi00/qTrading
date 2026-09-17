@@ -152,8 +152,10 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
 
         try:
             nb_lf = pl.from_pandas(nb_df).lazy()
-            # Select limited columns from base to avoid collisions or generic naming
-            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
+            # D2-M5: 保留 base 全部基础快照列（screening_history 需要完整快照）；
+            # 右表仅保留 join 键与业务列 ratio，避免 name/vol 等重名列污染快照语义
+            # （northbound_holding.vol 为北向持股数，与 base 成交量不同语义）。
+            nb_lf = nb_lf.select(["ts_code", "ratio"])
 
             return (
                 nb_lf.drop_nulls(subset=["ratio"])
@@ -161,7 +163,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
                 .filter(
                     pl.col("ts_code").str.ends_with(".SH") | pl.col("ts_code").str.ends_with(".SZ"),
                 )
-                .join(base_lf, on="ts_code", how="inner")
+                .join(lf, on="ts_code", how="inner")
                 .sort("ratio", descending=True)
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
@@ -338,12 +340,10 @@ class InstitutionalStrategy(PolarsBaseStrategy):
 
         try:
             top_lf = pl.from_pandas(lhb).lazy()
-            # D2-M3：base universe 缺 circ_mv 时降级跳过，仅当存在才保留，供
-            # get_ai_context 计算「净买入/流通市值」关键比值；避免无条件 select 崩列。
-            base_cols = ["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"]
-            if "circ_mv" in lf.columns:
-                base_cols.append("circ_mv")
-            base_lf = lf.select(base_cols)
+            # D2-M5: 保留 base 全部基础快照列（screening_history 需要完整快照）。
+            # 右表仅保留 join 键与业务列 net_amount，避免 name/close/amount 等重名列
+            # 污染快照语义；base 全列天然含 circ_mv，get_ai_context 可直接读取。
+            top_lf = top_lf.select(["ts_code", "net_amount"])
 
             # DATA-02: net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），参数 inst_net_min 单位为万，
             # 换算到数据单位（元）再比较，修复 10000 倍单位错位；未知单位抛 StrategyParamError（catch→空）。
@@ -352,7 +352,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             return (
                 top_lf.filter(pl.col("net_amount").is_not_null())
                 .filter(pl.col("net_amount") > net_threshold)
-                .join(base_lf, on="ts_code", how="inner")
+                .join(lf, on="ts_code", how="inner")
                 .sort("net_amount", descending=True)
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
@@ -409,8 +409,9 @@ class BlockTradeStrategy(PolarsBaseStrategy):
 
         try:
             block_lf = pl.from_pandas(block).lazy()
-            base_lf = lf.select(["ts_code", "name", "industry_sw_l2", "pe_ttm", "total_mv"])
-
+            # D2-M5: 保留 base 全部基础快照列（screening_history 需要完整快照）。
+            # 聚合右表 amount/vol 是该策略业务列（大宗成交额/量），与 base 同名冲突，
+            # 以 suffix="_base" 重命名 base 冲突列，保留右表业务值原名供落库。
             # R20：amount 为红线列，禁止裸数值比较；经统一入口换算（block 无单位元数据时回退声明单位 wan_cny）。
             amount_threshold = threshold_in_data_unit(
                 block, "amount", BLOCK_TRADE_AMOUNT_UNIT, target_amount, "wan_cny"
@@ -425,7 +426,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                         ((pl.col("price") * pl.col("amount")).sum() / pl.col("amount").sum()).alias("price"),
                     ],
                 )
-                .join(base_lf, on="ts_code", how="inner")
+                .join(lf, on="ts_code", how="inner", suffix="_base")
                 .sort("amount", descending=True)
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
