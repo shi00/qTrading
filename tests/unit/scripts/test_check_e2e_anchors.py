@@ -43,12 +43,13 @@ class TestExtractEidsNamespaces:
     """_extract_eids_namespaces: 从 e2e_ids.py 静态分析命名空间。"""
 
     def test_extracts_real_eids_file(self):
-        """对真实 ui/testing/e2e_ids.py 应提取出 10 个命名空间。"""
+        """对真实 ui/testing/e2e_ids.py 应提取出 11 个命名空间。"""
         eids_path = ROOT / "ui" / "testing" / "e2e_ids.py"
         ns = _extract_eids_namespaces(eids_path)
         assert set(ns.keys()) == {
             "SCREENER",
             "DETAIL_DIALOG",
+            "NEWS_RISK",
             "SETTINGS",
             "DATA",
             "BACKTEST",
@@ -69,6 +70,8 @@ class TestExtractEidsNamespaces:
         assert "task_row" in ns["TASK_CENTER"]
         # TUSHARE 应含 VERIFY_BUTTON 常量
         assert "VERIFY_BUTTON" in ns["TUSHARE"]
+        # NEWS_RISK 应含 GENERATE_BUTTON 常量
+        assert "GENERATE_BUTTON" in ns["NEWS_RISK"]
 
     def test_extracts_synthetic_eids(self, tmp_path):
         """构造最小 EIDS 定义文件，验证提取逻辑（含私有属性与 staticmethod）。"""
