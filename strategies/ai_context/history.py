@@ -18,7 +18,7 @@ def _build_history_text(
     history_df: pd.DataFrame,
     ts_code: str = "",
     stock_name: str = "",
-    vol_ratio_threshold: float = 1.5,
+    vol_ratio_threshold: float = 1.7,
     labels_out: list[str] | None = None,
 ) -> str:
     """

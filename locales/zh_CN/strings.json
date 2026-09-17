@@ -246,7 +246,7 @@
     "strategy_large_pe_desc_dynamic": "标准：总市值 > {market_cap_min}亿 | 市盈率 < {pe_max}倍 (核心资产)",
     "param_rsi_threshold": "RSI 阈值",
     "param_rsi_threshold_oversold": "RSI 阈值 (常用 20-30)",
-    "param_vol_ratio_threshold": "量比放大阈值 (默认 1.5)",
+    "param_vol_ratio_threshold": "量比放大阈值 (当日/前5日均量, 默认 1.7)",
     "param_rsi_period": "RSI 计算周期",
     "param_group_core_signal": "🎯 核心触发信号",
     "param_group_volume_confirm": "📊 量价资金确认",

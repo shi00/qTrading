@@ -163,6 +163,8 @@ async def test_oversold(strategies_ctx):
 
 
 async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
+    # D2-m1: 当日放量 1.6 倍（160 / 前5日均量100），新口径 ratio=1.6 恰落在
+    # 阈值 1.5（通过）与 1.7（过滤）之间，验证 shift(1) 口径下阈值语义。
     s = OversoldStrategy()
     dp_mock = MagicMock()
     dp_mock._quality_tier = 2
@@ -173,7 +175,7 @@ async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
 
     dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
     history_data = []
-    for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [200], strict=True):
+    for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [160], strict=True):
         history_data.append(
             {
                 "ts_code": "000003.SZ",

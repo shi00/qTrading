@@ -277,7 +277,7 @@
     "screener_running_strategy": "Running {name}...",
     "param_rsi_threshold": "RSI Threshold",
     "param_rsi_threshold_oversold": "RSI Threshold (Common: 20-30)",
-    "param_vol_ratio_threshold": "Volume Expansion Threshold (Default 1.5)",
+    "param_vol_ratio_threshold": "Volume Expansion Threshold (Today/5-Day Avg, Default 1.7)",
     "param_rsi_period": "RSI Calculation Period",
     "param_group_core_signal": "🎯 Core Signal",
     "param_group_volume_confirm": "📊 Volume Confirmation",

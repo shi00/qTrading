@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Bug Fixes
+* **strategy/oversold:** `vol_ratio_5d` 分母改为前 5 日均量（`shift(1)` 排除当日，D2-m1）
+  * 修复 `rolling_mean(5)` 含当日导致量比动态范围压缩的问题（真实放量 3 倍此前仅算约 1.9）
+  * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
+  * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
+
 ## [0.9.0](https://github.com/shi00/qTrading/compare/v0.8.0...v0.9.0) (2026-07-27)
 
 

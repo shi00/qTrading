@@ -40,8 +40,8 @@ class TestOversoldVolumeThreshold:
         rsi_col = "rsi_14"
         rsi_expr = TechnicalAnalysis.get_rsi_expr(col_name="qfq_close", period=14, alias=rsi_col)
         vol_ratio_expr = (
-            pl.when(pl.col("vol").rolling_mean(5).over("ts_code") > 0)
-            .then(pl.col("vol") / pl.col("vol").rolling_mean(5).over("ts_code"))
+            pl.when(pl.col("vol").shift(1).rolling_mean(5).over("ts_code") > 0)
+            .then(pl.col("vol") / pl.col("vol").shift(1).rolling_mean(5).over("ts_code"))
             .otherwise(None)
             .alias("vol_ratio_5d")
         )
@@ -76,8 +76,8 @@ class TestOversoldVolumeThreshold:
         rsi_col = "rsi_14"
         rsi_expr = TechnicalAnalysis.get_rsi_expr(col_name="qfq_close", period=14, alias=rsi_col)
         vol_ratio_expr = (
-            pl.when(pl.col("vol").rolling_mean(5).over("ts_code") > 0)
-            .then(pl.col("vol") / pl.col("vol").rolling_mean(5).over("ts_code"))
+            pl.when(pl.col("vol").shift(1).rolling_mean(5).over("ts_code") > 0)
+            .then(pl.col("vol") / pl.col("vol").shift(1).rolling_mean(5).over("ts_code"))
             .otherwise(None)
             .alias("vol_ratio_5d")
         )
@@ -107,8 +107,8 @@ class TestOversoldVolumeThreshold:
         rsi_col = "rsi_14"
         rsi_expr = TechnicalAnalysis.get_rsi_expr(col_name="qfq_close", period=14, alias=rsi_col)
         vol_ratio_expr = (
-            pl.when(pl.col("vol").rolling_mean(5).over("ts_code") > 0)
-            .then(pl.col("vol") / pl.col("vol").rolling_mean(5).over("ts_code"))
+            pl.when(pl.col("vol").shift(1).rolling_mean(5).over("ts_code") > 0)
+            .then(pl.col("vol") / pl.col("vol").shift(1).rolling_mean(5).over("ts_code"))
             .otherwise(None)
             .alias("vol_ratio_5d")
         )

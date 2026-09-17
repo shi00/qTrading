@@ -14,7 +14,7 @@ import pytest
 
 from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_mixin import PreFetchedContext
-from strategies.oversold_strategy import OversoldStrategy
+from strategies.oversold_strategy import OversoldStrategy, _compute_rsi_filter
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 pytestmark = pytest.mark.unit
@@ -291,6 +291,37 @@ async def test_rsi_filter_no_candidates():
     }
     result = await s._math_filter(context, 14, 30, 1.5)
     assert result.empty
+
+
+def test_vol_ratio_excludes_current_day_from_denominator():
+    """D2-m1: vol_ratio_5d 分母应为前 5 日均量（shift(1) 排除当日）。
+
+    构造前 59 日 vol=100、当日 vol=300 的数据：
+    新口径 ratio = 300 / mean(前5日=100) = 3.0；
+    旧口径（含当日）会得到 300 / mean([300,100,100,100,100]) ≈ 2.14。
+    """
+    n_days = 60
+    dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    vols = [100.0] * (n_days - 1) + [300.0]
+    history_data = {
+        "ts_code": ["000001.SZ"] * n_days,
+        "trade_date": [d.strftime("%Y%m%d") for d in dates],
+        "open": [10.0] * n_days,
+        "high": [10.5] * n_days,
+        "low": [9.5] * n_days,
+        "close": [10.0] * n_days,
+        "vol": vols,
+        "amount": [10000.0] * n_days,
+        "pct_chg": [-0.5] * n_days,
+    }
+    history_pdf = pd.DataFrame(history_data)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    # rsi_threshold=101 放行全部股票，聚焦量比口径断言
+    result = _compute_rsi_filter(history_pdf, snapshot, datetime.date(2024, 6, 14), 2, 101, 1.0)
+    assert not result.empty
+    ratio = result.iloc[0]["vol_ratio_5d"]
+    assert ratio == pytest.approx(3.0), f"vol_ratio_5d 应为 3.0（前5日均量不含当日），实际 {ratio}"
 
 
 def _make_dp_for_prefetch():
