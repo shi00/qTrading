@@ -151,6 +151,7 @@ HSGT_NORTH_MONEY_UNIT_SOURCE = {
     "doc_field": "north_money",
     "doc_description": "北向资金（百万元）",
 }
+BLOCK_TRADE_AMOUNT_UNIT = "wan_cny"  # Tushare block_trade.amount 单位：成交金额（万元）
 HSGT_COLUMN_UNITS = {
     "north_money": HSGT_NORTH_MONEY_UNIT,
 }
