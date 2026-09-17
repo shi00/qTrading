@@ -18,6 +18,7 @@ import pandas as pd
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.persistence.review_manager import ReviewManager
+from utils.time_utils import to_date
 import pytest
 
 
@@ -25,7 +26,26 @@ pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 
 def _make_trade_cal_mock():
-    return AsyncMock(return_value=pd.DataFrame({"cal_date": [f"202403{d:02d}" for d in range(1, 22)]}))
+    """返回模拟真实 stock_dao.get_trade_cal 的 AsyncMock。
+
+    真实 DAO 按 [start_date, end_date] 过滤并排除周末；mock 需同等行为，
+    否则 T+N 锚定（TradeCalendarService.get_trade_dates）会错位到非交易日。
+    """
+
+    async def _side_effect(start_date=None, end_date=None, is_open=None, **kwargs):
+        start = to_date(start_date) if start_date is not None else datetime.date(2024, 1, 1)
+        end = to_date(end_date) if end_date is not None else datetime.date(2024, 12, 31)
+        if start > end:
+            return pd.DataFrame({"cal_date": [], "is_open": []})
+        days = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:  # 周一~周五为交易日
+                days.append(d.strftime("%Y%m%d"))
+            d += datetime.timedelta(days=1)
+        return pd.DataFrame({"cal_date": days, "is_open": [1] * len(days)})
+
+    return AsyncMock(side_effect=_side_effect)
 
 
 class TestReviewManagerInit(unittest.TestCase):

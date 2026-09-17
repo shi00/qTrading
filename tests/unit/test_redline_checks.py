@@ -6,6 +6,8 @@
 """
 
 import ast
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -20,9 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_redlines import (  # noqa: E402 - sys.path 注入后导入
+    _KNOWN_UNIT_COLUMNS_HIGH,
+    _KNOWN_UNIT_COLUMNS_LOW,
     _R16_SINGLETON_CLASSES,
     _base_class_names,
     _check_R16_in_tree,
+    _check_R20_in_tree,
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
@@ -42,6 +47,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R14,
     check_R15,
     check_R16_vm_init_singleton_construction,
+    check_R20,
     check_R4,
     check_R4_in_tests,
     check_R4_literal_assignments,
@@ -825,6 +831,182 @@ class TestR16PureFunction:
             f"\n白名单独有: {sorted(_R16_SINGLETON_CLASSES - documented)}"
             f"\n文档独有: {sorted(documented - _R16_SINGLETON_CLASSES)}"
         )
+
+
+# ============================================================================
+# R20 报告模式纯函数测试
+# ============================================================================
+
+
+def _r20_check(code: str) -> list[str]:
+    """对代码片段执行 R20 报告模式纯函数检查（fake 路径挂在 strategies/ 下）。"""
+    tree = ast.parse(code)
+    fake_path = ROOT / "strategies" / "fake_module.py"
+    return _check_R20_in_tree(tree, fake_path)
+
+
+class TestR20PureFunction:
+    """R20 报告模式纯函数测试：验证已知单位列裸数值比较检测与豁免边界。
+
+    覆盖窄规则（第一阶段）判定：HIGH 列直判、LOW 列仅非 0 字面量报警、
+    换算调用/已换算变量/字面量 0/计算表达式豁免、变量名形态仅 HIGH 列。
+    """
+
+    def test_high_column_vs_nonzero_literal_warns(self):
+        """HIGH 列与裸数值比较（pl.col('north_money') > 500）应报警。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('north_money') > 500)\n"
+        warnings = _r20_check(code)
+        assert len(warnings) == 1
+        assert "R20" in warnings[0]
+        assert "north_money" in warnings[0]
+
+    def test_high_column_vs_zero_not_warned(self):
+        """HIGH 列与字面量 0 比较（健全性检查）不应报警。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('net_amount') > 0)\n"
+        assert _r20_check(code) == []
+
+    def test_high_column_vs_conversion_call_not_warned(self):
+        """对侧为 threshold_in_data_unit 调用（已换算）不应报警。"""
+        code = (
+            "import polars as pl\n"
+            "def f(lf):\n"
+            "    return lf.filter(pl.col('north_money') > threshold_in_data_unit(lf, 'north_money', 'm_cny', 50, 'yi_cny'))\n"
+        )
+        assert _r20_check(code) == []
+
+    def test_conversion_call_with_module_prefix_exempt(self):
+        """对侧为模块前缀的换算调用（utils.threshold_in_data_unit）同样豁免。"""
+        code = (
+            "import polars as pl\n"
+            "def f(lf):\n"
+            "    return lf.filter(pl.col('north_money') > utils.threshold_in_data_unit(lf, 'north_money', 'm_cny', 50, 'yi_cny'))\n"
+        )
+        assert _r20_check(code) == []
+
+    def test_high_column_vs_converted_variable_not_warned(self):
+        """对侧为同函数内由换算调用赋值的变量（已换算阈值）不应报警。"""
+        code = (
+            "import polars as pl\n"
+            "def f(lf):\n"
+            "    threshold = threshold_in_data_unit(lf, 'north_money', 'm_cny', 50, 'yi_cny')\n"
+            "    return lf.filter(pl.col('north_money') > threshold)\n"
+        )
+        assert _r20_check(code) == []
+
+    def test_annassign_converted_variable_exempt(self):
+        """AnnAssign 形态（threshold: float = threshold_in_data_unit(...)）同样追踪。"""
+        code = (
+            "import polars as pl\n"
+            "def f(lf):\n"
+            "    threshold: float = threshold_in_data_unit(lf, 'north_money', 'm_cny', 50, 'yi_cny')\n"
+            "    return lf.filter(pl.col('north_money') > threshold)\n"
+        )
+        assert _r20_check(code) == []
+
+    def test_high_variable_form_warns(self):
+        """变量承载列值（DATA-01 形态 north_money_val <= target_flow）应报警。"""
+        code = "def f():\n    return north_money_val <= target_flow\n"
+        warnings = _r20_check(code)
+        assert len(warnings) == 1
+        assert "R20" in warnings[0]
+        assert "north_money" in warnings[0]
+
+    def test_high_variable_form_converted_exempt(self):
+        """变量承载列值但对侧为已换算变量（修复后代码）不应报警。"""
+        code = (
+            "def f(df):\n"
+            "    threshold = threshold_in_data_unit(df, 'north_money', 'm_cny', 50, 'yi_cny')\n"
+            "    return north_money_val <= threshold\n"
+        )
+        assert _r20_check(code) == []
+
+    def test_low_column_vs_nonzero_literal_warns(self):
+        """LOW 列与裸数值比较（pl.col('total_mv') > 100）应报警。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('total_mv') > 100)\n"
+        warnings = _r20_check(code)
+        assert len(warnings) == 1
+        assert "total_mv" in warnings[0]
+
+    def test_low_column_vs_plain_variable_not_warned(self):
+        """LOW 列与普通变量比较（无法区分已换算/裸值）不报警（避免误报）。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('total_mv') > mv_threshold)\n"
+        assert _r20_check(code) == []
+
+    def test_low_variable_form_not_warned(self):
+        """LOW 列不做变量名推断（volume/vol_ratio 等无关变量不误报）。"""
+        code = "def f():\n    if volume > 1000 or vol_ratio_threshold > 1.7:\n        return True\n    return False\n"
+        assert _r20_check(code) == []
+
+    def test_equality_not_flagged(self):
+        """==/!= 比较不构成量纲错误，不报警。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('north_money') == 500)\n"
+        assert _r20_check(code) == []
+
+    def test_non_unit_column_not_flagged(self):
+        """非已知单位列（pe_ttm）不受 R20 约束。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('pe_ttm') > 0)\n"
+        assert _r20_check(code) == []
+
+    def test_expression_other_side_not_flagged(self):
+        """对侧为计算表达式（列运算）不报警（单位不可断言）。"""
+        code = "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('amount') > pl.col('amount').mean())\n"
+        assert _r20_check(code) == []
+
+    def test_col_call_with_variable_arg_not_flagged(self):
+        """pl.col(变量名)（列名非字面量）无法断言单位，不报警。"""
+        code = "import polars as pl\ndef f(lf, col_name):\n    return lf.filter(pl.col(col_name) > 500)\n"
+        assert _r20_check(code) == []
+
+    def test_known_column_sets_cover_redline(self):
+        """红线列集合与 redlines.yml R20 清单一致（防漂移快照）。"""
+        assert {
+            "amount",
+            "circ_mv",
+            "net_amount",
+            "north_money",
+            "total_mv",
+            "vol",
+        } == _KNOWN_UNIT_COLUMNS_HIGH | _KNOWN_UNIT_COLUMNS_LOW
+
+
+class TestR20IntegrationOnCurrentCodebase:
+    """R20 集成测试：报告模式机制验证（warning 输出 stderr、不阻断 exit code）。
+
+    test_check_R20_runs_clean_on_codebase 为误报率 0 基线契约：当前 strategies/ 在
+    窄规则下无报警（已修复的 DATA-01/02 换算点与健全性检查全部豁免）。
+    """
+
+    def test_check_R20_runs_clean_on_codebase(self):
+        """当前 strategies/ 在窄规则下无报警（误报率 0 基线契约）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            check_R20()
+        assert "R20" not in buf.getvalue()
+
+    def test_check_R20_emits_warning_not_blocking(self, tmp_path, monkeypatch):
+        """扫描到违规时输出 warning 到 stderr 且不抛错（报告模式不阻断）。"""
+        strategies_dir = tmp_path / "strategies"
+        strategies_dir.mkdir()
+        (strategies_dir / "bad_strategy.py").write_text(
+            "import polars as pl\ndef f(lf):\n    return lf.filter(pl.col('north_money') > 500)\n",
+            encoding="utf-8",
+        )
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            check_redlines.check_R20()
+        out = buf.getvalue()
+        assert "R20" in out
+        assert "north_money" in out
+
+    def test_check_R20_missing_dir_returns_silently(self, tmp_path, monkeypatch):
+        """strategies/ 目录不存在时静默返回（不抛错）。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        assert check_redlines.check_R20() is None
 
 
 # ============================================================================

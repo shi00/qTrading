@@ -20,6 +20,21 @@ from strategies.backtest.data_provider import BacktestDataProvider
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _autouse_mock_trade_calendar(monkeypatch) -> AsyncMock:
+    """D3-M2: preload_range 会调用 TradeCalendarService.get_trade_dates 计算区间"全市场交易日"全集。
+
+    默认兜底 patch 为返回与 screening_data 覆盖一致的交易日（20240102/20240103 → 无缺口 → GOLD），
+    避免走真实日历（API/offline 依赖 DB）导致既有 preload 断言不稳定。
+    用例可按需通过返回值 AsyncMock 覆写（如抛异常）。autouse 作用于全模块，非 preload 用例不受影响。
+    """
+    from data.domain_services.trade_calendar_service import TradeCalendarService
+
+    mock = AsyncMock(return_value=[date(2024, 1, 2), date(2024, 1, 3)])
+    monkeypatch.setattr(TradeCalendarService, "get_trade_dates", mock)
+    return mock
+
+
 class TestBacktestDataProvider:
     @pytest.fixture
     def mock_cache(self) -> MagicMock:
@@ -325,6 +340,65 @@ class TestBacktestQualityProxy:
         with pytest.raises(QualityGateError):
             _check_tier(proxy, QualityTier.GOLD, "test_func")
 
+    def test_missing_dates_attribute(self) -> None:
+        """D3-M2: _scan_missing_dates 承载区间缺口（frozenset），默认空 frozenset。"""
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(missing_dates=frozenset({"20240103"}))
+        assert proxy._scan_missing_dates == frozenset({"20240103"})
+
+        default_proxy = _BacktestQualityProxy()
+        assert default_proxy._scan_missing_dates == frozenset()
+
+    def test_delegate_forwarding(self) -> None:
+        """D3-M2: proxy 经 __getattr__ 把未知属性委托给注入的 delegate。"""
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        delegate = MagicMock()
+        delegate.get_screening_data = MagicMock(return_value=object())
+        proxy = _BacktestQualityProxy(delegate=delegate)
+        assert proxy.get_screening_data is delegate.get_screening_data
+        # 任意未定义属性都应转发到 delegate（策略对 context processor 的数据访问能力保持可用）
+        assert proxy.some_random_attr is delegate.some_random_attr
+
+    def test_delegate_none_raises_attr_error(self) -> None:
+        """D3-M2: 无 delegate 时访问未知属性应抛 AttributeError。"""
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy()
+        with pytest.raises(AttributeError, match="some_unknown_attr"):
+            _ = proxy.some_unknown_attr
+
+    def test_health_cache_overridden_not_forwarded(self) -> None:
+        """D3-M2(对抗检视 A): proxy 显式覆写 `_health_cache`，不转发到实盘 delegate。
+
+        `_check_tier` 在 BRONZE 降级时读取 `_health_cache` 追加 lag_days 归因；
+        回测场景该归因应引用区间缺失数据而非实盘落后天数，故代理必须覆写为 None，
+        阻止 `__getattr__` 把真实 processor 的 `_health_cache` 暴露出来。
+        """
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        delegate = MagicMock()
+        delegate._health_cache = {"data": {"market": {"lag_days": 5}}}
+        proxy = _BacktestQualityProxy(delegate=delegate)
+        assert proxy._health_cache is None
+        # 其余非质量字段仍正常转发（数据访问能力保持可用）
+        assert proxy.some_random_attr is delegate.some_random_attr
+
+    def test_require_continuous_window_blocks_on_missing(self) -> None:
+        """D3-M2: GOLD 等级先通过等级检查，再由连续窗口检查消费缺失日 frozenset 并拦截。"""
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(tier=QualityTier.GOLD, missing_dates=frozenset({"20240103"}))
+        with pytest.raises(QualityGateError):
+            _check_tier(proxy, QualityTier.GOLD, "f", require_continuous_window=True)
+
     @pytest.mark.asyncio
     async def test_proxy_reused_across_build_context_calls(self) -> None:
         """验证 BacktestDataProvider 复用 proxy 实例。"""
@@ -346,12 +420,19 @@ class TestBacktestQualityProxy:
         assert ctx1.get("data_processor") is ctx2.get("data_processor")
         assert ctx1.get("data_processor") is provider._quality_proxy
 
-    def test_no_proxy_when_data_processor_provided(self) -> None:
-        """当 data_processor 存在时，不应创建 proxy。"""
+    def test_proxy_created_when_data_processor_provided(self) -> None:
+        """D3-M2: 注入 data_processor 时恒创建 quality proxy。
+
+        代理 delegate=真实 processor、默认 GOLD 等级（preload_range 成功后再按区间缺口覆写真实等级）。
+        """
+        from data.persistence.quality_gate import QualityTier
+
         cache = MagicMock()
         processor = MagicMock()
         provider = BacktestDataProvider(cache, data_processor=processor)
-        assert provider._quality_proxy is None
+        assert provider._quality_proxy is not None
+        assert provider._quality_proxy._delegate is processor
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
 
     @pytest.mark.asyncio
     async def test_preload_range_success(self) -> None:
@@ -674,6 +755,102 @@ class TestBacktestQualityProxy:
 
         await provider.preload_range(date(2024, 1, 1), date(2024, 3, 1))
         assert provider.range_preload_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_preload_missing_dates_downgrades_to_bronze(self) -> None:
+        """D3-M2: 区间缺口（screening_data 缺 20240103）→ proxy 降级 BRONZE 并记录缺失日。
+
+        autouse fixture 使 TradeCalendarService.get_trade_dates 返回 {20240102, 20240103}（expected），
+        screening_data 仅覆盖 {20240102} → missing={20240103}。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240102"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._quality_proxy._quality_tier == int(QualityTier.BRONZE)
+        assert provider._quality_proxy._scan_missing_dates == frozenset({"20240103"})
+
+    @pytest.mark.asyncio
+    async def test_preload_no_missing_keeps_gold(self) -> None:
+        """D3-M2: 区间无缺口（screening_data 覆盖全交易日）→ 保持 GOLD 且 missing 为空。"""
+        from data.persistence.quality_gate import QualityTier
+
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240103"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
+        assert provider._quality_proxy._scan_missing_dates == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_preload_calendar_failure_keeps_gold(self, _autouse_mock_trade_calendar) -> None:
+        """D3-M2: 日历查询失败（非 CancelledError）→ 保持默认 GOLD、missing 空，preload 数据仍成功。"""
+        from data.persistence.quality_gate import QualityTier
+
+        _autouse_mock_trade_calendar.side_effect = RuntimeError("calendar boom")
+
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        # 不抛异常，数据本身 preload 成功
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
+        assert provider._quality_proxy._scan_missing_dates == frozenset()
+        assert isinstance(provider._preloaded, dict)
+        assert "20240102" in provider._preloaded["screening_data"]
 
 
 class TestBacktestDataProviderAuxiliaryTables:

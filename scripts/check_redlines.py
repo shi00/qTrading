@@ -14,6 +14,7 @@
 - R_no_bare_ft_colors_in_ui: 扫描 UI 层裸 ft.Colors.<COLOR> 引用 (必须替换为 AppColors token)
 - R_tushare_token_log: 扫描 tushare_client.py 中 logger 调用是否直接打印 self.token / token 明文 (R9 红线)
 - R_lazy_import_whitelist: 扫描函数体内禁止方向的跨层 import 是否带 # lazy-import: <原因> 注释（review01-A2-2）
+- R20 单位核对（报告模式，warning 不阻断）：扫描 strategies/ 下已知金额/数量列的裸数值比较
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
@@ -1332,6 +1333,171 @@ def check_no_component_render_side_effects() -> list[str]:
 
 
 # ============================================================================
+# R20 单位核对（报告模式，warning 不阻断）：策略/回测中已知金额/数量列裸数值比较
+# ============================================================================
+
+# 已知单位列（与 scripts/prototype_business_redlines.py 保持一致；权威单位元数据正本为
+# data/constants.py 的 HSGT_COLUMN_UNITS / TOP_LIST_COLUMN_UNITS）：
+#   HIGH：有明确单位元数据声明（百万/元/万元）且阈值参数隐含单位的列，裸比较几乎必然
+#         量纲错误（DATA-01 北向资金错 100 倍 / DATA-02 龙虎榜错 10000 倍）→ 直判
+#   LOW：单位含义随上下文变的列（回测撮合中常为单位一致的合法比较）→ 需人工复核
+_KNOWN_UNIT_COLUMNS_HIGH = frozenset({"north_money", "net_amount"})
+_KNOWN_UNIT_COLUMNS_LOW = frozenset({"amount", "total_mv", "circ_mv", "vol"})
+_KNOWN_UNIT_COLUMNS_ALL = _KNOWN_UNIT_COLUMNS_HIGH | _KNOWN_UNIT_COLUMNS_LOW
+
+# R20 统一换算入口（经此换算后的阈值与列直接比较属合规）
+_R20_CONVERSION_FUNCS = frozenset({"threshold_in_data_unit", "get_column_unit", "get_column_unit_source"})
+
+
+def _is_conversion_call(node: ast.AST) -> bool:
+    """判断表达式是否为 R20 统一换算入口调用（threshold_in_data_unit 等）。"""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in _R20_CONVERSION_FUNCS
+    if isinstance(func, ast.Attribute):
+        return func.attr in _R20_CONVERSION_FUNCS
+    return False
+
+
+def _collect_converted_names(tree: ast.Module) -> set[str]:
+    """收集函数作用域内由换算调用赋值的变量名。
+
+    已换算阈值通常先赋值给变量（如 ``mv_threshold = threshold_in_data_unit(...)``）再与列比较；
+    若不追踪该形态，报告模式会把已换算比较误判为裸比较——这是 AST 原型误报率高的根因。
+    仅做函数内简单作用域追踪（Assign/AnnAssign 的 Name 目标），不追踪属性流/跨函数流
+    （报告模式可接受轻微过度豁免，换取低误报率）。
+    """
+    converted: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt in ast.walk(node):
+            if isinstance(stmt, ast.Assign) and _is_conversion_call(stmt.value):
+                targets = stmt.targets
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None and _is_conversion_call(stmt.value):
+                targets = [stmt.target]
+            else:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    converted.add(target.id)
+    return converted
+
+
+def _extract_unit_column(node: ast.AST) -> str | None:
+    """从比较侧表达式提取已知单位列名。
+
+    形态 A：``pl.col("col")`` / ``x.col("col")`` —— HIGH/LOW 均识别（列引用明确）。
+    形态 B：变量名含 HIGH 列名（如 north_money_val 承载列值）—— 仅 HIGH 列；
+    LOW 列名短（vol/amount）与 volume/vol_ratio 等无关变量冲突，变量名推断会误报。
+    """
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "col":
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            col = node.args[0].value
+            return col if col in _KNOWN_UNIT_COLUMNS_ALL else None
+        return None
+    if isinstance(node, ast.Name):
+        for col in _KNOWN_UNIT_COLUMNS_HIGH:
+            if col in node.id:
+                return col
+        return None
+    return None
+
+
+class _R20UnitCompareVisitor(ast.NodeVisitor):
+    """R20 报告模式：检测已知单位列参与大小比较且未显式单位换算的节点。
+
+    命中收集 (lineno, col, detail) 到 self.hits。判定规则（窄规则，控制误报）：
+    - 仅大小比较（Lt/LtE/Gt/GtE）；==/!= 不构成量纲错误
+    - 豁免：任一其他比较侧为 换算调用 / 已换算变量 / 字面量 0（健全性检查）/ 计算表达式
+    - HIGH 列：对侧为 非 0 裸数值字面量 或 未换算变量（DATA-01/02 形态）→ 报警
+    - LOW 列：仅对侧为 非 0 裸数值字面量 → 报警（变量对侧无法区分已换算/裸值，不报）
+    """
+
+    def __init__(self, converted_names: set[str]) -> None:
+        super().__init__()
+        self._converted = converted_names
+        self.hits: list[tuple[int, str, str]] = []
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        if not any(isinstance(o, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for o in node.ops):
+            return
+        for side in (node.left, *node.comparators):
+            col = _extract_unit_column(side)
+            if col is None:
+                continue
+            reason = self._evaluate(side, node, col)
+            if reason is not None:
+                self.hits.append((node.lineno, col, reason))
+
+    def _evaluate(self, side: ast.AST, node: ast.Compare, col: str) -> str | None:
+        others = node.comparators if side is node.left else [node.left]
+        if any(self._is_exempt(other) for other in others):
+            return None
+        for other in others:
+            if isinstance(other, ast.Constant) and isinstance(other.value, (int, float)) and other.value != 0:
+                return f"列 {col!r} 与裸数值 {other.value!r} 比较（未显式单位换算）"
+        if col in _KNOWN_UNIT_COLUMNS_HIGH and any(isinstance(other, ast.Name) for other in others):
+            return f"列 {col!r} 承载变量与未换算变量比较（DATA-01/02 形态，未显式单位换算）"
+        return None
+
+    def _is_exempt(self, other: ast.AST) -> bool:
+        """判断对侧是否豁免：换算调用 / 计算表达式 / 字面量 0 / 已换算变量。"""
+        if _is_conversion_call(other):
+            return True
+        if isinstance(other, ast.Call):
+            return True  # 计算表达式（列运算等），单位不可断言
+        if isinstance(other, ast.Constant) and isinstance(other.value, (int, float)) and other.value == 0:
+            return True  # 字面量 0 健全性检查（如 total_mv > 0）
+        return isinstance(other, ast.Name) and other.id in self._converted  # 已换算阈值变量
+
+
+def _check_R20_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查 AST 中已知单位列裸数值大小比较（R20 报告模式）。
+
+    返回 warning 文本列表（R20 报告模式不阻断 exit code）。
+    """
+    warnings: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        # 契约测试用临时文件构造 AST（不在 ROOT 下），fallback 到绝对路径显示
+        rel = source_path
+    visitor = _R20UnitCompareVisitor(_collect_converted_names(tree))
+    visitor.visit(tree)
+    for lineno, _col, detail in visitor.hits:
+        warnings.append(f"R20 单位未核对: {rel}:{lineno} {detail}")
+    return warnings
+
+
+def check_R20() -> None:
+    """R20（报告模式，warning 不阻断）：扫描 strategies/ 下已知单位列裸数值比较。
+
+    第一阶段为报告模式：warning 输出到 stderr、不阻断 exit code，全库实测误报率，
+    达标后评估升级为硬拦截（第二阶段）。语义与扫描范围见 docs/governance/redlines.yml
+    R20（NEW_CODE，仅人工评审；统一入口 threshold_in_data_unit()）。
+    """
+    warnings: list[str] = []
+    target_dir = ROOT / "strategies"
+    if not target_dir.exists():
+        return
+    for p in _iter_py_files(target_dir):
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        warnings.extend(_check_R20_in_tree(tree, p))
+    if warnings:
+        print(
+            f"[WARN] R20 单位未核对 {len(warnings)} 处（报告模式，请人工复核；误报率达标后升级为拦截）：",
+            file=sys.stderr,
+        )
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -1356,6 +1522,8 @@ def main() -> int:
     ]
     # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr
     check_R4_fstring_sql()
+    # R20 单位核对为 WARNING（报告模式，不阻断），输出到 stderr
+    check_R20()
     all_errors: list[str] = []
     for _, errs in checks:
         all_errors.extend(errs)
