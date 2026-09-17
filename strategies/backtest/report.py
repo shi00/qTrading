@@ -21,10 +21,14 @@ class BacktestReport:
             f"{I18n.get('report_initial_capital')}: {config.initial_capital:,.2f}",
             "",
             f"{I18n.get('report_total_return')}: {m.get('total_return', 0):.2%}",
-            f"{I18n.get('report_annualized_return')}: {m.get('annualized_return', 0):.2%}",
+            f"{I18n.get('report_annualized_return')}: {m.get('annualized_return', 0):.2%}"
+            if m.get("annualized_return") is not None
+            else f"{I18n.get('report_annualized_return')}: N/A",
             f"{I18n.get('report_sharpe_ratio')}: {m.get('sharpe_ratio', 0):.4f}",
             f"{I18n.get('report_max_drawdown')}: {m.get('max_drawdown', 0):.2%}",
-            f"{I18n.get('report_calmar_ratio')}: {m.get('calmar_ratio', 0):.4f}",
+            f"{I18n.get('report_calmar_ratio')}: {m.get('calmar_ratio', 0):.4f}"
+            if m.get("calmar_ratio") is not None
+            else f"{I18n.get('report_calmar_ratio')}: N/A",
             "",
             f"{I18n.get('report_ic_mean')}: {m.get('ic_mean', 0):.4f}"
             if m.get("ic_mean") is not None

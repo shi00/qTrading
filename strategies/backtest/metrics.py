@@ -35,6 +35,12 @@ class ExitReason(enum.StrEnum):
 class BacktestMetrics:
     """回测指标计算器"""
 
+    # D1-M4: 年化外推的最短区间阈值（约一个季度）。低于此不做年化外推——
+    # 20 个交易日的回测 years≈0.079，指数高达 12.6，区间收益 ±8% 会被外推成
+    # +160% / −65%，高次方放大不可信。其余统计量（波动率/胜率/盈亏比等）均有
+    # 样本量守卫，年化此前唯独缺失，此为对齐内部标准。
+    _MIN_ANNUALIZE_DAYS = 60
+
     @staticmethod
     def calc_nav_curve(
         positions: pl.DataFrame,
@@ -68,9 +74,14 @@ class BacktestMetrics:
         total_return: float,
         num_days: int,
         trading_days_per_year: int = 252,
-    ) -> float:
-        if num_days <= 0:
-            return 0.0
+    ) -> float | None:
+        # D1-M4: 短区间不年化（返回 None，经 report/UI 渲染 N/A），避免高次方外推失真。
+        # 与 calc_win_rate / calc_profit_factor 的 None 语义对齐（R21：无定义用 None 哨兵，
+        # 不伪装为合法值）。
+        if num_days < BacktestMetrics._MIN_ANNUALIZE_DAYS:
+            return None
+        if 1 + total_return <= 0:
+            return -1.0  # 本金归零
         years = num_days / trading_days_per_year
         return float((1 + total_return) ** (1 / years) - 1)
 
@@ -141,9 +152,13 @@ class BacktestMetrics:
 
     @staticmethod
     def calc_calmar_ratio(
-        annualized_return: float,
+        annualized_return: float | None,
         max_drawdown: float,
-    ) -> float:
+    ) -> float | None:
+        # D1-M4: 年化为 None（区间过短不年化）时 Calmar 亦无定义，返回 None 经
+        # report/UI 渲染 N/A，避免用 0.0 伪装真实比值。
+        if annualized_return is None:
+            return None
         if max_drawdown <= 0:
             return 0.0
         return annualized_return / max_drawdown

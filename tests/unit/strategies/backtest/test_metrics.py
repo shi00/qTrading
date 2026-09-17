@@ -36,7 +36,19 @@ class TestBacktestMetrics:
         assert ann_return == pytest.approx(0.10, rel=0.01)
 
     def test_calc_annualized_return_zero_days(self) -> None:
-        assert BacktestMetrics.calc_annualized_return(0.10, 0) == 0.0
+        # D1-M4: 区间不足最短年化阈值，年化返回 None（不伪装为 0.0）
+        assert BacktestMetrics.calc_annualized_return(0.10, 0) is None
+
+    def test_calc_annualized_return_short_span_none(self) -> None:
+        # D1-M4: 短区间（< 60 交易日）不做年化外推，返回 None
+        assert BacktestMetrics.calc_annualized_return(0.08, 20) is None
+        assert BacktestMetrics.calc_annualized_return(-0.08, 20) is None
+        # 恰好在阈值上（60 天）仍正常年化
+        assert BacktestMetrics.calc_annualized_return(0.10, 60) is not None
+
+    def test_calc_annualized_return_zero_capital(self) -> None:
+        # D1-M4: 本金归零（total_return == -1）返回 -1.0，而非高次方 NaN
+        assert BacktestMetrics.calc_annualized_return(-1.0, 252) == -1.0
 
     def test_calc_volatility(self, sample_daily_returns: pl.Series) -> None:
         vol = BacktestMetrics.calc_volatility(sample_daily_returns)
@@ -75,6 +87,10 @@ class TestBacktestMetrics:
 
     def test_calc_calmar_ratio_zero_drawdown(self) -> None:
         assert BacktestMetrics.calc_calmar_ratio(0.15, 0.0) == 0.0
+
+    def test_calc_calmar_ratio_none_annualized(self) -> None:
+        # D1-M4: 年化为 None（区间过短）时 Calmar 亦无定义，返回 None
+        assert BacktestMetrics.calc_calmar_ratio(None, 0.10) is None
 
     def test_calc_win_rate(self) -> None:
         trades = pl.DataFrame(

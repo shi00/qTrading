@@ -203,8 +203,15 @@ def _build_metrics_section(
                 ft.Container(
                     content=_metric_card(
                         I18n.get("backtest_metric_annual_return"),
-                        f"{metrics.get('annualized_return', 0) * 100:.2f}%",
-                        _get_color_for_value(metrics.get("annualized_return", 0)),
+                        f"{metrics['annualized_return'] * 100:.2f}%"
+                        if metrics.get("annualized_return") is not None
+                        else "N/A",
+                        _get_color_for_value(metrics["annualized_return"])
+                        if metrics.get("annualized_return") is not None
+                        else AppColors.TEXT_SECONDARY,
+                        tooltip=I18n.get("backtest_metric_annual_return_na_tooltip")
+                        if metrics.get("annualized_return") is None
+                        else None,
                     ),
                     col=_COL_QUARTER,
                 ),
