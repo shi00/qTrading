@@ -257,6 +257,19 @@ class TestBacktestMetrics:
         assert ir == 0.0
         assert te == 0.0
 
+    def test_calc_information_ratio_drops_null_benchmark_days(self) -> None:
+        # D1-M1: 基准缺失（null）不应污染信息比率；结果应与"调用前剔除 null 行"等价。
+        ir, te = BacktestMetrics.calc_information_ratio(
+            pl.Series([0.01, 0.02, 0.03, 0.04]),
+            pl.Series([0.008, None, 0.006, 0.01]),
+        )
+        ir_expected, te_expected = BacktestMetrics.calc_information_ratio(
+            pl.Series([0.01, 0.03, 0.04]),
+            pl.Series([0.008, 0.006, 0.01]),
+        )
+        assert ir == pytest.approx(ir_expected)
+        assert te == pytest.approx(te_expected)
+
     def test_calc_all_metrics(
         self,
         sample_nav_curve: pl.Series,

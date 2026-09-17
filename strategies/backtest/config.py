@@ -25,6 +25,8 @@ class DataWarning:
         "limit_enrich_failed",
         "suspend_data_absent",
         "limit_data_absent",
+        "benchmark_data_absent",
+        "benchmark_data_partial",
     ]
     start_date: str
     end_date: str

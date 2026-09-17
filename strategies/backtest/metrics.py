@@ -244,10 +244,14 @@ class BacktestMetrics:
         benchmark_returns: pl.Series,
         trading_days_per_year: int = 252,
     ) -> tuple[float, float]:
-        if len(daily_returns) < 2 or len(benchmark_returns) < 2:
+        # D1-M1: 两序列按共同有效样本对齐后相减。缺口（基准缺失日 / 净值爆仓日）
+        #   不参与超额计算，避免 null 传播污染跟踪误差与信息比率，也防止"基准缺失被
+        #   伪装成 0"系统性拉低超额。对齐后不足 2 个样本则视为无超额（沿用旧语义）。
+        aligned = pl.DataFrame({"daily_returns": daily_returns, "benchmark_returns": benchmark_returns}).drop_nulls()
+        if len(aligned) < 2:
             return 0.0, 0.0
 
-        excess_returns = daily_returns - benchmark_returns
+        excess_returns = aligned["daily_returns"] - aligned["benchmark_returns"]
 
         tracking_error = excess_returns.std()
         if tracking_error is None:

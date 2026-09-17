@@ -133,7 +133,7 @@ class VectorBacktestEngine:
 
         ic_series, ic_dates = self._calc_ic_series(signals, quotes_df, trade_dates)
 
-        benchmark_returns = self._calc_benchmark_returns(benchmark_df, trade_dates)
+        benchmark_returns, benchmark_warning = self._calc_benchmark_returns(benchmark_df, trade_dates)
 
         metrics = BacktestMetrics.calc_all_metrics(
             nav_curve,
@@ -157,6 +157,10 @@ class VectorBacktestEngine:
         duration_ms = int((time.perf_counter() - start_time) * 1000)
 
         all_warnings = [str(w) for w in quote_warnings] + list(sim_warnings)
+        # D1-M1: 基准缺失/部分缺失告警接入 all_warnings，自动进入
+        # backtest_view_model 的 `unreliable` 判定，让相对指标降级在 UI 可见。
+        if benchmark_warning is not None:
+            all_warnings.append(str(benchmark_warning))
 
         # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
         # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。
@@ -757,7 +761,7 @@ class VectorBacktestEngine:
         self,
         benchmark_df: pl.DataFrame,
         trade_dates: list[date],
-    ) -> pl.Series:
+    ) -> tuple[pl.Series, DataWarning | None]:
         """
         计算 Benchmark 日收益序列。
 
@@ -765,23 +769,47 @@ class VectorBacktestEngine:
         需要除以 100 转换为小数形式（如 0.015）。
 
         这与 DailyQuotes.pct_chg 字段一致，都是百分比单位。
+
+        D1-M1：基准缺失的交易日保留 null（禁止用 0.0 伪装成"基准零涨跌"），
+        否则相对指标（信息比率/跟踪误差/月度超额）会把策略自身收益误判为超额收益。
+        缺失情况通过返回的 DataWarning 上报，由调用方接入 all_warnings，
+        最终驱动 backtest_view_model 的 `unreliable` 判定。
         """
         if benchmark_df.is_empty():
-            return pl.Series([0.0] * len(trade_dates))
+            return (
+                pl.Series([None] * len(trade_dates), dtype=pl.Float64),
+                DataWarning(
+                    warning_type="benchmark_data_absent",
+                    start_date=trade_dates[0].strftime("%Y%m%d"),
+                    end_date=trade_dates[-1].strftime("%Y%m%d"),
+                    affected_stock_count=0,
+                    error_message=f"基准 {self.config.benchmark_code} 在该区间无数据，超额收益类指标不可用。",
+                ),
+            )
 
         # 标准化 benchmark_df 的 trade_date 列为 date 类型
         bm = benchmark_df
         if bm["trade_date"].dtype == pl.Utf8:
-            bm = bm.with_columns(pl.col("trade_date").str.replace("-", "").str.to_date("%Y%m%d"))
+            # str.replace 只替换首个匹配（"2024-01-05"→"202401-05"），必须用 replace_all
+            bm = bm.with_columns(pl.col("trade_date").str.replace_all("-", "").str.to_date("%Y%m%d"))
 
-        # 构建 trade_dates DataFrame 并 join
+        # 构建 trade_dates DataFrame 并 join；缺失日产生 null，不填充
         trade_dates_df = pl.DataFrame({"trade_date": trade_dates})
         joined = trade_dates_df.join(bm, on="trade_date", how="left")
+        returns = joined["pct_chg"] / 100
 
-        # 缺失值填充 0.0，除以 100 转换为小数
-        returns = joined["pct_chg"].fill_null(0.0) / 100
+        missing = int(joined["pct_chg"].null_count())
+        warning = None
+        if missing:
+            warning = DataWarning(
+                warning_type="benchmark_data_partial",
+                start_date=trade_dates[0].strftime("%Y%m%d"),
+                end_date=trade_dates[-1].strftime("%Y%m%d"),
+                affected_stock_count=missing,
+                error_message=f"基准在 {missing} 个交易日缺失，相对指标按有效交易日子集计算。",
+            )
 
-        return returns
+        return returns, warning
 
     def _calc_period_stats(
         self,

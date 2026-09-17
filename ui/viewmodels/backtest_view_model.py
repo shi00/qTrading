@@ -140,7 +140,7 @@ def _to_date_strings(dates: Sequence[date | str] | None) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _build_benchmark_curve(nav0: float, returns: Sequence[float]) -> tuple[float, ...]:
+def _build_benchmark_curve(nav0: float, returns: Sequence[float | None]) -> tuple[float, ...]:
     """递推构造基准相对净值曲线 (基准对比系列, 与净值曲线同起点对齐)。
 
     bench[0] = nav0 (与策略净值首点显式对齐锚点);
@@ -148,12 +148,17 @@ def _build_benchmark_curve(nav0: float, returns: Sequence[float]) -> tuple[float
 
     ``returns`` 为基准日收益序列, 与净值曲线等长 (索引相互对齐交易日);
     空输入返回空元组。返回长度恒等于 ``len(returns)``。
+    D1-M1: 基准缺失日收益为 None，无当日数据，曲线沿用上一净值（平坦段），
+    避免 ``1.0 + None`` 崩溃；缺失日被基准告警 (benchmark_data_partial/absent) 提示。
     """
     if not returns:
         return ()
     curve = [nav0]
     for r in returns[1:]:
-        curve.append(curve[-1] * (1.0 + r))
+        if r is None:
+            curve.append(curve[-1])
+        else:
+            curve.append(curve[-1] * (1.0 + r))
     return tuple(curve)
 
 
