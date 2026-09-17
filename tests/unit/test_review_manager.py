@@ -13,8 +13,34 @@ from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.review_manager import ReviewManager
+from utils.time_utils import to_date
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
+
+
+@pytest.fixture(autouse=True)
+def _tcs_stub_trade_dates(monkeypatch):
+    """unit 环境无真实 DB：把 T+N 锚定的唯一日历来源（TradeCalendarService.get_trade_dates）
+    替换为「从 quote_dao mock 返回的 bulk_quotes 提取的并集日（升序 date）」。
+
+    修复前各用例靠 quotes mock 的 trade_date 并集间接构造日历，本桩产出与之逐位一致，
+    属于 D3-M1 回归净迁移（主体断言不变）。新用例需精确日历时应自行显式 patch
+    get_trade_dates 覆盖本默认值。
+    """
+    from data.domain_services import trade_calendar_service as _tcs
+
+    async def _fake_get_trade_dates(self, start, end):
+        cache = getattr(self, "_cache", None)
+        dao = getattr(cache, "quote_dao", None) if cache is not None else None
+        getter = getattr(dao, "get_daily_quotes", None)
+        if getter is None:
+            return []
+        quotes = getter.return_value
+        if quotes is None or getattr(quotes, "empty", True):
+            return []
+        return sorted({to_date(d) for d in quotes["trade_date"]})
+
+    monkeypatch.setattr(_tcs.TradeCalendarService, "get_trade_dates", _fake_get_trade_dates)
 
 
 class TestReviewManagerInit:
@@ -2623,3 +2649,205 @@ class TestQfqReturnPct:
 
         ser = pd.Series({"close": 10.5, "adj_factor": 1.0})
         assert _qfq_return_pct(ser, basis_close=10.0, basis_adj=0.0, has_adj_factor=True) is None
+
+
+class TestReviewManagerMarketCalendar:
+    """D3-M1: T+N 锚定统一改为全市场交易日（TradeCalendarService）后的关键行为回归。
+
+    旧实现用候选股行情并集冒充日历，候选股少/集中停牌时整体丢日，导致 T+1/T+5
+    静默错位并污染 WIN/LOSS 标签与 AI few-shot 样本；以下用例各自显式注入市场日历
+    stub（覆盖 autouse 的并集默认值），验证日历锚定语义。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_suspended_missing_t1_not_misfilled(self, mock_cm, mock_tc):
+        """停牌缺行不误填：市场日历含 t0+1，但两只候选股在 t0+1 均无行情行 →
+        不得把 t0+2 的价格填进 t1_pct（否则会静默错位并错误打标签）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1, 2],
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240610", "20240610"],
+                    "ai_score": [80, 70],
+                    "ai_reason": ["t", "t"],
+                }
+            )
+        )
+        # 两只候选股都只在 t0(6/10) 与 t0+2(6/12) 有行情，日历中的 t0+1(6/11) 全部缺行 → 停牌
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+                "trade_date": ["20240610", "20240612", "20240610", "20240612"],
+                "close": [10.0, 11.0, 20.0, 21.0],
+                "pct_chg": [1.0, 5.0, 1.0, 5.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._batch_update_results = AsyncMock()
+        # 全市场日历含 6/10, 6/11, 6/12；个股行情缺 6/11 → T+1 锚定 6/11 但无行情行
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 11),
+            datetime.date(2024, 6, 12),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            await rm.run_review()
+        # 无任何合法 T+1 → 不得写入（不把 6/12 价格误填为 t1_pct）
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t5_anchored_to_market_calendar(self, mock_cm, mock_tc):
+        """单股 T+5 锚点正确：以市场日历第 5 个交易日定价，而非个股行位置 t0+5。
+        个股在日历的 T+1/T+2（6/11, 6/12）缺行，T+5 仍应锚定日历 6/17 的价格（9.8）；"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "trade_date": ["20240610", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.5, 10.8, 9.8],
+                "adj_factor": [1.0] * 4,
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._batch_backfill_t5 = AsyncMock()
+        # 全市场日历为 6 个交易日；t0=6/10 → T+5 = 日历第 5 个交易日 6/17
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 11),
+            datetime.date(2024, 6, 12),
+            datetime.date(2024, 6, 13),
+            datetime.date(2024, 6, 14),
+            datetime.date(2024, 6, 17),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            count = await rm.backfill_horizon_returns(horizon=5)
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 载荷在紧邻 call_args 断言中逐字段验证
+        updates = rm._batch_backfill_t5.call_args.args[0]
+        assert len(updates) == 1
+        assert updates[0]["record_id"] == 1
+        assert updates[0]["t5_price"] == 9.8
+        assert updates[0]["t5_pct"] == round((9.8 / 10.0 - 1.0) * 100.0, 4)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_three_pathways_share_market_calendar(self, mock_cm, mock_tc):
+        """三通路日历口径一致：run_review / backfill_t1_returns / backfill_horizon_returns
+        均经同一 `_market_trade_dates`（底层 TradeCalendarService）解析 T+N，同 t0 解出同一日历。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "trade_date": ["20240610", "20240611"],
+                "close": [10.0, 10.5],
+                "adj_factor": [1.0, 1.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+
+        # 候选记录：三通路共用同一 t0
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["t"],
+                }
+            )
+        )
+        mock_cache.screener_dao.get_unfilled_t1_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        rm._batch_update_results = AsyncMock()
+        rm._batch_backfill_t5 = AsyncMock()
+
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 11),
+            datetime.date(2024, 6, 12),
+            datetime.date(2024, 6, 13),
+            datetime.date(2024, 6, 17),
+        ]
+        seen: list[list[datetime.date]] = []
+
+        async def _rec(start, end):
+            seen.append(cal)
+            return cal
+
+        # 打桩唯一日历来源，记录三次解析结果
+        rm._market_trade_dates = AsyncMock(side_effect=_rec)
+        await rm.run_review()
+        await rm.backfill_t1_returns()
+        await rm.backfill_horizon_returns()
+
+        assert rm._market_trade_dates.await_count == 3
+        assert len(seen) == 3
+        # 三通路解析出的市场日历口径一致
+        assert all(r == cal for r in seen)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_empty_market_calendar_logs_warning(self, mock_cm, mock_tc, caplog):
+        """空市场日历不静默：日历数据源退化返回 [] 时记警告日志且不批量写库，
+        避免在无有效 T+N 锚定下误标历史记录（R3 反静默）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["t"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240610"],
+                "close": [10.0],
+                "pct_chg": [1.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        rm._batch_update_results = AsyncMock()
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=[])
+            with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+                await rm.run_review()
+        # 无可锚定 T+N → 不批量写库；且发出可观测警告而非静默跳过
+        rm._batch_update_results.assert_not_called()
+        assert any("Market trade calendar empty" in r.message for r in caplog.records)
