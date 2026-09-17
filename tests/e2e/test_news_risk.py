@@ -34,10 +34,14 @@ async def test_news_risk_success_flow(news_risk_page_success):
     await nrp.generate()
     await nrp.wait_ready(timeout_ms=TIMEOUTS.BACKTEST)
 
-    # 至此 000001.SZ 已成功落库 brief；后续打开详情走缓存命中立即 ready。
-    # XP1：进入详情对话框的新闻风险区（ready 阶段 RISK_LEVEL 渲染 = 已进入风险解读）。
+    # 至此 000001.SZ 已成功落库 brief；XP1：再次进入详情后点「生成风险解读」，
+    # analyze 内缓存命中快速返回 ready（VM 契约：打开详情恒为 evidence_ready，不
+    # 自动触发 AI；需点 generate 才进入 analyze，其中缓存命中会秒回 ready，见
+    # news_insight_view_model.generate / news_insight_service.analyze）→ RISK_LEVEL 渲染。
     await nrp.close_detail()
     await nrp.open_detail()
+    await nrp.wait_evidence_ready()
+    await nrp.generate()
     await nrp.wait_ready()
 
     # XP4：合法结果展示风险等级 / 事件卡 / 置信度覆盖 / 总结。
