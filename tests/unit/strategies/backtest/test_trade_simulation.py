@@ -919,6 +919,98 @@ class TestDelistedLiquidation:
         assert "000005.SZ" in simulator.positions
         assert simulator.cash == initial_cash
 
+    def test_c1_delisted_liquidated_on_non_rebalance_day(self, config: BacktestConfig) -> None:
+        """D1-C1: 退市清算不依赖再平衡节奏——非再平衡日（rebalance_freq=signal 的空信号日）也清算。
+
+        修复前 process_day 只在 is_rebalance 时触发调仓，退市持仓会按最后已知价长期计入 NAV；
+        修复后每个交易日先 _liquidate_delisted_on 结清已退市无报价持仓。
+        """
+        delist_date = date(2024, 1, 15)
+        stock_meta = {"000001.SZ": {"delist_date": delist_date}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        last_known_price = 10.5
+        volume = 1000
+        simulator.positions["000001.SZ"] = {
+            "volume": volume,
+            "cost_basis": 10_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = last_known_price
+
+        initial_cash = simulator.cash
+        # 退市当日无报价（用其他标的占位），空信号且非再平衡：_liquidate_delisted_on 当日即清算
+        no_quote_day = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator.process_day(delist_date, pl.DataFrame(), no_quote_day, is_rebalance=False)
+
+        # 持仓当日即被清算移除
+        assert "000001.SZ" not in simulator.positions
+        trades = simulator.get_results()[0]
+        delist_trades = trades.filter(pl.col("exit_reason") == "DELISTED")
+        assert len(delist_trades) == 1
+        assert delist_trades["ts_code"][0] == "000001.SZ"
+
+        # 清算价 = 最后已知价 × 回收率，按扣费净额入账
+        recover_price = last_known_price * config.delist_recovery_rate
+        gross_amount = recover_price * volume * (1 - 5e-4)
+        expected_net = gross_amount - 5 - gross_amount * 5e-4 - gross_amount * 1e-5
+        assert simulator.cash == pytest.approx(initial_cash + expected_net)
+        # 分项统计
+        assert simulator.delist_liquidation_count == 1
+        assert simulator.delist_loss_amount == pytest.approx(last_known_price * volume - expected_net)
+
+        # T+1..T+n 后续交易日 positions 均不含该标的，且不重复清算
+        for d in (date(2024, 1, 16), date(2024, 1, 17), date(2024, 1, 18)):
+            simulator.process_day(d, pl.DataFrame(), no_quote_day, is_rebalance=False)
+        assert simulator.delist_liquidation_count == 1
+        for row in simulator.get_results()[1].iter_rows(named=True):
+            assert "000001.SZ" not in row["positions"]
+
+    def test_c1_delisted_with_quote_during_processing_not_forced(self, config: BacktestConfig) -> None:
+        """D1-C1 对照：退市整理期仍有报价时不强制清算，持仓走正常路径保留。"""
+        delist_date = date(2024, 1, 15)
+        stock_meta = {"000002.SZ": {"delist_date": delist_date}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        simulator.positions["000002.SZ"] = {
+            "volume": 500,
+            "cost_basis": 5_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000002.SZ"] = 10.5
+
+        # 退市整理期该标的仍有报价（is_tradable=True）：_liquidate_delisted_on 跳过，持仓保留
+        trading_day = pl.DataFrame(
+            {
+                "ts_code": ["000002.SZ"],
+                "raw_open": [10.0],
+                "raw_close": [10.2],
+                "qfq_open": [10.0],
+                "qfq_close": [10.5],
+                "is_tradable": [True],
+            }
+        )
+        simulator.process_day(delist_date, pl.DataFrame(), trading_day, is_rebalance=False)
+
+        assert "000002.SZ" in simulator.positions
+        assert simulator.delist_liquidation_count == 0
+        # 未触发 DELISTED 强制清算交易（非再平衡日无任何成交）
+        trades = simulator.get_results()[0]
+        assert trades.is_empty()
+
 
 class TestSuspendedMarketValueEstimation:
     """BT-002: 临时停牌标的市值估算测试"""
@@ -996,6 +1088,48 @@ class TestSuspendedMarketValueEstimation:
         # 断言：total_value 包含估算市值
         expected_total = initial_cash + volume * last_known_price
         assert last_day["total_value"] == expected_total
+
+    def test_c1_long_suspension_guard_warns_after_threshold(self, config: BacktestConfig) -> None:
+        """D1-C1: 长停（临时停牌）可见性护栏——连续 estimated 估值超阈值追加 warning。"""
+        stock_meta = {"000001.SZ": {"delist_date": None}}  # 未退市，属长期停牌
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            stock_meta=stock_meta,
+        )
+        simulator.positions["000001.SZ"] = {
+            "volume": 800,
+            "cost_basis": 8_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = 12.0
+        # 预置 29 天连续估值，模拟已按最后已知价估值的停牌天数（阈值 30 边界前）
+        simulator._stale_estimate_days["000001.SZ"] = 29
+        assert not any("suspension" in w for w in simulator.warnings)
+
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        # 第 30 个交易日 → 触发告警
+        simulator.process_day(date(2024, 1, 30), pl.DataFrame(), day_quotes, is_rebalance=False)
+        assert simulator._stale_estimate_days["000001.SZ"] == 30
+        assert any("suspension" in w for w in simulator.warnings)
+        # 持仓保留（长停不清算）
+        assert "000001.SZ" in simulator.positions
+
+        # 再次调用不复发重复告警（每标的仅一次）
+        simulator.process_day(date(2024, 1, 31), pl.DataFrame(), day_quotes, is_rebalance=False)
+        suspension_count = sum(1 for w in simulator.warnings if "suspension" in w)
+        assert suspension_count == 1
 
     def test_suspended_position_does_not_record_sell_trade(self, config: BacktestConfig) -> None:
         """临时停牌标的不会记录 sell 交易"""
