@@ -41,16 +41,14 @@
 
 | 轮次 | 发现 ID | 状态 | 一句话摘要 | 正本链接 |
 |------|---------|------|-----------|---------|
-| review03 | C1 | 未修复 | 读路径分块并发部分块失败时静默返回不完整数据，调用方无法区分「只有这么多」与「缺一块」 | `reviews/03-数据层与持久化.md`（本地） |
-| review03 | C6 | 未修复 | Data Explorer 执行任意用户 SQL 缺 `statement_timeout`，重查询（如 `SELECT pg_sleep(3600)`）可挂住连接 | `reviews/03-数据层与持久化.md`（本地） |
-| review03 | C12 | 未修复 | `write_db` 门面硬编码 `suppress_errors=True` 吞没写入失败，调用方无感 | `reviews/03-数据层与持久化.md`（本地） |
-| review03 | C14 | 未修复 | 交易日历获取失败时回退本地日历日，存在时区/非交易日偏移的静默数据正确性风险 | `reviews/03-数据层与持久化.md`（本地） |
-| review03 | C15 | 未修复 | 非严格模式下 processor 缺失即静默放行质量门控，生产应强制校验或提升日志级别 | `reviews/03-数据层与持久化.md`（本地） |
+| review03 | C4 | 部分 | `_read_db`/`_read_db_select` 已提供 `max_rows` 安全阀，但多数全表扫描调用点未强制设置，数据增长后可能一次性载入全量 | `reviews/03-数据层与持久化.md`（本地） |
+| review03 | C7 | 未修复 | `screener_dao` 仍有查询用 f-string 拼列名 / `ORDER BY`（`screening_history`），非注入风险，待迁移 SQLAlchemy Core | `reviews/03-数据层与持久化.md`（本地） |
+| review03 | C9 | 未修复 | 数据字典半数表 `columns` 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策 | `reviews/03-数据层与持久化.md`（本地） |
 | review06 | F9 | 未修复 | 外部数据（Tushare/Akshare）入库前缺 schema 校验，脏数据可静默影响选股决策 | `reviews/06-安全与供应链.md`（本地） |
 | review06 | F12 | 未修复 | prompt 注入防御为正则黑名单，对新闻正文植入指令固有局限，需结构化边界 + 输出侧交叉校验 | `reviews/06-安全与供应链.md`（本地） |
 | review06 | F13 | 未修复 | LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明 | `reviews/06-安全与供应链.md`（本地） |
-| review06 | F10 | 待处理 | 重试机制在外部服务故障时放大请求压力，建议加熔断器 | `reviews/06-安全与供应链.md`（本地） |
-| review06 | F16 | 待处理 | 备份恢复路径仅做存在性检查，建议校验 pg_dump magic header 并展示元信息 | `reviews/06-安全与供应链.md`（本地） |
-| review06 | F18 | 待处理 | sidecar 路径可通过配置指向任意二进制，低优先级防误配置项 | `reviews/06-安全与供应链.md`（本地） |
-| review06 | F19 | 待处理 | 数据库备份文件未加密，建议 UI 提示勿放共享目录 + 可选加密备份 | `reviews/06-安全与供应链.md`（本地） |
+| review06 | F10 | 未修复 | 重试机制在外部服务故障时放大请求压力，建议加熔断器 | `reviews/06-安全与供应链.md`（本地） |
+| review06 | F16 | 未修复 | 备份恢复路径仅做存在性检查，建议校验 pg_dump magic header 并展示元信息 | `reviews/06-安全与供应链.md`（本地） |
+| review06 | F18 | 未修复 | sidecar 路径可通过配置指向任意二进制，低优先级防误配置项 | `reviews/06-安全与供应链.md`（本地） |
+| review06 | F19 | 未修复 | 数据库备份文件未加密，建议 UI 提示勿放共享目录 + 可选加密备份 | `reviews/06-安全与供应链.md`（本地） |
 | 文档体系·AI 可执行性 | （DOC 系列） | 关闭中 | 修复分批落地见各 PR；未关闭项按 DOC-14 在本索引维护，已落地 ID 见 [governance-ids.md](../governance/governance-ids.md)「使用中」 | docs/reviews/README.md / 各 PR |
