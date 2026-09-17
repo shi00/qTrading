@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -28,26 +28,43 @@ logger = logging.getLogger(__name__)
 class _BacktestQualityProxy:
     """回测场景下的 DataProcessor 质量代理。
 
-    仅提供 _quality_tier 属性以满足质量门控 _check_tier 检查，
-    避免在回测路径因缺少 data_processor 而抛 QualityGateError。
+    双职责：
+    1. 覆写质量门控字段 `_quality_tier` / `_scan_missing_dates`，让门控评估
+       "回测区间"而非"实盘最新数据"（D3-M2）。`_scan_missing_dates` 以 frozenset
+       承载，契合 quality_gate._check_tier 的连续窗口契约（D2-9）。
+    2. 其余属性/方法经 `__getattr__` 委托给注入的 data_processor（若有），
+       保证策略访问 `context["data_processor"]` 的数据能力（cache / trade_calendar /
+       get_screening_data / get_latest_trade_date / is_cancelled 等）不被破坏。
 
-    回测使用历史快照数据，质量等级默认 GOLD（最高等级），
-    确保任何质量要求的策略都能通过门控。
-    回测数据质量由数据同步流程保证，不应被质量门控阻断。
+    无 delegate（未注入 data_processor 的纯数据预载场景）时退化为仅含质量字段的
+    纯代理，与历史行为一致。
 
-    # NOTE(lazy): 硬编码 GOLD 绕过数据质量门控，回测结果不反映数据质量问题。
-    # ceiling: 回测需历史任意时点数据，DataProcessor 质量评估面向最新数据设计，
-    #           直接复用会拒绝所有历史回测；含缺失日/异常值的区间不会被拦截。
-    # upgrade: 实现 evaluate_historical_window() 区间质量评估（复用
-    #           DataProcessor._scan_missing_dates，结果并入 DataWarning）后移除本代理。
+    # NOTE(lazy): 非 preload 路径（宽区间跳过 / daily fallback）仍用默认 GOLD，
+    #              区间缺口评估仅在 preload_range 成功路径生效。
+    # ceiling: 未预载时无区间数据可评估，无法计算缺口。
+    # upgrade: 为非 preload 路径补充区间质量评估（evaluate_historical_window）。
     """
 
-    def __init__(self, tier: QualityTier = QualityTier.GOLD):
+    def __init__(
+        self,
+        delegate: DataProcessor | None = None,
+        tier: QualityTier = QualityTier.GOLD,
+        missing_dates: frozenset[str] = frozenset(),
+    ):
+        self._delegate = delegate
         self._quality_tier = int(tier)
-        logger.debug(
-            "[BacktestQualityProxy] Using quality tier %s for backtest context.",
-            tier.name,
-        )
+        self._scan_missing_dates = missing_dates
+        # 对抗检视 A：显式覆写 `_health_cache`，避免 `_check_tier` 在 BRONZE 降级时经
+        # `__getattr__` 转发到实盘 delegate，把"实盘最新数据落后天数(lag_days)"误作回测
+        # 区间归因——回测归因应仅由上方 `_scan_missing_dates` 报告的区间缺失交易日承载。
+        self._health_cache: dict | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        # 仅当普通实例属性不存在时被调用：委托给真实 data_processor，
+        # 保持策略对 context processor 的数据访问能力（非质量字段）。
+        if self._delegate is not None:
+            return getattr(self._delegate, name)
+        raise AttributeError(name)
 
 
 class BacktestDataProvider:
@@ -69,8 +86,10 @@ class BacktestDataProvider:
     ):
         self.cache = cache
         self.data_processor = data_processor
-        # 缓存 proxy，避免每次 build_context 都新建实例
-        self._quality_proxy = _BacktestQualityProxy() if data_processor is None else None
+        # D3-M2: 恒创建回测区间质量代理，不再因注入 data_processor 而置 None。
+        # 有注入时 delegate=真实 processor（策略经 __getattr__ 委托访问其数据能力），
+        # 无注入时退化为纯质量字段代理。preload_range 成功后再按区间缺口覆写真实等级。
+        self._quality_proxy = _BacktestQualityProxy(delegate=data_processor)
         self._preloaded: dict | None = None
         self.preload_max_days = preload_max_days
 
@@ -122,6 +141,22 @@ class BacktestDataProvider:
         self._preloaded = {}
 
         try:
+            # D3-M2 区间质量评估：先取区间"全市场交易日"全集（TradeCalendarService，复用 D3-M1 通路），
+            # 用于检测 screening_data 的缺失交易日。查询失败/退化时 expected 为 None，保持默认 GOLD 代理。
+            from data.domain_services.trade_calendar_service import TradeCalendarService
+
+            expected_dates: set[str] | None = None
+            try:
+                cal_dates = await TradeCalendarService(self.cache, None).get_trade_dates(start_date_obj, end_date_obj)
+                expected_dates = {d.strftime("%Y%m%d") for d in cal_dates}
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "[BacktestDataProvider] Range quality evaluation calendar lookup failed, "
+                    "keep default GOLD quality proxy.",
+                    exc_info=True,
+                )
             # 并行查询所有数据
             results = await asyncio.gather(
                 self.cache.screener_dao.get_screening_data_range(start_str, end_str),
@@ -171,6 +206,24 @@ class BacktestDataProvider:
                     logger.info("[BacktestDataProvider] Preloaded %s: %s rows", key, rows)
                 else:
                     self._preloaded[key] = {}
+
+            # D3-M2 区间缺口评估：expected=全市场交易日全集，actual=screening_data 实际覆盖日期键。
+            # 仅当 screening_data 为按交易日分组 dict（含 trade_date 列）且 expected 可得时计算缺口；
+            # 否则（查询失败 fallback daily / 数据异常）保持默认 GOLD 代理，回测仍可运行。
+            screen_pre = self._preloaded.get("screening_data")
+            if expected_dates is not None and isinstance(screen_pre, dict) and screen_pre:
+                actual = set(screen_pre.keys())
+                missing = frozenset(sorted(expected_dates - actual))
+                self._quality_proxy = _BacktestQualityProxy(
+                    delegate=self.data_processor,
+                    tier=QualityTier.GOLD if not missing else QualityTier.BRONZE,
+                    missing_dates=missing,
+                )
+                logger.info(
+                    "[BacktestDataProvider] Range quality: %s missing trade date(s) in screening_data → tier %s",
+                    len(missing),
+                    QualityTier(self._quality_proxy._quality_tier).name,
+                )
         except asyncio.CancelledError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
@@ -209,10 +262,11 @@ class BacktestDataProvider:
         # 注入 data_processor 以通过质量门控检查
         # PolarsBaseStrategy.filter() 读取 context["data_processor"] 进行 _check_tier，
         # 缺少此键在 STRICT_QUALITY_GATE=true 下会抛 QualityGateError
-        if self.data_processor is not None:
-            context["data_processor"] = self.data_processor
-        else:
-            context["data_processor"] = self._quality_proxy
+        # D3-M2: 质量门控口径 = 回测区间数据质量（_quality_proxy，preload_range 已按区间
+        # 缺口注入真实等级），不复用实盘最新数据等级（data_processor._quality_tier）——
+        # 那会双向错配：实盘落后误杀历史回测、实盘完好漏放区间缺口。代理 __getattr__
+        # 委托持有真实 processor，策略对 context processor 的数据访问能力保持可用。
+        context["data_processor"] = self._quality_proxy
         return context
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
