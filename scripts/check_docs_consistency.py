@@ -60,6 +60,7 @@ import sys
 import tomllib
 import typing
 from dataclasses import dataclass
+from datetime import date
 from io import TextIOWrapper
 from pathlib import Path
 
@@ -1623,8 +1624,41 @@ def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
     return (m.group(1) if m else None, d.group(1) if d else None)
 
 
+def _extract_changelog_top_date() -> date | None:
+    """从 ruleset-changelog.md「变更记录」表首条数据行提取变更日期（DS-05）。
+
+    表头 `| ruleset_version | 变更日期 | 变更摘要 |`，首条数据行如
+    `| 1.6.0 | 2026-09-14 | ... |`，日期为第 2 列（YYYY-MM-DD）。文件缺失、
+    未找到数据行、或日期非法时返回 None（调用方 fail-closed 报错）。
+    顶行判定与 check_ruleset_changelog_version 一致（锚定「变更记录」标题后取首个数据行）。
+    """
+    if not RULESET_CHANGELOG_PATH.exists():
+        return None
+    lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
+    start = 0
+    for _i, line in enumerate(lines):
+        if line.strip() == "## 变更记录":
+            start = _i + 1
+            break
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        if re.fullmatch(r"\|[\s\-:]+\|", stripped):
+            continue  # 表格分隔行（|---|）
+        cols = [c.strip() for c in stripped.strip("|").split("|")]
+        if not cols or cols[0] in {"", "ruleset_version"}:
+            continue  # 表头或空行
+        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]) and len(cols) >= 2:
+            try:
+                return date.fromisoformat(cols[1])
+            except ValueError:
+                return None
+    return None
+
+
 def check_ruleset_metadata_consistency() -> list[str]:
-    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13）。
+    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13/DS-05）。
 
     已由 _check_version_consistency（产品版本对应 pyproject.toml）覆盖「对应版本」，
     本检查补齐 `ruleset_version` 与 `last_reviewed` 两个字段——它们**从未被任何检查读取**
@@ -1632,20 +1666,20 @@ def check_ruleset_metadata_consistency() -> list[str]:
     ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
 
     断言：
-    1. 三份文件均有 ruleset_version，且值相等（AGENTS 无 last_reviewed 字段，不校验该维度）。
-    2. CLAUDE.md 与 CONTRIBUTING.md 均有 last_reviewed，且值为合法日期。
-    3. CONTRIBUTING.md 的 last_reviewed 不早于 CLAUDE.md（人类贡献流程更新自由度不低于宪法）。
+    1. 三份文件均有 ruleset_version，且值相等。
+    2. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口，审核时间与宪法同步）。
+    3. CONTRIBUTING.md / AGENTS.md 的 last_reviewed 均不早于 CLAUDE.md（更新自由度不低于宪法）。
+    4. 三份文件的 last_reviewed 均不早于 ruleset-changelog.md 顶行变更日期（治理变更后须重新审核同步，DS-05）。
     """
-    from datetime import date
-
     errors: list[str] = []
     claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
     contributing_ver, contributing_reviewed = _extract_metadata_versions(CONTRIBUTING_PATH.read_text(encoding="utf-8"))
-    # AGENTS.md 为跨工具入口：仅纳入 ruleset_version 同步（无 last_reviewed）。存在性由
+    # AGENTS.md 为跨工具入口：纳入 ruleset_version 与 last_reviewed 双重同步（DS-05）。存在性由
     # check_agents_md_sync fail-closed 守护，故此处不存在时跳过 ruleset 校验。
     agents_ver: str | None = None
+    agents_reviewed: str | None = None
     if AGENTS_PATH.exists():
-        agents_ver, _ = _extract_metadata_versions(AGENTS_PATH.read_text(encoding="utf-8"))
+        agents_ver, agents_reviewed = _extract_metadata_versions(AGENTS_PATH.read_text(encoding="utf-8"))
 
     if claude_ver is None:
         errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
@@ -1668,19 +1702,43 @@ def check_ruleset_metadata_consistency() -> list[str]:
         errors.append("CLAUDE.md 缺少 last_reviewed 元数据字段")
     if contributing_reviewed is None:
         errors.append("CONTRIBUTING.md 缺少 last_reviewed 元数据字段")
+    if agents_ver is not None and agents_reviewed is None:
+        errors.append("AGENTS.md 缺少 last_reviewed 元数据字段")
 
-    if claude_reviewed is not None and contributing_reviewed is not None:
+    # DS-05：last_reviewed 不得早于 ruleset-changelog 顶行变更日期（治理变更后须重新审核同步）。
+    changelog_date = _extract_changelog_top_date()
+    if changelog_date is None:
+        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
+
+    if claude_reviewed is not None and contributing_reviewed is not None and agents_reviewed is not None:
         try:
             claude_date = date.fromisoformat(claude_reviewed)
             contributing_date = date.fromisoformat(contributing_reviewed)
+            agents_date = date.fromisoformat(agents_reviewed)
         except ValueError:
-            errors.append("CLAUDE.md/CONTRIBUTING.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
+            errors.append("CLAUDE.md/CONTRIBUTING.md/AGENTS.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
         else:
             if contributing_date < claude_date:
                 errors.append(
                     f"CONTRIBUTING.md last_reviewed({contributing_reviewed}) 早于 "
                     f"CLAUDE.md last_reviewed({claude_reviewed})"
                 )
+            if agents_date < claude_date:
+                errors.append(
+                    f"AGENTS.md last_reviewed({agents_reviewed}) 早于 CLAUDE.md last_reviewed({claude_reviewed})"
+                )
+            if changelog_date is not None:
+                for _name, _date in (
+                    ("CLAUDE.md", claude_date),
+                    ("CONTRIBUTING.md", contributing_date),
+                    ("AGENTS.md", agents_date),
+                ):
+                    if _date < changelog_date:
+                        errors.append(
+                            f"{_name} last_reviewed({_date.isoformat()}) 早于 "
+                            f"ruleset-changelog 顶行变更日期({changelog_date.isoformat()}) "
+                            "(治理变更后须重新审核并同步 last_reviewed)"
+                        )
     return errors
 
 

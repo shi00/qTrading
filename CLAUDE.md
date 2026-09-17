@@ -7,7 +7,7 @@
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
 > - ruleset_version: 1.6.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-11
+> - last_reviewed: 2026-09-17
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
