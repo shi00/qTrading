@@ -152,11 +152,12 @@ def _invested_warning(avg_invested_pct: float | None) -> ft.Container | None:
     )
 
 
-def _delist_warning(delist_count: int, delist_loss_amount: float) -> ft.Container | None:
-    """BT-02: 有退市强制清算（count>0）时返回退市影响说明条，否则 None。
+def _delist_warning(delist_count: int, delist_loss_amount: float, delist_recovery_rate: float) -> ft.Container | None:
+    """BT-02 + D1-m3: 有退市强制清算（count>0）时返回退市影响说明条，否则 None。
 
     让用户评估退市假设（delist_recovery_rate 经验估计）对收益的影响权重：
-    显示退市清算笔数与因回收率折扣相对全额变现被扣减的账面金额。
+    显示退市清算笔数、因回收率折扣相对全额变现被扣减的账面金额，以及所采用的回收率假设
+    （修复 D1-m3：此前回收率不落库、UI 不可见，历史结果无法复现该假设）。
     """
     if delist_count <= 0:
         return None
@@ -169,6 +170,7 @@ def _delist_warning(delist_count: int, delist_loss_amount: float) -> ft.Containe
                         "backtest_delist_warning",
                         count=delist_count,
                         amount=f"{delist_loss_amount:,.2f}",
+                        recovery_rate=f"{delist_recovery_rate * 100:.0f}",
                     ),
                     size=AppStyles.FONT_SIZE_CAPTION,
                     color=AppColors.WARNING,
@@ -188,6 +190,7 @@ def _build_metrics_section(
     has_real_score: bool = True,
     delist_liquidation_count: int = 0,
     delist_loss_amount: float = 0.0,
+    delist_recovery_rate: float = 0.3,
 ) -> ft.Column:
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
@@ -308,7 +311,7 @@ def _build_metrics_section(
     )
 
     invested_warning = _invested_warning(float(avg_invested) if avg_invested is not None else None)
-    delist_warning = _delist_warning(delist_liquidation_count, delist_loss_amount)
+    delist_warning = _delist_warning(delist_liquidation_count, delist_loss_amount, delist_recovery_rate)
 
     return ft.Column(
         [
@@ -724,6 +727,7 @@ def _build_content(
     has_real_score: bool,
     delist_liquidation_count: int,
     delist_loss_amount: float,
+    delist_recovery_rate: float,
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -754,6 +758,7 @@ def _build_content(
                 has_real_score=has_real_score,
                 delist_liquidation_count=delist_liquidation_count,
                 delist_loss_amount=delist_loss_amount,
+                delist_recovery_rate=delist_recovery_rate,
             ),
             ft.Divider(color=AppColors.DIVIDER),
             ft.Tabs(
@@ -819,6 +824,7 @@ def BacktestResultPanel(
     has_real_score: bool = True,
     delist_liquidation_count: int = 0,
     delist_loss_amount: float = 0.0,
+    delist_recovery_rate: float = 0.3,
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
@@ -858,6 +864,7 @@ def BacktestResultPanel(
             has_real_score,
             delist_liquidation_count,
             delist_loss_amount,
+            delist_recovery_rate,
             trades_page,
             set_trades_page,
             selected_tab,

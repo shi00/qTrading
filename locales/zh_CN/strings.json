@@ -1983,7 +1983,7 @@
     "backtest_skip_insufficient_cash": "资金不足：{count} 笔",
     "backtest_skip_invalid_price": "价格无效：{count} 笔",
     "backtest_skip_unknown": "其他原因：{count} 笔",
-    "backtest_delist_warning": "本次回测发生 {count} 笔退市强制清算。退市仓位按回收率清算（经验估计值），相对全额变现扣减账面 {amount} 元。此扣减反映退市假设对收益的影响，请结合退市假设评估权重。",
+    "backtest_delist_warning": "本次回测发生 {count} 笔退市强制清算。退市仓位按回收率 {recovery_rate}% 清算（经验估计值），相对全额变现扣减账面 {amount} 元。此扣减反映退市假设对收益的影响，请结合退市假设评估权重。",
     "report_delist_liquidation_count": "退市强制清算笔数",
     "report_delist_loss_amount": "退市假设账面扣减",
     "report_delist_note": "注：退市按回收率 {rate:.2f} 清算（经验估计，可配置 delist_recovery_rate），上述扣减反映退市假设对收益的影响。",

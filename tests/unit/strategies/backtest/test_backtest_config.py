@@ -270,9 +270,25 @@ class TestBacktestResultToPersistDict:
         d = result.to_persist_dict()
         assert d["run_id"] == result.run_id
         assert d["strategy_name"] == result.strategy_name
-        assert d["params_snapshot"] is result.params_snapshot
+        # D1-m3: params_snapshot 为并入 delist_recovery_rate 后的新 dict，不再与结果引用同一对象；
+        # 保留原策略参数内容由 test_to_persist_dict_embeds_recovery_rate 覆盖。
+        assert d["params_snapshot"]["param1"] == result.params_snapshot["param1"]
         assert d["metrics"] is result.metrics
         assert d["nav_curve"] is result.nav_curve
         assert d["trades"] is result.trades
         assert d["period_stats"] is result.period_stats
         assert d["duration_ms"] == result.duration_ms
+
+    def test_to_persist_dict_embeds_recovery_rate_in_params_snapshot(self) -> None:
+        """D1-m3: delist_recovery_rate 并入 params_snapshot 落库（JSONB，免迁移），
+        使历史回测可复现该退市回收率假设；原策略参数不被覆盖。"""
+        result = _make_result(
+            config=BacktestConfig(
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 1, 31),
+                delist_recovery_rate=0.15,
+            )
+        )
+        d = result.to_persist_dict()
+        assert d["params_snapshot"]["delist_recovery_rate"] == 0.15
+        assert d["params_snapshot"]["param1"] == "value1"
