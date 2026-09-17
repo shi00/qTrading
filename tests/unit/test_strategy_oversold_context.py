@@ -9,8 +9,11 @@ Tests for OversoldStrategy context builders.
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import datetime
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pandas as pd
 
@@ -1157,3 +1160,76 @@ class TestGetParameters(unittest.TestCase):
         self.assertIn("rsi_period", names)
         self.assertIn("rsi_threshold", names)
         self.assertIn("vol_ratio_threshold", names)
+
+
+class TestPrefetchMarketContextDateComparison(unittest.TestCase):
+    """D3-M5: 大盘上下文预取的日期比较口径。
+
+    prefetched.trade_date 经 _normalize_trade_date_for_cache 恒为 YYYYMMDD 字符串，
+    而 get_index_daily_range 返回的 trade_date 为 datetime.date 列。旧实现用
+    strftime 与 date 列比较恒假，依赖 tail(1) 取区间末行兜底——区间端点变化或
+    当天缺行时会写入错误日期的大盘行情。本组测试锁定统一为 date 对象比较后语义。
+    """
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    @staticmethod
+    def _dp(idx_daily_df: pd.DataFrame):
+        return SimpleNamespace(
+            cache=SimpleNamespace(
+                get_index_daily_range=AsyncMock(return_value=idx_daily_df),
+            ),
+            trade_calendar=SimpleNamespace(
+                get_start_date_by_trade_days=AsyncMock(return_value=datetime.date(2024, 3, 1)),
+            ),
+        )
+
+    async def _run_prefetch(self, idx_daily_df: pd.DataFrame) -> PreFetchedContext:
+        dp = self._dp(idx_daily_df)
+        context = {"data_processor": dp}
+        prefetched = PreFetchedContext(trade_date="20240321")
+        return await self.strategy._prefetch_strategy_specific(pd.DataFrame(), context, prefetched)
+
+    def test_market_context_uses_same_day(self):
+        """当天 (2024-03-21) 有行情行，且其后还有更晚日期时，取当天而非区间末行。"""
+        idx_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SH", "trade_date": datetime.date(2024, 3, 20), "pct_chg": -0.5, "close": 3000.0},
+                {"ts_code": "000001.SH", "trade_date": datetime.date(2024, 3, 21), "pct_chg": 1.5, "close": 3045.0},
+                # 区间末行是 03-22（旧 tail(1) 会错误取到它）
+                {"ts_code": "000001.SH", "trade_date": datetime.date(2024, 3, 22), "pct_chg": 9.9, "close": 3200.0},
+            ]
+        )
+        prefetched = asyncio.run(self._run_prefetch(idx_df))
+        self.assertIn("000001.SH", prefetched.market_context, "当天有行情行时应注入大盘上下文")
+        # 取当天(03-21)行情而非区间末行(03-22, pct_chg=9.9)，揭穿旧 tail(1) 兜底
+        self.assertEqual(prefetched.market_context["000001.SH"]["pct_chg"], 1.5)
+
+    def test_market_context_missing_day_degrades_without_tail(self):
+        """当天 (2024-03-21) 无行情行 → 该指数被跳过，不回落 tail(1) 的其它日期。"""
+        idx_df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SH", "trade_date": datetime.date(2024, 3, 20), "pct_chg": -0.5, "close": 3000.0},
+                {"ts_code": "399001.SZ", "trade_date": datetime.date(2024, 3, 21), "pct_chg": 0.8, "close": 9500.0},
+            ]
+        )
+        prefetched = asyncio.run(self._run_prefetch(idx_df))
+        self.assertNotIn("000001.SH", prefetched.market_context, "当天缺行时不得用别的日期兜底")
+        self.assertIn("399001.SZ", prefetched.market_context, "其它当天有行的指数正常注入")
+
+    def test_market_context_str_trade_date_normalized(self):
+        """trade_date 传入 YYYYMMDD 字符串（真实运行形态）时仍能命中当天日期行。"""
+        dp = self._dp(
+            pd.DataFrame(
+                [
+                    {"ts_code": "399006.SZ", "trade_date": datetime.date(2024, 3, 21), "pct_chg": 2.0, "close": 2100.0},
+                ]
+            )
+        )
+        prefetched = asyncio.run(
+            self.strategy._prefetch_strategy_specific(
+                pd.DataFrame(), {"data_processor": dp}, PreFetchedContext(trade_date="20240321")
+            )
+        )
+        self.assertEqual(prefetched.market_context.get("399006.SZ", {}).get("pct_chg"), 2.0)

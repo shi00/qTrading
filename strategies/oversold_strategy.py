@@ -14,6 +14,7 @@ from utils.qfq import qfq_ratio_expr, qfq_ratio_series
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import to_date
 
 logger = logging.getLogger(__name__)
 
@@ -470,11 +471,20 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
                             idx_data = idx_data.sort_values("trade_date", ascending=True)
 
-                            current_row = idx_data[
-                                idx_data["trade_date"] == trade_date.strftime("%Y%m%d")  # type: ignore[union-attr]
-                            ]
+                            # 日期口径统一为 date：prefetched.trade_date 经 _normalize_trade_date_for_cache
+                            # 恒为 YYYYMMDD 字符串，与其 str/datetime.date 归一后与 index_daily 的
+                            # date 列比较（DAO 边界按 DAT-26 返回 datetime.date）。旧逻辑用
+                            # strftime 比较，与 date 列恒假，靠 tail(1) 取区间末行兜底掩盖——
+                            # 区间端点变化或当天缺行时会写入错误日期的大盘行情。
+                            target_date = to_date(trade_date)
+                            current_row = idx_data[idx_data["trade_date"] == target_date]
                             if current_row.empty:
-                                current_row = idx_data.tail(1)
+                                logger.warning(
+                                    "[OversoldStrategy] Index %s has no quote on %s; market context skipped",
+                                    idx_code,
+                                    target_date,
+                                )
+                                continue
 
                             pct_chg = current_row["pct_chg"].iloc[0] if "pct_chg" in current_row.columns else 0
 
