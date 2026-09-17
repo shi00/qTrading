@@ -184,9 +184,10 @@ def apply_max_weight_constraint(
     截断 [0.4,0.3,0.2] → 归一化 [0.444,...] → 0.444 > 0.4 失效）。
     因此采用"截断→归一化"迭代直到收敛，保证 max(weight) <= max_weight + tolerance。
 
-    边界: N * max_weight < 1 时无法归一化到 1。此时所有标的取 max_weight（剩余留现金），
-    即"信号稀疏 → 资金闲置"（BT-03）。当 renormalize=True 时放宽单票硬上限，
-    等比放大到满仓（权总=1），避免资金闲置（资金效率优先）。
+    边界: N * max_weight < 1 时无法满仓且无法全 ≤ max_weight（D1-M3）。保留 sizer 的
+    相对权重形状、等比缩放到触顶 max_weight（剩余留现金），即"信号稀疏 → 资金闲置"
+    （BT-03），不覆写为 1/N 等权。当 renormalize=True 时放宽单票硬上限、等比归一化到
+    满仓（权总=1），避免资金闲置（资金效率优先）。
     兜底: 100 次迭代未收敛则强制截断（总权重可能 < 1，剩余留现金，优于违反约束）。
 
     Args:
@@ -202,12 +203,21 @@ def apply_max_weight_constraint(
         return weights_df
 
     n = weights_df.height
-    # N * max_weight < 1: 无法归一化到 1，所有取 max_weight（剩余留现金）
+    # N * max_weight < 1: 无法满仓且无法全 ≤ max_weight。保留 sizer 的相对权重形状，
+    # 不覆写为 1/n 常数（D1-M3）——否则 market_cap/rank 加权在候选数 < 1/max_weight 时
+    # 会静默退化为等权（对集中度高的策略在最需要加权时刻恰好失效）。
     if n * max_weight < 1.0:
+        total_weight = weights_df.select(pl.col("weight").sum()).item()
+        if total_weight is None or total_weight <= 0:
+            total_weight = 1.0
         if renormalize:
-            # 资金效率优先：全部触顶即无「未触顶」标的可承接盈余，放宽单票上限等比放大到满仓，
-            # 每只权重 1/n（> max_weight，超出硬上限是 renormalize 语义的固有取舍）。
-            return weights_df.select("ts_code").with_columns(pl.lit(1.0 / n).alias("weight"))
+            # 资金效率优先：放宽单票上限，等比归一到满仓（权总=1），保留相对形状；
+            # 部分权重 > max_weight 属 renormalize 语义的固有取舍。
+            return weights_df.with_columns((pl.col("weight") / total_weight).alias("weight"))
+        # 留现金（默认）：等比缩放到触顶（max_weight），保留相对形状，剩余资金闲置
+        peak = weights_df.select(pl.col("weight").max()).item()
+        if peak is not None and peak > 0:
+            return weights_df.with_columns((pl.col("weight") * (max_weight / peak)).alias("weight"))
         return weights_df.with_columns(pl.lit(max_weight).alias("weight"))
 
     result = weights_df

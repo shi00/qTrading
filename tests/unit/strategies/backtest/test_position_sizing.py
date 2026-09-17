@@ -608,10 +608,14 @@ class TestMaxSingleWeightConstraint:
                 "weight": [0.3, 0.25, 0.2, 0.15, 0.1],
             }
         )
-        # n=5, max_weight=0.1 → n*max=0.5 < 1 → 全取 0.1
+        # n=5, max_weight=0.1 → n*max=0.5 < 1：D1-M3 保留相对形状，等比缩放到触顶 0.1
         result = apply_max_weight_constraint(weights_df, 0.1)
-        assert result["weight"].to_list() == [0.1, 0.1, 0.1, 0.1, 0.1]
-        assert abs(float(result["weight"].sum()) - 0.5) < 1e-6  # 剩余 0.5 留现金
+        ws = result["weight"].to_list()
+        # 不再退化为 [0.1]*5 等权：相对形状保留（0.3>0.25>0.2>0.15>0.1）
+        assert ws[0] > ws[1] > ws[2] > ws[3] > ws[4]
+        assert abs(ws[0] - 0.1) < 1e-6  # 峰值触顶 max_weight
+        # 相对形状等比缩放（scale=0.1/0.3），剩余留现金（sum≈0.3333）
+        assert abs(float(sum(ws)) - 1.0 / 3.0) < 1e-6
 
     def test_renormalize_after_cap_fills_cash_when_n_times_max_lt_one(self):
         """BT-03: renormalize=True 时 n*max_weight < 1 放宽单票上限、等比放大到满仓。"""
@@ -623,13 +627,14 @@ class TestMaxSingleWeightConstraint:
                 "weight": [0.3, 0.25, 0.2, 0.15, 0.1],
             }
         )
-        # n=5, max_weight=0.1 → n*max=0.5 < 1；renormalize 后每只 1/5=0.2，权总=1
+        # n=5, max_weight=0.1 → n*max=0.5 < 1；D1-M3 renormalize 后等比归一化：保留相对形状 + 满仓
         result = apply_max_weight_constraint(weights_df, 0.1, renormalize=True)
-        assert result["weight"].to_list() == [0.2, 0.2, 0.2, 0.2, 0.2]
+        ws = result["weight"].to_list()
         assert abs(float(result["weight"].sum()) - 1.0) < 1e-6  # 满仓，无现金闲置
-        # 未启用 renormalize 时保持原「留现金」行为（不回归）
+        assert ws[0] > ws[1] > ws[2] > ws[3] > ws[4]  # 保留相对形状（不再退化为 0.2 常数）
+        # 未启用 renormalize 时保持「留现金」行为（相对形状缩放，不再等权 0.5）
         kept = apply_max_weight_constraint(weights_df, 0.1)
-        assert abs(float(kept["weight"].sum()) - 0.5) < 1e-6
+        assert abs(float(sum(kept["weight"].to_list())) - 1.0 / 3.0) < 1e-6
 
     def test_weight_renormalized_after_cap(self):
         """测试截断后权重重新归一化"""
