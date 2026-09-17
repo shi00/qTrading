@@ -831,6 +831,67 @@ class TestComputeAvgDailyVolume:
         assert avg.to_list()[-1] == pytest.approx(10000.0, rel=1e-9)
 
 
+class TestLoadQuotesSortBeforeAvgVolume:
+    """D1-m1：_load_quotes 在计算 avg_daily_volume 前按 ts_code/trade_date 排序，
+    使 rolling_mean(over ts_code) 不受上游行情行序影响（行序无关）。
+
+    此处刻意提供不含 adj_factor 的输入，使 _apply_qfq 走 early-return（内部不排序），
+    专门验证 _load_quotes 顶部的显式排序即为 avg_daily_volume 正确性的唯一保证。
+    """
+
+    def _make_engine(self, quotes_pd):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cache = MagicMock()
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_pd)
+        # enrich 不是本测试对象，短路以聚焦「排序→计算 avg_daily_volume」链路
+        engine._enrich_suspend_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        engine._enrich_limit_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_avg_daily_volume_row_order_invariant(self):
+        """同一逻辑数据的乱序输入与有序输入，经 _load_quotes 后 avg_daily_volume 一致。
+
+        若排序未在计算前执行，rollOver ts_code 的 rolling_mean 会对相邻异股行串窗，
+        导致乱序输入下 avg_daily_volume 偏小（混入对侧低 vol），本用例即会失败。
+        """
+        import pandas as pd
+
+        n = 25
+        codes = ["000001.SZ", "000002.SZ"]
+        vol_by = {"000001.SZ": 100.0, "000002.SZ": 200.0}
+        # 构造「interleave 不同 ts_code」的乱序输入
+        unsorted_rows = []
+        for i in range(n):
+            for code in codes:
+                unsorted_rows.append(
+                    {
+                        "ts_code": code,
+                        "trade_date": f"202401{1 + i:02d}",
+                        "open": 10.0,
+                        "high": 11.0,
+                        "low": 9.0,
+                        "close": 10.0,
+                        "vol": vol_by[code],
+                    }
+                )
+        engine = self._make_engine(pd.DataFrame(unsorted_rows))
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        result, _ = await engine._load_quotes(trade_dates, ts_codes=codes)
+
+        # 结果已按 ts_code/trade_date 排序；逐股取最新 avg_daily_volume
+        for code in codes:
+            per_stock = result.filter(pl.col("ts_code") == code)
+            expected = vol_by[code] * 100.0  # 手→股（BT-06）
+            assert per_stock["avg_daily_volume"].to_list()[-1] == pytest.approx(expected, rel=1e-9)
+
+
 class TestGenerateSignals:
     def _make_engine(self):
         config = BacktestConfig(
