@@ -376,9 +376,12 @@ class NewsRiskBrief(Base):
     risk_level = Column(String(16), info={"null_protected": True})
     confidence = Column(Integer, info={"null_protected": True})
     summary = Column(String, info={"null_protected": True})
-    events = Column(JSONB, info={"null_protected": True})
-    evidence_news_ids = Column(JSONB, info={"null_protected": True})
-    coverage = Column(JSONB, info={"null_protected": True})
+    # none_as_null=True：SQLAlchemy JSONB 默认把 Python None 编码为 JSON 'null'（非 SQL NULL），
+    # 会使 _save_upsert 的 null_protected coalesce 保护失效（coalesce('null', old) 仍返回 'null'）。
+    # 这些列语义上"缺失"应为 SQL NULL，故声明 none_as_null，令 coalesce(EXCLUDED, table) 正确保留旧值。
+    events = Column(JSONB(none_as_null=True), info={"null_protected": True})
+    evidence_news_ids = Column(JSONB(none_as_null=True), info={"null_protected": True})
+    coverage = Column(JSONB(none_as_null=True), info={"null_protected": True})
     model_id = Column(String, info={"null_protected": True})
     analysis_profile = Column(String(64), nullable=False)
     prompt_version = Column(String(32), nullable=False)
