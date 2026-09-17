@@ -1622,3 +1622,7 @@ class TestBacktestChartHelpers:
     def test_build_benchmark_curve_single_return(self):
         """单元素收益序列返回 len=1（仅锚点）。"""
         assert _build_benchmark_curve(100.0, [0.0]) == (100.0,)
+
+    def test_build_benchmark_curve_null_return_flat(self):
+        """D1-M1: 基准缺失日 (None) 沿用上一净值，不崩溃。"""
+        assert _build_benchmark_curve(100.0, [0.1, None, 0.1]) == pytest.approx((100.0, 100.0, 110.0))

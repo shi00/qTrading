@@ -355,31 +355,35 @@ class TestCalcBenchmarkReturns:
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
         return engine
 
-    def test_empty_benchmark_returns_zeros(self):
+    def test_empty_benchmark_returns_nulls_with_warning(self):
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
         benchmark_df = pl.DataFrame()
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns.len() == 2
-        assert all(r == 0.0 for r in returns.to_list())
+        assert returns.null_count() == 2
+        assert warning is not None
+        assert warning.warning_type == "benchmark_data_absent"
 
     def test_benchmark_with_string_dates(self):
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        # 带连字符日期串：覆盖 str.replace_all("-", "") 修复
         benchmark_df = pl.DataFrame(
             {
-                "trade_date": ["20240102", "20240103"],
+                "trade_date": ["2024-01-02", "2024-01-03"],
                 "pct_chg": [1.0, -0.5],
             }
         )
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns.len() == 2
         assert returns[0] == 0.01
         assert returns[1] == -0.005
+        assert warning is None
 
     def test_benchmark_with_date_objects(self):
         engine = self._make_engine()
@@ -391,13 +395,15 @@ class TestCalcBenchmarkReturns:
             }
         )
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns.len() == 2
         assert returns[0] == 0.015
         assert returns[1] == 0.02
+        assert warning is None
 
-    def test_missing_dates_filled_with_zero(self):
+    def test_missing_dates_kept_null_with_partial_warning(self):
+        # D1-M1: 基准缺失日保留 null（不再填 0.0 伪装"零涨跌"），并上报 partial 告警
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         benchmark_df = pl.DataFrame(
@@ -407,20 +413,23 @@ class TestCalcBenchmarkReturns:
             }
         )
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns.len() == 3
         assert returns[0] == 0.01
-        assert returns[1] == 0.0
+        assert returns[1] is None
         assert returns[2] == 0.02
+        assert warning is not None
+        assert warning.warning_type == "benchmark_data_partial"
+        assert warning.affected_stock_count == 1
 
-    def test_all_benchmark_dates_missing_returns_all_zeros(self):
-        """测试所有 Benchmark 日期缺失时返回全零序列。"""
+    def test_all_benchmark_dates_missing_returns_all_nulls(self):
+        """测试所有 Benchmark 日期缺失时返回全 null 序列 + partial 告警。
 
-        # 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
-        # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
-        # 测试行为由测试用例本身验证。
-
+        本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+        pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+        测试行为由测试用例本身验证。
+        """
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         benchmark_df = pl.DataFrame(
@@ -430,10 +439,13 @@ class TestCalcBenchmarkReturns:
             }
         )
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns.len() == 3
-        assert all(r == 0.0 for r in returns.to_list())
+        assert returns.null_count() == 3
+        assert warning is not None
+        assert warning.warning_type == "benchmark_data_partial"
+        assert warning.affected_stock_count == 3
 
     def test_benchmark_pct_chg_unit_conversion(self):
         """测试 Benchmark pct_chg 从百分比转换为小数。
@@ -450,9 +462,10 @@ class TestCalcBenchmarkReturns:
             }
         )
 
-        returns = engine._calc_benchmark_returns(benchmark_df, trade_dates)
+        returns, warning = engine._calc_benchmark_returns(benchmark_df, trade_dates)
 
         assert returns[0] == 0.015
+        assert warning is None
 
 
 class TestCalcPeriodStats:
