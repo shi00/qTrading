@@ -336,16 +336,24 @@ class TestDelistWarning:
     """BT-02: 退市清算影响说明条 (count>0 时渲染, count=0 时 None)."""
 
     def test_delist_warning_none_when_count_zero(self) -> None:
-        assert _delist_warning(0, 0.0) is None
+        assert _delist_warning(0, 0.0, 0.3) is None
 
     def test_delist_warning_shown_when_count_positive(self) -> None:
-        """count>0 → 返回 Container, i18n key 为 backtest_delist_warning, 金额千分位."""
+        """count>0 → 返回 Container, i18n key 为 backtest_delist_warning, 金额千分位 + 回收率."""
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            warning = _delist_warning(2, 12345.6)
+            warning = _delist_warning(2, 12345.6, 0.3)
 
         assert isinstance(warning, ft.Container)
-        mock_i18n.assert_called_with("backtest_delist_warning", count=2, amount="12,345.60")
+        mock_i18n.assert_called_with("backtest_delist_warning", count=2, amount="12,345.60", recovery_rate="30")
+
+    def test_delist_warning_shows_recovery_rate(self) -> None:
+        """D1-m3: 回收率假设随退市说明条透传 (0.15 → "15")."""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            _delist_warning(1, 100.0, 0.15)
+
+        mock_i18n.assert_called_with("backtest_delist_warning", count=1, amount="100.00", recovery_rate="15")
 
     def test_metrics_section_includes_delist_warning_when_positive(self) -> None:
         """delist_liquidation_count>0 → metrics section 含退市说明条 (title 前, 位于 invested 前)."""

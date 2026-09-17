@@ -213,7 +213,12 @@ class BacktestResult:
         return {
             "run_id": self.run_id,
             "strategy_name": self.strategy_name,
-            "params_snapshot": self.params_snapshot,
+            # D1-m3: 回收率假设并入 params_snapshot 落库（backtest_results.params_snapshot 为 JSONB，
+            # 免新增列/migration），使「同一策略在不同 delist_recovery_rate 下的结果」可追溯复现。
+            "params_snapshot": {
+                **self.params_snapshot,
+                "delist_recovery_rate": self.config.delist_recovery_rate,
+            },
             "start_date": self.config.start_date,
             "end_date": self.config.end_date,
             "initial_capital": self.config.initial_capital,

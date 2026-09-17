@@ -356,6 +356,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             has_real_score=state.has_real_score,
             delist_liquidation_count=state.delist_liquidation_count,
             delist_loss_amount=state.delist_loss_amount,
+            delist_recovery_rate=state.delist_recovery_rate,
         )
         banners = [b for b in (caveat_banner, warning_banner) if b is not None]
         if banners:

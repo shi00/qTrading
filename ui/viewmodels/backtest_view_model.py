@@ -302,6 +302,9 @@ class BacktestState:
     # count>0 时 UI 展示退市影响提示条, 说明收益中有多少来自退市假设（回收率经验估计）。
     delist_liquidation_count: int = 0
     delist_loss_amount: float = 0.0
+    # D1-m3: 退市清算回收率假设透传（result.config.delist_recovery_rate），
+    # 与 delist_* 统计一并展示，便于评估退市假设对收益的权重。
+    delist_recovery_rate: float = 0.3
 
 
 class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
@@ -519,6 +522,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             caveats=(),
             delist_liquidation_count=0,
             delist_loss_amount=0.0,
+            delist_recovery_rate=0.3,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -582,6 +586,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     has_real_score=result.has_real_score,
                     delist_liquidation_count=result.delist_liquidation_count,
                     delist_loss_amount=result.delist_loss_amount,
+                    delist_recovery_rate=result.config.delist_recovery_rate,
                     is_running=False,
                     progress=1.0,
                     progress_message=Message("backtest_done"),

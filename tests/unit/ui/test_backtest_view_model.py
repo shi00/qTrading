@@ -610,18 +610,22 @@ class TestBacktestViewModelRunBacktest:
 
     @pytest.mark.asyncio
     async def test_delist_fields_pass_through(self):
-        """BT-02: 成功终态透传 delist_liquidation_count / delist_loss_amount，失败/取消路径归零。"""
-        # 成功: mock result 显式携带退市分项统计
+        """BT-02 + D1-m3: 成功终态透传 delist_liquidation_count / delist_loss_amount /
+        delist_recovery_rate，失败/取消路径归零/还原默认。"""
+        # 成功: mock result 显式携带退市分项统计与回收率假设
         result = self._result_with(delist_liquidation_count=3, delist_loss_amount=1234.56)
+        result.config.delist_recovery_rate = 0.15
         vm = await self._exec_backtest(result)
 
         assert vm.state.delist_liquidation_count == 3
         assert vm.state.delist_loss_amount == 1234.56
+        assert vm.state.delist_recovery_rate == 0.15
 
     @pytest.mark.asyncio
     async def test_delist_fields_reset_on_start(self):
         """BT-02: 开始回测（running 态）时退市分项统计归零，避免残留上次结果。"""
         result = self._result_with(delist_liquidation_count=3, delist_loss_amount=1234.56)
+        result.config.delist_recovery_rate = 0.15
         vm = await self._exec_backtest(result)
         assert vm.state.delist_liquidation_count == 3
 
@@ -650,6 +654,8 @@ class TestBacktestViewModelRunBacktest:
         # running 初始态已归零
         assert vm.state.delist_liquidation_count == 0
         assert vm.state.delist_loss_amount == 0.0
+        # D1-m3: run 初始态时回收率假设还原默认 0.3
+        assert vm.state.delist_recovery_rate == 0.3
 
     @pytest.mark.asyncio
     async def test_data_warning_marks_unreliable(self):
