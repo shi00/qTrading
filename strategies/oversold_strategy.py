@@ -71,9 +71,12 @@ def _compute_rsi_filter(
         period=rsi_period,
         alias=rsi_col_name,
     )
+    # D2-m1: 分母用前 5 日均量（shift(1) 排除当日），与回测引擎
+    # _compute_avg_daily_volume 的 shift(1) 口径一致；避免当日量混入分母
+    # 压缩量比动态范围（真实放量 3 倍此前仅算约 1.9）。
     vol_ratio_expr = (
-        pl.when(pl.col("qfq_vol").rolling_mean(5).over("ts_code") > 0)
-        .then(pl.col("qfq_vol") / pl.col("qfq_vol").rolling_mean(5).over("ts_code"))
+        pl.when(pl.col("qfq_vol").shift(1).rolling_mean(5).over("ts_code") > 0)
+        .then(pl.col("qfq_vol") / pl.col("qfq_vol").shift(1).rolling_mean(5).over("ts_code"))
         .otherwise(None)
         .alias("vol_ratio_5d")
     )
@@ -170,7 +173,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 "group": "volume_confirm",
                 "min": 0.8,
                 "max": 3.0,
-                "default": 1.5,
+                "default": 1.7,
                 "step": 0.1,
             },
         ]
@@ -219,7 +222,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         period = row.get("_rsi_period", 14)
         rsi = row.get(f"rsi_{period}", "N/A")
         threshold = row.get("_rsi_threshold", 30)
-        vol_ratio_threshold = row.get("_vol_ratio_threshold", 1.5)
+        vol_ratio_threshold = row.get("_vol_ratio_threshold", 1.7)
         rsi_feature = row.get("_rsi_feature_text", "")
 
         context_parts = [
@@ -266,7 +269,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         params = context.get("params", {})
         rsi_period = params.get("rsi_period", 14)
         rsi_threshold = params.get("rsi_threshold", 30)
-        vol_ratio_threshold = params.get("vol_ratio_threshold", 1.5)
+        vol_ratio_threshold = params.get("vol_ratio_threshold", 1.7)
 
         # --- Phase 1: Math Filter ---
         candidates = await self._math_filter(context, rsi_period, rsi_threshold, vol_ratio_threshold)

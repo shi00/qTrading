@@ -794,7 +794,7 @@ class AIStrategyMixin:
                         history_df=hist_df,
                         news=news_list,
                         ui_prompt_override=ui_prompt_override,
-                        vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
+                        vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.7),
                     )
                     if res is None:
                         # UX-2.3: 软失败（_mixin_analyze_single 内部已日志）
@@ -1046,7 +1046,7 @@ class AIStrategyMixin:
                 prefetched,
                 history_df=hist_df,
                 news=news_list,
-                vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.5),
+                vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.7),
             )
             if res is None:
                 if on_card_error:
@@ -1209,7 +1209,7 @@ class AIStrategyMixin:
         history_df: pd.DataFrame | None = None,
         news: list | None = None,
         ui_prompt_override: str | None = None,
-        vol_ratio_threshold: float = 1.5,
+        vol_ratio_threshold: float = 1.7,
     ):
         """
         Analyze a single stock. Fetches history, tech indicators, news,

@@ -13,7 +13,7 @@ from utils.technical_analysis import TechnicalAnalysis
 logger = logging.getLogger(__name__)
 
 
-def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.5) -> dict:
+def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.7) -> dict:
     """
     Compute MA alignment and volume trend from history DataFrame.
     Returns a dict of human-readable technical structure signals.
