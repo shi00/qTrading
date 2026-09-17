@@ -716,12 +716,17 @@ class VectorBacktestEngine:
             if signal_quotes.is_empty() or len(signal_quotes) < 3:
                 continue
 
-            entry_price_col = "qfq_close" if self.config.execution_price == "next_close" else "qfq_open"
+            # D1-m2: 入场价与出场价均按 execution_price 对称选择列，避免
+            # next_open 时「开盘买→收盘卖」的隔夜混合口径与撮合层（portfolio.py 变更同口径）
+            # 不一致；next_close 时仍为「收盘买→收盘卖」，行为与修复前一致。
+            use_open = self.config.execution_price != "next_close"
+            entry_price_col = "qfq_open" if use_open else "qfq_close"
+            exit_price_col = "qfq_open_exit" if use_open else "qfq_close_exit"
             forward_return = signal_quotes.select(
                 [
                     "ts_code",
                     "signal_rank",
-                    ((pl.col("qfq_close_exit") / pl.col(entry_price_col) - 1) * 100).alias("fwd_ret"),
+                    ((pl.col(exit_price_col) / pl.col(entry_price_col) - 1) * 100).alias("fwd_ret"),
                 ]
             )
 
