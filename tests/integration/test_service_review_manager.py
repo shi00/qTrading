@@ -358,8 +358,8 @@ class TestGetLearningContext(unittest.TestCase):
             self.assertIn("history_context", result)
             self.assertIn("复盘参考 - 正向样本", result)
             self.assertIn("复盘参考 - 负向样本", result)
-            self.assertIn("Alpha +4.2%", result)
-            self.assertIn("Alpha -2.1%", result)
+            self.assertIn("Alpha(相对基准超额) +4.2%", result)
+            self.assertIn("Alpha(相对基准超额) -2.1%", result)
             self.assertNotIn("Learn from these", result)
             self.assertNotIn("Do NOT repeat", result)
 
