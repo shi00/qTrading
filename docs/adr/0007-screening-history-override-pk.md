@@ -18,7 +18,7 @@
 2. `run_id` 降级为普通列（仅作批次展示），不再是唯一性维度；覆盖时该值更新为最新一次运行的 run_id。
 3. `_save_upsert` 的 `pk_columns` 改为三个字段。
 4. 历史树 `get_history_tree` 由「按 run_id 分组」改为「按 (trade_date, strategy_name) 聚合」，run_id 取该组合最新代表值；点击节点按 (trade_date, strategy_name) 载入当前保留快照。
-5. Alembic 迁移 0020：先清理存量重复（保留 created_at 最新行，screening_thinking 经 FK CASCADE 级联），再替换唯一约束。`upgrade` 的去重删除不可逆，`downgrade` 仅重建旧约束、无法恢复被删行；同一 `created_at` 的兜底去重按 `id` 保留最小行，避免逐对互删清空整组。
+5. Alembic 迁移 0024：先清理存量重复（保留 created_at 最新行，screening_thinking 经 FK CASCADE 级联），再替换唯一约束。`upgrade` 的去重删除不可逆，`downgrade` 仅重建旧约束、无法恢复被删行；同一 `created_at` 的兜底去重按 `id` 保留最小行，避免逐对互删清空整组。
 6. 覆盖时显式将 `review_status` 置 `PENDING`：若被覆盖行此前已复盘（COMPLETED），其 `prediction_result` / `alpha` 等 computed 列不在本次写入列而保留，但状态重置为 PENDING 重新进入待复盘，保证复盘基于当日最新快照（覆盖即需重复盘）。
 
 ## Consequences
