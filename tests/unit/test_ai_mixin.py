@@ -3943,3 +3943,108 @@ class TestBuildStaleSection:
         assert "1.85" in result
         # stale 标注只出现一次（仅 macro 段落，shibor 段落无 stale 标注）
         assert result.count("【数据停止更新") == 1
+
+
+class TestRetrySingleGuardsAndCost:
+    """D4-M2: retry_single 必须与批量路径共用预算/政策/云端 guard，成功计入成本。"""
+
+    @staticmethod
+    def _make_strategy() -> ConcreteStrategy:
+        s = ConcreteStrategy()
+        s._last_candidates_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.0],
+            }
+        )
+        s._last_prefetched = PreFetchedContext()
+        return s
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_blocks_retry_no_llm_call(self):
+        """预算耗尽: retry_single 不调 analyze_stock，且触发 on_card_error。"""
+        s = self._make_strategy()
+        on_card_error = MagicMock()
+        context = {"on_card_error": on_card_error}
+
+        with (
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._preflight_cloud_call",
+                new=AsyncMock(return_value="ai_budget_exceeded"),
+            ),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.analyze_stock = AsyncMock()
+            mock_ai.return_value = mock_ai_instance
+
+            await s.retry_single("平安银行", context)
+
+        mock_ai_instance.analyze_stock.assert_not_awaited()
+        name, reason = on_card_error.call_args[0]
+        assert name == "平安银行"
+        assert reason == I18n.get("ai_budget_exceeded")
+        assert on_card_error.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_successful_retry_tracks_cost(self):
+        """重试成功: 按 res["cost"] 计费（元→分）。"""
+        s = self._make_strategy()
+        on_result = MagicMock()
+        context = {"on_result": on_result}
+
+        with (
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._preflight_cloud_call",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._mixin_analyze_single",
+                new=AsyncMock(
+                    return_value={
+                        "score": 75,
+                        "summary": "看好",
+                        "confidence": 80,
+                        "cost": 0.05,
+                    }
+                ),
+            ),
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+        ):
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
+
+            await s.retry_single("平安银行", context)
+
+        # 0.05 元 → 5 分
+        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        result_row = on_result.call_args.args[0]
+        assert result_row["ai_status"] == "analyzed"
+        assert on_result.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_retry_not_tracked(self):
+        """失败 dict 不计费（与批量路径一致）。"""
+        s = self._make_strategy()
+        context = {"on_result": MagicMock()}
+
+        with (
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._preflight_cloud_call",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._mixin_analyze_single",
+                new=AsyncMock(return_value={"error": "provider unavailable", "score": None, "ai_status": "failed"}),
+            ),
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+        ):
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
+
+            await s.retry_single("平安银行", context)
+
+        mock_tracker.add_cost_cny.assert_not_awaited()

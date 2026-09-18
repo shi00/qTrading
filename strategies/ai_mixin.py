@@ -974,6 +974,14 @@ class AIStrategyMixin:
         prefetched = self._last_prefetched
         ai_client = AIService()
         dp = context.get("data_processor") or self._last_dp
+        # D4-M2: 重试同样必须通过云端/政策/预算 guard——若跳过预算检查，预算上限可被
+        # 点击次数无限突破；跳过 provider 确认则数据可能外发至未授权对象。
+        block_reason = await self._preflight_cloud_call(context)
+        if block_reason is not None:
+            logger.warning("[AIStrategyMixin] retry_single blocked by guard: %s", block_reason)
+            if on_card_error:
+                on_card_error(stock_name, I18n.get(block_reason))
+            return
         # P1-1: retry_single 不调用 on_card_start（避免重复建卡）。
         # 调用方（ScreenerViewModel.retry_single_stock）已先将失败卡复用为占位卡；
         # 重试语义是"更新已有卡"，此处再触发 on_card_start（start_stream_card 追加）
@@ -1053,6 +1061,23 @@ class AIStrategyMixin:
                     on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
                 return
             result_row = self._build_result_row(row_data, res)
+            # D4-M2: 重试成功同样计入月度成本（与 run_ai_analysis 收尾 _track_cost 同口径）。
+            # failed 路径不产生有效调用，不计费。
+            if isinstance(res, dict) and res.get("ai_status") != "failed":
+                cost = res.get("cost")
+                if isinstance(cost, (int, float)) and cost > 0:
+                    try:
+                        await self._track_cost(float(cost))
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # 成本持久化失败不阻断结果交付（仅记录），与批量路径一致
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[AIStrategyMixin] retry_single failed to persist cost to tracker: %s",
+                        )
             if on_result:
                 # D3-6: _build_result_row 不再返回 None（score==0 亦视为 rejected 行）。
                 # 调用方 retry_single_stock 已把失败卡转为 is_analyzing=True 占位卡，
@@ -1070,6 +1095,24 @@ class AIStrategyMixin:
                 "[AIStrategyMixin] retry_single failed (%s: %s)",
                 exc_info=True,
             )
+
+    async def _preflight_cloud_call(self, context: dict) -> str | None:
+        """云端调用前置检查，返回阻断原因 i18n key（None 表示放行）。
+
+        批量路径（run_ai_analysis）与 retry_single 必须共用同一套 guard：
+        重试若跳过预算检查，预算上限会被点击次数无限突破；跳过 provider 确认
+        则数据可能外发至未授权对象。此方法仅做静态检查，不产出 UI 通知——
+        由调用方据此触发 on_card_error / on_progress。
+        """
+        if not AIService().is_cloud_available():
+            return "ai_not_configured"
+        ack_providers = collect_cloud_ack_providers(ConfigHandler.get_llm_provider())
+        if not all(ConfigHandler.is_ai_external_acknowledged(provider=p) for p in ack_providers):
+            return "ai_external_acknowledgment_prompt"
+        await self._ensure_cost_tracker_engine()
+        if await self._ai_budget_exhausted():
+            return "ai_budget_exceeded"
+        return None
 
     async def _ensure_cost_tracker_engine(self) -> None:
         """经 EngineProvider 惰性注入 AIUsageTracker 的引擎。
