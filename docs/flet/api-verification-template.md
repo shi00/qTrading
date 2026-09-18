@@ -47,6 +47,27 @@
 
 ## 历史核验记录
 
+### Flet 1.0 升级核验 @ 1.0 系列 (2026-09-19)
+
+- **API**: 全量 V1 声明式 API + 私有 API + flet_charts API + TextField error 属性
+- **锁定版本**: Flet 1.0 系列（pyproject.toml 实际锁定确切补丁号；flet/flet-desktop/flet-charts/flet-code-editor 四包与 flet-mcp 同步锁定）
+- **核验来源**:
+  - 项目单元测试（在 Flet 1.0 实际锁定版本下实跑，42 项全部通过）:
+    - tests/unit/ui/test_flet_0_86_v1_api_compat.py
+    - tests/unit/ui/test_flet_0_86_private_api_compat.py
+    - tests/unit/ui/test_flet_0_86_charts_compat.py
+  - 项目运行期验证（flet-mcp，与主包同版本锁定）: server 可加载（`mcp.name == flet-mcp`）；`get_api(Dropdown)` 的 `on_select` 事件存在；`enum_has_member(Icons.DELETE/ARROW_BACK)` True
+  - flet-mcp `api.json` 属性核验: `TextField` 无 `error_text`（`error`/`error_style`/`error_max_lines` 继承自 `FormFieldControl`）；`Dropdown.error_text` 存在
+- **项目结论**: 继续使用
+  - 理由: 三套兼容测试 42 项在 Flet 1.0 实际锁定版本下全部通过（与 0.86 系列的 42 项口径一致）；flet-mcp 与主包同版本发布，API 覆盖度验证通过；TextField/Dropdown 错误状态属性沿用 V1 语义（`TextField.error` / `Dropdown.error_text`），无障碍基线断言在 1.0 系列下仍成立。本次核验确立 1.0 版本基线，0.86 系列历史记录不再适用。
+- **需更新文件**:
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/flet/upgrade-checklist.md (版本范围标记 0.86.x+ → V1 系列)
+  - [x] docs/flet/accessibility-baseline.md (TextField error_text 版本 pin 去化)
+  - [x] docs/flet/mcp-usage.md (§6 验证记录更新至 1.0)
+  - [x] README.md (UI 徽章对齐 Flet >=1.0)
+- **核验人**: AI 助手 (文档复检批次1)
+
 ### engineRevision 修正 @ 0.86 最新补丁 (2026-08-07)
 
 - **API**: CanvasKit engineRevision（非 Flet API，但影响 E2E 测试基础设施）

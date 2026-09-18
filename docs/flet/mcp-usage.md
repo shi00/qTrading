@@ -145,7 +145,7 @@ flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建�
 
 本节记录 flet-mcp 工具签名与文档描述一致性的 smoke test 证据，作为 §3.2 工具清单与 §3.3 场景示例的可信度依据。
 
-**最近一次验证**：2026-07-24（flet / flet-mcp / fastmcp 版本见 `pyproject.toml`）
+**最近一次验证**：2026-09-19（flet / flet-mcp 版本见 `pyproject.toml`，fastmcp 为间接依赖未显式锁定）
 
 **验证命令与结果**：
 
@@ -181,6 +181,6 @@ venv/Scripts/python.exe -c "from flet_mcp import mcp; mcp.run()"
 # 预期：进程启动后阻塞等待 stdin 输入，不报错即通过（Ctrl+C 退出）
 ```
 
-**结论**：§3.2 工具清单签名准确，§3.3 场景 1/2 示例返回值与文档描述一致。§3.1 启动命令 `python -c "from flet_mcp import mcp; mcp.run()"` 验证可用（2026-07-24 补充）。
+**结论**：§3.2 工具清单签名准确，§3.3 场景 1/2 示例返回值与文档描述一致。§3.1 启动命令 `python -c "from flet_mcp import mcp; mcp.run()"` 验证可用（2026-07-24 补充；2026-09-19 于 flet/flet-mcp 1.0 实际锁定版本下复验通过：服务器 `mcp.name == flet-mcp` 可加载、`Dropdown.on_select` 事件存在、`Icons.DELETE/ARROW_BACK` 成员存在）。
 
 **复验触发器**：flet-mcp 包版本变化 / flet 主包版本变化 / fastmcp 版本变化（间接依赖，未显式锁定）/ mcp-usage.md §3.1、§3.2、§3.3 或 §5 修改时，应按上述命令重新执行 smoke test 并更新本节记录。
