@@ -28,7 +28,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)** (覆盖率阈值见 [`pyproject.toml`](../../pyproject.toml))
 9. **requirements*.txt 漂移处理** (`requirements-drift` job 检测到 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
 
-> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`。Python `3.14` 因上游 `litellm` 限制 `Requires-Python <3.14`，暂时无法安装项目依赖，故仅在 `lint-fast` job 中作为 experimental 矩阵项运行（详见 [已知架构技术债](../debt/known-technical-debt.md) 中的 litellm 限制条目）。
+> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast` job 将 `3.14` 作为 experimental 矩阵项前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；矩阵配置见 [已知架构技术债](../debt/known-technical-debt.md) 相关条目）。
 
 ### 版本发布流程与 Release 管理
 
