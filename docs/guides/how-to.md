@@ -153,7 +153,7 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 ```
 
-启动临时维护实例（不竞争主实例锁），输出含 `psql_path` + `connection_string_redacted`（密码已脱敏）的 JSON，用户可用 psql 直接连接进行高级维护。
+启动临时维护实例（需持维护锁：主实例/sidecar 运行中会拒绝，exit 50），输出含 `psql_path` + `connection_string_redacted`（密码已脱敏）的 JSON，用户可用 psql 直接连接进行高级维护。
 
 #### 9.6 错误分类
 

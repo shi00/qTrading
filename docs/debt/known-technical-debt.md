@@ -16,7 +16,7 @@
 |----|--------|------|------------------|
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | 策略层重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | utils 层异常处理统一改造时 |
-| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R12/R13/R14/R15 已落地；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | 事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟或红线违规频发时重新评估 |
+| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20 报告模式、R22 部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | 事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟或红线违规频发时重新评估 |
 | P3-TypeIgnores-Tests-HumanReason | tests/ 下非 attr-defined 的 # type: ignore 存量 226 处无 human reason（review07-G5 渐进升级） | P3 | 存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决 |
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达 §17.0 门禁 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | run.rs supervisor 可测路径重构时 |
 | P3-E2E-Windows-Embedded-Timeout-Tight | E2E Tests (Windows) embedded 模式 step `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用） | P3 | ① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试） |
@@ -151,15 +151,15 @@ M9 services 模块检视发现：`services/task_manager.py:542` `cancel_all_runn
 
 ### 红线自动化与类型压制
 
-#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R12/R13/R14/R15 已落地；R16 部分落地，事件处理器内同步 IO 暂缓）
+#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20 报告模式、R22 部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R12/R13/R14/R15 已落地；R16 部分落地，事件处理器内同步 IO 暂缓） | 事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟或红线违规频发时重新评估 |
+| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20 报告模式、R22 部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | 事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟或红线违规频发时重新评估 |
 
 **产生背景与现状**
 
-R1 由 import-linter 6 条契约守护；R4/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
+R1 由 import-linter 6 条契约守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（报告模式，warning 不阻断）与 R22（水位线单调，部分自动化）亦由 `scripts/check_redlines.py` 落地自动检查。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
 
 **期望的最终解法**
 

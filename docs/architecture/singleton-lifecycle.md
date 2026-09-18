@@ -73,7 +73,7 @@ def __init__(self, *, config=None, clock=None):
 | `CacheManager` | `data/cache/cache_manager.py` | DAO 实例与引擎生命周期 facade |
 | `ThreadPoolManager` | `utils/thread_pool.py` | IO/CPU 线程池调度 |
 | `TaskManager` | `services/task_manager.py` | 后台任务编排 |
-| `AIService` | `services/ai_service.py` | LLM 调用统一入口 |
+| `AIService` | `services/ai_service/__init__.py` | LLM 调用统一入口 |
 | `AIUsageTracker` | `services/ai_service/usage_tracker.py` | 立即 AI 货币成本按月（分）原子累加与跨月轮换持久化 |
 | `SchedulerService` | `utils/scheduler_service.py` | 定时调度 |
 | `DataProcessor` | `data/data_processor.py` | 数据质量扫描与处理 |
