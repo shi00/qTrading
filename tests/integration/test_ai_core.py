@@ -412,7 +412,8 @@ class TestBacktestIntegration:
             await strategy.run_ai_analysis(candidates_df, context)
 
             expected_as_of = trade_date - timedelta(days=SAFE_BACKTEST_LEARNING_OFFSET_DAYS)
-            mock_lc.assert_called_once_with(as_of=expected_as_of)
+            # D4-M3: 回测路径同样按策略隔离 few-shot 样本，避免跨策略污染。
+            mock_lc.assert_called_once_with(as_of=expected_as_of, strategy_name=strategy.name_key)
 
     @pytest.mark.asyncio
     async def test_backtest_ai_news_respects_as_of(self, mock_cache, mock_dp):

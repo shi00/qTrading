@@ -529,7 +529,12 @@ class ReviewManager:
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | datetime.datetime | None = None):
+    async def get_learning_context(
+        self,
+        limit: int | None = 3,
+        as_of: datetime.date | datetime.datetime | None = None,
+        strategy_name: str | None = None,
+    ):
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
         Returns formatted XML string for few-shot learning.
@@ -537,6 +542,11 @@ class ReviewManager:
         P0-5 fix: as_of parameter prevents look-ahead bias. When provided,
         only predictions with trade_date < as_of are included, preventing
         future data from leaking into historical replay contexts.
+
+        D4-M3: ``strategy_name`` 非空时只取同策略样本，避免跨策略 few-shot 混用导致
+        模型学到错误的「特征 → 收益」映射。``limit`` 样本是分布尾部（top WIN/LOSS），
+        为让模型能校准置信度，额外注入同口径总体统计（样本总数 / alpha 中位数 / 胜率），
+        并声明样本量是否充足（不足时模型不应过度依赖尾部样本）。
 
         Corner cases:
         - No history: Returns minimal XML
@@ -552,12 +562,14 @@ class ReviewManager:
             )
         wins = []
         losses = []
+        stats: dict | None = None
 
         try:
             df_wins = await self.cache.screener_dao.get_learning_context(
                 limit=limit or 3,
                 is_win=True,
                 as_of=as_of,
+                strategy_name=strategy_name,
             )
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
@@ -579,6 +591,7 @@ class ReviewManager:
                 limit=limit or 3,
                 is_win=False,
                 as_of=as_of,
+                strategy_name=strategy_name,
             )
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():
@@ -595,6 +608,11 @@ class ReviewManager:
                             else "",
                         },
                     )
+
+            stats = await self.cache.screener_dao.get_learning_context_stats(
+                as_of=as_of,
+                strategy_name=strategy_name,
+            )
 
         except EngineDisposedError:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
@@ -614,6 +632,19 @@ class ReviewManager:
 
         # Build XML
         xml = "<history_context>\n"
+
+        # D4-M3 偏差二/三：附总体统计 + 样本量充足性声明。
+        # 仅统计口径与提示语对模型可见，不改变 top WIN/LOSS 样本本身。
+        if stats is not None and stats["total"] > 0:
+            # 胜率 = WIN/(WIN+LOSS)，DRAW 不计入分母（与 get_strategy_review_stats 消费端口径一致）。
+            labeled = stats["win_cnt"] + stats["loss_cnt"]
+            win_rate = stats["win_cnt"] / labeled if labeled else None
+            median_str = f"{float(stats['alpha_median']):+.1f}" if stats["alpha_median"] is not None else "N/A"
+            win_rate_str = f"{win_rate * 100:.1f}%" if win_rate is not None else "N/A"
+            enough = stats["total"] >= (limit or 3) * 4
+            xml += f"  {I18n.get('review_ctx_stats', total=stats['total'], median=median_str, win_rate=win_rate_str)}\n"
+            if not enough:
+                xml += f"  {I18n.get('review_ctx_low_sample')}\n"
 
         if wins:
             xml += f"  [{I18n.get('review_ctx_positive')}]\n"

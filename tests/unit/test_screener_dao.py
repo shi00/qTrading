@@ -346,6 +346,59 @@ class TestScreenerDaoGetLearningContext:
         compiled = stmt.compile()
         assert REVIEW_STATUS_COMPLETED in compiled.params.values()
 
+    @pytest.mark.asyncio
+    async def test_strategy_name_filter_added(self):
+        """D4-M3: 传入 strategy_name 时 WHERE 增加同策略过滤。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True, strategy_name="strategy_oversold")
+        stmt = dao._read_db_select.call_args[0][0]
+        compiled = stmt.compile()
+        assert "strategy_oversold" in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_no_strategy_name_no_filter(self):
+        """D4-M3: strategy_name 为 None 时不追加策略过滤（向后兼容）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        sql = str(dao._read_db_select.call_args[0][0])
+        # 全表 SQL 不应包含 strategy_name 相等比较
+        compiled = dao._read_db_select.call_args[0][0].compile()
+        assert "strategy_name =" not in sql and not any(
+            isinstance(v, str) and "strategy" in str(v).lower() for v in compiled.params.values()
+        )
+
+    @pytest.mark.asyncio
+    async def test_learning_context_stats_aggregates(self):
+        """D4-M3: stats 聚合返回总数/win/loss/中位数。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "total": [100],
+                    "win_cnt": [30],
+                    "loss_cnt": [20],
+                    "alpha_mean": [0.5],
+                    "alpha_median": [0.2],
+                }
+            )
+        )
+        result = await dao.get_learning_context_stats(strategy_name="strategy_oversold")
+        assert result is not None
+        assert result["total"] == 100
+        assert result["win_cnt"] == 30
+        assert result["loss_cnt"] == 20
+        assert result["alpha_median"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_learning_context_stats_empty_returns_none(self):
+        """D4-M3: 无样本时 stats 返回 None 而非异常。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_learning_context_stats()
+        assert result is None
+
 
 class TestScreenerDaoUpdatePredictionResult:
     @pytest.mark.asyncio

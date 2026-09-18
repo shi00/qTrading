@@ -340,6 +340,7 @@ class TestReviewManagerGetLearningContext:
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=None)
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(return_value=None)
         rm = ReviewManager()
         rm.cache = mock_cache
         import datetime
@@ -350,11 +351,13 @@ class TestReviewManagerGetLearningContext:
             limit=3,
             is_win=True,
             as_of=as_of_date,
+            strategy_name=None,
         )
         mock_cache.screener_dao.get_learning_context.assert_any_call(
             limit=3,
             is_win=False,
             as_of=as_of_date,
+            strategy_name=None,
         )
 
     @pytest.mark.asyncio
@@ -365,6 +368,7 @@ class TestReviewManagerGetLearningContext:
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=None)
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(return_value=None)
         rm = ReviewManager()
         rm.cache = mock_cache
         import datetime
@@ -376,7 +380,87 @@ class TestReviewManagerGetLearningContext:
             limit=3,
             is_win=True,
             as_of=as_of_date,
+            strategy_name=None,
         )
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_strategy_name_passed_to_dao(self, mock_cm, mock_tc):
+        """D4-M3: strategy_name 透传到 DAO 的 wins/losses 查询，实现同策略过滤。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(return_value=None)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        await rm.get_learning_context(strategy_name="strategy_oversold")
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=True,
+            as_of=None,
+            strategy_name="strategy_oversold",
+        )
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=False,
+            as_of=None,
+            strategy_name="strategy_oversold",
+        )
+        mock_cache.screener_dao.get_learning_context_stats.assert_any_call(
+            as_of=None,
+            strategy_name="strategy_oversold",
+        )
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_stats_injected_into_xml(self, mock_cm, mock_tc):
+        """D4-M3: 附带总体统计（样本总数/中位数/胜率）注入 XML 供模型校准置信度。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=pd.DataFrame())
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(
+            return_value={
+                "total": 100,
+                "win_cnt": 30,
+                "loss_cnt": 20,
+                "alpha_mean": 0.5,
+                "alpha_median": 0.2,
+            }
+        )
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result = await rm.get_learning_context()
+        assert "共 100 条" in result
+        assert "+0.2" in result  # alpha 中位数 0.2 → +0.2%
+        assert "60.0%" in result  # 胜率 = 30/50
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_low_sample_declared(self, mock_cm, mock_tc):
+        """D4-M3: 同策略样本量偏少时输出样本量不足声明。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=pd.DataFrame())
+        # 总样本 5 < limit*4 = 12 → 触发样本量不足声明
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(
+            return_value={
+                "total": 5,
+                "win_cnt": 3,
+                "loss_cnt": 2,
+                "alpha_mean": 0.5,
+                "alpha_median": 0.2,
+            }
+        )
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result = await rm.get_learning_context()
+        assert "样本量偏少" in result
 
 
 class TestReviewManagerSaveResults:
