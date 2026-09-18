@@ -507,6 +507,98 @@ class TestReviewManagerSaveResults:
         await rm.save_results("test_strategy", df, trade_date="20240615", run_id="custom_run_id")
         mock_cache.screener_dao.save_screening_results.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_empty_df_returns_zero(self, mock_cm, mock_tc):
+        """D4-C1: df 为空 → 返回 0（无写入条数）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result = await rm.save_results("test_strategy", pd.DataFrame())
+        assert result == 0
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_with_data_returns_row_count(self, mock_cm, mock_tc):
+        """D4-C1: 正常写入 → 返回写入条数。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["Test", "Test2"],
+                "close": [10.0, 20.0],
+                "pct_chg": [1.0, 2.0],
+                "trade_date": ["20240615", "20240615"],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 2
+        mock_cache.screener_dao.save_screening_results.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_all_filtered_by_ai_status_returns_zero(self, mock_cm, mock_tc):
+        """D4-C1+R19: 全行 ai_status != analyzed（预算超限/政策未确认/AI 全失败）
+        → 返回 0 且 save_screening_results 未被调用（调用方据此不标记完成）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["Test", "Test2"],
+                "close": [10.0, 20.0],
+                "trade_date": ["20240615", "20240615"],
+                "ai_status": ["budget_exceeded", "budget_exceeded"],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 0
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_mixed_analyzed_failed_writes_only_analyzed(self, mock_cm, mock_tc):
+        """D4-C1+R19: 混合 analyzed/failed → 只写入 analyzed 行，返回值等于 analyzed 条数。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "name": ["A", "B", "C"],
+                "close": [10.0, 20.0, 30.0],
+                "trade_date": ["20240615", "20240615", "20240615"],
+                "ai_status": ["analyzed", "failed", "rejected"],
+                "ai_score": [80, None, 0],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 1
+        mock_cache.screener_dao.save_screening_results.assert_called_once()
+        saved_records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
+        assert len(saved_records) == 1
+        assert saved_records[0]["ts_code"] == "000001.SZ"
+
 
 class TestReviewManagerNormalizeTradeDate:
     def test_string_date(self):
