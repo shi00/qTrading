@@ -267,6 +267,18 @@ class AIStrategyMixin:
 
     @staticmethod
     def compute_learning_as_of(trade_date_raw, is_backtest: bool) -> date:
+        """Compute the exclusive learning-context cutoff (``trade_date < as_of``) date.
+
+        D4-M5 语义契约：本方法按**自然日**回退（``timedelta(days=N)``），而「T+5 收益已
+        回填」的实际前提是按**交易日**计数——长假期间 5 个交易日可跨 ~2 倍自然日，故自然日
+        偏移无法单独保证 T+5 复盘窗口已成熟，它只是一个**额外的冗余安全边界**，并非前视
+        防护的正主。真正的前视防护由 DAO 查询的硬性过滤保证（``screener_dao.
+        get_learning_context`` 的 ``review_status == REVIEW_STATUS_COMPLETED`` + ``t5_pct
+        IS NOT NULL``）：未完成 T+5 回填 / 未定稿标签的记录在取数时即被排除，天然不会泄漏
+        未来。因此：**放宽该 DAO 过滤条件（如为增加样本量而接受 T1_DONE）前，必须先把这个
+        自然日偏移改为交易日口径（经 TradeCalendarService 回退 N 个交易日）**，否则偏移
+        不足会立刻退化为真实的前视泄漏。
+        """
         import datetime
 
         from utils.time_utils import get_now, parse_date

@@ -608,6 +608,13 @@ class ScreenerDao(BaseDao):
         ``strategy_name`` 非空时只取同策略样本：不同策略的选股逻辑与持有周期假设不同，
         跨策略 few-shot 会让模型学到错误的「特征 → 收益」映射（BIZ-01 排除纯数学记录
         是同一动机的策略维度延伸）。
+
+        D4-M5 维护契约：**前视防护的真正正主是下方 WHERE 的 ``review_status ==
+        REVIEW_STATUS_COMPLETED`` + ``t5_pct.isnot(None)`` 过滤**（二者保证样本的 T+5 复盘
+        窗口已成熟、标签已定稿）。调用方 ``compute_learning_as_of`` 传入的 ``as_of`` 偏移是
+        按自然日计算的额外冗余边界，语义上并不等于「T+5 已回填」。**因此放宽本过滤条件前
+        （如为增加样本量而接受 T1_DONE 记录），必须先同步把 ``as_of`` 偏移改为交易日口径
+        （经 TradeCalendarService 回退 N 个交易日）**，否则偏移不足会立刻退化为真实的前视泄漏。
         """
         label = "WIN" if is_win else "LOSS"
         t = Base.metadata.tables["screening_history"]
