@@ -405,6 +405,16 @@ class TestDocsConsistencyScript:
         errors = check_version_consistency()
         assert errors == [], "Version mismatch:\n  " + "\n  ".join(errors)
 
+    def test_version_consistency_detects_declared_mismatch(self, tmp_path, monkeypatch):
+        """文档声明「对应版本」与 pyproject.toml 不一致时应报错（散文式自述版本漏检根因）。"""
+        from check_docs_consistency import check_version_consistency
+
+        doc = tmp_path / "stale_version.md"
+        doc.write_text("> **对应版本**：9.9.9\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_version_consistency()
+        assert any("对应版本" in e and "9.9.9" in e for e in errors), f"应报版本不一致, got: {errors}"
+
     def test_check_precommit_hook_count_passes(self):
         """文档中 pre-commit hook 数量与 .pre-commit-config.yaml 一致。"""
         from check_docs_consistency import check_precommit_hook_count
@@ -802,6 +812,36 @@ class TestRedlinesYamlConsistency:
 
         errors = check_redlines_yaml_consistency()
         assert errors == [], "redlines.yml consistency check failed:\n  " + "\n  ".join(errors)
+
+    def test_check_redline_range_consistency_passes(self):
+        """当前受检文档（非 ADR 快照）的红线总数散文为 R1~R23，应与 redlines.yml 一致。"""
+        from check_docs_consistency import check_redline_range_consistency
+
+        errors = check_redline_range_consistency()
+        assert errors == [], "Redline range consistency failed:\n  " + "\n  ".join(errors)
+
+    def test_redline_range_consistency_detects_stale_range(self, tmp_path, monkeypatch):
+        """非快照文档声明 R1~R18（滞后于实际 R23）时应报错（散文漏同步根因）。"""
+        from check_docs_consistency import check_redline_range_consistency
+
+        doc = tmp_path / "stale_range.md"
+        doc.write_text("红线 R1~R18 为项目宪法核心\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_redline_range_consistency()
+        assert any("R1~R18" in e and "R23" in e for e in errors), f"应报红线总数游标过期, got: {errors}"
+
+    def test_redline_range_consistency_ignores_adr_snapshot(self, tmp_path, monkeypatch):
+        """ADR 历史快照（R1~R18 为决策时点范围）不应被当前总数守卫误报。"""
+        from check_docs_consistency import check_redline_range_consistency
+
+        adr_dir = tmp_path / "adr"
+        adr_dir.mkdir()
+        doc = adr_dir / "0003-history.md"
+        doc.write_text("红线 R1~R18 编号 append-only 检查\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", adr_dir)
+        errors = check_redline_range_consistency()
+        assert errors == [], f"ADR 快照不应被误报, got: {errors}"
 
     def test_detects_missing_r15_in_yaml(self, tmp_path, monkeypatch):
         """构造缺 R15 的 yml, check_redlines_yaml_consistency() 应报错 (append-only 守护)."""

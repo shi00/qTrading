@@ -123,6 +123,13 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 _DOC_EXCLUDES: dict[Path, str] = {
     # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
     ROOT / "docs" / "superpowers": "本地 skill 计划目录（.gitignore 排除），非交付物，不参与文档一致性校验",
+    # 检视报告快照：记录发现问题当时（R1~R22）的过时事实，非当前状态，不参与版本/红线总数等一致性门禁
+    ROOT
+    / "docs"
+    / "reviews"
+    / "documentation-deep-review-2026-09-18.md": "文档检视报告快照，引用发现时的红线范围，非当前状态",
+    # 历史技术债计划归档：标题引用当时的红线范围（R1-R18），非当前状态
+    ROOT / "Plans-tech-debt.md": "历史技术债计划归档，标题引用当时红线范围，不参与一致性门禁",
 }
 CHECKED_DOCS: list[Path] = sorted(
     d
@@ -283,21 +290,28 @@ def check_relative_dead_links() -> list[str]:
 
 
 def check_version_consistency() -> list[str]:
-    """检查项 2：CLAUDE.md 顶部版本与 pyproject.toml 一致。"""
-    errors: list[str] = []
-    claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
-    m = re.search(r"\*\*对应版本\*\*[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)", claude_content)
-    if not m:
-        errors.append("CLAUDE.md: 未找到 '**对应版本**' 字段")
-        return errors
-    claude_ver = m.group(1)
+    """检查项 2：所有声明「对应版本」字段的受检文档与 pyproject.toml 版本一致。
 
+    原只校验 CLAUDE.md；现遍历 CHECKED_DOCS 中凡含 ``**对应版本**：x.y.z`` 的文档
+    （CLAUDE.md / CONTRIBUTING.md / AGENTS.md 等）一并比对，防止散文式版本声明漂移。
+    CLAUDE.md 为项目正本，必须声明该字段。
+    """
+    errors: list[str] = []
     with open(PYPROJECT_PATH, "rb") as f:
         cfg = tomllib.load(f)
     pyproject_ver = cfg["project"]["version"]
 
-    if claude_ver != pyproject_ver:
-        errors.append(f"CLAUDE.md 版本 {claude_ver} != pyproject.toml 版本 {pyproject_ver}")
+    for doc in CHECKED_DOCS:
+        content = doc.read_text(encoding="utf-8")
+        m = re.search(r"\*\*对应版本\*\*[：:]\s*v?([0-9]+\.[0-9]+\.[0-9]+)", content)
+        if not m:
+            if doc == CLAUDE_PATH:
+                errors.append("CLAUDE.md: 未找到 '**对应版本**' 字段")
+            continue
+        declared = m.group(1)
+        if declared != pyproject_ver:
+            line_no = content[: m.start()].count("\n") + 1
+            errors.append(f"{doc.name}:{line_no}: 对应版本 {declared} != pyproject.toml 版本 {pyproject_ver}")
     return errors
 
 
@@ -817,6 +831,47 @@ def check_redlines_yaml_consistency() -> list[str]:
             if yaml_value != claude_value:
                 errors.append(f"{rid}: CLAUDE.md 与 redlines.yml 字段 '{field}' 不一致")
 
+    return errors
+
+
+# 红线总数散文模式：R1 至 Rn，容忍 ~ / - / – / − 分隔符（如 R1~R23 / R1-R23）
+REDLINE_RANGE_PATTERN = re.compile(r"R1\s*[~\-–−]\s*R(\d+)")
+
+
+def check_redline_range_consistency() -> list[str]:
+    """检查项 7b：受检文档中「红线总数」散文（R1~Rxx）与 redlines.yml 实际一致。
+
+    背景（DS）：check_redlines_yaml_consistency() 只守卫 redlines.yml ↔ CLAUDE.md §3.1
+    红线「表格行」一致，覆盖不到散文式自述「R1~Rxx 总数」。新增红线时若只加表格行、
+    遗漏同步诸如「引用 R1~R22 前确认存在」等散文，此守卫会拦截。
+
+    规则：
+    - Rmax 取自 redlines.yml 实际最大红线号（其 id 已由 check_redlines_yaml_consistency 保证连续）。
+    - 遍历 CHECKED_DOCS，跳过 docs/adr/ 下文档（ADR 为决策时点历史快照，其中 R1~R18 是当时范围，
+      由 ADR-0002 Errata 声明以 redlines.yml 为准；其余快照文档经 _DOC_EXCLUDES 排除，不在 CHECKED_DOCS）。
+    :return: 错误信息列表。
+    """
+    errors: list[str] = []
+    try:
+        import yaml  # PyYAML 是 transitive 依赖，与 check_redlines_yaml_consistency 一致延迟 import
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except (ImportError, OSError, yaml.YAMLError):
+        return errors  # yml 缺失/解析失败由 check_redlines_yaml_consistency 报告
+    redlines = data.get("redlines") if isinstance(data, dict) else None
+    if not isinstance(redlines, list):
+        return errors
+    rmax = max(int(r["id"][1:]) for r in redlines if isinstance(r, dict) and str(r.get("id", "")).startswith("R"))
+
+    for doc in CHECKED_DOCS:
+        if ADR_DOCS_DIR in doc.parents:
+            continue  # ADR 为决策时点历史快照，含当时红线范围，不入当前总数守卫
+        content = doc.read_text(encoding="utf-8")
+        for m in REDLINE_RANGE_PATTERN.finditer(content):
+            declared = int(m.group(1))
+            if declared != rmax:
+                line_no = content[: m.start()].count("\n") + 1
+                errors.append(f"{doc.name}:{line_no}: 声明红线总数 R1~R{declared}，redlines.yml 实际最大为 R{rmax}")
     return errors
 
 
@@ -2568,6 +2623,8 @@ def main() -> int:
     all_errors.extend(check_flet_version_drift())
     all_errors.extend(check_note_lazy_format())
     all_errors.extend(check_redlines_yaml_consistency())
+    # 7b：红线总数散文（R1~Rxx）守卫，紧随表格式一致性之后，守护散文式自述漏同步（DS 根因）
+    all_errors.extend(check_redline_range_consistency())
     # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
     # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
     all_errors.extend(check_enforcement_mapping())
@@ -2617,7 +2674,7 @@ def main() -> int:
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
+        "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
