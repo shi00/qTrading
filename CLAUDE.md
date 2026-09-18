@@ -3,7 +3,7 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0（产品版本，与 pyproject.toml 一致）
+> **对应版本**：0.10.0（产品版本，与 pyproject.toml 一致）<!-- x-release-please-version -->
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
 > - ruleset_version: 1.7.0（规则集版本，规则变更时递增）
