@@ -2699,7 +2699,7 @@ class TestReviewManagerT1Backfill:
                 }
             )
         )
-        cache = await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
+        cache = await rm._prefetch_index_cache("000300.SH", datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         assert cache == {"20240610": 1.0, "20240611": None, "20240612": 3.0}
 
     @pytest.mark.asyncio
@@ -2710,7 +2710,7 @@ class TestReviewManagerT1Backfill:
         rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
         mock_cache.get_index_daily_range = AsyncMock(side_effect=asyncio.CancelledError())
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 测试意图即验证取消被重抛而非吞没，raises 本身即为断言
-            await rm._prefetch_index_cache("000300.SH", "20240601", "20240630")
+            await rm._prefetch_index_cache("000300.SH", datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
 
 
 class TestQfqReturnPct:

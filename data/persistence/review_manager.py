@@ -85,7 +85,7 @@ class ReviewManager:
         updates: list[dict] = []
 
         all_codes = pending_df["ts_code"].unique().tolist()
-        min_pred_date = str(pending_df["trade_date"].min())
+        min_pred_date = self._normalize_trade_date(pending_df["trade_date"].min())
 
         bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
             ts_code_list=all_codes,
@@ -98,16 +98,16 @@ class ReviewManager:
 
         # D3-M1: T+N 锚定的唯一交易日来源 = 全市场交易日历（TradeCalendarService，与回测层同通路）。
         # 候选股少或集中停牌时跨股票行情并集会整体丢日，导致 T+1/T+5 静默错位并污染标签。
+        max_quote_date = self._normalize_trade_date(bulk_quotes["trade_date"].max())
         market_trade_dates: list[datetime.date] = await self._market_trade_dates(
-            self._normalize_trade_date(min_pred_date),
-            self._normalize_trade_date(bulk_quotes["trade_date"].max()),
+            min_pred_date,
+            max_quote_date,
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
-        max_quote_date = str(bulk_quotes["trade_date"].max())
         index_cache = await self._prefetch_index_cache(index_code, min_pred_date, max_quote_date)
 
         for _, row in pending_df.iterrows():
@@ -360,10 +360,10 @@ class ReviewManager:
         quotes_by_code = {code: group.sort_values("trade_date") for code, group in bulk_quotes.groupby("ts_code")}
 
         # D3-M1: 与 run_review 同一 T+N 锚定口径，全市场交易日历（TradeCalendarService）。
-        max_quote_date = str(bulk_quotes["trade_date"].max())
+        max_quote_date = self._normalize_trade_date(bulk_quotes["trade_date"].max())
         market_trade_dates: list[datetime.date] = await self._market_trade_dates(
             min_t0,
-            self._normalize_trade_date(max_quote_date),
+            max_quote_date,
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
@@ -759,14 +759,18 @@ class ReviewManager:
     async def _prefetch_index_cache(
         self,
         index_code: str | None,
-        start_date: datetime.date | str,
-        end_date: str,
+        start_date: datetime.date,
+        end_date: datetime.date,
     ) -> dict[str, float | None]:
         """BIZ-03: 批量预取基准指数涨跌幅到 {YYYYMMDD: pct_chg} 缓存。
 
         run_review 与 backfill_t1_returns 共用，避免两处各自实现同一预取逻辑。
         与 run_review 原内联逻辑一致：预取失败仅告警（非 system 级），
         由调用方的单条兜底（_resolve_index_pct）补缺失日期。
+
+        D3-m2: 日期参数全程使用 date 对象（与 DAT-26「DAO 边界显式转 date」方向
+        统一），不再经 str(date) 隐式转换后再由 DAO 转回，避免 "2024-01-05" 与
+        "20240105" 两种日期格式在库内并存造成的摩擦。
         """
         index_cache: dict[str, float | None] = {}
         try:

@@ -838,7 +838,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
             mock_cache_instance.get_index_daily_range.assert_called_once()
             call_kwargs = mock_cache_instance.get_index_daily_range.call_args.kwargs
             assert call_kwargs["ts_code_list"] == [DEFAULT_BENCHMARK_INDEX]
-            assert call_kwargs["start_date"] == "20240315"
+            # D3-m2: get_index_daily_range 边界亦改为 date 对象（与 run_review 全程 date 方向统一）
+            assert call_kwargs["start_date"] == datetime.date(2024, 3, 15)
 
         asyncio.run(run_test())
 
