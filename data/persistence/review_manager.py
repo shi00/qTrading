@@ -860,7 +860,7 @@ class ReviewManager:
         trade_date: datetime.date | datetime.datetime | pd.Timestamp | str | None = None,
         run_id: str | None = None,
         params_snapshot: str | dict[str, typing.Any] | None = None,
-    ):
+    ) -> int:
         """
         Save screening results to history for future review.
         Persists the full strategy execution snapshot including financial indicators and AI thinking.
@@ -870,9 +870,15 @@ class ReviewManager:
             df: DataFrame of screening results.
             trade_date: The trading date being analyzed (not the current natural date).
                         If omitted, a single unique df["trade_date"] value may be used.
+
+        Returns:
+            Number of records actually persisted. ``0`` means nothing was written
+            (empty df, or every row filtered out by ai_status — e.g. budget exceeded /
+            policy not acknowledged / all AI failures). Callers MUST treat ``0`` as
+            "no reviewable result produced", never as success (D4-C1).
         """
         if df is None or df.empty:
-            return
+            return 0
 
         effective_date = self._normalize_trade_date(trade_date) if trade_date is not None else None
 
@@ -987,7 +993,16 @@ class ReviewManager:
             )
 
         if not records:
-            return
+            # D4-C1: 全量被 ai_status 过滤（预算超限/政策未确认/AI 全失败）属于业务失败，
+            # 调用方须据此决定是否标记 idempotency，不可按"df 非空"当作成功。
+            # D4-m1: 静默 return 会让夜间任务"宣称成功、实际零落库"，必须留日志。
+            logger.warning(
+                "[Review] save_results: all %d rows filtered by ai_status, nothing persisted (strategy=%s)",
+                len(df),
+                strategy_name,
+            )
+            return 0
 
         await self.cache.screener_dao.save_screening_results(records)
         logger.info("[Review] Saved %s predictions for %s", len(records), strategy_name)
+        return len(records)

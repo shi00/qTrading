@@ -207,12 +207,27 @@ class TestNightlyPredictionLogicClosure:
         result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
         runner = AsyncMock(return_value=result_df)
         mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
+        mock_rm.save_results = AsyncMock(return_value=1)
         await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
         # 强断言：保存次数 + 保存的策略名 + 标记今日完成
         assert mock_rm.save_results.call_count == 1
         assert mock_rm.save_results.call_args.args[0] == "strategy_ai_nightly_name"
         assert svc.marked_dates == ["20240614"]
+
+    @pytest.mark.asyncio
+    async def test_prediction_logic_saved_zero_does_not_mark_done(self):
+        """D4-C1: save_results 落库 0 条（预算超限/政策未确认/AI 全失败）→
+        与"无候选"同等处理：不标记完成，允许重试。"""
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        # 非空 df 但全被 ai_status 过滤 → save_results 返回 0
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_exceeded"]})
+        runner = AsyncMock(return_value=result_df)
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock(return_value=0)
+        await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
+        assert mock_rm.save_results.call_count == 1
+        assert svc.marked_dates == []
 
     @pytest.mark.asyncio
     async def test_scheduler_stores_i18n_key(self):
@@ -222,7 +237,7 @@ class TestNightlyPredictionLogicClosure:
         result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
         runner = AsyncMock(return_value=result_df)
         mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
+        mock_rm.save_results = AsyncMock(return_value=1)
         await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
 
         assert mock_rm.save_results.call_count == 1
@@ -244,7 +259,7 @@ class TestNightlyPredictionLogicClosure:
             return result_df
 
         mock_rm = MagicMock()
-        mock_rm.save_results = AsyncMock()
+        mock_rm.save_results = AsyncMock(return_value=1)
         await self._execute_logic(svc, _runner_with_progress, mock_tm, mock_rm=mock_rm)
 
         ai_calls = [c for c in mock_tm.update_progress.call_args_list if isinstance(c.args[2], Message)]

@@ -203,6 +203,8 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             params_snapshot=None,
         ):
             holder["saved"] = (strategy_name, trade_date, run_id, result_df.copy())
+            # D4-C1: save_results 返回实际写入条数；测试 stub 模拟 1 条写入。
+            return len(result_df)
 
     class _FakeTaskManager:
         def update_progress(self, *_args, **_kwargs):

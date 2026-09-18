@@ -100,15 +100,26 @@ async def _prediction_logic(
         # 这里有意使用 "strategy_ai_nightly_name" 而非 AISelectionStrategy.name_key
         # (= "strategy_ai_active_name")：夜间定时预测与用户交互式 AI 选股是两个
         # 语义场景，UI 上需区分显示（"夜间 AI 预测" vs "AI 主动选股"），非 DRY 违反。
-        await rm.save_results(
+        saved = await rm.save_results(
             "strategy_ai_nightly_name",
             result_df,
             trade_date=analysis_trade_date,
             run_id=run_id,
             params_snapshot={},
         )
+        if saved == 0:
+            # D4-C1: 落库 0 条 = 本次预测未产生可复盘结果（预算超限/政策未确认/AI 全失败），
+            # 与"无候选"同等处理：不标记完成，允许重试。此前按"df 非空"判定成功，
+            # 导致宣称成功、实际零落库、当日不再重试，交易日在学习闭环中永久缺失。
+            if context.get("_ai_budget_exceeded"):
+                logger.warning(
+                    "[Scheduler] Nightly prediction persisted 0 records (AI cost budget exceeded), NOT marking done"
+                )
+                return I18n.get("ai_budget_exceeded")
+            logger.warning("[Scheduler] Nightly prediction persisted 0 records, NOT marking done")
+            return I18n.get("sched_pred_done_empty")
         await svc._mark_nightly_prediction_done_db(today_str)
-        return I18n.get("sched_pred_done_found", count=len(result_df))
+        return I18n.get("sched_pred_done_found", count=saved)
 
     logger.info("[Scheduler] Nightly prediction found no candidates, NOT marking done to allow retry")
     return I18n.get("sched_pred_done_empty")
