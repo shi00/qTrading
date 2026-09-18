@@ -459,16 +459,19 @@ class TestBacktestMetrics:
         assert float(returns[0]) == 0.0
 
     def test_calc_daily_returns_handles_inf(self) -> None:
-        """nav_curve 含 0 值时 pct_change 产生 inf，应替换为 0.0"""
+        """nav_curve 含 0 值（爆仓）时 pct_change 产生 inf，应保留为 null 而非 0.0（D5-M2）。
+
+        净值归零是终止条件不是数值噪声：抹成 0.0 会让 volatility 低估、sharpe 被高估，
+        与 total_return/max_drawdown 的 -100% 自相矛盾。"""
         nav = pl.Series([0.0, 100.0, 105.0, 110.0])
         returns = BacktestMetrics.calc_daily_returns(nav)
         # 首项保持 null
         assert returns[0] is None
+        # 爆仓（0→正）日收益无定义 → null，而非 0.0
+        assert returns[1] is None
         # 不应包含 inf 或 nan
         assert not returns.is_infinite().any()
         assert not returns.is_nan().any()
-        # 0→100 的 inf 应被替换为 0.0
-        assert float(returns[1]) == 0.0
 
     def test_calc_investment_metrics_avg_min_drag(self) -> None:
         """BT-03: 基于每日持仓快照正确计算平均/最低投资比例与现金拖累天数。"""

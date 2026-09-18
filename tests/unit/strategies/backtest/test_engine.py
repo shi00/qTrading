@@ -1195,6 +1195,68 @@ class TestRunMergesRangePreloadWarnings:
         assert not any(w.startswith("preload_range_too_wide") for w in result.data_warnings)
 
 
+class TestRunPortfolioWipedOutWarning:
+    """D5-M2: 净值归零（爆仓）必须通过 portfolio_wiped_out 告警在 UI 可见。
+
+    calc_daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，
+    但 null 本身不会告知用户"爆仓发生了"——由 engine.run 在此处追加
+    DataWarning 进入 unreliable 判定，避免 volatility/sharpe 降级被静默掩盖。
+    """
+
+    async def _run_with_nav(self, monkeypatch, nav_curve: pl.Series):
+        """短路全部内部依赖，仅剩 nav 驱动爆仓检测，返回 engine.run 结果。"""
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+        )
+        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_nav_curve", MagicMock(return_value=nav_curve))
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        return await engine.run(strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_run_appends_wiped_out_warning_when_nav_zero(self, monkeypatch):
+        """nav 曲线含 0（爆仓）时，data_warnings 追加 portfolio_wiped_out，让爆仓首屏可见。"""
+        result = await self._run_with_nav(monkeypatch, pl.Series([100.0, 0.0], dtype=pl.Float64))
+        # DataWarning.__str__ 以 "[portfolio_wiped_out] ..." 起始，故用包含匹配
+        assert any("portfolio_wiped_out" in w for w in result.data_warnings)
+
+    @pytest.mark.asyncio
+    async def test_run_omits_warning_when_nav_never_zero(self, monkeypatch):
+        """nav 全程为正（未爆仓）时，data_warnings 不含 portfolio_wiped_out。"""
+        result = await self._run_with_nav(monkeypatch, pl.Series([100.0, 105.0], dtype=pl.Float64))
+        assert not any(w.startswith("portfolio_wiped_out") for w in result.data_warnings)
+
+
 class TestEnrichSuspendStatus:
     def _make_engine(self):
         config = BacktestConfig(

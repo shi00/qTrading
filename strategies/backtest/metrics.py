@@ -62,13 +62,23 @@ class BacktestMetrics:
 
     @staticmethod
     def calc_daily_returns(nav_curve: pl.Series) -> pl.Series:
+        """净值归零（pct_change 产生 inf/nan）不是数值噪声而是爆仓事件。
+
+        抹成 0.0 会让 volatility 低估、sharpe 被高估，与 total_return / max_drawdown
+        呈现的 -100% 自相矛盾。此处把爆仓日保留为 null（无定义），由调用方的
+        drop_nulls 自然剔除，并由 engine 追加 DataWarning(portfolio_wiped_out)
+        让爆仓在 UI 可见（D5-M2）。"""
         if len(nav_curve) <= 1:
             return pl.Series([0.0] * len(nav_curve))
         returns = nav_curve.pct_change()
-        # 首项保持 null（pct_change 产生）；nan 和 inf 替换为 0.0
+        # 首项保持 null（pct_change 产生）；爆仓日（inf/nan）转 null 而非 0.0
         return (
             returns.to_frame("_r")
-            .select(pl.when(pl.col("_r").is_infinite() | pl.col("_r").is_nan()).then(0.0).otherwise(pl.col("_r")))
+            .select(
+                pl.when(pl.col("_r").is_infinite() | pl.col("_r").is_nan())
+                .then(pl.lit(None, dtype=pl.Float64))
+                .otherwise(pl.col("_r"))
+            )
             .to_series()
         )
 

@@ -171,9 +171,9 @@ def _assess_credibility(
     顶部展示。VM 只产出 i18n key (Message)，不感知 locale (CLAUDE.md §3.2 MVVM)。
 
     严重性分级（对应真实数据结构）：
-    - data_warnings 非空 → unreliable：现存的两种 DataWarning
-      (suspend_enrich_failed / limit_enrich_failed) 均为停牌/涨跌停数据 enrichment 失败，
-      直接破坏撮合的可执行性，收益可能被高估。
+    - data_warnings 非空 → unreliable：各 DataWarning（如 suspend/limit enrichment 失败、
+      基准缺失/部分缺失、组合爆仓 portfolio_wiped_out）均表明回测结果受数据质量或
+      终止条件影响，收益/风控指标可能失真（爆仓日收益无定义被剔除）。
     - failed_signal_dates 非空 → unreliable：策略在某交易日执行失败，曲线存在平坦段。
     - skipped_orders 非空 → degraded：有订单因涨跌停/停牌/资金不足被跳过。
 
