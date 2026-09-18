@@ -133,7 +133,8 @@ qTrading/
 │   │   │   ├── stk_holdertrade_dao.py # 股东增减持数据
 │   │   │   ├── stk_limit_dao.py       # 涨跌停数据
 │   │   │   ├── sw_industry_dao.py     # 申万行业数据
-│   │   │   └── top_inst_dao.py        # 龙虎榜机构明细
+│   │   │   ├── top_inst_dao.py        # 龙虎榜机构明细
+│   │   │   └── watchlist_dao.py       # 自选股数据
 │   │   ├── models.py           # SQLAlchemy ORM 模型
 │   │   ├── db_migrator.py      # 数据库迁移管理
 │   │   ├── data_explorer_query_client.py # 数据库连接管理（同步引擎）
@@ -151,7 +152,9 @@ qTrading/
 │   │   ├── holder.py           # 股东数据同步
 │   │   ├── macro.py            # 宏观数据同步
 │   │   ├── concept_sync.py     # 概念板块同步
-│   │   └── sw_industry.py      # 申万行业同步
+│   │   ├── sw_industry.py      # 申万行业同步
+│   │   ├── name_change.py      # 证券更名历史同步
+│   │   └── errors.py           # 同步异常定义
 │   ├── mixins/             # 混入类
 │   │   ├── health_mixin.py     # 健康检查
 │   │   └── calendar_mixin.py   # 日历工具
@@ -173,6 +176,7 @@ qTrading/
 │   ├── polars_base.py          # Polars 策略基类
 │   ├── ai_mixin.py             # AI 分析混入
 │   ├── ai_strategy.py          # AI 策略实现
+│   ├── attribution.py          # 选股结果结构化归因（UX-04）
 │   ├── prompt_validator.py     # Prompt 数据声明校验器
 │   ├── strategy_prompts.py     # 策略 Prompt 模板
 │   ├── oversold_strategy.py    # 超跌反弹策略
@@ -303,7 +307,7 @@ qTrading/
 │   ├── env.py                  # Alembic 环境配置
 │   ├── script.py.mako          # 迁移脚本模板
 │   ├── README                  # Alembic 说明
-│   └── versions/               # 迁移脚本（0001~0015）
+│   └── versions/               # 迁移脚本（0001~0028）
 │
 ├── locales/                # 国际化
 │   ├── en_US/strings.json
