@@ -14,7 +14,7 @@
 |------|---------|
 | R1 架构越界 | core 导入其他层；data 导入 services/strategies/ui；services 导入 strategies/ui；strategies 导入 ui |
 | R2 异常吞没 | 吞没 `asyncio.CancelledError`（必须 raise） |
-| R3 模糊压制 | `# type: ignore` 不带 `[reason]` |
+| R3 模糊压制 | `# type: ignore` 不带 `[error-code]` |
 | R4 SQL 注入 | asyncpg 原生查询用 `%s` 而非 `$1, $2, ...` |
 | R5 僵尸引擎操作 | 在 disposed 引擎上执行数据库操作 |
 | R6 过时类型注解 | 使用 `Union[X, Y]` / `Optional[X]` 而非 `X \| Y` |
