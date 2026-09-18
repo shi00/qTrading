@@ -14,6 +14,10 @@ import polars as pl
 # report.py 与 calc_win_rate 共享此常量，确保 0 归类一致。
 PROFIT_THRESHOLD: float = 0.0
 
+# 现金拖累判定阈值：投资比例 < CASH_DRAG_THRESHOLD 的天数计入 cash_drag_days。
+# 「< 80% 视为现金拖累」是量纲专用阈值（D5-m1），集中为命名常量避免裸数值。
+CASH_DRAG_THRESHOLD: float = 0.8
+
 
 class ExitReason(enum.StrEnum):
     """平仓原因（D4-6）。
@@ -152,27 +156,21 @@ class BacktestMetrics:
 
     @staticmethod
     def calc_max_drawdown(nav_curve: pl.Series) -> tuple[float, int, int]:
+        """最大回撤及其峰值/谷底索引（Polars 向量化，D5-m2）。
+
+        经累计最大值 cum_max 求 drawdown = (cum_max - nav) / cum_max，用 arg_max
+        定位谷底 index，再回溯谷底前最近峰值（cum_max 前缀中最大值的 index），
+        避免逐元素 Python 循环。初值一致：空 nav 返回 (0, 0, 0)；单调递增（无
+        回撤）时 drawdown 全 0，arg_max 返回首元素 → (0, 0, 0)。首项为 0 时
+        0/0 产生 nan，fill_nan(0.0) 收敛（原 Python 版此处会除零崩溃）。
+        """
         if len(nav_curve) == 0:
             return 0.0, 0, 0
-
-        peak = nav_curve[0]
-        max_dd = 0.0
-        peak_idx = 0
-        trough_idx = 0
-        current_peak_idx = 0
-
-        for i in range(len(nav_curve)):
-            if nav_curve[i] > peak:
-                peak = nav_curve[i]
-                current_peak_idx = i
-            else:
-                dd = float((peak - nav_curve[i]) / peak)
-                if dd > max_dd:
-                    max_dd = dd
-                    peak_idx = current_peak_idx
-                    trough_idx = i
-
-        return max_dd, peak_idx, trough_idx
+        cumulative_max = nav_curve.cum_max()
+        drawdown = ((cumulative_max - nav_curve) / cumulative_max).fill_nan(0.0)
+        trough_idx = int(cast(float, drawdown.arg_max() or 0.0))
+        peak_idx = int(cast(float, cumulative_max[: trough_idx + 1].arg_max() or 0.0))
+        return float(cast(float, drawdown.max() or 0.0)), peak_idx, trough_idx
 
     @staticmethod
     def calc_calmar_ratio(
@@ -338,7 +336,7 @@ class BacktestMetrics:
         - 每日投资比例 invested_pct = (total_value - cash) / total_value（现金及未投出部分占比）
         - avg_invested_pct: 平均投资比例
         - min_invested_pct: 最低投资比例
-        - cash_drag_days: 投资比例 < 80% 的天数（现金拖累）
+        - cash_drag_days: 投资比例 < CASH_DRAG_THRESHOLD 的天数（现金拖累）
 
         持仓为空（无信号回测等）时视为 0% 投资。这些指标让「信号稀疏 → 资金闲置」
         变得可见：avg_invested_pct 低说明收益被现金稀释（volatility/回撤被压低但 Sharpe
@@ -352,7 +350,7 @@ class BacktestMetrics:
         invested_pct = (invested / total).fill_nan(0.0).fill_null(0.0)
         _mean = invested_pct.mean()
         _min = invested_pct.min()
-        _drag = (invested_pct < 0.8).sum()
+        _drag = (invested_pct < CASH_DRAG_THRESHOLD).sum()
         return {
             "avg_invested_pct": float(cast(float, _mean)) if len(invested_pct) > 0 else 0.0,
             "min_invested_pct": float(cast(float, _min)) if len(invested_pct) > 0 else 0.0,

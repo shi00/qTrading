@@ -83,6 +83,23 @@ class TestBacktestMetrics:
         assert peak_idx == 0
         assert trough_idx == 0
 
+    def test_calc_max_drawdown_monotonic_increasing(self) -> None:
+        """单调递增（无回撤）时最大回撤为 0，峰值/谷底回落首元素（D5-m2 向量化语义）。"""
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([100.0, 101.0, 102.0, 103.0]))
+        assert max_dd == 0.0
+        assert peak_idx == 0
+        assert trough_idx == 0
+
+    def test_calc_max_drawdown_leading_zero_no_crash(self) -> None:
+        """nav 首项为 0（净值归零起点）时不再除零崩溃，真实回撤仍被正确计算（D5-m2）。
+
+        原 Python 版本首项 0 时 (peak - nav) / peak = 0/0 抛 ZeroDivisionError；
+        向量化版经 fill_nan 收敛，后续 100→90 的正常 10% 回撤照常度量。"""
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([0.0, 100.0, 90.0]))
+        assert max_dd == pytest.approx(0.1, rel=1e-6)
+        assert peak_idx == 1
+        assert trough_idx == 2
+
     def test_calc_calmar_ratio(self) -> None:
         calmar = BacktestMetrics.calc_calmar_ratio(0.15, 0.10)
         assert calmar == pytest.approx(1.5, rel=0.01)
