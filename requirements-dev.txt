@@ -524,8 +524,10 @@ sortedcontainers==2.4.0
     # via
     #   cyclonedx-python-lib
     #   hypothesis
-soupsieve==2.8.4
-    # via beautifulsoup4
+soupsieve==2.9.2
+    # via
+    #   astockscreener (pyproject.toml)
+    #   beautifulsoup4
 sqlalchemy==2.0.54
     # via
     #   astockscreener (pyproject.toml)
