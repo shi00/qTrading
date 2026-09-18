@@ -228,8 +228,10 @@ redlines:
   - id: R22
     title: 水位线单调性
     description: "checkpoint / 高水位语义的持久化状态（如 set_app_state 写入的断点续传水位），写入必须单调（优先 *_max 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值"
-    enforcement: "仅人工评审（AST 可行性原型 scripts/prototype_business_redlines.py 的 WatermarkVisitor 检测 set_app_state 非 *_max 写水位形态供复核；存量缺陷修复前不设自动拦截）"
-    automation_coverage: none
+    enforcement: "pre-commit（check_redlines.py：check_R22 静态检测对 WATERMARK_KEY_PREFIXES 白名单前缀的 set_app_state 非单调写入；动态/插值 key 无法静态判定，保持人工评审）"
+    checks:
+      - check_R22
+    automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
 

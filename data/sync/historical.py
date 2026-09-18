@@ -22,6 +22,7 @@ from data.constants import (
     SYNC_RESULT_HAS_DATA,
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
+    WATERMARK_KEY_PREFIXES,
 )
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
@@ -46,7 +47,8 @@ _DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
 
 # "已尝试水位"存储键前缀（D1-1）：区分"该表该日已尝试且合法为空"（quality 豁免）
 # 与"从未尝试"（真实缺口）。key 形如 sync_attempted_upto:<table>，value 为 YYYYMMDD。
-_WATERMARK_KEY_PREFIX = "sync_attempted_upto"
+# 前缀为 R22 水位键白名单（D3-m1），单一真相源在 data/constants.py。
+_WATERMARK_KEY_PREFIX = WATERMARK_KEY_PREFIXES[0]
 
 
 class _FailureWindow:
