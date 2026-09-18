@@ -40,6 +40,7 @@ class TestRunReviewE2E(unittest.TestCase):
         from data.persistence.review_manager import ReviewManager
 
         manager = ReviewManager.__new__(ReviewManager)
+        manager.label_horizon = "t5"  # D4-M4: __new__ 不跑 __init__，须显式设置默认标签窗口
         manager.cache = MagicMock()
         manager.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240318")
         manager.cache.stock_dao.get_trade_cal = AsyncMock(
@@ -66,10 +67,11 @@ class TestRunReviewE2E(unittest.TestCase):
         manager.cache.screener_dao.update_prediction_result = AsyncMock()
         manager.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
         manager.cache.quote_dao.get_index_daily = AsyncMock(return_value=index_df)
+        manager.cache.get_index_daily_range = AsyncMock(return_value=None)
         manager.api = MagicMock()
         manager.api.get_index_daily = AsyncMock(return_value=index_df)
-        manager.alpha_win_threshold = 0.5
-        manager.alpha_loss_threshold = 0.5
+        manager.alpha_win_threshold = 3.0
+        manager.alpha_loss_threshold = 3.0
         return manager
 
     @patch("data.persistence.review_manager.ConfigHandler")
@@ -90,9 +92,12 @@ class TestRunReviewE2E(unittest.TestCase):
         asyncio.run(manager.run_review())
         manager.cache.screener_dao.update_prediction_result.assert_called_once()
         call_args = manager.cache.screener_dao.update_prediction_result.call_args
-        assert call_args[0][2] == "WIN"
+        # D4-M4: T+5 未成熟时回填 T+1 数值、打 DRAW 占位（alpha/index 留待 T+5 定稿）。
+        assert call_args[0][2] == "DRAW"
         assert call_args.kwargs["t1_price"] == 10.5
         assert call_args.kwargs["t5_pct"] is None
+        assert call_args.kwargs["index_pct"] is None
+        assert call_args.kwargs["alpha"] is None
 
     @patch("data.persistence.review_manager.ConfigHandler")
     def test_t1_t5_index_available_writes_completed(self, mock_config):
@@ -125,14 +130,22 @@ class TestRunReviewE2E(unittest.TestCase):
 
     @patch("data.persistence.review_manager.ConfigHandler")
     def test_index_unavailable_skips_and_stays_pending(self, mock_config):
+        """D4-M4: T+5 已成熟但基准指数不可得时，跳过不写以避免标签污染（保持 pending）。"""
         mock_config.get_config.return_value = "000001.SH"
-        pending_df = self._pending_df("20240315")
+        pending_df = self._pending_df("20240308")
         quotes_df = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ", "000001.SZ"],
-                "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
-                "close": [10.0, 10.5],
-                "pct_chg": [1.0, 5.0],
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": [
+                    datetime.date(2024, 3, 8),
+                    datetime.date(2024, 3, 11),
+                    datetime.date(2024, 3, 12),
+                    datetime.date(2024, 3, 13),
+                    datetime.date(2024, 3, 14),
+                    datetime.date(2024, 3, 15),
+                ],
+                "close": [10.0, 10.5, 10.3, 10.8, 11.0, 11.2],
+                "pct_chg": [1.0, 5.0, -1.9, 4.85, 1.85, 1.82],
             }
         )
         manager = self._make_manager(pending_df, quotes_df, None)

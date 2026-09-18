@@ -147,24 +147,27 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
                         "20240319",
                         "20240320",
                         "20240321",
+                        "20240322",
                     ],
-                    "is_open": [1] * 10,
+                    "is_open": [1] * 11,
                 }
             )
         )
         mock_cache.screener_dao = MagicMock()
         mock_cache.screener_dao.get_pending_predictions = AsyncMock(return_value=pending_df)
         mock_cache.screener_dao.update_prediction_result = AsyncMock()
+        # D4-M4: 行情覆盖到 T+5（20240322），触发 T+5 成熟分支的基准指数解析。
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": [
                         datetime.date(2024, 3, 15),
                         datetime.date(2024, 3, 18),
+                        datetime.date(2024, 3, 22),
                     ],
-                    "close": [10.0, 10.3],
-                    "pct_chg": [1.0, 3.0],
+                    "close": [10.0, 10.3, 10.3],
+                    "pct_chg": [1.0, 3.0, 3.0],
                 }
             )
         )
@@ -204,8 +207,8 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
             assert isinstance(call_kwargs["start_date"], str), (
                 f"H-4: api.get_index_daily must receive string, got {type(call_kwargs['start_date'])}"
             )
-            # run_review queries benchmark return on T+1 date (not analysis day).
-            assert call_kwargs["start_date"] == "20240318"
+            # D4-M4: run_review 在 T+5 成熟分支查询基准收益（复单 label_date=T+5，非 T+1）。
+            assert call_kwargs["start_date"] == "20240322"
 
         asyncio.run(run_test())
 
@@ -534,16 +537,16 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
 
     def test_review_win_when_alpha_positive(self):
-        """Alpha > 0.5 时标记为 WIN"""
+        """Alpha > 3.0 时标记为 WIN（D4-M4：以 T+5 成熟窗口定稿）"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240322"],
+                    "close": [10.0, 10.5, 10.5],
+                    "pct_chg": [1.0, 5.0, 5.0],
                 }
             )
         )
@@ -565,16 +568,16 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_review_loss_when_alpha_negative(self):
-        """Alpha < -0.5 时标记为 LOSS"""
+        """Alpha < -3.0 时标记为 LOSS（D4-M4：以 T+5 成熟窗口定稿）"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 9.5],
-                    "pct_chg": [1.0, -5.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240322"],
+                    "close": [10.0, 9.8, 9.5],
+                    "pct_chg": [1.0, -2.0, -5.0],
                 }
             )
         )
@@ -596,16 +599,16 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_review_draw_when_alpha_near_zero(self):
-        """|Alpha| <= 0.5 时标记为 DRAW"""
+        """|Alpha| <= 3.0 时标记为 DRAW（D4-M4：以 T+5 成熟窗口定稿）"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 10.1],
-                    "pct_chg": [1.0, 1.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240322"],
+                    "close": [10.0, 10.1, 10.1],
+                    "pct_chg": [1.0, 1.0, 1.0],
                 }
             )
         )
@@ -661,7 +664,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
             self.assertAlmostEqual(kwargs["t5_pct"], 10.0)
             self.assertEqual(kwargs["t5_price"], 11.0)
             self.assertEqual(kwargs["index_pct"], 1.0)
-            self.assertAlmostEqual(kwargs["alpha"], 4.0)
+            # D4-M4: alpha = t5_pct - index_pct = 10.0 - 1.0 = 9.0（T+5 窗口）。
+            self.assertAlmostEqual(kwargs["alpha"], 9.0)
 
         asyncio.run(run_test())
 
@@ -711,16 +715,16 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_review_index_data_failure_defaults_zero(self):
-        """指数数据获取失败时跳过记录以避免标签污染"""
+        """D4-M4: T+5 成熟但基准指数不可得时跳过记录以避免标签污染。"""
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 10.3],
-                    "pct_chg": [1.0, 3.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240322"],
+                    "close": [10.0, 10.3, 10.3],
+                    "pct_chg": [1.0, 3.0, 3.0],
                 }
             )
         )
@@ -904,10 +908,10 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240315", "20240318"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240315", "20240318", "20240322"],
+                    "close": [10.0, 10.5, 10.5],
+                    "pct_chg": [1.0, 5.0, 5.0],
                 }
             )
         )
@@ -921,8 +925,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
+            # D4-M4: 降级逐日查询在 T+5 成熟分支发生，trade_date 为 T+5 锚点。
             mock_cache_instance.quote_dao.get_index_daily.assert_called_once_with(
-                ts_code=DEFAULT_BENCHMARK_INDEX, trade_date=datetime.date(2024, 3, 18)
+                ts_code=DEFAULT_BENCHMARK_INDEX, trade_date=datetime.date(2024, 3, 22)
             )
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
 
@@ -1034,6 +1039,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=candidate)
         mock_cache_instance.screener_dao.backfill_t5_prediction = AsyncMock()
         mock_cache_instance.engine = _make_engine()
+        # D4-M4: backfill_horizon_returns 解析 T+5 基准指数以定稿标签。
+        mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=index_df)
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
         result = asyncio.run(manager.backfill_horizon_returns(horizon=5))
