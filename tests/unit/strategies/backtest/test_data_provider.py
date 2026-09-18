@@ -683,7 +683,16 @@ class TestBacktestQualityProxy:
         """D3-M4: count_expected_rows 失败时护栏退化回固定兜底常量，行为与现状一致且安全。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(side_effect=Exception("estimate boom"))
-        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240103"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
@@ -743,9 +752,18 @@ class TestBacktestQualityProxy:
         await provider.preload_range(date(2024, 1, 1), date(2025, 2, 1))
         assert provider.range_preload_warnings
 
-        # 第二次：正常预载（无 warnings 累积）
+        # 第二次：正常预载（screening_data 覆盖全交易日 → 无缺口 → 无 warnings 累积）
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240103"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
@@ -788,6 +806,12 @@ class TestBacktestQualityProxy:
 
         assert provider._quality_proxy._quality_tier == int(QualityTier.BRONZE)
         assert provider._quality_proxy._scan_missing_dates == frozenset({"20240103"})
+        # D3-M2: 区间缺口必须写入 range_preload_warnings，经 engine 并入 BacktestResult.data_warnings，
+        # 触发 backtest_view_model 的 unreliable 判定，让缺口在 UI 首屏可见。
+        assert any(
+            w.startswith("[range_quality_gaps]") and "20240103" in w and "1 of 2" in w
+            for w in provider.range_preload_warnings
+        )
 
     @pytest.mark.asyncio
     async def test_preload_no_missing_keeps_gold(self) -> None:
@@ -817,6 +841,8 @@ class TestBacktestQualityProxy:
 
         assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
         assert provider._quality_proxy._scan_missing_dates == frozenset()
+        # D3-M2: 无缺口 → 不产生 range_quality_gaps 警告
+        assert not any(w.startswith("[range_quality_gaps]") for w in provider.range_preload_warnings)
 
     @pytest.mark.asyncio
     async def test_preload_calendar_failure_keeps_gold(self, _autouse_mock_trade_calendar) -> None:
@@ -851,6 +877,33 @@ class TestBacktestQualityProxy:
         assert provider._quality_proxy._scan_missing_dates == frozenset()
         assert isinstance(provider._preloaded, dict)
         assert "20240102" in provider._preloaded["screening_data"]
+
+    @pytest.mark.asyncio
+    async def test_preload_empty_screening_data_reports_all_missing(self) -> None:
+        """D3-M2: screening_data 查询成功但零行（空 dict）→ 全区间缺口，降级 BRONZE 并告警。
+
+        空 dict 等价于整段区间无筛选数据，回测必然无信号；必须可见而非静默保持 GOLD。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._quality_proxy._quality_tier == int(QualityTier.BRONZE)
+        assert provider._quality_proxy._scan_missing_dates == frozenset({"20240102", "20240103"})
+        assert any(
+            w.startswith("[range_quality_gaps]") and "2 of 2" in w and "20240102" in w and "20240103" in w
+            for w in provider.range_preload_warnings
+        )
 
 
 class TestBacktestDataProviderAuxiliaryTables:

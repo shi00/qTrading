@@ -154,8 +154,10 @@ class BacktestDataProvider:
             self._preloaded = None
             return
 
-        # 每次预载重置降级警告列表，避免跨多次 preload_range 调用累积旧状态
+        # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
+        # （重复调用时若本次跳过评估，proxy 不应残留上次区间的 BRONZE/GOLD 判定）。
         self._range_preload_warnings = []
+        self._quality_proxy = _BacktestQualityProxy(delegate=self.data_processor)
 
         start_str = self._normalize_trade_date(start_date_obj)
         end_str = self._normalize_trade_date(end_date_obj)
@@ -260,10 +262,10 @@ class BacktestDataProvider:
                     self._preloaded[key] = {}
 
             # D3-M2 区间缺口评估：expected=全市场交易日全集，actual=screening_data 实际覆盖日期键。
-            # 仅当 screening_data 为按交易日分组 dict（含 trade_date 列）且 expected 可得时计算缺口；
-            # 否则（查询失败 fallback daily / 数据异常）保持默认 GOLD 代理，回测仍可运行。
+            # 空 dict（查询成功但零行）同样评估——整段区间无筛选数据等价于全缺口，必须可见。
+            # 仅查询失败 fallback daily（_preloaded[key]=None）或 expected 不可得时保持默认 GOLD 代理。
             screen_pre = self._preloaded.get("screening_data")
-            if expected_dates is not None and isinstance(screen_pre, dict) and screen_pre:
+            if expected_dates is not None and isinstance(screen_pre, dict):
                 actual = set(screen_pre.keys())
                 missing = frozenset(sorted(expected_dates - actual))
                 self._quality_proxy = _BacktestQualityProxy(
@@ -271,6 +273,22 @@ class BacktestDataProvider:
                     tier=QualityTier.GOLD if not missing else QualityTier.BRONZE,
                     missing_dates=missing,
                 )
+                if missing:
+                    # D3-M2: 区间缺口必须可见——对 required_quality_tier ≤ BRONZE 或未声明
+                    # require_continuous_window 的策略，缺口不触发 _check_tier 拦截，回测在
+                    # 缺口日无信号/无数据运行且全程无告警；声明 require_continuous_window 的
+                    # 策略缺口仍被 _check_tier 拒绝执行（quality_gate 连续窗口检查，拒绝本身
+                    # 经 failed_signal_dates 可见），本警告覆盖其余静默场景。经
+                    # _range_preload_warnings 并入 BacktestResult.data_warnings，触发
+                    # backtest_view_model 的 unreliable 判定。
+                    # 格式对齐 DataWarning.__str__（[type] start-end: ...），含缺失数量与占比、
+                    # 前 5 个缺失日（超长截断防撑爆）。
+                    missing_sorted = sorted(missing)
+                    sample = ",".join(missing_sorted[:5]) + ("..." if len(missing_sorted) > 5 else "")
+                    self._range_preload_warnings.append(
+                        f"[range_quality_gaps] {start_str}-{end_str}: {len(missing)} of {len(expected_dates)} "
+                        f"trade date(s) missing in screening_data: {sample}"
+                    )
                 logger.info(
                     "[BacktestDataProvider] Range quality: %s missing trade date(s) in screening_data → tier %s",
                     len(missing),
