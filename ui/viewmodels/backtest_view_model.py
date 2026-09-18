@@ -605,7 +605,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     skipped_reasons=skipped_reasons,
                 )
 
-                return Message("backtest_success", {"sharpe": f"{result.metrics.get('sharpe_ratio', 0):.2f}"})
+                _sharpe = result.metrics.get("sharpe_ratio")
+                return Message(
+                    "backtest_success",
+                    {"sharpe": "N/A" if _sharpe is None else f"{_sharpe:.2f}"},
+                )
 
             except asyncio.CancelledError:
                 # F3-11: 取消路径显式终态（progress 清空避免 UI 残留文案）

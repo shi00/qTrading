@@ -52,21 +52,23 @@ class TestBacktestMetrics:
 
     def test_calc_volatility(self, sample_daily_returns: pl.Series) -> None:
         vol = BacktestMetrics.calc_volatility(sample_daily_returns)
+        assert vol is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，真实断言在下一行 >0
         assert vol > 0
 
     def test_calc_volatility_insufficient_data(self) -> None:
-        assert BacktestMetrics.calc_volatility(pl.Series([0.01])) == 0.0
+        assert BacktestMetrics.calc_volatility(pl.Series([0.01])) is None
 
     def test_calc_sharpe_ratio(self, sample_daily_returns: pl.Series) -> None:
         sharpe = BacktestMetrics.calc_sharpe_ratio(sample_daily_returns, risk_free_rate=0.02)
+        assert sharpe is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，真实断言在下一行 >0
         assert sharpe > 0
 
     def test_calc_sharpe_ratio_insufficient_data(self) -> None:
-        assert BacktestMetrics.calc_sharpe_ratio(pl.Series([0.01]), 0.02) == 0.0
+        assert BacktestMetrics.calc_sharpe_ratio(pl.Series([0.01]), 0.02) is None
 
     def test_calc_sharpe_ratio_zero_std(self) -> None:
         returns = pl.Series([0.01, 0.01, 0.01])
-        assert BacktestMetrics.calc_sharpe_ratio(returns, 0.02) == 0.0
+        assert BacktestMetrics.calc_sharpe_ratio(returns, 0.02) is None
 
     def test_calc_max_drawdown(self) -> None:
         nav = pl.Series([100.0, 110.0, 105.0, 95.0, 100.0, 90.0, 95.0])
@@ -86,7 +88,8 @@ class TestBacktestMetrics:
         assert calmar == pytest.approx(1.5, rel=0.01)
 
     def test_calc_calmar_ratio_zero_drawdown(self) -> None:
-        assert BacktestMetrics.calc_calmar_ratio(0.15, 0.0) == 0.0
+        # D5-C1: max_drawdown == 0（全程无回撤，数学上 +∞）时 Calmar 无定义，返回 None
+        assert BacktestMetrics.calc_calmar_ratio(0.15, 0.0) is None
 
     def test_calc_calmar_ratio_none_annualized(self) -> None:
         # D1-M4: 年化为 None（区间过短）时 Calmar 亦无定义，返回 None
@@ -219,14 +222,17 @@ class TestBacktestMetrics:
         signal_rank = pl.Series([1, 2, 3, 4, 5])
         forward_return = pl.Series([5.0, 3.0, 0.0, -2.0, -4.0])
         ic = BacktestMetrics.calc_ic(signal_rank, forward_return)
+        assert ic is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，真实断言在下一行 <0
         assert ic < 0
 
     def test_calc_ic_insufficient_data(self) -> None:
-        assert BacktestMetrics.calc_ic(pl.Series([1, 2]), pl.Series([1.0, 2.0])) == 0.0
+        # D5-C1: 样本 < 3 时 Spearman 相关无定义，返回 None（区分「未测量」vs「测量为无效」）
+        assert BacktestMetrics.calc_ic(pl.Series([1, 2]), pl.Series([1.0, 2.0])) is None
 
     def test_calc_ir(self) -> None:
         ic_series = pl.Series([0.05, 0.03, 0.07, 0.02, 0.04])
         ir = BacktestMetrics.calc_ir(ic_series)
+        assert ir is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，后续强断言验证具体值
         assert ir > 0
 
     def test_calc_ir_annualization_factor(self) -> None:
@@ -239,18 +245,28 @@ class TestBacktestMetrics:
         ir_126 = BacktestMetrics.calc_ir(ic_series, num_days=126)
         # years=1.0 → factor=sqrt(5/1)=sqrt(5); years=0.5 → factor=sqrt(5/0.5)=sqrt(10)
         # 比值 = sqrt(10)/sqrt(5) = sqrt(2) ≈ 1.4142
+        assert ir_252 is not None
+        assert ir_126 is not None
         assert ir_252 > 0
         assert ir_126 > 0
         assert abs(ir_126 / ir_252 - (2**0.5)) < 1e-6
 
     def test_calc_ir_zero_std(self) -> None:
+        # D5-C1: IC 零波动（信号无稳定性）时 IR 无定义，返回 None
         ic_series = pl.Series([0.05, 0.05, 0.05])
-        assert BacktestMetrics.calc_ir(ic_series) == 0.0
+        assert BacktestMetrics.calc_ir(ic_series) is None
+
+    def test_calc_ir_all_none(self) -> None:
+        # D5-C1: IC 序列全部为 None（该期都无法计算）时 IR 无定义，返回 None，
+        # 而非误判为「信号无稳定性」(0.0)。
+        ic_series = pl.Series([None, None, None])
+        assert BacktestMetrics.calc_ir(ic_series) is None
 
     def test_calc_ir_zero_num_days_uses_fallback(self) -> None:
         """F3-03: num_days=0 时 years fallback 到 1.0，不爆除零。"""
         ic_series = pl.Series([0.05, 0.03, 0.07, 0.02, 0.04])
         ir = BacktestMetrics.calc_ir(ic_series, num_days=0)
+        assert ir is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，后续强断言验证具体值
         assert math.isfinite(ir)
 
     def test_calc_information_ratio(
@@ -262,6 +278,8 @@ class TestBacktestMetrics:
             sample_daily_returns,
             sample_benchmark_returns,
         )
+        assert ir is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，后续强断言验证具体值
+        assert te is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，后续强断言验证具体值
         assert ir > 0
         assert te > 0
 
@@ -270,8 +288,9 @@ class TestBacktestMetrics:
             pl.Series([0.01]),
             pl.Series([0.008]),
         )
-        assert ir == 0.0
-        assert te == 0.0
+        # D5-C1: 有效样本不足 2 时信息比率/跟踪误差无定义，返回 None
+        assert ir is None
+        assert te is None
 
     def test_calc_information_ratio_drops_null_benchmark_days(self) -> None:
         # D1-M1: 基准缺失（null）不应污染信息比率；结果应与"调用前剔除 null 行"等价。
@@ -327,6 +346,47 @@ class TestBacktestMetrics:
         assert metrics["total_return"] is not None and metrics["total_return"] > 0
         assert metrics["sharpe_ratio"] is not None and metrics["sharpe_ratio"] > 0
         assert metrics["max_drawdown"] is not None and metrics["max_drawdown"] >= 0
+
+    def test_calc_all_metrics_ic_mean_skips_none(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """D5-C1: ic_mean 剔除「该期无法计算」的 None，而非当作 0 参与平均拉低均值。
+
+        若把 None 当 0，[0.05, None, 0.03] 会算出 0.0267，伪装成「信号无效」。
+        """
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [100.0]})
+        ic_series = pl.Series([0.05, None, 0.03])
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            ic_series,
+            risk_free_rate=0.02,
+        )
+        assert metrics["ic_mean"] == pytest.approx(0.04)
+        assert metrics["ic_ir"] is not None  # noqa: weak-assertion ic_ir 由有效 IC 序列计算必为定义值，is not None 守卫类型收窄
+
+    def test_calc_all_metrics_ic_mean_empty_series_is_none(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """D5-C1: IC 序列为空（无任何可计算期）时 ic_mean 无定义，返回 None。"""
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [100.0]})
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            pl.Series([], dtype=pl.Float64),
+            risk_free_rate=0.02,
+        )
+        assert metrics["ic_mean"] is None
 
     def test_calc_nav_curve_from_positions(self) -> None:
         positions = pl.DataFrame(

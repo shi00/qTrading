@@ -269,6 +269,30 @@ class TestBuildMetricsSection:
 
         assert isinstance(content, ft.Column)
 
+    def test_metrics_section_none_metrics_render_na(self) -> None:
+        """D5-C1: sharpe/ic_mean/ic_ir 无定义 (None) → 渲染 N/A 并走次要色，不崩溃。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({"sharpe_ratio": None, "ic_mean": None, "ic_ir": None})
+
+        # controls: [title, row1, row2, row3]（无退市/资金告警条）
+        assert len(content.controls) == 4
+        row1, row2 = content.controls[1], content.controls[2]
+
+        # sharpe 卡片在 row1 第 3 位（index 2）
+        sharpe_value = row1.controls[2].content.content.controls[1]
+        assert sharpe_value.value == "N/A"
+        assert sharpe_value.color == AppColors.TEXT_SECONDARY
+
+        # ic_mean / ic_ir 卡片在 row2 第 2/3 位（index 1/2）
+        ic_mean_value = row2.controls[1].content.content.controls[1]
+        assert ic_mean_value.value == "N/A"
+        assert ic_mean_value.color == AppColors.TEXT_SECONDARY
+
+        ic_ir_value = row2.controls[2].content.content.controls[1]
+        assert ic_ir_value.value == "N/A"
+        assert ic_ir_value.color == AppColors.TEXT_SECONDARY
+
 
 class TestIcSortLabel:
     """BT-01: has_real_score=False 时 IC 卡片标签切换为「排序 IC」并附 tooltip。"""

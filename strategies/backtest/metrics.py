@@ -89,14 +89,16 @@ class BacktestMetrics:
     def calc_volatility(
         daily_returns: pl.Series,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
+        """有效样本不足 2 时波动率无定义，返回 None（R21：不可返回 0.0——
+        「零波动」是具体业务含义，且会低估爆仓后的真实波动）。"""
         # 排除首项 null（pct_change 产生的伪样本）
         valid_returns = daily_returns.drop_nulls()
         if len(valid_returns) < 2:
-            return 0.0
+            return None
         std_val = valid_returns.std()
         if std_val is None or not isinstance(std_val, (int, float)):
-            return 0.0
+            return None
         return float(std_val) * math.sqrt(trading_days_per_year)
 
     @staticmethod
@@ -104,25 +106,28 @@ class BacktestMetrics:
         daily_returns: pl.Series,
         risk_free_rate: float = 0.02,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
+        """夏普比率：有效样本不足、或超额收益零波动/异常时无定义，返回 None
+        （R21：不可返回 0.0——「风险调整后收益恰好等于无风险利率」是具体业务含义，
+        会掩盖样本不足或恒定收益的真实状态）。"""
         # 排除首项 null（pct_change 产生的伪样本）
         valid_returns = daily_returns.drop_nulls()
         if len(valid_returns) < 2:
-            return 0.0
+            return None
 
         daily_rf = risk_free_rate / trading_days_per_year
         excess_returns = valid_returns - daily_rf
 
         excess_std = excess_returns.std()
         if excess_std is None or not isinstance(excess_std, (int, float)):
-            return 0.0
+            return None
         excess_std_float = float(excess_std)
         if excess_std_float == 0:
-            return 0.0
+            return None
 
         excess_mean = excess_returns.mean()
         if excess_mean is None or not isinstance(excess_mean, (int, float)):
-            return 0.0
+            return None
 
         return float(excess_mean) / excess_std_float * math.sqrt(trading_days_per_year)
 
@@ -159,8 +164,10 @@ class BacktestMetrics:
         # report/UI 渲染 N/A，避免用 0.0 伪装真实比值。
         if annualized_return is None:
             return None
+        # R21: max_drawdown == 0（全程无回撤）时 Calmar 数学上为 +∞，是最优状态而非
+        # 「单位回撤收益为零」。记为 0.0 会让最好的结果显示为最差，被排序/寻优系统性淘汰。
         if max_drawdown <= 0:
-            return 0.0
+            return None
         return annualized_return / max_drawdown
 
     @staticmethod
@@ -214,9 +221,12 @@ class BacktestMetrics:
     def calc_ic(
         signal_rank: pl.Series,
         forward_return: pl.Series,
-    ) -> float:
+    ) -> float | None:
+        """样本不足或相关不可算时 IC 无定义，返回 None（R21：不可返回 0.0——
+        IC=0 的业务含义是「信号无预测力」，与「候选股不足无法计算」是完全不同的结论，
+        后者只是未测量，前者是对策略的判决）。"""
         if len(signal_rank) < 3 or len(forward_return) < 3:
-            return 0.0
+            return None
         df = pl.DataFrame(
             {
                 "signal_rank": signal_rank,
@@ -224,32 +234,38 @@ class BacktestMetrics:
             }
         )
         correlation = df.select(pl.corr("signal_rank", "forward_return", method="spearman")).item()
-        return float(correlation) if correlation is not None else 0.0
+        return float(correlation) if correlation is not None else None
 
     @staticmethod
     def calc_ir(
         ic_series: pl.Series,
         num_days: int = 252,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
         """计算 IC 信息比率 (IR)。
 
         年化系数 = sqrt(ic_count / years)，其中 years = num_days / 252。
         IC 序列按调仓频率计算（非日频），不能用固定 sqrt(252) 年化。
-        """
-        if len(ic_series) < 2:
-            return 0.0
-        ic_mean_raw = ic_series.mean()
-        ic_mean = float(cast(float, ic_mean_raw)) if ic_mean_raw is not None else 0.0
-        ic_std_val = ic_series.std()
+        无定义（有效样本不足 / IC 零波动）时返回 None（R21）。"""
+
+        # R21: 先剔除「该期无法计算」（None → null）的无效样本；有效样本不足 2 个时
+        # IR 无定义，返回 None。若不剔除，全 null 序列会被误判为「信号无稳定性」(0.0)。
+        valid = ic_series.drop_nulls()
+        if len(valid) < 2:
+            return None
+        ic_mean_raw = valid.mean()
+        ic_mean = float(cast(float, ic_mean_raw)) if ic_mean_raw is not None else None
+        ic_std_val = valid.std()
         if ic_std_val is None:
-            return 0.0
+            return None
         ic_std_float = float(cast(float, ic_std_val))
         if ic_std_float < 1e-10:
-            return 0.0
+            return None
+        if ic_mean is None:
+            return None
         # 年化系数: ic_count / years = 每年 IC 样本数
         years = num_days / trading_days_per_year if num_days > 0 else 1.0
-        ic_count = len(ic_series)
+        ic_count = len(valid)
         annualization_factor = math.sqrt(ic_count / years)
         return ic_mean / ic_std_float * annualization_factor
 
@@ -258,26 +274,28 @@ class BacktestMetrics:
         daily_returns: pl.Series,
         benchmark_returns: pl.Series,
         trading_days_per_year: int = 252,
-    ) -> tuple[float, float]:
+    ) -> tuple[float | None, float | None]:
         # D1-M1: 两序列按共同有效样本对齐后相减。缺口（基准缺失日 / 净值爆仓日）
         #   不参与超额计算，避免 null 传播污染跟踪误差与信息比率，也防止"基准缺失被
         #   伪装成 0"系统性拉低超额。对齐后不足 2 个样本则视为无超额（沿用旧语义）。
+        # R21: 无定义时返回 (None, None)——「无超额收益、零跟踪误差」是具体业务含义，
+        #   会把「无法计算」伪装成「业绩与基准完全持平」。
         aligned = pl.DataFrame({"daily_returns": daily_returns, "benchmark_returns": benchmark_returns}).drop_nulls()
         if len(aligned) < 2:
-            return 0.0, 0.0
+            return None, None
 
         excess_returns = aligned["daily_returns"] - aligned["benchmark_returns"]
 
         tracking_error = excess_returns.std()
         if tracking_error is None:
-            return 0.0, 0.0
+            return None, None
         tracking_error_float = float(cast(float, tracking_error))
         if tracking_error_float == 0:
-            return 0.0, 0.0
+            return None, None
 
         excess_mean = excess_returns.mean()
         if excess_mean is None:
-            return 0.0, 0.0
+            return None, None
 
         tracking_error_annual = tracking_error_float * math.sqrt(trading_days_per_year)
         information_ratio = float(cast(float, excess_mean)) * trading_days_per_year / tracking_error_annual
@@ -331,7 +349,10 @@ class BacktestMetrics:
 
         information_ratio, tracking_error = BacktestMetrics.calc_information_ratio(daily_returns, benchmark_returns)
 
-        _ic_mean_raw = ic_series.mean() if len(ic_series) > 0 else None
+        # R21: IC 序列中的 None（该期无法计算）剔除后取均值——否则样本不足的期数会把
+        # 均值系统性拉向 0，伪装成「信号无效」。全为 None 或空序列时均值无定义 → None。
+        _valid_ic = ic_series.drop_nulls()
+        _ic_mean_raw = _valid_ic.mean() if len(_valid_ic) > 0 else None
         return {
             "total_return": total_return,
             "annualized_return": ann_return,
@@ -342,7 +363,7 @@ class BacktestMetrics:
             "win_rate": BacktestMetrics.calc_win_rate(trades),
             "profit_factor": BacktestMetrics.calc_profit_factor(trades),
             "total_trades": len(trades),
-            "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else 0.0,
+            "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else None,
             "ic_ir": BacktestMetrics.calc_ir(ic_series, num_days=len(nav_curve)),
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,
