@@ -9,7 +9,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
                  ↘ INTERRUPTED (应用异常退出)
 ```
 
-- 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是无参可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
+- 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是接收 `task_id` 关键字参数（并可透传 `**kwargs`）的可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
 
   ```python
   task_id = task_manager.submit_task(
