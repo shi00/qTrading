@@ -20,6 +20,7 @@ import pytz
 from unittest.mock import AsyncMock, MagicMock
 
 import services.news_insight_service as module
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.news_insight_models import (
     NEWS_RISK_PROMPT_VERSION,
     EvidenceDocument,
@@ -514,6 +515,25 @@ class TestLoadEvidence:
         pub = datetime.datetime(2026, 9, 10)
 
         with pytest.raises(NewsInsightSourceDbError):  # noqa: weak-assertion 全来源 DB 故障须暴露可识别异常，异常类型即测试目标
+            asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+
+    def test_engine_disposed_propagates_from_documents(self, monkeypatch):
+        """R5：get_market_news_documents 抛 EngineDisposedError 时须传播，不得吞成 db_error。"""
+        dao = _make_dao()
+
+        async def boom(*a, **k):
+            raise EngineDisposedError("Engine disposed")
+
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(side_effect=boom)
+        dao.get_telegraph_news_for_stocks = AsyncMock(return_value=pd.DataFrame())
+        monkeypatch.setattr(module, "log_classified", _validating_log_classified)
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10)
+
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 僵尸引擎错误须显式传播，异常类型即测试目标
             asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
 
     def test_cancel_propagates(self, monkeypatch):

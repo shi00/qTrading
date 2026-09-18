@@ -208,13 +208,20 @@ class TestNewsInsightIntegration(TestDatabaseBase):
     # --- 5. 部分来源失败复用更完整快照，AI 次数不增 ---
 
     async def test_subset_reuse_does_not_call_ai_again(self, monkeypatch):
-        """部分来源失败导致证据集为既有成功快照真子集时复用，AI 调用次数不增加（§11）。"""
+        """部分来源失败（telegraph 快讯 DB 读取故障）导致证据集为既有成功快照真子集时复用，AI 调用次数不增加（§11）。"""
         # 外部抓取模拟完全失败（announcement/news 均无 fetch），候选仅来自落库行
         monkeypatch.setattr(
             NewsFetcher,
             "get_stock_news_documents",
             AsyncMock(return_value={"docs": [], "coverage": {}}),
         )
+
+        # 模拟部分来源失败：telegraph 快讯 DB 读取故障 → coverage[telegraph]="db_error"
+        # （§11 子集例外须有来源故障迹象，与单测 test_subset_reuse 对齐；删除证据本身不是 db_error）
+        async def _telegraph_db_down(*a, **k):
+            raise RuntimeError("telegraph db down")
+
+        monkeypatch.setattr(self.dao, "get_telegraph_news_for_stocks", AsyncMock(side_effect=_telegraph_db_down))
         ai = MagicMock()
         ai.analyze_news_risk = AsyncMock(
             side_effect=lambda req: _success_result(
@@ -236,7 +243,7 @@ class TestNewsInsightIntegration(TestDatabaseBase):
         assert ai.analyze_news_risk.await_count == 1
         assert len(set(out1.result.evidence_news_ids)) == 2, "首次分析应消费两条证据"
 
-        # 模拟部分来源失败：删除一条证据，重新 analyze → 子集复用，AI 不再调用
+        # 证据收缩（删除一条落库证据）且 telegraph 来源故障 → 证据集为成功快照真子集 → 子集复用，AI 不再调用
         deleted = await self._delete_one_news_row()
         assert deleted == 1
         out2 = await svc.analyze(_TS, _NAME)
