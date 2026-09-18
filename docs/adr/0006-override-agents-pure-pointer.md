@@ -4,6 +4,8 @@
 > Date: 2026-09-03
 > Owner: 架构维护者
 > Supersedes: ADR-0002「文档架构分层决策」中 AGENTS.md 的纯指针定位
+>
+> 注（2026-09-19 Errata）：下方正文所列红线编号与数量为决策时点（2026-09-03）快照——如 Context 的「18 条红线」与 Decision 第 1 点「INVARIANT 红线 R2/R3/R4/R5/R7/R9/R10，共 7 条」。R5 已由 INVARIANT 降为 EXCEPTIONABLE（见 docs/governance/exceptions.yml EX-0017/EX-0018），当前 AGENTS.md 生成区块为 R2/R3/R4/R7/R9/R10 + R18。当前红线范围与规则类型一律以 docs/governance/redlines.yml 机器可读正本为准。
 
 ## Context
 

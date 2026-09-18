@@ -866,6 +866,9 @@ def check_redline_range_consistency() -> list[str]:
     for doc in CHECKED_DOCS:
         if ADR_DOCS_DIR in doc.parents:
             continue  # ADR 为决策时点历史快照，含当时红线范围，不入当前总数守卫
+        if doc.name == "CHANGELOG.md":
+            continue  # release-please 自动生成，历史提交标题含旧红线范围引文（如"R1~R22 同步为 R1~R23"），
+            # 与治理 ID 检查对 CHANGELOG.md 的处理一致（见 check_governance_id_references 注释），不入守卫
         content = doc.read_text(encoding="utf-8")
         for m in REDLINE_RANGE_PATTERN.finditer(content):
             declared = int(m.group(1))
