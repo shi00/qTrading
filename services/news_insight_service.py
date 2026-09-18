@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from data.cache.cache_manager import CacheManager
 from data.external.news_fetcher import NewsFetcher
 from data.news_match import dedupe_documents, match_news_to_stock
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
 from services.news_insight_models import (
     NEWS_RISK_PROMPT_VERSION,
@@ -231,6 +232,8 @@ class NewsInsightService:
         #    读取失败显式标记 db_error（对抗性检视 Major①：不得吞成空证据伪装 no_evidence）。
         try:
             df = await self.dao.get_market_news_documents(ts_code, window_start_utc, window_end_utc)
+        except EngineDisposedError:
+            raise  # R5：僵尸引擎错误须传播，不得吞成 db_error
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -265,6 +268,8 @@ class NewsInsightService:
                 window_end_utc,
             )
             coverage["telegraph"]["status"] = "ok"
+        except EngineDisposedError:
+            raise  # R5：僵尸引擎错误须传播，不得吞成 db_error
         except asyncio.CancelledError:
             raise
         except Exception as e:

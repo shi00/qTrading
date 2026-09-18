@@ -20,6 +20,7 @@ import pytz
 from unittest.mock import AsyncMock, MagicMock
 
 import services.news_insight_service as module
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.news_insight_models import (
     NEWS_RISK_PROMPT_VERSION,
     EvidenceDocument,
@@ -369,6 +370,39 @@ class TestLoadEvidence:
         # §8.1 telegraph 按自然日条数分布（publish_time 归一化）
         assert coverage["telegraph"]["daily_counts"]  # 非空
 
+    def test_telegraph_daily_counts_exposes_hole(self, monkeypatch):
+        """§15.1 覆盖统计：本地快讯存在整段空洞时，按日分布必须暴露空洞。
+
+        窗口内 Day1 与 Day3 各有 telegraph，Day2 无条目 → daily_counts keys 不得被
+        填充为横跨首尾的覆盖（Day2 必须缺位，暴露该空洞）。
+        """
+        dao = _make_dao()
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        day1 = datetime.datetime(2026, 9, 10, 9, 0, 0)
+        day3 = datetime.datetime(2026, 9, 12, 9, 0, 0)
+        dao.get_telegraph_news_for_stocks = AsyncMock(
+            return_value=_candidate_df(
+                [
+                    {"id": 1, "title": "000001.SZ 一", "source_kind": "telegraph", "publish_time": day1},
+                    {"id": 2, "title": "000001.SZ 二", "source_kind": "telegraph", "publish_time": day3},
+                ]
+            )
+        )
+        monkeypatch.setattr(module, "match_news_to_stock", lambda text, pool: ["000001.SZ"] if "000001" in text else [])
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+
+        window_start = datetime.datetime(2026, 9, 10, 0, 0, 0)
+        window_end = datetime.datetime(2026, 9, 12, 23, 59, 59)
+        _evidence, coverage = asyncio.run(svc._load_evidence("000001.SZ", None, window_start, window_end, None))
+
+        daily = coverage["telegraph"]["daily_counts"]
+        # 空洞暴露：Day2 不存在条目，必须缺位而非被填充成覆盖值
+        assert daily.get("2026-09-10") == 1
+        assert daily.get("2026-09-12") == 1
+        assert "2026-09-11" not in daily
+
     def test_fetch_failure_still_reads_db(self, monkeypatch):
         dao = _make_dao()
 
@@ -481,6 +515,25 @@ class TestLoadEvidence:
         pub = datetime.datetime(2026, 9, 10)
 
         with pytest.raises(NewsInsightSourceDbError):  # noqa: weak-assertion 全来源 DB 故障须暴露可识别异常，异常类型即测试目标
+            asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+
+    def test_engine_disposed_propagates_from_documents(self, monkeypatch):
+        """R5：get_market_news_documents 抛 EngineDisposedError 时须传播，不得吞成 db_error。"""
+        dao = _make_dao()
+
+        async def boom(*a, **k):
+            raise EngineDisposedError("Engine disposed")
+
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(side_effect=boom)
+        dao.get_telegraph_news_for_stocks = AsyncMock(return_value=pd.DataFrame())
+        monkeypatch.setattr(module, "log_classified", _validating_log_classified)
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10)
+
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 僵尸引擎错误须显式传播，异常类型即测试目标
             asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
 
     def test_cancel_propagates(self, monkeypatch):
