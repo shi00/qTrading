@@ -28,6 +28,14 @@
         {
           "type": "generic",
           "path": "SECURITY.md"
+        },
+        {
+          "type": "generic",
+          "path": "CLAUDE.md"
+        },
+        {
+          "type": "generic",
+          "path": "AGENTS.md"
         }
       ]
     }
