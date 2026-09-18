@@ -122,6 +122,7 @@ class ReviewManager:
         market_trade_dates: list[datetime.date] = await self._market_trade_dates(
             min_pred_date,
             max_quote_date,
+            observed_dates={self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]},
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
@@ -320,7 +321,11 @@ class ReviewManager:
 
         # D3-M1: 与 run_review 同一 T+N 锚定口径，全市场交易日历（TradeCalendarService）。
         max_quote_date = self._normalize_trade_date(bulk_quotes["trade_date"].max())
-        market_trade_dates: list[datetime.date] = await self._market_trade_dates(min_t0, max_quote_date)
+        market_trade_dates: list[datetime.date] = await self._market_trade_dates(
+            min_t0,
+            max_quote_date,
+            observed_dates={self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]},
+        )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
@@ -442,6 +447,7 @@ class ReviewManager:
         market_trade_dates: list[datetime.date] = await self._market_trade_dates(
             min_t0,
             max_quote_date,
+            observed_dates={self._normalize_trade_date(d) for d in bulk_quotes["trade_date"]},
         )
         market_pos = {d: i for i, d in enumerate(market_trade_dates)}
 
@@ -843,18 +849,49 @@ class ReviewManager:
         """Normalize supported trade_date input types to datetime.date."""
         return to_date(value)
 
-    async def _market_trade_dates(self, start, end) -> list[datetime.date]:
+    async def _market_trade_dates(
+        self,
+        start,
+        end,
+        observed_dates: set[datetime.date] | None = None,
+    ) -> list[datetime.date]:
         """T+N 锚定的唯一交易日来源：与回测层共用 TradeCalendarService（同一通路）。
         候选股少或集中停牌时行情并集会整体丢日，导致 T+1/T+5 静默错位并污染
         WIN/LOSS 标签与 AI few-shot 样本；全市场日历不受候选股范围影响。
 
         返回空日历（日历数据源不可用 / start>end 等退化态）时记警告日志，
         避免调用方在无有效日历下静默跳过全部 T+N 锚定（R3 反静默）。
+
+        D3-M1 残留修复：get_trade_dates 对短窗口（≤30 自然日）不校验 DB 日历完整性，
+        部分缺失（非全空）会静默返回残缺日历，T+N 锚点索引随之错位并污染标签。
+        调用方传入 observed_dates（候选股行情日期并集，必 ⊆ [start, end]）做单向
+        包含校验：观测交易日必须都在日历内；缺任一观测日即视为日历不可信，整体
+        降级返回空日历（宁缺毋错，整批跳过本次锚定，下次调度自愈）。
+
+        已知局限（对抗性检视确认）：若日历缺日 X 且所有候选股在 X 均停牌（观测
+        集合恰无 X），单向包含校验无法检出；此为单向校验的固有代价，正常停牌场景
+        下 T+N 锚点本就无行情可用，不会触发静默错位。
         """
         from data.domain_services.trade_calendar_service import TradeCalendarService
 
         dates = await TradeCalendarService(self.cache, None).get_trade_dates(start, end)
-        if not dates:
+        if dates:
+            if observed_dates:
+                calendar_set = set(dates)
+                missing = sorted(d for d in observed_dates if d not in calendar_set)
+                if missing:
+                    logger.warning(
+                        "[Review] Market trade calendar incomplete: %d observed trading "
+                        "date(s) absent (e.g. %s..%s) for [%s, %s]. Calendar may lag "
+                        "quotes sync; T+N anchoring disabled for this run.",
+                        len(missing),
+                        missing[0],
+                        missing[-1],
+                        start,
+                        end,
+                    )
+                    return []
+        else:
             logger.warning(
                 "[Review] Market trade calendar empty for [%s, %s]: T+N anchoring disabled for this run.",
                 start,
