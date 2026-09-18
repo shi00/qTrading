@@ -56,9 +56,11 @@ class TestReviewManagerInit:
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
     def test_init_default_thresholds(self, mock_tc, mock_cm):
+        # D4-M4: 标签窗口取 T+5 后，默认阈值按 5 日累计超额尺度从 0.5 上调到 3.0
         rm = ReviewManager()
-        assert rm.alpha_win_threshold == 0.5
-        assert rm.alpha_loss_threshold == 0.5
+        assert rm.alpha_win_threshold == 3.0
+        assert rm.alpha_loss_threshold == 3.0
+        assert rm.label_horizon == "t5"
 
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")
@@ -66,6 +68,23 @@ class TestReviewManagerInit:
         rm = ReviewManager(alpha_win_threshold=1.0, alpha_loss_threshold=2.0)
         assert rm.alpha_win_threshold == 1.0
         assert rm.alpha_loss_threshold == 2.0
+
+    @patch("data.persistence.review_manager.CacheManager", spec=CacheManager)
+    @patch("data.persistence.review_manager.TushareClient", spec=TushareClient)
+    def test_default_thresholds_not_overtag_small_alpha_d4_m4(self, mock_tc, mock_cm):
+        """D4-M4 R19：T+5 标签窗口的默认阈值（3.0/3.0）下，超额 0.6 / -0.6 / +0.1（百分点）
+        经 `_classify_alpha` 均返回 DRAW——不再像旧默认 0.5 那样把小波动误判为 WIN/LOSS
+        （避免噪声标签污染 few-shot 学习样本）。同时验证 `label_horizon=='t5'` 为默认值。"""
+        mock_cm.return_value = MagicMock(spec=CacheManager)
+        mock_tc.return_value = MagicMock(spec=TushareClient)
+        rm = ReviewManager()
+        assert rm.label_horizon == "t5"
+        assert rm._classify_alpha(0.6) == "DRAW"
+        assert rm._classify_alpha(-0.6) == "DRAW"
+        assert rm._classify_alpha(0.1) == "DRAW"
+        # 对照：越过新阈值才打 WIN/LOSS，确保分类仍有效而非恒为 DRAW
+        assert rm._classify_alpha(4.0) == "WIN"
+        assert rm._classify_alpha(-4.0) == "LOSS"
 
 
 class TestReviewManagerSwIndustryPassThrough:
@@ -462,6 +481,70 @@ class TestReviewManagerGetLearningContext:
         result = await rm.get_learning_context()
         assert "样本量偏少" in result
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_learning_context_only_finished_samples_d4_m4(self, mock_cm, mock_tc):
+        """D4-M4 R19：get_learning_context 只应取学习窗口（T+5 成熟、非 DRAW 占位）的标签样本。
+
+        review_manager 层是对 ``screener_dao.get_learning_context`` 的转发：DRAW 占位
+        （``t5_pct IS NULL`` / ``review_status != COMPLETED``）不进入学习样本这一语义由 DAO
+        的 WHERE 子句保证（TSourceOfTruth：定位样本基于 ``t5_pct IS NOT NULL + review_status=COMPLETED``
+        并叠加 ``is_win`` 分桶）。此处断言转发参数正确落到 DAO，且 DAO 返回的已定稿（非占位）
+        样本如实进入输出 XML。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        # DAO 分别只返回已定稿的 WIN / LOSS 样本（T+5 成熟、非 DRAW 占位）
+        mock_cache.screener_dao.get_learning_context = AsyncMock(
+            side_effect=[
+                pd.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ"],
+                        "name": ["Test"],
+                        "alpha": [6.0],
+                        "t1_pct": [3.0],
+                        "ai_score": [80],
+                        "ai_reason": ["up"],
+                        "benchmark_code": ["000985.CSI"],
+                    }
+                ),
+                pd.DataFrame(
+                    {
+                        "ts_code": ["000002.SZ"],
+                        "name": ["Test2"],
+                        "alpha": [-5.0],
+                        "t1_pct": [-3.0],
+                        "ai_score": [60],
+                        "ai_reason": ["down"],
+                        "benchmark_code": ["000985.CSI"],
+                    }
+                ),
+            ]
+        )
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(return_value=None)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result = await rm.get_learning_context()
+
+        # 转发参数：学习样本按 is_win 分桶，限定为同一策略已定稿记录
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=True,
+            as_of=None,
+            strategy_name=None,
+        )
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3,
+            is_win=False,
+            as_of=None,
+            strategy_name=None,
+        )
+        # 已定稿样本如实进入输出 XML（非占位，可被当作 few-shot 学习样本）
+        assert "+6.0" in result
+        assert "-5.0" in result
+
 
 class TestReviewManagerSaveResults:
     @pytest.mark.asyncio
@@ -826,10 +909,11 @@ class TestReviewManagerIndexCacheNaN:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数，验证 NaN index 不污染 alpha
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1086,10 +1170,11 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1123,10 +1208,11 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1160,10 +1246,11 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1197,10 +1284,11 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1241,10 +1329,11 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数（system 异常路径移到 T+5 日）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1287,10 +1376,12 @@ class TestReviewManagerRunReviewLossLabel:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 9.0],
-                    "pct_chg": [1.0, -10.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: 标签窗口取 T+5，alpha 以 T+5 超额计算；t5 日 close=9.0 → t5_pct=-10%，
+                    # 减去指数 2% → alpha=-12% < -3% → LOSS（而非旧的 T+1 单日口径）
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 9.0],
+                    "pct_chg": [1.0, -10.0, 0.0, 0.0, 0.0, -10.0],
                 }
             )
         )
@@ -1324,10 +1415,11 @@ class TestReviewManagerRunReviewLossLabel:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.2],
-                    "pct_chg": [1.0, 2.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口。t5 日 close=10.2 → t5_pct=2%，减去指数 2% → alpha=0 → DRAW
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],
+                    "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
                 }
             )
         )
@@ -1345,9 +1437,7 @@ class TestReviewManagerCustomThresholds:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_custom_win_threshold_higher(self, mock_cm, mock_tc):
-        """alpha=3.0 with default threshold (0.5) -> WIN.
-        With alpha_win_threshold=5.0, alpha=3.0 -> DRAW (not high enough).
-        """
+        """D4-M4: T+5 alpha=3.0 低于自定义 win 阈值 5.0 → DRAW（default 3.0 下为 WIN 的对照）。"""
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager(alpha_win_threshold=5.0)
@@ -1366,10 +1456,11 @@ class TestReviewManagerCustomThresholds:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # t5 日 close=10.5 → t5_pct=5%，指数 2% → alpha=3.0 < 5.0 → DRAW
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -1385,9 +1476,7 @@ class TestReviewManagerCustomThresholds:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_custom_loss_threshold_higher(self, mock_cm, mock_tc):
-        """alpha=-8.0 with default threshold (0.5) -> LOSS.
-        With alpha_loss_threshold=10.0, alpha=-8.0 -> DRAW (not low enough).
-        """
+        """D4-M4: T+5 alpha=-8.0 高于自定义 loss 阈值 -10.0 → DRAW（default 3.0 下为 LOSS 的对照）。"""
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager(alpha_loss_threshold=10.0)
@@ -1406,12 +1495,12 @@ class TestReviewManagerCustomThresholds:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    # D2-3：无 adj_factor 时 T+1 用 close 比率（-6%），故 close 取 10→9.4 以保持
-                    # alpha=-8 → DRAW 的原测试意图（与 pct_chg -6 一致，避免 mock 内部不一致）。
-                    "close": [10.0, 9.4],
-                    "pct_chg": [1.0, -6.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D2-3：无 adj_factor 时 T+5 用 close 比率（t5=-6%），指数 2% → alpha=-8 → DRAW
+                    # （与 pct_chg -6 一致，避免 mock 内部不一致）。
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 9.4],
+                    "pct_chg": [1.0, -6.0, 0.0, 0.0, 0.0, -6.0],
                 }
             )
         )
@@ -1427,10 +1516,7 @@ class TestReviewManagerCustomThresholds:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_custom_win_threshold_lower(self, mock_cm, mock_tc):
-        """alpha=1.0 with default threshold (0.5) -> WIN.
-        With alpha_win_threshold=0.3, alpha=1.0 still -> WIN.
-        With alpha=0.4, default threshold -> DRAW; threshold=0.3 -> WIN.
-        """
+        """D4-M4: T+5 alpha=2.4 高于自定义 win 阈值 0.3 → WIN（default 3.0 下为 DRAW 的对照）。"""
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         rm = ReviewManager(alpha_win_threshold=0.3)
@@ -1446,14 +1532,14 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        # alpha = 2.0 - 1.6 = 0.4 -> WIN with threshold 0.3, DRAW with default 0.5
+        # D4-M4: T+5 alpha = 4.0 - 1.6 = 2.4 → WIN with threshold 0.3，default 3.0 下为 DRAW
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.4],
-                    "pct_chg": [1.0, 2.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.4],
+                    "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
                 }
             )
         )
@@ -1929,10 +2015,11 @@ class TestReviewManagerR9Sanitization:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": ["20240615", "20240616"],
-                    "close": [10.0, 10.5],
-                    "pct_chg": [1.0, 5.0],
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数，触发内层 _resolve_index_pct 的 safe_error 路径
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
@@ -2178,6 +2265,10 @@ class TestReviewManagerBackfill:
         mock_cm.return_value = mock_cache
         rm = ReviewManager()
         rm.cache = mock_cache
+        # D4-M4: backfill_horizon_returns 现在解析基准指数以定稿 T+5 标签。
+        # 统一 stub 索引预取与单日解析，否则真实 _prefetch/_resolve 依赖 DB/API mock。
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._resolve_index_pct = AsyncMock(return_value=2.0)
         rm._batch_backfill_t5 = AsyncMock()
         return rm, mock_cache
 
@@ -2237,6 +2328,11 @@ class TestReviewManagerBackfill:
         assert updates[0]["record_id"] == 1
         assert updates[0]["t5_pct"] == round(((9.8 / 1.0) / (10.0 / 1.0) - 1.0) * 100.0, 4)
         assert updates[0]["t5_price"] == 9.8
+        # D4-M4: T+5 回填同步定稿标签（alpha = t5_pct - index = -2.0 - 2.0 = -4.0 → LOSS）
+        assert updates[0]["label"] == "LOSS"
+        assert updates[0]["index_pct"] == 2.0
+        assert updates[0]["alpha"] == round(-4.0, 4)
+        assert updates[0]["benchmark_code"] is not None
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2427,7 +2523,10 @@ class TestReviewManagerBackfillBatch:
         mock_cache.engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
         mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(side_effect=RuntimeError("db down"))
         await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
-        mock_cache.screener_dao.backfill_t5_prediction.assert_called_once_with(1, 1.0, 10.0)
+        # D4-M4: 签名已扩展 label/index_pct/benchmark_code/alpha，fallback 载荷同样透传
+        mock_cache.screener_dao.backfill_t5_prediction.assert_called_once_with(
+            1, 1.0, 10.0, label=None, index_pct=None, benchmark_code=None, alpha=None
+        )
 
 
 class TestReviewManagerBackfillSkipBranches:
@@ -2584,7 +2683,8 @@ class TestReviewManagerT1Backfill:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_stale_pending_record_gets_t1_backfilled(self, mock_cm, mock_tc):
-        """核心场景：超期 PENDING 记录（t0=20240610）获得 T+1 回填，含标签/alpha/指数。"""
+        """核心场景：超期 PENDING 记录（t0=20240610）获得 T+1 回填，仅打 DRAW 占位
+        （D4-M4：T+1 阶段不再解析基准指数/定稿 WIN/LOSS，标签留待 T+5 成熟时定稿）。"""
         rm, mock_cache = self._make_rm(
             mock_cm,
             [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
@@ -2611,9 +2711,10 @@ class TestReviewManagerT1Backfill:
         assert u["t1_price"] == 10.5
         assert u["t5_pct"] is None
         assert u["t5_price"] is None
-        assert u["index_pct"] == 2.0
-        assert u["alpha"] == round(u["pct"] - 2.0, 4)
-        assert u["label"] == "WIN"
+        # D4-M4: T+1 阶段打 DRAW 占位，index_pct/alpha 留待 T+5 成熟时定稿
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["label"] == "DRAW"
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2705,8 +2806,9 @@ class TestReviewManagerT1Backfill:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_skips_index_unavailable(self, mock_cm, mock_tc):
-        """基准指数不可得 → 跳过，避免标签污染（alpha 无法计算）。"""
+    async def test_backfill_t1_proceeds_even_when_index_unavailable(self, mock_cm, mock_tc):
+        """D4-M4: T+1 阶段不再解析基准指数（基础指数不可得不再阻塞）——仍写 DRAW 占位，
+        标签与 alpha 待 T+5 成熟时由 run_review/backfill_horizon_returns 定稿。"""
         rm, mock_cache = self._make_rm(
             mock_cm,
             [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
@@ -2721,14 +2823,18 @@ class TestReviewManagerT1Backfill:
             index_daily=pd.DataFrame({"pct_chg": [float("nan")]}),
         )
         count = await rm.backfill_t1_returns()
-        assert count == 0
-        rm._batch_update_results.assert_not_called()
+        assert count == 1
+        updates = rm._batch_update_results.call_args.args[0]
+        assert updates[0]["label"] == "DRAW"
+        assert updates[0]["index_pct"] is None
+        assert updates[0]["alpha"] is None
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_label_loss_when_alpha_negative(self, mock_cm, mock_tc):
-        """alpha 低于 -loss 阈值 → LOSS 标签。"""
+    async def test_backfill_t1_label_is_draw_placeholder(self, mock_cm, mock_tc):
+        """D4-M4: T+1 阶段即使超额为负，也只打 DRAW 占位——不再以 T+1 单日超额定稿 LOSS，
+        标签须待 T+5 窗口成熟后定稿（避免噪声标签污染 few-shot 学习样本）。"""
         rm, mock_cache = self._make_rm(
             mock_cm,
             [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
@@ -2745,7 +2851,8 @@ class TestReviewManagerT1Backfill:
         count = await rm.backfill_t1_returns()
         assert count == 1
         updates = rm._batch_update_results.call_args.args[0]
-        assert updates[0]["label"] == "LOSS"
+        assert updates[0]["label"] == "DRAW"
+        assert updates[0]["alpha"] is None
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2902,6 +3009,9 @@ class TestReviewManagerMarketCalendar:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         rm = ReviewManager()
         rm.cache = mock_cache
+        # D4-M4: backfill_horizon_returns 现在解析基准指数来定稿 T+5 标签，此处 stub 索引
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._resolve_index_pct = AsyncMock(return_value=2.0)
         rm._batch_backfill_t5 = AsyncMock()
         # 全市场日历为 6 个交易日；t0=6/10 → T+5 = 日历第 5 个交易日 6/17
         cal = [

@@ -547,11 +547,19 @@ class ScreenerDao(BaseDao):
         t5_pct: float,
         t5_price: float | None,
         *,
+        label: str | None = None,
+        index_pct: float | None = None,
+        benchmark_code: str | None = None,
+        alpha: float | None = None,
         conn: typing.Any = None,
     ):
         """D2-4: 幂等回填单条记录的 T+5 并推进 review_status 为 COMPLETED。
 
         WHERE 带 ``t5_pct IS NULL`` → 与 ``run_review`` 同批并行也不会重复/覆盖已填值。
+
+        D4-M4: 新增可选 label/index_pct/benchmark_code/alpha，供 backfill_horizon_returns
+        在 T+5 成熟回填时同步定稿 T+5 窗口标签（run_review 在 T+5 未成熟时仅打 DRAW 占位）。
+        均为 None 时保持 D2-4 既有纯数值回填语义，不覆盖既有列。
         """
         self._check_engine()
         table = Base.metadata.tables.get("screening_history")
@@ -559,15 +567,21 @@ class ScreenerDao(BaseDao):
             logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
             return
 
-        stmt = (
-            sa.update(table)
-            .where(table.c.id == record_id, table.c.t5_pct.is_(None))
-            .values(
-                t5_pct=t5_pct,
-                t5_price=t5_price,
-                review_status=REVIEW_STATUS_COMPLETED,
-            )
-        )
+        values_: dict[str, typing.Any] = {
+            "t5_pct": t5_pct,
+            "t5_price": t5_price,
+            "review_status": REVIEW_STATUS_COMPLETED,
+        }
+        if label is not None:
+            values_["prediction_result"] = label
+        if index_pct is not None:
+            values_["index_pct"] = index_pct
+        if benchmark_code is not None:
+            values_["benchmark_code"] = benchmark_code
+        if alpha is not None:
+            values_["alpha"] = alpha
+
+        stmt = sa.update(table).where(table.c.id == record_id, table.c.t5_pct.is_(None)).values(**values_)
 
         # DAT-01: 维护事件放行后复查引擎，防范 conn 路径 TOCTOU
         await self._wait_maintenance_guard(context="backfill_t5_prediction")
