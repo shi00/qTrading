@@ -41,6 +41,15 @@ class BacktestMetrics:
     # 样本量守卫，年化此前唯独缺失，此为对齐内部标准。
     _MIN_ANNUALIZE_DAYS = 60
 
+    # D5-M1: 主动决策平仓的退出原因白名单。胜率与盈亏比共用同一口径——退市强平
+    # （DELISTED）是非策略决策的强制簿记，计入会系统性恶化指标并使策略间不可比
+    # （D4-6）；两个指标若口径不同，用户会把口径差异误读为「小赢大亏」之类的
+    # 策略特征。退市损失已由 delist_liquidation_count / delist_loss_amount 单独呈现。
+    _DECISION_EXIT_REASONS: tuple[str, ...] = (
+        ExitReason.SIGNAL.value,
+        ExitReason.REBALANCE.value,
+    )
+
     @staticmethod
     def calc_nav_curve(
         positions: pl.DataFrame,
@@ -171,6 +180,21 @@ class BacktestMetrics:
         return annualized_return / max_drawdown
 
     @staticmethod
+    def _decision_sells(trades: pl.DataFrame) -> pl.DataFrame | None:
+        """主动决策平仓样本：胜率与盈亏比必须共用同一口径。
+
+        退市强平（DELISTED）是非策略决策的强制簿记，计入会系统性恶化两个指标并
+        使策略间不可比（D4-6）；两个指标若口径不同，用户会把口径差异误读为
+        「小赢大亏」之类的策略特征。无主动决策平仓或空 trades 时返回 None
+        （指标无定义）。"""
+        if len(trades) == 0 or "exit_reason" not in trades.columns:
+            return None
+        sells = trades.filter(
+            (pl.col("action") == "sell") & pl.col("exit_reason").is_in(list(BacktestMetrics._DECISION_EXIT_REASONS))
+        )
+        return sells if len(sells) > 0 else None
+
+    @staticmethod
     def calc_win_rate(trades: pl.DataFrame) -> float | None:
         """计算胜率，仅统计卖出/平仓交易中由策略主动决策的平仓。
 
@@ -182,35 +206,29 @@ class BacktestMetrics:
         语义一致，report 层渲染 N/A。盈亏阈值由 PROFIT_THRESHOLD 共享常量定义，
         与 report.py 保持一致。
         """
-        if len(trades) == 0:
-            return None
-        if "exit_reason" not in trades.columns:
-            # 历史/无退出原因标注的 trades 无法区分主动与非策略决策平仓 → 无定义
-            return None
-        decision_sells = trades.filter(
-            (pl.col("action") == "sell")
-            & pl.col("exit_reason").is_in([ExitReason.SIGNAL.value, ExitReason.REBALANCE.value])
-        )
-        if len(decision_sells) == 0:
+        decision_sells = BacktestMetrics._decision_sells(trades)
+        if decision_sells is None:
             return None
         profitable = decision_sells.filter(pl.col("realized_pnl") > PROFIT_THRESHOLD)
         return len(profitable) / len(decision_sells)
 
     @staticmethod
     def calc_profit_factor(trades: pl.DataFrame) -> float | None:
-        """计算盈亏比，仅统计卖出/平仓交易。
+        """计算盈亏比，仅统计主动决策平仓（与胜率共用口径，D5-M1）。
 
-        无亏损交易（gross_loss <= 0）或无平仓交易时返回 None（指标无定义），
+        退市强平（DELISTED）等非策略决策平仓不参与盈亏统计——与 calc_win_rate
+        保持一致，避免退市损失整额计入分子分母之比、系统性恶化指标并使策略间不可比。
+        退市损失由 delist_liquidation_count / delist_loss_amount 单独呈现。
+
+        无亏损交易（gross_loss <= 0）或无主动决策平仓时返回 None（指标无定义），
         不返回 inf —— inf 无法 JSON 序列化，且写入 numeric 列会被 PostgreSQL 拒绝
         （D4-5）。
         """
-        if len(trades) == 0:
+        decision_sells = BacktestMetrics._decision_sells(trades)
+        if decision_sells is None:
             return None
-        sell_trades = trades.filter(pl.col("action") == "sell")
-        if len(sell_trades) == 0:
-            return None
-        gross_profit_raw = sell_trades.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
-        gross_loss_raw = sell_trades.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
+        gross_profit_raw = decision_sells.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
+        gross_loss_raw = decision_sells.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
         gross_profit = float(gross_profit_raw) if gross_profit_raw is not None else 0.0
         gross_loss = abs(float(gross_loss_raw)) if gross_loss_raw is not None else 0.0
         if gross_loss <= 0:

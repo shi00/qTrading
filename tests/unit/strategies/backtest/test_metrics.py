@@ -164,17 +164,32 @@ class TestBacktestMetrics:
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE"] * 5,
                 "realized_pnl": [100.0, -50.0, 200.0, -30.0, 50.0],
             }
         )
         pf = BacktestMetrics.calc_profit_factor(trades)
         assert pf == pytest.approx(350.0 / 80.0, rel=0.01)
 
-    def test_calc_profit_factor_no_loss(self) -> None:
-        """无亏损交易时返回 None（指标无定义），不返回 inf（D4-5）。"""
+    def test_calc_profit_factor_no_exit_reason_returns_none(self) -> None:
+        """trades 缺 exit_reason 列时盈亏比无法区分主动/非策略平仓 → 无定义（D5-M1）。
+
+        与 calc_win_rate 语义一致：缺少退出原因标注时无法判定主动决策样本，返回 None
+        而非退化为「按全部 sell 统计」的另一套口径。"""
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell", "sell"],
+                "realized_pnl": [100.0, -50.0, 200.0],
+            }
+        )
+        assert BacktestMetrics.calc_profit_factor(trades) is None
+
+    def test_calc_profit_factor_no_loss(self) -> None:
+        """无亏损交易（主动决策平仓中）时返回 None（指标无定义），不返回 inf（D4-5）。"""
+        trades = pl.DataFrame(
+            {
+                "action": ["sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE", "REBALANCE", "REBALANCE"],
                 "realized_pnl": [100.0, 200.0, 50.0],
             }
         )
@@ -184,6 +199,7 @@ class TestBacktestMetrics:
         trades = pl.DataFrame(
             {
                 "action": ["sell", "sell"],
+                "exit_reason": ["REBALANCE", "REBALANCE"],
                 "realized_pnl": [-100.0, -50.0],
             }
         )
@@ -194,12 +210,32 @@ class TestBacktestMetrics:
         trades = pl.DataFrame(
             {
                 "action": ["buy", "sell", "sell"],
+                "exit_reason": [None, "REBALANCE", "REBALANCE"],
                 "realized_pnl": [0.0, 100.0, -50.0],
             }
         )
         # 仅统计 sell: gross_profit=100, gross_loss=50 → pf=2.0
         pf = BacktestMetrics.calc_profit_factor(trades)
         assert pf == pytest.approx(2.0, rel=0.01)
+
+    def test_calc_profit_factor_excludes_delisted(self) -> None:
+        """盈亏比排除退市强平（DELISTED），与胜率共用同一决策平仓口径（D5-M1）。
+
+        3 笔 REBALANCE（2 盈 1 亏）+ 1 笔 DELISTED 大额亏损：
+        - 只统计 3 笔 REBALANCE → pf = 300/50 = 6.0（不含退市笔则 300/550 ≈ 0.545，口径差异被误读为「小赢大亏」）
+        - win_rate 同基于这 3 笔 → 2/3
+        """
+        trades = pl.DataFrame(
+            {
+                "action": ["sell", "sell", "sell", "sell"],
+                "exit_reason": ["REBALANCE", "REBALANCE", "REBALANCE", "DELISTED"],
+                "realized_pnl": [100.0, 200.0, -50.0, -500.0],
+            }
+        )
+        pf = BacktestMetrics.calc_profit_factor(trades)
+        win_rate = BacktestMetrics.calc_win_rate(trades)
+        assert pf == pytest.approx(6.0, rel=0.01)
+        assert win_rate == pytest.approx(2 / 3, rel=0.01)
 
     def test_calc_profit_factor_empty(self) -> None:
         """空交易（无任何数据）时返回 None（指标无定义）。
