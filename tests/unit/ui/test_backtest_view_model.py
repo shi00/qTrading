@@ -599,6 +599,38 @@ class TestBacktestViewModelRunBacktest:
         assert execution_result is not None
 
     @pytest.mark.asyncio
+    async def test_run_backtest_success_sharpe_none_reports_na(self):
+        """D5-C1: sharpe_ratio 无定义 (None) → backtest_success 消息 sharpe 渲染 N/A。"""
+        vm, mock_result = self._make_vm_with_mocks()
+        mock_result.metrics = {"sharpe_ratio": None, "total_return": 0.1}
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_123"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm.update_progress = MagicMock()
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
+            await vm.run_backtest("test_strategy", config)
+
+        assert captured_factory is not None
+        execution_result = await captured_factory(task_id="task_123")
+
+        assert isinstance(execution_result, Message)
+        assert execution_result.key == "backtest_success"
+        assert execution_result.params["sharpe"] == "N/A"
+
+    @pytest.mark.asyncio
     async def test_clean_result_stays_ok(self):
         """UX-01: 无任何告警的结果保持 credibility_level=ok，无告警消息。"""
         vm = await self._exec_backtest(self._result_with())

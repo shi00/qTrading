@@ -27,6 +27,7 @@ class DataWarning:
         "limit_data_absent",
         "benchmark_data_absent",
         "benchmark_data_partial",
+        "portfolio_wiped_out",
     ]
     start_date: str
     end_date: str

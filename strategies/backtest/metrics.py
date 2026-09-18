@@ -14,6 +14,10 @@ import polars as pl
 # report.py 与 calc_win_rate 共享此常量，确保 0 归类一致。
 PROFIT_THRESHOLD: float = 0.0
 
+# 现金拖累判定阈值：投资比例 < CASH_DRAG_THRESHOLD 的天数计入 cash_drag_days。
+# 「< 80% 视为现金拖累」是量纲专用阈值（D5-m1），集中为命名常量避免裸数值。
+CASH_DRAG_THRESHOLD: float = 0.8
+
 
 class ExitReason(enum.StrEnum):
     """平仓原因（D4-6）。
@@ -41,6 +45,15 @@ class BacktestMetrics:
     # 样本量守卫，年化此前唯独缺失，此为对齐内部标准。
     _MIN_ANNUALIZE_DAYS = 60
 
+    # D5-M1: 主动决策平仓的退出原因白名单。胜率与盈亏比共用同一口径——退市强平
+    # （DELISTED）是非策略决策的强制簿记，计入会系统性恶化指标并使策略间不可比
+    # （D4-6）；两个指标若口径不同，用户会把口径差异误读为「小赢大亏」之类的
+    # 策略特征。退市损失已由 delist_liquidation_count / delist_loss_amount 单独呈现。
+    _DECISION_EXIT_REASONS: tuple[str, ...] = (
+        ExitReason.SIGNAL.value,
+        ExitReason.REBALANCE.value,
+    )
+
     @staticmethod
     def calc_nav_curve(
         positions: pl.DataFrame,
@@ -53,13 +66,23 @@ class BacktestMetrics:
 
     @staticmethod
     def calc_daily_returns(nav_curve: pl.Series) -> pl.Series:
+        """净值归零（pct_change 产生 inf/nan）不是数值噪声而是爆仓事件。
+
+        抹成 0.0 会让 volatility 低估、sharpe 被高估，与 total_return / max_drawdown
+        呈现的 -100% 自相矛盾。此处把爆仓日保留为 null（无定义），由调用方的
+        drop_nulls 自然剔除，并由 engine 追加 DataWarning(portfolio_wiped_out)
+        让爆仓在 UI 可见（D5-M2）。"""
         if len(nav_curve) <= 1:
             return pl.Series([0.0] * len(nav_curve))
         returns = nav_curve.pct_change()
-        # 首项保持 null（pct_change 产生）；nan 和 inf 替换为 0.0
+        # 首项保持 null（pct_change 产生）；爆仓日（inf/nan）转 null 而非 0.0
         return (
             returns.to_frame("_r")
-            .select(pl.when(pl.col("_r").is_infinite() | pl.col("_r").is_nan()).then(0.0).otherwise(pl.col("_r")))
+            .select(
+                pl.when(pl.col("_r").is_infinite() | pl.col("_r").is_nan())
+                .then(pl.lit(None, dtype=pl.Float64))
+                .otherwise(pl.col("_r"))
+            )
             .to_series()
         )
 
@@ -89,14 +112,16 @@ class BacktestMetrics:
     def calc_volatility(
         daily_returns: pl.Series,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
+        """有效样本不足 2 时波动率无定义，返回 None（R21：不可返回 0.0——
+        「零波动」是具体业务含义，且会低估爆仓后的真实波动）。"""
         # 排除首项 null（pct_change 产生的伪样本）
         valid_returns = daily_returns.drop_nulls()
         if len(valid_returns) < 2:
-            return 0.0
+            return None
         std_val = valid_returns.std()
         if std_val is None or not isinstance(std_val, (int, float)):
-            return 0.0
+            return None
         return float(std_val) * math.sqrt(trading_days_per_year)
 
     @staticmethod
@@ -104,51 +129,48 @@ class BacktestMetrics:
         daily_returns: pl.Series,
         risk_free_rate: float = 0.02,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
+        """夏普比率：有效样本不足、或超额收益零波动/异常时无定义，返回 None
+        （R21：不可返回 0.0——「风险调整后收益恰好等于无风险利率」是具体业务含义，
+        会掩盖样本不足或恒定收益的真实状态）。"""
         # 排除首项 null（pct_change 产生的伪样本）
         valid_returns = daily_returns.drop_nulls()
         if len(valid_returns) < 2:
-            return 0.0
+            return None
 
         daily_rf = risk_free_rate / trading_days_per_year
         excess_returns = valid_returns - daily_rf
 
         excess_std = excess_returns.std()
         if excess_std is None or not isinstance(excess_std, (int, float)):
-            return 0.0
+            return None
         excess_std_float = float(excess_std)
         if excess_std_float == 0:
-            return 0.0
+            return None
 
         excess_mean = excess_returns.mean()
         if excess_mean is None or not isinstance(excess_mean, (int, float)):
-            return 0.0
+            return None
 
         return float(excess_mean) / excess_std_float * math.sqrt(trading_days_per_year)
 
     @staticmethod
     def calc_max_drawdown(nav_curve: pl.Series) -> tuple[float, int, int]:
+        """最大回撤及其峰值/谷底索引（Polars 向量化，D5-m2）。
+
+        经累计最大值 cum_max 求 drawdown = (cum_max - nav) / cum_max，用 arg_max
+        定位谷底 index，再回溯谷底前最近峰值（cum_max 前缀中最大值的 index），
+        避免逐元素 Python 循环。初值一致：空 nav 返回 (0, 0, 0)；单调递增（无
+        回撤）时 drawdown 全 0，arg_max 返回首元素 → (0, 0, 0)。首项为 0 时
+        0/0 产生 nan，fill_nan(0.0) 收敛（原 Python 版此处会除零崩溃）。
+        """
         if len(nav_curve) == 0:
             return 0.0, 0, 0
-
-        peak = nav_curve[0]
-        max_dd = 0.0
-        peak_idx = 0
-        trough_idx = 0
-        current_peak_idx = 0
-
-        for i in range(len(nav_curve)):
-            if nav_curve[i] > peak:
-                peak = nav_curve[i]
-                current_peak_idx = i
-            else:
-                dd = float((peak - nav_curve[i]) / peak)
-                if dd > max_dd:
-                    max_dd = dd
-                    peak_idx = current_peak_idx
-                    trough_idx = i
-
-        return max_dd, peak_idx, trough_idx
+        cumulative_max = nav_curve.cum_max()
+        drawdown = ((cumulative_max - nav_curve) / cumulative_max).fill_nan(0.0)
+        trough_idx = int(cast(float, drawdown.arg_max() or 0.0))
+        peak_idx = int(cast(float, cumulative_max[: trough_idx + 1].arg_max() or 0.0))
+        return float(cast(float, drawdown.max() or 0.0)), peak_idx, trough_idx
 
     @staticmethod
     def calc_calmar_ratio(
@@ -159,9 +181,26 @@ class BacktestMetrics:
         # report/UI 渲染 N/A，避免用 0.0 伪装真实比值。
         if annualized_return is None:
             return None
+        # R21: max_drawdown == 0（全程无回撤）时 Calmar 数学上为 +∞，是最优状态而非
+        # 「单位回撤收益为零」。记为 0.0 会让最好的结果显示为最差，被排序/寻优系统性淘汰。
         if max_drawdown <= 0:
-            return 0.0
+            return None
         return annualized_return / max_drawdown
+
+    @staticmethod
+    def _decision_sells(trades: pl.DataFrame) -> pl.DataFrame | None:
+        """主动决策平仓样本：胜率与盈亏比必须共用同一口径。
+
+        退市强平（DELISTED）是非策略决策的强制簿记，计入会系统性恶化两个指标并
+        使策略间不可比（D4-6）；两个指标若口径不同，用户会把口径差异误读为
+        「小赢大亏」之类的策略特征。无主动决策平仓或空 trades 时返回 None
+        （指标无定义）。"""
+        if len(trades) == 0 or "exit_reason" not in trades.columns:
+            return None
+        sells = trades.filter(
+            (pl.col("action") == "sell") & pl.col("exit_reason").is_in(list(BacktestMetrics._DECISION_EXIT_REASONS))
+        )
+        return sells if len(sells) > 0 else None
 
     @staticmethod
     def calc_win_rate(trades: pl.DataFrame) -> float | None:
@@ -175,35 +214,29 @@ class BacktestMetrics:
         语义一致，report 层渲染 N/A。盈亏阈值由 PROFIT_THRESHOLD 共享常量定义，
         与 report.py 保持一致。
         """
-        if len(trades) == 0:
-            return None
-        if "exit_reason" not in trades.columns:
-            # 历史/无退出原因标注的 trades 无法区分主动与非策略决策平仓 → 无定义
-            return None
-        decision_sells = trades.filter(
-            (pl.col("action") == "sell")
-            & pl.col("exit_reason").is_in([ExitReason.SIGNAL.value, ExitReason.REBALANCE.value])
-        )
-        if len(decision_sells) == 0:
+        decision_sells = BacktestMetrics._decision_sells(trades)
+        if decision_sells is None:
             return None
         profitable = decision_sells.filter(pl.col("realized_pnl") > PROFIT_THRESHOLD)
         return len(profitable) / len(decision_sells)
 
     @staticmethod
     def calc_profit_factor(trades: pl.DataFrame) -> float | None:
-        """计算盈亏比，仅统计卖出/平仓交易。
+        """计算盈亏比，仅统计主动决策平仓（与胜率共用口径，D5-M1）。
 
-        无亏损交易（gross_loss <= 0）或无平仓交易时返回 None（指标无定义），
+        退市强平（DELISTED）等非策略决策平仓不参与盈亏统计——与 calc_win_rate
+        保持一致，避免退市损失整额计入分子分母之比、系统性恶化指标并使策略间不可比。
+        退市损失由 delist_liquidation_count / delist_loss_amount 单独呈现。
+
+        无亏损交易（gross_loss <= 0）或无主动决策平仓时返回 None（指标无定义），
         不返回 inf —— inf 无法 JSON 序列化，且写入 numeric 列会被 PostgreSQL 拒绝
         （D4-5）。
         """
-        if len(trades) == 0:
+        decision_sells = BacktestMetrics._decision_sells(trades)
+        if decision_sells is None:
             return None
-        sell_trades = trades.filter(pl.col("action") == "sell")
-        if len(sell_trades) == 0:
-            return None
-        gross_profit_raw = sell_trades.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
-        gross_loss_raw = sell_trades.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
+        gross_profit_raw = decision_sells.filter(pl.col("realized_pnl") > 0)["realized_pnl"].sum()
+        gross_loss_raw = decision_sells.filter(pl.col("realized_pnl") < 0)["realized_pnl"].sum()
         gross_profit = float(gross_profit_raw) if gross_profit_raw is not None else 0.0
         gross_loss = abs(float(gross_loss_raw)) if gross_loss_raw is not None else 0.0
         if gross_loss <= 0:
@@ -214,9 +247,12 @@ class BacktestMetrics:
     def calc_ic(
         signal_rank: pl.Series,
         forward_return: pl.Series,
-    ) -> float:
+    ) -> float | None:
+        """样本不足或相关不可算时 IC 无定义，返回 None（R21：不可返回 0.0——
+        IC=0 的业务含义是「信号无预测力」，与「候选股不足无法计算」是完全不同的结论，
+        后者只是未测量，前者是对策略的判决）。"""
         if len(signal_rank) < 3 or len(forward_return) < 3:
-            return 0.0
+            return None
         df = pl.DataFrame(
             {
                 "signal_rank": signal_rank,
@@ -224,32 +260,38 @@ class BacktestMetrics:
             }
         )
         correlation = df.select(pl.corr("signal_rank", "forward_return", method="spearman")).item()
-        return float(correlation) if correlation is not None else 0.0
+        return float(correlation) if correlation is not None else None
 
     @staticmethod
     def calc_ir(
         ic_series: pl.Series,
         num_days: int = 252,
         trading_days_per_year: int = 252,
-    ) -> float:
+    ) -> float | None:
         """计算 IC 信息比率 (IR)。
 
         年化系数 = sqrt(ic_count / years)，其中 years = num_days / 252。
         IC 序列按调仓频率计算（非日频），不能用固定 sqrt(252) 年化。
-        """
-        if len(ic_series) < 2:
-            return 0.0
-        ic_mean_raw = ic_series.mean()
-        ic_mean = float(cast(float, ic_mean_raw)) if ic_mean_raw is not None else 0.0
-        ic_std_val = ic_series.std()
+        无定义（有效样本不足 / IC 零波动）时返回 None（R21）。"""
+
+        # R21: 先剔除「该期无法计算」（None → null）的无效样本；有效样本不足 2 个时
+        # IR 无定义，返回 None。若不剔除，全 null 序列会被误判为「信号无稳定性」(0.0)。
+        valid = ic_series.drop_nulls()
+        if len(valid) < 2:
+            return None
+        ic_mean_raw = valid.mean()
+        ic_mean = float(cast(float, ic_mean_raw)) if ic_mean_raw is not None else None
+        ic_std_val = valid.std()
         if ic_std_val is None:
-            return 0.0
+            return None
         ic_std_float = float(cast(float, ic_std_val))
         if ic_std_float < 1e-10:
-            return 0.0
+            return None
+        if ic_mean is None:
+            return None
         # 年化系数: ic_count / years = 每年 IC 样本数
         years = num_days / trading_days_per_year if num_days > 0 else 1.0
-        ic_count = len(ic_series)
+        ic_count = len(valid)
         annualization_factor = math.sqrt(ic_count / years)
         return ic_mean / ic_std_float * annualization_factor
 
@@ -258,26 +300,28 @@ class BacktestMetrics:
         daily_returns: pl.Series,
         benchmark_returns: pl.Series,
         trading_days_per_year: int = 252,
-    ) -> tuple[float, float]:
+    ) -> tuple[float | None, float | None]:
         # D1-M1: 两序列按共同有效样本对齐后相减。缺口（基准缺失日 / 净值爆仓日）
         #   不参与超额计算，避免 null 传播污染跟踪误差与信息比率，也防止"基准缺失被
         #   伪装成 0"系统性拉低超额。对齐后不足 2 个样本则视为无超额（沿用旧语义）。
+        # R21: 无定义时返回 (None, None)——「无超额收益、零跟踪误差」是具体业务含义，
+        #   会把「无法计算」伪装成「业绩与基准完全持平」。
         aligned = pl.DataFrame({"daily_returns": daily_returns, "benchmark_returns": benchmark_returns}).drop_nulls()
         if len(aligned) < 2:
-            return 0.0, 0.0
+            return None, None
 
         excess_returns = aligned["daily_returns"] - aligned["benchmark_returns"]
 
         tracking_error = excess_returns.std()
         if tracking_error is None:
-            return 0.0, 0.0
+            return None, None
         tracking_error_float = float(cast(float, tracking_error))
         if tracking_error_float == 0:
-            return 0.0, 0.0
+            return None, None
 
         excess_mean = excess_returns.mean()
         if excess_mean is None:
-            return 0.0, 0.0
+            return None, None
 
         tracking_error_annual = tracking_error_float * math.sqrt(trading_days_per_year)
         information_ratio = float(cast(float, excess_mean)) * trading_days_per_year / tracking_error_annual
@@ -292,7 +336,7 @@ class BacktestMetrics:
         - 每日投资比例 invested_pct = (total_value - cash) / total_value（现金及未投出部分占比）
         - avg_invested_pct: 平均投资比例
         - min_invested_pct: 最低投资比例
-        - cash_drag_days: 投资比例 < 80% 的天数（现金拖累）
+        - cash_drag_days: 投资比例 < CASH_DRAG_THRESHOLD 的天数（现金拖累）
 
         持仓为空（无信号回测等）时视为 0% 投资。这些指标让「信号稀疏 → 资金闲置」
         变得可见：avg_invested_pct 低说明收益被现金稀释（volatility/回撤被压低但 Sharpe
@@ -306,7 +350,7 @@ class BacktestMetrics:
         invested_pct = (invested / total).fill_nan(0.0).fill_null(0.0)
         _mean = invested_pct.mean()
         _min = invested_pct.min()
-        _drag = (invested_pct < 0.8).sum()
+        _drag = (invested_pct < CASH_DRAG_THRESHOLD).sum()
         return {
             "avg_invested_pct": float(cast(float, _mean)) if len(invested_pct) > 0 else 0.0,
             "min_invested_pct": float(cast(float, _min)) if len(invested_pct) > 0 else 0.0,
@@ -331,7 +375,10 @@ class BacktestMetrics:
 
         information_ratio, tracking_error = BacktestMetrics.calc_information_ratio(daily_returns, benchmark_returns)
 
-        _ic_mean_raw = ic_series.mean() if len(ic_series) > 0 else None
+        # R21: IC 序列中的 None（该期无法计算）剔除后取均值——否则样本不足的期数会把
+        # 均值系统性拉向 0，伪装成「信号无效」。全为 None 或空序列时均值无定义 → None。
+        _valid_ic = ic_series.drop_nulls()
+        _ic_mean_raw = _valid_ic.mean() if len(_valid_ic) > 0 else None
         return {
             "total_return": total_return,
             "annualized_return": ann_return,
@@ -342,7 +389,7 @@ class BacktestMetrics:
             "win_rate": BacktestMetrics.calc_win_rate(trades),
             "profit_factor": BacktestMetrics.calc_profit_factor(trades),
             "total_trades": len(trades),
-            "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else 0.0,
+            "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else None,
             "ic_ir": BacktestMetrics.calc_ir(ic_series, num_days=len(nav_curve)),
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,

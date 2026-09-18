@@ -165,6 +165,23 @@ class VectorBacktestEngine:
         # 与其它 data_warnings 同通道进入 unreliable 判定，让「本次回测走了慢路径」首屏可见。
         all_warnings.extend(self.data_provider.range_preload_warnings)
 
+        # D5-M2: 净值归零（爆仓）检测——不是数值噪声，必须让爆仓在 UI 可见。
+        # daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，此处显式追加
+        # DataWarning 进入 unreliable 判定，避免波动率低估/夏普被高估被静默掩盖。
+        if bool((nav_curve == 0).any()):
+            all_warnings.append(
+                str(
+                    DataWarning(
+                        warning_type="portfolio_wiped_out",
+                        start_date=str(self.config.start_date),
+                        end_date=str(self.config.end_date),
+                        affected_stock_count=1,
+                        error_message="组合净值归零（爆仓）：爆仓日收益无定义被剔除，"
+                        "volatility/sharpe 已相应修正，请以 total_return/max_drawdown 的 -100% 为准。",
+                    )
+                )
+            )
+
         # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
         # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。
         has_real_score = (

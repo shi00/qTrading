@@ -192,6 +192,11 @@ def _build_metrics_section(
     delist_loss_amount: float = 0.0,
     delist_recovery_rate: float = 0.3,
 ) -> ft.Column:
+    # D5-C1: 无定义指标（None）在面板渲染为 N/A 并走次要色，不调用颜色函数
+    # （_get_color_for_sharpe/_get_color_for_ic 对 None 非安全）。
+    sharpe = metrics.get("sharpe_ratio")
+    ic_mean = metrics.get("ic_mean")
+    ic_ir = metrics.get("ic_ir")
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
             [
@@ -221,8 +226,8 @@ def _build_metrics_section(
                 ft.Container(
                     content=_metric_card(
                         I18n.get("backtest_metric_sharpe"),
-                        f"{metrics.get('sharpe_ratio', 0):.2f}",
-                        _get_color_for_sharpe(metrics.get("sharpe_ratio", 0)),
+                        f"{sharpe:.2f}" if sharpe is not None else "N/A",
+                        _get_color_for_sharpe(sharpe) if sharpe is not None else AppColors.TEXT_SECONDARY,
                     ),
                     col=_COL_QUARTER,
                 ),
@@ -247,8 +252,8 @@ def _build_metrics_section(
                 ft.Container(
                     content=_metric_card(
                         _ic_mean_label(has_real_score),
-                        f"{metrics.get('ic_mean', 0):.4f}",
-                        _get_color_for_ic(metrics.get("ic_mean", 0)),
+                        f"{ic_mean:.4f}" if ic_mean is not None else "N/A",
+                        _get_color_for_ic(ic_mean) if ic_mean is not None else AppColors.TEXT_SECONDARY,
                         tooltip=_ic_sort_tooltip(has_real_score) or None,
                     ),
                     col=_COL_QUARTER,
@@ -256,8 +261,8 @@ def _build_metrics_section(
                 ft.Container(
                     content=_metric_card(
                         _ic_ir_label(has_real_score),
-                        f"{metrics.get('ic_ir', 0):.2f}",
-                        _get_color_for_ic(metrics.get("ic_ir", 0)),
+                        f"{ic_ir:.2f}" if ic_ir is not None else "N/A",
+                        _get_color_for_ic(ic_ir) if ic_ir is not None else AppColors.TEXT_SECONDARY,
                         tooltip=_ic_sort_tooltip(has_real_score) or None,
                     ),
                     col=_COL_QUARTER,

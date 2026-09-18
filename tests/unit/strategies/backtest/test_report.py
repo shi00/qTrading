@@ -152,6 +152,28 @@ class TestBacktestReport:
         summary = BacktestReport().format_summary(result)
         assert f"{I18n.get('report_win_rate')}: N/A" in summary
 
+    def test_format_summary_all_optional_none_render_na(self, backtest_result: BacktestResult) -> None:
+        """D5-C1/M3 门禁: 所有可能为 None 的指标键同时置 None 时，format_summary 逐项渲染
+        ``<label>: N/A`` 且不抛异常。把「逐项手写 N/A 分支容易漏」变成门禁——当前
+        sharpe_ratio 即为此前漏网处，本测试对其显式约束（R21 对齐）。"""
+        none_keys = [
+            "annualized_return",
+            "sharpe_ratio",
+            "calmar_ratio",
+            "ic_mean",
+            "ic_ir",
+            "win_rate",
+            "profit_factor",
+        ]
+        result = dataclasses.replace(
+            backtest_result,
+            metrics={**backtest_result.metrics, **{k: None for k in none_keys}},
+        )
+        summary = BacktestReport().format_summary(result)
+        for k in none_keys:
+            # 所有可 None 指标键的 i18n key 均为 `report_<key>`，渲染一致为 `:` 加 N/A
+            assert f"{I18n.get(f'report_{k}')}: N/A" in summary, f"metric {k} 未渲染 N/A"
+
     def test_format_summary_with_data_warnings(self, backtest_result: BacktestResult) -> None:
         result_with_warning = backtest_result.with_warnings(list(backtest_result.data_warnings) + ["test warning"])
         report = BacktestReport()
