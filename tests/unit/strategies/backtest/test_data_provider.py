@@ -399,6 +399,22 @@ class TestBacktestQualityProxy:
         with pytest.raises(QualityGateError):
             _check_tier(proxy, QualityTier.GOLD, "f", require_continuous_window=True)
 
+    def test_check_tier_passes_silver_on_gap_proxy(self) -> None:
+        """D3-M2 残留修复: 有缺口（missing 非空）的 GOLD proxy 通过 SILVER 门控，不抛 QualityGateError。
+
+        回归核心缺陷：区间缺口不再降级 tier 为 BRONZE，默认 SILVER 策略不被全区间拦截；
+        缺口日由 build_context 空 screening_data 自然空输出，而非门控拒绝。
+        """
+        from data.persistence.quality_gate import QualityTier, _check_tier
+
+        from strategies.backtest.data_provider import _BacktestQualityProxy
+
+        proxy = _BacktestQualityProxy(tier=QualityTier.GOLD, missing_dates=frozenset({"20240103"}))
+        # SILVER 要求（默认策略等级）在缺口 proxy 下应放行
+        _check_tier(proxy, QualityTier.SILVER, "test_func")
+        # 等级检查与连续窗口检查相互独立：GOLD 等级本身始终通过等级检查
+        _check_tier(proxy, QualityTier.GOLD, "test_func")
+
     @pytest.mark.asyncio
     async def test_proxy_reused_across_build_context_calls(self) -> None:
         """验证 BacktestDataProvider 复用 proxy 实例。"""
@@ -775,11 +791,15 @@ class TestBacktestQualityProxy:
         assert provider.range_preload_warnings == []
 
     @pytest.mark.asyncio
-    async def test_preload_missing_dates_downgrades_to_bronze(self) -> None:
-        """D3-M2: 区间缺口（screening_data 缺 20240103）→ proxy 降级 BRONZE 并记录缺失日。
+    async def test_preload_missing_dates_keeps_gold_with_gap_warning(self) -> None:
+        """D3-M2 残留修复: 区间缺口（screening_data 缺 20240103）→ proxy 保持 GOLD、缺失日仍记录并告警。
 
         autouse fixture 使 TradeCalendarService.get_trade_dates 返回 {20240102, 20240103}（expected），
         screening_data 仅覆盖 {20240102} → missing={20240103}。
+
+        关键语义: 区间缺口**不降级 tier**（聚合粒度与 _check_tier 逐日消费错配会把整个区间
+        的每一天都拦截，默认 SILVER 策略整段回测零信号）；缺口日由 build_context 返回空
+        screening_data 自然空输出，可见性由 range_quality_gaps 警告承载。
         """
         from data.persistence.quality_gate import QualityTier
 
@@ -804,7 +824,7 @@ class TestBacktestQualityProxy:
         provider = BacktestDataProvider(cache)
         await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
 
-        assert provider._quality_proxy._quality_tier == int(QualityTier.BRONZE)
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
         assert provider._quality_proxy._scan_missing_dates == frozenset({"20240103"})
         # D3-M2: 区间缺口必须写入 range_preload_warnings，经 engine 并入 BacktestResult.data_warnings，
         # 触发 backtest_view_model 的 unreliable 判定，让缺口在 UI 首屏可见。
@@ -880,9 +900,11 @@ class TestBacktestQualityProxy:
 
     @pytest.mark.asyncio
     async def test_preload_empty_screening_data_reports_all_missing(self) -> None:
-        """D3-M2: screening_data 查询成功但零行（空 dict）→ 全区间缺口，降级 BRONZE 并告警。
+        """D3-M2 残留修复: screening_data 查询成功但零行（空 dict）→ 全区间缺口，proxy 保持 GOLD 并告警。
 
-        空 dict 等价于整段区间无筛选数据，回测必然无信号；必须可见而非静默保持 GOLD。
+        空 dict 等价于整段区间无筛选数据，回测必然无信号；必须可见而非静默。缺口经
+        range_quality_gaps 警告可见（而非降级 BRONZE 拦截——那会把"区间无数据"放大为
+        "每一天数据不足"，对默认 SILVER 策略等价于全区间失败噪音）。
         """
         from data.persistence.quality_gate import QualityTier
 
@@ -898,12 +920,53 @@ class TestBacktestQualityProxy:
         provider = BacktestDataProvider(cache)
         await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
 
-        assert provider._quality_proxy._quality_tier == int(QualityTier.BRONZE)
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
         assert provider._quality_proxy._scan_missing_dates == frozenset({"20240102", "20240103"})
         assert any(
             w.startswith("[range_quality_gaps]") and "2 of 2" in w and "20240102" in w and "20240103" in w
             for w in provider.range_preload_warnings
         )
+
+    @pytest.mark.asyncio
+    async def test_gap_day_build_context_empty_screening_full_on_other_days(self) -> None:
+        """D3-M2 残留修复: 缺口日 build_context 返回空 screening_data，非缺口日正常非空。
+
+        支撑"缺口不降级 tier"语义：缺口只在当日以空输出体现（策略无信号），
+        不污染整段区间其它交易日的信号生成。
+        """
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240102"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        # 缺口日（20240103）：preloaded screening_data 无该日 → build_context 返回空 DataFrame
+        gap_ctx = await provider.build_context(date(2024, 1, 3))
+        gap_screen = gap_ctx.get("screening_data")
+        assert gap_screen is not None
+        assert gap_screen.empty
+
+        # 非缺口日（20240102）：screening_data 完好，策略可正常出信号
+        full_ctx = await provider.build_context(date(2024, 1, 2))
+        full_screen = full_ctx.get("screening_data")
+        assert full_screen is not None
+        assert not full_screen.empty
+        assert len(full_screen) == 2
 
 
 class TestBacktestDataProviderAuxiliaryTables:

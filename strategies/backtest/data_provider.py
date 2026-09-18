@@ -38,8 +38,12 @@ class _BacktestQualityProxy:
 
     双职责：
     1. 覆写质量门控字段 `_quality_tier` / `_scan_missing_dates`，让门控评估
-       "回测区间"而非"实盘最新数据"（D3-M2）。`_scan_missing_dates` 以 frozenset
-       承载，契合 quality_gate._check_tier 的连续窗口契约（D2-9）。
+       "回测区间"而非"实盘最新数据"（D3-M2）。`_quality_tier` 恒为区间可用数据的
+       质量等级（无缺口日为 GOLD）——区间缺口**不降级 tier**（D3-M2 残留修复）：
+       缺口日由 build_context 返回空 screening_data → 策略空输出（无信号），
+       若聚合降级 BRONZE 会在 `_check_tier` 逐日消费时把整个区间的每一天都拦截。
+       `_scan_missing_dates` 以 frozenset 承载缺口日，供 quality_gate._check_tier
+       的连续窗口契约消费（D2-9）与 range_quality_gaps 警告展示。
     2. 其余属性/方法经 `__getattr__` 委托给注入的 data_processor（若有），
        保证策略访问 `context["data_processor"]` 的数据能力（cache / trade_calendar /
        get_screening_data / get_latest_trade_date / is_cancelled 等）不被破坏。
@@ -96,7 +100,8 @@ class BacktestDataProvider:
         self.data_processor = data_processor
         # D3-M2: 恒创建回测区间质量代理，不再因注入 data_processor 而置 None。
         # 有注入时 delegate=真实 processor（策略经 __getattr__ 委托访问其数据能力），
-        # 无注入时退化为纯质量字段代理。preload_range 成功后再按区间缺口覆写真实等级。
+        # 无注入时退化为纯质量字段代理。preload_range 成功后按区间缺口写入
+        # `_scan_missing_dates`（等级恒 GOLD，缺口不降级，见 preload_range 注释）。
         self._quality_proxy = _BacktestQualityProxy(delegate=data_processor)
         self._preloaded: dict | None = None
         self.preload_max_days = preload_max_days
@@ -264,23 +269,27 @@ class BacktestDataProvider:
             # D3-M2 区间缺口评估：expected=全市场交易日全集，actual=screening_data 实际覆盖日期键。
             # 空 dict（查询成功但零行）同样评估——整段区间无筛选数据等价于全缺口，必须可见。
             # 仅查询失败 fallback daily（_preloaded[key]=None）或 expected 不可得时保持默认 GOLD 代理。
+            # D3-M2 残留修复：区间缺口只写入 `_scan_missing_dates` 与下方警告，**不降级 proxy tier**。
+            # 区间 tier 是聚合粒度，而 `_check_tier` 逐日消费——若任一缺口降级 BRONZE，默认 SILVER
+            # 策略（polars_base 默认等级）会在整个区间的每一天被 QualityGateError 拦截，整段回测零信号；
+            # 缺口日本身已由 build_context 返回空 screening_data → 策略空输出（无信号），无需拦截。
+            # 缺口可见性由下方 range_quality_gaps 警告承载（入 data_warnings → UI unreliable 判定）。
             screen_pre = self._preloaded.get("screening_data")
             if expected_dates is not None and isinstance(screen_pre, dict):
                 actual = set(screen_pre.keys())
                 missing = frozenset(sorted(expected_dates - actual))
                 self._quality_proxy = _BacktestQualityProxy(
                     delegate=self.data_processor,
-                    tier=QualityTier.GOLD if not missing else QualityTier.BRONZE,
+                    tier=QualityTier.GOLD,
                     missing_dates=missing,
                 )
                 if missing:
-                    # D3-M2: 区间缺口必须可见——对 required_quality_tier ≤ BRONZE 或未声明
-                    # require_continuous_window 的策略，缺口不触发 _check_tier 拦截，回测在
-                    # 缺口日无信号/无数据运行且全程无告警；声明 require_continuous_window 的
-                    # 策略缺口仍被 _check_tier 拒绝执行（quality_gate 连续窗口检查，拒绝本身
-                    # 经 failed_signal_dates 可见），本警告覆盖其余静默场景。经
-                    # _range_preload_warnings 并入 BacktestResult.data_warnings，触发
-                    # backtest_view_model 的 unreliable 判定。
+                    # D3-M2: 区间缺口必须可见——缺口不触发 `_check_tier` 的等级拦截（proxy 恒
+                    # GOLD，缺口日策略空输出）；但声明 `require_continuous_window=True` 的策略
+                    # （如 OversoldStrategy）仍被 quality_gate 的连续窗口检查拒绝（D2-9 保守
+                    # 设计，缺口区间整段 failed 经 failed_signal_dates 可见）。本警告覆盖其余
+                    # 静默场景（BRONZE 策略 / 未声明连续窗口的策略），经 _range_preload_warnings
+                    # 并入 BacktestResult.data_warnings，触发 backtest_view_model 的 unreliable 判定。
                     # 格式对齐 DataWarning.__str__（[type] start-end: ...），含缺失数量与占比、
                     # 前 5 个缺失日（超长截断防撑爆）。
                     missing_sorted = sorted(missing)
@@ -336,8 +345,9 @@ class BacktestDataProvider:
         # 注入 data_processor 以通过质量门控检查
         # PolarsBaseStrategy.filter() 读取 context["data_processor"] 进行 _check_tier，
         # 缺少此键在 STRICT_QUALITY_GATE=true 下会抛 QualityGateError
-        # D3-M2: 质量门控口径 = 回测区间数据质量（_quality_proxy，preload_range 已按区间
-        # 缺口注入真实等级），不复用实盘最新数据等级（data_processor._quality_tier）——
+        # D3-M2: 质量门控口径 = 回测区间数据质量（_quality_proxy，等级恒为区间可用数据的
+        # GOLD；区间缺口不降级，缺口日由空 screening_data 自然空输出，缺口信息由
+        # `_scan_missing_dates` 承载），不复用实盘最新数据等级（data_processor._quality_tier）——
         # 那会双向错配：实盘落后误杀历史回测、实盘完好漏放区间缺口。代理 __getattr__
         # 委托持有真实 processor，策略对 context processor 的数据访问能力保持可用。
         context["data_processor"] = self._quality_proxy
