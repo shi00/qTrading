@@ -1626,6 +1626,8 @@
     "review_ctx_positive": "Review Reference - Positive Samples",
     "review_ctx_negative": "Review Reference - Negative Samples",
     "review_ctx_none": "No historical review samples available.",
+    "review_ctx_stats": "Same-strategy reviewed samples: {total} total, alpha median {median}%, win rate {win_rate}. Below are distribution tails (top WIN/LOSS) and do not represent typical performance.",
+    "review_ctx_low_sample": "Note: few same-strategy reviewed samples; treat the below tail samples with caution.",
     "review_ctx_benchmark_na": "Benchmark unknown",
     "review_ctx_no_reason": "N/A",
     "review_ctx_win_detail": "{code} ({name}): Alpha {alpha}%, T+1 {pct}%, Attribution: {reason}",

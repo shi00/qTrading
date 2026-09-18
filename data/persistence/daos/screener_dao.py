@@ -587,7 +587,14 @@ class ScreenerDao(BaseDao):
         limit: int = 3,
         is_win: bool = True,
         as_of: datetime.date | datetime.datetime | None = None,
+        strategy_name: str | None = None,
     ):
+        """Return top WIN/LOSS samples for few-shot learning.
+
+        ``strategy_name`` 非空时只取同策略样本：不同策略的选股逻辑与持有周期假设不同，
+        跨策略 few-shot 会让模型学到错误的「特征 → 收益」映射（BIZ-01 排除纯数学记录
+        是同一动机的策略维度延伸）。
+        """
         label = "WIN" if is_win else "LOSS"
         t = Base.metadata.tables["screening_history"]
         order_dir = sa.desc if is_win else sa.asc
@@ -609,6 +616,8 @@ class ScreenerDao(BaseDao):
             # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
             t.c.ai_score.isnot(None),
         )
+        if strategy_name is not None:
+            stmt = stmt.where(t.c.strategy_name == strategy_name)
         if as_of is not None:
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
@@ -616,6 +625,53 @@ class ScreenerDao(BaseDao):
         stmt = stmt.order_by(order_dir(t.c.alpha), order_dir(t.c.t1_pct)).limit(limit)
         df = await self._read_db_select(stmt)
         return df if df is not None else pd.DataFrame()
+
+    async def get_learning_context_stats(
+        self,
+        as_of: datetime.date | datetime.datetime | None = None,
+        strategy_name: str | None = None,
+    ):
+        """返回 few-shot 学习样本的总体统计（BIZ/D4-M3 偏差二兜底）。
+
+        极值样本（top WIN + top LOSS）不代表分布全貌；把样本总数、alpha 中位数与胜率
+        一并注入 prompt，让模型知道 top 样本是尾部而非默认表现，避免高估自身识别
+        极端机会的能力并难以校准置信度。
+        """
+        t = Base.metadata.tables["screening_history"]
+        # 仅统计已复盘、带 alpha 的 AI 样本；与 get_learning_context 的 BIZ-01 过滤口径一致。
+        stmt = (
+            sa.select(
+                sa.func.count().label("total"),
+                sa.func.count().filter(t.c.prediction_result == "WIN").label("win_cnt"),
+                sa.func.count().filter(t.c.prediction_result == "LOSS").label("loss_cnt"),
+                sa.func.avg(t.c.alpha).label("alpha_mean"),
+                sa.func.percentile_cont(0.5).within_group(t.c.alpha).label("alpha_median"),
+            )
+            .select_from(t)
+            .where(
+                t.c.alpha.isnot(None),
+                t.c.t5_pct.isnot(None),
+                t.c.review_status == REVIEW_STATUS_COMPLETED,
+                t.c.ai_score.isnot(None),
+            )
+        )
+        if strategy_name is not None:
+            stmt = stmt.where(t.c.strategy_name == strategy_name)
+        if as_of is not None:
+            if isinstance(as_of, datetime.datetime):
+                as_of = as_of.date()
+            stmt = stmt.where(t.c.trade_date < as_of)
+        df = await self._read_db_select(stmt)
+        if df is None or df.empty:
+            return None
+        row = df.iloc[0]
+        return {
+            "total": int(row["total"]),
+            "win_cnt": int(row["win_cnt"] or 0),
+            "loss_cnt": int(row["loss_cnt"] or 0),
+            "alpha_mean": row["alpha_mean"],
+            "alpha_median": row["alpha_median"],
+        }
 
     @log_async_operation(
         operation_name="ScreenerDao.update_prediction_result",

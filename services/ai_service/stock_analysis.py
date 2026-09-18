@@ -84,10 +84,15 @@ class StockAnalysisService:
         financial_labels: list[str] | None = None,
         capital_labels: list[str] | None = None,
         history_labels: list[str] | None = None,
+        learning_strategy_name: str | None = None,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'llm_model' to be configured.
+
+        ``learning_strategy_name``：调用方策略的 ``name_key``，非空时仅取同策略的
+        few-shot 学习样本（与 save_results 写入的 strategy_name 口径对齐），避免在
+        独立单股分析路径兜底预取时跨策略混用（与批量预取路径 D4-M3 一致）。
 
         ⚠️ Backtest safety: When called in a backtest context, ``history_context``
         MUST be pre-fetched via ``AIStrategyMixin.run_ai_analysis()`` so that the
@@ -179,7 +184,10 @@ class StockAnalysisService:
 
                 rm = ReviewManager()
                 safe_as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
-                history_context = await rm.get_learning_context(as_of=safe_as_of)
+                history_context = await rm.get_learning_context(
+                    as_of=safe_as_of,
+                    strategy_name=learning_strategy_name,
+                )
             except Exception as e:
                 log_classified(
                     logger,

@@ -1626,6 +1626,8 @@
     "review_ctx_positive": "复盘参考 - 正向样本",
     "review_ctx_negative": "复盘参考 - 负向样本",
     "review_ctx_none": "暂无可用历史复盘样本。",
+    "review_ctx_stats": "同策略历史已复盘样本: 共 {total} 条, Alpha 中位数 {median}%, 胜率 {win_rate}。以下为分布尾部(top WIN/LOSS)样本, 不代表典型表现。",
+    "review_ctx_low_sample": "注意: 同策略已复盘样本量偏少, 请谨慎参考以下尾部样本。",
     "review_ctx_benchmark_na": "基准未知",
     "review_ctx_no_reason": "无",
     "review_ctx_win_detail": "{code} ({name}): Alpha {alpha}%，次日 {pct}%，当时归因摘要: {reason}",

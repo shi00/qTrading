@@ -508,6 +508,7 @@ class AIService:
         financial_labels: list[str] | None = None,
         capital_labels: list[str] | None = None,
         history_labels: list[str] | None = None,
+        learning_strategy_name: str | None = None,
     ) -> dict | None:
         """委托 StockAnalysisService.analyze_stock（保留显式签名）。"""
         self._ensure_subservices()
@@ -530,6 +531,7 @@ class AIService:
             financial_labels=financial_labels,
             capital_labels=capital_labels,
             history_labels=history_labels,
+            learning_strategy_name=learning_strategy_name,
         )
 
     # ------------------------------------------------------------------

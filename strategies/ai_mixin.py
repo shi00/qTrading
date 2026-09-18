@@ -496,7 +496,11 @@ class AIStrategyMixin:
 
                 rm = ReviewManager()
                 as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
-                history_context = await rm.get_learning_context(as_of=as_of)
+                # D4-M3: 传入 name_key 只取同策略 few-shot 样本，避免跨策略污染。
+                history_context = await rm.get_learning_context(
+                    as_of=as_of,
+                    strategy_name=getattr(self, "name_key", None),
+                )
             except Exception as e:
                 log_classified(
                     logger,
@@ -1439,6 +1443,7 @@ class AIStrategyMixin:
                 financial_labels=financial_labels,
                 capital_labels=capital_labels,
                 history_labels=history_labels,
+                learning_strategy_name=getattr(self, "name_key", None),
             )
             return ai_result
 
