@@ -8,6 +8,29 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.10.1](https://github.com/shi00/qTrading/compare/v0.10.0...v0.10.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **d3-m2:** 回测质量代理区间缺口不再降级 BRONZE，避免默认 SILVER 策略整段回测零信号 ([#1008](https://github.com/shi00/qTrading/issues/1008)) ([9afe77a](https://github.com/shi00/qTrading/commit/9afe77a179591e8ce3b113f6f84dc2afa67c098e))
+* **review:** 短窗口日历部分缺失时降级禁用 T+N 锚定（D3-M1 残留） ([#1007](https://github.com/shi00/qTrading/issues/1007)) ([75d0edb](https://github.com/shi00/qTrading/commit/75d0edbaeebbd8eade16f932957f4da5f953e062))
+
+
+### Documentation
+
+* **readme:** 修正迁移版本范围与补齐目录树 ([#1019](https://github.com/shi00/qTrading/issues/1019)) ([bacda7b](https://github.com/shi00/qTrading/commit/bacda7beaa80066cb6e2fffa5e9b4da24c318079))
+* **review:** adr/0007 Alembic 迁移 0020→0024（文档检视 U8） ([#1017](https://github.com/shi00/qTrading/issues/1017)) ([a6e6fa0](https://github.com/shi00/qTrading/commit/a6e6fa0838828b7207b4d189ec855b84fef838f1))
+* **review:** ci-cd.md CI 全量门禁顺序对齐 ci_cd.yml（文档检视 U4） ([#1013](https://github.com/shi00/qTrading/issues/1013)) ([b5b2a7b](https://github.com/shi00/qTrading/commit/b5b2a7b0bcc85f59e577dc58d0b8ea86984387fa))
+* **review:** CONTRIBUTING 对应版本 0.9.0 对齐 0.10.0（文档检视 U3） ([#1011](https://github.com/shi00/qTrading/issues/1011)) ([f3ef629](https://github.com/shi00/qTrading/commit/f3ef6291f61b6bd708f7e87a4262f781ea40e376))
+* **review:** dao-pattern 路径 base_dao→daos/base_dao（文档检视 U6） ([#1015](https://github.com/shi00/qTrading/issues/1015)) ([cadb455](https://github.com/shi00/qTrading/commit/cadb4552735c8a52badc8348addf63429d612f62))
+* **review:** data-sync.md 补齐 data/sync 文件清单 5→9（文档检视 U7） ([#1016](https://github.com/shi00/qTrading/issues/1016)) ([3bb385e](https://github.com/shi00/qTrading/commit/3bb385ef18e52c8dd787751647a5da6ba9793742))
+* **review:** known-technical-debt 数据矛盾修正 258/226 与 import 26/22→32/24（文档检视 U5） ([#1014](https://github.com/shi00/qTrading/issues/1014)) ([5518c17](https://github.com/shi00/qTrading/commit/5518c17bc03ae5bfc773b0e565bae50c729e6278))
+* **review:** project-profile R3 措辞 [reason] 改 [error-code]（文档检视 U2） ([#1012](https://github.com/shi00/qTrading/issues/1012)) ([3744ab6](https://github.com/shi00/qTrading/commit/3744ab60004bc18c1c2cf83757e70dae6ce4f0cf))
+* **review:** scenario-completeness 引用标题「防漏报」修正为「防误报与防漏报」 ([#1021](https://github.com/shi00/qTrading/issues/1021)) ([daad49d](https://github.com/shi00/qTrading/commit/daad49d7df20f0cef3fdf6421ca5fe678ea0ca43))
+* **review:** task-manager coroutine_factory 无参描述修正（文档检视 U9） ([#1018](https://github.com/shi00/qTrading/issues/1018)) ([b01fd59](https://github.com/shi00/qTrading/commit/b01fd59428fd49eed8e110e32a23feaad317523e))
+* **review:** 红线编号总述 R1~R22 同步为 R1~R23 并补 project-profile R23 行（文档检视 U1） ([#1010](https://github.com/shi00/qTrading/issues/1010)) ([84b6781](https://github.com/shi00/qTrading/commit/84b6781e4aa4817964487ac0836c2fc24e0518b3))
+
 ## [0.10.0](https://github.com/shi00/qTrading/compare/v0.9.0...v0.10.0) (2026-09-18)
 
 
