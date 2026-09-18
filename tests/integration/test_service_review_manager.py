@@ -48,6 +48,23 @@ def _make_trade_cal_mock():
     return AsyncMock(side_effect=_side_effect)
 
 
+def _make_engine():
+    """返回支持 `async with engine.begin() as conn` 的 engine 替身（可断言 begin 被调用）。
+
+    用 asynccontextmanager 而非 AsyncMock 模拟事务上下文，避免 AsyncMock 的
+    __aenter__/__aexit__ 产生"coroutine never awaited"运行时警告。
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _begin():
+        yield MagicMock()
+
+    engine = MagicMock()
+    engine.begin = MagicMock(side_effect=_begin)
+    return engine
+
+
 class TestReviewManagerInit(unittest.TestCase):
     """测试初始化"""
 
@@ -908,6 +925,162 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 ts_code=DEFAULT_BENCHMARK_INDEX, trade_date=datetime.date(2024, 3, 18)
             )
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+
+        asyncio.run(run_test())
+
+    def test_review_all_candidates_missing_t1_does_not_use_t2(self):
+        """D3-M1 测试缺口（场景 1）：2 只候选股 T+1 全缺行时不得把 T+2 价格记为 t1_pct。
+
+        行情并集中 T+1（20240318）整体缺行、T+2（20240319）有行：若以个股行序锚定
+        T+1 会滑到 T+2 误标（10.0→10.3）；日历锚定下 t1_date=20240318 无行情 → 悬空跳过。
+        """
+        mock_cache_instance = MagicMock()
+        self._setup_cache_with_pending(
+            mock_cache_instance,
+            pending_df=self._make_pending_df(
+                ids=[1, 2],
+                ts_codes=["000001.SZ", "000002.SZ"],
+                trade_dates=["20240315", "20240315"],
+            ),
+        )
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+                    "trade_date": ["20240315", "20240319", "20240315", "20240319"],
+                    "close": [10.0, 10.3, 20.0, 20.5],
+                    "pct_chg": [1.0, 3.0, 1.0, 2.5],
+                }
+            )
+        )
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            await manager.run_review()
+            # 日历数据源确实被调用（区分"锚定跳过"与"日历退化静默返回空"两种形态）
+            mock_cache_instance.stock_dao.get_trade_cal.assert_awaited()
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_three_paths_resolve_same_t1_t5_anchors(self):
+        """D3-M1 测试缺口（场景 3）：三条复盘通路对同一 t0 解出相同的 T+1/T+5 锚点。
+
+        行情仅覆盖 t0（20240315）、T+1（20240318）、T+5（20240322），中间 3 个交易日
+        缺行（个股停牌）。三路均以全市场交易日历锚定：run_review 与 backfill_t1_returns
+        解出相同 T+1（t1_price=11.0 唯一指纹）、run_review 与 backfill_horizon_returns
+        解出相同 T+5（t5_price=12.0）；若某路退化为个股行序锚定，T+5=iloc[5] 越界无法
+        产出，本测试即失败。
+        """
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "trade_date": ["20240315", "20240318", "20240322"],
+                "close": [10.0, 11.0, 12.0],
+                "pct_chg": [1.0, 10.0, 9.1],
+            }
+        )
+        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        candidate = [{"id": 1, "ts_code": "000001.SZ", "trade_date": datetime.date(2024, 3, 15)}]
+
+        # ① run_review：T+1=20240318（+10.0%）、T+5=20240322（+20.0%）
+        mock_cache_instance = MagicMock()
+        self._setup_cache_with_pending(mock_cache_instance)
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=index_df)
+        mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=index_df)
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        asyncio.run(manager.run_review())
+        mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+        call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
+        self.assertEqual(call_args[0][0], 1)
+        self.assertAlmostEqual(call_args[0][1], 10.0)
+        self.assertEqual(call_args.kwargs["t1_price"], 11.0)
+        self.assertAlmostEqual(call_args.kwargs["t5_pct"], 20.0)
+        self.assertEqual(call_args.kwargs["t5_price"], 12.0)
+
+        # ② backfill_t1_returns：同一 t0 → 相同 T+1 锚点（t1_price=11.0、pct=10.0）
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=index_df)
+        mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.screener_dao.get_unfilled_t1_predictions = AsyncMock(return_value=candidate)
+        mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
+        mock_cache_instance.engine = _make_engine()
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        result = asyncio.run(manager.backfill_t1_returns())
+        self.assertEqual(result, 1)
+        mock_cache_instance.engine.begin.assert_called_once()  # noqa: weak-assertion begin 无参事务上下文，次数断言即验证批量事务路径
+        call_args = mock_cache_instance.screener_dao.update_prediction_result.call_args
+        self.assertEqual(call_args[0][0], 1)
+        self.assertAlmostEqual(call_args[0][1], 10.0)
+        self.assertEqual(call_args.kwargs["t1_price"], 11.0)
+
+        # ③ backfill_horizon_returns：同一 t0 → 相同 T+5 锚点（t5_price=12.0、t5_pct=20.0）
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=candidate)
+        mock_cache_instance.screener_dao.backfill_t5_prediction = AsyncMock()
+        mock_cache_instance.engine = _make_engine()
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        result = asyncio.run(manager.backfill_horizon_returns(horizon=5))
+        self.assertEqual(result, 1)
+        mock_cache_instance.engine.begin.assert_called_once()  # noqa: weak-assertion begin 无参事务上下文，次数断言即验证批量事务路径
+        call_args = mock_cache_instance.screener_dao.backfill_t5_prediction.call_args
+        self.assertEqual(call_args[0][0], 1)
+        self.assertAlmostEqual(call_args[0][1], 20.0)
+        self.assertEqual(call_args[0][2], 12.0)
+
+    def test_backfill_t1_missing_t1_skips_not_misuses_t2(self):
+        """D3-M1 测试缺口（场景 3 补充）：backfill_t1_returns 对 T+1 缺行记录不误用 T+2。
+
+        行情 [20240315(t0), 20240319(T+2), 20240322(T+5)] 中 T+1=20240318 缺行：日历锚定下
+        t1_date 无行情 → 跳过（返回 0、不更新）；若退化为个股行序锚定会把 20240319 当 T+1
+        （错价 +120%）→ 测试失败。与 run_review 的 T+1 缺行测试共同证明两条 T+1 通路对
+        同一 t0 的锚定一致。
+        """
+        mock_cache_instance = MagicMock()
+        mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240315", "20240319", "20240322"],
+                    "close": [10.0, 22.0, 12.0],
+                    "pct_chg": [1.0, 120.0, 9.1],
+                }
+            )
+        )
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
+        mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
+        mock_cache_instance.screener_dao.get_unfilled_t1_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": datetime.date(2024, 3, 15)}]
+        )
+        mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
+        mock_cache_instance.engine = _make_engine()
+        mock_api_instance = MagicMock()
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+
+        manager = self._make_manager(mock_cache_instance, mock_api_instance)
+
+        async def run_test():
+            result = await manager.backfill_t1_returns()
+            self.assertEqual(result, 0)
+            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
+            mock_cache_instance.engine.begin.assert_not_called()
 
         asyncio.run(run_test())
 
