@@ -2093,6 +2093,7 @@
     "col_change_reason": "Change Reason",
     "ai_card_retry": "Retry analysis",
     "ai_card_analysis_failed": "Analysis failed",
+    "ai_card_no_score": "Analysis incomplete (model returned no score)",
     "ai_retry_strategy_changed": "Strategy changed, cannot retry last analysis",
     "ai_retry_failed": "Retry failed",
     "news_insight_err_no_loop": "Event loop unavailable, task cannot start",

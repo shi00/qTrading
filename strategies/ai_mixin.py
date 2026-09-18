@@ -1137,7 +1137,8 @@ class AIStrategyMixin:
         - ai_status="analyzed": res 为正常 dict 且 score>0，携带 ai_score/ai_reason/confidence/thinking
         - ai_status="rejected": res 为正常 dict 且 score==0（模型明确否决），ai_score=0，ai_reason 保留否决理由
         - ai_status="failed":   res 为 None/异常，或 stock_analysis 失败分支的 dict
-                                （含 error 字段 / ai_status="failed"），ai_score=None，ai_reason 承载错误分类
+                                （含 error 字段 / ai_status="failed"），或成功返回但 score 缺失/不可解析
+                                （R21：不把"没打分"伪装成"否决"），ai_score=None，ai_reason 承载错误分类
 
         返回始终为 dict（保留原始行全部字段），不再返回 None。
         """
@@ -1187,7 +1188,17 @@ class AIStrategyMixin:
                 summary += f" ({I18n.get('ai_risk_label')}: {uncertainty_str})"
 
         # D3-6: score==0 表示模型明确否决，不再丢弃；得分>0 为 analyzed
-        score_int = round(min(100, max(0, float(score_val))), 1) if isinstance(score_val, (int, float)) else 0
+        # 三态区分：None = 模型未打分（视为分析未完成，failed）；0 = 模型明确否决；>0 = 正常。
+        # 不用 res.get("score", 0) 的默认值——缺省 0 会把"没打分"伪装成"否决"（R21）。
+        score_val = res.get("score")  # type: ignore[union-attr]
+        if score_val is None or not isinstance(score_val, (int, float)):
+            row_dict["ai_status"] = "failed"
+            row_dict["ai_score"] = None
+            row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
+            row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
+            row_dict["confidence"] = None
+            return row_dict
+        score_int = round(min(100, max(0, float(score_val))), 1)
         row_dict["ai_status"] = "rejected" if score_val == 0 else "analyzed"
         row_dict["ai_score"] = score_int
         row_dict["ai_reason"] = summary

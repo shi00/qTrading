@@ -53,8 +53,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
                 score = max(0, min(100, score))
             response["score"] = score
         except (ValueError, TypeError):
+            # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
             logger.warning("[AIService] Output validation: invalid score type: %s", score)
-            response["score"] = 0
+            response["score"] = None
 
     # AI-02: 模型能力信息——缺失 confidence 记 debug 日志，供排查某模型是否持续不返回置信度。
     if response.get("confidence") is None:
