@@ -12,7 +12,7 @@
 |------|---------|----------|
 | **本地最小门禁** | 每次小改动后自检 | `ruff check .` + `ruff format --check .` + 变更相关测试 |
 | **变更相关门禁** | 提交前按变更范围自检 | 按 [变更类型 → 最小验证子集](../../CONTRIBUTING.md#变更类型--最小验证子集) 选择 |
-| **CI 全量门禁** | 推送 / PR / 跨层修改 | `ruff` → `format` → `pre-commit` → `pyright` → `pytest` → 安全扫描 → 迁移一致性 → integration/e2e |
+| **CI 全量门禁** | 推送 / PR / 跨层修改 | `ruff`（前置 `lint-fast` job）→ `pre-commit` → 版本一致 → 安全扫描（pip-audit）→ `pyright` → weak assertions → 迁移一致性（`upgrade head`/`check`/`downgrade base`/`upgrade head`）→ ORM 一致性 → 单测 → 集成 → 覆盖率 → Windows e2e |
 
 ### CI Job 矩阵
 
