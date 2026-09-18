@@ -109,6 +109,21 @@ class TestBuildResultRowFailureClassification:
         assert row["ai_status"] == "rejected"
         assert row["ai_score"] == 0
 
+    def test_missing_score_yields_failed_not_rejected(self):
+        # D4-M1 (R21): 模型未返回 score 字段（无 error/ai_status），视为"未打分"而非"否决"。
+        res = {"summary": "看好", "confidence": 80}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+        assert row["confidence"] is None
+
+    def test_unparseable_score_yields_failed_not_rejected(self):
+        # D4-M1 (R21): 不可解析的 score（如 "high"）置 None 后按"未打分"处理，不伪装为否决。
+        res = {"score": "high"}
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
+
 
 class ConcreteStrategy(AIStrategyMixin):
     key = "test_strategy"

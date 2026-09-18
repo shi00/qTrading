@@ -370,7 +370,8 @@ class TestValidateAiAnalysisResponseContinued:
 
     def test_invalid_score_type(self):
         result = validate_ai_analysis_response({"score": "abc", "recommendation": "hold"})
-        assert result["score"] == 0
+        # R21: 不可解析的 score 置 None（"未打分"），而非伪装为 0 分否决
+        assert result["score"] is None
 
     def test_invalid_recommendation(self):
         result = validate_ai_analysis_response({"score": 50, "recommendation": "unknown"})

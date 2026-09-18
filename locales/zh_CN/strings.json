@@ -2093,6 +2093,7 @@
     "col_change_reason": "变更原因",
     "ai_card_retry": "重试分析",
     "ai_card_analysis_failed": "分析失败",
+    "ai_card_no_score": "分析未完成（模型未返回评分）",
     "ai_retry_strategy_changed": "策略已切换，无法重试上次分析",
     "ai_retry_failed": "重试失败",
     "news_insight_err_no_loop": "事件循环未就绪，无法启动任务",
