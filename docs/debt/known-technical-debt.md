@@ -725,6 +725,6 @@ v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万�
 
 - [CONTRIBUTING.md §排查典型问题](../../CONTRIBUTING.md#排查典型问题): 排查典型问题（与技术债互补）
 
-- [docs/guides/ci-cd.md](../guides/ci-cd.md): CI/CD 流水线与门禁（litellm Python 3.14 限制相关 CI 矩阵配置）
+- [docs/guides/ci-cd.md](../guides/ci-cd.md): CI/CD 流水线与门禁（litellm Python 3.14 支持与 CI 矩阵配置）
 
 
