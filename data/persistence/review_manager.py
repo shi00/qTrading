@@ -57,14 +57,34 @@ class ReviewManager:
 
     def __init__(
         self,
-        alpha_win_threshold: float = 0.5,
-        alpha_loss_threshold: float = 0.5,
+        alpha_win_threshold: float = 3.0,
+        alpha_loss_threshold: float = 3.0,
+        label_horizon: str = "t5",
     ):
+        # D4-M4: 标签窗口取 T+5 而非 T+1。单日超额收益的标准差与个股日波动同量级
+        # （约 2~3 个百分点），以 ±0.5pp 划线会让近八成随机样本被打上 WIN/LOSS；
+        # 而这些标签是 few-shot 学习样本的筛选依据，噪声标签会把模型引向虚假模式。
+        # 阈值按 T+5 窗口波动尺度设定（5 日累计超额的残差量级，典型 3pp 以上才有区分度），
+        # 且 T+5 收益（t5_pct）由 backfill 通道回填后方可打标签——保证标签建立在
+        # 系统已采样的可靠窗口上，而非当日运气。
         self.cache = CacheManager()
         self.api = TushareClient()
         self.config = ConfigHandler()
         self.alpha_win_threshold = alpha_win_threshold
         self.alpha_loss_threshold = alpha_loss_threshold
+        self.label_horizon = label_horizon
+
+    def _classify_alpha(self, alpha: float) -> str:
+        """按阈值将超额收益 alpha（百分点）分类为 WIN / LOSS / DRAW。
+
+        D4-M4: 唯一打标签判据入口，run_review（T+5 成熟时）与
+        backfill_horizon_returns（T+5 回填时）共用，避免口径漂移。
+        """
+        if alpha > self.alpha_win_threshold:
+            return "WIN"
+        if alpha < -self.alpha_loss_threshold:
+            return "LOSS"
+        return "DRAW"
 
     @log_async_operation(
         operation_name="t1_review",
@@ -183,28 +203,57 @@ class ReviewManager:
                         t1_date_obj = t1_date_val
                     else:
                         t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()
-                    trade_date_str = t1_date_obj.strftime("%Y%m%d")
 
-                    if trade_date_str not in index_cache:
-                        index_cache[trade_date_str] = await self._resolve_index_pct(index_code, t1_date_obj)
+                    # D4-M4: 标签窗口取 T+5。get_learning_context 只读
+                    # ``t5_pct IS NOT NULL + review_status=COMPLETED`` 记录，故标签必须反映
+                    # T+5 窗口而非 T+1 单日；t5 未成熟时仅回填 t1 数值、打 DRAW 占位
+                    # （status 由 update_prediction_result 置 T1_DONE），待 run_review
+                    # 重访或 backfill 补 T+5 后再以 T+5 超额定稿标签。
+                    label_date = t5_date if (self.label_horizon == "t5" and t5_date is not None) else t1_date_obj
+                    label_pct = t5_pct if (self.label_horizon == "t5" and t5_pct is not None) else None
+                    if self.label_horizon != "t5":
+                        # 兼容历史 t1 口径（仅测试/显式覆盖时）：T+1 阶段即以当日超额定稿。
+                        label_pct = t1_pct
 
-                    index_pct = index_cache.get(trade_date_str)
+                    if label_pct is None:
+                        # T+5 未成熟：暂不判定 WIN/LOSS，仅推进 T+1 数值与 T1_DONE 状态。
+                        updates.append(
+                            {
+                                "record_id": row["id"],
+                                "pct": t1_pct,
+                                "label": "DRAW",
+                                "index_pct": None,
+                                "benchmark_code": index_code,
+                                "t1_price": t1_price,
+                                "t5_pct": None,
+                                "t5_price": None,
+                                "alpha": None,
+                            }
+                        )
+                        logger.info(
+                            "[Review] %s: T+5 not matured, staged T+1=%.2f%% as DRAW (label pending T+5)",
+                            ts_code,
+                            t1_pct,
+                        )
+                        continue
+
+                    label_date_str = label_date.strftime("%Y%m%d")
+                    if label_date_str not in index_cache:
+                        index_cache[label_date_str] = await self._resolve_index_pct(index_code, label_date)
+
+                    index_pct = index_cache.get(label_date_str)
 
                     if index_pct is None:
                         logger.warning(
                             "[Review] %s: Index return unavailable for %s, skipping to avoid label pollution",
                             ts_code,
-                            trade_date_str,
+                            label_date_str,
                         )
                         continue
 
-                    alpha = round(t1_pct - index_pct, 4)
+                    alpha = round(label_pct - index_pct, 4)
 
-                    label = "DRAW"
-                    if alpha > self.alpha_win_threshold:
-                        label = "WIN"
-                    elif alpha < -self.alpha_loss_threshold:
-                        label = "LOSS"
+                    label = self._classify_alpha(alpha)
 
                     updates.append(
                         {
@@ -214,15 +263,15 @@ class ReviewManager:
                             "index_pct": index_pct,
                             "benchmark_code": index_code,
                             "t1_price": t1_price,
-                            "t5_pct": t5_pct,
-                            "t5_price": t5_price,
+                            "t5_pct": t5_pct if self.label_horizon == "t5" else None,
+                            "t5_price": t5_price if self.label_horizon == "t5" else None,
                             "alpha": alpha,
                         }
                     )
                     logger.info(
                         "[Review] %s: Stock %s%% vs Index %s%% = Alpha %.2f%% -> %s, T+5=%s",
                         ts_code,
-                        t1_pct,
+                        label_pct,
                         index_pct,
                         alpha,
                         label,
@@ -276,6 +325,10 @@ class ReviewManager:
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
+        # D4-M4: T+5 backfill 需定稿 T+5 标签，故须解析基准指数（与 run_review 同口径）。
+        index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+        index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
+
         updates: list[dict] = []
         for cand in candidates:
             code = cand["ts_code"]
@@ -308,11 +361,34 @@ class ReviewManager:
                 continue
             t5_close_raw = t5_row.get("close")
             t5_price = float(t5_close_raw) if bool(pd.notna(t5_close_raw)) else None
+            t5_pct = round(ret * 100.0, 4)
+
+            # D4-M4: T+5 成熟回填时同步定稿 T+5 窗口标签。run_review 在 T+5
+            # 未成熟时仅打 DRAW 占位（status=T1_DONE），此处补齐 T+5 数值并
+            # 以 T+5 超额定稿 WIN/LOSS/DRAW（与 run_review 共用 _classify_alpha）。
+            t5_date_str = t5_date.strftime("%Y%m%d")
+            if t5_date_str not in index_cache:
+                index_cache[t5_date_str] = await self._resolve_index_pct(index_code, t5_date)
+            index_pct = index_cache.get(t5_date_str)
+            if index_pct is None:
+                logger.warning(
+                    "[Review] T+5 backfill: %s: Index return unavailable for %s, skipping to avoid label pollution",
+                    code,
+                    t5_date_str,
+                )
+                continue
+            alpha = round(t5_pct - index_pct, 4)
+            label = self._classify_alpha(alpha)
+
             updates.append(
                 {
                     "record_id": cand["id"],
-                    "t5_pct": round(ret * 100.0, 4),
+                    "t5_pct": t5_pct,
                     "t5_price": t5_price,
+                    "label": label,
+                    "index_pct": index_pct,
+                    "benchmark_code": index_code,
+                    "alpha": alpha,
                 }
             )
 
@@ -331,16 +407,18 @@ class ReviewManager:
         形成永久数据缺口。本方法每日调度一次即可自然覆盖全部历史，返回回填条数。
 
         只处理 ``review_status IN (PENDING, NULL)`` 且 ``t1_pct IS NULL`` 的记录；
-        T+1 交易日未满 / 停牌缺行 / 复权计算失败 / 基准指数不可得的记录保持 NULL，
-        次日重试。与 ``run_review`` 共享 ``_qfq_return_pct`` 复权口径与
-        ``market_trade_dates`` 锚定，保证预测当天与回填口径一致。
+        T+1 交易日未满 / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试。
+        与 ``run_review`` 共享 ``_qfq_return_pct`` 复权口径与 ``market_trade_dates``
+        锚定，保证预测当天与回填口径一致。
 
-        与 T+5 回填不同，T+1 是打标签（WIN/LOSS/DRAW）与计算 alpha 的依据，故须
-        同时解析基准指数涨跌幅；状态推进由 ``update_prediction_result`` 完成
-        （t5_pct 为空 → 自动置 ``T1_DONE``，不会越级到 COMPLETED）。
+        D4-M4: 标签窗口取 T+5，T+1 阶段仅回填 T+1 数值并打 DRAW 占位（与
+        ``run_review`` 的 T+1 分支一致，不再以 T+1 单日超额定稿 WIN/LOSS）；标签由
+        ``run_review`` 重访或 ``backfill_horizon_returns`` 在 T+5 成熟时定稿。
+        状态推进由 ``update_prediction_result`` 完成（t5_pct 为空 → 自动置
+        ``T1_DONE``，不会越级到 COMPLETED）。
         写库经 ``_batch_update_results(guard_t1=True)`` 启用 T+1 幂等守卫
-        （WHERE 带 ``t1_pct IS NULL``），与 T+5 回填的 ``t5_pct IS NULL`` 语义对称，
-        避免与 run_review 同批并行时把已填的 T+1 重复覆盖。
+        （WHERE 带 ``t1_pct IS NULL``），避免与 run_review 同批并行时把已填的
+        T+1 重复覆盖。
         """
         candidates = await self.cache.screener_dao.get_unfilled_t1_predictions()
         if not candidates:
@@ -369,8 +447,8 @@ class ReviewManager:
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
+        # D4-M4: 标签窗口取 T+5，T+1 阶段不解析 T+1 基准指数（alpha/标签留待 T+5 定稿）。
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
-        index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
         updates: list[dict] = []
         for cand in candidates:
             code = cand["ts_code"]
@@ -408,36 +486,22 @@ class ReviewManager:
             t1_close_raw = t1_row.get("close")
             t1_price = float(t1_close_raw) if bool(pd.notna(t1_close_raw)) else None
 
-            t1_date_str = t1_date.strftime("%Y%m%d")
-            if t1_date_str not in index_cache:
-                index_cache[t1_date_str] = await self._resolve_index_pct(index_code, t1_date)
-            index_pct = index_cache.get(t1_date_str)
-            if index_pct is None:
-                logger.warning(
-                    "[Review] T+1 backfill: %s: Index return unavailable for %s, skipping to avoid label pollution",
-                    code,
-                    t1_date_str,
-                )
-                continue
-
-            alpha = round(t1_pct - index_pct, 4)
+            # D4-M4: 标签窗口取 T+5，T+1 阶段仅打 DRAW 占位（alpha/index_pct 留待
+            # T+5 成熟时由 run_review 或 backfill_horizon_returns 定稿，与 run_review
+            # 的 T+1 分支一致，避免以 T+1 单日超额定稿噪声标签）。
             label = "DRAW"
-            if alpha > self.alpha_win_threshold:
-                label = "WIN"
-            elif alpha < -self.alpha_loss_threshold:
-                label = "LOSS"
 
             updates.append(
                 {
                     "record_id": cand["id"],
                     "pct": t1_pct,
                     "label": label,
-                    "index_pct": index_pct,
+                    "index_pct": None,
                     "benchmark_code": index_code,
                     "t1_price": t1_price,
                     "t5_pct": None,
                     "t5_price": None,
-                    "alpha": alpha,
+                    "alpha": None,
                 }
             )
 
@@ -463,6 +527,10 @@ class ReviewManager:
                         u["record_id"],
                         u["t5_pct"],
                         u["t5_price"],
+                        label=u.get("label"),
+                        index_pct=u.get("index_pct"),
+                        benchmark_code=u.get("benchmark_code"),
+                        alpha=u.get("alpha"),
                         conn=conn,
                     )
         except EngineDisposedError:
@@ -472,7 +540,15 @@ class ReviewManager:
             logger.error("[Review] Batch T+5 backfill failed, falling back to individual updates: %s", safe_error(e))
             for u in updates:
                 try:
-                    await dao.backfill_t5_prediction(u["record_id"], u["t5_pct"], u["t5_price"])
+                    await dao.backfill_t5_prediction(
+                        u["record_id"],
+                        u["t5_pct"],
+                        u["t5_price"],
+                        label=u.get("label"),
+                        index_pct=u.get("index_pct"),
+                        benchmark_code=u.get("benchmark_code"),
+                        alpha=u.get("alpha"),
+                    )
                 except EngineDisposedError:
                     # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
                     raise
