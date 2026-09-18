@@ -36,7 +36,7 @@
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① stock\_detail\_dialog MVVM 改造时；② 或 ui 层 MVVM 完全迁移时 |
 | P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 11 个 use\_state 未建 VM | P3 | ① backtest\_config\_panel MVVM 改造时；② 或 ui 层 MVVM 完全迁移时 |
 | P3-M12-ScreenerViewModel-State-Mutable-Types | #M12-017 MVVM 契约：screener\_view\_model.py state 可变类型 | P3 | ① ScreenerViewModel 重构时；② 或 ui 层 MVVM 完全迁移时 |
-| P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (26 import) / data\_view\.py (22 import) 导入复杂度过高 | P3 | ① screener\_view / data\_view 重构时；② 或 ui 层模块拆分时 |
+| P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (32 import) / data\_view\.py (24 import) 导入复杂度过高 | P3 | ① screener\_view / data\_view 重构时；② 或 ui 层模块拆分时 |
 | P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:199 ↑↓ 排序指示器 | P3 | ① virtual\_table 重构时；② 或可访问性 audit 时 |
 | P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel.py:34 URL 含 referrer code | P3 | ① 项目维护者决策时；② 或隐私 audit 时 |
 | P3-M12-ViewModels-Repeated-Singleton-Calls | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | P3 | ① VM 性能优化时；② 或单例模式重构时 |
@@ -173,7 +173,7 @@ R1 由 import-linter 6 条契约守护；R4/R12/R13/R14/R15 由 `scripts/check_r
 
 **产生背景与现状**
 
-宪法 R3（INVARIANT）要求 `# type: ignore` 带 \[error-code]（已强制）；报告 G5 务实版要求 tests/ 中 attr-defined 之外的类型压制带 human reason（mock 替身场景的 attr-defined 免于说明）。2026-09-04 复核：tests/ 共 327 处 `# type: ignore[x]`，其中 attr-defined 69 处（豁免）、非 attr-defined 258 处（arg-type 41 / method-assign 73 / union-attr 29 / misc 24 / untyped 18 / assignment 27 / 其余 14）。`scripts/check_type_ignore_reason.py` 已实现分级检查（生产 ERROR + tests WARNING），存量 >5 处故先 WARNING 不阻断，避免为 226 处机械补注（宪法 §1.4）。
+宪法 R3（INVARIANT）要求 `# type: ignore` 带 \[error-code]（已强制）；报告 G5 务实版要求 tests/ 中 attr-defined 之外的类型压制带 human reason（mock 替身场景的 attr-defined 免于说明）。2026-09-04 复核：tests/ 共 327 处 `# type: ignore[x]`，其中 attr-defined 69 处（豁免）、非 attr-defined 258 处、其中无 human reason 226 处（arg-type 41 / method-assign 73 / union-attr 29 / misc 24 / untyped 18 / assignment 27 / 其余 14）。`scripts/check_type_ignore_reason.py` 已实现分级检查（生产 ERROR + tests WARNING），存量 >5 处故先 WARNING 不阻断，避免为 226 处机械补注（宪法 §1.4）。
 
 **期望的最终解法**
 
@@ -525,11 +525,11 @@ M12 ui 表现层模块检视发现：`ui/viewmodels/screener_view_model.py` stat
 
 ScreenerState 字段重设计为不可变类型。验收标准：① state 字段全部不可变；② 现有 `test_screener_view_model*.py` 全过。upgrade 触发条件：① ScreenerViewModel 重构时；② 或 ui 层 MVVM 完全迁移时。
 
-#### P3-M12-Views-Import-Complexity-High：#M12-019 可维护性：screener\_view\.py (26 import) / data\_view\.py (22 import) 导入复杂度过高
+#### P3-M12-Views-Import-Complexity-High：#M12-019 可维护性：screener\_view\.py (32 import) / data\_view\.py (24 import) 导入复杂度过高
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M12-Views-Import-Complexity-High** | #M12-019 可维护性：screener\_view\.py (26 import) / data\_view\.py (22 import) 导入复杂度过高 | ① screener\_view / data\_view 重构时；② 或 ui 层模块拆分时 |
+| **P3-M12-Views-Import-Complexity-High** | #M12-019 可维护性：screener\_view\.py (32 import) / data\_view\.py (24 import) 导入复杂度过高 | ① screener\_view / data\_view 重构时；② 或 ui 层模块拆分时 |
 
 **产生背景与现状**
 
