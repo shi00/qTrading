@@ -3084,7 +3084,7 @@ class TestReviewManagerMarketCalendar:
         ]
         seen: list[list[datetime.date]] = []
 
-        async def _rec(start, end):
+        async def _rec(start, end, **kwargs):
             seen.append(cal)
             return cal
 
@@ -3137,3 +3137,163 @@ class TestReviewManagerMarketCalendar:
         # 无可锚定 T+N → 不批量写库；且发出可观测警告而非静默跳过
         rm._batch_update_results.assert_not_called()
         assert any("Market trade calendar empty" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_partial_calendar_missing_observed_date_disables_anchoring(self, mock_cm, mock_tc, caplog):
+        """D3-M1 残留：短窗口日历部分缺失（非全空）时静默错位修复（run_review 通路）。
+        候选股在 6/11 有行情但日历缺 6/11 → 单向包含校验检出 → 整批降级返回空日历，
+        不写任何标签（宁缺毋错），并发出可观测警告而非静默用残缺日历锚定。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["t"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "trade_date": ["20240610", "20240611"],
+                "close": [10.0, 10.5],
+                "pct_chg": [1.0, 2.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        rm._batch_update_results = AsyncMock()
+        # 残缺日历：缺观测行情日 6/11 → 校验检出并整体降级
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 12),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+                await rm.run_review()
+        # 整批降级 → 不写任何标签；且发出可观测警告而非静默用残缺日历锚定
+        rm._batch_update_results.assert_not_called()
+        assert any("Market trade calendar incomplete" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_market_trade_dates_complete_calendar_passes_through(self, mock_cm, mock_tc):
+        """日历完整（observed ⊆ calendar）时原样返回，不误报、不降级。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 11),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            result = await rm._market_trade_dates(
+                datetime.date(2024, 6, 10),
+                datetime.date(2024, 6, 11),
+                observed_dates={datetime.date(2024, 6, 10), datetime.date(2024, 6, 11)},
+            )
+        assert result == cal
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_market_trade_dates_missing_observed_date_returns_empty(self, mock_cm, mock_tc, caplog):
+        """日历缺观测交易日 → 返回空日历（整体降级）并记警告（R3 反静默）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 12),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+                result = await rm._market_trade_dates(
+                    datetime.date(2024, 6, 10),
+                    datetime.date(2024, 6, 12),
+                    observed_dates={datetime.date(2024, 6, 10), datetime.date(2024, 6, 11)},
+                )
+        assert result == []
+        assert any("Market trade calendar incomplete" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_partial_calendar_missing_disables_t5_backfill(self, mock_cm, mock_tc, caplog):
+        """backfill_horizon_returns 通路同样受残缺日历防护：日历缺观测日 → 整批降级，
+        不写 T+5 标签（宁缺毋错）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "trade_date": ["20240610", "20240611"],
+                "close": [10.0, 10.5],
+                "adj_factor": [1.0, 1.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._batch_backfill_t5 = AsyncMock()
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 12),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+                count = await rm.backfill_horizon_returns(horizon=5)
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_partial_calendar_missing_disables_t1_backfill(self, mock_cm, mock_tc, caplog):
+        """backfill_t1_returns 通路同样受残缺日历防护：日历缺观测日 → 整批降级，
+        不写 T+1 数值（宁缺毋错）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao.get_unfilled_t1_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "trade_date": ["20240610", "20240611"],
+                "close": [10.0, 10.5],
+                "adj_factor": [1.0, 1.0],
+                "pct_chg": [1.0, 2.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._batch_update_results = AsyncMock()
+        cal = [
+            datetime.date(2024, 6, 10),
+            datetime.date(2024, 6, 12),
+        ]
+        with patch("data.domain_services.trade_calendar_service.TradeCalendarService") as m:
+            m.return_value.get_trade_dates = AsyncMock(return_value=cal)
+            with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+                count = await rm.backfill_t1_returns()
+        assert count == 0
+        rm._batch_update_results.assert_not_called()
