@@ -27,7 +27,7 @@
 1. [CLAUDE.md](../../CLAUDE.md) §3.1：R4 / R5 / R8 / R12 / R13 / R17（数据库红线）与 §4.1（data 分层边界）
 2. [docs/guides/how-to.md](../guides/how-to.md)「1. 新增一张数据表」与「2. 新增一个 DAO」（流程正本）
 3. [docs/governance/redlines.yml](../governance/redlines.yml)：R12 / R13 / R17 的 `rule_type` 与豁免语义
-4. `data/persistence/base_dao.py` 与 `data/persistence/daos/` 下既有 DAO 样例
+4. `data/persistence/daos/base_dao.py` 与 `data/persistence/daos/` 下既有 DAO 样例
 
 ### 条件触发
 
