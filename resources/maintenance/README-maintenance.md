@@ -77,6 +77,4 @@ cd "<安装目录>/resources/maintenance"
 
 ## 相关文档
 
-- 主计划：`reviews/pg_plan.md`
-- Phase 4 计划：`reviews/pg_phase4_plan.md`
 - sidecar 命令详细语义：`sidecars/qtrading-pg-sidecar/src/cli.rs`

@@ -269,6 +269,7 @@
             "test_gap",
             "question",
             "risk",
+            "out_of_scope",
             "suggestion"
           ]
         },
