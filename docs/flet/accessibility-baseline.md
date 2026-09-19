@@ -43,7 +43,7 @@
 - **Tab 顺序**：控件树顺序与视觉顺序一致（声明式渲染天然保证）。
 - **Enter 提交**：表单提交按钮必须可由 Enter 键触发（`ft.TextField(on_submit=...)` 链接到提交逻辑）。
 - **Esc 关闭 Dialog**：Dialog 必须支持 Esc 键关闭（Flet V1 `ft.use_dialog` 默认支持，禁止禁用）。
-- **焦点可见**：禁止全局禁用焦点边框（如 `ft.TextField(focused_border_color=ft.Colors.TRANSPARENT)`）。
+- **焦点可见**：禁止全局禁用焦点边框（如 `ft.TextField(border={ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=ft.Colors.TRANSPARENT))})`）。
 
 ### 2.5 响应式不隐藏操作入口
 
