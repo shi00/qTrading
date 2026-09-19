@@ -45,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # pg_plan §15.3 多平台构建矩阵（4 平台，移除 macos-13 Intel runner，已退役）
+          # 多平台构建矩阵：windows-x64 / linux-x64 / linux-arm64 / macos-arm64（macos-13 Intel runner 已退役）
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -104,7 +104,7 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: cargo llvm-cov (unit tests coverage, Linux only, enforced)
-        # §17.0 要求 Rust unit 行覆盖率 ≥85%。run.rs supervisor 难以单测（D38 已知技术债），
+        # Rust unit 行覆盖率目标 ≥85%。run.rs supervisor 难以单测（D38 已知技术债），
         # 当前 TOTAL ~80%。门禁底线设为 75% 防止覆盖率退化，run.rs 达 85% 后提升门禁至 85（独立 PR）。
         if: matrix.os == 'linux'
         env:
@@ -134,7 +134,7 @@ jobs:
         include:
           # binary_path 相对于 defaults.run.working-directory（sidecars/qtrading-pg-sidecar）
           # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
-          # pg_plan §15.3 多平台构建矩阵（4 平台，移除 macos-13 Intel runner，已退役）
+          # 多平台构建矩阵：windows-x64 / linux-x64 / linux-arm64 / macos-arm64（macos-13 Intel runner 已退役）
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -243,7 +243,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 对齐 build-artifacts job 的 4 平台 target 矩阵 (pg_plan §15.3 多平台构建矩阵，移除 macos-13 Intel runner)
+          # 对齐 build-artifacts job 的 4 平台 target 矩阵（macos-13 Intel runner 已退役）
           - os: windows
             runner: windows-latest
             target: x86_64-pc-windows-msvc
