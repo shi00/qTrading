@@ -18,9 +18,9 @@
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | utils 层异常处理统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20 报告模式、R22 部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | 事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟或红线违规频发时重新评估 |
 | P3-TypeIgnores-Tests-HumanReason | tests/ 下非 attr-defined 的 # type: ignore 存量 226 处无 human reason（review07-G5 渐进升级） | P3 | 存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决 |
-| P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达 §17.0 门禁 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | run.rs supervisor 可测路径重构时 |
+| P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | run.rs supervisor 可测路径重构时 |
 | P3-E2E-Windows-Embedded-Timeout-Tight | E2E Tests (Windows) embedded 模式 step `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用） | P3 | ① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试） |
-| P3-Fi25-Rust-Injection-Missing | §17.6 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P3 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
+| P3-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P3 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-ExcInfo-Traceback-Path-Leak | `exc_info=True` 的 traceback 文件路径未经 sanitize\_error 脱敏（合理设计决策，供未来评估） | P3 | ① 安全审计要求脱敏文件路径时；② 或引入自定义 logging Formatter 时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
 | P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
@@ -179,19 +179,19 @@ R1 由 import-linter 6 条契约守护；R4/R9（Tushare token 静态脱敏）/R
 
 ### Rust sidecar 与嵌入式 PostgreSQL
 
-#### P3-Rust-Coverage-D38：Rust sidecar unit 覆盖率 run.rs 15.68% 未达 §17.0 门禁 85%（D38，maint.rs/pgbin.rs 已达标）
+#### P3-Rust-Coverage-D38：Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-Rust-Coverage-D38** | Rust sidecar unit 覆盖率 run.rs 15.68% 未达 §17.0 门禁 85%（D38，maint.rs/pgbin.rs 已达标） | run.rs supervisor 可测路径重构时 |
+| **P3-Rust-Coverage-D38** | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | run.rs supervisor 可测路径重构时 |
 
 **产生背景与现状**
 
-pg\_plan.md §17.0 要求 Rust unit 行覆盖率 ≥85%。2026-07-28 已补测 `maint.rs`（45.20%→86.29%）与 `pgbin.rs`（45.03%→95.08%）至 85%+，恢复 `sidecar.yml` 的 `--fail-under-lines 75` 门禁（advisory→enforce），移除 NOTE(lazy) 注释。当前 TOTAL 79.87%（`run.rs` 15.68% 仍测试不足，supervisor 难以单测，需 mock postgresql\_embedded 或重构可测路径）。门禁底线 75% 防止覆盖率退化；run.rs 达 85% 后提升门禁至 85。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`/`maint.rs`/`pgbin.rs`、`.github/workflows/sidecar.yml`、`reviews/pg_plan.md` §22 D38。
+Rust sidecar 工程要求 unit 行覆盖率目标 ≥85%。2026-07-28 已补测 `maint.rs`（45.20%→86.29%）与 `pgbin.rs`（45.03%→95.08%）至 85%+，恢复 `sidecar.yml` 的 `--fail-under-lines 75` 门禁（advisory→enforce），移除 NOTE(lazy) 注释。当前 TOTAL 79.87%（`run.rs` 15.68% 仍测试不足，supervisor 难以单测，需 mock postgresql\_embedded 或重构可测路径）。门禁底线 75% 防止覆盖率退化；run.rs 达 85% 后提升门禁至 85。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`/`maint.rs`/`pgbin.rs`、`.github/workflows/sidecar.yml`。
 
 **期望的最终解法**
 
-补测 `run.rs` supervisor 路径至 ≥85% 后：① 提升 `sidecar.yml` 门禁至 `--fail-under-lines 85`；② 更新 pg\_plan.md §22 D38 状态为已解决。验收标准：① `cargo llvm-cov --fail-under-lines 85` 通过；② run.rs supervisor 分支有单测覆盖（mock postgresql\_embedded 或重构可测路径）。upgrade 触发条件：run.rs supervisor 可测路径重构时。
+补测 `run.rs` supervisor 路径至 ≥85% 后：① 提升 `sidecar.yml` 门禁至 `--fail-under-lines 85`；② 更新本条目（D38）状态为已解决。验收标准：① `cargo llvm-cov --fail-under-lines 85` 通过；② run.rs supervisor 分支有单测覆盖（mock postgresql\_embedded 或重构可测路径）。upgrade 触发条件：run.rs supervisor 可测路径重构时。
 
 #### P3-E2E-Windows-Embedded-Timeout-Tight：E2E Tests (Windows) embedded 模式 step `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用）
 
@@ -207,15 +207,15 @@ PR #291 方案 B 将 E2E Tests (Windows) 从外置 PostgreSQL 改为 embedded �
 
 长期优化方案（任选其一或组合）：① 用 `pytest --durations=20` 识别 embedded 模式下最慢的 20 个 E2E 测试并优化（如减少 sidecar 启动等待时间、并行化独立测试）；② 将 `tests/e2e/` 拆分为 2-3 个并行 job（如按 `test_onboarding_*`、`test_screener_*`、`test_settings_*` 等模块拆分），缩短 wall clock；③ 优化 sidecar 启动流程（如复用 PGDATA 目录、跳过重复 initdb）；④ 评估是否部分 E2E 测试可回退到外置 PostgreSQL 模式（仅 embedded 特性测试用 embedded 模式）。验收标准：① E2E Tests (Windows) embedded 模式实际运行时间 ≤ 40 分钟（余量 ≥ 20 分钟 / \~33%）；② 拆分 job 后各 job wall clock ≤ 30 分钟；③ 现有测试全过且无新增 flaky。upgrade 触发条件：① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试）。
 
-#### P3-Fi25-Rust-Injection-Missing：§17.6 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试
+#### P3-Fi25-Rust-Injection-Missing：失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-Fi25-Rust-Injection-Missing** | §17.6 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
+| **P3-Fi25-Rust-Injection-Missing** | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 
 **产生背景与现状**
 
-pg\_plan.md §17.6 失败注入测试矩阵场景 #25：篡改测试表数据页后查询 → PostgreSQL 报 `invalid page in block` → sidecar stdout warning 事件上报 → UI 提示备份恢复（§13.7.38）。`failure_injection.rs` 现覆盖 10 场景（#3/#4/#8/#9/#23/#24/#26/#27/#28/#31），#25 缺失。根因分析（2026-07-23）：① **需协议扩展**——当前 sidecar stdout 协议仅 `ready.v1` / `event.warning.v1` / `event.exit.v1` / `status.v1` / `doctor.v1` / `version.v1` 六类 schema，运行期 PostgreSQL 日志监听 + warning 事件 emission 尚未实现（`run.rs` 的 `supervise` 循环无 postgres stderr/log 关键字扫描）；② **需运行期日志监控**——sidecar 需新增 daemon thread/task 持续读取 PostgreSQL `log_min_messages=warning` 输出，匹配 `invalid page in block` 关键字后经 `protocol::print_json_line(&EventJson::warning(...))` 上报 stdout；③ **需 UI 集成**——Python 侧 `_stdout_reader_task` 需解析 `event.warning` 事件并经 ViewModel state 通知 UI 显示"检测到数据页损坏，建议尽快备份并从最近备份恢复"。三端协同改造 scope 远超 P2 修复边界，母计划策略"对影响正确性的 P2 修复（如 #25/#28）"中 #25 归类为"需协议扩展的设计偏差"，按 §1.3 YAGNI 推迟。**注**：#28（restore 中断残留）已在本次 pg-plan-review 修复（doctor 新增 `scan_residuals` + `restore_residuals` / `dump_partials` 字段 + 集成测试 `test_inject_28_restore_interruption_residual`）。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`（supervise 循环）、`src/protocol.rs`（EventJson::warning）、`src/maint.rs`（doctor scan\_residuals 已实现）、`data/persistence/embedded_postgres/service.py`（\_stdout\_reader\_task）、`reviews/pg_plan.md` §17.6 #25 / §13.7.38。
+失败注入测试矩阵场景 #25：篡改测试表数据页后查询 → PostgreSQL 报 `invalid page in block` → sidecar stdout warning 事件上报 → UI 提示备份恢复。`failure_injection.rs` 现覆盖 10 场景（#3/#4/#8/#9/#23/#24/#26/#27/#28/#31），#25 缺失。根因分析（2026-07-23）：① **需协议扩展**——当前 sidecar stdout 协议仅 `ready.v1` / `event.warning.v1` / `event.exit.v1` / `status.v1` / `doctor.v1` / `version.v1` 六类 schema，运行期 PostgreSQL 日志监听 + warning 事件 emission 尚未实现（`run.rs` 的 `supervise` 循环无 postgres stderr/log 关键字扫描）；② **需运行期日志监控**——sidecar 需新增 daemon thread/task 持续读取 PostgreSQL `log_min_messages=warning` 输出，匹配 `invalid page in block` 关键字后经 `protocol::print_json_line(&EventJson::warning(...))` 上报 stdout；③ **需 UI 集成**——Python 侧 `_stdout_reader_task` 需解析 `event.warning` 事件并经 ViewModel state 通知 UI 显示"检测到数据页损坏，建议尽快备份并从最近备份恢复"。三端协同改造 scope 远超 P2 修复边界，母计划策略"对影响正确性的 P2 修复（如 #25/#28）"中 #25 归类为"需协议扩展的设计偏差"，按 §1.3 YAGNI 推迟。**注**：#28（restore 中断残留）已在本次 pg-plan-review 修复（doctor 新增 `scan_residuals` + `restore_residuals` / `dump_partials` 字段 + 集成测试 `test_inject_28_restore_interruption_residual`）。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`（supervise 循环）、`src/protocol.rs`（EventJson::warning）、`src/maint.rs`（doctor scan\_residuals 已实现）、`data/persistence/embedded_postgres/service.py`（\_stdout\_reader\_task）。
 
 **期望的最终解法**
 
