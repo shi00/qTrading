@@ -38,7 +38,7 @@
 
 ## 红线自查步骤
 
-对 `automation_coverage: none` 的 6 条红线（R5 / R17 / R18 / R20 / R21 / R22）与高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。这些红线无自动门禁，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22（R20 由 check_R20 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
