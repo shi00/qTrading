@@ -43,6 +43,14 @@
 21. 策略静态描述与可调参数一致性检查（D2-M4）：扫描 `strategy_*_desc` 静态描述中硬编码的
    数字字面量阈值，若含数字则必须配套 `strategy_*_desc_dynamic` 动态模板，避免 UI 展示阈值
    与可调参数脱钩漂移。
+22. Flet 徽章版本一致性检查（文档复检 H1 根因）：扫描 README 的 UI 徽章中 Flet 后的版本声明，
+   断言与 pyproject.toml 锁定 flet 主版本一致（主版本 `>=N` 形式或补丁 `N.M.P` 的 N 均须对齐），
+   避免徽章落后锁定版写版本造成「宣称守护却漏检」。
+23. 例外清单数量守卫检查（文档复检 L1 根因）：扫描受检 markdown 中「现存 N 条 R1 例外」
+   式数量自述，断言 N 与 exceptions.yml 实际注册 EX 条目数一致，避免清单数量陈旧快照。
+24. 治理 ID 对义守卫检查（文档复检 H3 根因）：检测 governance-ids.md 中同一 ID 被登记为多条
+   不同语义（同名异义）；行内已声明「双义登记/另义」的视为已披露而豁免，未披露的多义报 WARNING
+   （渐进部署，存量清零后翻转 ERROR），弥补仅查「是否登记」不查「是否对义」的守护盲区。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -82,6 +90,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
+# Flet 徽章版本守卫（文档复检 H1）：README UI 徽章中的 Flet 版本声明须与 pyproject 锁定主版本对齐
+README_PATH = ROOT / "README.md"
 # man/flet-best-practices.md 现为 stub，指向 docs/flet/README.md（保留历史路径兼容）
 FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
 KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
@@ -510,6 +520,99 @@ def check_flet_version_drift() -> list[str]:
     return errors
 
 
+def check_flet_badge_version() -> list[str]:
+    """检查项 22：README UI 徽章中的 Flet 版本声明与 pyproject 锁定主版本对齐（文档复检 H1 根因）。
+
+    README 徽章（https://img.shields.io/badge/...）是当前状态的单点自述，此前无守卫：
+    锁定的 flet 升级到 1.0 后徽章仍写 `Flet 0.86.3`（补丁号，主版本 0）不落检。
+    规则：提取 `Flet` 之后的版本 token（URL 编码，如 `Flet%200.86.3` / `Flet%20%3E%3D1.0`），
+    解码后若是补丁版本 `<major.minor.patch>`（取 major）或主版本 `>=<major>`，其 major 均须等于
+    pyproject 锁定 flet 的 major；缺失/不可解析则报错。API 验证记录等历史快照不在此范围，
+    由 check_flet_version_drift 对治理文档另行守护。
+    """
+    errors: list[str] = []
+    locked = _get_flet_locked_versions()
+    if not locked:
+        return errors
+    py_major = next(iter(locked)).split(".")[0]
+    # URL 编码还原（`%20` 空格、`%3E%3D` >=）
+    import urllib.parse
+
+    content = README_PATH.read_text(encoding="utf-8")
+    for line_no, line in enumerate(content.splitlines(), 1):
+        m = re.search(r"[Ff]let\s*([0-9%][^\s)\]]*)", line)
+        if not m:
+            continue
+        token = m.group(1)
+
+        raw = urllib.parse.unquote(token)
+        raw = raw.strip().strip("()[]")
+        # 前缀匹配版本段：徽章版本后常跟颜色后缀（如 `-00d2b4`），故只取语首的
+        # 补丁版本 `N.M.P` 或主版本 `>=N`，忽略其后颜色/命名后缀。
+        ver = re.match(r"(?:>=?(\d+))|(\d+)\.\d+(?:\.\d+)?", raw)
+        if ver is not None:
+            declared_major = ver.group(1) or ver.group(2)
+        else:
+            declared_major = None
+        if declared_major is None:
+            errors.append(
+                f"{README_PATH.name}:{line_no}: Flet 徽章版本无法解析（{token!r}），"
+                f"须为 `>=N` 主版本或 `N.M.P` 补丁版本以与 pyproject flet major {py_major} 对齐"
+            )
+        elif declared_major != py_major:
+            errors.append(
+                f"{README_PATH.name}:{line_no}: Flet 徽章版本 {raw} 主版本 {declared_major}"
+                f" != pyproject 锁定 flet major {py_major}"
+            )
+    return errors
+
+
+def _count_exceptions() -> int | None:
+    """实计 exceptions.yml 已注册 R1 例外（rule_id == R1）条目数；无法解析返回 None。
+
+    散文守卫匹配的「现存 N 条 *R1* 例外」语义上特指 R1 例外的数量，故只统计
+    rule_id == R1 的条目，剔除 R5 等其他规则例外（如 EX-0017/EX-0018），
+    避免把非 R1 例外混入 R1 计数造成正文与实计不一致（文档复检 L1）。
+    """
+    import yaml  # PyYAML 是 transitive 依赖，与 check_exceptions_yaml_consistency 一致延迟 import
+
+    try:
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if isinstance(data, dict):
+        items = data.get("exceptions")
+        if isinstance(items, list):
+            return sum(1 for e in items if isinstance(e, dict) and e.get("rule_id") == "R1")
+    return None
+
+
+def check_exception_count_prose() -> list[str]:
+    """检查项 23：受检 markdown 中「现存 N 条 R1 例外」式数量自述与 exceptions.yml 实计一致（文档复检 L1 根因）。
+
+    治理清单数量（如 governance-ids.md 的「现存 N 条 R1 例外」）此前为人工自述无守卫：
+    新增 EX id 后若遗漏同步 N，会宣称「现存 N 条」却与实际不符。对齐 check_precommit_hook_count
+    的散文数量守卫范式。受检范围限 CHECKED_DOCS（markdown），exceptions.yml 以实计为唯一正本。
+    """
+    errors: list[str] = []
+    actual = _count_exceptions()
+    if actual is None:
+        return errors  # exceptions.yml 缺失/解析失败由 check_exceptions_yaml_consistency 报告
+    for doc in CHECKED_DOCS:
+        try:
+            content = doc.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for m in re.finditer(r"现存\s*(\d+)\s*条\s*R1\s*例外", content):
+            declared = int(m.group(1))
+            if declared != actual:
+                line_no = content[: m.start()].count("\n") + 1
+                errors.append(
+                    f"{doc.name}:{line_no}: 声明现存 {declared} 条 R1 例外，exceptions.yml 实际注册 {actual} 条"
+                )
+    return errors
+
+
 # =============================================================================
 # Flet 入口完整性检查（spec §11.2）
 #
@@ -866,6 +969,9 @@ def check_redline_range_consistency() -> list[str]:
     for doc in CHECKED_DOCS:
         if ADR_DOCS_DIR in doc.parents:
             continue  # ADR 为决策时点历史快照，含当时红线范围，不入当前总数守卫
+        if doc.name == "CHANGELOG.md":
+            continue  # release-please 自动生成，历史提交标题含旧红线范围引文（如"R1~R22 同步为 R1~R23"），
+            # 与治理 ID 检查对 CHANGELOG.md 的处理一致（见 check_governance_id_references 注释），不入守卫
         content = doc.read_text(encoding="utf-8")
         for m in REDLINE_RANGE_PATTERN.finditer(content):
             declared = int(m.group(1))
@@ -2442,8 +2548,11 @@ _GOVERNANCE_ID_PATTERN = re.compile(
 GOVERNANCE_IDS_PATH = ROOT / "docs" / "governance" / "governance-ids.md"
 
 
-def _load_glossary_ids() -> set[str] | None:
-    """加载 governance-ids.md 对照表已登记 ID；文件缺失或无法解析返回 None。"""
+def _load_glossary_entries() -> dict[str, list[tuple[str, int]]] | None:
+    """加载 governance-ids.md 对照表已登记 ID → [(语义描述, 行号)] 列表；文件缺失/无法解析返回 None。
+
+    保留同名同 ID 的多行语义（比对 registered set 更细，供 check_governance_id_dual_meaning 检测对义）。
+    """
     path = GOVERNANCE_IDS_PATH
     if not path.exists():
         return None
@@ -2451,8 +2560,8 @@ def _load_glossary_ids() -> set[str] | None:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    ids: set[str] = set()
-    for line in text.splitlines():
+    entries: dict[str, list[tuple[str, int]]] = {}
+    for line_no, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line.startswith("|"):
             continue
@@ -2461,8 +2570,45 @@ def _load_glossary_ids() -> set[str] | None:
             continue
         m = _GOVERNANCE_ID_PATTERN.search(cells[0])
         if m:
-            ids.add(m.group(1))
-    return ids
+            entries.setdefault(m.group(1), []).append((cells[1], line_no))
+    return entries
+
+
+def _load_glossary_ids() -> set[str] | None:
+    """加载 governance-ids.md 对照表已登记 ID；文件缺失或无法解析返回 None。
+
+    仅返回注册 ID 集合，供 check_governance_id_glossary 查询「是否登记」。
+    """
+    entries = _load_glossary_entries()
+    return None if entries is None else set(entries)
+
+
+def check_governance_id_dual_meaning() -> list[str]:
+    """检查项 24：治理 ID 同名异义（对义）守卫（文档复检 H3 根因）。
+
+    现有 check_governance_id_glossary 只查「是否登记」，查不出「同名异义」：同一 ID 在对照表
+    登记为两条不同语义时，引用方无从确定所指，且新会话会误读。检测规则：
+    - 同一 ID 在对照表出现 ≥2 行（语义不同）→ 视为潜在对义；
+    - 行内已声明「双义登记」或「另义（同名异义」子串 → 视为已披露而豁免（如 P1-04 双义登记）；
+    - 未披露的对义报 WARNING（渐进部署，与 .py 扫描 WARNING 分级一致，存量清零后翻转 ERROR）。
+    """
+    warnings: list[str] = []
+    entries = _load_glossary_entries()
+    if entries is None:
+        return warnings
+    for gov_id in sorted(entries):
+        rows = entries[gov_id]
+        if len(rows) < 2:
+            continue
+        # 任一行已披露双义则豁免：批次2 登记 P1-04 时在语义首列标注「另义（同名异义双义登记）」
+        if any("双义登记" in sem or "另义（同名异义" in sem for sem, _ in rows):
+            continue
+        meanings = [sem for sem, _ in rows]
+        warnings.append(
+            f"治理 ID 对义(WARNING): {gov_id} 在 governance-ids.md 有多条不同语义未声明双义登记"
+            f"（{'; '.join(meanings)}）；请在对应登记行标注「另义（同名异义双义登记）」或拆分 ID（渐进部署，存量清零后翻转为 ERROR）"
+        )
+    return warnings
 
 
 def check_governance_id_glossary() -> tuple[list[str], list[str]]:
@@ -2665,6 +2811,15 @@ def main() -> int:
     # 策略静态描述与可调参数一致性（D2-M4）：硬编码数字阈值必须配套 _desc_dynamic 动态模板
     all_errors.extend(check_strategy_desc_dynamic_consistency())
 
+    # 散文式自述元信息守卫（文档复检 H1/L1/H3 根因治理，补「对比型/锚点型」之外的漏检单点）
+    all_errors.extend(check_flet_badge_version())  # H1：README UI 徽章 Flet 版本对齐
+    all_errors.extend(check_exception_count_prose())  # L1：「现存 N 条 R1 例外」数量守卫
+    dual_meaning = check_governance_id_dual_meaning()  # H3：治理 ID 同名异义（渐进 WARNING 不阻断）
+    if dual_meaning:
+        print("::warning::治理 ID 对义（渐进部署，不阻断）存在未声明双义登记的治理 ID：")
+        for w in dual_meaning:
+            print(f"  - {w}")
+
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
         for err in all_errors:
@@ -2678,7 +2833,8 @@ def main() -> int:
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性）"
+        "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
+        "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫）"
     )
     return 0
 

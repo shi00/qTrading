@@ -4704,3 +4704,136 @@ class TestGuillemetReferences:
             "## Database (DB)\n",
         )
         assert check() == []
+
+
+def _make_exceptions_yaml(count: int) -> str:
+    """构造含 `count` 个 EX 条目的精简 exceptions.yml（供 L1 数量守卫测试复用）。"""
+    lines = ["exceptions:"]
+    for i in range(1, count + 1):
+        lines.append(f"  - id: EX-{i:04d}")
+        lines.append("    rule_id: R1")
+    return "\n".join(lines) + "\n"
+
+
+class TestProseMetaGuards:
+    """文档复检（H1/L1/H3）根因治理三守卫配套单测（报告「四、修复建议」第 5 条门禁增强）。
+
+    - H1 `check_flet_badge_version`：README UI 徽章 Flet 版本与 pyproject 锁定主版本对齐。
+    - L1 `check_exception_count_prose`：「现存 N 条 R1 例外」散文数量与 exceptions.yml 实计一致。
+    - H3 `check_governance_id_dual_meaning`：治理 ID 同名异义，未披露双义时报 WARNING。
+    """
+
+    # --- H1 Flet 徽章版本守卫 ---
+
+    def test_flet_badge_version_passes_current_major(self, tmp_path, monkeypatch):
+        """徽章 `Flet%20%3E%3D1.0`（>=1 主版本）应与 pyproject 锁定 flet major 对齐。"""
+        from check_docs_consistency import check_flet_badge_version
+
+        readme = tmp_path / "README.md"
+        readme.write_text("![flet](https://img.shields.io/badge/Flet%20%3E%3D1.0-red)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.README_PATH", readme)
+        errors = check_flet_badge_version()
+        assert errors == [], f"Flet%20%3E%3D1.0 主版本应对齐 pyproject flet, got: {errors}"
+
+    def test_flet_badge_version_detects_stale_patch(self, tmp_path, monkeypatch):
+        """徽章 `Flet%200.86.3`（主版本 0）滞后于锁定 flet major → 应报错。"""
+        from check_docs_consistency import check_flet_badge_version
+
+        readme = tmp_path / "README.md"
+        readme.write_text("![flet](https://img.shields.io/badge/Flet%200.86.3-red)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.README_PATH", readme)
+        errors = check_flet_badge_version()
+        assert any("0.86.3" in e for e in errors), f"主版本 0 非对齐应报错, got: {errors}"
+
+    def test_flet_badge_version_detects_unparseable(self, tmp_path, monkeypatch):
+        """徽章版本 `Flet%20latest` 非 `>=N` 或 `N.M.P` 形态 → 无法解析应报错。"""
+        from check_docs_consistency import check_flet_badge_version
+
+        readme = tmp_path / "README.md"
+        readme.write_text("![flet](https://img.shields.io/badge/Flet%20latest-red)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.README_PATH", readme)
+        errors = check_flet_badge_version()
+        assert any("无法解析" in e for e in errors), f"latest 不可解析应报错, got: {errors}"
+
+    # --- L1 例外清单数量守卫 ---
+
+    def test_exception_count_prose_passes_match(self, tmp_path, monkeypatch):
+        """散文「现存 16 条 R1 例外」与 exceptions.yml 实计一致 → 放行。"""
+        from check_docs_consistency import check_exception_count_prose
+
+        exc = tmp_path / "exceptions.yml"
+        exc.write_text(_make_exceptions_yaml(16), encoding="utf-8")
+        doc = tmp_path / "governance-ids.md"
+        doc.write_text("现存 16 条 R1 例外（EX-0001~EX-0016）\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_exception_count_prose()
+        assert errors == [], f"声明 16 与实计 16 应一致, got: {errors}"
+
+    def test_exception_count_prose_detects_mismatch(self, tmp_path, monkeypatch):
+        """散文「现存 15 条 R1 例外」滞后于实计 16 → 报错（散文漏同步根因）。"""
+        from check_docs_consistency import check_exception_count_prose
+
+        exc = tmp_path / "exceptions.yml"
+        exc.write_text(_make_exceptions_yaml(16), encoding="utf-8")
+        doc = tmp_path / "governance-ids.md"
+        doc.write_text("现存 15 条 R1 例外\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_exception_count_prose()
+        assert any("15" in e and "16" in e for e in errors), f"声明 15 实计 16 应报错, got: {errors}"
+
+    def test_exception_count_prose_absent_yaml_silent(self, tmp_path, monkeypatch):
+        """exceptions.yml 解析失败 → 由 check_exceptions_yaml_consistency 报告，本守卫静默。"""
+        from check_docs_consistency import check_exception_count_prose
+
+        exc = tmp_path / "missing.yml"
+        doc = tmp_path / "governance-ids.md"
+        doc.write_text("现存 16 条 R1 例外\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_exception_count_prose()
+        assert errors == [], f"缺失 yaml 应静默交由其他 check 报告, got: {errors}"
+
+    # --- H3 治理 ID 对义守卫 ---
+
+    def test_governance_id_dual_meaning_single_row_pass(self, tmp_path, monkeypatch):
+        """同 ID 仅登记一行语义 → 无对义报警。"""
+        from check_docs_consistency import check_governance_id_dual_meaning
+
+        glossary = tmp_path / "governance-ids.md"
+        glossary.write_text("| GDR-06 | 治理文档不得硬编码 Flet 补丁版本号 |\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
+        warnings = check_governance_id_dual_meaning()
+        assert warnings == [], f"单行语义不应报警, got: {warnings}"
+
+    def test_governance_id_dual_meaning_disclosed_exempt(self, tmp_path, monkeypatch):
+        """同 ID 多行但已标注「另义（同名异义双义登记）」→ 已披露豁免。"""
+        from check_docs_consistency import check_governance_id_dual_meaning
+
+        glossary = tmp_path / "governance-ids.md"
+        glossary.write_text(
+            "| P1-04 | 含义 A（另义（同名异义双义登记）） |\n| P1-04 | 含义 B |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
+        warnings = check_governance_id_dual_meaning()
+        assert warnings == [], f"已披露双义应豁免, got: {warnings}"
+
+    def test_governance_id_dual_meaning_detects_concealed(self, tmp_path, monkeypatch):
+        """同 ID 多行不同语义且未声明双义 → WARNING 报警（渐进部署不阻断）。"""
+        from check_docs_consistency import check_governance_id_dual_meaning
+
+        glossary = tmp_path / "governance-ids.md"
+        glossary.write_text("| P1-04 | 含义 A |\n| P1-04 | 含义 B |\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
+        warnings = check_governance_id_dual_meaning()
+        assert any("P1-04" in w and "双义" in w for w in warnings), f"未披露对义应报警, got: {warnings}"
+
+    def test_governance_id_missing_glossary_silent(self, tmp_path, monkeypatch):
+        """对照表缺失 → 由 check_governance_id_glossary 报告，本守卫静默。"""
+        from check_docs_consistency import check_governance_id_dual_meaning
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", tmp_path / "missing.md")
+        warnings = check_governance_id_dual_meaning()
+        assert warnings == [], f"缺失对照表应静默, got: {warnings}"

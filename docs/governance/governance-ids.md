@@ -39,7 +39,7 @@
 | review03-C11 | CacheManager↔BaseDao 循环由中立模块 engine_provider.py 切断 | review03 数据层与持久化 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
 | D6-1 | utils/scheduler_service → data.domain_services.offline_calendar 日历降级例外（EX-0016） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
 | D6-2 | 同 D6-1（D6-1/D6-2 日历降级修复） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
-| GDR-01 | 补录 contract 5 ignore_imports 现存 15 条 R1 例外（EX-0001~EX-0015） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
+| GDR-01 | 补录 contract 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016，含 EX-0016 D6-1/D6-2 日历降级） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
 | GDR-10 | AGENTS.md 最小安全集排除非 INVARIANT 红线，R1/R16 已有独立自动化兜底故不收录 | 文档体系检视（GDR 系列，2026-09-08） | [0006-override-agents-pure-pointer.md](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GDR-12 | ADR 决策文档文件级索引完整性检查（CONTRIBUTING.md 登记全部 docs/adr/*.md） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-13 | 书名号式章节引用一致性检查（`<文档路径>「<章节名>」`） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
