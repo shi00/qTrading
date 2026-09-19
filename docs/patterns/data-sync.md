@@ -20,7 +20,7 @@
 
 ## Tushare Syncer 设计模式
 
-`data/sync/` 下所有 syncer 通过 `TushareClient` 单例（见 [singleton-lifecycle.md](../architecture/singleton-lifecycle.md#单例模式实现模板)）拉取数据，统一遵循以下设计模式：
+`data/sync/` 下经 Tushare 拉取的 syncer 通过 `TushareClient` 单例（见 [singleton-lifecycle.md](../architecture/singleton-lifecycle.md#单例模式实现模板)）拉取数据，统一遵循以下设计模式：
 
 ### 数据流向
 
