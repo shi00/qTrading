@@ -93,7 +93,7 @@
 ### 提交前自检
 
 1. 确保所有测试通过（单元、集成、E2E 视变更范围）
-2. 确保代码覆盖率达标（整体 ≥ 85%，单文件 ≥ 80%）
+2. 确保代码覆盖率达标（整体 ≥ 85%，单文件 ≥ 80%；分层单文件阈值与 advisory 状态见 [testing.md](./docs/guides/testing.md)）
 3. 运行 `pre-commit run --all-files`
 4. 更新相关文档（README / CLAUDE.md / CONTRIBUTING.md / SECURITY.md 视变更范围）
 

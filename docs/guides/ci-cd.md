@@ -25,7 +25,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
 6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration；完整测试矩阵仅 Python `3.13`)
 7. **Windows E2E Tests** (`tests/e2e/`，Chromium + PostgreSQL)
-8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)** (覆盖率阈值见 [`pyproject.toml`](../../pyproject.toml))
+8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)**；分层单文件阈值 services/strategies/data ≥ 90%、ui ≥ 85%（advisory 报告模式，不阻断，见 [testing.md](./testing.md)）(覆盖率阈值见 [`pyproject.toml`](../../pyproject.toml))
 9. **requirements*.txt 漂移处理** (`requirements-drift` job 检测到 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
 
 > **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast` job 将 `3.14` 作为 experimental 矩阵项前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；矩阵配置见 [已知架构技术债](../debt/known-technical-debt.md) 相关条目）。
