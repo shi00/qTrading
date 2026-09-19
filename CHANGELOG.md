@@ -8,6 +8,45 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.10.2](https://github.com/shi00/qTrading/compare/v0.10.1...v0.10.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* **system-tab:** 告警卡 Text 以 AppStyles 字号 token 替代 TextThemeStyle, 规避 Flet 1.0 系统优化 Tab 崩溃 ([#1037](https://github.com/shi00/qTrading/issues/1037)) ([38bf844](https://github.com/shi00/qTrading/commit/38bf844b84ed521372ce15c5eeea08ee9f0e52c1))
+* **system-tab:** 规范化配置读口到 Dropdown 合法值, 修复系统优化 Tab 崩溃 ([#1036](https://github.com/shi00/qTrading/issues/1036)) ([1428984](https://github.com/shi00/qTrading/commit/14289841bb8e42b20f96802b9678ee23a5eb1c41))
+
+
+### Miscellaneous
+
+* **docs-gate:** 移除失效检视报告 _DOC_EXCLUDES 排除项 ([#1031](https://github.com/shi00/qTrading/issues/1031)) ([c1af45f](https://github.com/shi00/qTrading/commit/c1af45f0e15ae7315de1f8878a52c0e41b0c1641))
+
+
+### Documentation
+
+* **ci:** redline-check hook 名补 R20/R22 ([#1045](https://github.com/shi00/qTrading/issues/1045)) ([64a6987](https://github.com/shi00/qTrading/commit/64a6987f37381290508455d712a193ac32cf344b))
+* **contributing:** run_pip_audit 命令补 requirements-dev.txt ([#1043](https://github.com/shi00/qTrading/issues/1043)) ([6e2e91b](https://github.com/shi00/qTrading/commit/6e2e91b0e12a21af3eb3fc40de84e5b8529acde9))
+* **contributing:** 依赖审计归属改述为 CI Security Audit 步骤 ([#1046](https://github.com/shi00/qTrading/issues/1046)) ([fb1ae4d](https://github.com/shi00/qTrading/commit/fb1ae4d442a689757724c6fdbc1b118a96d379e7))
+* **data-sync:** 修正 TUSHARE_POINT_TIERS 真相源引用为 utils/constants.py ([#1035](https://github.com/shi00/qTrading/issues/1035)) ([565b1e5](https://github.com/shi00/qTrading/commit/565b1e5ad316efedd2242f2bf0c0bb34f2b871be))
+* **flet:** cleanup 传递改述为项目约定而非框架事实 ([#1047](https://github.com/shi00/qTrading/issues/1047)) ([8be7c09](https://github.com/shi00/qTrading/commit/8be7c096667cc3759d0550a8bb9ade93ceb52e64))
+* **flet:** Flet 1.0 版本基线整改（文档复检批次1） ([#1022](https://github.com/shi00/qTrading/issues/1022)) ([fc0fc2a](https://github.com/shi00/qTrading/commit/fc0fc2a92cbe782eafedf92f0f5159f68c765e25))
+* **flet:** 修正 V1 迁移表 [#19](https://github.com/shi00/qTrading/issues/19) 本地存储臆造 API page.shared_preferences ([#1038](https://github.com/shi00/qTrading/issues/1038)) ([d5b4926](https://github.com/shi00/qTrading/commit/d5b4926099cca75eae6cb55764150d2787608089))
+* **flet:** 修正迁移表 [#10](https://github.com/shi00/qTrading/issues/10) ElevatedButton 检测方式为 AttributeError ([#1044](https://github.com/shi00/qTrading/issues/1044)) ([258fbb7](https://github.com/shi00/qTrading/commit/258fbb7473c81c7466ffe60e9c39b6988615dacb))
+* **flet:** 统一 ResponsiveRow 现状统计口径为构造处数 ([#1048](https://github.com/shi00/qTrading/issues/1048)) ([6b1bd42](https://github.com/shi00/qTrading/commit/6b1bd4236dc3c7aa21c311a1d8ce2b450693644c))
+* **governance:** 治理 ID 双义登记与红线快照整改（文档复检批次2） ([#1023](https://github.com/shi00/qTrading/issues/1023)) ([a61ecf5](https://github.com/shi00/qTrading/commit/a61ecf5acae5b0dc8a083db392ec4f15998865e6))
+* **guides:** 披露分层覆盖率阈值与 advisory 状态 ([#1041](https://github.com/shi00/qTrading/issues/1041)) ([deb433c](https://github.com/shi00/qTrading/commit/deb433c81981c846a74cb4386e3441d5dbfa5b7a))
+* litellm 理由/ruff 版本/ADR-0002 状态修正（文档复检批次4） ([#1025](https://github.com/shi00/qTrading/issues/1025)) ([a593ccd](https://github.com/shi00/qTrading/commit/a593ccd08adb878630085fc5cef5d65f79718f6a))
+* **patterns:** 修正 data-sync 限流描述单位与真相源指向 ([#1040](https://github.com/shi00/qTrading/issues/1040)) ([75beca2](https://github.com/shi00/qTrading/commit/75beca26b98aeb7ccf2f3007ff0fc0615e468212))
+* **patterns:** 收窄 data-sync 经 Tushare 拉取 syncer 范围表述 ([#1042](https://github.com/shi00/qTrading/issues/1042)) ([510ec18](https://github.com/shi00/qTrading/commit/510ec188c7dc6ad430931911df0fa25789433c2b))
+* **review3-batch-C:** 清理已关闭技术债并守护单例/ADR数量与supersede双向链 ([#1034](https://github.com/shi00/qTrading/issues/1034)) ([83d4aa6](https://github.com/shi00/qTrading/commit/83d4aa605ad528a06e26654ee2f5f178835c0f11))
+* **review3:** 修复批次2高严重度文档/CI/脚本问题 N1~N3 ([#1029](https://github.com/shi00/qTrading/issues/1029)) ([c0972b6](https://github.com/shi00/qTrading/commit/c0972b6285cfb29fd67db2f8b5659adbe00e2e48))
+* **sidecar,debt:** 消除 pg_plan.md 悬空权威引用, 改为自包含描述 ([#1039](https://github.com/shi00/qTrading/issues/1039)) ([9698451](https://github.com/shi00/qTrading/commit/9698451a46f083a89b84a920b7bf00bd7d4674c1))
+* 修正文档检视报告 N4~N9 行号/计数/归类问题 ([#1030](https://github.com/shi00/qTrading/issues/1030)) ([0e873e5](https://github.com/shi00/qTrading/commit/0e873e5127a5cfec9cda6a179d768577718e513d))
+* 文档复检批次A 版本号对齐与措辞统一（L1/L3/L4/L7/N12/N15） ([#1032](https://github.com/shi00/qTrading/issues/1032)) ([71c7c6f](https://github.com/shi00/qTrading/commit/71c7c6f2bce07e29471e1d73afc96c481213fd40))
+* 文档复检批次B 方法论文档登记机器文件并移除失效 renovate pip_requirements（N10/N13） ([#1033](https://github.com/shi00/qTrading/issues/1033)) ([6825b68](https://github.com/shi00/qTrading/commit/6825b68d2e449d237aece6bf9f6b785f4c9647c9))
+* 文档复检批次知悉障碍（M1~M5）修正迁移数/flet-web pin/服务目录树等内容 ([#1028](https://github.com/shi00/qTrading/issues/1028)) ([4e8d7e0](https://github.com/shi00/qTrading/commit/4e8d7e069377f50403ac1058168643cc3b6ec6cb))
+* 模块路径/sidecar 锁语义/债务快照修正（文档复检批次3） ([#1024](https://github.com/shi00/qTrading/issues/1024)) ([bc46fe7](https://github.com/shi00/qTrading/commit/bc46fe718f9179eb77e49f6eff95272f575147e1))
+
 ## [0.10.1](https://github.com/shi00/qTrading/compare/v0.10.0...v0.10.1) (2026-09-18)
 
 
