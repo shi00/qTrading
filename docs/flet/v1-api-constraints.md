@@ -42,7 +42,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 16 | 拖拽增量 | `e.delta_x` | `e.primary_delta`（主路径），`e.local_delta.x`（回退） | **静默回归**（恒 0） |
 | 17 | 窗口图标 | `page.window_icon` | `page.window.icon` | AttributeError |
 | 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；声明式组件内经 `ft.context.page` 或事件 `e.page` 获取（`PageRefMixin` 已删除，新代码禁用） | AttributeError |
-| 19 | 本地存储 | `page.client_storage` | `page.shared_preferences` | AttributeError |
+| 19 | 本地存储 | `page.client_storage.get(key)` / `page.client_storage.set(key, value)` | `prefs = ft.SharedPreferences(); page.services.append(prefs)` 后 `await prefs.get(key)` / `await prefs.set(key, value)` | AttributeError |
 | 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `conftest._v1_page_compat` fixture 兼容） | RuntimeError |
 | 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
 
