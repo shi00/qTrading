@@ -356,7 +356,7 @@ class TestSaveNoProxy:
 class TestConstructorInjection:
     def test_constructor_accepts_custom_config_handler(self):
         custom_ch = MagicMock()
-        custom_ch.get_locale.return_value = "ja_JP"
+        custom_ch.get_locale.return_value = "en_US"
         custom_ch.get_theme_name.return_value = "navy"
         custom_ch.get_sync_max_concurrent_heavy.return_value = 2
         custom_ch.get_log_level.return_value = "WARNING"
@@ -371,7 +371,7 @@ class TestConstructorInjection:
             patch("ui.viewmodels.system_settings_view_model.ThreadPoolManager"),
         ):
             vm = SystemSettingsViewModel()
-            assert vm.state.language_value == "ja_JP"
+            assert vm.state.language_value == "en_US"
             assert vm.state.theme_value == "navy"
             assert vm.state.concurrency_value == "2"
             assert vm.state.log_level_value == "WARNING"
@@ -568,3 +568,89 @@ class TestKeyringAvailable:
     def test_default_state_field_exists(self):
         """state 默认含 keyring_available 字段（True 兜底）。"""
         assert SystemSettingsState().keyring_available is True
+
+
+class TestDropdownValueNormalization:
+    """FIX: config 非法枚举值致 system-tab index 崩溃——VM 读口规范化。
+
+    覆盖 theme/locale/log_level 三个 Dropdown 绑定值：
+    - 合法值原样保留
+    - 非法/空值回落默认（theme→dark, locale→zh_CN, log_level→INFO）
+    - locale 别名映射（en→en_US）生效
+    - 规范化不改变其它字段
+    """
+
+    @staticmethod
+    def _vm_with(mock_config_handler, **overrides):
+        """按需覆写 getter 后构造 VM。"""
+        for name, value in overrides.items():
+            getattr(mock_config_handler, name).return_value = value
+        return SystemSettingsViewModel(), mock_config_handler
+
+    def test_invalid_theme_falls_back_to_default(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_theme_name": "system"})
+        assert vm.state.theme_value == "dark"
+
+    def test_valid_theme_preserved(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_theme_name": "navy"})
+        assert vm.state.theme_value == "navy"
+
+    def test_invalid_locale_falls_back_to_default(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_locale": "en-us"})
+        assert vm.state.language_value == "zh_CN"
+
+    def test_locale_alias_mapped(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_locale": "en"})
+        assert vm.state.language_value == "en_US"
+
+    def test_invalid_log_level_falls_back_to_default(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_log_level": "WARN"})
+        assert vm.state.log_level_value == "INFO"
+
+    def test_valid_log_level_preserved(self, mock_config_handler):
+        vm, _ = self._vm_with(mock_config_handler, **{"get_log_level": "WARNING"})
+        assert vm.state.log_level_value == "WARNING"
+
+    def test_normalization_does_not_affect_other_fields(self, mock_config_handler):
+        vm, _ = self._vm_with(
+            mock_config_handler,
+            **{"get_locale": "en-us", "get_theme_name": "system", "get_log_level": "WARN"},
+        )
+        assert vm.state.concurrency_value == "4"
+        assert vm.state.pool_size_value == "5"
+        assert vm.state.db_overflow_value == "10"
+        assert vm.state.db_timeout_value == "30"
+        assert vm.state.io_workers_value == "8"
+        assert vm.state.cpu_workers_value == "4"
+
+    def test_constructor_invalid_values_normalized(self, mock_config_handler):
+        """构造注入自定义 handler 时非法值同样回落（覆盖构造路径）。"""
+        vm, _ = self._vm_with(
+            mock_config_handler,
+            **{"get_locale": "fr_FR", "get_theme_name": "blue", "get_log_level": "verbose"},
+        )
+        assert vm.state.language_value == "zh_CN"
+        assert vm.state.theme_value == "dark"
+        assert vm.state.log_level_value == "INFO"
+
+    def test_valid_values_do_not_emit_warning(self, mock_config_handler, caplog):
+        """合法 config 值时不得记录 normalization warning（避免误报噪音）。"""
+        with caplog.at_level("WARNING", logger="ui.viewmodels.system_settings_view_model"):
+            self._vm_with(mock_config_handler)
+        assert not [r for r in caplog.records if "normalized" in r.getMessage()]
+
+    def test_static_normalize_alias_mapping_to_invalid_falls_back(self):
+        """别名映射结果非法时应回落 default（防御别名契约将来指向非法值）。"""
+        normalize = SystemSettingsViewModel._normalize_dropdown_value
+        assert normalize("x", ["a", "b"], "default", alias={"x": "out-of-set"}) == "default"
+
+    def test_static_normalize_empty_and_none_fall_back(self):
+        """空串/None 输入应回落 default（不触发越界/异常）。"""
+        normalize = SystemSettingsViewModel._normalize_dropdown_value
+        assert normalize("", ["a", "b"], "default") == "default"
+        assert normalize(None, ["a", "b"], "default") == "default"
+
+    def test_static_normalize_alias_missing_falls_back(self):
+        """alias 未命中且不在合法集合时回落 default。"""
+        normalize = SystemSettingsViewModel._normalize_dropdown_value
+        assert normalize("en-GB", ["zh_CN", "en_US"], "zh_CN", alias={"en": "en_US"}) == "zh_CN"

@@ -20,6 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from core.i18n import LOCALE_MAP, SUPPORTED_LOCALES
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config.secrets import is_keyring_available
 from utils.config_handler import ConfigHandler
@@ -58,6 +59,15 @@ IO_WORKERS_MIN = _IO_WORKERS_MIN
 IO_WORKERS_MAX = _IO_WORKERS_MAX
 CPU_WORKERS_MIN = _CPU_WORKERS_MIN
 CPU_WORKERS_MAX = _CPU_WORKERS_MAX
+
+# --- Dropdown 合法值集合 (FIX: system-tab index 崩溃) ---
+# 主题 / 日志级别的合法 key 集合。ThemeName(ui/theme.py) 与 logger.level_map
+# 均含运行态依赖或函数局部定义，VM 禁 import flet / 无法安全复用，故用字面量。
+# NOTE(lazy): theme/log 集合需与 system_tab._build_*_options 手工保持同步。
+# ceiling: 新增主题或日志级别时须同步本处, 否则下拉无法回显新项. upgrade: 在
+# core 层引入共享无 flet 的合法值正本, VM 与 View 同源.
+_VALID_THEMES = frozenset({"dark", "light", "navy", "dracula"})
+_VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 
 
 @dataclass(frozen=True)
@@ -110,13 +120,57 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
 
     # --- Config loading ---
 
+    @staticmethod
+    def _normalize_dropdown_value(
+        value: str, valid: frozenset[str] | list[str], default: str, alias: dict[str, str] | None = None
+    ) -> str:
+        """将 config 原始字符串规范化到 Dropdown options 合法 key 集合。
+
+        非法值或空值回落 ``default``；传 ``alias`` 时先尝试别名映射
+        （如 locale ``en`` → ``en_US``），映射结果仍需 ∈ ``valid`` 才采用，
+        否则回落（防御别名契约将来指向非法值）。避免非法 config 值直接注入
+        ``ft.Dropdown.value`` 触发客户端 ``String→int of index`` 崩溃。
+        """
+        if value in valid:
+            return value
+        if alias is not None and value in alias:
+            mapped = alias[value]
+            if mapped in valid:
+                return mapped
+        return default
+
     def _load_config_to_state(self) -> None:
         """从 ConfigHandler 加载配置到 state（同步, 仅在 __init__ 调用一次）。"""
+        # 规范化 Dropdown 绑定的枚举值, 防止 config 非法值致客户端崩溃 (FIX: system-tab index 崩溃)
+        raw_locale = ConfigHandler.get_locale()
+        raw_theme = ConfigHandler.get_theme_name()
+        raw_log = ConfigHandler.get_log_level()
+        language_value = self._normalize_dropdown_value(raw_locale, SUPPORTED_LOCALES, "zh_CN", alias=LOCALE_MAP)
+        theme_value = self._normalize_dropdown_value(raw_theme, _VALID_THEMES, "dark")
+        log_level_value = self._normalize_dropdown_value(raw_log, _VALID_LOG_LEVELS, "INFO")
+        if raw_locale != language_value:
+            logger.warning(
+                "[SystemSettingsVM] locale normalized %r -> %r (invalid config)",
+                raw_locale,
+                language_value,
+            )
+        if raw_theme != theme_value:
+            logger.warning(
+                "[SystemSettingsVM] theme normalized %r -> %r (invalid config)",
+                raw_theme,
+                theme_value,
+            )
+        if raw_log != log_level_value:
+            logger.warning(
+                "[SystemSettingsVM] log_level normalized %r -> %r (invalid config)",
+                raw_log,
+                log_level_value,
+            )
         self._state = SystemSettingsState(
-            language_value=ConfigHandler.get_locale(),
-            theme_value=ConfigHandler.get_theme_name(),
+            language_value=language_value,
+            theme_value=theme_value,
             concurrency_value=str(ConfigHandler.get_sync_max_concurrent_heavy()),
-            log_level_value=ConfigHandler.get_log_level(),
+            log_level_value=log_level_value,
             pool_size_value=str(ConfigHandler.get_db_connection_pool_size()),
             db_overflow_value=str(ConfigHandler.get_db_max_overflow()),
             db_timeout_value=str(ConfigHandler.get_db_pool_timeout()),
