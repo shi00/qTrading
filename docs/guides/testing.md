@@ -40,6 +40,7 @@
 > 覆盖率阈值的单一事实源位于 `pyproject.toml`。
 > - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）
 > - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 强制检查）
+> - **分层单文件覆盖率**：`services/`、`strategies/`、`data/` 单文件阈值 ≥ 90%，`ui/` ≥ 85%（`pyproject.toml` `per_file_minimum_by_path`，最长前缀匹配，未匹配目录仍按默认 ≥ 80%）；当前 `enforce_layered=false` 为 advisory 报告模式（`scripts/check_per_file_coverage.py --report` 输出，CI「Report Layered Coverage」step），不阻断；补齐分层覆盖率后翻转强制
 > - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
 > - **覆盖率排除行**：`pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
 > - **覆盖率 omit 文件**：`pyproject.toml` `[tool.coverage.run].omit` 含 `main.py`（标注 `NOTE(lazy)`；升级触发条件：重构 `main.py` 拆出可测的 bootstrap 模块后移除 omit）
