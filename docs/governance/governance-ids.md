@@ -39,7 +39,7 @@
 | review03-C11 | CacheManager↔BaseDao 循环由中立模块 engine_provider.py 切断 | review03 数据层与持久化 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
 | D6-1 | utils/scheduler_service → data.domain_services.offline_calendar 日历降级例外（EX-0016） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
 | D6-2 | 同 D6-1（D6-1/D6-2 日历降级修复） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
-| GDR-01 | 补录 contract 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016，含 EX-0016 D6-1/D6-2 日历降级） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
+| GDR-01 | 补录 contract 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016，含 D6-1/D6-2 日历降级 EX-0016） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
 | GDR-10 | AGENTS.md 最小安全集排除非 INVARIANT 红线，R1/R16 已有独立自动化兜底故不收录 | 文档体系检视（GDR 系列，2026-09-08） | [0006-override-agents-pure-pointer.md](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GDR-12 | ADR 决策文档文件级索引完整性检查（CONTRIBUTING.md 登记全部 docs/adr/*.md） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-13 | 书名号式章节引用一致性检查（`<文档路径>「<章节名>」`） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
@@ -47,6 +47,7 @@
 | P0-1 | 单文件巨石结构违反渐进式披露原则，需分层治理 | 文档体系检视（P0 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-1 | 同 P0-1：单文件巨石结构问题 | 文档体系检视（P1 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-04 | UX-06 冷启动验证（生产模式全页构造 proxy 成本基线） | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| P1-04 | 另义（同名异义双义登记）：R5 由 INVARIANT 降为 EXCEPTIONABLE 分类修正（P1-04 方案1；[exceptions.yml](./exceptions.yml) EX-0017/EX-0018 引用；与上一行「UX-06 冷启动验证」为同一编号两处语义，来源轮次不可考） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0017/EX-0018 | 使用中 |
 | P1-05 | 文档权威按主题确定正本，而非按目录层级全局覆盖 | 文档体系检视（P1 系列） | [CLAUDE.md](../../CLAUDE.md) §1 / [flet/v1-api-constraints](../flet/v1-api-constraints.md) | 使用中 |
 | P1-2 | CI 自动化专项迭代（红线机器可读映射落地触发条件） | 文档体系检视（P1 系列） | [0003-overturn-3b-3c-deferral.md](../adr/0003-overturn-3b-3c-deferral.md) | 使用中 |
 | P1-3 | Flet 绝对化表述分层（「新代码禁止/契约守护」规则例外集中登记） | 文档体系检视（P1 系列） | [flet/v1-api-constraints.md](../flet/v1-api-constraints.md) | 使用中 |

@@ -23,7 +23,7 @@
 #   - 禁止删除或复用已废弃例外编号 (append-only)
 #   - 例外到期或触发移除条件后, 必须从本文件移除并同步清理引用
 
-# GDR-01 修复：补录契约 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016），
+# GDR-01 修复：补录契约 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016，EX-0016 为 D6-1/D6-2 日历降级），
 # 使「例外唯一注册入口」名副其实；pyproject.toml 契约 5 注释逐条回指 EX id。
 # 方向性违规（scheduler_service → strategies/services）按 review01-A2/A6 夜间预测下沉消除；
 # 循环打破型（config.db ↔ db_config_service）随按域拆分迁移；关机/采集型 lazy import 保留但须带注释。

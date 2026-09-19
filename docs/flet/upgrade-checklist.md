@@ -76,8 +76,8 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.3 何时需要重新同步字体
 
-- **flet 主版本/次版本升级**（如 0.86.x → 0.87.x）：`main.dart.js` 中字体 URL hash 或版本号可能变化 → 必须重新运行 `sync_e2e_fonts.py`
-- **flet patch 版本升级**（如 0.86.x → 0.86.x+1）：通常 `main.dart.js` 不变，但建议运行脚本验证（幂等，已存在文件跳过）
+- **flet 主版本/次版本升级**（如 1.0.x → 1.1.x）：`main.dart.js` 中字体 URL hash 或版本号可能变化 → 必须重新运行 `sync_e2e_fonts.py`
+- **flet patch 版本升级**（如 1.0.x → 1.0.x+1）：通常 `main.dart.js` 不变，但建议运行脚本验证（幂等，已存在文件跳过）
 - **应用新增 locale 支持**（如增加日文/韩文）：需在 `tests/e2e/_font_urls.py::REQUIRED_FONT_FAMILIES` 中补充对应字体族（如 `notosansjp`），再运行 `python scripts/sync_e2e_fonts.py` 同步新字体分片，将 `tests/e2e/mock_assets/fonts/` 下新增文件提交后推送
 
 > 注意：sync 脚本必须在 E2E 运行的同一 venv 中执行，确保解析到的 `flet_web` 与 E2E 实际使用的版本一致。
@@ -96,7 +96,7 @@ python scripts/sync_e2e_fonts.py --force
 - [ ] **若 engineRevision 未变化**：跳过文件复制，但在升级 PR 描述中记录"engineRevision 未变，canvaskit 资源无需更新"
 - [ ] **运行 E2E 冒烟测试**（若本地环境支持）：验证 canvaskit 加载无回归
 
-### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet 0.86.x+）
+### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet V1 系列）
 
 > 背景：Flet 0.86.x 引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
 
@@ -111,7 +111,7 @@ python scripts/sync_e2e_fonts.py --force
 
 > 排查指南：E2E 启动卡死且日志显示 `canvases: 0` 或 `webglContexts=0`，通常是 CanvasKit 资源未命中本地缓存。检查 `tests/e2e/mock_assets/canvaskit/` 目录结构是否与新版本 `site-packages/flet_web/web/canvaskit/` 一致。
 
-### 3.6 RiveNative 资源验证（Flet 0.86.x+）
+### 3.6 RiveNative 资源验证（Flet V1 系列）
 
 > 背景：Flet 0.86.x 的 `main.dart.js` 硬编码了 `@rive-app/flutter-native-wasm` CDN 依赖（`rive_native.js` / `rive_native.wasm`）。该请求被 E2E 拦截器 abort 后会阻塞 Flutter 引擎初始化。E2E 需预先缓存 RiveNative 资源到 `tests/e2e/mock_assets/rive/`，拦截器按 `@rive-app/flutter-native-wasm` 关键字匹配并从本地 `rive/<subdir>/<filename>` 提供。
 
@@ -122,7 +122,7 @@ python scripts/sync_e2e_fonts.py --force
 - [ ] **若不再引用**：删除 `tests/e2e/mock_assets/rive/` 目录，并在 `intercept_external` 中移除 `@rive-app/flutter-native-wasm` 匹配分支
 - [ ] **若新版本引用了其他 CDN 依赖**：在 `intercept_external` 中新增对应拦截分支，预先缓存资源到 `tests/e2e/mock_assets/`
 
-### 3.7 COEP + PNA 死锁与浏览器启动参数（Flet 0.86.x+）
+### 3.7 COEP + PNA 死锁与浏览器启动参数（Flet V1 系列）
 
 > 背景：Flet 0.86.x 设置 `Cross-Origin-Embedder-Policy: require-corp` 响应头，导致跨域 CanvasKit 资源加载被阻止（`webglContexts=0`）。尝试用 Playwright `route.fulfill()` 移除 COEP 头又会触发 Private Network Access（PNA）检查，阻止 Flet WebSocket 连接（`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`）。两者形成死锁。
 

@@ -843,6 +843,17 @@ class TestRedlinesYamlConsistency:
         errors = check_redline_range_consistency()
         assert errors == [], f"ADR 快照不应被误报, got: {errors}"
 
+    def test_redline_range_consistency_ignores_changelog(self, tmp_path, monkeypatch):
+        """CHANGELOG.md 为 release-please 自动生成历史, 含修复提交标题引用的旧红线范围(如"R1~R22 同步为 R1~R23"),
+        不应被当前总数守卫误报(与治理 ID 检查对 CHANGELOG.md 的处理一致)。"""
+        from check_docs_consistency import check_redline_range_consistency
+
+        doc = tmp_path / "CHANGELOG.md"
+        doc.write_text("历史提交: 红线 R1~R22 同步为 R1~R23 并补 project-profile R23 行\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_redline_range_consistency()
+        assert errors == [], f"CHANGELOG 不应被误报, got: {errors}"
+
     def test_detects_missing_r15_in_yaml(self, tmp_path, monkeypatch):
         """构造缺 R15 的 yml, check_redlines_yaml_consistency() 应报错 (append-only 守护)."""
         import yaml

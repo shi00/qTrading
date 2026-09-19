@@ -30,7 +30,7 @@
 
 ### 2.3 错误状态可读性
 
-- **错误消息**：`ft.TextField(error=...)` 必须设置非空错误消息（`error` 接受字符串或 `ft.Text(...)` 插槽——Flet 0.86 的 `TextField` 无 `error_text`；`ft.Dropdown(error_text=...)`），不依赖颜色变化作为唯一错误提示。
+- **错误消息**：`ft.TextField(error=...)` 必须设置非空错误消息（`error` 接受字符串或 `ft.Text(...)` 插槽——Flet V1 的 `TextField` 无 `error_text`；`ft.Dropdown(error_text=...)`），不依赖颜色变化作为唯一错误提示。
 - **Toast 反馈**：操作成功/失败必须通过 `ToastManager.show()`（`ui/components/toast_manager.py`）反馈，不依赖控制台日志。Toast 无障碍要求：
   - 普通 toast duration 不得低于 10s（`show()` 强制下限，低于 10 自动提升到 10）；操作型 toast（含 action 按钮）自动 30s。
   - Toast 必须可手动关闭（`ToastCard` 提供关闭按钮），禁止依赖自动消失作为唯一关闭路径。

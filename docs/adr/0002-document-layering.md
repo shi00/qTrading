@@ -1,6 +1,6 @@
 # ADR-0002: 文档架构分层决策
 
-> Status: Accepted
+> Status: Partial Superseded by ADR-0005 (3c portion only) and ADR-0006 (AGENTS.md pointer portion)
 > Date: 2026-07-17
 > Owner: 架构维护者
 > Supersedes: CONTRIBUTING.md 历史版本中「3b/3c 过度工程不做」决策的部分前提（3b 由 ADR-0003 单独推翻）
