@@ -33,7 +33,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ### 限流与重试（C5）
 
-- `TushareClient` 内置 `TokenBucket` 限流器，按积分档位（120/2000/5000/10000/15000）区分 QPS 上限，配置见 `data/constants.py` 的 `TUSHARE_POINT_TIERS`。
+- `TushareClient` 内置 `TokenBucket` 限流器，按积分档位（120/2000/5000/10000/15000）区分 QPS 上限，真相源见 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`（`data/constants.py` 中的同名常量仅为兼容再导出，见 [how-to.md 5.1 Tushare 集成工作流](../guides/how-to.md#51-tushare-集成工作流简述)）。
 - 网络错误与限流错误自动重试（指数退避 + jitter），重试上限由 `TushareClient` 配置控制；超阈值后通过 `classify_error()` 分类并触发慢操作告警。
 - 外部 IO 方法挂 `@log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)` 触发性能监控。
 

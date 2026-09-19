@@ -464,7 +464,7 @@ python main.py
 
 **Token 获取**：在 [Tushare Pro](https://tushare.pro/) 注册账号后，于「个人主页 → 接口 TOKEN」页复制 token；首次启动 Onboarding 向导或「设置 → 数据源」面板均可粘贴配置。Token 通过系统 Keyring 加密存储（无 Keyring 环境回退到 AES-GCM 加密文件），不入数据库、不写入日志。
 
-**积分档位**：Tushare 按 token 积分档位（120/2000/5000/10000/15000）开放不同 API 与 QPS。应用启动时会执行 capability probe 探测当前 token 可访问的 API 集，未授权 API 在 UI 上灰显并跳过同步。积分档位映射配置见 `data/constants.py` 的 `TUSHARE_POINT_TIERS`。
+**积分档位**：Tushare 按 token 积分档位（120/2000/5000/10000/15000）开放不同 API 与 QPS。应用启动时会执行 capability probe 探测当前 token 可访问的 API 集，未授权 API 在 UI 上灰显并跳过同步。积分档位映射配置真相源见 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`（`data/constants.py` 中的同名常量仅为兼容再导出）。
 
 **降级行为**：当某 API 触发 `TushareAPIPermissionError`（积分不足/未授权），syncer 会跳过该 API 并继续同步其他 API，不阻塞整体流程；token 认证失败（`您的token不对`）会触发全局熔断，所有 API 调用 fast-fail，需用户重新设置 token 后恢复。
 
