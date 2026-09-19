@@ -72,10 +72,10 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          # Pre-install flet-web to prevent Flet 0.86 from auto-installing it at app startup.
+          # Pre-install flet-web to prevent the Flet runtime from auto-installing it at app startup.
           # Same fix as embedded-tests job (ci_cd.yml): without this, Linux E2E fails because
           # Flet tries to pip install flet-web at runtime into system Python without a venv.
-          uv pip install --system flet-web==0.86.3
+          uv pip install --system flet-web==1.0.0
           pip install playwright pytest-playwright
 
       - name: Install Playwright chromium

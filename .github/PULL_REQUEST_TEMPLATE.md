@@ -64,7 +64,7 @@ Relates to #XXX
 - [ ] Ruff lint + format 已通过（`ruff check .` + `ruff format --check .`）
 - [ ] Pyright 类型检查已通过（`pyright`）
 - [ ] 测试断言避免弱断言（`assert x` / `assertTrue`），使用精确断言（`assertEqual` / `assert x == y`）
-- [ ] 所有 `# type: ignore` 均带 `[reason]` 注释（R3 红线）
+- [ ] 所有 `# type: ignore` 均带 `[error-code]` 注释（R3 红线）
 - [ ] 所有 `# NOTE(lazy):` 标记含三要素（简化内容 / ceiling / upgrade）
 
 ## 👀 评审重点提示
