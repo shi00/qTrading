@@ -111,13 +111,13 @@ def _build_legacy_key_warning() -> ft.Control:
                     [
                         ft.Text(
                             I18n.get("sys_legacy_key_warning_title"),
-                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.WARNING,
                         ),
                         ft.Text(
                             I18n.get("sys_legacy_key_warning_desc"),
-                            style=ft.TextThemeStyle.BODY_SMALL,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                             color=AppColors.INPUT_TEXT,
                         ),
                     ],
@@ -150,13 +150,13 @@ def _build_storage_security_notice() -> ft.Control:
                     [
                         ft.Text(
                             I18n.get("sys_storage_security_title"),
-                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.INFO,
                         ),
                         ft.Text(
                             I18n.get("sys_storage_security_desc", path=USER_DATA_ROOT),
-                            style=ft.TextThemeStyle.BODY_SMALL,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                             color=AppColors.INPUT_TEXT,
                         ),
                     ],
@@ -188,13 +188,13 @@ def _build_keyring_unavailable_warning() -> ft.Control:
                     [
                         ft.Text(
                             I18n.get("sys_keyring_unavailable_title"),
-                            style=ft.TextThemeStyle.TITLE_SMALL,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.WARNING,
                         ),
                         ft.Text(
                             I18n.get("sys_keyring_unavailable_desc"),
-                            style=ft.TextThemeStyle.BODY_SMALL,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                             color=AppColors.INPUT_TEXT,
                         ),
                     ],
