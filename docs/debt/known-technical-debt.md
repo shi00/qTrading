@@ -431,7 +431,7 @@ review02 B12 已实现第 1 步（data\_version memo 缓存，消除无谓重算
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/db_migrator.py:149-153` 的 `_heal_orphaned_revision` 注释明确「严格线性单链迁移策略」，「未来引入多分支需重新评估」。当前 18 个迁移（0001\~0018）均为单链，假设成立。未来若引入 Alembic 多分支（Multiple Heads），「直接拨回 head」逻辑可能导致 schema 漂移。属于已文档化的设计限制，本次 M4 仅补登记到债表以跨检视周期追溯。相关文件：`data/persistence/db_migrator.py:149-153`、`alembic/versions/0001~0018`。
+M4 模块化检视发现：`data/persistence/db_migrator.py:149-153` 的 `_heal_orphaned_revision` 注释明确「严格线性单链迁移策略」，「未来引入多分支需重新评估」。当前 28 个迁移（0001\~0028）均为单链，假设成立。未来若引入 Alembic 多分支（Multiple Heads），「直接拨回 head」逻辑可能导致 schema 漂移。属于已文档化的设计限制，本次 M4 仅补登记到债表以跨检视周期追溯。相关文件：`data/persistence/db_migrator.py:149-153`、`alembic/versions/0001~0028`。
 
 **期望的最终解法**
 

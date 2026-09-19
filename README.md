@@ -186,11 +186,17 @@ qTrading/
 │   └── all_strategies.py       # 策略注册汇总
 │
 ├── services/               # 服务层
-│   ├── ai_service.py           # AI 服务（LiteLLM 多模型网关）
+│   ├── ai_service/             # AI 服务（LiteLLM 多模型网关，子包）
+│   ├── scheduled_jobs/         # 定时任务（夜间预测、复评回填，子包）
+│   ├── backtest_service.py     # 回测服务（策略回测执行、结果管理）
+│   ├── embedded_pg_maintenance_service.py # 内置 PostgreSQL 离线维护
 │   ├── local_model_manager.py  # 本地模型管理
-│   ├── task_manager.py         # 异步任务管理器
+│   ├── news_insight_models.py  # AI 新闻洞察数据模型
+│   ├── news_insight_service.py # AI 新闻洞察服务
+│   ├── news_insight_e2e_fake.py # AI 新闻洞察 E2E 桩
 │   ├── news_subscription_service.py # 新闻订阅服务
-│   └── backtest_service.py     # 回测服务（策略回测执行、结果管理）
+│   ├── task_manager.py         # 异步任务管理器
+│   └── task_rebuild.py         # 任务重建程序
 │
 ├── ui/                     # 表现层 (MVVM)
 │   ├── app_layout.py           # 主布局（6 标签页导航：市场 | 选股 | 回测 | 数据 | 任务 | 设置）
