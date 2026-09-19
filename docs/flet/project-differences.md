@@ -284,7 +284,7 @@ return ft.Column(
 2. 内层 `Inner Column` **不设** `expand=True`，仅设 `width=total_w`（expand 沿主轴=水平方向 flex 分配，会覆盖 width，导致单列被视口挤压——即 PR #392 移除水平滚动的根因）；
 3. 垂直滚动 `Column` 必须同时 `scroll=AUTO + expand=True`（expand 接受父 BodyClip 分配的 tight height，scroll=AUTO 让溢出转内部滚动，不撑开外层链）。
 
-**已验证**：方案 D 在项目锁定 Flet 版本下 E2E 回归全绿（`test_screener_flow` / `test_data_explorer` / `test_screener_to_backtest`）。反例（v1.2 曾出现）为 Inner Column 误加 `expand=True` 导致主轴/交叉轴混淆，见 §4.8。
+**已验证**：方案 D 在项目锁定 Flet 版本下 E2E 回归全绿（`test_screener_flow` / `test_data_explorer` / `test_screener_to_backtest`）。反例（Inner Column 误加 `expand=True` 曾导致主轴/交叉轴混淆，见 §4.8）。
 
 ---
 

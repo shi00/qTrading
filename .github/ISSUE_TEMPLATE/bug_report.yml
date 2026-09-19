@@ -117,7 +117,7 @@ body:
     attributes:
       label: 项目版本
       description: 见 pyproject.toml 或应用「关于」对话框。
-      placeholder: 0.9.0
+      placeholder: 0.10.1
     validations:
       required: true
 
@@ -131,7 +131,7 @@ body:
         - Polars 版本
         - PostgreSQL 版本
       placeholder: |
-        Flet: 0.85.3
+        Flet: 1.0.0
         Polars: x.x.x
         PostgreSQL: 16.x
     validations:
