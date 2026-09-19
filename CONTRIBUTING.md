@@ -250,7 +250,7 @@ python main.py
 | 仅 `ui/` | ruff + pyright + `tests/unit/ui/` |
 | `data/` DAO/模型 | 上述 + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
 | `strategies/` | ruff + pyright + `tests/unit/` 对应策略用例 |
-| 依赖变更 | 编辑 `pyproject.toml` → pre-commit 自动同步 `requirements*.txt` + `pip-audit` |
+| 依赖变更 | 编辑 `pyproject.toml` → pre-commit 自动同步 `requirements*.txt`（依赖审计由 CI Security Audit 步骤执行） |
 
 ## 代码风格基础
 
