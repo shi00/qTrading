@@ -60,7 +60,7 @@
 3. **同步策略**：在 `data/sync/` 下对应 syncer 文件中实现 `ISyncStrategy.sync()`，通过 `SyncContext` 注入 `cancel_event`，分块调用 `TushareClient` wrapper。
 4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
 5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
-6. **质量门控**：syncer 写入前挂 `@require_quality(QualityTier.X)`，同步后由 `QuoteDAO.get_sync_quality_score()` 评估质量分数。
+6. **质量门控**：`data/sync` 层作为同步入口不挂 `@require_quality`，质量门控由业务消费方（`strategies/`）按数据质量声明；质量评分评估机制详见文末 [data-sync.md 质量门控](../patterns/data-sync.md#质量门控c15) 链接。
 7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`，主动退出时 `raise asyncio.CancelledError`（R2 红线）。
 8. **错误处理**：`except asyncio.CancelledError: raise`；`TushareAPIPermissionError` 捕获后跳过对应 API；其他异常经 `classify_error()` 分类。
 9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API（[测试编写模板](../guides/testing.md#测试编写模板)）。
