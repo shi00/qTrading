@@ -3,7 +3,7 @@
 > Status: Accepted
 > Date: 2026-07-17
 > Owner: 架构维护者
-> Partial Supersedes: ADR-0003 (3c portion only; 3b portion remains valid)
+> Partial Supersedes: ADR-0002（3c 部分，仅 enforcement 字段映射）; ADR-0003 (3c portion only; 3b portion remains valid)
 
 ## Context
 

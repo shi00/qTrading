@@ -4848,3 +4848,160 @@ class TestProseMetaGuards:
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", tmp_path / "missing.md")
         warnings = check_governance_id_dual_meaning()
         assert warnings == [], f"缺失对照表应静默, got: {warnings}"
+
+
+class TestSingletonCountProse:
+    """盲1：注册单例散文数量守卫（@register_singleton，N 个）vs 表格实计。
+
+    只守护类名集合的既有测试查不出散文数字与表格行数脱钩；本守卫对齐
+    check_exception_count_prose 的散文数量范式，守护 N 随表格增减同步。
+    """
+
+    @staticmethod
+    def _doc(declared: int, data_rows: int) -> str:
+        rows = "\n".join(f"| `Class{i}` | `mod{i}.py` | 职责 {i} |" for i in range(data_rows))
+        return (
+            f"### 单例注册清单\n\n"
+            f"**注册单例（`@register_singleton`，{declared} 个）**：\n\n"
+            f"| 类名 | 模块路径 | 职责 |\n"
+            f"|------|---------|------|\n"
+            f"{rows}\n\n"
+            f"**非注册单例（...）**：\n"
+            f"| 类名 | 模块路径 | 不纳入原因 |\n"
+            f"|------|---------|-----------|\n"
+            f"| `ConfigHandler` | `utils/config_handler.py` | 全静态方法 |\n"
+        )
+
+    def test_singleton_count_passes_match(self, tmp_path, monkeypatch):
+        """散文声明 N 与注册单例表格数据行数一致 → 放行。"""
+        from check_docs_consistency import check_singleton_count_prose
+
+        doc = tmp_path / "singleton-lifecycle.md"
+        doc.write_text(self._doc(2, 2), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", doc)
+        errors = check_singleton_count_prose()
+        assert errors == [], f"声明 2 与表格 2 行应一致, got: {errors}"
+
+    def test_singleton_count_detects_prose_drift(self, tmp_path, monkeypatch):
+        """散文声明 2 个但表格已扩到 3 行 → 报错（散文漏同步根因）。"""
+        from check_docs_consistency import check_singleton_count_prose
+
+        doc = tmp_path / "singleton-lifecycle.md"
+        doc.write_text(self._doc(2, 3), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", doc)
+        errors = check_singleton_count_prose()
+        assert any("声明注册单例 2" in e and "实计 3" in e for e in errors), f"散文 2 vs 表格 3 应报错, got: {errors}"
+
+    def test_singleton_count_unable_to_parse_reports(self, tmp_path, monkeypatch):
+        """文档不含「注册单例（@register_singleton，N 个）」散文声明 → 缺失声明报错。"""
+        from check_docs_consistency import check_singleton_count_prose
+
+        doc = tmp_path / "singleton-lifecycle.md"
+        doc.write_text("只有正文\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", doc)
+        errors = check_singleton_count_prose()
+        assert any("未找到" in e for e in errors), f"无散文声明应报错, got: {errors}"
+
+    def test_singleton_count_missing_doc_reports(self, tmp_path, monkeypatch):
+        """文档不存在 → 报错（区别于 check_redlines 的白名单缺失场景）。"""
+        from check_docs_consistency import check_singleton_count_prose
+
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", tmp_path / "missing.md")
+        errors = check_singleton_count_prose()
+        assert any("不存在" in e for e in errors), f"文档缺失应报错, got: {errors}"
+
+
+class TestAdrSupersedeChain:
+    """盲2：ADR supersede 双向链守卫（X supersedes Y ⇔ Y 被 X supersede）。
+
+    检视发现 ADR-0002 声明「Partial Superseded by ADR-0005」但 ADR-0005 未回指 → 单向断链。
+    本守卫对 docs/adr/*.md 头元数据建立双向映射并校验对称性。
+    """
+
+    @staticmethod
+    def _adr(name: str, status: str, supersedes: str | None = None) -> str:
+        header = f"> Status: {status}\n"
+        if supersedes:
+            header += f"> {supersedes}\n"
+        return f"# {name}\n\n{header}## Context\n"
+
+    def test_adr_supersede_chain_pass_symmetric(self, tmp_path, monkeypatch):
+        """X supersedes Y 且 Y Status 声明被 X supersede → 双向印证放行。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Accepted", "Partial Supersedes: ADR-0002 (3c)"), encoding="utf-8"
+        )
+        (tmp_path / "0002-y.md").write_text(
+            self._adr("ADR-0002", "Partial Superseded by ADR-0001 (3c portion only)"), encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert errors == [], f"双向印证应放行, got: {errors}"
+
+    def test_adr_supersede_chain_detects_one_way(self, tmp_path, monkeypatch):
+        """X 声明 supersedes Y，但 Y 不声明被 X supersede → 单向断链报错。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(self._adr("ADR-0001", "Accepted", "Supersedes: ADR-0002"), encoding="utf-8")
+        (tmp_path / "0002-y.md").write_text(self._adr("ADR-0002", "Accepted"), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert any("ADR-0001" in e and "ADR-0002" in e for e in errors), f"单向断链应报错, got: {errors}"
+
+    def test_adr_supersede_chain_detects_reverse_way(self, tmp_path, monkeypatch):
+        """Y 声明被 X supersede，但 X 不声明 supersedes Y → 反向断链报错。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(self._adr("ADR-0001", "Accepted"), encoding="utf-8")
+        (tmp_path / "0002-y.md").write_text(
+            self._adr("ADR-0002", "Partial Superseded by ADR-0001 (3c)"), encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert any("ADR-0002" in e and "ADR-0001" in e for e in errors), f"反向断链应报错, got: {errors}"
+
+    def test_adr_supersede_chain_ignores_explanatory_ref(self, tmp_path, monkeypatch):
+        """Supersedes 目标非 ADR（如 CONTRIBUTING.md 引用）不误判为 ADR 断链。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Accepted", "Supersedes: CONTRIBUTING.md 历史版本（3b 部分）"),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert errors == [], f"非 ADR 目标不应误报, got: {errors}"
+
+    def test_adr_supersede_chain_ignores_trailing_explanatory_ref(self, tmp_path, monkeypatch):
+        """ADR 目标后跟解释性 ADR 引用（如「详见 ADR-0009」）不被误捕为 supersede 目标。
+
+        收窄正则限界于「首 token + 圆括号注释 + 分号并列」；段后游离的解释性 ADR 引用不在捕获范围。
+        """
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Accepted", "Partial Supersedes: ADR-0002（3c）; 详见 ADR-0009"),
+            encoding="utf-8",
+        )
+        (tmp_path / "0002-y.md").write_text(
+            self._adr("ADR-0002", "Partial Superseded by ADR-0001 (3c portion only)"), encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert errors == [], f"段后解释性引用不应误捕为 supersede 目标, got: {errors}"
+
+    def test_adr_supersede_chain_real_repo_passes(self):
+        """真实仓库 docs/adr/ 全量头元数据：双向印证实计通过（防未来 ADR 引入断链回归）。"""
+        import check_docs_consistency
+
+        errors = check_docs_consistency.check_adr_supersede_chain()
+        assert errors == [], f"当前仓库 ADR supersede 链应全部双向印证, got: {errors}"
+
+    def test_adr_supersede_chain_missing_dir_silent(self, tmp_path, monkeypatch):
+        """ADR 目录缺失 → 由 check_adr_index_completeness 报告，本守卫静默。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path / "missing")
+        errors = check_adr_supersede_chain()
+        assert errors == [], f"缺失目录应静默, got: {errors}"

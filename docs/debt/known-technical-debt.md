@@ -35,7 +35,6 @@
 | P3-M11-StartupViews-HomeViewModel-Static-Call | #M11-002 MVVM 边界：startup\_views.py View 直接调用 HomeViewModel 静态方法 | P3 | ① 启动流程重构时；② 或 news alert 监听机制重构时 |
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① stock\_detail\_dialog MVVM 改造时；② 或 ui 层 MVVM 完全迁移时 |
 | P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM | P3 | ① backtest\_config\_panel MVVM 改造时；② 或 ui 层 MVVM 完全迁移时 |
-| P3-M12-ScreenerViewModel-State-Mutable-Types | #M12-017 MVVM 契约：screener\_view\_model.py state 可变类型 | P3 | ① ScreenerViewModel 重构时；② 或 ui 层 MVVM 完全迁移时 |
 | P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (32 import) / data\_view\.py (24 import) 导入复杂度过高 | P3 | ① screener\_view / data\_view 重构时；② 或 ui 层模块拆分时 |
 | P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:214 ↑↓ 排序指示器 | P3 | ① virtual\_table 重构时；② 或可访问性 audit 时 |
 | P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | P3 | ① 项目维护者决策时；② 或隐私 audit 时 |
@@ -43,7 +42,6 @@
 | P3-M12-FailoverConfigPanel-BtnSave-No-RunTask | #M12-023 一致性：failover\_config\_panel.py btn\_save 未通过 \_run\_task\_no\_args 提交 | P3 | ① failover\_config\_panel 重构时；② 或 ui 层异步模式统一时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_view\.py / data\_source\_tab.py View 获取 data\_processor 传子组件 | P3 | ① data\_view / data\_source\_tab MVVM 改造时；② 或 ui 层 MVVM 完全迁移时 |
 | P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:289 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① news\_feed 重构时；② 或 ui 层 MVVM 完全迁移时 |
-| P3-M12-ToastManager-Not-Registered-Singleton | #M12-030 单例：toast\_manager.py ToastManager 未注册 @register\_singleton —— ✅ 已关闭（2026-09-06，C1 fix/b3-01-state-ownership：经 review05-E15 复核为「去单例化薄壳」非事实单例，不再注册；R7 隔离改由 tests/unit/conftest.py autouse fixture `_reset_toast_manager_state` 调用模块级 `_reset_state_for_test` 覆盖） | P3 | ① ToastManager 重构时；② 或单例 audit 时 |
 | P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:511 \_build\_content pragma: no cover | P3 | ① stock\_detail\_dialog 重构时；② 或测试覆盖 audit 时 |
 | P3-PR373-Viewport-Collapse-Audit | 增量变更触发边缘状态视口塌陷同类风险排查（PR #373 举一反三） | P3 | ① 上述视图新增控件触发 E2E 文本超时失败时；② 或布局重构时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
@@ -323,20 +321,6 @@ M12 ui 表现层模块检视发现：`ui/components/config_panels/failover_confi
 
 评估 btn\_save 是否需要 `_run_task_no_args` 提交。验收标准：① btn\_save 与同模块按钮模式一致；② 现有 `test_failover_config_panel*.py` 全过。upgrade 触发条件：① failover\_config\_panel 重构时；② 或 ui 层异步模式统一时。
 
-#### P3-M12-ToastManager-Not-Registered-Singleton：#M12-030 单例：toast\_manager.py ToastManager 未注册 @register\_singleton —— ✅ 已关闭（2026-09-06，C1 fix/b3-01-state-ownership：经 review05-E15 复核为「去单例化薄壳」非事实单例，不再注册；R7 隔离改由 tests/unit/conftest.py autouse fixture `_reset_toast_manager_state` 调用模块级 `_reset_state_for_test` 覆盖）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-ToastManager-Not-Registered-Singleton** | #M12-030 单例：toast\_manager.py ToastManager 未注册 @register\_singleton —— ✅ 已关闭（2026-09-06，C1 fix/b3-01-state-ownership：经 review05-E15 复核为「去单例化薄壳」非事实单例，不再注册；R7 隔离改由 tests/unit/conftest.py autouse fixture `_reset_toast_manager_state` 调用模块级 `_reset_state_for_test` 覆盖） | ① ToastManager 重构时；② 或单例 audit 时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/components/toast_manager.py` `ToastManager` 未注册 `@register_singleton`。CLAUDE.md §4.3 要求所有单例必须使用 `@register_singleton` 注册。ToastManager 是事实上的单例（通过 `ft.context.page` 访问），但未注册。M12 未修复原因：修复需评估 ToastManager 是否真为单例 + 注册 + 实现 `_reset_singleton`，跨多文件协调。相关文件：`ui/components/toast_manager.py`。
-
-**期望的最终解法**
-
-评估 ToastManager 是否需要注册为单例。验收标准：① 若需要，注册 `@register_singleton` + 实现 `_reset_singleton`；② 现有 `test_toast_manager*.py` 全过。upgrade 触发条件：① ToastManager 重构时；② 或单例 audit 时。
-
 #### P3-M12-StockDetailDialog-BuildContent-No-Cover：#M12-031 测试覆盖：stock\_detail\_dialog.py:511 \_build\_content pragma: no cover
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -510,20 +494,6 @@ M12 ui 表现层模块检视发现：`ui/components/backtest/backtest_config_pan
 **期望的最终解法**
 
 引入 BacktestConfigViewModel，迁移 13 个 use\_state 到 VM state。验收标准：① 13 个 use\_state 迁移到 VM；② 现有 `test_backtest_config_panel*.py` 全过。upgrade 触发条件：① backtest\_config\_panel MVVM 改造时；② 或 ui 层 MVVM 完全迁移时。
-
-#### P3-M12-ScreenerViewModel-State-Mutable-Types：#M12-017 MVVM 契约：screener\_view\_model.py state 可变类型
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-ScreenerViewModel-State-Mutable-Types** | #M12-017 MVVM 契约：screener\_view\_model.py state 可变类型 | ① ScreenerViewModel 重构时；② 或 ui 层 MVVM 完全迁移时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/viewmodels/screener_view_model.py` state 含可变类型（`strategies_with_dep` / `HistoryTreeRow.strategies` / `get_current_page_data` DataFrame dual-track）。严格 MVVM 契约下，state 应为不可变 frozen dataclass。M12 未修复原因：修复需重设计 ScreenerState 字段类型 + 调用方适配，跨多文件协调。相关文件：`ui/viewmodels/screener_view_model.py`。**✅ 已关闭（2026-09-06，fix/b3-02c-immutable-hardening + fix/b3-02-eliminate-dual-track）：`strategies_with_dep`/`HistoryTreeRow.strategies` 已为 frozen tuple；`strategy_params` dict→`Mapping`（MappingProxyType 只读包装）；`_realtime_snapshot` dict→frozen `RealtimeSnapshot`；`get_current_page_data` DataFrame 双轨已由 batch3 C2b 消除（H1 唯一切片 owner `_update_pagination` 单帧原子产出分页元数据 + locale-neutral `current_page_rows` 入 state，`get_current_page_data()` 与 `data_version` 全仓移除）。**
-
-**期望的最终解法**
-
-ScreenerState 字段重设计为不可变类型。验收标准：① state 字段全部不可变；② 现有 `test_screener_view_model*.py` 全过。upgrade 触发条件：① ScreenerViewModel 重构时；② 或 ui 层 MVVM 完全迁移时。
 
 #### P3-M12-Views-Import-Complexity-High：#M12-019 可维护性：screener\_view\.py (32 import) / data\_view\.py (24 import) 导入复杂度过高
 

@@ -51,6 +51,12 @@
 24. 治理 ID 对义守卫检查（文档复检 H3 根因）：检测 governance-ids.md 中同一 ID 被登记为多条
    不同语义（同名异义）；行内已声明「双义登记/另义」的视为已披露而豁免，未披露的多义报 WARNING
    （渐进部署，存量清零后翻转 ERROR），弥补仅查「是否登记」不查「是否对义」的守护盲区。
+25. 注册单例散文数量守卫检查（文档复检盲1）：解析 docs/architecture/singleton-lifecycle.md 中
+   「注册单例（@register_singleton，N 个）」散文 N，与「注册单例」章节表格实际数据行数比对，
+   守护单例清单数量随增删同步。
+26. ADR supersede 双向链守卫检查（文档复检盲2）：解析 docs/adr/*.md 头元数据的 Supersedes 与
+   Superseded by 声明，校验双向对称（X 声明 supersedes Y ⇔ Y 声明被 X 部分/整体 supersede），
+   守护 ADR supersede 引用不单向断链。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -102,6 +108,8 @@ RULESET_CHANGELOG_PATH = ROOT / "docs" / "governance" / "ruleset-changelog.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
+# 单例注册清单文档（盲1 守卫基准）：散文「注册单例（@register_singleton，N 个）」数量 vs 表格实计
+SINGLETON_LIFECYCLE_PATH = ROOT / "docs" / "architecture" / "singleton-lifecycle.md"
 
 # 3c: enforcement 字段校验所需的项目配置路径常量（monkeypatch 可注入，禁止内联路径构造）
 CI_WORKFLOW_DIR = ROOT / ".github" / "workflows"
@@ -2606,6 +2614,112 @@ def check_governance_id_dual_meaning() -> list[str]:
     return warnings
 
 
+_REGISTERED_SINGLETON_PROSE = re.compile(r"注册单例（`@register_singleton`，(\d+) 个）")
+
+
+def check_singleton_count_prose() -> list[str]:
+    """检查项 25：注册单例散文数量守卫（文档复检盲1）。
+
+    现有测试只守护注册单例**类名集合**与代码白名单一致，不守护散文「注册单例（N 个）」的
+    N 是否随表格增减同步。新增/移除注册单例后若漏同步 N，会宣称「19 个」却与实际表格行数不符。
+    本守卫对齐 check_exception_count_prose 的散文数量守卫范式：解析 SINGLETON_LIFECYCLE_PATH
+    中「注册单例（@register_singleton，N 个）」的散文 N，与「注册单例」章节实际表格数据行数比对。
+    """
+    errors: list[str] = []
+    try:
+        content = SINGLETON_LIFECYCLE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return [f"单例注册清单文档不存在: {SINGLETON_LIFECYCLE_PATH}"]
+
+    m = _REGISTERED_SINGLETON_PROSE.search(content)
+    if not m:
+        return [f"未找到「注册单例（@register_singleton，N 个）」散文声明: {SINGLETON_LIFECYCLE_PATH.name}"]
+    declared = int(m.group(1))
+
+    # 统计「注册单例」章节到「非注册单例」章节之间的表格数据行
+    # （首列被反引号包裹的类名行即数据行，表头「类名」与分隔行不匹配）
+    section_start = m.end()
+    next_section = content.find("**非注册单例", section_start)
+    section_end = next_section if next_section != -1 else len(content)
+    actual = 0
+    for line in content[section_start:section_end].splitlines():
+        if re.match(r"^\|\s*`([^`]+)`", line):
+            actual += 1
+
+    if declared != actual:
+        prose_line = content[: m.start()].count("\n") + 1
+        errors.append(
+            f"{SINGLETON_LIFECYCLE_PATH.name}:{prose_line}: 散文声明注册单例 {declared} 个，"
+            f"「注册单例」章节表格实计 {actual} 行"
+        )
+    return errors
+
+
+# ADR supersede 双向链守卫（盲2）：ADR 头元数据中的 supersedes 与 superseded-by 声明须互相印证。
+# 提取声明（收窄匹配避免解释性引用误报，如 ADR-0002 `Supersedes: CONTRIBUTING.md...（3b 由 ADR-0003 单独推翻）`）：
+#   - sup 行：`> Partial Supersedes: ADR-0003 ...` / `> Supersedes: ADR-0002 ...`
+#     目标须紧跟在「Supersedes:」关键字后的首 token 即为 ADR-NNNN，才作为真声明捕获；
+#   - 被 sup 行（限 Status）：`> Status: Partial Superseded by ADR-0005 ... and ADR-0006 ...`
+#     捕获 Status 行中「Superseded by」之后全部 ADR-NNNN。
+_ADR_SUPERSEDES = re.compile(
+    r"^>\s*(?:Partial\s+)?Supersedes:\s*"
+    r"ADR-\d{4}(?:\s*[（(][^）)]*[）)])?"
+    r"(?:\s*;\s*(?:and\s+)?ADR-\d{4}(?:\s*[（(][^）)]*[）)])?)*"
+)
+_ADR_SUPERSEDED_BY_STATUS = re.compile(r"^>\s*Status:.*?Superseded\s+by\s+(.+)$")
+_ADR_ID_INLINE = re.compile(r"ADR-(\d{4})")
+
+
+def check_adr_supersede_chain() -> list[str]:
+    """检查项 26：ADR supersede 双向链守卫（文档复检盲2）。
+
+    ADR X 声明「Supersedes ADR-Y」，则 ADR-Y 的 Status 应声明「Superseded by ADR-X」，反之亦然。
+    检视发现 ADR-0002 声明「Partial Superseded by ADR-0005」，但 ADR-0005 仅回指 ADR-0003 未回指
+    ADR-0002，构成单向断链。本守卫对 docs/adr/*.md 头元数据建立双向映射并校验对称性。
+    """
+    errors: list[str] = []
+    if not ADR_DOCS_DIR.is_dir():
+        return errors  # 目录缺失由 check_adr_index_completeness 报告
+
+    supersedes: dict[str, set[str]] = {}
+    superseded_by: dict[str, set[str]] = {}
+    for path in ADR_DOCS_DIR.glob("*.md"):
+        if path.name == "README.md":
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        adr_id = path.name.split("-", 1)[0]  # 0001
+        supersedes.setdefault(adr_id, set())
+        superseded_by.setdefault(adr_id, set())
+        for line in content.splitlines():
+            sm = _ADR_SUPERSEDES.match(line)
+            if sm:
+                # 正则已按「首 token + 圆括号注释 + 分号/and 并列目标」限界整个 ADR 目标段，
+                # 只从该段提取 ADR 编号，避免把其后解释性文本中的 ADR 引用误当 supersede 目标。
+                supersedes[adr_id].update(_ADR_ID_INLINE.findall(sm.group(0)))
+                continue
+            dm = _ADR_SUPERSEDED_BY_STATUS.match(line)
+            if dm:
+                superseded_by[adr_id].update(_ADR_ID_INLINE.findall(dm.group(1)))
+
+    # 双向校验：X 声明 supersedes Y ⇒ Y 必须声明 superseded by X；反之亦然。
+    for x, targets in supersedes.items():
+        for y in targets:
+            if y not in superseded_by:
+                continue
+            if x not in superseded_by[y]:
+                errors.append(f"ADR-{x} 声明 Supersedes ADR-{y}，但 ADR-{y} 未声明 Superseded by ADR-{x}（单向断链）")
+    for y, sources in superseded_by.items():
+        for x in sources:
+            if x not in supersedes:
+                continue
+            if y not in supersedes[x]:
+                errors.append(f"ADR-{y} 声明被 ADR-{x} Supersede，但 ADR-{x} 未声明 Supersedes ADR-{y}（单向断链）")
+    return errors
+
+
 def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     """检查项 19：治理 ID 对照表一致性（GDR-09）。
 
@@ -2809,6 +2923,9 @@ def main() -> int:
     # 散文式自述元信息守卫（文档复检 H1/L1/H3 根因治理，补「对比型/锚点型」之外的漏检单点）
     all_errors.extend(check_flet_badge_version())  # H1：README UI 徽章 Flet 版本对齐
     all_errors.extend(check_exception_count_prose())  # L1：「现存 N 条 R1 例外」数量守卫
+    # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
+    all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
+    all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
     dual_meaning = check_governance_id_dual_meaning()  # H3：治理 ID 同名异义（渐进 WARNING 不阻断）
     if dual_meaning:
         print("::warning::治理 ID 对义（渐进部署，不阻断）存在未声明双义登记的治理 ID：")
@@ -2829,7 +2946,8 @@ def main() -> int:
         "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
-        "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫）"
+        "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
+        "注册单例散文数量守卫 / ADR supersede 双向链守卫）"
     )
     return 0
 
