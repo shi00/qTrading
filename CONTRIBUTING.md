@@ -216,7 +216,7 @@ python -m alembic upgrade head
 python -m alembic check
 python -m alembic downgrade base
 python -m alembic upgrade head
-python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt --allowlist .security/audit-allowlist.yml --sources pypi osv
+python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt requirements-dev.txt --allowlist .security/audit-allowlist.yml --sources pypi osv
 
 # 依赖同步 (通常由 pre-commit 自动触发)
 uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt

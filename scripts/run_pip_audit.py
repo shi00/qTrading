@@ -7,7 +7,7 @@ This script reads a YAML allowlist file and runs pip-audit with the appropriate
 (reevaluate_at date passed) and fails the CI if so.
 
 Usage:
-    python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt --allowlist .security/audit-allowlist.yml
+    python scripts/run_pip_audit.py --requirements requirements.txt requirements-optional.txt requirements-dev.txt --allowlist .security/audit-allowlist.yml
 """
 
 from __future__ import annotations
