@@ -133,11 +133,6 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 _DOC_EXCLUDES: dict[Path, str] = {
     # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
     ROOT / "docs" / "superpowers": "本地 skill 计划目录（.gitignore 排除），非交付物，不参与文档一致性校验",
-    # 检视报告快照：记录发现问题当时（R1~R22）的过时事实，非当前状态，不参与版本/红线总数等一致性门禁
-    ROOT
-    / "docs"
-    / "reviews"
-    / "documentation-deep-review-2026-09-18.md": "文档检视报告快照，引用发现时的红线范围，非当前状态",
     # 历史技术债计划归档：标题引用当时的红线范围（R1-R18），非当前状态
     ROOT / "Plans-tech-debt.md": "历史技术债计划归档，标题引用当时红线范围，不参与一致性门禁",
 }
