@@ -9,7 +9,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SIDECAR_BIN="$SCRIPT_DIR/../_internal/sidecars/qtrading-pg-sidecar"
+SIDECAR_BIN="$SCRIPT_DIR/../../_internal/sidecars/qtrading-pg-sidecar"
 
 if [ ! -x "$SIDECAR_BIN" ]; then
     echo "ERROR: sidecar binary not found or not executable: $SIDECAR_BIN" >&2

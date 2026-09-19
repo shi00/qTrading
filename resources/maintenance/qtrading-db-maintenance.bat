@@ -9,7 +9,7 @@ REM
 REM 详见 README-maintenance.md。
 
 set "SCRIPT_DIR=%~dp0"
-set "SIDECAR_EXE=%SCRIPT_DIR%..\_internal\sidecars\qtrading-pg-sidecar.exe"
+set "SIDECAR_EXE=%SCRIPT_DIR%..\..\_internal\sidecars\qtrading-pg-sidecar.exe"
 
 if not exist "%SIDECAR_EXE%" (
     echo ERROR: sidecar binary not found: %SIDECAR_EXE%
