@@ -126,7 +126,7 @@
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile） |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
 | 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) |
-| 性能优化 / 阈值调整 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
+| 性能优化 / 性能阈值调整 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
 | 调整 CI / 依赖 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 版本发布 / Release 管理 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) |
