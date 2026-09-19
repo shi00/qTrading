@@ -52,9 +52,6 @@
     "automerge": true,
     "schedule": ["before 5am on Monday"]
   },
-  "pip_requirements": {
-    "managerFilePatterns": ["/^requirements(-dev|-optional)?\\.txt$/"]
-  },
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
   "labels": ["dependencies", "renovate"],
