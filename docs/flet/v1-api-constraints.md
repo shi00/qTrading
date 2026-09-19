@@ -61,7 +61,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | Dialog 管理 | `ft.use_dialog(dialog)` | 声明式组件内唯一契约；自动挂载/卸载到 page overlay（由 `use_state(open)` 控制显隐） |
 | ViewModel 消费 | `use_viewmodel(factory=...)` 或 `use_viewmodel(vm=...)` | 唯一桥接 hook；`factory` 与 `vm` 互斥，详见 [MVVM 表现层](../patterns/mvvm.md) 与 [ui/hooks.py](../../ui/hooks.py) |
 | Dropdown 事件 | `Dropdown(on_select=...)` | 声明式组件内事件契约（与 V0→V1 迁移表第 13 项一致） |
-| use_effect cleanup | `ft.use_effect(setup, dependencies=[], cleanup=fn)` | cleanup 通过显式 `cleanup=` 参数传入，**不是 setup 返回值** |
+| use_effect cleanup | `ft.use_effect(setup, dependencies=[], cleanup=fn)` | cleanup 通过显式 `cleanup=` 参数传入（项目约定不用 setup 返回值，统一用 `cleanup=` 参数） |
 | page 引用 | `ft.context.page` 或事件 `e.page` | 不直接赋值 `self.page = page`（`PageRefMixin` 已删除） |
 
 ## 兼容垫片使用规则
@@ -126,7 +126,7 @@ def MetricCard(label: str):
 
 - `ft.use_state(initial) -> (value, setter)`：类似 React `useState`。`setter` 接受新值，或接受接收前值返回新值的函数。
 - `ft.use_effect(setup, dependencies=None, cleanup=None)`：
-  - `setup` 为普通函数，**不通过返回值传递 cleanup**；cleanup 必须通过显式 `cleanup=` 参数传入（与 [声明式组件内 API 契约](#声明式组件内-api-契约) 一致）。
+  - `setup` 为普通函数，项目约定不用返回值传递 cleanup，统一用显式 `cleanup=` 参数（与 [声明式组件内 API 契约](#声明式组件内-api-契约) 一致）。
   - `dependencies` 缺省时只在初次渲染运行；指定时按依赖变化重跑；cleanup 在重跑前与卸载时执行。
   - hooks 必须在 `@ft.component` 渲染上下文内调用，独立调用抛 `RuntimeError: No current renderer`。
 - `ft.component(fn)` 装饰器：把函数标记为组件，返回值即控件树根节点。
