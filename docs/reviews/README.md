@@ -16,6 +16,8 @@
 - [appendix.md](./appendix.md) — 检视附录（模板 / 术语 / 深度阅读）
 - [quality-dimensions.md](./quality-dimensions.md) — 检视质量维度定义
 - [scenario-completeness.md](./scenario-completeness.md) — Evals 场景完整性方法论
+- [review-policy.yaml](./review-policy.yaml) — 检视策略机器可读定义（字段语义与 ai-review.md 对齐）
+- [review-result.schema.json](./review-result.schema.json) — 检视结论机器可读 JSON Schema（见文末引用）
 
 ## 轮次清单
 
