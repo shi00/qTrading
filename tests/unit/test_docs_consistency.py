@@ -3095,6 +3095,65 @@ class TestCanonicalTopicsYamlConsistency:
             )
 
 
+class TestCanonicalDocsAreGated:
+    """canonical 正本必须落在文档门禁受检范围内 (F-13 元规则门禁).
+
+    与 TestCanonicalTopicsYamlConsistency / TestDecisionTreeMapping 共享同名临时 yml 注入手法：
+    monkeypatch CANONICAL_TOPICS_YAML_PATH 与 CHECKED_DOCS 模块级常量，验证
+    check_canonical_docs_are_gated() 的「正本受保护」断言。
+    """
+
+    def test_all_canonical_docs_gated_passes(self):
+        """真实配置下：所有 canonical 正本都应在 CHECKED_DOCS 内，返回空错误."""
+        from check_docs_consistency import check_canonical_docs_are_gated
+
+        errors = check_canonical_docs_are_gated()
+        assert errors == [], "当前项目配置应通过 canonical 受检范围校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_canonical_not_in_checked_docs(self, tmp_path, monkeypatch):
+        """canonical 指向真实文件但不在 CHECKED_DOCS 时应报不受保护."""
+        from check_docs_consistency import ROOT, check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/guides/ci-cd.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        assert (ROOT / "docs/guides/ci-cd.md").exists()
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+        errors = check_canonical_docs_are_gated()
+        assert any("不在文档门禁受检范围" in e for e in errors), f"应报 canonical 不受保护, got: {errors}"
+
+    def test_gated_when_checked_docs_includes_canonical(self, tmp_path, monkeypatch):
+        """受检集合包含 canonical 时应通过."""
+        from check_docs_consistency import ROOT, check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/guides/ci-cd.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [ROOT / "docs/guides/ci-cd.md"])
+        errors = check_canonical_docs_are_gated()
+        assert errors == [], f"受检集合含 canonical 时应通过, got: {errors}"
+
+    def test_detects_missing_canonical_path(self, tmp_path, monkeypatch):
+        """canonical 指向不存在文件时应报路径不存在."""
+        from check_docs_consistency import check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+        errors = check_canonical_docs_are_gated()
+        assert any("canonical 路径不存在" in e for e in errors), f"应报 canonical 路径不存在, got: {errors}"
+
+
 class TestAgentsMdSync:
     """AGENTS.md 最小安全集生成区块与 redlines.yml 一致性契约测试 (DOC-08 / DOC-13, 见 ADR-0006)."""
 
