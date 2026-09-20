@@ -369,29 +369,25 @@ class VectorBacktestEngine:
         end_date: str,
     ) -> tuple[pl.DataFrame, DataWarning | None]:
         """
-        为行情数据增加涨跌停状态。
+        为行情数据增加当日涨跌停价格（limit_up_price/limit_down_price）。
 
-        limit_status 值（统一枚举，供 PortfolioSimulator 撮合层判断）：
-        - 'up_limit': 涨停（Tushare 原始值 'U' 映射）
-        - 'down_limit': 跌停（Tushare 原始值 'D' 映射）
-        - None: 正常交易
+        涨跌停价格列来自 stk_limit 表（每日 up_limit/down_limit，名义价），
+        与 raw_open/raw_close 同口径，供 PortfolioSimulator 撮合层将名义执行价
+        （raw_open/raw_close）与涨跌停价格直接比较，判定涨停买入/跌停卖出是否可执行。
 
         失败时策略：
-        - limit_status 保持 None（无涨跌停限制）
+        - limit_up_price/limit_down_price 保持 None（无涨跌停限制）
         - 但返回 DataWarning 让用户知晓数据质量问题
         - 撮合层行为不变（允许买卖），但报告中有记录
-
-        涨跌停数据来自 limit_list 表，用于撮合层判断是否可买卖。
         """
         try:
-            limit_list_pd = await self.cache.quote_dao.get_limit_list(
+            stk_limit_pd = await self.cache.stk_limit_dao.get_stk_limit_range(
                 start_date=start_date,
                 end_date=end_date,
             )
 
-            if limit_list_pd is None or limit_list_pd.empty:
-                # DATA-03：与 suspend 同理，查询成功但区间内无涨跌停数据必须显式告警
-                # （limit_list 需较高 Tushare 积分，普通用户大概率未同步），
+            if stk_limit_pd is None or stk_limit_pd.empty:
+                # DATA-03：与 suspend 同理，查询成功但区间内无涨跌停价格数据必须显式告警，
                 # 否则默认无涨跌停限制会让回测在涨停板上买入/跌停板上卖出，收益被高估。
                 warning = DataWarning(
                     warning_type="limit_data_absent",
@@ -399,28 +395,31 @@ class VectorBacktestEngine:
                     end_date=end_date,
                     affected_stock_count=quotes_df.height,
                     error_message=(
-                        "limit_list 表在该区间无数据，涨跌停撮合保护未生效。"
+                        "stk_limit 表在该区间无数据，涨跌停撮合保护未生效。"
                         "回测允许了涨停买入/跌停卖出，实盘不可执行，收益被高估。"
                     ),
                 )
-                return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
+                return quotes_df.with_columns(
+                    [
+                        pl.lit(None).alias("limit_up_price"),
+                        pl.lit(None).alias("limit_down_price"),
+                    ]
+                ), warning
 
-            limit_df = pl.from_pandas(limit_list_pd)
-            limit_df = limit_df.select(["ts_code", "trade_date", "limit_type"]).rename({"limit_type": "limit_status"})
-
-            # 映射 Tushare 原始枚举 → 撮合层统一枚举（使用 Polars 原生表达式，避免 Python 回调）
+            limit_df = pl.from_pandas(stk_limit_pd)
+            limit_df = limit_df.select(["ts_code", "trade_date", "up_limit", "down_limit"]).rename(
+                {"up_limit": "limit_up_price", "down_limit": "limit_down_price"}
+            )
             limit_df = limit_df.with_columns(
-                pl.when(pl.col("limit_status") == "U")
-                .then(pl.lit("up_limit"))
-                .when(pl.col("limit_status") == "D")
-                .then(pl.lit("down_limit"))
-                .otherwise(pl.col("limit_status"))
-                .alias("limit_status")
+                [
+                    pl.col("limit_up_price").cast(pl.Float64),
+                    pl.col("limit_down_price").cast(pl.Float64),
+                ]
             )
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
             return quotes_df, None
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出涨跌停状态补充异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出涨跌停价格补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", sanitized_msg)
@@ -431,7 +430,12 @@ class VectorBacktestEngine:
                 affected_stock_count=quotes_df.height,
                 error_message=sanitized_msg,
             )
-            return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
+            return quotes_df.with_columns(
+                [
+                    pl.lit(None).alias("limit_up_price"),
+                    pl.lit(None).alias("limit_down_price"),
+                ]
+            ), warning
 
     def _apply_qfq(self, quotes_df: pl.DataFrame) -> pl.DataFrame:
         """

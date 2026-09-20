@@ -109,7 +109,7 @@ def mock_cache() -> MagicMock:
     cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-    cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+    cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
     # Range preloading mocks to support the optimized preload path in E2E tests
@@ -329,7 +329,7 @@ class TestBacktestE2E:
         cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
 
         strategy = SimpleTestStrategy()
 
@@ -434,7 +434,7 @@ class TestBacktestE2E:
         cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         class EmptyStrategy(BaseStrategy):
@@ -539,7 +539,7 @@ class TestBacktestHandCalculated:
         cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         return cache
@@ -692,7 +692,7 @@ class TestBacktestHandCalculated:
         cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
-        cache.quote_dao.get_limit_list = AsyncMock(return_value=pd.DataFrame())
+        cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
         config = BacktestConfig(
