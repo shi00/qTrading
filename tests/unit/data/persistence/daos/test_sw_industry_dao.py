@@ -499,3 +499,84 @@ class TestGetNameRanges:
         dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
         with pytest.raises(EngineDisposedError):
             await dao.get_name_ranges("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_empty_list(self):
+        """非 Cancelled/EngineDisposed 异常 sanitize 后返回空 list。"""
+        dao = _make_name_history_dao()
+        original_error = RuntimeError("db error with sensitive: token=secret")
+        dao._read_db = AsyncMock(side_effect=original_error)
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
+            result = await dao.get_name_ranges("000001.SZ")
+        assert result == []
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+
+class TestGetNameHistoryCoverageSummary:
+    """get_name_history_coverage_summary：覆盖度汇总 + 空/None + 异常分层（R4/R2/R5）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_coverage_dict(self):
+        """非空 df 时返回 {total_rows, st_rows}，无参数化占位符（R4）。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"total_rows": [120], "st_rows": [8]}))
+        result = await dao.get_name_history_coverage_summary()
+        assert result == {"total_rows": 120, "st_rows": 8}
+        dao._read_db.assert_awaited_once()
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "%s" not in sql_arg
+        assert "total_rows" in sql_arg
+        assert "st_rows" in sql_arg
+        assert len(dao._read_db.call_args.args) == 1
+
+    @pytest.mark.asyncio
+    async def test_none_df_returns_zero_dict(self):
+        """_read_db 返回 None 时返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_empty_df_returns_zero_dict(self):
+        """_read_db 返回空 DataFrame 时返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_none_values_coerced_to_zero(self):
+        """df 中存在 None 值时以 0 兜底（'或 0' 分支）。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"total_rows": [None], "st_rows": [None]}))
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError 必须传播（R2），不返回 0 dict。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_name_history_coverage_summary()
+        dao._read_db.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """EngineDisposedError 必须传播（R5），不返回 0 dict。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_name_history_coverage_summary()
+        dao._read_db.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_zero_dict(self):
+        """非 Cancelled/EngineDisposed 异常 sanitize 后返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        original_error = RuntimeError("db error with sensitive: password=456")
+        dao._read_db = AsyncMock(side_effect=original_error)
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
+            result = await dao.get_name_history_coverage_summary()
+        assert result == {"total_rows": 0, "st_rows": 0}
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)

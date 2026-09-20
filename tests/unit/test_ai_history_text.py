@@ -78,6 +78,11 @@ class TestResolveNameAsOf:
         assert _resolve_name_as_of(ranges, None) is None
         assert _resolve_name_as_of(ranges, "20240101") is None  # 非 date（str）无法解析
 
+    def test_datetime_as_of_is_normalized_to_date(self):
+        # datetime 实例先归一化为 date（覆盖 as_of = as_of.date() 分支）
+        ranges = [(datetime.date(2024, 1, 1), None, "平安银行")]
+        assert _resolve_name_as_of(ranges, datetime.datetime(2024, 6, 15, 10, 0)) == "平安银行"
+
     def test_last_in_range_after_end_none(self):
         # 多段区间，end 封口后无匹配
         ranges = [

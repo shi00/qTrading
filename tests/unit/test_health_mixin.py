@@ -695,6 +695,34 @@ class TestDimensionChecks:
             await proc._run_dimension_checks(reasons)
         assert not any("stock_name_history" in r for r in reasons)
 
+    @pytest.mark.asyncio
+    async def test_stock_name_history_cancelled_propagates(self):
+        """stock_name_history 检查内 asyncio.CancelledError 必须传播（R2），不吞异常。"""
+        proc = FakeProcessor()
+        proc.cache.stock_name_history_dao.get_name_history_coverage_summary = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await proc._run_dimension_checks([])
+        # 强断言：异常确实来自 coverage 检查调用，而非被吞没
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        proc.cache.stock_name_history_dao.get_name_history_coverage_summary.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stock_name_history_disposed_propagates(self):
+        """stock_name_history 检查内 EngineDisposedError 必须传播（R5），不吞异常。"""
+        proc = FakeProcessor()
+        proc.cache.stock_name_history_dao.get_name_history_coverage_summary = AsyncMock(
+            side_effect=EngineDisposedError("disposed")
+        )
+        with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
+            with pytest.raises(EngineDisposedError) as exc_info:
+                await proc._run_dimension_checks([])
+        # 强断言：异常确实来自 coverage 检查调用，而非被吞没
+        assert isinstance(exc_info.value, EngineDisposedError)
+        proc.cache.stock_name_history_dao.get_name_history_coverage_summary.assert_awaited_once()
+
 
 class TestDat12Dat13WiredThroughCheckDataHealth:
     """DAT-12/13 经 check_data_health 全链路接入（镜像 DAT-06 的 wiring 测试）。"""
