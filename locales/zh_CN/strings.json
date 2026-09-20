@@ -1596,6 +1596,8 @@
     "col_app_version": "应用版本",
     "col_executed_at": "执行时间",
     "col_duration_ms": "耗时(ms)",
+    "col_quality_json": "数据质量快照",
+    "col_config_json": "配置快照",
     "tushare_token_label": "Tushare Token",
     "tushare_token_hint": "请输入 Tushare Token",
     "tushare_token_storage_hint": "Token 存储于系统密钥环，不写入数据库",
