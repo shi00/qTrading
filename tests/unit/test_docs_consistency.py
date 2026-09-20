@@ -3160,6 +3160,54 @@ class TestAgentsMdSync:
         assert any("缺少生成区块标记" in e for e in errors), f"错误信息应提示标记缺失, got: {errors}"
 
 
+class TestClaudeExecutiveSync:
+    """CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性契约测试 (F-04, 机制延续 DOC-08)."""
+
+    def test_claude_md_has_generated_executive_block(self):
+        """CLAUDE.md 顶部摘要含生成区块包裹标记."""
+        from check_docs_consistency import CLAUDE_PATH
+
+        content = CLAUDE_PATH.read_text(encoding="utf-8")
+        assert "<!-- generated:claude-executive -->" in content, "缺少摘要生成区块起始标记"
+        assert "<!-- /generated -->" in content, "缺少生成区块结束标记"
+
+    def test_render_claude_executive_block_covers_exceptionable(self):
+        """渲染结果须同时包含 INVARIANT 全量 与 EXCEPTIONABLE 全量 (R1 不可再被漏列)."""
+        from check_docs_consistency import _render_claude_executive_block
+
+        lines = _render_claude_executive_block()
+        inv_line = next(ln for ln in lines if "INVARIANT" in ln)
+        exc_line = next(ln for ln in lines if "EXCEPTIONABLE" in ln)
+        assert "R1" in exc_line, f"可豁免清单应含 R1, got: {exc_line}"
+        assert "R5" in exc_line, f"可豁免清单应含 R5, got: {exc_line}"
+        assert "R2" in inv_line and "R10" in inv_line, f"INVARIANT 清单应前后齐备, got: {inv_line}"
+
+    def test_check_claude_executive_sync_passes(self):
+        """真实 CLAUDE.md 顶部摘要应与 redlines.yml 渲染一致 (无错误)."""
+        from check_docs_consistency import check_claude_executive_sync
+
+        assert check_claude_executive_sync() == []
+
+    def test_detects_claude_executive_drift(self, tmp_path, monkeypatch):
+        """篡改 CLAUDE.md 摘要生成区块 → check_claude_executive_sync() 报错."""
+        import check_docs_consistency as cdc
+        from check_docs_consistency import _render_claude_executive_block
+
+        lines = _render_claude_executive_block()
+        tampered = "\n".join([lines[0]] + [lines[1].replace("R1", "R99")] + lines[2:])
+        tmp_claude = tmp_path / "CLAUDE.md"
+        tmp_claude.write_text(
+            "# CLAUDE.md\n\n## 本次会话必须遵守\n\n> 引述\n>\n"
+            "<!-- generated:claude-executive -->\n" + "\n".join(tampered) + "\n<!-- /generated -->\n\n## 正文\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = cdc.check_claude_executive_sync()
+        assert len(errors) > 0, "应检出摘要生成区块漂移, got no errors"
+        assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
+
+
 class TestRulesetMetadataConsistency:
     """规则集元数据一致性（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version / last_reviewed 同步."""
 
