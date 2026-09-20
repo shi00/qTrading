@@ -122,6 +122,7 @@
 | 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) |
 | 新增/修改 UI 视图 / 布局 / i18n | [docs/flet/README.md](./docs/flet/README.md)（条件路由到各专题） |
 | 新增/修改 ViewModel | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md)（MVVM 架构与 ViewModel 生命周期 SSOT） |
+| 新增/修改 AI 服务 / LLM 集成 | [docs/patterns/ai-service.md](./docs/patterns/ai-service.md)（AI 执行权 / R21 缺失表示 / 成本配额 / 输出契约 / egress 审计 / prompt 注入分层的引用型正本） |
 | 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式) |
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md)（六状态门 + 专项 Profile） |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
