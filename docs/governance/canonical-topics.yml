@@ -37,6 +37,11 @@ topics:
     title: 新增/修改数据同步
     canonical: docs/patterns/data-sync.md
 
+  - id: application-service
+    title: 新增/修改应用服务
+    canonical: docs/patterns/application-service.md
+    note: 应用服务层以引用为主的汇编正本（单例判定 / R5 轮询豁免 EX-0017 / 编排边界 / 错误分类与降级）
+
   - id: ui-view
     title: 新增/修改 UI 视图
     canonical: docs/flet/README.md
@@ -66,6 +71,11 @@ topics:
   - id: code-review
     title: AI 代码检视 / PR review
     canonical: docs/reviews/ai-review.md
+
+  - id: ai-service
+    title: 新增/修改 AI 服务 / LLM 集成
+    canonical: docs/patterns/ai-service.md
+    note: AI/LLM 子系统约束以引用为主的汇编正本（ADR-0008 执行权 / R21 缺失表示 / 成本配额 / 输出契约 / egress 审计 / prompt 注入分层）
 
   - id: singleton
     title: 修改单例 / 资源生命周期

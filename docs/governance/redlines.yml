@@ -210,7 +210,7 @@ redlines:
   - id: R20
     title: 单位未核对的量纲比较
     description: "策略/回测中对已知金额、数量列（north_money / net_amount / amount / total_mv / circ_mv / vol）的裸数值比较，调用链上无显式单位换算即违规（必须经 threshold_in_data_unit() 统一入口换算后再比较）"
-    enforcement: "pre-commit 报告模式（check_redlines.py check_R20：warning 输出 stderr 不阻断，实测误报率达标后评估升级为拦截）+ 统一入口 threshold_in_data_unit() 架构惯例 + AST 可行性原型 scripts/prototype_business_redlines.py 供复核 + 仅人工评审（R20 语义以人工评审为准）"
+    enforcement: "pre-commit 报告模式（check_redlines.py check_R20：warning 输出 stderr 不阻断，实测误报率达标后评估升级为拦截）+ 统一入口 threshold_in_data_unit() 架构惯例 + AST 可行性原型 scripts/prototype_business_redlines.py 供复核 + 人工评审对照基准（单位声明与换算入口见 docs/patterns/strategy-template.md「条件触发」与 docs/patterns/config-quality-perf.md「金额/数量列阈值比较（R20）」）+ 仅人工评审（R20 语义以人工评审为准）"
     checks:
       - check_R20
     automation_coverage: partial
