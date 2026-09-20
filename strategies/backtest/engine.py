@@ -864,20 +864,31 @@ class VectorBacktestEngine:
             }
         )
 
+        # BT-04: 月度聚合必须区分「基准该月完全无数据」与「基准该月确实涨了 0%」。
+        # polars `count()` 不计 null，`product()` 会跳过 null（空积为 1.0，减 1 得 0.0），
+        # 若直接用 product 会把「基准缺失」伪装成「基准零涨跌」，使月度超额等于策略自身收益。
+        # 故将有效样本数 `_bm_valid_days` 与乘积 `_bm_raw` 分开算，全缺失月显式置 None。
         monthly = (
             df.group_by("year_month")
             .agg(
                 [
                     ((pl.col("daily_return").fill_nan(0.0) + 1).product() - pl.lit(1.0)).alias("monthly_return"),
-                    ((pl.col("benchmark_return").fill_nan(0.0) + 1).product() - pl.lit(1.0)).alias("benchmark_return"),
+                    pl.col("benchmark_return").count().alias("_bm_valid_days"),
+                    ((pl.col("benchmark_return").fill_nan(0.0) + 1).product() - pl.lit(1.0)).alias("_bm_raw"),
                     pl.col("nav").first().alias("start_nav"),
                     pl.col("nav").last().alias("end_nav"),
                 ]
             )
             .sort("year_month")
             .with_columns(
-                (pl.col("monthly_return") - pl.col("benchmark_return")).alias("excess_return"),
+                pl.when(pl.col("_bm_valid_days") == 0)
+                .then(None)
+                .otherwise(pl.col("_bm_raw"))
+                .alias("benchmark_return"),
             )
+            .with_columns((pl.col("monthly_return") - pl.col("benchmark_return")).alias("excess_return"))
+            # 丢弃临时聚合列，保持列集与原实现一致（year_month/monthly_return/benchmark_return/excess_return/start_nav/end_nav）
+            .drop(["_bm_valid_days", "_bm_raw"])
         )
 
         return monthly

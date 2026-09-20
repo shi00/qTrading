@@ -618,6 +618,40 @@ class TestCalcPeriodStats:
         expected_monthly = 1.05 * 1.0 - 1
         assert monthly_ret == pytest.approx(expected_monthly, rel=1e-4)
 
+    def test_period_stats_benchmark_all_null_yields_none(self):
+        """BT-04: 基准该月完全无数据时 benchmark_return/excess_return 应为 None 而非 0.0。"""
+        engine = self._make_engine()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        nav_curve = pl.Series([1.0, 1.05, 1.06])
+        daily_returns = pl.Series([0.05, 0.01, 0.0])
+        benchmark_returns = pl.Series([None, None, None], dtype=pl.Float64)
+
+        result = engine._calc_period_stats(nav_curve, daily_returns, benchmark_returns, trade_dates)
+
+        assert result.height == 1
+        monthly_ret = float(result["monthly_return"][0])
+        expected_monthly = 1.05 * 1.01 * 1.0 - 1
+        assert monthly_ret == pytest.approx(expected_monthly, rel=1e-4)
+
+        assert result["benchmark_return"][0] is None, "基准整月无数据时应为 None，不得伪装成基准涨跌 0%"
+        assert result["excess_return"][0] is None, "基准缺失时超额收益应为 None，不得等于策略自身收益"
+
+    def test_period_stats_benchmark_partial_null_uses_valid_samples(self):
+        """BT-04: 基准部分缺失时按有效样本复利，不全缺失月保持数值行为。"""
+        engine = self._make_engine()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        nav_curve = pl.Series([100.0, 105.0, 102.9])
+        daily_returns = pl.Series([0.0, 0.05, -0.02])
+        benchmark_returns = pl.Series([0.03, None, None], dtype=pl.Float64)
+
+        result = engine._calc_period_stats(nav_curve, daily_returns, benchmark_returns, trade_dates)
+
+        assert result.height == 1
+        bench_ret = float(result["benchmark_return"][0])
+        # 有效样本乘积：1.03 - 1 = 0.03（product 跳过缺失日，但该月仍视为有数据）
+        assert bench_ret == pytest.approx(0.03, rel=1e-4)
+        assert not math.isnan(bench_ret)
+
 
 class TestGetNextRebalanceDate:
     def _make_engine(self, **kwargs):
