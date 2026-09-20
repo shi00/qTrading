@@ -109,6 +109,38 @@ class TestScreenerViewModelAiUpdateInterval:
         assert vm.AI_UPDATE_INTERVAL == 0.5
 
 
+class TestScreenerViewModelExcludeSt:
+    """SC-01: exclude_st 状态默认开启，set_exclude_st 幂等切换。"""
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_exclude_st_default_true(self, mock_dp, mock_sm, mock_rm):
+        """SC-01 建议 3: 排除风险警示股为行业默认，UI 开关默认开启。"""
+        vm = ScreenerViewModel()
+        assert vm.state.exclude_st is True
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_exclude_st_toggles_state(self, mock_dp, mock_sm, mock_rm):
+        vm = ScreenerViewModel()
+        vm.set_exclude_st(False)
+        assert vm.state.exclude_st is False
+        vm.set_exclude_st(True)
+        assert vm.state.exclude_st is True
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_exclude_st_idempotent_skips_notify(self, mock_dp, mock_sm, mock_rm):
+        """同值重复调用不触发 _set_state（幂等，避免无意义重渲染）。"""
+        vm = ScreenerViewModel()
+        vm._notify = MagicMock()
+        vm.set_exclude_st(True)
+        vm._notify.assert_not_called()
+
+
 class TestSortDirectionConsistency:
     @pytest.mark.asyncio
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -1051,6 +1083,95 @@ class TestScreenerViewModelRunStrategy:
         # Final state: loading reverted, cancellation status set
         assert vm.state.loading is False
         assert vm.state.status_color == "warning"
+
+
+class TestRunStrategyExcludeStInjection:
+    """SC-01: run_strategy 将 exclude_st 注入策略 context（UI 开关 → 策略基类）。"""
+
+    @pytest.mark.asyncio
+    async def test_exclude_st_injected_into_context(self, vm):
+        """run_strategy(exclude_st=...) 必须写入 context["exclude_st"]，策略基类据此过滤。"""
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.5],
+                "pct_chg": [2.5],
+                "ai_score": [85],
+                "ai_reason": ["test"],
+                "thinking": ["test"],
+            }
+        )
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "test_strategy_name"
+        mock_strategy.filter = AsyncMock(return_value=result_df)
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        submitted_coro = []
+
+        def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy", save_results=False, exclude_st=False)
+
+        assert len(submitted_coro) == 1
+        await submitted_coro[0]
+
+        captured_context = mock_strategy.filter.call_args.args[0]
+        assert captured_context["exclude_st"] is False
+
+    @pytest.mark.asyncio
+    async def test_exclude_st_default_true(self, vm):
+        """缺省调用 run_strategy 时 context["exclude_st"] 为 True（与状态默认一致）。"""
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.5],
+                "pct_chg": [2.5],
+                "ai_score": [85],
+                "ai_reason": ["test"],
+                "thinking": ["test"],
+            }
+        )
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "test_strategy_name"
+        mock_strategy.filter = AsyncMock(return_value=result_df)
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        submitted_coro = []
+
+        def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy", save_results=False)
+
+        await submitted_coro[0]
+
+        captured_context = mock_strategy.filter.call_args.args[0]
+        assert captured_context["exclude_st"] is True
 
 
 class TestSortHelper:

@@ -486,7 +486,13 @@ class _FakeScreenerViewModel:
     def unsubscribe_task_manager(self) -> None:
         self.method_calls.append("unsubscribe_task_manager")
 
-    async def run_strategy(self, strategy_key: str, save_results: bool = True, params: dict | None = None) -> Any:
+    async def run_strategy(
+        self,
+        strategy_key: str,
+        save_results: bool = True,
+        params: dict | None = None,
+        exclude_st: bool = True,
+    ) -> Any:
         self.method_calls.append(f"run_strategy:{strategy_key}")
         return self.run_strategy_mock(strategy_key, save_results, params)
 

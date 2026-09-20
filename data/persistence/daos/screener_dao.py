@@ -34,7 +34,7 @@ REVIEW_STATS_WINDOW_DAYS = 180
 # __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
-                     b.name,
+                     COALESCE(nh.name, b.name) AS name,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -56,7 +56,8 @@ _SCREENING_SQL_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable,
+                     COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%') AS is_st
                FROM stock_basic b
                         LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
                         LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
@@ -90,6 +91,15 @@ _SCREENING_SQL_TEMPLATE = """
                             ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（$5）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT name
+                            FROM stock_name_history
+                            WHERE ts_code = b.ts_code
+                              AND start_date <= $1
+                              AND (end_date IS NULL OR end_date > $1)
+                            ORDER BY start_date DESC  -- SC-01: as-of 名称还原（DATA-04 L3），消除当前名称快照的前视偏差
+                            LIMIT 1
+                        ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
                WHERE __CLOSE_COND__b.list_date <= $4
                  AND __STOCK_ALIVE_CONDITION__
@@ -98,7 +108,7 @@ _SCREENING_SQL_TEMPLATE = """
 
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
-                     b.name,
+                     COALESCE(nh.name, b.name) AS name,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -120,7 +130,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable,
+                     COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%') AS is_st
                FROM (
                    SELECT cal_date
                    FROM trade_cal
@@ -154,6 +165,15 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（cal.cal_date）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT name
+                            FROM stock_name_history
+                            WHERE ts_code = b.ts_code
+                              AND start_date <= cal.cal_date
+                              AND (end_date IS NULL OR end_date > cal.cal_date)
+                            ORDER BY start_date DESC  -- SC-01: as-of 名称还原（DATA-04 L3），消除当前名称快照的前视偏差
+                            LIMIT 1
+                        ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
                WHERE __CLOSE_COND__b.list_date <= cal.cal_date
                  AND __STOCK_ALIVE_CONDITION__
