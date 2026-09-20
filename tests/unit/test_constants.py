@@ -24,6 +24,7 @@ from data.constants import (
     SYNC_RESULT_HAS_DATA,
     SYNC_RESULT_SAVE_FAILED,
     TOP_LIST_COLUMN_UNITS,
+    indices_to_sync,
     TOP_LIST_COLUMN_UNIT_SOURCES,
     TOP_LIST_NET_AMOUNT_UNIT,
     attach_column_units,
@@ -192,8 +193,18 @@ class TestConstantsValues:
         assert len(MAJOR_INDICES) >= 5
 
     def test_default_benchmark_single_source(self):
-        """D2-5：单一基准正本统一为 000985.CSI（中证全指）。"""
-        assert DEFAULT_BENCHMARK_INDEX == "000985.CSI"
+        """D2-5：单一基准正本统一为 000300.SH（沪深 300，已在同步列表且积分门槛低）。"""
+        assert DEFAULT_BENCHMARK_INDEX == "000300.SH"
+
+    def test_default_benchmark_in_sync_target(self):
+        """DS-01：配置的默认基准必然出现在 index_daily 同步目标集合中（CI 防同类错配）。
+
+        默认基准 000300.SH 落在 MAJOR_INDICES 内，此断言在任何 config 状态下恒真，
+        用来永久挡住「基准与同步列表错配」导致的健康检查盲区复发。
+        """
+        assert DEFAULT_BENCHMARK_INDEX in MAJOR_INDICES
+        assert DEFAULT_BENCHMARK_INDEX in indices_to_sync()
+        assert indices_to_sync()[0] == MAJOR_INDICES[0]  # 保持监控列表顺序优先
 
     def test_sync_result_constants(self):
         assert SYNC_RESULT_HAS_DATA == "HAS_DATA"

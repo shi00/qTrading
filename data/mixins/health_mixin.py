@@ -21,7 +21,6 @@ from data.constants import (
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
-    MAJOR_INDICES,
     SYNC_RESULT_EMPTY,
     TIER_FINANCIAL_FRESHNESS_DAYS,
     TIER_FIN_FRESH_RATIO_GOLD,
@@ -30,6 +29,7 @@ from data.constants import (
     TIER_FUNDAMENTAL_HIGH_THRESHOLD,
     TIER_FUNDAMENTAL_LOW_THRESHOLD,
     TIER_QUOTE_FRESHNESS_DAYS,
+    indices_to_sync,
 )
 from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
@@ -701,8 +701,8 @@ class HealthCheckMixin:
         与日线表不同，维度表的检查是「覆盖度」而非「连续性」：
         - stock_basic: active 数合理区间 + ts_code 格式合法 + updated_at 新鲜度
         - trade_cal: 未来至少覆盖 _TRADE_CAL_FUTURE_DAYS 天（否则回测/调度日期轴提前截断）
-        - index_daily: 每只 MAJOR_INDICES 都有近期数据（screening_history 的
-          index_pct / alpha 计算基准）。同样只告警，不硬降级。
+        - index_daily: 每只 indices_to_sync()（监控列表 ∪ 当前配置基准）都有近期数据
+          （screening_history 的 index_pct / alpha 计算基准）。同样只告警，不硬降级。
         """
         # --- stock_basic ---
         try:
@@ -766,15 +766,16 @@ class HealthCheckMixin:
         # --- index_daily ---
         try:
             idx = await self.cache.quote_dao.get_index_daily_coverage_summary()
+            # DS-01: 覆盖集为同步目标集合（含配置基准），确保基准缺失能被检出。
             covered = set(idx["ts_code"].tolist()) if idx is not None and not idx.empty else set()
-            missing = [c for c in MAJOR_INDICES if c not in covered]
+            missing = [c for c in indices_to_sync() if c not in covered]
             if missing:
                 logger.warning(
-                    "[DataProcessor] Health | ⚠️ DAT-13 index_daily 缺失 %d 只 MAJOR_INDICES: %s",
+                    "[DataProcessor] Health | ⚠️ DAT-13 index_daily 缺失 %d 只指数: %s",
                     len(missing),
                     missing,
                 )
-                reasons.append(f"index_daily missing data for {len(missing)} MAJOR_INDICES")
+                reasons.append(f"index_daily missing data for {len(missing)} indices")
             if idx is not None and not idx.empty:
                 cutoff = get_now().date() - datetime.timedelta(days=_INDEX_STALE_DAYS)
                 stale = []
@@ -791,7 +792,7 @@ class HealthCheckMixin:
                         len(stale),
                         stale,
                     )
-                    reasons.append(f"index_daily stale for {len(stale)} MAJOR_INDICES")
+                    reasons.append(f"index_daily stale for {len(stale)} indices")
         except asyncio.CancelledError:
             raise
         except EngineDisposedError:
