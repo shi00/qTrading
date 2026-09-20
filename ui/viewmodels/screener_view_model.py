@@ -161,13 +161,6 @@ class ScreenerViewModel(
             changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
 
-    def set_exclude_st(self, value: bool) -> None:
-        """DS-02: 设置是否排除风险警示股（ST/*ST），经 get_strategy_data 透传数据层行过滤。"""
-        value = bool(value)
-        if value == self._state.exclude_st:
-            return  # 幂等: 相同值不触发重渲染
-        self._set_state(exclude_st=value)
-
     def init(self):
         """Initialize resources"""
         pass
@@ -262,6 +255,16 @@ class ScreenerViewModel(
         task = loop.create_task(_persist())
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
+
+    def set_exclude_st(self, value: bool) -> None:
+        """SC-01: 设置是否排除 ST/*ST 风险警示股（全局筛选设置，View 渲染开关调用）。
+
+        纯状态命令（§3.2 MVVM）：不感知 locale，下次 run_strategy 时经
+        ``context["exclude_st"]`` 注入策略基类。
+        """
+        if value == self._state.exclude_st:
+            return  # 幂等: 相同值不触发重渲染
+        self._set_state(exclude_st=value)
 
     # --- TaskManager Subscription ---
 

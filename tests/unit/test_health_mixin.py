@@ -604,7 +604,7 @@ class TestDimensionChecks:
         reasons: list[str] = []
         with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
             await proc._run_dimension_checks(reasons)
-        assert any("missing data for 6 MAJOR_INDICES" in r for r in reasons)
+        assert any("missing data for 6 indices" in r for r in reasons)
 
     @pytest.mark.asyncio
     async def test_index_daily_stale(self):
@@ -622,7 +622,7 @@ class TestDimensionChecks:
         reasons: list[str] = []
         with patch("data.mixins.health_mixin.get_now", return_value=self._NOW):
             await proc._run_dimension_checks(reasons)
-        assert any("index_daily stale for 1 MAJOR_INDICES" in r for r in reasons)
+        assert any("index_daily stale for 1 indices" in r for r in reasons)
 
     @pytest.mark.asyncio
     async def test_exception_skipped(self):
@@ -794,7 +794,7 @@ class TestDat12Dat13WiredThroughCheckDataHealth:
             result = await proc.check_data_health()
         assert any("outside expected range" in r for r in result["reasons"])
         assert any("no open-day records" in r for r in result["reasons"])
-        assert any("missing data for 6 MAJOR_INDICES" in r for r in result["reasons"])
+        assert any("missing data for 6 indices" in r for r in result["reasons"])
 
 
 class TestRunQualityScan:

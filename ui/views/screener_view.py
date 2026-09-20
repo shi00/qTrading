@@ -111,6 +111,7 @@ _HIDDEN_COLS = frozenset(
         "thinking",
         "review_status",
         "created_at",
+        "is_st",  # SC-01: 内部过滤列（排除后恒为 False），不进结果表
         "t1_price",
         "t5_price",
         "params_snapshot",
@@ -1318,7 +1319,7 @@ async def _execute_pending_strategy_run(vm: ScreenerViewModel, key: str) -> None
     vm.update_strategy_desc(key)
     vm.init_strategy_params(key)
     try:
-        await vm.run_strategy(key, params=dict(vm.state.strategy_params))
+        await vm.run_strategy(key, params=dict(vm.state.strategy_params), exclude_st=vm.state.exclude_st)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -1595,6 +1596,11 @@ def _build_screener_control_card(
     realtime_controls = ft.Column(
         [
             ft.Row([strategy_dropdown, filter_row], spacing=10),
+            ft.Switch(
+                label=I18n.get("screener_exclude_st"),
+                value=state.exclude_st,
+                on_change=safe_on_change(handlers["on_exclude_st_change"]),
+            ),
             ft.Text(
                 _render_strategy_desc(state.strategy_desc) or I18n.get("screener_no_strategy_hint"),
                 size=AppStyles.FONT_SIZE_BODY,
@@ -2068,7 +2074,11 @@ def ScreenerView(
         if not state.selected_strategy:
             return
         try:
-            await vm.run_strategy(state.selected_strategy, params=dict(vm.state.strategy_params))
+            await vm.run_strategy(
+                state.selected_strategy,
+                params=dict(vm.state.strategy_params),
+                exclude_st=state.exclude_st,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

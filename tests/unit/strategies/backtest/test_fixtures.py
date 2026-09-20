@@ -66,8 +66,9 @@ class TestMakeQuotesDf:
 
         df = make_quotes_df(ts_codes, trade_dates, limit_status=limit_status)
 
-        limit_col = df.filter(pl.col("trade_date") == date(2024, 1, 2)).select("limit_status")
-        assert limit_col.item() == "up_limit"
+        limit_up = df.filter(pl.col("trade_date") == date(2024, 1, 2)).select("limit_up_price")
+        raw_open = df.filter(pl.col("trade_date") == date(2024, 1, 2)).select("raw_open")
+        assert limit_up.item() == raw_open.item()
 
     def test_quotes_with_suspension(self) -> None:
         ts_codes = ["000001.SZ"]
@@ -185,11 +186,9 @@ class TestBacktestTestFixture:
         )
 
         up_limit = df.filter(
-            (pl.col("ts_code") == fixture.ts_codes[0])
-            & (pl.col("trade_date") == fixture.trade_dates[0])
-            & (pl.col("limit_status") == "up_limit")
+            (pl.col("ts_code") == fixture.ts_codes[0]) & (pl.col("trade_date") == fixture.trade_dates[0])
         )
-        assert len(up_limit) == 1
+        assert up_limit["limit_up_price"].item() == up_limit["raw_open"].item()
 
     def test_get_fixed_signals(self) -> None:
         fixture = BacktestTestFixture(num_trade_days=5, num_stocks=2)

@@ -176,7 +176,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             WHERE ts_code = b.ts_code
                               AND start_date <= cal.cal_date
                               AND (end_date IS NULL OR end_date > cal.cal_date)
-                            ORDER BY start_date DESC
+                            ORDER BY start_date DESC  -- SC-01: as-of 名称还原（DATA-04 L3），消除当前名称快照的前视偏差
                             LIMIT 1
                         ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date

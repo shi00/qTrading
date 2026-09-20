@@ -1391,10 +1391,10 @@ class TestEnrichLimitStatus:
 
     @pytest.mark.asyncio
     async def test_no_limit_data_returns_none_limit_status_and_warns(self):
-        """DATA-03：区间内无 limit_list 数据 → limit_status=None + limit_data_absent 告警。"""
+        """DATA-03：区间内无 stk_limit 价格数据 → 限价列全 None + limit_data_absent 告警。"""
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=None)
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=None)
 
         quotes_df = pl.DataFrame(
             {
@@ -1406,14 +1406,16 @@ class TestEnrichLimitStatus:
 
         result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
 
-        assert "limit_status" in result.columns
-        assert all(v is None for v in result["limit_status"].to_list())
+        assert "limit_up_price" in result.columns
+        assert "limit_down_price" in result.columns
+        assert all(v is None for v in result["limit_up_price"].to_list())
+        assert all(v is None for v in result["limit_down_price"].to_list())
         assert warning is not None
         assert warning.warning_type == "limit_data_absent"
         assert warning.start_date == "20240102"
         assert warning.end_date == "20240131"
         assert warning.affected_stock_count == 2
-        assert "limit_list" in warning.error_message
+        assert "stk_limit" in warning.error_message
 
     @pytest.mark.asyncio
     async def test_limit_data_marks_limit_stocks(self):
@@ -1425,10 +1427,11 @@ class TestEnrichLimitStatus:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": [date(2024, 1, 2)],
-                "limit_type": ["U"],
+                "up_limit": [11.0],
+                "down_limit": [9.0],
             }
         )
-        engine.cache.quote_dao.get_limit_list = AsyncMock(return_value=limit_pd)
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=limit_pd)
 
         quotes_df = pl.DataFrame(
             {
@@ -1440,17 +1443,21 @@ class TestEnrichLimitStatus:
 
         result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
 
-        assert "limit_status" in result.columns
-        limit_status_list = result["limit_status"].to_list()
-        assert limit_status_list[0] == "up_limit"
-        assert limit_status_list[1] is None
+        assert "limit_up_price" in result.columns
+        assert "limit_down_price" in result.columns
+        limit_up_list = result["limit_up_price"].to_list()
+        limit_down_list = result["limit_down_price"].to_list()
+        assert limit_up_list[0] == 11.0
+        assert limit_down_list[0] == 9.0
+        assert limit_up_list[1] is None
+        assert limit_down_list[1] is None
         assert warning is None
 
     @pytest.mark.asyncio
     async def test_exception_creates_warning(self):
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.quote_dao.get_limit_list = AsyncMock(side_effect=Exception("DB error"))
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=Exception("DB error"))
 
         quotes_df = pl.DataFrame(
             {
@@ -1462,8 +1469,10 @@ class TestEnrichLimitStatus:
 
         result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
 
-        assert "limit_status" in result.columns
-        assert all(v is None for v in result["limit_status"].to_list())
+        assert "limit_up_price" in result.columns
+        assert "limit_down_price" in result.columns
+        assert all(v is None for v in result["limit_up_price"].to_list())
+        assert all(v is None for v in result["limit_down_price"].to_list())
         assert warning is not None
         assert warning.warning_type == "limit_enrich_failed"
         assert warning.start_date == "20240102"
@@ -1493,7 +1502,7 @@ class TestEngineEndToEndPipeline:
 
     @pytest.mark.asyncio
     async def test_limit_up_skips_buy_in_simulation(self):
-        """涨停股票在撮合层被跳过：limit_status=up_limit → PortfolioSimulator 跳过买入"""
+        """涨停股票在撮合层被跳过：raw_open >= limit_up_price → PortfolioSimulator 跳过买入"""
         from strategies.backtest.portfolio import PortfolioSimulator
 
         engine = self._make_engine(allow_limit_up_buy=False)
@@ -1507,7 +1516,7 @@ class TestEngineEndToEndPipeline:
                 "close": [10.0],
                 "vol": [100000],
                 "is_tradable": [True],
-                "limit_status": ["up_limit"],
+                "limit_up_price": [10.0],
                 "raw_open": [10.0],
                 "raw_close": [10.0],
                 "qfq_open": [10.0],
@@ -1537,7 +1546,7 @@ class TestEngineEndToEndPipeline:
 
     @pytest.mark.asyncio
     async def test_limit_down_skips_sell_in_simulation(self):
-        """跌停股票在撮合层被跳过卖出：limit_status=down_limit → PortfolioSimulator 跳过卖出"""
+        """跌停股票在撮合层被跳过卖出：raw_open <= limit_down_price → PortfolioSimulator 跳过卖出"""
         from strategies.backtest.portfolio import PortfolioSimulator
 
         engine = self._make_engine(allow_limit_down_sell=False)
@@ -1551,7 +1560,7 @@ class TestEngineEndToEndPipeline:
                 "close": [10.0],
                 "vol": [100000],
                 "is_tradable": [True],
-                "limit_status": ["down_limit"],
+                "limit_down_price": [10.0],
                 "raw_open": [10.0],
                 "raw_close": [10.0],
                 "qfq_open": [10.0],
@@ -1590,7 +1599,6 @@ class TestEngineEndToEndPipeline:
                 "close": [10.0],
                 "vol": [100000],
                 "is_tradable": [False],
-                "limit_status": [None],
                 "raw_open": [10.0],
                 "raw_close": [10.0],
                 "qfq_open": [10.0],
@@ -2000,7 +2008,7 @@ class TestR9SanitizationGuard:
         """_enrich_limit_status 异常时 DataWarning.error_message 不含明文密码"""
         engine = self._make_engine()
         engine.cache = MagicMock()
-        engine.cache.quote_dao.get_limit_list = AsyncMock(side_effect=Exception(self._SECRET_URL))
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=Exception(self._SECRET_URL))
 
         quotes_df = pl.DataFrame(
             {

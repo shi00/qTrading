@@ -1105,5 +1105,104 @@ async def test_math_filter_result_columns_and_sort_preserved():
     assert rsi_values == sorted(rsi_values), "Result must be sorted by rsi_14 ascending"
 
 
+# --- SC-01: OversoldStrategy（非 Polars 基类）经 filter_exclude_st 统一排除 ST ---
+
+
+def _fake_compute_rsi_filter(history_pdf, snapshot_df, *args, **kwargs):
+    """接线测试替身：直接透传（已过滤的）snapshot_df，绕过真实 RSI 计算。"""
+    return snapshot_df
+
+
+class TestOversoldExcludeSt:
+    @staticmethod
+    def _snapshot_with_st():
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600001.SS"],
+                "name": ["平安银行", "万科A", "*ST 某某"],
+                "close": [7.0, 8.0, 5.0],
+                "is_st": [False, False, True],
+            }
+        )
+
+    @staticmethod
+    def _make_context(dp, snapshot):
+        return _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    async def test_math_filter_excludes_st_and_reports_warning(self):
+        """SC-01: _math_filter 先排除 ST 行再进入 RSI 管线，排除数量上报 D3-4 warnings。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = self._snapshot_with_st()
+        context = self._make_context(dp, snapshot)
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert "600001.SS" not in result["ts_code"].tolist()
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "000002.SZ"}
+        warnings = context.get("warnings", [])
+        assert len(warnings) == 1
+        assert warnings[0].key == "strategy_excluded_st"
+        assert warnings[0].params == {"count": 1}
+
+    async def test_math_filter_context_disable_keeps_st(self):
+        """ctx["exclude_st"]=False 运行时关闭排除（与 PolarsBaseStrategy 语义一致）。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = self._snapshot_with_st()
+        context = self._make_context(dp, snapshot)
+        context["exclude_st"] = False
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert len(result) == 3
+        assert "600001.SS" in result["ts_code"].tolist()
+        assert context.get("warnings") is None
+
+    async def test_math_filter_no_st_no_warning(self):
+        """无 ST 行时不产生警告（避免空噪音）。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {"ts_code": ["000001.SZ", "000002.SZ"], "name": ["平安银行", "万科A"], "close": [7.0, 8.0]}
+        )
+        context = self._make_context(dp, snapshot)
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert len(result) == 2
+        assert context.get("warnings") is None
+
+    async def test_math_filter_null_is_st_treated_as_non_st(self):
+        """NULL is_st（stock_basic.name 可空）按非 ST 保留且不计入排除数。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600001.SS"],
+                "name": ["平安银行", "万科A", "*ST 某某"],
+                "close": [7.0, 8.0, 5.0],
+                "is_st": [False, None, True],
+            }
+        )
+        context = self._make_context(dp, snapshot)
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert "000002.SZ" in result["ts_code"].tolist()
+        assert "600001.SS" not in result["ts_code"].tolist()
+        warnings = context.get("warnings", [])
+        assert len(warnings) == 1
+        assert warnings[0].params == {"count": 1}
+
+
 if __name__ == "__main__":
     unittest.main()

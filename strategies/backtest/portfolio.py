@@ -136,7 +136,7 @@ class PortfolioSimulator:
         for ts_code, pos in self.positions.items():
             quote = quotes_by_code.get(ts_code)
             if quote is not None and not quote.is_empty():
-                px = float(quote.select("qfq_close").item())
+                px = self._exec_price(quote)
             else:
                 px = self._last_known_prices.get(ts_code, float(pos.get("entry_price", 0.0)))
             current_values[ts_code] = pos["volume"] * px
@@ -260,24 +260,22 @@ class PortfolioSimulator:
             self.warnings.append(f"{exec_date}: {ts_code} sell skipped (suspended)")
             return
 
-        limit_status = quote.select("limit_status").item() if "limit_status" in quote.columns else None
-        if limit_status == "down_limit" and not self.config.allow_limit_down_sell:
-            self.skipped_list.append(
-                {
-                    "trade_date": exec_date,
-                    "ts_code": ts_code,
-                    "direction": "sell",
-                    "reason": "down_limit",
-                    "intended_volume": pos["volume"],
-                }
-            )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
-            return
+        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
+        if down_price is not None and not self.config.allow_limit_down_sell:
+            if self._exec_nominal_price(quote) <= float(down_price) + 1e-6:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "sell",
+                        "reason": "down_limit",
+                        "intended_volume": pos["volume"],
+                    }
+                )
+                self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
+                return
 
-        if self.config.execution_price == "next_close":
-            exit_price = float(quote.select("qfq_close").item())
-        else:
-            exit_price = float(quote.select("qfq_open").item())
+        exit_price = self._exec_price(quote)
         volume = pos["volume"]
 
         cost = self.cost_model.calculate(
@@ -361,24 +359,22 @@ class PortfolioSimulator:
             self.warnings.append(f"{exec_date}: {ts_code} sell skipped (suspended)")
             return
 
-        limit_status = quote.select("limit_status").item() if "limit_status" in quote.columns else None
-        if limit_status == "down_limit" and not self.config.allow_limit_down_sell:
-            self.skipped_list.append(
-                {
-                    "trade_date": exec_date,
-                    "ts_code": ts_code,
-                    "direction": "sell",
-                    "reason": "down_limit",
-                    "intended_volume": pos["volume"],
-                }
-            )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
-            return
+        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
+        if down_price is not None and not self.config.allow_limit_down_sell:
+            if self._exec_nominal_price(quote) <= float(down_price) + 1e-6:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "sell",
+                        "reason": "down_limit",
+                        "intended_volume": pos["volume"],
+                    }
+                )
+                self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
+                return
 
-        if self.config.execution_price == "next_close":
-            exit_price = float(quote.select("qfq_close").item())
-        else:
-            exit_price = float(quote.select("qfq_open").item())
+        exit_price = self._exec_price(quote)
         current_value = pos["volume"] * exit_price
         sell_value = max(current_value - target_value, 0.0)
         volume = int(sell_value / exit_price / 100) * 100
@@ -471,25 +467,23 @@ class PortfolioSimulator:
                 self.warnings.append(f"{exec_date}: {ts_code} buy skipped (suspended)")
                 continue
 
-            limit_status = quote.select("limit_status").item() if "limit_status" in quote.columns else None
-            if limit_status == "up_limit" and not self.config.allow_limit_up_buy:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "up_limit",
-                        "intended_volume": 0,
-                    }
-                )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (up_limit)")
-                continue
+            up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
+            if up_price is not None and not self.config.allow_limit_up_buy:
+                if self._exec_nominal_price(quote) >= float(up_price) - 1e-6:
+                    self.skipped_list.append(
+                        {
+                            "trade_date": exec_date,
+                            "ts_code": ts_code,
+                            "direction": "buy",
+                            "reason": "up_limit",
+                            "intended_volume": 0,
+                        }
+                    )
+                    self.warnings.append(f"{exec_date}: {ts_code} buy skipped (up_limit)")
+                    continue
 
             # D4-1: 差异化调仓买入同样统一使用 qfq 复权口径，避免除权交易日虚假损益。
-            if self.config.execution_price == "next_close":
-                qfq_entry_price = float(quote.select("qfq_close").item())
-            else:
-                qfq_entry_price = float(quote.select("qfq_open").item())
+            qfq_entry_price = self._exec_price(quote)
 
             if qfq_entry_price <= 0:
                 self.skipped_list.append(
@@ -753,6 +747,23 @@ class PortfolioSimulator:
             pl.DataFrame(self.skipped_list) if self.skipped_list else pl.DataFrame(),
             self.warnings,
         )
+
+    def _exec_price(self, quote: pl.DataFrame) -> float:
+        """按 execution_price 返回单个标的价格口径的复权价（qfq）。
+
+        quote 是单标的的单行 pl.DataFrame。next_open → qfq_open，
+        next_close → qfq_close。买卖执行与估值统一走此单一出口（BT-01），
+        避免执行价按 execution_price 分支而估值硬编码收盘价造成未来函数。
+        """
+        if self.config.execution_price == "next_close":
+            return float(quote.select("qfq_close").item())
+        return float(quote.select("qfq_open").item())
+
+    def _exec_nominal_price(self, quote: pl.DataFrame) -> float:
+        """按 execution_price 返回单个标的价格口径的名义价（raw），涨跌停判据与 stk_limit 价格同口径。"""
+        if self.config.execution_price == "next_close":
+            return float(quote.select("raw_close").item())
+        return float(quote.select("raw_open").item())
 
     @staticmethod
     def _get_avg_daily_volume(quote: pl.DataFrame) -> float | None:

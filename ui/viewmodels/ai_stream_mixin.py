@@ -470,6 +470,7 @@ class AIStreamMixin:
         strategy_key: str,
         save_results: bool = True,
         params: dict | None = None,  # type: ignore[untyped]
+        exclude_st: bool = True,
     ):
         """Execute strategy screening via the global TaskManager."""
         from utils.correlation import ensure_correlation_id
@@ -539,6 +540,8 @@ class AIStreamMixin:
 
                 context["data_processor"] = dp
                 context["params"] = params or {}  # Dynamic strategy parameters from UI
+                # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关）注入策略基类
+                context["exclude_st"] = exclude_st
 
                 # Setup AI Callbacks
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
