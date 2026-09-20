@@ -16,13 +16,13 @@ import pandas as pd
 
 from data.constants import (
     CRITICAL_EMPTY_TABLES,
-    MAJOR_INDICES,
     SYNC_RESULT_EMPTY,
     SYNC_RESULT_FETCH_FAILED,
     SYNC_RESULT_HAS_DATA,
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
     WATERMARK_KEY_PREFIXES,
+    indices_to_sync,
 )
 from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
@@ -826,7 +826,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         async def fetch_indices():
             try:
-                tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in MAJOR_INDICES]
+                # DS-01: 同步目标由 indices_to_sync() 派生（MAJOR_INDICES ∪ 当前配置基准），
+                # 确保设置的基准指数必然被写入 index_daily，否则健康检查永远检不出来。
+                tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in indices_to_sync()]
                 results = await gather_return_exceptions_propagating_cancel(*tasks)
                 # S9: 检测 TushareAPIPermissionError，标记 skipped_permission 避免下次重试
                 for r in results:

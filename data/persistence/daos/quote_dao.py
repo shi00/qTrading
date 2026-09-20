@@ -11,6 +11,7 @@ from data.constants import (
     MAJOR_INDICES,
     attach_daily_quotes_column_units,
     attach_top_list_column_units,
+    indices_to_sync,
 )
 from data.persistence.models import (
     BlockTrade,
@@ -38,6 +39,8 @@ _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
 LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "block_trade"}
 
+# DS-01: index_daily 期望行数在运行期按 indices_to_sync()（含配置基准）派生，见本
+# 函数对 index_daily 的 special-case；此处保留基准下限值，供集成测试读取/断言。
 FIXED_EXPECTED_TABLES: dict[str, int] = {
     "index_daily": len(MAJOR_INDICES),
     "index_dailybasic": len(MAJOR_INDICES),
@@ -1007,7 +1010,11 @@ class QuoteDao(BaseDao):
                             }
                             continue
 
-                if table in FIXED_EXPECTED_TABLES:
+                if table == "index_daily":
+                    # DS-01: 期望行数随同步目标集合动态派生（监控列表 ∪ 配置基准），
+                    # 避免配置外基准被写入后因期望行数仍按旧列表算而漏检评分满分。
+                    expected = len(indices_to_sync())
+                elif table in FIXED_EXPECTED_TABLES:
                     expected = FIXED_EXPECTED_TABLES[table]
                 else:
                     expected = int(reference_count * tolerance)

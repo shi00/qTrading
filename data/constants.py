@@ -66,7 +66,10 @@ FINANCIAL_REPORT_SCHEMA_COLS = [
 
 # 单一基准正本（D2-5）：复盘 Alpha 与回测超额收益统一以此指数为比较基准。
 # ReviewManager 与 BacktestConfig/backtest_view_model 缺省值共同读取，禁止各自硬编码。
-DEFAULT_BENCHMARK_INDEX = "000985.CSI"
+# DS-01：默认基准改为 000300.SH——它已在 MAJOR_INDICES 内（写入/健康检查/期望行均覆盖），
+# 且 Tushare index_daily 积分门槛低，保证开箱即有数据；中证全指 000985.CSI 需高积分，
+# 仅作为可选配置项留给高积分用户（用户改写 benchmark_index 后由 indices_to_sync() 派生纳入同步）。
+DEFAULT_BENCHMARK_INDEX = "000300.SH"
 
 # Major Market Indices to Track
 MAJOR_INDICES = [
@@ -78,6 +81,25 @@ MAJOR_INDICES = [
     "000852.SH",  # CSI 1000
     "000688.SH",  # STAR 50
 ]
+
+
+def indices_to_sync() -> list[str]:
+    """index_daily 实际需同步的指数 = 监控列表 ∪ 当前配置的基准（DS-01 根因修复）。
+
+    基准可被用户在设置页改写，故同步目标不能是静态常量，必须运行时派生；
+    若只遍历 ``MAJOR_INDICES``，配置的基准不在其内时永远不会被同步/健康检查/期望
+    行数覆盖（报告 DS-01）。结果去重保序，供以下三处统一消费：
+    - ``data/sync/historical.py`` 的 ``fetch_indices``（index_daily 唯一写入路径）
+    - ``data/mixins/health_mixin.py`` 的 DAT-13 index_daily 覆盖度检查
+    - ``data/persistence/daos/quote_dao.py`` 的 index_daily 期望行数
+    """
+    from utils.config_handler import ConfigHandler  # lazy-import: 避免 data→utils 循环
+
+    bench = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+    if not isinstance(bench, str) or not bench:
+        bench = DEFAULT_BENCHMARK_INDEX
+    return list(dict.fromkeys([*MAJOR_INDICES, bench]))
+
 
 # DataFrame column unit metadata
 DATAFRAME_ATTR_COLUMN_UNITS = "column_units"
