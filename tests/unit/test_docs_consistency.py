@@ -4851,6 +4851,37 @@ class TestAdrIndexCompleteness:
         assert any("引用了不存在的 ADR 文档 '0099-ghost.md'" in e for e in errors)
 
 
+class TestScriptsIndexCompleteness:
+    """F-08: 工程脚本清单完整性（docs/guides/ci-cd.md 登记全部 scripts/*.py）."""
+
+    def test_scripts_index_pass_on_current_repo(self):
+        from check_docs_consistency import check_scripts_index_completeness
+
+        errors = check_scripts_index_completeness()
+        assert errors == [], "当前仓库 ci-cd.md 应登记全部工程脚本，实际报错:\n  " + "\n  ".join(errors)
+
+    def test_detects_uncovered_script(self, tmp_path, monkeypatch):
+        from check_docs_consistency import check_scripts_index_completeness
+
+        (tmp_path / "new_guard.py").write_text("", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.SCRIPTS_DIR", tmp_path)
+        errors = check_scripts_index_completeness()
+        assert any("未登记工程脚本 'new_guard.py'" in e for e in errors), f"缺失, got: {errors}"
+
+    def test_detects_ghost_script(self, monkeypatch):
+        from check_docs_consistency import CI_CD_PATH, check_scripts_index_completeness
+
+        real_text = CI_CD_PATH.read_text(encoding="utf-8")
+        ghost_entry = "\n`scripts/no_such_script.py` 幽灵引用\n"
+        tampered_text = real_text + ghost_entry
+        monkeypatch.setattr(
+            "pathlib.Path.read_text",
+            lambda self, encoding="utf-8": tampered_text if self.name == "ci-cd.md" else real_text,
+        )
+        errors = check_scripts_index_completeness()
+        assert any("引用了不存在的工程脚本 'no_such_script.py'" in e for e in errors), f"缺失, got: {errors}"
+
+
 class TestGuillemetReferences:
     """GDR-13: 书名号式章节引用（<文档路径>「<章节名>」）必须指向目标文档真实标题."""
 

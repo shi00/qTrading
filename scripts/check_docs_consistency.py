@@ -57,10 +57,12 @@
 26. ADR supersede 双向链守卫检查（文档复检盲2）：解析 docs/adr/*.md 头元数据的 Supersedes 与
    Superseded by 声明，校验双向对称（X 声明 supersedes Y ⇔ Y 声明被 X 部分/整体 supersede），
    守护 ADR supersede 引用不单向断链。
-27. pre-commit hook 名称级一致性检查（F-09）：从 .pre-commit-config.yaml 提取本地 hook id 集合，
+27. 脚本索引完整性检查（F-08）：校验 docs/guides/ci-cd.md 以 `scripts/<name>.py` 形式登记了
+   scripts/*.py 全部工程脚本（含未登记与幽灵引用双向检测），防止新增脚本成为不可发现的暗坑。
+28. pre-commit hook 名称级一致性检查（F-09）：从 .pre-commit-config.yaml 提取本地 hook id 集合，
    断言 ci-cd.md「Pre-commit Hooks」节的受控枚举与之一致（无遗漏 + 无幽灵），
    守护"只能数数量、不能核名字"的枚举漂移（数量门禁可被指针式写法绕过）。
-28. workflow 枚举无遗漏检查（F-09）：断言 .github/workflows/*.yml 每一文件都在 ci-cd.md 出现，
+29. workflow 枚举无遗漏检查（F-09）：断言 .github/workflows/*.yml 每一文件都在 ci-cd.md 出现，
    守护 CI 前端流水线（docs-ci / flet-nightly / sidecar 等）因仅存在于文件而被文档漏登记。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
@@ -101,8 +103,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
-# CI/CD 门禁文档与 workflow 目录（F-09：hook / workflow 枚举名称级门禁的数据源）
-CI_CD_PATH = ROOT / "docs" / "guides" / "ci-cd.md"
+# workflow 目录（F-09 workflow 枚举门禁的数据源；CI_CD_PATH 在下方与 SCRIPTS_DIR 一并定义）
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 # Flet 徽章版本守卫（文档复检 H1）：README UI 徽章中的 Flet 版本声明须与 pyproject 锁定主版本对齐
 README_PATH = ROOT / "README.md"
@@ -139,6 +140,8 @@ REVIEWS_README_PATH = REVIEWS_DOCS_DIR / "README.md"
 
 # docs/adr/ 目录（GDR-12 ADR 决策文档文件级登记）
 ADR_DOCS_DIR = ROOT / "docs" / "adr"
+SCRIPTS_DIR = ROOT / "scripts"
+CI_CD_PATH = ROOT / "docs" / "guides" / "ci-cd.md"
 
 # 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
 # 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
@@ -2614,6 +2617,50 @@ def check_adr_index_completeness() -> list[str]:
     return errors
 
 
+# scripts/ Python 脚本路径引用（F-08：工程脚本清单完整性）。仅匹配仓库根 `scripts/<name>.py`
+# 顶层脚本，排除 `.rs`/`.ps1` 及子目录引用与带 `#`/`?` 后缀的链接形态。
+_SCRIPT_FILE_REF = re.compile(r"scripts/([A-Za-z0-9_][A-Za-z0-9_.-]*\.py)")
+
+
+def check_scripts_index_completeness() -> list[str]:
+    """检查项：工程脚本清单完整性（F-08）。
+
+    确保 docs/guides/ci-cd.md 以 `scripts/<name>.py` 形式登记了 scripts/*.py 全部工程脚本，
+    防止新增脚本（pre-commit hook / CI 步骤 / 维护工具）因仅有文件存在而成为 AI 不可发现的暗坑
+    （CLAUDE.md §3.2「复用优先」要求 AI 能通过文档发现既有脚本及其触发时机/是否 CI 强制）。
+
+    参照既有 check_adr_index_completeness / check_flet_hub_completeness 的「目录实际文件 ⊆ 文档引用」
+    双向模式：未登记（实际有文件、文档没写）与幽灵引用（文档写了、实际无文件）均报错。
+    """
+    errors: list[str] = []
+    if not SCRIPTS_DIR.is_dir():
+        return [f"脚本目录不存在: {SCRIPTS_DIR}"]
+    if not CI_CD_PATH.exists():
+        return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
+
+    content = CI_CD_PATH.read_text(encoding="utf-8")
+    actual_files: set[str] = {p.name for p in SCRIPTS_DIR.glob("*.py") if p.is_file()}
+
+    referenced_files: set[str] = set()
+    in_code_block = False
+    for line in content.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        for m in _SCRIPT_FILE_REF.finditer(line):
+            referenced_files.add(m.group(1))
+
+    # 未登记的工程脚本
+    for fname in sorted(actual_files - referenced_files):
+        errors.append(f"脚本索引完整性: ci-cd.md 未登记工程脚本 '{fname}'")
+    # 幽灵引用（ci-cd.md 引用不存在的 scripts/*.py）
+    for fname in sorted(referenced_files - actual_files):
+        errors.append(f"脚本索引完整性: ci-cd.md 引用了不存在的工程脚本 '{fname}'")
+    return errors
+
+
 # --- DOC-09: 治理 id 引用一致性（EX-\d{4} 双向：注册表 ↔ 消费文档）---
 # 宪法曾引用未登记的 EX-0001（复现 GOV-01，DOC-09）。本检查把「引用必须落在注册表、
 # 登记必须被消费」沉淀为机制：任一方向漂移即报错，防止悬空/孤儿例外长期存活。
@@ -3170,6 +3217,7 @@ def main() -> int:
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_adr_index_completeness())
+    all_errors.extend(check_scripts_index_completeness())
     all_errors.extend(check_governance_id_references())
     all_errors.extend(check_core_modules_completeness())
     # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后。
@@ -3210,7 +3258,7 @@ def main() -> int:
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
+        "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
         "注册单例散文数量守卫 / ADR supersede 双向链守卫）"
     )
