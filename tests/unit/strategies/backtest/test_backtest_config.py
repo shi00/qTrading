@@ -292,3 +292,43 @@ class TestBacktestResultToPersistDict:
         d = result.to_persist_dict()
         assert d["params_snapshot"]["delist_recovery_rate"] == 0.15
         assert d["params_snapshot"]["param1"] == "value1"
+
+    def test_to_persist_dict_embeds_config_json(self) -> None:
+        """BT-03: config_json 全量快照包含完整 BacktestConfig（含 date 等不可平铺字段）。"""
+        result = _make_result()
+        d = result.to_persist_dict()
+        cfg = d["config_json"]
+        assert cfg is not None
+        assert cfg["start_date"] == result.config.start_date
+        assert cfg["end_date"] == result.config.end_date
+        assert cfg["initial_capital"] == result.config.initial_capital
+        assert cfg["rebalance_freq"] == result.config.rebalance_freq
+        assert cfg["benchmark_code"] == result.config.benchmark_code
+        assert cfg["risk_free_rate"] == result.config.risk_free_rate
+
+    def test_to_persist_dict_embeds_quality_json(self) -> None:
+        """BT-03: quality_json 快照包含可信度元数据，供列表/详情区分干净与带警告回测。"""
+        result = _make_result(
+            data_warnings=("suspend_data_absent: ...",),
+            failed_signal_dates=({"signal_date": "2024-01-02"},),
+            delist_liquidation_count=2,
+            delist_loss_amount=150.5,
+            has_real_score=False,
+        )
+        d = result.to_persist_dict()
+        q = d["quality_json"]
+        assert q is not None
+        assert q["data_warnings"] == ["suspend_data_absent: ..."]
+        assert q["failed_signal_dates"] == [{"signal_date": "2024-01-02"}]
+        assert q["skipped_order_count"] == 0
+        assert q["delist_liquidation_count"] == 2
+        assert q["delist_loss_amount"] == 150.5
+        assert q["has_real_score"] is False
+
+    def test_to_persist_dict_quality_json_skipped_order_count(self) -> None:
+        """BT-03: skipped_order_count 取 skipped_orders 行数（非空 DataFrame）。"""
+        result = _make_result(
+            skipped_orders=pl.DataFrame({"ts_code": ["000001.SZ"], "reason": ["up_limit"]}),
+        )
+        d = result.to_persist_dict()
+        assert d["quality_json"]["skipped_order_count"] == 1

@@ -949,6 +949,10 @@ class BacktestResultModel(Base):
     slippage_model = Column(String(20))
     app_version = Column(String(32))
 
+    # BT-03: 可信度元数据与完整配置快照（JSONB，一次容纳，避免每加一种告警就迁移）。
+    quality_json = Column(JSONB)
+    config_json = Column(JSONB)
+
     executed_at = Column(DateTime(timezone=False), server_default=text("now()"))
     duration_ms = Column(Integer)
 

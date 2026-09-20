@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
@@ -210,6 +210,9 @@ class BacktestResult:
 
         将 BacktestResult 与 BacktestConfig 中需要落库的字段平铺为单层 dict，
         供 BacktestService._persist_result 调用，避免在服务层散落字段映射逻辑。
+
+        BT-03: 新增 config_json / quality_json 两个 JSONB 结构，完整落一组
+        回测配置与可信度元数据，使历史记录可复现、可信度不因持久化而单向蒸发。
         """
         return {
             "run_id": self.run_id,
@@ -233,4 +236,16 @@ class BacktestResult:
             "allow_limit_down_sell": self.config.allow_limit_down_sell,
             "slippage_model": self.config.slippage_model,
             "on_empty_signal": self.config.on_empty_signal,
+            # BT-03: 完整回测配置快照（dataclasses.asdict），含 date 对象，DAO 侧递归序列化。
+            # 作为完整配置的唯一来源，平铺的 execution_price 等列保留做索引用。
+            "config_json": asdict(self.config),
+            # BT-03: 可信度元数据快照，供历史列表/详情页区分「干净」与「带警告」的回测。
+            "quality_json": {
+                "data_warnings": list(self.data_warnings),
+                "failed_signal_dates": list(self.failed_signal_dates),
+                "skipped_order_count": 0 if self.skipped_orders.is_empty() else len(self.skipped_orders),
+                "delist_liquidation_count": self.delist_liquidation_count,
+                "delist_loss_amount": self.delist_loss_amount,
+                "has_real_score": self.has_real_score,
+            },
         }

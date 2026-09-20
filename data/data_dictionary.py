@@ -932,6 +932,8 @@ TABLE_DEFINITIONS = {
             "app_version": "col_app_version",
             "executed_at": "col_executed_at",
             "duration_ms": "col_duration_ms",
+            "quality_json": "col_quality_json",
+            "config_json": "col_config_json",
         },
     },
     "watchlist": {

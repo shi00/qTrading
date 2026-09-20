@@ -454,6 +454,149 @@ class TestBacktestDAOJsonbSerialization:
         assert trades_json[0]["trade_time"] == "2024-01-01T10:30:00"
 
     @pytest.mark.asyncio
+    async def test_save_result_serializes_config_and_quality_json(
+        self,
+        dao: BacktestDAO,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        """BT-03: config_json/quality_json 中嵌套的 date 应转为 ISO 字符串，可直接落 JSONB。"""
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        result = {
+            "run_id": "test_jsonb_meta",
+            "strategy_name": "test_strategy",
+            "config": backtest_config,
+            "metrics": {},
+            "duration_ms": 100,
+            "config_json": {
+                "start_date": date(2024, 1, 1),
+                "end_date": date(2024, 1, 31),
+                "initial_capital": 1_000_000.0,
+            },
+            "quality_json": {
+                "data_warnings": ["suspend_data_absent: ..."],
+                "failed_signal_dates": [{"signal_date": date(2024, 1, 2)}],
+                "delist_loss_amount": 150.5,
+                "has_real_score": True,
+            },
+        }
+
+        await dao.save_result(result)
+
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        record = df.iloc[0]
+
+        assert record["config_json"]["start_date"] == "2024-01-01"
+        assert record["config_json"]["end_date"] == "2024-01-31"
+        assert record["quality_json"]["failed_signal_dates"][0]["signal_date"] == "2024-01-02"
+
+    @pytest.mark.asyncio
+    async def test_save_result_jsonb_meta_default_none(
+        self,
+        dao: BacktestDAO,
+        backtest_result: BacktestResult,
+    ) -> None:
+        """BT-03: 旧 dict 无 config_json/quality_json 键时，DF 该列取 None 而非报错。"""
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        await dao.save_result(_result_to_dict(backtest_result))
+
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        record = df.iloc[0]
+        assert record["config_json"] is None
+        assert record["quality_json"] is None
+
+    @pytest.mark.asyncio
+    async def test_list_results_has_warnings_true(self, dao: BacktestDAO) -> None:
+        mock_df = pd.DataFrame(
+            {
+                "run_id": ["run1"],
+                "strategy_name": ["strategy1"],
+                "start_date": [date(2024, 1, 1)],
+                "end_date": [date(2024, 1, 31)],
+                "sharpe_ratio": [1.5],
+                "max_drawdown": [0.05],
+                "executed_at": [datetime(2024, 1, 31)],
+                "quality_json": [{"data_warnings": ["suspend_data_absent: ..."]}],
+            }
+        )
+        dao._read_db_select = AsyncMock(return_value=mock_df)
+
+        results = await dao.list_results()
+
+        assert len(results) == 1
+        assert results[0]["has_warnings"] is True
+
+    @pytest.mark.asyncio
+    async def test_list_results_has_warnings_true_on_failed_signal_dates(
+        self,
+        dao: BacktestDAO,
+    ) -> None:
+        """BT-03: 仅 failed_signal_dates 非空也应判定 has_warnings=True（策略运行失败日视为不可靠）。"""
+        mock_df = pd.DataFrame(
+            {
+                "run_id": ["run1"],
+                "strategy_name": ["strategy1"],
+                "start_date": [date(2024, 1, 1)],
+                "end_date": [date(2024, 1, 31)],
+                "sharpe_ratio": [1.5],
+                "max_drawdown": [0.05],
+                "executed_at": [datetime(2024, 1, 31)],
+                "quality_json": [{"data_warnings": [], "failed_signal_dates": [{"signal_date": "2024-01-02"}]}],
+            }
+        )
+        dao._read_db_select = AsyncMock(return_value=mock_df)
+
+        results = await dao.list_results()
+
+        assert len(results) == 1
+        assert results[0]["has_warnings"] is True
+
+    @pytest.mark.asyncio
+    async def test_list_results_has_warnings_false_when_empty(self, dao: BacktestDAO) -> None:
+        mock_df = pd.DataFrame(
+            {
+                "run_id": ["run1"],
+                "strategy_name": ["strategy1"],
+                "start_date": [date(2024, 1, 1)],
+                "end_date": [date(2024, 1, 31)],
+                "sharpe_ratio": [1.5],
+                "max_drawdown": [0.05],
+                "executed_at": [datetime(2024, 1, 31)],
+                "quality_json": [{"data_warnings": []}],
+            }
+        )
+        dao._read_db_select = AsyncMock(return_value=mock_df)
+
+        results = await dao.list_results()
+
+        assert len(results) == 1
+        assert results[0]["has_warnings"] is False
+
+    @pytest.mark.asyncio
+    async def test_list_results_has_warnings_false_when_null(self, dao: BacktestDAO) -> None:
+        """BT-03: 存量记录 quality_json 为 NULL → has_warnings=False（视为无警告）。"""
+        mock_df = pd.DataFrame(
+            {
+                "run_id": ["run1"],
+                "strategy_name": ["strategy1"],
+                "start_date": [date(2024, 1, 1)],
+                "end_date": [date(2024, 1, 31)],
+                "sharpe_ratio": [1.5],
+                "max_drawdown": [0.05],
+                "executed_at": [datetime(2024, 1, 31)],
+                "quality_json": [None],
+            }
+        )
+        dao._read_db_select = AsyncMock(return_value=mock_df)
+
+        results = await dao.list_results()
+
+        assert results[0]["has_warnings"] is False
+
+    @pytest.mark.asyncio
     async def test_save_result_empty_data_unaffected(
         self,
         dao: BacktestDAO,
