@@ -1,4 +1,4 @@
-# Project Documentation Index
+﻿# Project Documentation Index
 
 本目录承载从 CONTRIBUTING.md 渐进式披露拆分出的专项深入文档。
 
@@ -34,7 +34,7 @@ Tushare 相关文档分散在多个章节，按主题索引如下：
 | 单例生命周期与特殊说明 | [architecture/singleton-lifecycle.md](./architecture/singleton-lifecycle.md#tushareclient-特殊说明) |
 | Syncer 设计模式（限流/质量门控/错误处理/取消传播） | [patterns/data-sync.md](./patterns/data-sync.md#tushare-syncer-设计模式) |
 | 集成工作流简述 | [guides/how-to.md](./guides/how-to.md#51-tushare-集成工作流简述) |
-| 配置说明（token 获取/积分档位/降级行为） | [README.md](../README.md#41-配置-tushare-数据源) |
+| 配置说明（token 获取/积分档位/降级行为） | [README.md](../README.md#配置-tushare-数据源) |
 | Token 安全（存储/脱敏/熔断/静态守护） | [SECURITY.md](../SECURITY.md#tushare-token-security) |
 | 已知技术债 | [debt/known-technical-debt.md](./debt/known-technical-debt.md) |
 | 红线自动化守护 | `scripts/check_redlines.py` 的 `check_R_tushare_token_log`（R9 红线专属守护） |
