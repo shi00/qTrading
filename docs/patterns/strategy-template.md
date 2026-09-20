@@ -46,6 +46,7 @@ class MyStrategy(BaseStrategy):
 - 访问 LLM：混入 `AIStrategyMixin`，Prompt 写入 `strategies/strategy_prompts.py`
 - 动态参数 / 描述：实现 `get_parameters()` / `get_dynamic_description()` / `check_dependencies()`（见 `strategies/base_strategy.py`）
 - 新增策略未用 `@register_strategy("key")` 装饰器 → 触发 R14（pre-commit `redline-check` 守护）
+- 涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较：必须经 `threshold_in_data_unit()` 统一入口换算后再比较（`strategies/utils.py`）；单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`。违反触发 R20（见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）
 
 ### 完成判定
 

@@ -33,4 +33,12 @@
 - `TaskType.CPU`：**仅适用于释放 Python GIL 的密集计算**（如 Polars 表达式、NumPy 数组计算、C 扩展等）。
 - **纯 Python 密集循环**：纯 Python 循环在线程池内会产生严重 GIL 争抢，不仅无法利用多核，还会争抢事件循环线程导致 UI 卡顿。桌面应用模型下不引入多进程池（避免进程间序列化开销与打包复杂度）；**所有 CPU 密集型计算必须改用 Polars 向量化表达**。
 
+### 金额/数量列阈值比较（R20）
+
+调整或新增涉及金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的
+阈值、筛选或比较时，必须经 `threshold_in_data_unit()`（`strategies/utils.py`）统一单位换算后再比较；
+各列数据单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`，并按需用
+`get_column_unit()` / `get_column_unit_source()` 显式取单位。直接按字面数值比较会因单位差（如北向
+资金以万元计）产生量纲偏差，违反 R20（见 CLAUDE.md §3.1）。
+
 > **操作指引**：修改配置项或调整性能相关阈值，入口见 [CLAUDE.md §1.8 决策树](../../CLAUDE.md#18-任务类型--必读文件-决策树)（「修改配置项 / 性能优化 / 阈值调整」均路由到本节）；完整新增策略/DAO 的落地流程见 [docs/guides/how-to.md](../guides/how-to.md)。
