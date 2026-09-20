@@ -213,6 +213,12 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 | **Unit** | `tests/unit/` | 373 | 纯逻辑：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
 | **Integration** | `tests/integration/` | 67 | 组件协作：数据同步、迁移、回顾系统、任务调度、回测全流程 |
 
+| 覆盖维度 | 说明 |
+|----------|------|
+| **覆盖目标** | `core/` `app/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 9 个核心模块 |
+| **门禁阈值** | **85%** — 低于此值 CI 流水线失败 |
+| **排除项** | tiktoken 缓存、离线日历数据、辅助脚本 |
+
 ---
 
 ## 📊 设计亮点
