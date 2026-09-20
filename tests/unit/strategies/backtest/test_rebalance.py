@@ -412,7 +412,7 @@ class TestLimitControl:
                 "qfq_open": [10.0],
                 "qfq_close": [10.5],
                 "is_tradable": [True],
-                "limit_status": ["up_limit"],
+                "limit_up_price": [10.0],
             }
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
@@ -438,7 +438,7 @@ class TestLimitControl:
                 "qfq_open": [10.0],
                 "qfq_close": [10.5],
                 "is_tradable": [True],
-                "limit_status": ["up_limit"],
+                "limit_up_price": [10.0],
             }
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
@@ -463,7 +463,7 @@ class TestLimitControl:
                 "qfq_open": [10.0, 10.5, 20.0],
                 "qfq_close": [10.5, 10.0, 20.5],
                 "is_tradable": [True, True, True],
-                "limit_status": [None, "down_limit", None],
+                "limit_down_price": [None, 10.5, None],
             }
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
@@ -491,7 +491,7 @@ class TestLimitControl:
                 "qfq_open": [10.0, 10.5],
                 "qfq_close": [10.5, 10.0],
                 "is_tradable": [True, True],
-                "limit_status": [None, "down_limit"],
+                "limit_down_price": [None, 10.5],
             }
         )
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
@@ -1061,7 +1061,6 @@ class TestDiffRebalance:
                 "qfq_open": [price],
                 "qfq_close": [price],
                 "is_tradable": [True],
-                "limit_status": [None],
                 "avg_daily_volume": [5_000_000.0],
             }
         )
@@ -1526,7 +1525,6 @@ class TestDiffRebalance:
                 "qfq_open": [10.0] * 3,
                 "qfq_close": [10.0] * 3,
                 "is_tradable": [True] * 3,
-                "limit_status": [None] * 3,
                 "avg_daily_volume": [5_000_000.0] * 3,
             }
         )
@@ -1590,7 +1588,6 @@ class TestRebalanceValuationExecPrice:
                 "qfq_open": [10.0, 10.0],
                 "qfq_close": [20.0, 10.0],
                 "is_tradable": [True, True],
-                "limit_status": [None, None],
                 "avg_daily_volume": [5_000_000.0, 5_000_000.0],
             }
         )

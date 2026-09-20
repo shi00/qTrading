@@ -58,6 +58,8 @@ def make_quotes_df(
         daily_returns: 各股票日收益率 {ts_code: daily_return}
         adj_factors: 各股票复权因子序列 {ts_code: [factor1, factor2, ...]}
         limit_status: 涨跌停状态 {ts_code: {date: "up_limit" | "down_limit"}}
+            "up_limit" → 设该行 limit_up_price = raw_open（结果 >= 触发买跳过）
+            "down_limit" → 设该行 limit_down_price = raw_open（结果 <= 触发卖跳过）
         is_tradable: 是否可交易 {ts_code: {date: bool}}
 
     Returns:
@@ -75,9 +77,14 @@ def make_quotes_df(
             close_price = base_price * ((1 + daily_ret) ** i)
             open_price = close_price * 0.99
 
-            limit = None
+            limit_up = None
+            limit_down = None
             if limit_status and ts_code in limit_status:
                 limit = limit_status[ts_code].get(trade_date)
+                if limit == "up_limit":
+                    limit_up = open_price
+                elif limit == "down_limit":
+                    limit_down = open_price
 
             tradable = True
             if is_tradable and ts_code in is_tradable:
@@ -98,7 +105,8 @@ def make_quotes_df(
                     "vol": 1000000,
                     "amount": close_price * 1000000,
                     "adj_factor": adj_factor,
-                    "limit_status": limit,
+                    "limit_up_price": limit_up,
+                    "limit_down_price": limit_down,
                     "is_tradable": tradable,
                 }
             )
