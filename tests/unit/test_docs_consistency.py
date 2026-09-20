@@ -3095,6 +3095,65 @@ class TestCanonicalTopicsYamlConsistency:
             )
 
 
+class TestCanonicalDocsAreGated:
+    """canonical 正本必须落在文档门禁受检范围内 (F-13 元规则门禁).
+
+    与 TestCanonicalTopicsYamlConsistency / TestDecisionTreeMapping 共享同名临时 yml 注入手法：
+    monkeypatch CANONICAL_TOPICS_YAML_PATH 与 CHECKED_DOCS 模块级常量，验证
+    check_canonical_docs_are_gated() 的「正本受保护」断言。
+    """
+
+    def test_all_canonical_docs_gated_passes(self):
+        """真实配置下：所有 canonical 正本都应在 CHECKED_DOCS 内，返回空错误."""
+        from check_docs_consistency import check_canonical_docs_are_gated
+
+        errors = check_canonical_docs_are_gated()
+        assert errors == [], "当前项目配置应通过 canonical 受检范围校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_detects_canonical_not_in_checked_docs(self, tmp_path, monkeypatch):
+        """canonical 指向真实文件但不在 CHECKED_DOCS 时应报不受保护."""
+        from check_docs_consistency import ROOT, check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/guides/ci-cd.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        assert (ROOT / "docs/guides/ci-cd.md").exists()
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+        errors = check_canonical_docs_are_gated()
+        assert any("不在文档门禁受检范围" in e for e in errors), f"应报 canonical 不受保护, got: {errors}"
+
+    def test_gated_when_checked_docs_includes_canonical(self, tmp_path, monkeypatch):
+        """受检集合包含 canonical 时应通过."""
+        from check_docs_consistency import ROOT, check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/guides/ci-cd.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [ROOT / "docs/guides/ci-cd.md"])
+        errors = check_canonical_docs_are_gated()
+        assert errors == [], f"受检集合含 canonical 时应通过, got: {errors}"
+
+    def test_detects_missing_canonical_path(self, tmp_path, monkeypatch):
+        """canonical 指向不存在文件时应报路径不存在."""
+        from check_docs_consistency import check_canonical_docs_are_gated
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: strategy\n    title: A\n    canonical: docs/nonexistent.md\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+        errors = check_canonical_docs_are_gated()
+        assert any("canonical 路径不存在" in e for e in errors), f"应报 canonical 路径不存在, got: {errors}"
+
+
 class TestAgentsMdSync:
     """AGENTS.md 最小安全集生成区块与 redlines.yml 一致性契约测试 (DOC-08 / DOC-13, 见 ADR-0006)."""
 
@@ -3158,6 +3217,54 @@ class TestAgentsMdSync:
         errors = check_agents_md_sync()
         assert len(errors) > 0, "应检出缺少标记, got no errors"
         assert any("缺少生成区块标记" in e for e in errors), f"错误信息应提示标记缺失, got: {errors}"
+
+
+class TestClaudeExecutiveSync:
+    """CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性契约测试 (F-04, 机制延续 DOC-08)."""
+
+    def test_claude_md_has_generated_executive_block(self):
+        """CLAUDE.md 顶部摘要含生成区块包裹标记."""
+        from check_docs_consistency import CLAUDE_PATH
+
+        content = CLAUDE_PATH.read_text(encoding="utf-8")
+        assert "<!-- generated:claude-executive -->" in content, "缺少摘要生成区块起始标记"
+        assert "<!-- /generated -->" in content, "缺少生成区块结束标记"
+
+    def test_render_claude_executive_block_covers_exceptionable(self):
+        """渲染结果须同时包含 INVARIANT 全量 与 EXCEPTIONABLE 全量 (R1 不可再被漏列)."""
+        from check_docs_consistency import _render_claude_executive_block
+
+        lines = _render_claude_executive_block()
+        inv_line = next(ln for ln in lines if "INVARIANT" in ln)
+        exc_line = next(ln for ln in lines if "EXCEPTIONABLE" in ln)
+        assert "R1" in exc_line, f"可豁免清单应含 R1, got: {exc_line}"
+        assert "R5" in exc_line, f"可豁免清单应含 R5, got: {exc_line}"
+        assert "R2" in inv_line and "R10" in inv_line, f"INVARIANT 清单应前后齐备, got: {inv_line}"
+
+    def test_check_claude_executive_sync_passes(self):
+        """真实 CLAUDE.md 顶部摘要应与 redlines.yml 渲染一致 (无错误)."""
+        from check_docs_consistency import check_claude_executive_sync
+
+        assert check_claude_executive_sync() == []
+
+    def test_detects_claude_executive_drift(self, tmp_path, monkeypatch):
+        """篡改 CLAUDE.md 摘要生成区块 → check_claude_executive_sync() 报错."""
+        import check_docs_consistency as cdc
+        from check_docs_consistency import _render_claude_executive_block
+
+        lines = _render_claude_executive_block()
+        tampered = "\n".join([lines[0]] + [lines[1].replace("R1", "R99")] + lines[2:])
+        tmp_claude = tmp_path / "CLAUDE.md"
+        tmp_claude.write_text(
+            "# CLAUDE.md\n\n## 本次会话必须遵守\n\n> 引述\n>\n"
+            "<!-- generated:claude-executive -->\n" + "\n".join(tampered) + "\n<!-- /generated -->\n\n## 正文\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = cdc.check_claude_executive_sync()
+        assert len(errors) > 0, "应检出摘要生成区块漂移, got no errors"
+        assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
 
 
 class TestRulesetMetadataConsistency:

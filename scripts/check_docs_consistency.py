@@ -106,6 +106,8 @@ EXCEPTIONS_YAML_PATH = ROOT / "docs" / "governance" / "exceptions.yml"
 CANONICAL_TOPICS_YAML_PATH = ROOT / "docs" / "governance" / "canonical-topics.yml"
 RULESET_CHANGELOG_PATH = ROOT / "docs" / "governance" / "ruleset-changelog.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
+# 生成区块统一结束标记（AGENTS.md 最小安全集 / CLAUDE.md 顶部摘要共用）
+_GENERATED_END_TAG = "<!-- /generated -->"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 # 单例注册清单文档（盲1 守卫基准）：散文「注册单例（@register_singleton，N 个）」数量 vs 表格实计
@@ -136,7 +138,8 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
-# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、PR 模板；排除项必须带原因（_DOC_EXCLUDES）。
+# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、requirements/ 全部 *.md、PR 模板；
+# 排除项必须带原因（_DOC_EXCLUDES）。
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
 _DOC_EXCLUDES: dict[Path, str] = {
     # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
@@ -150,6 +153,7 @@ CHECKED_DOCS: list[Path] = sorted(
         *ROOT.glob("*.md"),
         *(ROOT / "docs").rglob("*.md"),
         *(ROOT / "man").rglob("*.md"),
+        *(ROOT / "requirements").rglob("*.md"),
         ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
     }
     # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
@@ -1714,6 +1718,30 @@ def _render_agents_invariant_lines() -> list[str]:
     return lines
 
 
+def _render_claude_executive_block() -> list[str]:
+    """从 redlines.yml 渲染 CLAUDE.md 顶部「本次会话必须遵守」摘要生成区块行（不含包裹标记）。
+
+    与 _render_agents_invariant_lines() 同源，均以 redlines.yml 为唯一事实源，按 rule_type 分组
+    全量渲染 INVARIANT（不可豁免安全不变量）与 EXCEPTIONABLE（可豁免）红线，并追加 R18
+    （工作区整洁）。修复手工摘要仅列 R5 可豁免而漏 R1（EXCEPTIONABLE，例外 16 条）导致的
+    「第一屏」失真（F-04，机制推广 DOC-08）。
+    """
+    import yaml  # 延迟 import: 与 _render_agents_invariant_lines 保持一致
+
+    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    redlines = data["redlines"]
+
+    def _join(rule_type: str, sep: str) -> str:
+        return sep.join(f"{entry['id']} {entry['title']}" for entry in redlines if entry.get("rule_type") == rule_type)
+
+    r18 = next(entry for entry in redlines if entry.get("id") == "R18")
+    return [
+        f"> - **不可豁免安全不变量（INVARIANT，先读后写）**：{_join('INVARIANT', ' · ')}",
+        f"> - **可豁免（EXCEPTIONABLE，经 exceptions.yml 例外注册豁免）**：{_join('EXCEPTIONABLE', ' / ')}",
+        f"> - **工作区整洁**：R18 {r18['title']}（跨多文件任务须 git worktree 隔离）",
+    ]
+
+
 def _check_agents_declaration(content: str) -> list[str]:
     """校验 AGENTS.md 最小安全集区块前的声明句是否披露组成规则（含 R18）。
 
@@ -1749,6 +1777,28 @@ def _check_agents_declaration(content: str) -> list[str]:
     return errors
 
 
+def _generated_block_sync(
+    content: str,
+    start_tag: str,
+    expected: list[str],
+    mismatch_msg: str,
+    missing_msg: str,
+) -> list[str]:
+    """比对文档中生成区块内容是否等于预期渲染结果（DOC-08，F-04 推广到 CLAUDE.md）。
+
+    定位 start_tag 与 _GENERATED_END_TAG 之间内容，整段 strip 后按行与 expected 比对。
+    AGENTS.md 最小安全集与 CLAUDE.md 顶部摘要两个生成区块共用此同一比对机制，避免分叉。
+    """
+    start = content.find(start_tag)
+    end = content.find(_GENERATED_END_TAG)
+    if start == -1 or end == -1 or end <= start:
+        return [missing_msg]
+    block = content[start + len(start_tag) : end].strip().splitlines()
+    if block != expected:
+        return [mismatch_msg]
+    return []
+
+
 def check_agents_md_sync() -> list[str]:
     """校验 AGENTS.md 生成区块与 redlines.yml 一致性（DOC-08/DOC-13）。
 
@@ -1761,21 +1811,36 @@ def check_agents_md_sync() -> list[str]:
         return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
     content = AGENTS_PATH.read_text(encoding="utf-8")
     start_tag = "<!-- generated:redlines-invariant -->"
-    end_tag = "<!-- /generated -->"
-    start = content.find(start_tag)
-    end = content.find(end_tag)
-    if start == -1 or end == -1 or end <= start:
-        return [f"AGENTS.md 缺少生成区块标记（{start_tag} / {end_tag}）"]
-
-    block = content[start + len(start_tag) : end].strip().splitlines()
-    expected = _render_agents_invariant_lines()
-    if block != expected:
-        errors.append(
+    errors.extend(
+        _generated_block_sync(
+            content,
+            start_tag,
+            _render_agents_invariant_lines(),
             "AGENTS.md 生成区块与 redlines.yml 不一致（INVARIANT 红线 + R18）。"
-            "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。"
+            "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。",
+            f"AGENTS.md 缺少生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
         )
+    )
     errors.extend(_check_agents_declaration(content))
     return errors
+
+
+def check_claude_executive_sync() -> list[str]:
+    """校验 CLAUDE.md 顶部「本次会话必须遵守」摘要生成区块与 redlines.yml 一致性（F-04）。
+
+    与 check_agents_md_sync 同机制：CLAUDE.md 的 `<!-- generated:claude-executive -->` 与
+    `<!-- /generated -->` 之间内容须等于 redlines.yml 渲染结果（见 _render_claude_executive_block）。
+    """
+    content = CLAUDE_PATH.read_text(encoding="utf-8")
+    start_tag = "<!-- generated:claude-executive -->"
+    return _generated_block_sync(
+        content,
+        start_tag,
+        _render_claude_executive_block(),
+        "CLAUDE.md 顶部摘要生成区块与 redlines.yml 不一致（INVARIANT + EXCEPTIONABLE + R18）。"
+        "请改正本 redlines.yml 后同步生成区块，勿手工修改。",
+        f"CLAUDE.md 缺少顶部摘要生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
+    )
 
 
 # --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
@@ -2229,6 +2294,54 @@ def check_canonical_completion_criteria() -> list[str]:
             errors.append(
                 f"topics[{idx}] (id={topic.get('id')}) canonical '{norm}' 的「完成判定」章节"
                 f"无可打勾判据列表（至少一条 `- ` 项）"
+            )
+    return errors
+
+
+def check_canonical_docs_are_gated() -> list[str]:
+    """检查项 N：被登记为 canonical 正本的文档必须落在文档门禁受检范围内（F-13）。
+
+    canonical-topics.yml 把若干文档登记为正本；正本若不在 CHECKED_DOCS 内，就得不到
+    锚点死链 / 相对链接死链 / 版本一致 / 治理 ID / 书名号引用等任何门禁保护，准确性只靠
+    人工维护。本检查断言：每个 canonical 值都必须落在受检范围内。
+
+    与既有反向覆盖检查（check_enforcement_reverse_coverage）同思路：配置/代码里被声明为
+    正本的东西，在门禁中必须受保护。
+    """
+    errors: list[str] = []
+
+    # 受检集合：CHECKED_DOCS 解析后的绝对路径（含小写归一，规避 Windows 盘符/大小写差异）
+    checked: set[str] = set()
+    for d in CHECKED_DOCS:
+        try:
+            resolved = str(d.resolve())
+        except OSError:
+            continue
+        checked.add(resolved)
+        checked.add(resolved.lower())
+
+    topics = _load_canonical_topics()
+    if topics is None:
+        errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过 canonical 受检范围校验")
+        return errors
+
+    for idx, topic in enumerate(topics, 1):
+        canonical = topic.get("canonical")
+        if not isinstance(canonical, str):
+            continue
+        canonical_path = ROOT / canonical.removeprefix("./").strip()
+        if not canonical_path.exists():
+            errors.append(f"topics[{idx}] (id={topic.get('id')}) canonical 路径不存在: {canonical}")
+            continue
+        try:
+            resolved = str(canonical_path.resolve())
+        except OSError:
+            errors.append(f"topics[{idx}] (id={topic.get('id')}) canonical 无法解析: {canonical}")
+            continue
+        if resolved not in checked and resolved.lower() not in checked:
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) 正本 '{canonical}' 不在文档门禁受检范围 "
+                f"CHECKED_DOCS 内：声明为正本却不受保护 (F-13)"
             )
     return errors
 
@@ -2819,8 +2932,13 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     governance_yml = [
         p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
     ]
+    # 需求正本（requirements/*.md）整体排除：其内容使用需求编号（FR-UX-xxx，模式会命中
+    # UX-xxx）与阶段工作码（P3-7~P3-20），属非治理 ID 噪声，登记会污染治理对照表；
+    # 与 CHANGELOG.md / Plans.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
     scan_paths = [
-        p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md")
+        p
+        for p in CHECKED_DOCS
+        if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
     ] + governance_yml
     for path in scan_paths:
         if path.exists():
@@ -2967,6 +3085,8 @@ def main() -> int:
     all_errors.extend(check_flet_hub_completeness())
     # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
     all_errors.extend(check_agents_md_sync())
+    # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
+    all_errors.extend(check_claude_executive_sync())
 
     # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
     # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
@@ -2975,6 +3095,7 @@ def main() -> int:
     all_errors.extend(check_decision_tree_mapping())
     all_errors.extend(check_canonical_routing())
     all_errors.extend(check_canonical_completion_criteria())
+    all_errors.extend(check_canonical_docs_are_gated())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_adr_index_completeness())
@@ -3015,8 +3136,8 @@ def main() -> int:
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / 检视方法论文档登记 / "
+        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
+        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
