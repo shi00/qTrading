@@ -1500,8 +1500,9 @@ def check_enforcement_reverse_coverage() -> list[str]:
 
 
 # 例外注册表必填字段 (P1-01: 集中例外治理, 见 docs/governance/exceptions.yml)
+# validity_criteria (F-05): 可执行判据——供 AI 判定"例外是否仍应存在"的正向检查条件。
 EXCEPTION_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {"id", "rule_id", "paths", "reason", "owner", "approved_by", "verification"}
+    {"id", "rule_id", "paths", "reason", "owner", "approved_by", "verification", "validity_criteria"}
 )
 # expires_at 与 removal_trigger 二选一必填
 EXCEPTION_EXPIRY_FIELDS: frozenset[str] = frozenset({"expires_at", "removal_trigger"})
@@ -1512,7 +1513,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     校验 docs/governance/exceptions.yml：
     1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
-    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification)。
+    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)。
     3. expires_at 与 removal_trigger 二选一必填。
     4. id 唯一且格式为 EX-XXXX。
     5. rule_id 必须存在于 docs/governance/redlines.yml。
