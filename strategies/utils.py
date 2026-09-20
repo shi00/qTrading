@@ -95,3 +95,28 @@ class StrategyContext(TypedDict, total=False):
     # Message(i18n key + params)，交由 base filter 初始化本次运行通道、VM 透传、
     # View 在结果区上方渲染。符合 §3.2 策略只产出 i18n key 约束。
     warnings: list[Message]
+    # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关运行时注入）。
+    exclude_st: bool
+
+
+def filter_exclude_st(
+    df: pd.DataFrame,
+    context: StrategyContext,
+    default_exclude: bool = True,
+) -> tuple[pd.DataFrame, int]:
+    """SC-01: 从 pandas 候选表排除 ST/风险警示股行（OversoldStrategy 等非 Polars 基类路径）。
+
+    与 ``PolarsBaseStrategy._apply_exclude_st``（LazyFrame 形态）语义一致：
+    - ``context["exclude_st"]`` 运行时覆盖（UI 开关），缺省回退 ``default_exclude``；
+    - 无 ``is_st`` 列（旧数据源/测试构造）时原样返回，保持向后兼容；
+    - NULL is_st（stock_basic.name 可空）按「非 ST」处理：不排除且不计数；
+    - 返回 (过滤后 df, 排除数量)；排除数量为 0 或未启用时由调用方决定是否上报 D3-4 warnings。
+    """
+    exclude = context.get("exclude_st", default_exclude)
+    if not exclude or "is_st" not in df.columns:
+        return df, 0
+    is_st = df["is_st"].fillna(False).astype(bool)
+    excluded = int(is_st.sum())
+    if not excluded:
+        return df, 0
+    return df[~is_st], excluded

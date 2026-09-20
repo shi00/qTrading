@@ -6,6 +6,7 @@ import pandas as pd
 import polars as pl
 
 from core.errors import StrategyParamError
+from core.i18n import Message
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.attribution import ATTRIBUTION_COLUMN, attribution_to_json
 from strategies.ai_mixin import AIStrategyMixin
@@ -48,6 +49,11 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     requires_fundamental_coverage: bool = False
     required_context_keys: tuple[str, ...] = ("screening_data",)
     required_tables: tuple[str, ...] = ("daily_quotes",)
+
+    # SC-01: 是否排除 ST/*ST 风险警示股（基类统一过滤，根因优先于症状）。
+    # A 股量化的行业默认；专门研究 ST 股特征的策略可覆盖为 False。
+    # context["exclude_st"] 可运行时覆盖（UI 开关），缺省回退本类属性。
+    exclude_st: bool = True
 
     @require_quality(from_attr="required_quality_tier")
     async def filter(self, context: StrategyContext):
@@ -100,6 +106,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             # Thread-safety: df and context are not mutated concurrently during filter() execution.
             def _convert_and_filter(df_in, ctx):
                 lf = pl.from_pandas(df_in).lazy()
+                lf = self._apply_exclude_st(lf, ctx)
                 result_lf = self._filter_logic(lf, ctx)
                 return result_lf.collect().to_pandas()
 
@@ -134,6 +141,26 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         candidates_df = self._sort_for_ai(candidates_df)
 
         return await self.run_ai_analysis(candidates_df, context)  # type: ignore[arg-type]
+
+    def _apply_exclude_st(self, lf: pl.LazyFrame, ctx: StrategyContext) -> pl.LazyFrame:
+        """SC-01: 基类统一排除 ST/*ST 风险警示股。
+
+        在 ``_filter_logic`` 之前施加（根因优先于症状，避免每个策略各加一次）。
+        - ``ctx["exclude_st"]`` 运行时覆盖（UI 开关），缺省回退类属性 ``exclude_st``；
+        - 无 ``is_st`` 列（如测试构造数据/未升级数据源）时跳过，保持向后兼容；
+        - 排除数量经既有 D3-4 warnings 通道透传（「已排除 N 只风险警示股」），
+          避免变成一次静默过滤（SC-01 报告建议 3）。
+        在线程池线程内执行：仅对 ctx list append（GIL 原子），主协程 await 完成后读取，无竞态。
+        """
+        exclude = ctx.get("exclude_st", self.exclude_st)
+        if not exclude or "is_st" not in lf.collect_schema().names():
+            return lf
+        # NULL is_st（stock_basic.name 可空，双 COALESCE 仍可能为 NULL）按「非 ST」处理：
+        # 不排除且不计数，避免 NULL 行被 ~pl.col() 过滤掉造成静默漏股。
+        excluded = lf.filter(pl.col("is_st").is_not_null() & pl.col("is_st")).select(pl.len()).collect().item()
+        if excluded:
+            ctx.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded}))
+        return lf.filter(pl.col("is_st").fill_null(False).not_())
 
     @abstractmethod
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:

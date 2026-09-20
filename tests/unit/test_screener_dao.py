@@ -759,6 +759,64 @@ class TestScreenerDaoSwIndustryJoin:
             assert "AND out_date IS NULL" not in lateral, f"行业 LATERAL 不得退回裸当前快照:\n{lateral}"
 
 
+class TestScreenerDaoExcludeSt:
+    """SC-01: 筛选 SQL 层 as-of ST 判定（stock_name_history LATERAL + is_st 派生列）。"""
+
+    @staticmethod
+    def _extract_name_lateral(sql: str) -> str:
+        """提取 stock_name_history 的 LATERAL 子查询片段（含 LIMIT 1）。"""
+        m = re.search(
+            r"LEFT JOIN LATERAL \(\s*SELECT name\s*FROM stock_name_history.*?LIMIT 1\s*\) nh ON TRUE",
+            sql,
+            re.S,
+        )
+        assert m is not None, f"SQL 中未找到 stock_name_history LATERAL 子查询:\n{sql}"
+        return m.group(0)
+
+    def test_single_day_template_has_asof_name_lateral(self):
+        """SC-01: 单日模板必须经 stock_name_history 做 as-of 名称还原（as-of 为 $1）。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        lateral = self._extract_name_lateral(sql)
+        assert "start_date <= $1" in lateral, f"单日模板缺少 start_date as-of 条件:\n{lateral}"
+        assert "(end_date IS NULL OR end_date > $1)" in lateral, f"单日模板缺少 end_date as-of 条件:\n{lateral}"
+
+    def test_range_template_has_asof_name_lateral(self):
+        """SC-01: 区间模板必须逐交易日做 as-of 名称还原（as-of 为 cal.cal_date）。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        lateral = self._extract_name_lateral(sql)
+        assert "start_date <= cal.cal_date" in lateral, f"区间模板缺少 start_date as-of 条件:\n{lateral}"
+        assert "(end_date IS NULL OR end_date > cal.cal_date)" in lateral, (
+            f"区间模板缺少 end_date as-of 条件:\n{lateral}"
+        )
+
+    def test_name_lateral_deterministic_order(self):
+        """SC-01: LATERAL LIMIT 1 前必须有 ORDER BY start_date DESC（防执行计划漂移）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            lateral = self._extract_name_lateral(sql)
+            assert "ORDER BY start_date DESC" in lateral, f"名称 LATERAL 缺少 ORDER BY:\n{lateral}"
+            assert "LIMIT 1" in lateral
+            assert lateral.index("ORDER BY start_date DESC") < lateral.index("LIMIT 1")
+
+    def test_name_column_coalesce_asof_fallback(self):
+        """SC-01: name 列 COALESCE(nh.name, b.name)——名称表空/无记录时回退当前名称。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "COALESCE(nh.name, b.name) AS name" in sql
+
+    def test_is_st_column_with_dual_fallback(self):
+        """SC-01: is_st 派生列 COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%')。
+
+        双回退：名称表有 as-of 记录用历史名判定（消除当前快照前视/漏判），
+        无记录时回退当前名称，空表不误判全市场非 ST。
+        """
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%') AS is_st" in sql
+
+
 class TestScreenerDaoGetLatestClosedTradeDate:
     @pytest.mark.asyncio
     async def test_returns_date_string(self):

@@ -6,8 +6,8 @@ import polars as pl
 
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
-from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
+from strategies.utils import StrategyContext, filter_exclude_st
 from core.i18n import I18n, Message
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
@@ -121,6 +121,10 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
     required_context_keys: tuple[str, ...] = ("screening_data",)
     required_tables: tuple[str, ...] = ("daily_quotes",)
+
+    # SC-01: 基类统一排除 ST/风险警示股（非 Polars 路径，见 _math_filter）。
+    # context["exclude_st"] 可运行时覆盖（UI 开关），缺省回退本类属性。
+    exclude_st: bool = True
 
     @property
     def required_history_days(self):
@@ -310,6 +314,11 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         if snapshot_df is None or snapshot_df.empty:
             logger.warning("[OversoldStrategy] No snapshot data available.")
             return pd.DataFrame()
+
+        # SC-01: 与 PolarsBaseStrategy 一致，从筛选数据统一排除 ST/风险警示股。
+        snapshot_df, excluded_st = filter_exclude_st(snapshot_df, context, self.exclude_st)
+        if excluded_st:
+            context.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded_st}))
 
         if dp is None:
             logger.error("[OversoldStrategy] DataProcessor not found in context.")
