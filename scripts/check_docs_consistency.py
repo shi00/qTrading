@@ -138,7 +138,8 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
-# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、PR 模板；排除项必须带原因（_DOC_EXCLUDES）。
+# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、requirements/ 全部 *.md、PR 模板；
+# 排除项必须带原因（_DOC_EXCLUDES）。
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
 _DOC_EXCLUDES: dict[Path, str] = {
     # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
@@ -152,6 +153,7 @@ CHECKED_DOCS: list[Path] = sorted(
         *ROOT.glob("*.md"),
         *(ROOT / "docs").rglob("*.md"),
         *(ROOT / "man").rglob("*.md"),
+        *(ROOT / "requirements").rglob("*.md"),
         ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
     }
     # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
@@ -2224,6 +2226,54 @@ def check_canonical_routing() -> list[str]:
     return errors
 
 
+def check_canonical_docs_are_gated() -> list[str]:
+    """检查项 N：被登记为 canonical 正本的文档必须落在文档门禁受检范围内（F-13）。
+
+    canonical-topics.yml 把若干文档登记为正本；正本若不在 CHECKED_DOCS 内，就得不到
+    锚点死链 / 相对链接死链 / 版本一致 / 治理 ID / 书名号引用等任何门禁保护，准确性只靠
+    人工维护。本检查断言：每个 canonical 值都必须落在受检范围内。
+
+    与既有反向覆盖检查（check_enforcement_reverse_coverage）同思路：配置/代码里被声明为
+    正本的东西，在门禁中必须受保护。
+    """
+    errors: list[str] = []
+
+    # 受检集合：CHECKED_DOCS 解析后的绝对路径（含小写归一，规避 Windows 盘符/大小写差异）
+    checked: set[str] = set()
+    for d in CHECKED_DOCS:
+        try:
+            resolved = str(d.resolve())
+        except OSError:
+            continue
+        checked.add(resolved)
+        checked.add(resolved.lower())
+
+    topics = _load_canonical_topics()
+    if topics is None:
+        errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过 canonical 受检范围校验")
+        return errors
+
+    for idx, topic in enumerate(topics, 1):
+        canonical = topic.get("canonical")
+        if not isinstance(canonical, str):
+            continue
+        canonical_path = ROOT / canonical.removeprefix("./").strip()
+        if not canonical_path.exists():
+            errors.append(f"topics[{idx}] (id={topic.get('id')}) canonical 路径不存在: {canonical}")
+            continue
+        try:
+            resolved = str(canonical_path.resolve())
+        except OSError:
+            errors.append(f"topics[{idx}] (id={topic.get('id')}) canonical 无法解析: {canonical}")
+            continue
+        if resolved not in checked and resolved.lower() not in checked:
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) 正本 '{canonical}' 不在文档门禁受检范围 "
+                f"CHECKED_DOCS 内：声明为正本却不受保护 (F-13)"
+            )
+    return errors
+
+
 # --- DOC-07/DOC-11: 文档索引全覆盖（CONTRIBUTING.md 或 docs/README.md 目录级引用覆盖 docs/**/*.md）---
 # 职责单一：断言 `docs/**/*.md` 中每个文件都能被索引源引用，目录级引用视为覆盖其下全部文件。
 # 固定双索引源（CONTRIBUTING_PATH / DOCS_README_PATH），不依赖手动维护的清单。
@@ -2810,8 +2860,13 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     governance_yml = [
         p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
     ]
+    # 需求正本（requirements/*.md）整体排除：其内容使用需求编号（FR-UX-xxx，模式会命中
+    # UX-xxx）与阶段工作码（P3-7~P3-20），属非治理 ID 噪声，登记会污染治理对照表；
+    # 与 CHANGELOG.md / Plans.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
     scan_paths = [
-        p for p in CHECKED_DOCS if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md")
+        p
+        for p in CHECKED_DOCS
+        if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
     ] + governance_yml
     for path in scan_paths:
         if path.exists():
@@ -2967,6 +3022,7 @@ def main() -> int:
     all_errors.extend(check_ruleset_changelog_version())
     all_errors.extend(check_decision_tree_mapping())
     all_errors.extend(check_canonical_routing())
+    all_errors.extend(check_canonical_docs_are_gated())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_adr_index_completeness())
@@ -3008,7 +3064,7 @@ def main() -> int:
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
+        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
