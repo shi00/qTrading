@@ -10,6 +10,55 @@
 
 测试 marker 清单见 [`pyproject.toml`](../../pyproject.toml) 的 `[tool.pytest.ini_options].markers`（含 `unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` 等）。本文档不手工维护子集，以 `pyproject.toml` 为单一事实源。
 
+### 测试资产地图
+
+> 仓库测试资产共 **495 个 `.py`**（`tests/` 递归计数，不含 `__init__.py` 外的 fixture/工具）。本节是测试资产的可发现索引：先查"去哪个目录、按什么关键词、用什么 fixture"，再着手写，避免重复造轮子（§3.2 复用优先）。entry-level 运行命令见「marker → 运行命令」表；E2E / embedded 完整前置见「集成与 E2E 环境」小节。
+
+#### 测试目录 → 覆盖对象 → 如何定位
+
+| 测试目录（glob） | 覆盖对象 | 如何定位（关键词 / glob） | 新增用例入该目录的条件 |
+|---|---|---|---|
+| `tests/unit/test_*.py`（顶层，约 210 个文件） | 各层纯逻辑单测 + **治理/文档门禁**（见下） | `tests/unit/test_<主题>.py`；按类名如 `test_no_cancelled_error_swallow.py`（R2）/ `test_no_class_attr_asyncio_primitives.py`（R11）/ `test_architecture_boundaries.py`（R1）/ `test_redline_checks.py` / `test_data_dictionary_alignment.py`（R12）/ `test_cache_manager_dao_registry.py`（R13）/ `test_r8_enforcement.py`（R8）/ `test_i18n_*.py` | 不依赖真实 DB / 外部服务，用 mock 隔离即归此域；门禁 / 脚本 / 工具类变更的配套测试必放此 |
+| `tests/unit/strategies/` | 策略类（`strategies/`） | `strategies/`、`backtest/` 等子目录 | 单测断言 `required_quality_tier` + `_filter_logic`（Polars 夹具） |
+| `tests/unit/data/` + `persistence/` + `daos/` + `data/domain_services/` + `data/persistence/daos/` | `data/` 层：DAO / 数据清洗 / 域服务 | `tests/unit/data/**`、`tests/unit/daos/**`、`tests/unit/persistence/**` | 用 mock engine / mock TushareClient 隔离真实 IO（sync/DAO 顶层单测如 `test_holder_sync.py` 亦在此域） |
+| `tests/unit/services/` + `ai_service/` | `services/` 层：应用服务 / AI 服务 / 编排 | `tests/unit/services/**`、`services/ai_service/` | 服务单测；涉及 is_refresh 生命周期 / 轮询编排 |
+| `tests/unit/ui/`（含 `viewmodels/` / `views/` / `components/`） | `ui/` 层：ViewModel / 视图 / 组件 | `tests/unit/ui/**` | ViewModel 状态快照 + subscribe 断言；依赖 `tests/unit/ui/conftest.py` 的 page stub |
+| `tests/unit/utils/`、`tests/unit/scripts/` | `utils/` 横切 + `scripts/` 工程工具 | 按被测模块名 `tests/unit/utils/*` | utils / 工程脚本逻辑 |
+| `tests/builders/` | 测试数据构建器（`stock_data.py`） | `tests/builders/*.py` | 跨文件共享的最小真实数据集构造（stock_basic / trade_cal / daily_quotes） |
+| `tests/integration/`（约 70 个文件） | DAO / 服务 / 模型 / schema（真实 `test_astock` PostgreSQL） | `tests/integration/*.py`；`fixtures/mvd_data.py`；`tests/integration/_db_config.py` | 需真实 DB / schema 的行为验证（标记 `integration`） |
+| `tests/e2e/`（+`fixtures/fake_sidecar.py`） | Flet UI 端到端 / embedded 启动 / onboarding 流程 | `tests/e2e/*.py` | 端到端真实运行（标记 `e2e`），依赖 E2E 环境（见下） |
+
+**治理 / 文档门禁测试**（`tests/unit/` 顶层，与施工门禁强相关）：
+`test_docs_consistency.py`（文档一致性）· `test_redline_checks.py`（红线检查）· `test_architecture_boundaries.py`（R1 分层）· `test_import_linter_config.py`（import-linter 契约）· `test_no_cancelled_error_swallow.py`（R2）· `test_no_class_attr_asyncio_primitives.py`（R11）· `test_check_diff_coverage.py` · `test_check_per_file_coverage.py` · `test_check_staged_weak_assertions.py` · `test_scan_weak_assertions.py` · `test_run_pyright_changed.py`。新增/修改门禁或工程脚本规范时，配套测试一律放入 `tests/unit/` 顶层。
+
+#### conftest 层级与 autouse fixture
+
+| 文件 | 作用域 | 关键 fixture / hook |
+|---|---|---|
+| `tests/conftest.py` | session | `pytest_asyncio_loop_factories()`（Windows SelectorEventLoop）、`singleton_state` 上下文管理器、`mock_external_services` autouse（mock `NewsFetcher`/`ReviewManager`）、`isolate_config_file`、keyring/litellm 全局 mock、`pytest_configure` 早期拦截 |
+| `tests/unit/conftest.py` | unit | **`_reset_all_singletons` autouse**（R7 单例隔离）、`_isolate_egress_audit_disk` 等 8 个 autouse 状态重置 fixture |
+| `tests/unit/ui/conftest.py` | unit-ui | page stub（`Control.update()` 已挂载兼容，按 monkeypatch 隔离） |
+| `tests/integration/conftest.py` | integration | `_v1_page_compat`、`_isolate_tushare_token_file`、`function_engine` 等；session 级 DB 环境搭建 |
+| `tests/e2e/conftest.py` | e2e | session 级真 sidecar 启动 fixture（`real_sidecar_binary_e2e` / `flet_app` / `embedded_wizard_app` 等） |
+
+#### marker → 运行命令
+
+> marker 清单单一事实源为 `pyproject.toml` `[tool.pytest.ini_options].markers`（`unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` / `embedded_real` / `meta` / `xdist_group` / `timeout_e2e_*`）。以下为常用运行入口。
+
+| 关注域 | 运行命令 |
+|---|---|
+| 单元测试 | `python -m pytest tests/unit/ -n auto -v --tb=short` |
+| 集成测试 | `python -m pytest tests/integration/ -n auto -v --tb=short`（需 `test_astock` 库，见 CONTRIBUTING.md「数据库设置」） |
+| E2E 本地跑 | 根目录 `python run_e2e_local.py`（绕过 PowerShell ExecutionPolicy，自动设 sidecar/artifact/env 变量） |
+| embedded 真实 sidecar 集成/E2E | 见 [how-to.md「10. 运行 embedded 模式真实 sidecar 测试」](../guides/how-to.md#10-运行-embedded-模式真实-sidecar-测试)（前提、命令、skip 行为/CI 均在该节，不复制） |
+
+#### 测试质量治理工具
+
+| 工具 | 用途 | 入口 |
+|---|---|---|
+| flaky 处置 | 重复跑 pytest 对比多轮结果，定位 flaky nodeid | `python scripts/detect_flaky.py [--path tests/unit/ --runs 10 --parallel/--reruns/--lf]` |
+| 弱断言治理 | 扫描弱断言（裸布尔 / pass / Mock 弱断言等），baseline 增量阻断 | CI：`python scripts/scan_weak_assertions.py --base tests/weak_assertion_baseline.json`（baseline 条目数只降不升，`--update-baseline` 开发态覆盖）；pre-commit：`scripts/check_staged_weak_assertions.py`（仅阻断新增）；行内白名单 `# noqa: weak-assertion <reason>` |
+
 ### 测试编写规则
 
 - **单例隔离**: 单元测试（`tests/unit/`）由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置所有注册单例。集成测试和 e2e 测试不自动重置单例，需手动管理。需精细控制单例初始化状态时（如测试 `__init__` 重复初始化防护），可使用 `singleton_state` 上下文管理器：
