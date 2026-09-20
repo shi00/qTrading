@@ -9,7 +9,7 @@ import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
-from data.mixins.health_mixin import HealthCheckMixin, _compute_tier
+from data.mixins.health_mixin import HealthCheckMixin, _classify_table_tier, _compute_tier
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.write_quality import WriteQuality
 from data.constants import (
@@ -2281,3 +2281,90 @@ class TestRunQualityScanMissingDates:
         self._mock_scan_env(proc)
         await proc.run_quality_scan(sample_size=1)
         assert isinstance(proc._scan_missing_dates, frozenset)
+
+
+class TestClassifyTableTier:
+    """DS-03: per-table 质量等级分类（支撑 per-table 门控）。
+
+    覆盖：
+      - financial 陈旧 → BRONZE；avg_fund=None → SILVER（fast-path GOLD 不可达）；
+        avg_fund < LOW → BRONZE（①）；avg_fund > HIGH → GOLD；中间 → SILVER。
+      - 非 financial：报价陈旧 → BRONZE；新鲜 → GOLD（逐表可达最高级）。
+      - lag_days=None（无引用数据）保守按新鲜处理。
+    """
+
+    def test_financial_stale_bronze(self):
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                fin_lag_days=TIER_FINANCIAL_FRESHNESS_DAYS + 1,
+                avg_fundamental=0.8,
+            )
+            == 1
+        )
+
+    def test_financial_avg_fund_none_silver(self):
+        assert _classify_table_tier(is_financial=True, avg_fundamental=None) == 2
+
+    def test_financial_avg_fund_below_low_bronze(self):
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                fin_lag_days=1,
+                avg_fundamental=TIER_FUNDAMENTAL_LOW_THRESHOLD - 0.1,
+            )
+            == 1
+        )
+
+    def test_financial_avg_fund_below_low_bronze_stale_quote_ignored(self):
+        """financial 评分只看 fin 维度，报价 lag 不影响其分级（①）。"""
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                lag_days=0,
+                fin_lag_days=1,
+                avg_fundamental=TIER_FUNDAMENTAL_LOW_THRESHOLD - 0.1,
+            )
+            == 1
+        )
+
+    def test_financial_avg_fund_below_low_bronze_even_when_fin_lag_none(self):
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                avg_fundamental=TIER_FUNDAMENTAL_LOW_THRESHOLD - 0.1,
+            )
+            == 1
+        )
+
+    def test_financial_avg_fund_high_gold(self):
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                fin_lag_days=1,
+                avg_fundamental=TIER_FUNDAMENTAL_HIGH_THRESHOLD + 0.1,
+            )
+            == 3
+        )
+
+    def test_financial_mid_silver(self):
+        assert (
+            _classify_table_tier(
+                is_financial=True,
+                fin_lag_days=1,
+                avg_fundamental=(TIER_FUNDAMENTAL_HIGH_THRESHOLD + TIER_FUNDAMENTAL_LOW_THRESHOLD) / 2,
+            )
+            == 2
+        )
+
+    def test_quote_fresh_gold(self):
+        assert _classify_table_tier(lag_days=0) == 3
+
+    def test_quote_fresh_within_threshold_gold(self):
+        assert _classify_table_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS) == 3
+
+    def test_quote_stale_bronze(self):
+        assert _classify_table_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1) == 1
+
+    def test_quote_lag_none_conservative_fresh(self):
+        assert _classify_table_tier() == 3

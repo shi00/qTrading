@@ -70,6 +70,10 @@ class _BacktestQualityProxy:
         # `__getattr__` 转发到实盘 delegate，把"实盘最新数据落后天数(lag_days)"误作回测
         # 区间归因——回测归因应仅由上方 `_scan_missing_dates` 报告的区间缺失交易日承载。
         self._health_cache: dict | None = None
+        # DS-03: 显式覆写 per-table 等级表为 None，避免 `_check_tier` 经 `__getattr__`
+        # 转发到实盘 delegate 的逐表等级——回测信任本代理固定的 `_quality_tier` 定值
+        # （GOLD），不依实盘 per-table 质量判级（None ⇒ 非 dict ⇒ 门控回退全局）。
+        self._quality_tier_by_table: dict[str, int] | None = None
 
     def __getattr__(self, name: str) -> Any:
         # 仅当普通实例属性不存在时被调用：委托给真实 data_processor，

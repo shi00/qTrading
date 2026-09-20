@@ -12,7 +12,7 @@ from strategies.utils import fmt_val, threshold_in_data_unit
 
 @register_strategy("value")
 class ValueStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
@@ -118,7 +118,7 @@ class ValueStrategy(PolarsBaseStrategy):
 
 @register_strategy("growth")
 class GrowthStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
@@ -207,7 +207,7 @@ class GrowthStrategy(PolarsBaseStrategy):
 
 @register_strategy("dividend")
 class DividendStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
@@ -261,7 +261,7 @@ class DividendStrategy(PolarsBaseStrategy):
 
 @register_strategy("cashflow")
 class CashFlowStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")

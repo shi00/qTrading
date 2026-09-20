@@ -446,6 +446,9 @@ class TestDataProcessor(unittest.TestCase):
 
         await self.processor._assign_basic_tier()
         self.assertEqual(self.processor._quality_tier, 2)
+        # DS-03: fast-path per-table —— fresh 报价可达 GOLD，financial 无字段完整性最高 SILVER
+        self.assertEqual(self.processor._quality_tier_by_table["daily_quotes"], 3)
+        self.assertEqual(self.processor._quality_tier_by_table["financial_reports"], 2)
 
     def test_assign_basic_tier_gold(self):
         asyncio.run(self.async_test_assign_basic_tier_gold())
@@ -456,6 +459,8 @@ class TestDataProcessor(unittest.TestCase):
 
         await self.processor._assign_basic_tier()
         self.assertEqual(self.processor._quality_tier, 0)
+        # DS-03: 无 sync 记录时 per-table 表被重置为空（不残留上次运行等级）
+        self.assertEqual(self.processor._quality_tier_by_table, {})
 
     def test_assign_basic_tier_critical(self):
         asyncio.run(self.async_test_assign_basic_tier_critical())
@@ -476,6 +481,9 @@ class TestDataProcessor(unittest.TestCase):
 
         await self.processor._assign_basic_tier()
         self.assertEqual(self.processor._quality_tier, 1)
+        # DS-03: 报价陈旧 → daily_quotes 为 BRONZE，financial 仍保守 SILVER
+        self.assertEqual(self.processor._quality_tier_by_table["daily_quotes"], 1)
+        self.assertEqual(self.processor._quality_tier_by_table["financial_reports"], 2)
 
     def test_assign_basic_tier_bronze(self):
         asyncio.run(self.async_test_assign_basic_tier_bronze())

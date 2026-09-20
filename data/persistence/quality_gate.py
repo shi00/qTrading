@@ -65,6 +65,7 @@ def _check_tier(
     min_tier: typing.Any,
     func_name: typing.Any,
     require_continuous_window: bool = False,
+    required_tables: tuple[str, ...] = (),
 ):
     """Shared logic to verify quality tier, optionally enforcing window integrity."""
     if is_e2e_mode():
@@ -87,6 +88,14 @@ def _check_tier(
     current_tier = getattr(processor, "_quality_tier", None)
     if current_tier is None:
         current_tier = 0  # Treat uninitialized as CRITICAL
+    # DS-03: per-table 门控。策略声明 required_tables 时，effective 为各表自身等级的
+    # 最小值（避免全局等级退化到 SILVER 恰等于基本面策略默认要求的放行漏洞）。
+    # 未登记的 required 表回退全局等级；未声明 required_tables 或 processor 无
+    # per-table 表（如回测 DataProvider 仅单 int）时保持原全局判定，兼容既有行为。
+    if required_tables:
+        by_table = getattr(processor, "_quality_tier_by_table", None)
+        if isinstance(by_table, dict):
+            current_tier = min(by_table.get(_t, current_tier) for _t in required_tables)
     if current_tier < min_tier:
         from core.i18n import I18n
 
@@ -196,6 +205,7 @@ def require_quality(
                     _resolve_tier(self),
                     func.__name__,
                     require_continuous_window=require_continuous_window,
+                    required_tables=tuple(getattr(self, "required_tables", ()) or ()),
                 )
                 return await func(self, *args, **kwargs)
 
@@ -209,6 +219,7 @@ def require_quality(
                 _resolve_tier(self),
                 func.__name__,
                 require_continuous_window=require_continuous_window,
+                required_tables=tuple(getattr(self, "required_tables", ()) or ()),
             )
             return func(self, *args, **kwargs)
 

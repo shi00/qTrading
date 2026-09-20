@@ -376,6 +376,108 @@ class TestCheckTier:
         assert "continuous window integrity" not in str(exc_info.value)
 
 
+class TestCheckTierPerTableGate:
+    """DS-03: per-table 门控 — required_tables 声明时 effective 为逐表等级最小值。
+
+    - financial_reports 等级 SILVER/BRONZE 而策略要求 GOLD ⇒ 拦截。
+    - 多 required 表取最小值。
+    - 未登记的 required 表回退全局等级。
+    - by_table 缺失/None（回测代理）⇒ 回退全局，兼容既有单 int 语义。
+    - required_tables 为空 ⇒ 保持原全局判定。
+    """
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_gold_required_blocked_when_financial_silver(self, mock_i18n):
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._quality_tier_by_table = {
+            "daily_quotes": 3,
+            "financial_reports": QualityTier.SILVER,
+        }
+        with pytest.raises(QualityGateError):
+            _check_tier(
+                processor,
+                QualityTier.GOLD,
+                "test_func",
+                required_tables=("daily_quotes", "financial_reports"),
+            )
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_gold_required_passes_when_all_gold(self):
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._quality_tier_by_table = {
+            "daily_quotes": QualityTier.GOLD,
+            "financial_reports": QualityTier.GOLD,
+        }
+        _check_tier(
+            processor,
+            QualityTier.GOLD,
+            "test_func",
+            required_tables=("daily_quotes", "financial_reports"),
+        )
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_gold_required_blocked_when_financial_bronze(self, mock_i18n):
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._quality_tier_by_table = {
+            "daily_quotes": QualityTier.GOLD,
+            "financial_reports": QualityTier.BRONZE,
+        }
+        with pytest.raises(QualityGateError):
+            _check_tier(
+                processor,
+                QualityTier.GOLD,
+                "test_func",
+                required_tables=("daily_quotes", "financial_reports"),
+            )
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_multi_required_tables_use_min(self):
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        processor._quality_tier_by_table = {
+            "t1": QualityTier.GOLD,
+            "t2": QualityTier.SILVER,
+        }
+        # 要求 GOLD：min(t1=3, t2=2)=2 < 3 ⇒ 拦截
+        with pytest.raises(QualityGateError):
+            _check_tier(processor, QualityTier.GOLD, "f", required_tables=("t1", "t2"))
+        # 要求 SILVER：min=2 >= 2 ⇒ 放行
+        _check_tier(processor, QualityTier.SILVER, "f", required_tables=("t1", "t2"))
+
+    @patch("core.i18n.I18n")
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_unregistered_required_table_falls_back_to_global(self, mock_i18n):
+        mock_i18n.get.return_value = "quality_err_too_low"
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.BRONZE
+        processor._quality_tier_by_table = {"other": QualityTier.GOLD}
+        # required 表 "daily_quotes" 未登记 → 回退全局 BRONZE(1)；要求 GOLD ⇒ 拦截
+        with pytest.raises(QualityGateError):
+            _check_tier(processor, QualityTier.GOLD, "f", required_tables=("daily_quotes",))
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_by_table_absent_uses_global(self):
+        """回测代理无 per-table 表（None/falsey）⇒ 回退全局，兼容单 int 语义。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.GOLD
+        processor._quality_tier_by_table = None
+        _check_tier(processor, QualityTier.GOLD, "f", required_tables=("daily_quotes", "financial_reports"))
+
+    @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
+    def test_no_required_tables_uses_global(self):
+        """required_tables 为空 ⇒ 与原全局判定一致。"""
+        processor = MagicMock()
+        processor._quality_tier = QualityTier.SILVER
+        _check_tier(processor, QualityTier.SILVER, "f")
+
+
 class TestRequireQualityDecorator:
     @patch("data.persistence.quality_gate._STRICT_QUALITY_GATE", False)
     def test_sync_decorator_passes(self):
