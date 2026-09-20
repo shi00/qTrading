@@ -6,6 +6,7 @@ Phase 2G §3.2：stk_limit 涨跌停价格，仅数据层，不注入 AI。
 import logging
 
 import pandas as pd
+import sqlalchemy as sa
 
 from data.persistence.models import StkLimit, get_model_columns, get_model_pk_columns
 
@@ -33,3 +34,14 @@ class StkLimitDao(BaseDao):
             cols,
             pk_columns=pk_columns,
         )
+
+    async def get_stk_limit_range(self, start_date: str, end_date: str) -> pd.DataFrame | None:
+        """区间涨跌停价格（ts_code/trade_date/up_limit/down_limit），供回测撮合层按执行价判定可成交性。
+
+        涨跌停价是名义价，与 raw_open/raw_close 同口径；stk_limit 缺失时由调用方
+        _enrich_limit_status 显式告警（limit_data_absent），不做静默回退。
+        """
+        stmt = sa.select(StkLimit.ts_code, StkLimit.trade_date, StkLimit.up_limit, StkLimit.down_limit).where(
+            StkLimit.trade_date.between(self._to_db_date(start_date), self._to_db_date(end_date))
+        )
+        return await self._read_db_select(stmt)
