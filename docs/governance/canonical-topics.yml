@@ -37,6 +37,11 @@ topics:
     title: 新增/修改数据同步
     canonical: docs/patterns/data-sync.md
 
+  - id: application-service
+    title: 新增/修改应用服务
+    canonical: docs/patterns/application-service.md
+    note: 应用服务层以引用为主的汇编正本（单例判定 / R5 轮询豁免 EX-0017 / 编排边界 / 错误分类与降级）
+
   - id: ui-view
     title: 新增/修改 UI 视图
     canonical: docs/flet/README.md
