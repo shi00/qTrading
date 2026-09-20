@@ -451,14 +451,21 @@ class TestLLMProviders:
     """Tests for LLM_PROVIDERS configuration data"""
 
     def test_provider_data_structure(self):
-        """Test: LLM_PROVIDERS has correct structure for all providers"""
+        """Test: LLM_PROVIDERS has correct structure for all providers
+
+        §3.1c：LLM_PROVIDERS 仅保留供应商识别元数据 + 运行路由必需字段
+        （无 models / 无 URL 注册 / 无 tag），模型列表统一经 litellm 目录。
+        """
         from utils.llm_providers import LLM_PROVIDERS
 
-        required_keys = ["name", "base_url", "models", "key_prefix"]
+        required_keys = ["name", "base_url", "key_prefix"]
 
         for provider_id, provider_data in LLM_PROVIDERS.items():
             for key in required_keys:
                 assert key in provider_data, f"Provider {provider_id} missing key {key}"
+            # §3.1c：静态 models 列表已移除，模型目录依赖 litellm
+            assert "models" not in provider_data, f"Provider {provider_id} should not carry static models"
+            assert "tag" not in provider_data, f"Provider {provider_id} should not carry display tag"
 
     def test_azure_provider_config(self):
         """Test: Azure provider has azure_config flag"""
@@ -469,18 +476,26 @@ class TestLLMProviders:
         assert azure_config.get("azure_config") is True
         assert azure_config.get("base_url") == ""
 
-    def test_deepseek_provider_models(self):
-        """Test: DeepSeek provider has expected models"""
-        from utils.llm_providers import LLM_PROVIDERS
+    def test_deepseek_provider_models(self, monkeypatch):
+        """Test: DeepSeek provider models come from litellm catalog (not static list)
 
-        deepseek = LLM_PROVIDERS.get("deepseek")
-        assert deepseek is not None
+        §3.1c：模型目录 100% 依赖 litellm；此处验证投影目录可解析出 deepseek 模型。
+        """
+        import utils.llm_providers as llm_providers
 
-        models = deepseek.get("models", [])
-        model_ids = [m.get("id") for m in models]
+        # 强断言：deepseek 配置存在且目录 key 指向 litellm 官方目录（无静态 models）
+        deepseek = llm_providers.LLM_PROVIDERS["deepseek"]
+        assert deepseek["litellm_catalog_key"] == "deepseek"
+
+        monkeypatch.setattr(
+            llm_providers,
+            "get_litellm_models_by_provider",
+            lambda: {"deepseek": [{"id": "deepseek-v4-pro", "context": 1000}]},
+        )
+        projection = llm_providers.get_litellm_models_by_provider()
+        model_ids = [m.get("id") for m in projection.get("deepseek", [])]
 
         assert "deepseek-v4-pro" in model_ids
-        assert "deepseek-v4-flash" in model_ids
 
     def test_provider_categories(self):
         """Test: PROVIDER_CATEGORIES contains all expected providers"""

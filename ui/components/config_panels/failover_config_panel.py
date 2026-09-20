@@ -20,7 +20,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_change, safe_on_click
-from ui.components.safe_wrap_row import SafeWrapRow
+from ui.components.model_picker import ModelPicker
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -30,7 +30,8 @@ from ui.viewmodels.failover_config_panel_view_model import (
     FailoverConfigPanelViewModel,
     FailoverItem,
 )
-from utils.llm_providers import LLM_PROVIDERS, get_display_tag
+from ui.viewmodels.model_picker_view_model import ModelPickerViewModel
+from utils.llm_providers import LLM_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -84,55 +85,6 @@ def _build_provider_options(
     return options
 
 
-def _build_model_options(provider: str) -> list[ft.dropdown.Option]:
-    """构建指定供应商的模型下拉选项（tag 需 i18n）。"""
-    pinfo = LLM_PROVIDERS.get(provider, {})
-    models = pinfo.get("models", [])
-
-    options: list[ft.dropdown.Option] = []
-    for m in models:
-        label = str(m.get("id", ""))
-        tag = m.get("tag", "")
-        display_tag = get_display_tag(tag)
-        if display_tag:
-            label += f" ({display_tag})"
-        options.append(ft.dropdown.Option(key=m.get("id"), text=label))
-    return options
-
-
-def _build_links_row(provider: str) -> ft.Row:
-    """构建供应商相关链接行（console_url / pricing_url / models_url）。"""
-    pinfo = LLM_PROVIDERS.get(provider, {})
-
-    links: list[ft.Control] = []
-    console_url = pinfo.get("console_url")
-    if console_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_get_api_key"),
-                url=console_url,
-            )
-        )
-    pricing_url = pinfo.get("pricing_url")
-    if pricing_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_view_pricing"),
-                url=pricing_url,
-            )
-        )
-    models_url = pinfo.get("models_url")
-    if models_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_view_models"),
-                url=models_url,
-            )
-        )
-
-    return SafeWrapRow(controls=links, spacing=10)
-
-
 # --- Event handler factories (submit VM commands via page.run_task) ---
 
 
@@ -182,8 +134,6 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
 
     # --- Dialog form controls (driven by state) ---
     provider_options = _build_provider_options(state.dialog_is_edit, state.dialog_existing_providers)
-    model_options = _build_model_options(state.dialog_provider)
-    links_row = _build_links_row(state.dialog_provider)
 
     provider_dropdown = ft.Dropdown(
         label=I18n.get("failover_select_provider"),
@@ -194,12 +144,24 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
         disabled=state.dialog_is_edit,
     )
 
-    model_dropdown = ft.Dropdown(
-        label=I18n.get("failover_select_model"),
-        options=model_options,
-        value=state.dialog_model or None,
-        width=AppStyles.CONTROL_WIDTH_LG,
-        on_select=lambda e: vm.update_dialog_model(e.control.value) if e.control.value else None,
+    # ModelPicker 内部 VM（内部模式，卸载自动 dispose）。选中模型 → 回写 dialog_model。
+    # §3.1c-review #5：跨供应商搜索命中时同步 dialog_provider = 命中 provider，再写回 model，
+    # 避免条目以 f"{provider}/{model}" 拼接时前缀错位与 credential 归属错误。
+    _pick_state, picker_vm = use_viewmodel(factory=ModelPickerViewModel)
+
+    def _on_dialog_model_selected(provider_id: str, model_id: str) -> None:
+        if provider_id != state.dialog_provider:
+            vm.update_dialog_provider(provider_id)
+        vm.update_dialog_model(model_id)
+
+    # dialog provider/model 变化 → 同步 ModelPicker 已选态（回显）
+    def _sync_picker_selection() -> None:
+        picker_vm.set_selection(state.dialog_provider, state.dialog_model or "")
+
+    ft.use_effect(_sync_picker_selection, dependencies=[state.dialog_provider, state.dialog_model])
+
+    model_picker = ft.Column(
+        [ModelPicker(picker_vm, on_select=_on_dialog_model_selected, text_field_width=AppStyles.CONTROL_WIDTH_LG)],
         visible=not state.dialog_custom_model,
     )
 
@@ -278,11 +240,10 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
             content=ft.Column(
                 [
                     provider_dropdown,
-                    model_dropdown,
+                    model_picker,
                     custom_model_input,
                     base_url_input,
                     api_key_input,
-                    links_row,
                     status_row,
                 ],
                 tight=True,

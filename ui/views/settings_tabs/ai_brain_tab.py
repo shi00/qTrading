@@ -354,6 +354,13 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         _month_cost_text = "—"
     else:
         _month_cost_text = I18n.get("settings_month_ai_cost").format(cost=f"{_month_cost_value:.2f}")
+        # AI-01/R21: 本月存在不可计价调用时追加「成本未知」诚实说明，避免「无法计量」被误读为「零成本」。
+        _unpriced_calls, _unpriced_tokens = ai_settings_state.month_unpriced
+        if _unpriced_calls > 0:
+            _month_cost_text += I18n.get("ai_usage_unpriced_note").format(
+                unpriced_calls=_unpriced_calls,
+                unpriced_tokens=_unpriced_tokens,
+            )
     month_cost_display = ft.Text(
         _month_cost_text,
         size=AppStyles.FONT_SIZE_BODY_SM,

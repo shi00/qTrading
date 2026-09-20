@@ -1445,7 +1445,13 @@ class TestRunAiAnalysisUsageSummary:
             assert len(result) == 2
 
         # 成功调用累计 calls/tokens/cost，并按分币落账（0.02+0.03=0.05 元 → 5 分）
-        assert context["_ai_usage_summary"] == {"calls": 2, "tokens": 200, "cost_cny": 0.05}
+        assert context["_ai_usage_summary"] == {
+            "calls": 2,
+            "tokens": 200,
+            "cost_cny": 0.05,
+            "unpriced_calls": 0,
+            "unpriced_tokens": 0,
+        }
         mock_tracker.add_cost_cny.assert_awaited_once_with(5)
 
     @pytest.mark.asyncio
@@ -1494,7 +1500,13 @@ class TestRunAiAnalysisUsageSummary:
             assert len(result) == 2
 
         # 仅成功调用被累计(含成本, 0.02 元 → 2 分), 失败不计入
-        assert context["_ai_usage_summary"] == {"calls": 1, "tokens": 100, "cost_cny": 0.02}
+        assert context["_ai_usage_summary"] == {
+            "calls": 1,
+            "tokens": 100,
+            "cost_cny": 0.02,
+            "unpriced_calls": 0,
+            "unpriced_tokens": 0,
+        }
         mock_tracker.add_cost_cny.assert_awaited_once_with(2)
 
     @pytest.mark.asyncio
@@ -4059,6 +4071,8 @@ class TestRetrySingleGuardsAndCost:
                         "summary": "看好",
                         "confidence": 80,
                         "cost": 0.05,
+                        # AI-01: _accumulate_usage 依赖 usage 存在才计数 calls/tokens
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
                     }
                 ),
             ),
@@ -4100,3 +4114,160 @@ class TestRetrySingleGuardsAndCost:
             await s.retry_single("平安银行", context)
 
         mock_tracker.add_cost_cny.assert_not_awaited()
+
+
+class TestUnpricedUsageGuards:
+    """AI-01 §3.1c: 不可计价调用（cost=None）的诚实计数与保守确认。
+
+    设计决策（docs/designs/ai01-unpriced-cost-plan.md §3.1c）：
+    - cost=None（模型不在 litellm 价格表）→ 计 unpriced，不伪装零成本（R21）；
+    - cost=0.0（免费模型，已计价）→ 走成本记账归零，不误计 unpriced；
+    - 预算已设 + 本月有不可计价量 → 保守提示确认；无确认能力 → 保守拒绝。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_unpriced_ack(self):
+        """R7: 进程级确认标记测试间隔离（AI-01 类属性）。"""
+        AIStrategyMixin._ai_unpriced_acknowledged = False
+        yield
+        AIStrategyMixin._ai_unpriced_acknowledged = False
+
+    # --- _accumulate_usage（静态方法直接验证） ---
+
+    def test_accumulate_usage_unpriced_when_cost_none(self):
+        """cost=None（不可计量）→ unpriced_calls/tokens 计数，不伪装零成本（R21）。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(cluster, {"usage": {"total_tokens": 30}, "cost": None})
+        assert cluster["calls"] == 1
+        assert cluster["tokens"] == 30
+        assert cluster["unpriced_calls"] == 1
+        assert cluster["unpriced_tokens"] == 30
+        assert cluster["cost_cny"] == 0.0
+
+    def test_accumulate_usage_free_model_not_unpriced(self):
+        """cost=0.0（免费模型，已计价）→ 计入 cost_cny=0，不误计 unpriced。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(cluster, {"usage": {"total_tokens": 10}, "cost": 0.0})
+        assert cluster["calls"] == 1
+        assert cluster["cost_cny"] == 0.0
+        assert cluster["unpriced_calls"] == 0
+
+    def test_accumulate_usage_requires_usage(self):
+        """usage 缺失 → 不计数（防御非标准响应）。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(cluster, {"cost": 0.05})
+        assert cluster["calls"] == 0
+        assert cluster["unpriced_calls"] == 0
+
+    def test_accumulate_usage_non_numeric_cost_is_unpriced(self):
+        """cost 非数值（非 int/float）→ 按不可计价处理。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(cluster, {"usage": {"total_tokens": 5}, "cost": "unknown"})
+        assert cluster["unpriced_calls"] == 1
+        assert cluster["unpriced_tokens"] == 5
+
+    # --- _should_prompt_unpriced ---
+
+    @pytest.mark.asyncio
+    async def test_should_prompt_false_when_acknowledged(self):
+        s = ConcreteStrategy()
+        s._ai_unpriced_acknowledged = True
+        assert await s._should_prompt_unpriced() is False
+
+    @pytest.mark.asyncio
+    async def test_should_prompt_false_without_budget(self):
+        s = ConcreteStrategy()
+        with patch("strategies.ai_mixin.ConfigHandler.get_setting", return_value=None):
+            assert await s._should_prompt_unpriced() is False
+
+    @pytest.mark.asyncio
+    async def test_should_prompt_false_when_no_unpriced_calls(self):
+        s = ConcreteStrategy()
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_setting", return_value=10),
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls,
+        ):
+            mock_tracker = MagicMock()
+            mock_tracker.get_month_unpriced = AsyncMock(return_value=(0, 0))
+            mock_cls.return_value = mock_tracker
+            assert await s._should_prompt_unpriced() is False
+
+    @pytest.mark.asyncio
+    async def test_should_prompt_true_when_unpriced_calls_exist(self):
+        s = ConcreteStrategy()
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_setting", return_value=10),
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls,
+        ):
+            mock_tracker = MagicMock()
+            mock_tracker.get_month_unpriced = AsyncMock(return_value=(3, 500))
+            mock_cls.return_value = mock_tracker
+            assert await s._should_prompt_unpriced() is True
+
+    # --- _confirm_unpriced ---
+
+    @pytest.mark.asyncio
+    async def test_confirm_unpriced_without_callback_refuses(self):
+        """无确认能力（夜间任务/未注入回调）→ 保守拒绝（R21）。"""
+        s = ConcreteStrategy()
+        assert await s._confirm_unpriced({}) is False
+        assert s._ai_unpriced_acknowledged is False
+
+    @pytest.mark.asyncio
+    async def test_confirm_unpriced_accept_sets_process_flag(self):
+        s = ConcreteStrategy()
+        context = {"on_ai_unpriced_ack_request": AsyncMock(return_value=True)}
+        assert await s._confirm_unpriced(context) is True
+        assert s._ai_unpriced_acknowledged is True
+
+    @pytest.mark.asyncio
+    async def test_confirm_unpriced_reject_keeps_flag(self):
+        s = ConcreteStrategy()
+        context = {"on_ai_unpriced_ack_request": AsyncMock(return_value=False)}
+        assert await s._confirm_unpriced(context) is False
+        assert s._ai_unpriced_acknowledged is False
+
+    @pytest.mark.asyncio
+    async def test_confirm_unpriced_exception_refuses(self):
+        s = ConcreteStrategy()
+        context = {"on_ai_unpriced_ack_request": AsyncMock(side_effect=RuntimeError("ui error"))}
+        assert await s._confirm_unpriced(context) is False
+        assert s._ai_unpriced_acknowledged is False
+
+    # --- _track_cost ---
+
+    @pytest.mark.asyncio
+    async def test_track_cost_priced_only(self):
+        """cost 非 None（元）→ 转分累加；unpriced 缺省不调。"""
+        s = ConcreteStrategy()
+        with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_unpriced = AsyncMock()
+            mock_cls.return_value = mock_tracker
+            await s._track_cost(0.05)
+        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_unpriced.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_track_cost_unpriced_only(self):
+        """cost=None + unpriced>0 → 累计不可计价量，不累计成本。"""
+        s = ConcreteStrategy()
+        with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_unpriced = AsyncMock()
+            mock_cls.return_value = mock_tracker
+            await s._track_cost(None, unpriced_calls=3, unpriced_tokens=500)
+        mock_tracker.add_cost_cny.assert_not_awaited()
+        mock_tracker.add_unpriced.assert_awaited_once_with(3, 500)
+
+    @pytest.mark.asyncio
+    async def test_track_cost_zero_unpriced_skips(self):
+        s = ConcreteStrategy()
+        with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
+            mock_tracker = MagicMock()
+            mock_tracker.add_unpriced = AsyncMock()
+            mock_cls.return_value = mock_tracker
+            await s._track_cost(None)
+        mock_tracker.add_unpriced.assert_not_awaited()

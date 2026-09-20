@@ -138,8 +138,8 @@ def _check_reasoning_support(model: str) -> bool:
     """检查模型是否支持推理增强 (reasoning_content)
 
     R16: litellm 惰性加载后，__init__ 链不得触发 import。此处仅当 litellm 已加载
-    （模块级符号非 None）时才用 litellm.utils.supports_reasoning；未加载时直接走
-    LLM_PROVIDERS fallback 判定，不触发 _ensure_litellm_loaded()。
+    （模块级符号非 None）时才用 litellm.utils.supports_reasoning；未加载或调用异常
+    时保守返回 ``False``（不可判定即视为不支持，见 §3.1c-review #2）。
     """
     import services.ai_service as _ai
 
@@ -151,25 +151,10 @@ def _check_reasoning_support(model: str) -> bool:
                 logger,
                 exc,
                 "general",
-                "[AIService] supports_reasoning check failed (%s) for %s: %s, using LLM_PROVIDERS fallback",
+                "[AIService] supports_reasoning check failed (%s) for %s: %s, treating as not reasoning",
                 model,
                 exc_info=True,
             )
-
-    from utils.llm_providers import LLM_PROVIDERS
-
-    # Derive reasoning model IDs from LLM_PROVIDERS tags
-    for provider_config in LLM_PROVIDERS.values():
-        for m in provider_config.get("models", []):
-            tag = m.get("tag", "")
-            tags = tag if isinstance(tag, list) else [tag]
-            if "reasoning" in tags:
-                # F4-S-4: Exact match (conservative: avoid false-positive reasoning
-                # support detection for variant model names like "qwen3.6-max-no-reasoning")
-                model_lower = model.lower()
-                model_id_lower = m["id"].lower()
-                if model_lower == model_id_lower:
-                    return True
     return False
 
 

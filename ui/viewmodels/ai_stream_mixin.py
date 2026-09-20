@@ -104,6 +104,8 @@ class AIStreamMixin:
     _on_background_task_done: Callable[[asyncio.Task], None]
     # SEC-01 gap3: 运行时 AI 外发确认的待决 Future（同一 asyncio loop，详见 _request_egress_ack）。
     _egress_ack_future: asyncio.Future | None = None
+    # AI-01: 运行时「不可计价调用」保守确认的待决 Future（同 loop 桥接，详见 _request_unpriced_ack）。
+    _unpriced_ack_future: asyncio.Future | None = None
 
     def clear_stream_cards(self) -> None:
         """Clear all stream cards and buffers (called on new run)."""
@@ -315,6 +317,36 @@ class AIStreamMixin:
         future = self._egress_ack_future
         self._egress_ack_future = None
         self._set_state(pending_egress_ack_preview="", pending_egress_ack_provider="")
+        if future is not None and not future.done():
+            future.set_result(bool(confirmed))
+
+    async def _request_unpriced_ack(self) -> bool:
+        """AI-01: 运行时「不可计价调用」保守确认桥接（由策略层经 context 注入回调调用）。
+
+        与 ``_request_egress_ack`` 同构：在**同一** asyncio loop 内创建待决 Future，写入
+        state 由 View 渲染确认对话框；用户在 View 点击「继续/取消」调
+        ``resolve_ai_unpriced_ack`` 落地。返回值即用户决策。进程级一次确认由策略层
+        ``_confirm_unpriced`` 在确认后置 ``_ai_unpriced_acknowledged = True`` 达成。
+
+        R2：CancelledError 直接传播（不吞没）。
+        """
+        loop = self._get_loop_or_none() or asyncio.get_running_loop()
+        prev = self._unpriced_ack_future
+        if prev is not None and not prev.done():
+            prev.set_result(False)
+        future = loop.create_future()
+        self._unpriced_ack_future = future
+        self._set_state(pending_unpriced_ack=True)
+        try:
+            return await future
+        finally:
+            self._unpriced_ack_future = None
+
+    def resolve_ai_unpriced_ack(self, confirmed: bool) -> None:
+        """AI-01: 用户对「不可计价调用保守确认」的决策落地（View 调）。"""
+        future = self._unpriced_ack_future
+        self._unpriced_ack_future = None
+        self._set_state(pending_unpriced_ack=False)
         if future is not None and not future.done():
             future.set_result(bool(confirmed))
 
@@ -562,6 +594,11 @@ class AIStreamMixin:
                 # strategy.filter 与 UI 在同一 asyncio loop 内 await（见 run_strategy 末尾），
                 # 策略层经此协程挂起等待用户确认；确认/拒绝由 View 调用 resolve_ai_egress_ack 落地。
                 context["on_ai_egress_ack_request"] = self._request_egress_ack
+                # AI-01: 注入运行时「不可计价调用」保守确认回调（同 loop 桥接，R11 安全）。
+                # 策略层在 _preflight_cloud_call / run_ai_analysis 中发现本月存在不可计价
+                # 调用且预算已设时，经此协程挂起等待用户确认；确认/拒绝由 View 调
+                # resolve_ai_unpriced_ack 落地。
+                context["on_ai_unpriced_ack_request"] = self._request_unpriced_ack
                 context["strategy_key"] = strategy_key
                 self._last_ai_context = context
                 self._last_strategy_key = strategy_key
@@ -598,7 +635,8 @@ class AIStreamMixin:
                 # dep unready 等提前返回路径未初始化通道时 .get() 为 None，判空后 () 空载。
                 strategy_warnings = tuple(context.get("warnings") or ())
                 # AI-03(完整版): 读取 ai_mixin 回写的本次消耗统计。
-                # ai_usage_summary 仅在其中 dict 时展开为 (calls, tokens, cost_cny) 元组；
+                # ai_usage_summary 仅在其中 dict 时展开为
+                # (calls, tokens, cost_cny, unpriced_calls, unpriced_tokens) 元组；
                 # 无消耗/未执行 AI 时为 None（View 据此决定是否渲染汇总行，避免 "消耗 0" 误读）。
                 _ai_usage = context.get("_ai_usage_summary")
                 ai_usage_summary = (
@@ -606,6 +644,8 @@ class AIStreamMixin:
                         int(_ai_usage["calls"]),
                         int(_ai_usage["tokens"]),
                         round(float(_ai_usage.get("cost_cny", 0.0)), 4),
+                        int(_ai_usage.get("unpriced_calls", 0)),
+                        int(_ai_usage.get("unpriced_tokens", 0)),
                     )
                     if isinstance(_ai_usage, dict)
                     else None

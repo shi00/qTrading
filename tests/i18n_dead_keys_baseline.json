@@ -1,6 +1,6 @@
 {
   "_description": "UIX-16: Ratchet baseline for unreferenced i18n keys. This count may only decrease.",
-  "count": 311,
+  "count": 310,
   "keys": [
     "ai_analyzing_stock",
     "ai_btn_test",
@@ -116,7 +116,6 @@
     "llm_provider_moonshot",
     "llm_provider_openai",
     "llm_provider_qwen",
-    "llm_refresh_failed",
     "llm_testing_in_progress",
     "nav_analysis",
     "news_l1_geopolitics",

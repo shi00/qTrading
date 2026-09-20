@@ -259,7 +259,8 @@ class ScreenerState:
     exclude_st: bool = True
     # AI-03(完整版): 上次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # None 表示当次未执行 AI 分析（本轮没有可展示的消耗）；View 据此决定是否渲染汇总行。
-    ai_usage_summary: tuple[int, int, float] | None = None
+    # 元组第 4/5 位为不可计价调用量（unpriced_calls/unpriced_tokens），供 View 追加「成本未知」说明。
+    ai_usage_summary: tuple[int, int, float, int, int] | None = None
     # UX-03: 空结果时的可操作原因横幅 Message (i18n key, VM 不感知 locale; None 表示非空结果)。
     # 仅「有候选数据但筛选后无匹配」时设置 —— 区分「无匹配」(可调低条件) 与「无数据」(需先同步),
     # View 在结果区空态渲染该原因, 提示用户如何恢复。
@@ -276,3 +277,7 @@ class ScreenerState:
     # 命令 resolve_ai_egress_ack(confirmed) 完成确认；确认后置回 None。
     pending_egress_ack_preview: str = ""
     pending_egress_ack_provider: str = ""
+    # AI-01: 运行时「本月存在不可计价调用」保守确认对话框待决标记。为 True 表示当前
+    # 正在等待用户确认是否继续发起不可计价调用（进程级一次，本进程确认后不再弹）。
+    # View 渲染确认框并经 VM 命令 resolve_ai_unpriced_ack(confirmed) 落地；确认后置回 False。
+    pending_unpriced_ack: bool = False

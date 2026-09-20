@@ -1,10 +1,13 @@
 """FailoverConfigPanel + ProviderCredentialDialog 契约守护测试（Phase D.1 声明式重写）。
 
 测试策略（参考 3.2.1-3.2.7 声明式范式）：
-1. 模块级纯函数单测（_render_message/_build_provider_options/_build_model_options/
-   _build_links_row/_run_task_factory/_run_task_no_args/_build_list_item）
+1. 模块级纯函数单测（_render_message/_build_provider_options/_run_task_factory/
+   _run_task_no_args/_build_list_item）
 2. 契约守护测试（grep 命令式禁止模式 = 0 + 验证声明式 API）
 3. 组件体渲染测试（ProviderCredentialDialog + FailoverConfigPanel @ft.component body）
+
+说明: 模型选择经 ModelPicker（litellm 目录搜索/浏览/回记）承载，不再有
+``_build_model_options`` 下拉或 ``_build_links_row`` 注册链接行（AI-01 §3.1c）。
 
 声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化。
 VM 由消费方实例化，View 通过 use_viewmodel(vm=vm) hook 订阅。
@@ -28,9 +31,7 @@ from ui.components.config_panels import failover_config_panel as panel_module
 from ui.components.config_panels.failover_config_panel import (
     FailoverConfigPanel,
     ProviderCredentialDialog,
-    _build_links_row,
     _build_list_item,
-    _build_model_options,
     _build_provider_options,
     _render_message,
     _run_task_factory,
@@ -139,74 +140,6 @@ class TestBuildProviderOptions:
         for opt in options:
             assert opt.text is not None
             assert isinstance(opt.text, str)
-
-
-# --- 模块级纯函数：_build_model_options ---
-
-
-class TestBuildModelOptions:
-    """_build_model_options: 构建指定供应商的模型下拉选项。"""
-
-    def test_returns_models_for_known_provider(self):
-        options = _build_model_options("deepseek")
-        keys = [opt.key for opt in options]
-        assert len(keys) > 0
-        # deepseek 应有 deepseek-v4-pro / deepseek-v4-flash
-        assert "deepseek-v4-pro" in keys
-        assert "deepseek-v4-flash" in keys
-
-    def test_returns_empty_for_unknown_provider(self):
-        options = _build_model_options("unknown-provider")
-        assert options == []
-
-    def test_returns_empty_for_custom_provider(self):
-        # custom 供应商无 models 列表
-        options = _build_model_options("custom")
-        assert options == []
-
-    def test_label_includes_display_tag_when_present(self):
-        options = _build_model_options("deepseek")
-        # 至少一个模型应有 tag，label 应包含 "(...)"
-        labels = [opt.text for opt in options if opt.text]
-        # deepseek-v4-flash 有 tag_recommend
-        flash_label = next((label for label in labels if "deepseek-v4-flash" in label), None)
-        assert flash_label is not None
-        # tag_recommend 应被翻译为 display_tag，附加在 label 后
-        assert "(" in flash_label
-
-
-# --- 模块级纯函数：_build_links_row ---
-
-
-class TestBuildLinksRow:
-    """_build_links_row: 构建供应商相关链接行。"""
-
-    def test_returns_row_with_links_for_provider_with_urls(self):
-        # deepseek 有 console_url / pricing_url / models_url
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek")
-        assert isinstance(row, ft.Row)
-        # 应有 3 个 TextButton（console / pricing / models）
-        assert len(row.controls) == 3
-        for ctrl in row.controls:
-            assert isinstance(ctrl, ft.TextButton)
-            assert ctrl.url  # 每个 button 都应有 url
-
-    def test_returns_empty_row_for_provider_without_urls(self):
-        # custom 供应商无任何 URL
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("custom")
-        assert isinstance(row, ft.Row)
-        assert len(row.controls) == 0
-
-    def test_returns_empty_row_for_unknown_provider(self):
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("unknown")
-        assert isinstance(row, ft.Row)
-        assert len(row.controls) == 0
 
 
 # --- 模块级纯函数：_run_task_factory / _run_task_no_args ---
@@ -432,8 +365,6 @@ class TestFailoverConfigPanelContract:
         content = self._read_panel_content()
         assert "def _render_message(" in content
         assert "def _build_provider_options(" in content
-        assert "def _build_model_options(" in content
-        assert "def _build_links_row(" in content
         assert "def _build_list_item(" in content
         assert "def _run_task_factory(" in content
         assert "def _run_task_no_args(" in content
@@ -864,6 +795,9 @@ class TestProviderCredentialDialogOnSubmitEnter:
 
     dialog_open=True 渲染时, custom_model/base_url/api_key 3 字段的 ``on_submit``
     非空且触发 ``page.run_task(vm.confirm_credential)``（与确认按钮等价）。
+
+    dialog 内嵌 ModelPicker（AI-01 §3.1c）新增一个无 ``on_submit`` 的 search
+    TextField（Enter 不提交凭据），故按 ``on_submit is not None`` 过滤「自提交字段」。
     """
 
     _SUBMIT_FIELD_COUNT = 3  # custom_model / base_url / api_key
@@ -887,14 +821,15 @@ class TestProviderCredentialDialogOnSubmitEnter:
         return vm
 
     def _dialog_text_fields(self, page):
-        """从 dialog overlay 收集全部 TextField（custom_model/base_url/api_key）。
+        """从 dialog overlay 收集「自提交」TextField（custom_model/base_url/api_key）。
 
         ``_make_failover_patches`` 将 I18n 替换为裸 MagicMock，``I18n.get`` 返回
-        MagicMock 而非字面 label key，故按类型收集后断言数量（3 个自提交字段）。
+        MagicMock 而非字面 label key，故按类型收集后断言数量。dialog 内嵌 ModelPicker
+        的 search TextField 无 ``on_submit``（Enter 不提交凭据），按该属性过滤排除。
         """
         assert len(page._dialogs.controls) == 1, "dialog_open=True 应注册 1 个 AlertDialog"
         dialog = page._dialogs.controls[0]
-        fields = [c for c in _collect_controls(dialog) if isinstance(c, ft.TextField)]
+        fields = [c for c in _collect_controls(dialog) if isinstance(c, ft.TextField) and c.on_submit is not None]
         assert len(fields) == self._SUBMIT_FIELD_COUNT
         return fields
 

@@ -1864,7 +1864,7 @@ def _build_screener_log_card(
     stream_cards: tuple[StreamCard, ...],
     stream_cards_truncated: bool,
     is_realtime: bool,
-    ai_usage_summary: tuple[int, int, float] | None,
+    ai_usage_summary: tuple[int, int, float, int, int] | None,
     on_retry_click: typing.Callable[[str], None],
 ) -> ft.Container:
     """构建 AI 流式分析卡片区 (仅 REALTIME 模式有效)."""
@@ -1879,7 +1879,7 @@ def _build_screener_log_card(
     # AI-03(完整版): 本次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # 仅当确有消耗时渲染; None 表示当次未执行 AI 分析, 不展示 "消耗 0" 的误导信息。
     if ai_usage_summary is not None:
-        calls, tokens, cost_cny = ai_usage_summary
+        calls, tokens, cost_cny, unpriced_calls, unpriced_tokens = ai_usage_summary
         log_column_controls.append(
             ft.Text(
                 I18n.get("ai_usage_summary").format(
@@ -1892,6 +1892,19 @@ def _build_screener_log_card(
                 text_align=ft.TextAlign.CENTER,
             )
         )
+        # AI-01/R21: 存在不可计价调用时追加「成本未知」诚实说明，避免「无法计量」被误读为「零成本」。
+        if unpriced_calls > 0:
+            log_column_controls.append(
+                ft.Text(
+                    I18n.get("ai_usage_unpriced_note").format(
+                        unpriced_calls=unpriced_calls,
+                        unpriced_tokens=unpriced_tokens,
+                    ),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                    text_align=ft.TextAlign.CENTER,
+                )
+            )
     log_column_controls.append(
         ft.Container(
             content=ft.Column(
@@ -2301,6 +2314,23 @@ def ScreenerView(
         else None
     )
 
+    # AI-01: 「本月存在不可计价调用」保守确认对话框。pending_unpriced_ack=True 时渲染，
+    # 用户「继续」调 vm.resolve_ai_unpriced_ack(True) 放行（进程级一次，本进程不再弹）；
+    # 「取消」落 False 回退，跳过本次云端 AI。
+    unpriced_ack_dialog = (
+        ConfirmDialog(
+            open_state=bool(state.pending_unpriced_ack),
+            title=I18n.get("ai_budget_unpriced_dialog_title"),
+            body=I18n.get("ai_budget_unpriced_dialog_body"),
+            on_confirm=lambda: vm.resolve_ai_unpriced_ack(True),
+            on_cancel=lambda: vm.resolve_ai_unpriced_ack(False),
+            confirm_text=I18n.get("ai_budget_unpriced_dialog_confirm"),
+            cancel_text=I18n.get("ai_budget_unpriced_dialog_cancel"),
+        )
+        if state.pending_unpriced_ack
+        else None
+    )
+
     return ft.Container(
         content=ft.Column(
             [
@@ -2309,6 +2339,7 @@ def ScreenerView(
                 main_body,
                 *([dialog_control] if dialog_control is not None else []),
                 *([egress_ack_dialog] if egress_ack_dialog is not None else []),
+                *([unpriced_ack_dialog] if unpriced_ack_dialog is not None else []),
             ],
             expand=True,
             spacing=15,

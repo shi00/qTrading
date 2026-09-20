@@ -24,17 +24,18 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.model_picker import ModelPicker
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
+from ui.viewmodels.model_picker_view_model import ModelPickerViewModel
 from utils.llm_providers import (
     AZURE_API_VERSIONS,
     AZURE_DEFAULT_API_VERSION,
     LLM_PROVIDERS,
-    get_display_tag,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,76 +122,6 @@ def _build_provider_options() -> list[ft.dropdown.Option]:
     return options
 
 
-def _build_model_options(provider_id: str) -> list[ft.dropdown.Option]:
-    """构建指定供应商的模型下拉选项（tag 需 i18n）。"""
-    provider = LLM_PROVIDERS.get(provider_id, {})
-    models = provider.get("models", [])
-
-    options: list[ft.dropdown.Option] = []
-    for model in models:
-        text = model.get("name", model.get("id", ""))
-        tag = model.get("tag", "")
-        display_tag = I18n.get(get_display_tag(tag), default=get_display_tag(tag))
-        if display_tag:
-            text = f"{text} ({display_tag})"
-        options.append(
-            ft.dropdown.Option(
-                key=model.get("id"),
-                text=text,
-            )
-        )
-
-    return options
-
-
-def _build_links_row(provider_id: str, compact: bool) -> ft.Row:
-    """构建供应商相关链接行（console_url / pricing_url / models_url）。"""
-    provider = LLM_PROVIDERS.get(provider_id, {})
-
-    links: list[ft.Control] = []
-    compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if compact else None
-
-    console_url = provider.get("console_url")
-    if console_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_get_api_key"),
-                url=console_url,
-                icon=ft.Icons.KEY if ft.Icons else None,
-                style=compact_btn_style,
-            )
-        )
-
-    pricing_url = provider.get("pricing_url")
-    if pricing_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_view_pricing"),
-                url=pricing_url,
-                icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
-                style=compact_btn_style,
-            )
-        )
-
-    models_url = provider.get("models_url")
-    if models_url:
-        links.append(
-            ft.TextButton(
-                content=I18n.get("llm_view_models"),
-                url=models_url,
-                icon=ft.Icons.LIST if ft.Icons else None,
-                style=compact_btn_style,
-            )
-        )
-
-    return ft.Row(
-        controls=links,
-        alignment=ft.MainAxisAlignment.CENTER if compact else ft.MainAxisAlignment.START,
-        wrap=not compact,
-        spacing=8 if compact else 10,
-    )
-
-
 def _on_test_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
     """Create on_click handler for test button — submits vm.verify_connection via page.run_task.
 
@@ -220,20 +151,6 @@ def _on_save_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlE
             logger.debug("[LLMConfigPanel] page not available for save_config")
 
     return _on_save_click
-
-
-def _on_refresh_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
-    """Create on_click handler for refresh button — submits vm.refresh_models via page.run_task."""
-
-    def _on_refresh_click(e: ft.ControlEvent) -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.run_task(vm.refresh_models)
-        except RuntimeError:
-            logger.debug("[LLMConfigPanel] page not available for refresh_models")
-
-    return _on_refresh_click
 
 
 def _on_provider_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
@@ -277,7 +194,6 @@ def LLMConfigPanel(
     *,
     show_save_button: bool = True,
     compact: bool = False,
-    show_register_link: bool = True,
     enable_enter_submit: bool = True,
 ) -> ft.Control:
     """LLM Configuration panel (declarative).
@@ -288,11 +204,13 @@ def LLMConfigPanel(
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 page ref / 生命周期回调 / 手动刷新
 
+    §3.1c：模型选择经 ModelPicker（litellm 目录搜索/浏览/回记），selected 回写 vm.model。
+    移除注册/定价/模型链接行与 refresh 按钮（目录即权威源，见 §3.1c-review #4）。
+
     Args:
         vm: 由消费方实例化的 LLMConfigPanelViewModel
         show_save_button: 是否显示保存按钮（default: True）
         compact: 是否使用紧凑布局（default: False）
-        show_register_link: 是否显示注册链接（default: True）
         enable_enter_submit: 单行主表单 Enter 提交开关（UX-09 P2-04；default: True；
             设置页默认开启，wizard 传 False 避免 Enter 触发网络验证卡流程）
     """
@@ -313,13 +231,42 @@ def LLMConfigPanel(
         width=input_width,
     )
 
-    model_dropdown = ft.Dropdown(
-        label=I18n.get("llm_select_model"),
-        options=_build_model_options(state.provider),
-        value=state.model,
-        width=input_width,
+    # ModelPicker 内部 VM（内部模式，卸载自动 dispose）。选中模型 → 回写 vm.model。
+    _pick_state, picker_vm = use_viewmodel(factory=ModelPickerViewModel)
+
+    def _on_model_selected(provider_id: str, model_id: str) -> None:
+        if provider_id != state.provider:
+            # 跨供应商命中：先切 provider（异步重置 model 等派生状态），完成后再写回
+            # model。与 ProviderCredentialDialog 的 dialog 处理同构（§3.1c-review #5），
+            # 避免保存时 provider/model 错配（如 openai 前缀发往 kimi 端点）。
+            async def _switch_and_set() -> None:
+                await vm.update_provider(provider_id)
+                vm.update_model(model_id)
+
+            try:
+                page = ft.context.page
+                if page is not None:
+                    page.run_task(_switch_and_set)
+            except RuntimeError:
+                logger.debug("[LLMConfigPanel] page not available for provider switch on model select")
+        else:
+            vm.update_model(model_id)
+
+    # provider/model 变化 → 同步 ModelPicker 已选态（回显 + 判定 custom 历史）
+    def _sync_picker_selection() -> None:
+        picker_vm.set_selection(state.provider, state.model or "")
+
+    ft.use_effect(_sync_picker_selection, dependencies=[state.provider, state.model])
+
+    model_picker = ft.Column(
+        [
+            ModelPicker(
+                picker_vm,
+                on_select=_on_model_selected,
+                text_field_width=input_width,
+            ),
+        ],
         visible=not state.is_azure and not state.show_custom_model_input,
-        on_select=lambda e: vm.update_model(e.control.value) if e.control.value else None,
     )
 
     custom_model_input = ft.Dropdown(
@@ -407,14 +354,6 @@ def LLMConfigPanel(
         disabled=state.is_verifying,
     )
 
-    refresh_models_button = ft.IconButton(
-        icon=ft.Icons.REFRESH if ft.Icons else None,
-        tooltip=I18n.get("llm_refresh_models"),
-        on_click=safe_on_click(_on_refresh_click_factory(vm)),
-        visible=state.show_refresh_button,
-        disabled=state.is_refreshing,
-    )
-
     save_button = ft.Button(
         content=I18n.get("settings_save_config"),
         on_click=safe_on_click(_on_save_click_factory(vm)),
@@ -425,14 +364,12 @@ def LLMConfigPanel(
     )
 
     # --- Build UI layout ---
-    model_row = ft.Row(
+    model_row = ft.Column(
         controls=[
-            model_dropdown,
+            model_picker,
             custom_model_input,
-            refresh_models_button,
         ],
-        spacing=0,
-        vertical_alignment=ft.CrossAxisAlignment.END,
+        spacing=6,
     )
 
     azure_row = ft.Column(
@@ -452,9 +389,6 @@ def LLMConfigPanel(
         ],
         alignment=ft.MainAxisAlignment.CENTER,
     )
-
-    links_row = _build_links_row(state.provider, compact)
-    links_row.visible = show_register_link
 
     # SectionHeader 是 @ft.component，返回的 Component 为 frozen，不能直接改 .visible，
     # 因此在 compact 模式下通过条件渲染（不加入 form_content）实现隐藏。
@@ -514,7 +448,6 @@ def LLMConfigPanel(
                 alignment=ft.MainAxisAlignment.CENTER,
                 spacing=5,
             ),
-            links_row,
         ]
     )
 

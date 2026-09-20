@@ -69,6 +69,9 @@ class AIBrainSettingsState:
     ai_cost_limit_value: str = ""
     # AI-03 完整版 T7: 本月累计 AI 成本 (元, 供 UI 展示; 未加载为 None)
     month_cost_cny: float | None = None
+    # AI-01/R21: 本月累计不可计价调用 (calls, tokens)；无不可计价调用时为 (0, 0)。
+    # 供设置页本月累计文案在存在不可计价量时追加「成本未知」诚实说明。
+    month_unpriced: tuple[int, int] = (0, 0)
     # Phase 3.2 P1-1: MD5 检查结果 i18n key (非空时 View 显示 WARNING snack)
     # 下沉自 View._check_local_model_md5, VM 在 save_ai_settings 末尾写入
     warning_message: str = ""
@@ -415,7 +418,11 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 return
             AIUsageTracker().configure(engine=engine)
             month_cost_cents = await AIUsageTracker().get_month_cost_cny()
-            self._set_state(month_cost_cny=month_cost_cents / 100)
+            month_unpriced = await AIUsageTracker().get_month_unpriced()
+            self._set_state(
+                month_cost_cny=month_cost_cents / 100,
+                month_unpriced=(int(month_unpriced[0]), int(month_unpriced[1])),
+            )
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:  # noqa: BLE001 -- 读取失败降级为 None, 不阻断 UI

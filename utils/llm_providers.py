@@ -1,17 +1,21 @@
-"""
-LLM Provider Configuration Data
+"""LLM Provider Configuration Data & litellm 官方目录投影（AI-01 §3.1c）。
 
-数据来源说明:
-- 验证日期: 2026-05-05
-- 数据来源: 各供应商官方 API 文档和定价页面
-- 更新策略:
-  1. 用户可通过"刷新模型列表"按钮动态获取最新模型
-  2. 用户可手动输入任意模型 ID
-  3. 开发团队定期同步各供应商最新模型列表
-- 注意: 以下为静态默认列表，可能不是最新。建议使用动态刷新功能获取实时模型列表。
+设计约定（docs/designs/ai01-unpriced-cost-plan.md §3.1c / §3.1c-review）：
+- 供应商/模型清单以 **litellm 官方目录为唯一权威源**。项目不再预置任何硬编码型号数组、
+  "推荐/主流"标签、或注册/控制台/定价/模型链接等 URL 字段。用户从 litellm 列表**自行选择**，
+  无任何注册引导、无商业推荐。
+- 展示层仅保留供应商识别元数据（name/name_en/icon/key_prefix/custom/azure_config/分类）。
+- `LLM_PROVIDERS` 仍保留运行路由必需的 `base_url`（功能性 API 端点）与 `litellm_prefix`
+  （`_build_litellm_params` 拼 `<prefix>/<model>` 走路由）。**UI 枚举（litellm_catalog_key）
+  与运行路由（litellm_prefix）解耦**——qwen/zhipu/moonshot/minimax 的 litellm_prefix 均为
+  "openai"（OpenAI 兼容端点），若 UI 按 litellm_prefix 枚举会把多家混进 openai 目录（错误设计）。
+- litellm 为惰性加载（避免 UI 主循环 import 阻塞）；本模块内 ``import litellm`` 均在函数体内执行。
 """
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 AZURE_DEFAULT_API_VERSION = "2025-04-01-preview"
 
@@ -21,282 +25,114 @@ AZURE_API_VERSIONS = [
     "2024-10-21",
 ]
 
+# 最近选用记录上限（取最近选用的前 N 条置顶）
+RECENT_SELECTIONS_LIMIT = 8
+
+# 语义化配置的键（recent 回记忆复用现有 ConfigHandler JSON 持久化，最小实现）
+_LLM_RECENT_SELECTIONS_KEY = "llm_recent_selections"
+
+
+# 仅保留供应商识别元数据 + 运行路由必需字段（无 models / 无 URL / 无 tag）。
+# litellm_catalog_key：UI 枚举与计价回溯专用（litellm 官方目录 key），回退自身 provider_id。
 LLM_PROVIDERS = {
     "deepseek": {
         "name": "DeepSeek",
         "name_en": "DeepSeek",
         "icon": "deepseek.png",
         "base_url": "https://api.deepseek.com",
-        "models": [
-            {
-                "id": "deepseek-v4-pro",
-                "name": "DeepSeek V4 Pro",
-                "context": 1000000,
-                "tag": ["tag_flagship", "reasoning"],
-            },
-            {
-                "id": "deepseek-v4-flash",
-                "name": "DeepSeek V4 Flash",
-                "context": 1000000,
-                "tag": "tag_recommend",
-            },
-        ],
         "key_prefix": "sk-",
         "litellm_prefix": "deepseek",
-        "console_url": "https://platform.deepseek.com/api_keys",
-        "pricing_url": "https://api-docs.deepseek.com/quick_start/pricing",
-        "models_url": "https://api-docs.deepseek.com/",
+        "litellm_catalog_key": "deepseek",
     },
     "qwen": {
         "name": "通义千问",
         "name_en": "Alibaba Qwen",
         "icon": "qwen.png",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "models": [
-            {
-                "id": "qwen3.6-max-preview",
-                "name": "Qwen 3.6 Max",
-                "context": 256000,
-                "tag": ["tag_flagship", "reasoning"],
-            },
-            {
-                "id": "qwen3.6-plus",
-                "name": "Qwen 3.6 Plus",
-                "context": 1000000,
-                "tag": "tag_recommend",
-            },
-            {
-                "id": "qwen3.6-flash",
-                "name": "Qwen 3.6 Flash",
-                "context": 1000000,
-                "tag": "tag_fast",
-            },
-        ],
         "key_prefix": "sk-",
         "litellm_prefix": "openai",
-        "console_url": "https://dashscope.console.aliyun.com/apiKey",
-        "pricing_url": "https://help.aliyun.com/zh/model-studio/getting-started/models",
-        "models_url": "https://help.aliyun.com/zh/model-studio/text-generation-model/",
+        "litellm_catalog_key": "dashscope",
     },
     "zhipu": {
         "name": "智谱 AI",
         "name_en": "Zhipu AI",
         "icon": "zhipu.png",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": [
-            {"id": "glm-5.1", "name": "GLM-5.1", "context": 200000, "tag": "tag_latest"},
-            {"id": "glm-5", "name": "GLM-5", "context": 200000, "tag": ["tag_flagship", "reasoning"]},
-            {"id": "glm-4.7-flash", "name": "GLM-4.7 Flash (Free)", "context": 200000, "tag": "tag_recommend"},
-        ],
         "key_prefix": "",
         "litellm_prefix": "openai",
-        "console_url": "https://open.bigmodel.cn/usercenter/apikeys",
-        "pricing_url": "https://open.bigmodel.cn/pricing",
-        "models_url": "https://open.bigmodel.cn/cn/guide/start/model-overview",
+        # zhipu 在 litellm 无独立目录键 → 留空，诚实降级到自定义输入
     },
     "moonshot": {
         "name": "Moonshot (Kimi)",
         "name_en": "Moonshot AI",
         "icon": "moonshot.png",
         "base_url": "https://api.moonshot.cn/v1",
-        "models": [
-            {"id": "kimi-k2.6", "name": "Kimi K2.6", "context": 262144, "tag": "tag_latest"},
-            {"id": "kimi-k2.5", "name": "Kimi K2.5", "context": 262144, "tag": "tag_recommend"},
-        ],
         "key_prefix": "sk-",
         "litellm_prefix": "openai",
-        "console_url": "https://platform.moonshot.cn/console/api-keys",
-        "pricing_url": "https://platform.moonshot.cn/docs/pricing/chat",
-        "models_url": "https://platform.moonshot.cn/docs/models",
+        "litellm_catalog_key": "moonshot",
     },
     "minimax": {
         "name": "MiniMax",
         "name_en": "MiniMax",
         "icon": "minimax.png",
         "base_url": "https://api.minimaxi.com/v1",
-        "models": [
-            {
-                "id": "MiniMax-M2.7",
-                "name": "MiniMax M2.7",
-                "context": 204800,
-                "tag": "tag_latest",
-            },
-            {
-                "id": "MiniMax-M2.5",
-                "name": "MiniMax M2.5",
-                "context": 204800,
-                "tag": "tag_recommend",
-            },
-        ],
         "key_prefix": "",
         "litellm_prefix": "openai",
-        "console_url": "https://www.minimaxi.com/user-center/basic-information/interface-key",
-        "pricing_url": "https://www.minimaxi.com/document/pricing",
-        "models_url": "https://www.minimaxi.com/document/guides/chat",
+        "litellm_catalog_key": "minimax",
     },
     "openai": {
         "name": "OpenAI",
         "name_en": "OpenAI",
         "icon": "openai.png",
         "base_url": "https://api.openai.com",
-        "models": [
-            {"id": "gpt-5.5", "name": "GPT-5.5", "context": 1050000, "tag": "tag_latest_flagship"},
-            {"id": "gpt-5.4", "name": "GPT-5.4", "context": 1050000, "tag": "tag_flagship"},
-            {
-                "id": "gpt-5.4-mini",
-                "name": "GPT-5.4 Mini",
-                "context": 400000,
-                "tag": "tag_recommend",
-            },
-            {
-                "id": "gpt-5.4-nano",
-                "name": "GPT-5.4 Nano",
-                "context": 400000,
-                "tag": "tag_fast",
-            },
-            {"id": "o4-mini", "name": "o4 Mini", "context": 200000, "tag": ["tag_reasoning", "reasoning"]},
-            {"id": "o3-pro", "name": "o3 Pro", "context": 200000, "tag": ["tag_reasoning_plus", "reasoning"]},
-        ],
         "key_prefix": "sk-",
         "litellm_prefix": "openai",
-        "console_url": "https://platform.openai.com/api-keys",
-        "pricing_url": "https://openai.com/api/pricing",
-        "models_url": "https://platform.openai.com/docs/models",
+        "litellm_catalog_key": "openai",
     },
     "azure": {
         "name": "Azure OpenAI",
         "name_en": "Azure OpenAI",
         "icon": "azure.png",
         "base_url": "",
-        "models": [],
         "key_prefix": "",
-        "console_url": "https://portal.azure.com/",
-        "pricing_url": "https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/",
-        "models_url": "https://learn.microsoft.com/azure/ai-services/openai/concepts/models",
         "azure_config": True,
+        # azure 部署制，无 litellm 目录 → 保留部署名输入
     },
     "anthropic": {
         "name": "Anthropic (Claude)",
         "name_en": "Anthropic Claude",
         "icon": "anthropic.png",
         "base_url": "https://api.anthropic.com",
-        "models": [
-            {
-                "id": "claude-opus-4-7",
-                "name": "Claude Opus 4.7",
-                "context": 1000000,
-                "tag": ["tag_latest_flagship", "reasoning"],
-            },
-            {
-                "id": "claude-opus-4-6",
-                "name": "Claude Opus 4.6",
-                "context": 1000000,
-                "tag": ["tag_flagship", "reasoning"],
-            },
-            {
-                "id": "claude-sonnet-4-6",
-                "name": "Claude Sonnet 4.6",
-                "context": 1000000,
-                "tag": ["tag_recommend", "reasoning"],
-            },
-            {
-                "id": "claude-haiku-4-5",
-                "name": "Claude Haiku 4.5",
-                "context": 200000,
-                "tag": "tag_fast",
-            },
-        ],
         "key_prefix": "sk-ant-",
         "litellm_prefix": "anthropic",
-        "console_url": "https://console.anthropic.com/settings/keys",
-        "pricing_url": "https://www.anthropic.com/pricing",
-        "models_url": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
+        "litellm_catalog_key": "anthropic",
     },
     "google": {
         "name": "Google AI (Gemini)",
         "name_en": "Google Gemini",
         "icon": "google.png",
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
-        "models": [
-            {
-                "id": "gemini-3.1-pro-preview",
-                "name": "Gemini 3.1 Pro",
-                "context": 1048576,
-                "tag": ["tag_latest", "reasoning"],
-            },
-            {
-                "id": "gemini-3-flash",
-                "name": "Gemini 3 Flash",
-                "context": 1048576,
-                "tag": "tag_recommend",
-            },
-            {
-                "id": "gemini-3.1-flash-lite-preview",
-                "name": "Gemini 3.1 Flash Lite",
-                "context": 1048576,
-                "tag": "tag_fast",
-            },
-        ],
         "key_prefix": "",
         "litellm_prefix": "gemini",
-        "console_url": "https://aistudio.google.com/apikey",
-        "pricing_url": "https://ai.google.dev/gemini-api/docs/pricing",
-        "models_url": "https://ai.google.dev/gemini-api/docs/models",
+        "litellm_catalog_key": "gemini",
     },
     "mistral": {
         "name": "Mistral AI",
         "name_en": "Mistral AI",
         "icon": "mistral.png",
         "base_url": "https://api.mistral.ai",
-        "models": [
-            {
-                "id": "mistral-medium-latest",
-                "name": "Mistral Medium 3.5",
-                "context": 262144,
-                "tag": "tag_latest",
-            },
-            {
-                "id": "mistral-large-latest",
-                "name": "Mistral Large 3",
-                "context": 262144,
-                "tag": "tag_flagship",
-            },
-            {
-                "id": "mistral-small-latest",
-                "name": "Mistral Small 4",
-                "context": 131072,
-                "tag": "tag_recommend",
-            },
-            {
-                "id": "magistral-medium-latest",
-                "name": "Magistral Medium",
-                "context": 131072,
-                "tag": ["tag_reasoning_plus", "reasoning"],
-            },
-            {
-                "id": "devstral-latest",
-                "name": "Devstral 2",
-                "context": 262144,
-                "tag": "tag_coding",
-            },
-        ],
         "key_prefix": "",
         "litellm_prefix": "mistral",
-        "console_url": "https://console.mistral.ai/api-keys/",
-        "pricing_url": "https://mistral.ai/pricing",
-        "models_url": "https://docs.mistral.ai/models/overview",
+        "litellm_catalog_key": "mistral",
     },
     "custom": {
         "name": "自定义供应商",
         "name_en": "Custom Provider",
         "icon": "custom.png",
         "base_url": "",
-        "models": [],
         "key_prefix": "",
         "litellm_prefix": "openai",
-        "console_url": "",
-        "pricing_url": "",
-        "models_url": "",
+        "litellm_catalog_key": "",
         "custom": True,
     },
 }
@@ -311,15 +147,6 @@ PROVIDER_CATEGORIES = {
 def get_provider_by_id(provider_id: str) -> dict:
     """获取供应商配置"""
     return LLM_PROVIDERS.get(provider_id, LLM_PROVIDERS["custom"])
-
-
-def get_model_info(provider_id: str, model_id: str) -> dict:
-    """获取模型信息"""
-    provider = get_provider_by_id(provider_id)
-    for model in provider.get("models", []):
-        if model["id"] == model_id:
-            return model
-    return {"id": model_id, "name": model_id, "context": 0}
 
 
 def get_all_providers() -> dict:
@@ -365,40 +192,271 @@ def get_provider_icon(provider_id: str) -> str:
     return get_provider_icon_path(icon_name)
 
 
-def get_display_tag(tag: str | list[str]) -> str:
-    """Get the display tag from a model's tag field.
+# ---------------------------------------------------------------------------
+# litellm 官方目录投影（UI 枚举 + 计价回溯唯一权威源）
+# ---------------------------------------------------------------------------
 
-    The tag field can be either a string or a list of strings.
-    For lists, returns the first non-internal tag (skipping "reasoning" etc.).
-    For strings, returns as-is.
 
-    Args:
-        tag: Model tag value (string or list of strings)
+def _get_litellm_version() -> str:
+    """读取锁定的 litellm 版本号（缓存键，升级后失效重算）。"""
+    from importlib.metadata import version  # type: ignore[import-untyped]  # stdlib
 
-    Returns:
-        Display-friendly tag string
+    try:
+        return version("litellm")
+    except Exception:
+        return "unknown"
+
+
+def _resolve_catalog_key(provider_id: str) -> str:
+    """解析 provider 的 litellm 官方目录 key。
+
+    显式配置优先；缺省回退**自身 provider_id**（不得回退 litellm_prefix——qwen 等
+    litellm_prefix 为 "openai" 会与 GPT 撞车，见 §3.1c-review #9）。
     """
-    if isinstance(tag, list):
-        # Return first non-internal tag for display
-        internal_tags = {"reasoning"}
-        display_tags = [t for t in tag if t not in internal_tags]
-        return display_tags[0] if display_tags else ""
-    return tag
+    return LLM_PROVIDERS.get(provider_id, {}).get("litellm_catalog_key") or provider_id
 
 
-RECOMMENDED_TAG = "tag_recommend"
+def _extract_context(cost_entry: dict) -> int:
+    """从 litellm.model_cost 的模型条目中取 context（首非零 token 上限，缺全退 0）。
 
-
-def is_recommended_model(model: dict) -> bool:
-    """Check if a model is tagged as recommended.
-
-    Args:
-        model: Model dict with optional "tag" field
-
-    Returns:
-        True if the model's tag contains the recommended tag
+    升级韧性：对不可预期字段增删用 dict.get 防御，.get 首参数为 None 时返回默认 None。
+    返回 int；无法计量时 0（R21：不伪装成业务合法值，UI 隐藏 context 呈现）。
     """
-    tag = model.get("tag")
-    if isinstance(tag, list):
-        return RECOMMENDED_TAG in tag
-    return tag == RECOMMENDED_TAG
+    for key in ("max_input_tokens", "max_tokens", "max_output_tokens"):
+        value = (cost_entry or {}).get(key)
+        if isinstance(value, (int, float)) and value:
+            return int(value)
+    return 0
+
+
+def _normalize_model_id(model_id: str) -> str:
+    """模型 id 可能是 ``provider/model`` 形态，按 `/` 右侧 id 归一（P2 去重键）。"""
+    return model_id.split("/")[-1] if "/" in model_id else model_id
+
+
+# 模块级投影缓存：缓存键含 litellm 版本号，升级后失效重算。
+_PROJECTION_CACHE: dict[str, list[dict]] = {}
+_PROJECTION_CACHE_LITELLM_VERSION: str = ""
+
+
+def get_litellm_models_by_provider() -> dict[str, list[dict]]:
+    """按 litellm 官方目录投影各项目供应商的模型清单。
+
+    只投影项目支持的供应商（LLM_PROVIDERS 内的 provider_id），不把 litellm 全部
+    供应商全量塞入。每项 ``{"id", "context"}``；同一 catalog_key 被多个项目 provider
+    复用（如 qwen 系三个 key）时按归一模型 id 去重。
+
+    返回:
+        ``{provider_id: [{"id": str, "context": int}, ...]}``。某 key 缺失时该 provider
+        为空列表，不崩 UI（升级韧性）。zhipu/azure/custom 无目录 → 空列表。
+    """
+    global _PROJECTION_CACHE, _PROJECTION_CACHE_LITELLM_VERSION
+
+    import litellm  # type: ignore[import-untyped]  # 惰性加载，避免 UI 主循环 import 阻塞（R16）
+
+    # 惰性 import 本身可能较慢（十秒级），但首次触发由调用方（VM 命令）经
+    # ThreadPoolManager offload；此处仅做缓存命中判断（纯内存，快）。
+    litellm_version = _get_litellm_version()
+    if litellm_version == _PROJECTION_CACHE_LITELLM_VERSION and _PROJECTION_CACHE:
+        return _PROJECTION_CACHE
+
+    models_by_provider: dict = getattr(litellm, "models_by_provider", {}) or {}
+    model_cost: dict = getattr(litellm, "model_cost", {}) or {}
+
+    result: dict[str, list[dict]] = {}
+    for provider_id in LLM_PROVIDERS:
+        provider_conf = LLM_PROVIDERS[provider_id]
+        # azure（部署制）/ custom（自由文本）不枚举 litellm 目录，保留空列表。
+        if provider_conf.get("azure_config") or provider_conf.get("custom"):
+            result[provider_id] = []
+            continue
+        catalog_key = _resolve_catalog_key(provider_id)
+        raw_ids = models_by_provider.get(catalog_key, set()) if isinstance(models_by_provider, dict) else set()
+        if not isinstance(raw_ids, (set, list)):
+            raw_ids = set()
+
+        seen: set[str] = set()
+        entries: list[dict] = []
+        for raw_id in raw_ids:
+            norm = _normalize_model_id(raw_id)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            cost_entry = model_cost.get(raw_id, {}) if isinstance(model_cost, dict) else {}
+            entries.append(
+                {
+                    "id": norm,
+                    "context": _extract_context(cost_entry if isinstance(cost_entry, dict) else {}),
+                }
+            )
+        # 稳定排序（防抖动）：按模型 id。
+        entries.sort(key=lambda e: e["id"])
+        result[provider_id] = entries
+
+    _PROJECTION_CACHE = result
+    _PROJECTION_CACHE_LITELLM_VERSION = litellm_version
+    return result
+
+
+def _provider_order(provider_id: str) -> int:
+    """provider 在 PROVIDER_CATEGORIES 中的遍历顺序（稳定排序首键）。"""
+    for idx, category in enumerate(PROVIDER_CATEGORIES.values()):
+        if provider_id in category:
+            return idx
+    return len(PROVIDER_CATEGORIES)
+
+
+def search_models(keyword: str) -> list[dict]:
+    """在全量投影结果上跨供应商子串搜索（大小写不敏感）。
+
+    返回拍平列表，每项含 ``{provider_id, provider_name, icon, model_id, context}``；
+    排序按（分类顺序, 供应商 name_en, 模型 id）稳定排序防抖动。空 keyword 返回空列表
+    （UI 据此转浏览模式）。
+
+    性能（R16）：预构建小写归一化索引（model id + provider 名），单次过滤 O(n) 命中
+    集合较小；openai 231 项规模下按需惰性排序。事件处理器内过滤整体超出阈值时由调用方
+    经 ThreadPoolManager offload（config-quality-perf 决策）。
+    """
+    if not keyword:
+        return []
+
+    projection = get_litellm_models_by_provider()
+
+    # 重建扁平行（每次搜索重投影行，但投影结果有模块级缓存，二次命中快）。
+    flat: list[dict] = []
+    for provider_id, models in projection.items():
+        provider = LLM_PROVIDERS.get(provider_id, {})
+        for model in models:
+            flat.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_name": str(provider.get("name", provider_id)),
+                    "icon": str(provider.get("icon", "custom.png")),
+                    "model_id": model["id"],
+                    "context": int(model.get("context", 0)),
+                }
+            )
+
+    needle = keyword.lower().strip()
+    if not needle:
+        return []
+
+    # 内置 provider_id / provider_name（name_en 便于英文匹配）/ key_prefix 命中也可选。
+    boost = [
+        provider_id
+        for provider_id in LLM_PROVIDERS
+        if needle in provider_id.lower()
+        or needle in str(LLM_PROVIDERS[provider_id].get("name", "")).lower()
+        or needle in str(LLM_PROVIDERS[provider_id].get("name_en", "")).lower()
+        or needle in str(LLM_PROVIDERS[provider_id].get("key_prefix", "")).lower()
+    ]
+    boost_set = set(boost)
+
+    matches = [row for row in flat if needle in row["model_id"].lower() or row["provider_id"] in boost_set]
+
+    matches.sort(
+        key=lambda r: (
+            _provider_order(r["provider_id"]),
+            str(LLM_PROVIDERS.get(r["provider_id"], {}).get("name_en", r["provider_id"])).lower(),
+            r["model_id"].lower(),
+        )
+    )
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# 最近选用回记（复用 ConfigHandler JSON 持久化，最小实现）
+# ---------------------------------------------------------------------------
+
+
+def get_recent_selections() -> list[dict]:
+    """读取最近选用记录（有序去重，`[{"provider", "model"}]`）。
+
+    ConfigHandler 同步 IO；UI 事件处理器经 ThreadPoolManager offload 后调入。
+    """
+    from utils.config_handler import ConfigHandler  # lazy-import: 避免模块顶层触发 IO
+
+    try:
+        config = ConfigHandler.load_config()
+    except Exception as ex:  # noqa: BLE001 -- 读取失败降级为空列表，不阻断 UI
+        logger.debug("[llm_providers] read recent selections failed: %s", ex)
+        return []
+    # config 为用户可编辑文件（trust boundary）：损坏/非字典降级为空列表，不崩 UI。
+    if not isinstance(config, dict):
+        return []
+    raw = config.get(_LLM_RECENT_SELECTIONS_KEY, [])
+    if not isinstance(raw, list):
+        return []
+    result: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        provider = str(entry.get("provider", ""))
+        model = str(entry.get("model", ""))
+        if not provider or not model:
+            continue
+        key = (provider, model)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"provider": provider, "model": model})
+    return result
+
+
+def record_selection(provider: str, model: str) -> None:
+    """记录一次选用（有序去重，上限 RECENT_SELECTIONS_LIMIT，新的在前）。"""
+    if not provider or not model:
+        return
+    from utils.config_handler import ConfigHandler  # lazy-import: 避免模块顶层触发 IO
+
+    current = get_recent_selections()
+    current = [entry for entry in current if not (entry["provider"] == provider and entry["model"] == model)]
+    current.insert(0, {"provider": provider, "model": model})
+    current = current[:RECENT_SELECTIONS_LIMIT]
+    try:
+        ConfigHandler.save_config({_LLM_RECENT_SELECTIONS_KEY: current})
+    except Exception as ex:  # noqa: BLE001 -- 写失败仅降级丢回记，不阻断保存主流程
+        logger.debug("[llm_providers] record recent selection failed: %s", ex)
+
+
+# ---------------------------------------------------------------------------
+# 模型信息（对外契约：返回 {"id", "name", "context"}）
+# ---------------------------------------------------------------------------
+
+
+def get_model_info(provider_id: str, model_id: str) -> dict:
+    """获取模型信息。
+
+    对外契约**不变**：返回 ``{"id", "name", "context"}``。
+    context 解析优先级 =
+        1. litellm ``model_cost``（经投影目录，provider_id → catalog_key 归一到官方 key）；
+        2. 项目 ``llm_custom_model_contexts`` 运行时覆盖；
+        3. 0（litellm 未声明/无法计量，R21 诚实呈现）。
+
+    ``token_budget.py`` 消费 ``get_model_info(...).get("context", 0)`` 不受影响。
+    """
+    context = 0
+
+    try:
+        projection = get_litellm_models_by_provider()  # 已缓存，命中快
+        for model in projection.get(provider_id, []):
+            if model["id"] == model_id:
+                context = int(model.get("context", 0))
+                break
+    except Exception as ex:  # noqa: BLE001 -- litellm 不可用时走配置覆盖/0，不崩调用方
+        logger.debug("[llm_providers] get_model_info litellm lookup failed: %s", ex)
+
+    if context == 0:
+        try:
+            from utils.config_handler import ConfigHandler  # lazy-import
+
+            # llm_custom_model_contexts 经 get_llm_config()["custom_model_contexts"] 暴露
+            llm_config = ConfigHandler.get_llm_config()
+            cmc = llm_config.get("custom_model_contexts", {})
+            if isinstance(cmc, dict) and model_id in cmc.get(provider_id, {}):
+                context = int(cmc[provider_id][model_id] or 0)
+        except Exception as ex:  # noqa: BLE001 -- 配置读取失败保持 0（R21 诚实呈现），不崩调用方
+            logger.debug("[llm_providers] get_model_info config lookup failed: %s", ex)
+
+    return {"id": model_id, "name": model_id, "context": context}

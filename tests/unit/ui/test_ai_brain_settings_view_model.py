@@ -235,6 +235,8 @@ def _enter_cost_tracker(engine_value, is_disposed_value, get_result, get_side_ef
     """Patch 引擎与成本追踪依赖, 返回 (ExitStack, AIUsageTracker instance)。
 
     测试使用方式: ``stack, instance = _enter_cost_tracker(...); with stack: await ...``。
+    get_month_unpriced 同步 mock 返回 (0, 0)：AI-01 引入的可计价外统计，
+    本 fixture 关注月份成本，非本项。
     """
     import contextlib
 
@@ -247,6 +249,7 @@ def _enter_cost_tracker(engine_value, is_disposed_value, get_result, get_side_ef
         instance.get_month_cost_cny = AsyncMock(side_effect=get_side_effect)
     else:
         instance.get_month_cost_cny = AsyncMock(return_value=get_result)
+    instance.get_month_unpriced = AsyncMock(return_value=(0, 0))
     tracker_cls.return_value = instance
     return stack, instance
 

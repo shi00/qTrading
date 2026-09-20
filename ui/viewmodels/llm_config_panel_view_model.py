@@ -3,14 +3,14 @@
 声明式渲染范式：
 - 不可变 state snapshot（LLMConfigState frozen dataclass）
 - subscribe/_notify 通知机制（View 通过 use_state + use_effect 订阅）
-- commands 作为实例方法（消费方可直接调用 save_config/verify_connection/refresh_models）
+- commands 作为实例方法（消费方可直接调用 save_config/verify_connection）
 
 VM 不感知 locale：status_message 用 Message dataclass 产出 (key, params)，
 View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_KEY
 + default=params 传递，I18n.get 对不存在的 key 返回 default。
 
 线程模型：
-- verify_connection/save_config/refresh_models/update_provider 是 async
+- verify_connection/save_config/update_provider 是 async
 - ConfigHandler 同步 IO 通过 ThreadPoolManager.run_async(TaskType.IO, ...) offload（R16）
 - httpx.AsyncClient 是 async-native IO，按原生 await 模型执行（R16 澄清）
 """
@@ -24,25 +24,13 @@ from ui.viewmodels import Message
 from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
-from utils.llm_providers import AZURE_DEFAULT_API_VERSION, LLM_PROVIDERS, is_recommended_model
+from utils.llm_providers import AZURE_DEFAULT_API_VERSION, LLM_PROVIDERS, get_litellm_models_by_provider
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
-MODELS_API_COMPATIBLE = {
-    "openai",
-    "deepseek",
-    "qwen",
-    "zhipu",
-    "moonshot",
-    "mistral",
-    "minimax",
-    "custom",
-}
-
-_REFRESH_TIMEOUT = 10.0
 _MAX_CUSTOM_MODELS = 50
 
 
@@ -68,10 +56,8 @@ class LLMConfigState:
     is_azure: bool = False
     base_url_read_only: bool = True
     show_custom_model_input: bool = False
-    show_refresh_button: bool = True
     # Status fields
     is_verifying: bool = False
-    is_refreshing: bool = False
     is_saving: bool = False
     api_key_modified: bool = False
     status_message: Message | None = None
@@ -124,7 +110,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
 
         is_azure = provider == "azure"
         show_custom = False
-        show_refresh = True
         base_url_read_only = True
         custom_model = ""
         azure_resource = ""
@@ -137,7 +122,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             azure_deployment = llm_config.get("azure_deployment_name", "") or model
             azure_version = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
             base_url = ""
-            show_refresh = False
         else:
             if provider == "custom":
                 custom_model_options = self._load_custom_model_history_from_config(provider, llm_config)
@@ -145,24 +129,12 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
                 custom_model = model
                 base_url_read_only = False
             else:
-                models = LLM_PROVIDERS.get(provider, {}).get("models", [])
-                model_ids = [m.get("id") for m in models]
-                if model and model in model_ids:
-                    pass  # model stays as-is
-                elif model:
-                    show_custom = True
-                    custom_model = model
-                    custom_model_options = self._load_custom_model_history_from_config(provider, llm_config)
-                elif models:
-                    recommended = next(
-                        (m.get("id") for m in models if is_recommended_model(m)),
-                        None,
-                    )
-                    model = recommended or models[0].get("id", "")
+                # §3.1c: 模型改由 <ModelPicker> 回写，不再从静态 models 自动推荐默认模型；
+                # 已存 model（含不在新目录中的历史值）原样保留，不回退、不误删。
+                model = model or ""
 
             provider_config = LLM_PROVIDERS.get(provider, {})
             base_url = base_url or provider_config.get("base_url", "")
-            show_refresh = provider in MODELS_API_COMPATIBLE
 
         self._state = replace(
             self._state,
@@ -177,7 +149,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             is_azure=is_azure,
             base_url_read_only=base_url_read_only,
             show_custom_model_input=show_custom,
-            show_refresh_button=show_refresh,
             api_key_modified=False,
             custom_model_options=custom_model_options,
             ai_external_acknowledged=ConfigHandler.is_ai_external_acknowledged(provider=provider),
@@ -259,8 +230,8 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
 
         is_azure = provider_id == "azure"
         show_custom = False
-        show_refresh = True
         base_url_read_only = True
+        # §3.1c: 切换供应商不自动推荐模型（静态 models 已删，模型由 <ModelPicker> 选择）
         model = ""
         custom_model = ""
         base_url = ""
@@ -268,25 +239,15 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
 
         if is_azure:
             base_url = ""
-            show_refresh = False
         elif provider_id == "custom":
             show_custom = True
             base_url = stored_base_url
             base_url_read_only = False
-            show_refresh = True
             llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
             custom_model_options = self._load_custom_model_history_from_config(provider_id, llm_config)
         else:
             base_url = stored_base_url or provider.get("base_url", "")
             base_url_read_only = True
-            show_refresh = provider_id in MODELS_API_COMPATIBLE
-            models = provider.get("models", [])
-            if models:
-                recommended = next(
-                    (m.get("id") for m in models if is_recommended_model(m)),
-                    None,
-                )
-                model = recommended or models[0].get("id", "")
 
         self._set_state(
             provider=provider_id,
@@ -298,7 +259,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             is_azure=is_azure,
             base_url_read_only=base_url_read_only,
             show_custom_model_input=show_custom,
-            show_refresh_button=show_refresh,
             custom_model_options=custom_model_options,
             ai_external_acknowledged=ack_state,
         )
@@ -531,71 +491,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
         finally:
             self._set_state(is_saving=False)
 
-    @log_async_operation(
-        operation_name="llm_panel_refresh_models",
-        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
-    )
-    async def refresh_models(self) -> None:
-        """通过 HTTP /models 刷新模型列表。
-
-        httpx.AsyncClient 是 async-native IO，按原生 await 模型执行（R16 澄清）。
-        """
-        api_key = self._state.api_key
-        base_url = self._normalize_base_url(self._state.base_url or "")
-
-        if not api_key:
-            self._show_warning(Message("llm_refresh_need_key"))
-            return
-
-        if not base_url:
-            self._show_warning(Message("llm_refresh_need_url"))
-            return
-
-        self._set_state(is_refreshing=True)
-        self._set_loading_state(True)
-        self._show_info(Message("llm_refreshing"))
-
-        try:
-            import httpx
-            from utils.proxy_manager import ProxyManager
-
-            models_url = f"{base_url.rstrip('/')}/models"
-
-            proxy_cfg = ProxyManager.get_httpx_proxy_config()
-            async with httpx.AsyncClient(**proxy_cfg) as client:
-                response = await client.get(
-                    models_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=_REFRESH_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json()
-
-            models = data.get("data", [])
-            model_ids = sorted([m["id"] for m in models if m.get("id")])
-
-            if not model_ids:
-                self._show_warning(Message("llm_refresh_empty"))
-                return
-
-            # 更新 model 为第一个可用模型（如果当前 model 不在列表中）
-            new_model = self._state.model if self._state.model in model_ids else model_ids[0]
-            self._set_state(model=new_model)
-
-            self._show_success(Message("llm_refresh_success", {"count": len(model_ids)}))
-
-        except Exception as ex:
-            logger.error(
-                "[LLMConfigVM] Refresh models error: %s",
-                DataSanitizer.sanitize_error(ex),
-                exc_info=True,
-            )
-            error_info = classify_error(ex, context="llm")
-            self._show_error(get_error_message_key(error_info))
-        finally:
-            self._set_state(is_refreshing=False)
-            self._set_loading_state(False)
-
     # --- static helpers (migrated from imperative LLMConfigPanel) ---
 
     @staticmethod
@@ -625,11 +520,17 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
         model: str,
         is_azure: bool = False,
     ) -> dict[str, list[str]] | None:
-        """构建 custom_models 更新字典（历史记录去重 + 上限裁剪）。"""
+        """构建 custom_models 更新字典（历史记录去重 + 上限裁剪）。
+
+        §3.1c-review #3: 目录中可选的模型（经 <ModelPicker> 选定）不记入 custom 历史；
+        仅记录不在 litellm 目录中的自定义模型（custom provider 或用户手输的历史值）。
+        """
         if not model or is_azure:
             return None
-        if provider != "custom" and model in [m.get("id") for m in LLM_PROVIDERS.get(provider, {}).get("models", [])]:
-            return None
+        if provider != "custom":
+            catalog_ids = [m["id"] for m in get_litellm_models_by_provider().get(provider, [])]
+            if model in catalog_ids:
+                return None
         llm_config = ConfigHandler.get_llm_config()
         custom_models = llm_config.get("custom_models", {})
         if provider not in custom_models:
