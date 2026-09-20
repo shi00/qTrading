@@ -135,6 +135,12 @@ class ConcreteStrategy(AIStrategyMixin):
         return f"Test context for {row.get('ts_code', '?')}"
 
 
+class _RiskCheckStrategy(ConcreteStrategy):
+    """SC-02: 模拟 get_ai_context 承载定性风险检查职责的策略（ai_risk_check_in_prompt=True）。"""
+
+    ai_risk_check_in_prompt = True
+
+
 def _make_mock_dp(*, is_cancelled: bool = False, trade_date: str | None = None) -> MagicMock:
     """创建完整的 mock DataProcessor，所有 cache 异步方法均设为 AsyncMock。"""
     dp = MagicMock()
@@ -953,6 +959,52 @@ class TestRunAiAnalysis:
             mock_ai.return_value.is_cloud_available.return_value = True
             result = await s.run_ai_analysis(candidates, context)
             assert len(result) == 1
+            mock_ai.return_value.analyze_stock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_risk_check_skipped_written_when_disable_ai(self):
+        """SC-02: _disable_ai=True 且策略声明 ai_risk_check_in_prompt 时，向 context['warnings'] 写入降级声明。"""
+        from core.i18n import Message
+
+        s = _RiskCheckStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        dp = MagicMock()
+        warnings: list = []
+        context = {"data_processor": dp, "_disable_ai": True, "warnings": warnings}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = True
+            await s.run_ai_analysis(candidates, context)
+            assert warnings == [Message("strategy_ai_risk_check_skipped")]
+            mock_ai.return_value.analyze_stock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_risk_check_skipped_written_when_not_configured(self):
+        """SC-02: AI 未配置（is_cloud_available False）且策略声明风险检查时，写入降级声明。"""
+        from core.i18n import Message
+
+        s = _RiskCheckStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        dp = MagicMock()
+        warnings: list = []
+        context = {"data_processor": dp, "warnings": warnings}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = False
+            await s.run_ai_analysis(candidates, context)
+            assert warnings == [Message("strategy_ai_risk_check_skipped")]
+            mock_ai.return_value.analyze_stock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_risk_check_skipped_noop_when_flag_false(self):
+        """SC-02: 未声明 ai_risk_check_in_prompt 的策略，AI 不运行时不做任何降级声明（保持既有行为）。"""
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        dp = MagicMock()
+        warnings: list = []
+        context = {"data_processor": dp, "_disable_ai": True, "warnings": warnings}
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = True
+            await s.run_ai_analysis(candidates, context)
+            assert warnings == []
             mock_ai.return_value.analyze_stock.assert_not_called()
 
     @pytest.mark.asyncio

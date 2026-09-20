@@ -55,7 +55,7 @@ class TestTradeSimulation:
                 "qfq_open": [10.0],
                 "qfq_close": [10.5],
                 "is_tradable": [True],
-                "limit_status": ["up_limit"],
+                "limit_up_price": [10.0],
             }
         )
 
@@ -96,7 +96,7 @@ class TestTradeSimulation:
                 "qfq_open": [10.0, 10.5, 20.0],
                 "qfq_close": [10.5, 10.0, 20.5],
                 "is_tradable": [True, True, True],
-                "limit_status": [None, "down_limit", None],
+                "limit_down_price": [None, 10.5, None],
             }
         )
 
@@ -140,7 +140,6 @@ class TestTradeSimulation:
                 "qfq_open": [10.0],
                 "qfq_close": [10.5],
                 "is_tradable": [False],
-                "limit_status": [None],
             }
         )
 
@@ -180,7 +179,6 @@ class TestTradeSimulation:
                 "qfq_open": [10.0],
                 "qfq_close": [10.5],
                 "is_tradable": [True],
-                "limit_status": [None],
             }
         )
 
@@ -221,7 +219,6 @@ class TestTradeSimulation:
                 "qfq_open": [0.0],
                 "qfq_close": [0.0],
                 "is_tradable": [True],
-                "limit_status": [None],
             }
         )
 

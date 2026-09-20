@@ -136,6 +136,9 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             )
 
         if not self.enable_ai_analysis:
+            # SC-02: 类级关闭 AI 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+            # type: ignore[arg-type]  # StrategyContext→dict 不兼容，同下方 run_ai_analysis 既有模式
+            self._note_ai_risk_check_skipped(context)  # type: ignore[arg-type]
             return candidates_df
 
         candidates_df = self._sort_for_ai(candidates_df)
