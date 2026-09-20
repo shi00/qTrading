@@ -5249,3 +5249,67 @@ class TestAdrSupersedeChain:
         monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path / "missing")
         errors = check_adr_supersede_chain()
         assert errors == [], f"缺失目录应静默, got: {errors}"
+
+
+class TestPrecommitHookAndWorkflowEnum:
+    """F-09：hook / workflow 枚举名称级门禁（数量门禁可被指针式写法绕过）。
+
+    数量校验（check_precommit_hook_count）只认「N 个 pre-commit hook」数字；当文档收敛为
+    「hook 数量见配置文件」指针式后该正则不再命中，枚举漂移失去守护。本门禁从配置 id 集合
+    与磁盘 workflow 文件出发，按「名称」双向/单向比对，新增/删除 hook 或 workflow 不登记即报错。
+    """
+
+    def test_precommit_hook_names_real_repo_passes(self):
+        """真实仓库：ci-cd.md 受控枚举与配置本地 hook id 完全一致。"""
+        from check_docs_consistency import check_precommit_hook_names
+
+        errors = check_precommit_hook_names()
+        assert errors == [], "pre-commit hook 名称一致性失败:\n  " + "\n  ".join(errors)
+
+    def test_precommit_hook_names_detects_missing(self, tmp_path, monkeypatch):
+        """配置存在但文档漏枚举 → 无遗漏报错。"""
+        from check_docs_consistency import check_precommit_hook_names, _local_hook_ids
+
+        # 真实配置集合中取一个 id，作为临时文档缺失的样本
+        missing = sorted(_local_hook_ids())[0]
+        fake_doc = "### Pre-commit Hooks\n\n`ruff-check`\n"
+        doc = tmp_path / "ci-cd.md"
+        doc.write_text(fake_doc, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CI_CD_PATH", doc)
+        errors = check_precommit_hook_names()
+        assert any(missing in e and "未在 ci-cd.md 枚举" in e for e in errors), (
+            f"应报缺失 hook {missing}, got: {errors}"
+        )
+
+    def test_precommit_hook_names_detects_ghost(self, tmp_path, monkeypatch):
+        """文档枚举配置不存在的 hook → 幽灵枚举报错。"""
+        from check_docs_consistency import check_precommit_hook_names
+
+        doc = tmp_path / "ci-cd.md"
+        doc.write_text("### Pre-commit Hooks\n\n`ruff-check` · `ghost-hook`\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CI_CD_PATH", doc)
+        errors = check_precommit_hook_names()
+        assert any("ghost-hook" in e and "幽灵枚举" in e for e in errors), f"应报幽灵 hook ghost-hook, got: {errors}"
+
+    def test_workflow_enum_real_repo_passes(self):
+        """真实仓库：所有 .github/workflows/*.yml 均已在 ci-cd.md 登记。"""
+        from check_docs_consistency import check_workflow_enum
+
+        errors = check_workflow_enum()
+        assert errors == [], "workflow 枚举无遗漏失败:\n  " + "\n  ".join(errors)
+
+    def test_workflow_enum_detects_unregistered(self, tmp_path, monkeypatch):
+        """workflow 文件存在但文档未登记 → 无遗漏报错。"""
+        from check_docs_consistency import check_workflow_enum
+
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "nightly-probe.yml").write_text("name: probe\n", encoding="utf-8")
+        doc = tmp_path / "ci-cd.md"
+        doc.write_text("# 无 workflow 引用\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.WORKFLOWS_DIR", wf_dir)
+        monkeypatch.setattr("check_docs_consistency.CI_CD_PATH", doc)
+        errors = check_workflow_enum()
+        assert any("nightly-probe.yml" in e and "未在 ci-cd.md 登记" in e for e in errors), (
+            f"应报未登记 workflow, got: {errors}"
+        )

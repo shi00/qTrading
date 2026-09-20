@@ -165,7 +165,7 @@ pre-commit install
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ```
 
-> 项目使用 pre-commit hooks（Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、pyright 增量类型检查（staged `.py`）、弱断言增量扫描（staged `test_*.py`，与 CI baseline 一致）、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护、WCAG 主题对比度检查（ui/theme.py 变更时触发）），hook 数量见 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)，亦见 [Pre-commit Hooks](./docs/guides/ci-cd.md#pre-commit-hooks)。
+> 项目使用 pre-commit hooks（Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、禁临时文件入库、pyright 增量类型检查（staged `.py`）、弱断言增量扫描（staged `test_*.py`，与 CI baseline 一致）、E2E anchor 引用校验、WCAG 主题对比度检查（ui/theme.py 变更时触发）、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护），完整 hook 清单与英文 id 见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)（名称级正本，`repo: local` 下 16 个），名称与数量均以 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml) 为唯一正本。
 >
 > **新特性开发请使用 worktree 隔离**，避免在主工作区直接开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md) 中的「Worktree 强制使用」）。
 >

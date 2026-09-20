@@ -57,6 +57,11 @@
 26. ADR supersede 双向链守卫检查（文档复检盲2）：解析 docs/adr/*.md 头元数据的 Supersedes 与
    Superseded by 声明，校验双向对称（X 声明 supersedes Y ⇔ Y 声明被 X 部分/整体 supersede），
    守护 ADR supersede 引用不单向断链。
+27. pre-commit hook 名称级一致性检查（F-09）：从 .pre-commit-config.yaml 提取本地 hook id 集合，
+   断言 ci-cd.md「Pre-commit Hooks」节的受控枚举与之一致（无遗漏 + 无幽灵），
+   守护"只能数数量、不能核名字"的枚举漂移（数量门禁可被指针式写法绕过）。
+28. workflow 枚举无遗漏检查（F-09）：断言 .github/workflows/*.yml 每一文件都在 ci-cd.md 出现，
+   守护 CI 前端流水线（docs-ci / flet-nightly / sidecar 等）因仅存在于文件而被文档漏登记。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -96,6 +101,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
+# CI/CD 门禁文档与 workflow 目录（F-09：hook / workflow 枚举名称级门禁的数据源）
+CI_CD_PATH = ROOT / "docs" / "guides" / "ci-cd.md"
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 # Flet 徽章版本守卫（文档复检 H1）：README UI 徽章中的 Flet 版本声明须与 pyproject 锁定主版本对齐
 README_PATH = ROOT / "README.md"
 # man/flet-best-practices.md 现为 stub，指向 docs/flet/README.md（保留历史路径兼容）
@@ -359,6 +367,67 @@ def check_precommit_hook_count() -> list[str]:
                     f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
                     f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
                 )
+    return errors
+
+
+# 本地 pre-commit hook id：形如反引号包裹的纯小写 kebab（`ruff-check`），
+# 排除 `.pre-commit-config.yaml`（含点）、`ci_cd`（含下划线）、`IsolatedAsyncioTestCase`（首字母大写）等非 hook token。
+_HOOK_ID_SPAN = re.compile(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`")
+# workflow 文件名引用（`.github/workflows/*.yml` 的 base，如 `docs-ci.yml`）
+_WORKFLOW_FILE_REF = re.compile(r"([a-z][a-z0-9_-]*\.yml)\b")
+
+
+def _local_hook_ids() -> set[str]:
+    """提取 .pre-commit-config.yaml 中本地（repo: local）hook 的 id 集合。"""
+    content = PRECOMMIT_PATH.read_text(encoding="utf-8")
+    return set(re.findall(r"^ {6}- id: (\S+)", content, re.MULTILINE))
+
+
+def check_precommit_hook_names() -> list[str]:
+    """检查项 27：pre-commit hook 名称级一致性（F-09）。
+
+    从 .pre-commit-config.yaml 提取本地 hook id 集合，断言 ci-cd.md「Pre-commit Hooks」节
+    以反引号枚举到与配置一致：既有 hook 漏枚举（无遗漏）与文档枚举出配置没有的幽灵 hook
+    （子集）双向报错。数量门禁（check_precommit_hook_count）可被「hook 数量见配置文件」的
+    指针式写法绕过，此检查改由名称锚定，阻塞枚举漂移。
+    """
+    errors: list[str] = []
+    if not CI_CD_PATH.exists():
+        return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
+    config_ids = _local_hook_ids()
+    doc_content = CI_CD_PATH.read_text(encoding="utf-8")
+    # 限定到「### Pre-commit Hooks」节内提取反引号 hook id，避免同文档其他段落
+    # 的小写 kebab token（如 `continue-on-error`）被误判为幽灵枚举。
+    section = re.search(r"### Pre-commit Hooks(.*?)(?:\n### |\Z)", doc_content, re.DOTALL)
+    text = section.group(1) if section else doc_content
+    doc_ids = set(_HOOK_ID_SPAN.findall(text))
+    for hook_id in sorted(config_ids - doc_ids):
+        errors.append(
+            f"pre-commit hook 名称一致性: .pre-commit-config.yaml 有本地 hook '{hook_id}' "
+            f"未在 ci-cd.md 枚举（无遗漏违规，F-09）"
+        )
+    for hook_id in sorted(doc_ids - config_ids):
+        errors.append(f"pre-commit hook 名称一致性: ci-cd.md 枚举了配置中不存在的 hook '{hook_id}' （幽灵枚举，F-09）")
+    return errors
+
+
+def check_workflow_enum() -> list[str]:
+    """检查项 28：workflow 枚举无遗漏（F-09）。
+
+    断言 .github/workflows/*.yml 每一文件 base（如 `docs-ci.yml`）都在 ci-cd.md 中出现，
+    守护 docs-ci / flet-nightly / sidecar 等流水线因仅在文件系统中存在而未被文档登记
+    （CI 前端存在性漂移）。仅做「配置 ⊆ 文档」单向：ci-cd.md 还会引用 audit-allowlist.yml
+    等非 workflow 的 .yml，故不做幽灵方向。
+    """
+    errors: list[str] = []
+    if not WORKFLOWS_DIR.is_dir():
+        return [f"workflow 目录不存在: {WORKFLOWS_DIR}"]
+    if not CI_CD_PATH.exists():
+        return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
+    content = CI_CD_PATH.read_text(encoding="utf-8")
+    for wf in sorted(p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()):
+        if not _WORKFLOW_FILE_REF.search(content):
+            errors.append(f"workflow 枚举无遗漏: .github/workflows/{wf} 未在 ci-cd.md 登记（F-09）")
     return errors
 
 
@@ -3065,6 +3134,8 @@ def main() -> int:
     all_errors.extend(check_relative_dead_links())
     all_errors.extend(check_version_consistency())
     all_errors.extend(check_precommit_hook_count())
+    all_errors.extend(check_precommit_hook_names())
+    all_errors.extend(check_workflow_enum())
     all_errors.extend(check_flet_version_drift())
     all_errors.extend(check_note_lazy_format())
     all_errors.extend(check_redlines_yaml_consistency())
@@ -3134,7 +3205,7 @@ def main() -> int:
 
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
-        "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
+        "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
