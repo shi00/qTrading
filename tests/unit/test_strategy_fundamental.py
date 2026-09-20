@@ -253,10 +253,10 @@ class TestDividendStrategy(unittest.TestCase):
         self.strategy = DividendStrategy()
         self.sample_df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "高股息", "dv_ttm": 5.5},
-                {"ts_code": "000002.SZ", "name": "中股息", "dv_ttm": 3.5},
-                {"ts_code": "000003.SZ", "name": "低股息", "dv_ttm": 1.5},
-                {"ts_code": "000004.SZ", "name": "无股息", "dv_ttm": 0.0},
+                {"ts_code": "000001.SZ", "name": "高股息", "dv_ttm": 5.5, "roe": 15.0, "or_yoy": 10.0},
+                {"ts_code": "000002.SZ", "name": "中股息", "dv_ttm": 3.5, "roe": 12.0, "or_yoy": 5.0},
+                {"ts_code": "000003.SZ", "name": "低股息", "dv_ttm": 1.5, "roe": 8.0, "or_yoy": 0.0},
+                {"ts_code": "000004.SZ", "name": "无股息", "dv_ttm": 0.0, "roe": 6.0, "or_yoy": -5.0},
             ]
         )
 
@@ -296,6 +296,70 @@ class TestDividendStrategy(unittest.TestCase):
 
         dv_values = result["dv_ttm"].to_list()
         self.assertEqual(dv_values, sorted(dv_values, reverse=True))
+
+    def test_dividend_strategy_fake_high_yield_roe_excluded(self):
+        """SC-02: 假高息防护——roe<=0（盈利能力恶化）的高股息标的不属于"真高息"，必须剔除。"""
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "正常", "dv_ttm": 5.5, "roe": 15.0, "or_yoy": 10.0},
+                {"ts_code": "000002.SZ", "name": "亏损", "dv_ttm": 6.0, "roe": 0.0, "or_yoy": 10.0},
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"dv_min": 4.0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+
+    def test_dividend_strategy_fake_high_yield_or_yoy_excluded(self):
+        """SC-02: 假高息防护——or_yoy<=-20（成长性显著恶化）的高股息标的不属于"真高息"，必须剔除。"""
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "正常", "dv_ttm": 5.5, "roe": 15.0, "or_yoy": 10.0},
+                {"ts_code": "000002.SZ", "name": "衰退", "dv_ttm": 6.0, "roe": 10.0, "or_yoy": -20.0},
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"dv_min": 4.0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertIn("000001.SZ", ts_codes)
+        self.assertNotIn("000002.SZ", ts_codes)
+
+    def test_dividend_strategy_null_roe_or_yoy_passes(self):
+        """SC-02: 假高息防护对财务缺失（null）放行——财报缺失属数据问题而非风险信号（R21 精神）。"""
+        df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "有财报", "dv_ttm": 5.5, "roe": 15.0, "or_yoy": 10.0},
+                {"ts_code": "000002.SZ", "name": "财报缺失", "dv_ttm": 6.0, "roe": None, "or_yoy": None},
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"dv_min": 4.0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+
+        ts_codes = result["ts_code"].to_list()
+        self.assertEqual(sorted(ts_codes), ["000001.SZ", "000002.SZ"])
+
+    def test_dividend_sort_for_ai_ascending(self):
+        """SC-02: AI 截断前按 dv_ttm 升序重排，极端高息候选最后进入 AI 分析队列。"""
+        df = self.sample_df.copy()
+        out = self.strategy._sort_for_ai(df)
+        self.assertEqual(out["dv_ttm"].to_list(), [0.0, 1.5, 3.5, 5.5])
+
+    def test_dividend_sort_for_ai_empty(self):
+        """SC-02: 空候选集直接返回，不排序不报错。"""
+        out = self.strategy._sort_for_ai(pd.DataFrame())
+        self.assertTrue(out.empty)
+
+    def test_dividend_sort_for_ai_missing_column(self):
+        """SC-02: 候选集缺 dv_ttm 列时原样返回（防御，正常路径必含该列）。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["缺列"]})
+        out = self.strategy._sort_for_ai(df)
+        self.assertEqual(out["ts_code"].to_list(), ["000001.SZ"])
 
 
 class TestCashFlowStrategy(unittest.TestCase):

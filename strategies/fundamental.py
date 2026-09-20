@@ -14,6 +14,8 @@ from strategies.utils import fmt_val, threshold_in_data_unit
 class ValueStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    # SC-02: get_ai_context 承载定性风险检查（周期股/价值陷阱判定），AI 未运行须声明。
+    ai_risk_check_in_prompt = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
 
@@ -120,6 +122,8 @@ class ValueStrategy(PolarsBaseStrategy):
 class GrowthStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    # SC-02: get_ai_context 承载定性风险检查（非经常性损益质疑），AI 未运行须声明。
+    ai_risk_check_in_prompt = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
 
@@ -209,6 +213,8 @@ class GrowthStrategy(PolarsBaseStrategy):
 class DividendStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    # SC-02: get_ai_context 承载假高息判定，AI 未运行须声明。
+    ai_risk_check_in_prompt = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
 
@@ -245,7 +251,29 @@ class DividendStrategy(PolarsBaseStrategy):
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
         dv_min = p.get("dv_min", 4)
-        return lf.drop_nulls(subset=["dv_ttm"]).filter(pl.col("dv_ttm") > dv_min).sort("dv_ttm", descending=True)
+        return (
+            lf.drop_nulls(subset=["dv_ttm"])
+            .filter(pl.col("dv_ttm") > dv_min)
+            # SC-02: 假高息防护下沉到代码（原仅存于 AI prompt）。高股息策略的头号
+            # 陷阱是股价暴跌被动抬高股息率；roe<=0（盈利能力恶化）或 or_yoy<=-20
+            # （成长性恶化）的高股息标的直接剔除。null 放行（is_null()|...）是
+            # 有意的：财报缺失属数据问题而非风险信号，不得因此剔除（R21 精神）。
+            .filter((pl.col("roe").is_null()) | (pl.col("roe") > 0))
+            .filter((pl.col("or_yoy").is_null()) | (pl.col("or_yoy") > -20))
+            .sort("dv_ttm", descending=True)
+        )
+
+    def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
+        """SC-02: 极端高股息样本（多为股价暴跌被动高息）不优先送 AI 分析。
+
+        升序排列使候选截断（cap）优先保留股息率稳健的标的；AI 关闭时结果
+        保持 _filter_logic 的 dv_ttm 降序不变。
+        """
+        if df.empty:
+            return df
+        if "dv_ttm" in df.columns:
+            return df.sort_values("dv_ttm", ascending=True)
+        return df
 
     attribution_enabled = True  # UX-04
 
@@ -263,6 +291,8 @@ class DividendStrategy(PolarsBaseStrategy):
 class CashFlowStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
     requires_fundamental_coverage = True
+    # SC-02: get_ai_context 承载资金链断裂风险判定，AI 未运行须声明。
+    ai_risk_check_in_prompt = True
     required_context_keys: tuple[str, ...] = ("screening_data", "fundamental_screening_data")
     required_tables: tuple[str, ...] = ("daily_quotes", "financial_reports")
 

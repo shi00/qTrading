@@ -155,6 +155,12 @@ class AIStrategyMixin:
 
     enable_ai_analysis: bool = True
 
+    # SC-02: get_ai_context 承载了定性风险检查职责（如假高息/护城河/资金链判定）
+    # 的策略应置 True。AI 实际不运行时（enable_ai_analysis=False / AI 未配置 /
+    # 回测 disable_ai），经 _note_ai_risk_check_skipped 向 context["warnings"]
+    # 写入降级声明，避免"风险检查缺失"被静默吞掉。
+    ai_risk_check_in_prompt: bool = False
+
     _HISTORY_CACHE_MAX = 4
     _HISTORY_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB
     _HISTORY_CACHE_TTL = 120
@@ -183,6 +189,18 @@ class AIStrategyMixin:
         """
         self._context_builders[name] = builder
         logger.debug("[AIStrategyMixin] Registered context builder: %s", name)
+
+    def _note_ai_risk_check_skipped(self, context: dict) -> None:
+        """SC-02: AI 实际不运行时声明能力边界（复用 D3-4 warnings 通道）。
+
+        仅对 ``ai_risk_check_in_prompt=True``（get_ai_context 承载风险检查职责）的
+        策略生效；其余策略为 no-op。warnings 缺失时静默跳过（调用方未初始化通道）。
+        """
+        if not self.ai_risk_check_in_prompt:
+            return
+        warnings = context.get("warnings")
+        if warnings is not None:
+            warnings.append(Message("strategy_ai_risk_check_skipped"))
 
     def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -358,6 +376,8 @@ class AIStrategyMixin:
             logger.info(
                 "[AIStrategyMixin] AI service not configured — returning math-only results",
             )
+            # SC-02: 未配置 LLM 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+            self._note_ai_risk_check_skipped(context)
             if on_progress:
                 on_progress(
                     0,
@@ -439,6 +459,8 @@ class AIStrategyMixin:
             logger.info(
                 "[AIStrategyMixin] AI disabled by backtest config — returning math-only results",
             )
+            # SC-02: 回测关闭 AI 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+            self._note_ai_risk_check_skipped(context)
             return candidates_df
 
         # --- Guard: 月度成本预算未超限 (AI-03 完整版) ---
