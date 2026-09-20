@@ -1534,3 +1534,86 @@ class TestDiffRebalance:
 
         assert any("sparse signals" in w for w in sim.warnings)
         assert any("effective position ceiling" in w for w in sim.warnings)
+
+
+class TestRebalanceValuationExecPrice:
+    """BT-01：_rebalance_diff 估值口径与 execution_price 对齐（防未来函数/系统性失真）。
+
+    制作 bug 场景：持有标的 A 当日 qfq_open=10、qfq_close=20（日内 +100%）。
+    rank_weighted 下 A 目标权重 = rank_A / (rank_A + rank_B) = 2/3。
+    - next_open（默认）时成交按 open，估值也必须按 open 计算当前市值：
+      修复前硬编码 qfq_close(20) → 高估 A → 误判超配而减持；
+      修复后用 qfq_open(10) → A 目标权重高于现值 → 不减持。
+    """
+
+    def _make_simulator(self, **kwargs):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            **kwargs,
+        )
+        return PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig(slippage_bps=0.0)),
+        ), config
+
+    def _rebalance_rank_weighted(self, execution_price: str) -> PortfolioSimulator:
+        """构造 rank_weighted 再平衡：A 持仓(open10/close20)，B 无仓(10/10)。"""
+        sim, _ = self._make_simulator(
+            position_sizing="rank_weighted",
+            min_rebalance_delta_pct=0.001,
+            cash_reserve_pct=0.0,
+            max_single_weight=0.9,
+            execution_price=execution_price,
+        )
+        sim.cash = 7000.0
+        sim.positions["000001.SZ"] = {
+            "volume": 1000,
+            "cost_basis": 10000.0,
+            "entry_date": date(2024, 1, 1),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8), date(2024, 1, 8)],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 8), date(2024, 1, 8)],
+                "raw_open": [10.0, 10.0],
+                "raw_close": [20.0, 10.0],
+                "qfq_open": [10.0, 10.0],
+                "qfq_close": [20.0, 10.0],
+                "is_tradable": [True, True],
+                "limit_status": [None, None],
+                "avg_daily_volume": [5_000_000.0, 5_000_000.0],
+            }
+        )
+        sim._rebalance_diff(date(2024, 1, 8), signals, quotes)
+        return sim
+
+    def test_rebalance_values_holding_by_open_when_next_open(self) -> None:
+        """BT-01 核心：next_open 时估值按 qfq_open，日内上涨股不被误判超配而减配。
+
+        修复前估值用 qfq_close(20) → current_value=20000 > target_A=18000 → 误触发减持；
+        修复后估值用 qfq_open(10) → current_value=10000 < target_A=(2/3)*17000 → 保持不卖。
+        """
+        sim = self._rebalance_rank_weighted(execution_price="next_open")
+        a_sells = [t for t in sim.trades_list if t["action"] == "sell" and t["ts_code"] == "000001.SZ"]
+        assert a_sells == [], f"A 被误以为超配而减持(应保持)：{a_sells}"
+
+    def test_rebalance_values_holding_by_close_when_next_close(self) -> None:
+        """BT-01 防回归：next_close 时估值仍用 qfq_close（与执行价一致）。
+
+        next_close 下成交在 close(20)，估值用 close 使 A 的目标(2/3)低于现值 → 减持到目标。
+        断言 A 发生部分减持；若误用 open(10) 估值则 A 目标高于现值 → 不会减持 → 测试失败。
+        """
+        sim = self._rebalance_rank_weighted(execution_price="next_close")
+        a_sells = [t for t in sim.trades_list if t["action"] == "sell" and t["ts_code"] == "000001.SZ"]
+        assert len(a_sells) == 1, f"A 应依 next_close 减持到目标：{a_sells}"
+        assert a_sells[0]["volume"] == 100  # 部分减持 100 股（从 1000 减到目标市值 18000/20=900 股）
